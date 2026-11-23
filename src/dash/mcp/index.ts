@@ -12,6 +12,8 @@ import { KINDS } from "../../decisions.ts";
 import { frame } from "../../itemtools/server/tools.ts";
 import * as dec from "../api/decisions.ts";
 import * as modelQueue from "../api/model-queue.ts";
+import * as userSettings from "../api/user-settings.ts";
+import { MAX_RESERVE, userReserve } from "../../remote/reserve.ts";
 import { cancelItemPreapproval } from "../api/operator.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { queueAdd, queuePage } from "../api/queue-page.ts";
@@ -113,7 +115,7 @@ const MODEL_PICK_INSTRUCTIONS = ` pick_model_call reserves a call for your user'
 // ---- arguments ------------------------------------------------------------
 
 class BadArgs extends Error {}
-type Kind = "repo" | "kind" | "id" | "text" | "option" | "limit" | "cursor" | "item" | "weight" | "flag";
+type Kind = "reserve" | "count" | "repos" | "repo" | "kind" | "id" | "text" | "option" | "limit" | "cursor" | "item" | "weight" | "flag";
 const REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
 function args(raw: unknown, spec: Record<string, Kind>, required: string[] = []): Record<string, string | number | boolean> {
@@ -126,8 +128,13 @@ function args(raw: unknown, spec: Record<string, Kind>, required: string[] = [])
   for (const [k, v] of Object.entries(o)) {
     if (v === undefined || v === null) continue;
     const t = spec[k]!;
-    if (t === "limit" || t === "weight") {
-      const [lo, hi] = t === "limit" ? [1, LIST_MAX] : [WEIGHT_MIN, WEIGHT_MAX];
+    if (t === "repos") {
+      if (!Array.isArray(v) || v.length > 500 || !v.every((x) => typeof x === "string" && x.length <= 200)) throw new BadArgs(`"${k}" must be a list of repo names`);
+      out[k] = v as unknown as string;
+      continue;
+    }
+    if (t === "limit" || t === "weight" || t === "reserve" || t === "count") {
+      const [lo, hi] = t === "limit" ? [1, LIST_MAX] : t === "weight" ? [WEIGHT_MIN, WEIGHT_MAX] : t === "reserve" ? [0, MAX_RESERVE] : [k === "max_calls" ? 1 : 0, 1_000_000];
       if (!Number.isInteger(v) || (v as number) < lo || (v as number) > hi) throw new BadArgs(`"${k}" must be a whole number from ${lo} to ${hi}`);
       out[k] = v as number;
       continue;
@@ -329,6 +336,32 @@ export const MODEL_PICK_TOOLS = [
     name: "unpick_model_call",
     description: "Ends your user's pick of a model call; an operator may end any user's pick. The call goes back to the queue's order.",
     inputSchema: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", description: CALL_ID_HELP } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+] as const;
+
+/** Offered to maintainers and operators: the Connect page's own settings (GET and PUT /api/me/settings). */
+export const SETTINGS_TOOLS = [
+  {
+    name: "my_settings",
+    description: "Your user's Task Runner settings as on the Connect page: the usage reserve kept free per plan window, the repos your Task Runners take calls from, the most calls at once and the interactive slots.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "set_my_settings",
+    description: "Changes your user's Task Runner settings, as the Connect page does (the same checks; a change is audited). Send only what changes. A reserve given for one window leaves the other as it is.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        reserve_five_hour: { type: "integer", minimum: 0, maximum: 90, description: "Percent of the 5-hour plan window kept free." },
+        reserve_weekly: { type: "integer", minimum: 0, maximum: 90, description: "Percent of the weekly plan window kept free." },
+        repos: { type: "array", items: { type: "string" }, description: "Repos your Task Runners take calls from; [\"all\"] or an empty list takes every repo." },
+        max_calls: { type: "integer", minimum: 1, description: "The most calls your Task Runners run at once." },
+        no_max_calls: { type: "boolean", description: "Remove the limit on calls at once." },
+        interactive_slots: { type: "integer", minimum: 0, description: "Slots for interactive calls such as Discord replies." },
+      },
+    },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ] as const;
@@ -667,6 +700,34 @@ async function pickModelCall(env: McpEnv, raw: unknown, pick: boolean): Promise<
   return { text: pick ? `Picked model call ${a.id as string}: your user's Task Runners take it next.` : `Ended the pick of model call ${a.id as string}.` };
 }
 
+const settingsText = (r: { reserve: { fiveHour: number; weekly: number }; repos: string[]; maxCalls: number | null; interactiveSlots: number }): string =>
+  `reserve kept free: 5-hour ${r.reserve.fiveHour}%, weekly ${r.reserve.weekly}%\nrepos: ${r.repos.length ? r.repos.join(", ") : "all"}\nmax calls at once: ${r.maxCalls ?? "no limit"}\ninteractive slots: ${r.interactiveSlots}`;
+
+/** my_settings: GET /api/me/settings. */
+async function mySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
+  args(raw, {});
+  return { text: settingsText(await userSettings.settings(env.db, reqOf(await env.user(false)))) };
+}
+
+/** set_my_settings: PUT /api/me/settings, with its checks and audit rows. */
+async function setMySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
+  const a = args(raw, { reserve_five_hour: "reserve", reserve_weekly: "reserve", repos: "repos", max_calls: "count", no_max_calls: "flag", interactive_slots: "count" });
+  const user = await env.user(true);
+  const body: Record<string, unknown> = {};
+  if (a.reserve_five_hour !== undefined || a.reserve_weekly !== undefined) {
+    const was = await userReserve(env.db, user.login);
+    body.reserve = { fiveHour: a.reserve_five_hour ?? was.fiveHour, weekly: a.reserve_weekly ?? was.weekly };
+  }
+  if (a.repos !== undefined) body.repos = (a.repos as unknown as string[]).includes("all") ? [] : a.repos;
+  if (a.max_calls !== undefined && a.no_max_calls) throw new BadArgs("give max_calls or no_max_calls, not both");
+  if (a.max_calls !== undefined) body.maxCalls = a.max_calls;
+  if (a.no_max_calls) body.maxCalls = null;
+  if (a.interactive_slots !== undefined) body.interactiveSlots = a.interactive_slots;
+  if (!Object.keys(body).length) throw new BadArgs("send reserve_five_hour, reserve_weekly, repos, max_calls, no_max_calls or interactive_slots");
+  const reply = await userSettings.setSettings(env.db, reqOf(user, { method: "PUT", json: body }));
+  return { text: `Saved.\n${settingsText(reply)}` };
+}
+
 const HARNESS_IDS: HarnessId[] = ["claude", "codex"];
 
 const needRun = (env: McpEnv): NonNullable<McpEnv["run"]> => {
@@ -752,6 +813,8 @@ async function callTool(env: McpEnv, name: unknown, raw: unknown): Promise<ToolR
       case "list_model_calls": return await listModelCalls(env, raw);
       case "pick_model_call": return await pickModelCall(env, raw, true);
       case "unpick_model_call": return await pickModelCall(env, raw, false);
+      case "my_settings": return await mySettings(env, raw);
+      case "set_my_settings": return await setMySettings(env, raw);
       default: return { text: `unknown tool ${JSON.stringify(name)}`, isError: true };
     }
   } catch (e) {
@@ -792,7 +855,7 @@ export const RUN_TOOLS = [
 ] as const;
 
 /** Whether a tools/call writes (so the server can tell its live watchers). */
-export const writes = (msg: Msg): boolean => msg.method === "tools/call" && ["send_feedback", "answer_decision", "undo_answer", "queue_pr", "set_weight", "cancel_queued", "pick_model_call", "unpick_model_call"].includes(String(msg.params?.name));
+export const writes = (msg: Msg): boolean => msg.method === "tools/call" && ["send_feedback", "answer_decision", "undo_answer", "queue_pr", "set_weight", "cancel_queued", "pick_model_call", "unpick_model_call", "set_my_settings"].includes(String(msg.params?.name));
 
 /** One MCP server over JSON-RPC: what initialize reports, the tools it lists and how a tool call runs. */
 export type McpServerDef = { name: string; title: string; instructions?: string; tools: readonly unknown[]; call: (name: unknown, args: unknown) => Promise<ToolResult> };
@@ -826,7 +889,7 @@ export async function mcpReply(server: McpServerDef, msg: Msg): Promise<Reply | 
 }
 
 /** Every tool the server may offer, whoever asks: the CLI maps each one or lists it as MCP-only (test/autocraft-cli-layout.test.ts). */
-export const ALL_TOOL_NAMES: readonly string[] = [...TOOLS, ...ANSWER_TOOLS, ...QUEUE_TOOLS, ...QUEUE_APPROVE_TOOLS, ...RUN_TOOLS, ...MODEL_CALL_TOOLS, ...MODEL_PICK_TOOLS].map((t) => t.name);
+export const ALL_TOOL_NAMES: readonly string[] = [...TOOLS, ...ANSWER_TOOLS, ...QUEUE_TOOLS, ...QUEUE_APPROVE_TOOLS, ...RUN_TOOLS, ...MODEL_CALL_TOOLS, ...MODEL_PICK_TOOLS, ...SETTINGS_TOOLS].map((t) => t.name);
 
 /** The reply to one JSON-RPC message, or null for a notification or a response. */
 export async function handleMcp(env: McpEnv, msg: Msg): Promise<Reply | null> {
@@ -841,6 +904,6 @@ export async function handleMcp(env: McpEnv, msg: Msg): Promise<Reply | null> {
     instructions: INSTRUCTIONS + (env.canAnswer ? ANSWER_INSTRUCTIONS : "") + (queue ? QUEUE_INSTRUCTIONS + (env.canAnswer ? QUEUE_APPROVE_INSTRUCTIONS : "") : addsToQueue ? MAINTAINER_QUEUE_INSTRUCTIONS : "") + (env.run ? RUN_INSTRUCTIONS : "")
       + (env.userLocal ? MODEL_CALL_INSTRUCTIONS + (picks ? MODEL_PICK_INSTRUCTIONS : "") : ""),
     tools: [...TOOLS, ...(env.canAnswer ? ANSWER_TOOLS : []), ...(steers ? QUEUE_TOOLS : []), ...(queue && env.canAnswer ? QUEUE_APPROVE_TOOLS : addsToQueue ? [MAINTAINER_QUEUE_PR, ...QUEUE_APPROVE_TOOLS.filter((t) => t.name === "cancel_queued")] : []), ...(env.run ? RUN_TOOLS : []),
-      ...(env.userLocal ? MODEL_CALL_TOOLS : []), ...(picks ? MODEL_PICK_TOOLS : [])], call: (name, raw) => callTool(env, name, raw),
+      ...(env.userLocal ? MODEL_CALL_TOOLS : []), ...(picks ? MODEL_PICK_TOOLS : []), ...(steers ? SETTINGS_TOOLS : [])], call: (name, raw) => callTool(env, name, raw),
   }, msg);
 }
