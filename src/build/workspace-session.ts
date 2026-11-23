@@ -195,6 +195,7 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
     const outcome = describeOutcome(out);
     await update({ outcome: outcome.slice(0, 300) });
     ctx.log(`session ${id}: model call ${callId} ${outcome}`);
+    if (out.state === "done" && out.text.trim()) ctx.log(`session ${id}: reply:\n${capReply(out.text.trim())}`);
     const stats = await sessionStats(db, wsId, callId);
     ctx.log(`session ${id}: ${stats.calls} workspace tool calls, ${formatMs(stats.shellMs)} of shell time`);
     const files = await logDiffStat(ctx, wsId);
@@ -208,6 +209,15 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
     if (st && st.state !== "failed" && st.state !== "done") await finish("failed", (e as Error).message ?? String(e));
     throw e;
   }
+}
+
+const REPLY_CAP_BYTES = 4096;
+
+/** A try session's reply text cut to REPLY_CAP_BYTES (on a character boundary), with a marker that says how long it was. */
+export function capReply(text: string): string {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= REPLY_CAP_BYTES) return text;
+  return `${Buffer.from(text, "utf8").subarray(0, REPLY_CAP_BYTES).toString("utf8").replace(/\uFFFD+$/, "")}\n(cut, ${bytes} bytes)`;
 }
 
 function describeOutcome(o: Outcome): string {

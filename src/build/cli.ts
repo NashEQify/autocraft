@@ -22,7 +22,7 @@ import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { LAYOUT_CI, warmOf } from "./workspace-layout.ts";
 import { listHelpers } from "../remote/helpers.ts";
-import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
+import { capReply, requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
 import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
 import { capJson, createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
@@ -455,6 +455,9 @@ async function workspace(args: string[]): Promise<void> {
       console.log(`layout 2 (CI paths)  warm target ${warm?.target ?? "-"}  volume ${warm ? `${(warm.storageBytes / 1024 ** 3).toFixed(0)} GiB` : "-"}  ${warm?.note ? safe(warm.note) : warm?.use ? `copying ${warm.use.key}@${warm.use.commit.slice(0, 12)} on ${warm.use.node}` : warm?.why ? `cold: ${safe(warm.why)}` : w.prepared ? "" : "reading the CI gate"}`);
     }
     if (w.error) console.log(`error: ${safe(w.error)}`);
+    const reply = await db.get(db.k.selectFrom("workspace_sessions as s").innerJoin("remote_calls as c", "c.id", "s.remote_call_id").select(["s.id", "c.reply"])
+      .where("s.workspace_id", "=", w.id).where("s.kind", "=", "try").where("c.reply", "is not", null).orderBy("s.id", "desc").limit(1));
+    if (reply?.reply?.trim()) console.log(`reply of try session ${reply.id}:\n${safe(capReply(reply.reply.trim()))}`);
     const calls = await db.all(db.k.selectFrom("workspace_calls").select(["id", "n", "tool", "state", "created_at", "finished_at", "result"]).where("workspace_id", "=", w.id).orderBy("id", "desc").limit(10));
     for (const c of calls.reverse()) {
       let summary = "";
