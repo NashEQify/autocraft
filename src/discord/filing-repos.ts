@@ -4,7 +4,7 @@
 import { execFile } from "node:child_process";
 import { audit } from "../dash/audit.ts";
 import { OWNER } from "../owners.ts";
-import { ownerAllowed } from "../github/allowed-owners.ts";
+import { listRepoOwner, ownerAllowed } from "../github/allowed-owners.ts";
 import { appCoverage } from "../github/identity.ts";
 import { AppReadError, readEnv } from "../github/read.ts";
 import { publicRepoNames } from "../public/status.ts";
@@ -100,6 +100,7 @@ export async function addFilingRepo(db: Db, by: string, input: string, deps: { r
   const row = { owner, name, added_by: by, added_at: new Date().toISOString() };
   await db.run(db.k.insertInto("discord_filing_repos").values(row));
   await audit(db, by, "discord-filing-add", name, { owner });
+  await listRepoOwner(db, by, owner, "filing");
   return { owner, name, addedBy: by, addedAt: row.added_at };
 }
 

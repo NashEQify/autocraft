@@ -204,13 +204,19 @@ function AllowedOwners({ s, onChange }: { s: GithubAppStatus; onChange: () => vo
               <span className="text-xs text-ink/55">
                 {o.addedBy} · {day(o.addedAt)}
               </span>
-              <ConfirmButton
-                className="ml-auto"
-                label="Remove"
-                confirmLabel={`Remove ${o.login}`}
-                loading={w.busy === `remove:${o.login}`}
-                onConfirm={() => void w.run(`remove:${o.login}`, () => api.githubApp.removeOwner(o.login))}
-              />
+              {o.kept ? (
+                <Badge tone="ok" className="ml-auto">
+                  Protected
+                </Badge>
+              ) : (
+                <ConfirmButton
+                  className="ml-auto"
+                  label="Remove"
+                  confirmLabel={`Remove ${o.login}`}
+                  loading={w.busy === `remove:${o.login}`}
+                  onConfirm={() => void w.run(`remove:${o.login}`, () => api.githubApp.removeOwner(o.login))}
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -234,9 +240,9 @@ function Installations({ s, onChange }: { s: GithubAppStatus; onChange: () => vo
               {i.type && <Badge>{i.type}</Badge>}
               <Badge>{i.selection === "all" ? "All repos" : `${i.repos.length} repos`}</Badge>
               {i.createdAt && <span className="text-xs text-ink/55">installed {day(i.createdAt)}</span>}
-              {i.allowed ? (
+              {i.allowed || i.protected ? (
                 <Badge tone="ok" className="ml-auto">
-                  Allowed
+                  {i.allowed ? "Allowed" : "Protected"}
                 </Badge>
               ) : (
                 <Button size="sm" variant="secondary" className="ml-auto max-md:h-11" loading={w.busy === i.owner} onClick={() => void w.run(i.owner, () => api.githubApp.allowOwner(i.owner))}>

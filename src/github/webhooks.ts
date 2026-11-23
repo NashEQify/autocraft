@@ -98,13 +98,9 @@ export async function handleDelivery(db: Db, secret: string | null, headers: { s
   } catch {
     return { status: 400 };
   }
-  // An installation on an account that is not an allowed owner is removed at once; the sweep is the backup.
+  // An installation on an account that is not an allowed owner is removed right after the answer; the sweep is the backup.
   if (event === "installation" || event === "installation_repositories") {
-    try {
-      await installationEvent(db, event, payload);
-    } catch (e) {
-      console.log(`webhook ${event}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-    }
+    void installationEvent(db, event, payload).catch((e: unknown) => console.log(`webhook ${event}: ${String((e as Error)?.message ?? e).slice(0, 200)}`));
     return { status: 202, queued: 0 };
   }
   return { status: 202, queued: await queueDelivery(db, event, payload, new Date(), appSlug) };

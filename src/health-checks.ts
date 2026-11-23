@@ -297,8 +297,13 @@ async function appIdentityChecks({ db, probe }: CheckCtx): Promise<Check[]> {
 async function foreignInstallCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
   const removed = await unackedRemovals(db, nowMs);
   if (!removed.length) return [ok("app-foreign-install", "/admin/github-app")];
-  const accounts = [...new Set(removed.map((r) => r.account))];
-  const text = `The GitHub App was installed on ${clip(accounts.join(", "), 120)}, not ${accounts.length === 1 ? "an allowed owner" : "allowed owners"}, and removed`;
+  const gone = [...new Set(removed.filter((r) => !r.refused).map((r) => r.account))];
+  const kept = removed.filter((r) => r.refused).map((r) => `${r.account} (covers ${r.refused})`);
+  const parts = [
+    ...(gone.length ? [`The GitHub App was installed on ${clip(gone.join(", "), 100)}, not ${gone.length === 1 ? "an allowed owner" : "allowed owners"}, and removed`] : []),
+    ...(kept.length ? [`The GitHub App's installation on ${clip([...new Set(kept)].join(", "), 120)} is not on the allowed owners list and was kept`] : []),
+  ];
+  const text = parts.join("; ");
   return [{ id: "app-foreign-install", state: "warn", text, brief: "The GitHub App was installed on an account that may not use it", since: removed[0]!.at, count: removed.length, ack: "app-foreign-install", to: "/admin/github-app" }];
 }
 

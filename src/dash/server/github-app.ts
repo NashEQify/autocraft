@@ -16,7 +16,7 @@ import { githubIdentity, IdentityRefused, setGithubIdentityChecked } from "../..
 import { randomToken } from "./crypto.ts";
 import { esc, plainPage } from "./util.ts";
 import { createLink, openLinks, revokeLink } from "./github-setup.ts";
-import { ackRemovals, allowedOwners, AllowedOwnerError, allowOwner, keptOwners, removeOwner } from "../../github/allowed-owners.ts";
+import { ackRemovals, allowedOwners, AllowedOwnerError, allowOwner, keptOwners, removeOwner, rowFor } from "../../github/allowed-owners.ts";
 import type { Db } from "../../db/index.ts";
 
 export const DEFAULT_APP_NAME = "AutoCraft";
@@ -80,7 +80,7 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
     method: "POST", pattern: "/api/admin/github-app/owners", operator: true,
     handler: async (db, r): Promise<Res> => {
       try {
-        await allowOwner(db, r.user.login, String((r.json as { login?: unknown } | undefined)?.login ?? ""), config.secrets.app?.owner?.login ?? null);
+        await allowOwner(db, r.user.login, String((r.json as { login?: unknown } | undefined)?.login ?? ""), config.secrets.app, deps);
       } catch (e) {
         if (e instanceof AllowedOwnerError) return { status: 409, json: { error: e.message } };
         throw e;
@@ -120,8 +120,8 @@ export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Pr
     defaultName: envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME, app: null, installations: [], links: await openLinks(db), error: null, keysUnreadable: false, allowedOwners: [],
   };
   const kept = await keptOwners(db, app?.owner?.login ?? null);
-  status.allowedOwners = (await allowedOwners(db)).map((o) => ({ ...o, kept: kept.get(o.login.toLowerCase())?.why ?? null }));
-  const listed = new Set(status.allowedOwners.map((o) => o.login.toLowerCase()));
+  const rows = await allowedOwners(db);
+  status.allowedOwners = rows.map((o) => ({ login: o.login, addedBy: o.addedBy, addedAt: o.addedAt, kept: kept.get(o.login.toLowerCase())?.why ?? null }));
   if (!app) {
     if (boundAppKeys(config.secrets)?.unreadable()) { status.error = UNREADABLE; status.keysUnreadable = true; }
     return status;
@@ -130,7 +130,7 @@ export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Pr
   try {
     status.app.name = await appName(app, deps);
     for (const i of await installations(app, deps)) {
-      status.installations.push({ id: i.id, owner: i.owner, type: i.type, selection: i.selection, repos: await installationRepos(app, i.id, deps), createdAt: i.createdAt, allowed: listed.has(i.owner.toLowerCase()) });
+      status.installations.push({ id: i.id, owner: i.owner, type: i.type, selection: i.selection, repos: await installationRepos(app, i.id, deps), createdAt: i.createdAt, allowed: rowFor(rows, i) !== null, protected: kept.has(i.owner.toLowerCase()) });
     }
   } catch (e) {
     status.error = e instanceof AppError ? e.message : "GitHub could not be read";

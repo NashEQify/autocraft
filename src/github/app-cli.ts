@@ -7,7 +7,7 @@
 import { envVar } from "../env.ts";
 import { openDb } from "../db/open.ts";
 import { installations } from "./app.ts";
-import { allowedOwners, AllowedOwnerError, allowOwner, removeOwner } from "./allowed-owners.ts";
+import { allowedOwners, AllowedOwnerError, allowOwner, removeOwner, rowFor } from "./allowed-owners.ts";
 import { readAppSecrets } from "./install-token.ts";
 
 function registerUrl(): string {
@@ -33,16 +33,15 @@ async function app(args: string[]): Promise<void> {
       if (!owners.length) console.log("no allowed owners: any account may install the app, and nothing is removed");
       for (const o of owners) console.log(`${o.login}  added ${o.addedAt.slice(0, 16).replace("T", " ")} by ${o.addedBy}`);
     } else if (sub === "owners" && a === "allow" && b) {
-      for (const o of await allowOwner(db, "cli", b, appOwner)) console.log(o.login);
+      for (const o of await allowOwner(db, "cli", b, keys)) console.log(o.login);
     } else if (sub === "owners" && a === "remove" && b) {
       if (!await removeOwner(db, "cli", b, appOwner)) die(`${b} is not an allowed owner`);
       console.log(`removed ${b}`);
     } else if (sub === "installations" && a === undefined) {
       if (!keys) die("no GitHub App is registered");
       const owners = await allowedOwners(db);
-      const listed = new Set(owners.map((o) => o.login.toLowerCase()));
       for (const i of await installations(keys)) {
-        const state = !owners.length ? "" : listed.has(i.owner.toLowerCase()) ? "  allowed" : "  not allowed";
+        const state = !owners.length ? "" : rowFor(owners, i) ? "  allowed" : "  not allowed";
         console.log(`${i.id}  ${i.owner}  ${i.type ?? "?"}  ${i.selection === "all" ? "all repos" : "selected repos"}  installed ${i.createdAt?.slice(0, 10) ?? "?"}${state}`);
       }
     } else {

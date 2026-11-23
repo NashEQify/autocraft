@@ -187,13 +187,15 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
     { id: "l1", org: "storytold", createdBy: me.login, createdAt: new Date(NOW - 2 * H).toISOString(), expiresAt: new Date(NOW + 7 * D - 2 * H).toISOString() },
     { id: "l2", org: "glasswing", createdBy: me.login, createdAt: new Date(NOW - 3 * D).toISOString(), expiresAt: new Date(NOW + 4 * D).toISOString() },
   ];
-  /** The allowed owners: glasswing and storytold; the app's installation on lumenworks is not allowed. */
+  /** The allowed owners: glasswing, storytold and harborlight (not installed yet); the app's installation on lumenworks is not allowed. */
   const appOwners: { login: string; addedBy: string; addedAt: string }[] = [
     { login: "glasswing", addedBy: me.login, addedAt: new Date(NOW - 5 * D).toISOString() },
     { login: "storytold", addedBy: me.login, addedAt: new Date(NOW - 5 * D).toISOString() },
+    { login: "harborlight", addedBy: me.login, addedAt: new Date(NOW - 1 * D).toISOString() },
   ];
-  /** Owners of tracked repos, which stay allowed. */
+  /** The app's owner and owners of tracked repos, which stay allowed. */
   const keptWhy = (login: string): string | null => {
+    if (login.toLowerCase() === "glasswing") return "glasswing owns the GitHub App";
     const r = repos.find((x) => x.tracked && x.owner.toLowerCase() === login.toLowerCase());
     return r ? `${r.owner} owns the tracked repo ${r.name}` : null;
   };
@@ -209,7 +211,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         { id: 101, owner: "glasswing", type: "Organization" as const, selection: "selected" as const, repos: ["glasswing/photocraft", "glasswing/designcraft", "glasswing/filmcraft"], createdAt: new Date(NOW - 40 * D).toISOString() },
         { id: 102, owner: "storytold", type: "Organization" as const, selection: "selected" as const, repos: ["storytold/filmcraft", "storytold/designcraft"], createdAt: new Date(NOW - 30 * D).toISOString() },
         { id: 103, owner: "lumenworks", type: "Organization" as const, selection: "all" as const, repos: ["lumenworks/inkwell", "lumenworks/lantern"], createdAt: new Date(NOW - 2 * H).toISOString() },
-      ].map((i) => ({ ...i, allowed: isAllowed(i.owner) })) : [],
+      ].map((i) => ({ ...i, allowed: isAllowed(i.owner), protected: keptWhy(i.owner) !== null })) : [],
       allowedOwners: appOwners.map((o) => ({ ...o, kept: keptWhy(o.login) })),
       error: null,
     };

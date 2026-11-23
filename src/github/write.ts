@@ -18,7 +18,7 @@ import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstalla
 import { type Note, withNote } from "./note.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
-import { appJwt, call, GITHUB_API } from "./app.ts";
+import { AppError, appJwt, call, GITHUB_API } from "./app.ts";
 import type { AppSecrets } from "../dash/server/config.ts";
 import { currentJobId } from "../agents/call.ts";
 import { resumedRun } from "../runner/resuming.ts";
@@ -1088,10 +1088,12 @@ export function grantOrgRole(w: Writer, o: { org: string; user: string; role: { 
 /**
  * Uninstalls the GitHub App from one account with the app's own JWT; src/github/allowed-owners.ts decides which. Made
  * as the app itself, which no grant names; audited as `app-install-removed` on the account's login, with the
- * installation id and what found it (`webhook` or `sweep`).
+ * installation id, the account's id and what found it (`webhook` or `sweep`). GitHub's 404 means it is gone already:
+ * recorded done with `already`, and the answer is true.
  */
-export function removeInstallation(w: Writer, o: { app: Pick<AppSecrets, "clientId" | "privateKey">; installationId: number; account: string; found: "webhook" | "sweep"; apiBase?: string }): Promise<void> {
+export function removeInstallation(w: Writer, o: { app: Pick<AppSecrets, "clientId" | "privateKey">; installationId: number; account: string; accountId: number | null; found: "webhook" | "sweep"; apiBase?: string }): Promise<boolean> {
   const identity = "app";
-  return recorded(w, identity, "app-install-removed", o.account, { installation: o.installationId, account: o.account, found: o.found },
-    () => call(o.apiBase ?? GITHUB_API, `/app/installations/${o.installationId}`, appJwt(o.app), "DELETE").then(() => undefined), undefined, undefined, undefined, o.account);
+  const gone = (e: unknown): boolean => { if (e instanceof AppError && e.status === 404) return true; throw e; };
+  return recorded(w, identity, "app-install-removed", o.account, { installation: o.installationId, account: o.account, accountId: o.accountId, found: o.found },
+    () => call(o.apiBase ?? GITHUB_API, `/app/installations/${o.installationId}`, appJwt(o.app), "DELETE").then(() => false, gone), (already) => (already ? { already: true } : {}), undefined, undefined, o.account);
 }
