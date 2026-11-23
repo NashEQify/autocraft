@@ -378,8 +378,9 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   if (!rustc) e.log("warm publish: no rustc -vV output; the manifest records none");
   // Before the walk, which reads every file and so moves the atimes the trim reads.
   const start = readBuildStart(w.v("STAMP_FILE"));
-  const trim = start?.atime ? trimTarget(roots.target, start) : null;
-  if (!trim) e.log(`warm publish: ${start ? "reads do not update atimes on the target's file system" : "no build start recorded"}; nothing trimmed, and consumers count every source as changed`);
+  const found = start?.atime ? trimTarget(roots.target, start) : null;
+  const trim = found && found.profiles > 0 ? found : null;
+  if (!trim) e.log(`warm publish: ${!start ? "no build start recorded" : !start.atime ? "reads do not update atimes on the target's file system" : "no profile dir (.fingerprint or build/<package>/<hash>/fingerprint) found in the target"}; nothing trimmed, and consumers count every source as changed`);
   else if (trim.unattributed) e.log(`warm publish: ${trim.unattributed} kept units were read at an unknown time; consumers count every source as changed`);
   const s = await w.store(true).publish({
     key: w.key(), repo: w.v("REPO") ?? task!.repo, commit: w.v("COMMIT") ?? task!.headSha,
