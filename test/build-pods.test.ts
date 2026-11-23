@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { decodeManifest, encodeManifest, makeHeader } from "../src/warm/manifest.ts";
 import { authenticate, createEnv, kubeReport } from "../src/build/envs.ts";
 import type { CapacityApi, ExecResult, KNode, KPod, KResourceQuota, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
@@ -429,6 +430,10 @@ test("a warm producer's pods: the mirror for the fetch, then restore, build with
   for (const c of [step, byName["warm-restore"]!, byName["warm-publish"]!]) assert.ok(mounts(c).some((m) => m.name === "warm-target" && m.mountPath === target), `${c.name} sees the build's target dir`);
   assert.equal(build.spec.volumes.find((v: { name: string }) => v.name === "warm-target").emptyDir.medium, "Memory");
   assert.equal(envOf(byName["warm-publish"]!).AUTOCRAFT_WARM_TARGET, target, "published at the path the build used");
+  const slug = envOf(byName["warm-publish"]!).AUTOCRAFT_WARM_REPO!;
+  assert.match(slug, /^[\w.-]+\/open-app$/, "the publish gets the repo as owner/name although the task stores the bare name");
+  const header = makeHeader({ key: "a".repeat(8), repo: slug, commit: "c".repeat(40), stored: 1, image: null, rustc: null, envHash: null, checkout: null, targetDir: target, cargoHome: "/cache/cargo" }, []);
+  assert.equal(decodeManifest(encodeManifest({ header, entries: [] })).header.repo, slug, "the header is accepted when written and when read back");
 });
 
 test("a warm producer's memory limit grows with the expected warm bytes; a large or unknown version puts the target on the volume", () => {

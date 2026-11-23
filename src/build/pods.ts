@@ -652,13 +652,13 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
       : [];
     return pod(c, group.network, volumes, [disk, ...wait, ...check, ...copy, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
   }
-  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, warmEnvHash(prepared), targetVolume, extraMemory);
+  const w = warmPhases(c, appImage, warm!, slugOf(repo), target!, checkout!, image, warmEnvHash(prepared), targetVolume, extraMemory);
   const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
   return pod(c, group.network, volumes, [disk, ...wait, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
 }
 
-/** The AutoCraft-image containers of a warm producer's pod (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
-function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, envHash: string, targetVolume: { name: string; subPath?: string }, extraMemory: number | null) {
+/** The AutoCraft-image containers of a warm producer's pod (`slug` is the tracked `owner/name`, which the manifest header records) (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
+function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, slug: string, target: string, checkout: string, image: string, envHash: string, targetVolume: { name: string; subPath?: string }, extraMemory: number | null) {
   const v = (o: Record<string, string>) => envList({ HOME: "/tmp", ...Object.fromEntries(Object.entries(o).map(([k, x]) => [`AUTOCRAFT_WARM_${k}`, x])) });
   const signing = { name: "warm-signing", mountPath: "/keys/signing", readOnly: true };
   const verify = { name: "warm-verify", mountPath: "/keys/verify", readOnly: true };
@@ -670,7 +670,7 @@ function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, 
     restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: VERIFY_KEY, IMAGE: image, BAD_BLOBS_FILE, STAMP_FILE }),
       [{ ...targetVolume, mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, verify], extraMemory),
     publish: phase(WARM_PUBLISH_CONTAINER, [
-      ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE, STAMP_FILE,
+      ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, REPO: slug, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE, STAMP_FILE,
         ...(warm.recheck?.length ? { RECHECK: warm.recheck.filter((x) => /^[0-9a-f]{64}$/.test(x)).slice(0, MAX_RECHECK).join(",") } : {}) }),
       ...writer,
     ], [
