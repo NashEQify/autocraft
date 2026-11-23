@@ -4,7 +4,7 @@
 // `warm-assign` lists. Nothing is written while no node reports or no repo is covered: an empty placement would make
 // every node drop what it holds.
 import type { Db } from "../db/index.ts";
-import { parsePlacement, PLACEMENT_CONFIGMAP, PLACEMENT_DATA_KEY, placeKeys } from "../warm/placement.ts";
+import { parsePlacement, PLACEMENT_CONFIGMAP, PLACEMENT_DATA_KEY, placeKeys, type Placement } from "../warm/placement.ts";
 import { DEFAULT_GRACE_MS } from "../warm/sync-agent.ts";
 import type { ConfigMapApi } from "./kube-api.ts";
 import { warmKeyOf } from "./tasks.ts";
@@ -17,6 +17,10 @@ const ASSIGN_CONFIGMAP = "warm-assign";
 export class WarmPlacer {
   private at = -Infinity;
   private lastNote: string | null = null;
+  /** The placement in force as the last pass read or wrote it; null before a pass got that far or when there is none. */
+  current: Placement | null = null;
+  /** Why the last pass could not place (shown on the caches report); null when it could. */
+  note: string | null = null;
   private readonly api: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap">;
   private readonly o: { namespace: string; now: () => number; log: (line: string) => void };
   constructor(api: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap">, o: { namespace: string; now: () => number; log: (line: string) => void }) {
@@ -24,9 +28,10 @@ export class WarmPlacer {
     this.o = o;
   }
 
-  private note(m: string) {
+  private warn(m: string) {
     if (m !== this.lastNote) this.o.log(`warm placement: ${m}`);
     this.lastNote = m;
+    this.note = m;
   }
 
   async pass(db: Db, status: WarmStatus): Promise<void> {
@@ -38,7 +43,10 @@ export class WarmPlacer {
       const repos = (await warmCoverage(db)).repos;
       if (!nodes.some((n) => n.fresh) || !repos.length) return;
       const cm = await this.api.getConfigMap(ns, PLACEMENT_CONFIGMAP);
-      if (!cm) return this.note(`ConfigMap ${PLACEMENT_CONFIGMAP} is missing in ${ns}, so every node keeps every key warm-assign lists`);
+      if (!cm) {
+        this.current = null;
+        return this.warn(`ConfigMap ${PLACEMENT_CONFIGMAP} is missing in ${ns}, so every node keeps every key warm-assign lists`);
+      }
       const gb = Number((await this.api.getConfigMap(ns, ASSIGN_CONFIGMAP))?.data?.maxGbPerNode);
       const keys: { key: string; bytes: number | null }[] = [];
       for (const r of repos) {
@@ -51,9 +59,11 @@ export class WarmPlacer {
         await this.api.patchConfigMap(ns, PLACEMENT_CONFIGMAP, { data: { [PLACEMENT_DATA_KEY]: next } });
         this.o.log(`warm placement: ${parsePlacement(next)!.keys.map((k) => `${k.key} on ${k.nodes.join(", ") || "no node"}`).join("; ")}`);
       }
+      this.current = parsePlacement(next);
       this.lastNote = null;
+      this.note = null;
     } catch (e) {
-      this.note((e as Error).message.slice(0, 300));
+      this.warn((e as Error).message.slice(0, 300));
     }
   }
 }

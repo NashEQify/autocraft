@@ -1280,6 +1280,17 @@ What the DaemonSet needs:
 
 **On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there (it selects by the label `craft.build/warm-status=node`). Placement needs `get` there and `patch` on the ConfigMap `warm-placement`, which the cluster's configuration creates once (with `{}`) and does not overwrite. A status not rewritten for 15 minutes counts as not warm and is not counted in M. A node whose agent reports an error shows `node: message` on the environment's Warm row and in `envs list`. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
 
+**Caches report.** The Caches block on the Build environments page (`GET /api/envs/caches`, everyone signed in, keys of repos the reader cannot see left out) and `autocraft-server envs caches [--json]` show the same report:
+
+| Part | Shows | Source |
+|---|---|---|
+| Repositories | Per covered, added, excluded or built repo: the published version (the last successful warm task: commit, end, size) and whether it is up to date, behind main or of another toolchain image than the warm writer's; the last warm task (state, summary, link); the warm target and whether an operator set it; how many fresh nodes hold the published version | `build_tasks` (step `warm`), `main_ci`, `build_sizes`, the `warm_bytes:<key>` settings, warm-repos coverage |
+| Nodes | Per node: when its status was written (stale after 15 minutes), disk use, warm bytes (current and in grace), each key held (commit, size, synced, an older version, not placed here), pending keys with the reason, bad blob counts, an agent error | the `warm-status-*` ConfigMaps |
+| Placement | Per key, its nodes and whether each holds the newest version, an older one or none yet; why the runner could not place | the runner's last placement pass |
+| Crate mirror | The git allowlist and the environments with `--crate-mirror` | ConfigMap `crate-mirror-git-allowlist` (key `allowlist.txt`, `AUTOCRAFT_MIRROR_ALLOWLIST_CONFIGMAP` to rename) in the warm status namespace, read every 5 minutes while an enabled environment has a crate mirror; the runner's `get` on configmaps there covers it |
+
+Only the runner reads the cluster, so the pod launcher stores its reads in the settings row `warm_report` when they change, and at least every 5 minutes while only the report times move. The row bumps the `envs` live topic, which the planner does not read. The mirror's health and store sizes (its `/healthz`) are not in the report: the runner cannot reach the mirror's health port.
+
 ## Similar items and semantic search
 
 `autocraft-server embed [--all] [--threads N] [--batch N]` embeds every tracked item whose text changed since its last embedding (`--all`: every tracked item) into `item_embeddings`, and removes vectors of items that left the mirror or the tracked repos. Each batch commits on its own, so an interrupted run continues where it stopped. The dashboard reads the table for "Similar items" on the Item page and for the search box's meaning toggle; it embeds search queries, and items without a vector yet, itself.

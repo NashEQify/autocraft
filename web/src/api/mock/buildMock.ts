@@ -4,6 +4,7 @@ import { mayRunMock } from "./adminMock";
 import type { Api } from "../client";
 import type { ItemShown, BuildEnv, BuildFeatureName, BuildFeatures, ScreenshotConfigJson, ScreenshotSetup, BuildTask, PrBuildScope, BuildTaskDetail, TaskResult, TaskState, TaskStep, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
+import { cachesMock } from "./cachesMock";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
@@ -223,6 +224,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
         if (!envs.some((x) => x.id === id)) throw new Error("no such environment");
         return wait({ key: `cwk_${id}_Hq8LwN2cT5vB0xYzR3mKd7JpEa9UsGf1iO6XtVjQ4Mn` }, 40);
       },
+      caches: () => wait(cachesMock({ done: TASKS.filter((t) => t.state === "done").map((t) => t.id), failed: TASKS.filter((t) => t.state === "failed").map((t) => t.id) })),
     },
     tasks: {
       list(f) {

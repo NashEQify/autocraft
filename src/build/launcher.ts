@@ -24,6 +24,7 @@ import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { STATUS_NAMESPACE, WarmStatus } from "./warm-status.ts";
 import { takeLog, type LogPos } from "./pod-log.ts";
 import { WarmPlacer } from "./warm-place.ts";
+import { CacheReporter } from "./caches.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
@@ -70,6 +71,8 @@ export type LauncherDeps = {
   configMaps?: Pick<ConfigMapApi, "listConfigMaps"> | null;
   /** Writes the warm placement (src/build/warm-place.ts); null or left out: none is written. */
   placement?: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap"> | null;
+  /** Reads the crate mirror's allowlist for the caches report (src/build/caches.ts); null or left out: none is read. */
+  caches?: Pick<ConfigMapApi, "getConfigMap"> | null;
   /** The runner's own image (AUTOCRAFT_IMAGE), for environments that name none. */
   defaultImage: string | null;
   log: (line: string) => void;
@@ -104,6 +107,7 @@ class PassReads {
 export class LauncherState {
   warm: WarmStatus | null = null;
   placer: WarmPlacer | null = null;
+  caches: CacheReporter | null = null;
   reads = new PassReads();
   access = new Map<string, { at: number; missing: string[] }>();
   /** `capacity`: the quota refused a first pod, a capacity wait rather than a fault. */
@@ -134,6 +138,12 @@ export async function launcherPass(d: LauncherDeps, state: LauncherState): Promi
     if (d.placement) {
       state.placer ??= new WarmPlacer(d.placement, { namespace: envVar("WARM_STATUS_NAMESPACE") ?? STATUS_NAMESPACE, now: d.now ?? Date.now, log: d.log });
       await state.placer.pass(d.db, state.warm);
+    }
+    state.caches ??= new CacheReporter(d.caches ?? null, d.now);
+    try {
+      await state.caches.pass(d.db, state.warm, state.placer, envs.some((e) => e.enabled && settingsOf(e.settings).crateMirror));
+    } catch (e) {
+      d.log(`caches report: ${(e as Error).message}`);
     }
   }
   for (const env of envs) {
@@ -933,7 +943,7 @@ export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string
     getConfigMap: api.getConfigMap,
     patchConfigMap: async (ns: string, name: string, patch: object) => (await guard?.(), await api.patchConfigMap(ns, name, patch)),
   };
-  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, placement, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
+  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, placement, caches: api, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
   const state = new LauncherState();
   const workspaces = new WorkspaceState();
   void (async () => {
