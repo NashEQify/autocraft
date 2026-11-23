@@ -8,8 +8,6 @@ import { WS_IMAGE_PATH, WS_POD_PATH } from "./workspace.ts";
 import { ciStepEnv, LAYOUT_SH, workspaceEnvHash, type WorkspacePrepared } from "./workspace-layout.ts";
 
 export const WORKSPACE_APP = "autocraft-workspace";
-/** The AutoCraft service's pods, which no workspace pod may share a node with. */
-export const SERVICE_SELECTOR = { namespace: "craft", labels: { "app.kubernetes.io/name": "autocraft" } };
 export const WS_CONTAINER = "workspace";
 const COPY_CONTAINER = "ws-helper";
 const LAYOUT_CONTAINER = "ws-layout";
@@ -107,11 +105,6 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
       // copies a warm version mounts that node's warm claim, which pins it to that node.
       affinity: {
         podAntiAffinity: {
-          requiredDuringSchedulingIgnoredDuringExecution: [{
-            labelSelector: { matchLabels: SERVICE_SELECTOR.labels },
-            namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": SERVICE_SELECTOR.namespace } },
-            topologyKey: "kubernetes.io/hostname",
-          }],
           preferredDuringSchedulingIgnoredDuringExecution: [{
             weight: 50,
             podAffinityTerm: { labelSelector: { matchLabels: { "app.kubernetes.io/name": WORKSPACE_APP } }, topologyKey: "kubernetes.io/hostname" },
