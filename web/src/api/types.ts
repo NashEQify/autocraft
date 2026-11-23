@@ -1790,10 +1790,13 @@ export type Requires = Partial<Pick<Capabilities, "os" | "arch" | "display" | "g
   toolchains?: string[]; minMemGb?: number; minDiskGb?: number;
 };
 export type EnvKind = "local-sandbox" | "remote" | "kubernetes";
+export type EnvTask = { id: number; step: string; repo: RepoName; number: number | null; current: string | null; startedAt: string };
 export type BuildEnv = {
   id: string; label: string; kind: EnvKind;
   enabled: boolean; online: boolean; lastSeenAt: string | null;
   slots: number; running: number;
+  /** The claimed and running tasks, oldest first: what the busy slots are doing. */
+  tasks: EnvTask[];
   capabilities: Capabilities | null;   // as last reported by the worker
   version: string | null;              // worker software version
   pausedReason: string | null;         // e.g. "disk 12 GB free (needs 20)"

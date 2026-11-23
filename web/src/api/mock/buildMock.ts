@@ -12,23 +12,23 @@ const HOUR = 3_600_000;
 
 const envs: BuildEnv[] = [
   {
-    id: "sandbox", label: "Local sandbox", kind: "local-sandbox", enabled: true, online: true, lastSeenAt: iso(4_000), slots: 2, running: 0, version: "0.4.1", pausedReason: null, confidential: false, settings: null,
+    id: "sandbox", label: "Local sandbox", kind: "local-sandbox", enabled: true, online: true, lastSeenAt: iso(4_000), slots: 2, running: 0, tasks: [], version: "0.4.1", pausedReason: null, confidential: false, settings: null,
     capabilities: { os: "linux", arch: "x86_64", cpus: 16, memGb: 48, diskGb: 210, display: false, gpu: false, toolchains: ["node-24", "rust-stable"] },
   },
   {
-    id: "build-a", label: "Build server A", kind: "remote", enabled: true, online: true, lastSeenAt: iso(9_000), slots: 4, running: 0, version: "0.4.1", pausedReason: null, confidential: false, settings: null,
+    id: "build-a", label: "Build server A", kind: "remote", enabled: true, online: true, lastSeenAt: iso(9_000), slots: 4, running: 0, tasks: [], version: "0.4.1", pausedReason: null, confidential: false, settings: null,
     capabilities: { os: "linux", arch: "x86_64", cpus: 64, memGb: 256, diskGb: 1800, display: true, gpu: true, toolchains: ["java-21", "node-24", "rust-stable", "rust-nightly"] },
   },
   {
-    id: "build-b", label: "Build server B", kind: "remote", enabled: true, online: true, lastSeenAt: iso(12_000), slots: 4, running: 0, version: "0.4.0", pausedReason: "disk 12 GB free (needs 20)", confidential: false, settings: null,
+    id: "build-b", label: "Build server B", kind: "remote", enabled: true, online: true, lastSeenAt: iso(12_000), slots: 4, running: 0, tasks: [], version: "0.4.0", pausedReason: "disk 12 GB free (needs 20)", confidential: false, settings: null,
     capabilities: { os: "linux", arch: "aarch64", cpus: 32, memGb: 128, diskGb: 900, display: false, gpu: false, toolchains: ["node-24", "rust-stable"] },
   },
   {
-    id: "mac-mini", label: "Mac mini", kind: "remote", enabled: true, online: false, lastSeenAt: iso(3 * HOUR), slots: 1, running: 0, version: "0.3.2", pausedReason: null, confidential: false, settings: null,
+    id: "mac-mini", label: "Mac mini", kind: "remote", enabled: true, online: false, lastSeenAt: iso(3 * HOUR), slots: 1, running: 0, tasks: [], version: "0.3.2", pausedReason: null, confidential: false, settings: null,
     capabilities: { os: "macos", arch: "aarch64", cpus: 10, memGb: 32, diskGb: 400, display: true, gpu: true, toolchains: ["rust-stable"] },
   },
   {
-    id: "cluster", label: "Cluster pods", kind: "kubernetes", enabled: true, online: true, lastSeenAt: iso(3_000), slots: 4, running: 1, version: null, pausedReason: null, confidential: false,
+    id: "cluster", label: "Cluster pods", kind: "kubernetes", enabled: true, online: true, lastSeenAt: iso(3_000), slots: 4, running: 1, tasks: [], version: null, pausedReason: null, confidential: false,
     capabilities: {
       os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [],
       warm: [{ key: "deckcraft", commit: "3f9c1e07a2b4d8e6f0a1b2c3d4e5f60718293a4b", nodes: 6, of: 6 }, { key: "photocraft", commit: "a07b3c9d1e2f4a5b6c7d8e9f0a1b2c3d4e5f6071", nodes: 4, of: 6 }],
@@ -39,10 +39,10 @@ const envs: BuildEnv[] = [
       ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64", display: false,
       workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
       workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
-      warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null, display: false,
+      warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
     },
   },
-  { id: "old-box", label: "Old build box", kind: "remote", enabled: false, online: false, lastSeenAt: iso(9 * 24 * HOUR), slots: 2, running: 0, version: null, pausedReason: null, confidential: true, settings: null, capabilities: null },
+  { id: "old-box", label: "Old build box", kind: "remote", enabled: false, online: false, lastSeenAt: iso(9 * 24 * HOUR), slots: 2, running: 0, tasks: [], version: null, pausedReason: null, confidential: true, settings: null, capabilities: null },
 ];
 
 const PLAN: TaskStep[] = [
@@ -124,7 +124,11 @@ const TASKS: BuildTask[] = [
 ];
 TASKS.sort((a, b) => b.id - a.id);
 const used = (e: string) => TASKS.filter((t) => t.envId === e && (t.state === "running" || t.state === "claimed")).length;
-for (const e of envs) e.running = used(e.id);
+for (const e of envs) {
+  const on = TASKS.filter((t) => t.envId === e.id && (t.state === "running" || t.state === "claimed")).sort((a, b) => a.id - b.id);
+  e.running = used(e.id);
+  e.tasks = on.map((t) => ({ id: t.id, step: t.step, repo: t.repo, number: t.number, current: t.plan.find((s) => !t.results.some((r) => r.step === s.name))?.name ?? null, startedAt: t.startedAt ?? t.claimedAt ?? iso(0) }));
+}
 
 export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs" | "tasks" | "buildFeatures" | "screenshotSetup"> {
   const featureOn = new Set<string>(["implement:designcraft", "implement:photocraft", "push-tests:designcraft", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
@@ -198,7 +202,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
         operator();
         if (!/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(input.id)) throw new Error("id must be 3 to 32 lowercase letters, digits or hyphens, starting with a letter");
         if (envs.some((e) => e.id === input.id)) throw new Error(`environment ${input.id} exists`);
-        const env: BuildEnv = { id: input.id, label: input.label, kind: input.kind, enabled: true, online: false, lastSeenAt: null, slots: input.slots, running: 0, capabilities: null, version: null, pausedReason: null, confidential: input.confidential ?? false, settings: null };
+        const env: BuildEnv = { id: input.id, label: input.label, kind: input.kind, enabled: true, online: false, lastSeenAt: null, slots: input.slots, running: 0, tasks: [], capabilities: null, version: null, pausedReason: null, confidential: input.confidential ?? false, settings: null };
         envs.push(env);
         changed();
         return wait({ env, key: `cwk_${input.id}_Zr4mQ0vJp8XwL2nT7bKd1HsYcE9uAf3GiO5xVjR6MqN` }, 40);
