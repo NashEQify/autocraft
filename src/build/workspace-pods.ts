@@ -184,7 +184,7 @@ export type FetchPodCtx = { s: KubeSettings; envId: string; id: number; appImage
 
 /**
  * A short-lived pod with network `mirror` on the workspace's volume, at the workspace's paths and env (without
- * CARGO_NET_OFFLINE and the display), that runs `cargo fetch` in `dir`. Its mirror parts are a build pod's (mirrorParts):
+ * CARGO_NET_OFFLINE and the display, with HOME=/tmp and no global or system git config), that runs `cargo fetch` in `dir`. Its mirror parts are a build pod's (mirrorParts):
  * crates.io and GitHub resolve to the crate mirror and nothing else is reachable. The volume is local-path, so the pod runs
  * on the workspace's node beside its pod.
  */
@@ -192,7 +192,9 @@ export function workspaceFetchPodSpec(c: FetchPodCtx) {
   const { s, ci } = c;
   const m = mirrorParts(s, c.appImage, "tmp");
   const { CARGO_NET_OFFLINE: _offline, DISPLAY: _display, XDG_RUNTIME_DIR: _run, VK_ICD_FILENAMES: _vk, WGPU_BACKEND: _wgpu, LP_NUM_THREADS: _lp, ...own } = podEnv(s, ci);
-  const env = { ...own, ...m.env };
+  // HOME and the global and system git config the session could have written are not read: only the repository's own
+  // config is, as in a build pod's mirror step, and the network policy bounds what it can reach.
+  const env = { ...own, ...m.env, HOME: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
   return {
     apiVersion: "v1", kind: "Pod",
     metadata: { name: c.name, namespace: s.namespace, labels: { "app.kubernetes.io/name": WORKSPACE_APP, "craft.build/env": c.envId, [FETCH_LABEL]: String(c.id), "craft.build/network": "mirror" } },

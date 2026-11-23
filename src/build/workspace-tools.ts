@@ -81,15 +81,31 @@ class Gate {
   constructor(max: number) {
     this.max = max;
   }
-  async run<T>(f: () => Promise<T>): Promise<T> {
+  private async take(): Promise<void> {
     if (this.active < this.max) this.active++;
     else await new Promise<void>((r) => this.waiting.push(r));
+  }
+  private release(): void {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.active--;
+  }
+  async run<T>(f: () => Promise<T>): Promise<T> {
+    await this.take();
     try {
       return await f();
     } finally {
-      const next = this.waiting.shift();
-      if (next) next();
-      else this.active--;
+      this.release();
+    }
+  }
+  /** Runs `f` holding every slot: after the tasks running now, before the ones that arrive later. */
+  async runAll<T>(f: () => Promise<T>): Promise<T> {
+    let held = 0;
+    try {
+      for (; held < this.max; held++) await this.take();
+      return await f();
+    } finally {
+      for (; held > 0; held--) this.release();
     }
   }
 }
@@ -112,8 +128,6 @@ export class WorkspaceSession {
   private readonly seen = new Map<number, number>();
   private images = 0;
   private readonly gate = new Gate(SESSION_LIMITS.execs);
-  /** One dependency fetch at a time; it holds no exec slot while its pod runs. */
-  private readonly fetchGate = new Gate(1);
   private readonly pathLocks = new Map<string, Promise<void>>();
   /** The wait for the workspace to be ready that the session's calls share. */
   private ready: Promise<void> | null = null;
@@ -266,7 +280,8 @@ export class WorkspaceSession {
       case "app_start": return await this.gate.run(() => this.appStart(a, row));
       case "app_stop": return await this.gate.run(() => this.appStop(a, row));
       case "screenshot": return await this.gate.run(() => this.screenshot(a, row));
-      case "fetch_dependencies": return await this.fetchGate.run(() => this.fetchDependencies(a, row));
+      // Every exec slot: no foreground command or other call runs while cargo fetch rewrites Cargo.lock and CARGO_HOME.
+      case "fetch_dependencies": return await this.gate.runAll(() => this.fetchDependencies(a, row));
     }
   }
 
@@ -424,7 +439,7 @@ export class WorkspaceSession {
   private async fetchDependencies(a: Args, row: number): Promise<Out> {
     const dir = a.path !== undefined ? podPath(a.path as string) : SRC_ROOT;
     // A call number marks the row as one a restarted job hands back to the session, which finds its fetch pod again.
-    await this.begin(row, FETCH_CALL_MS, await takeCallNumber(this.db, this.workspaceId));
+    await this.begin(row, FETCH_CALL_MS, await this.callNumber(row));
     return await fetchDependencies(this.db, this.api, this.workspaceId, row, dir);
   }
 

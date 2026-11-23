@@ -518,17 +518,20 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, tried);
   // A call back in the queue after its session did work: the next session's prompt states the checkpoint's changes.
   const requeued = bound === "queued" && w.last_call_at !== null && (w.checkpoint_at === null || w.last_call_at > w.checkpoint_at) && now - tried > REQUEUE_CHECKPOINT_MS;
-  if (now - lastCheckpoint > CHECKPOINT_EVERY_MS || requeued) {
+  // A checkpoint waits for a dependency fetch, which rewrites Cargo.lock: the next pass takes it.
+  if ((now - lastCheckpoint > CHECKPOINT_EVERY_MS || requeued) && !await callRunning(c, w.id, now, "fetch_dependencies")) {
     c.state.checkpointTried.set(w.id, now);
     background(c, w.id, async () => void await checkpoint(c, w.id));
   }
 }
 
-/** Whether a call is running in the workspace within its time limit (plus CALL_GRACE_MS); a row past it no longer holds the pod. */
-async function callRunning(c: Ctx, id: number, now: number): Promise<boolean> {
+/** Whether a call (of `tool`, when given) is running in the workspace within its time limit (plus CALL_GRACE_MS); a row past it no longer holds the pod. */
+async function callRunning(c: Ctx, id: number, now: number, tool?: string): Promise<boolean> {
   const { db } = c.d;
-  return !!await db.get(db.k.selectFrom("workspace_calls").select(["id"]).where("workspace_id", "=", id).where("state", "=", "running")
-    .where("deadline_at", ">", new Date(now).toISOString()).limit(1));
+  let q = db.k.selectFrom("workspace_calls").select(["id"]).where("workspace_id", "=", id).where("state", "=", "running")
+    .where("deadline_at", ">", new Date(now).toISOString());
+  if (tool) q = q.where("tool", "=", tool);
+  return !!await db.get(q.limit(1));
 }
 
 /** The state of the remote call bound to the workspace while it is queued or leased (its session may still make tool calls), else null. */

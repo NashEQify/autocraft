@@ -67,8 +67,18 @@ export async function fetchDependencies(db: Db, api: KubeApi, workspaceId: numbe
 
 /** Waits until the fetch pod has ended; a string says why it will not. */
 async function finished(db: Db, api: KubeApi, w: WorkspaceRow, ns: string, name: string, started: number, pollMs: number, now: () => number): Promise<KPod | string> {
+  const pause = () => new Promise((r) => setTimeout(r, pollMs));
   for (;;) {
-    const p = (await api.listPods(ns, fetchSelector(w.id))).find((x) => x.metadata.name === name);
+    let pods: KPod[];
+    // A failed read (the API server busy or restarting) is read again until the call's deadline; the pod keeps running.
+    try {
+      pods = await api.listPods(ns, fetchSelector(w.id));
+    } catch (e) {
+      if (now() - started > FETCH_CALL_MS) return `the fetch pod could not be read: ${cleanOutput(Buffer.from((e as Error).message)).slice(0, 300)}`;
+      await pause();
+      continue;
+    }
+    const p = pods.find((x) => x.metadata.name === name);
     if (!p) return "the fetch pod is gone (the workspace was parked or ended, or the pod was deleted); call fetch_dependencies again";
     const phase = p.status?.phase;
     if (phase === "Succeeded" || phase === "Failed") return p;
@@ -81,9 +91,9 @@ async function finished(db: Db, api: KubeApi, w: WorkspaceRow, ns: string, name:
       return `the fetch pod did not start within ${FETCH_START_MS / 60_000} min${sched ? `: ${cleanOutput(Buffer.from(sched.message ?? sched.reason ?? "")).slice(0, 300)}` : ""}`;
     }
     if (at - started > FETCH_CALL_MS) return `the fetch did not end within ${Math.round(FETCH_CALL_MS / 60_000)} min`;
-    const cur = await getWorkspace(db, w.id);
+    const cur = await getWorkspace(db, w.id).catch(() => w);
     if (cur?.state !== "ready" || cur.pod !== w.pod) return `the workspace was ${cur?.state ?? "removed"} during the fetch`;
-    await new Promise((r) => setTimeout(r, pollMs));
+    await pause();
   }
 }
 
