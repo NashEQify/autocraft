@@ -28,6 +28,8 @@ export type SessionInput = {
   guidance: string[];
   /** A session that starts over on an earlier one's changes (its session was lost): what is in the tree and what the checks found. */
   earlier?: { diff_stat: string; findings: SessionFinding[] };
+  /** The workspace's environment has a crate mirror, so the session may call fetch_dependencies. Picks the system prompt; not part of the task. */
+  fetch_dependencies?: boolean;
 };
 
 export const SAMPLE_SESSION: SessionInput[] = [{

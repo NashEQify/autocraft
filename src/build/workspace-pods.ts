@@ -2,7 +2,7 @@
 // Pod Security `restricted` with nothing added, no credentials and no network (craft.build/network=none). The source
 // arrives over exec stdin; the helper `ws` (deploy/container/ws) is copied from the AutoCraft image by an init container.
 // The labels are not the build tasks': the build launcher's orphan sweep deletes every autocraft-build pod it does not own.
-import { POD_UID, type KubeSettings } from "./pods.ts";
+import { mirrorParts, POD_UID, type KubeSettings } from "./pods.ts";
 import { warmCopyParts, warmNodeVolume, warmVerifyVolume, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { WS_IMAGE_PATH, WS_POD_PATH } from "./workspace.ts";
 import { ciStepEnv, LAYOUT_SH, workspaceEnvHash, type WorkspacePrepared } from "./workspace-layout.ts";
@@ -51,17 +51,21 @@ export type WorkspaceCiLayout = { checkout: string; prepared: WorkspacePrepared;
 
 export type WorkspacePodCtx = { s: KubeSettings; envId: string; id: number; appImage: string; toolchainImage: string; limits: WorkspaceLimits; pod?: string; pvc?: string; ci?: WorkspaceCiLayout };
 
+/** Layout 2's mounts of the workspace volume at the CI paths, beside /work. */
+const ciMounts = (ci: WorkspaceCiLayout | undefined): object[] => (ci ? [
+  { name: "work", mountPath: ci.checkout, subPath: "checkout" },
+  { name: "work", mountPath: `${ci.checkout}/target`, subPath: "cargo-target" },
+  { name: "work", mountPath: "/cache", subPath: "cache" },
+  ...(ci.prepared.craftFontsRef ? [{ name: "work", mountPath: "/craft-fonts", subPath: "ext/craft-fonts", readOnly: true }] : []),
+  ...(ci.prepared.craftI18nRev ? [{ name: "work", mountPath: "/craft-i18n", subPath: "ext/craft-i18n", readOnly: true }] : []),
+] : []);
+
+const podEnv = (s: KubeSettings, ci: WorkspaceCiLayout | undefined): Record<string, string> => (ci ? workspaceEnvCi(s.arch, ci.prepared, ci.checkout) : workspaceEnv(s.arch));
+
 export function workspacePodSpec(c: WorkspacePodCtx) {
   const { s, ci } = c;
   const target = ci ? { name: "work", subPath: "cargo-target" } : null;
-  const ciMounts = ci ? [
-    { name: "work", mountPath: ci.checkout, subPath: "checkout" },
-    { ...target!, mountPath: `${ci.checkout}/target` },
-    { name: "work", mountPath: "/cache", subPath: "cache" },
-    ...(ci.prepared.craftFontsRef ? [{ name: "work", mountPath: "/craft-fonts", subPath: "ext/craft-fonts", readOnly: true }] : []),
-    ...(ci.prepared.craftI18nRev ? [{ name: "work", mountPath: "/craft-i18n", subPath: "ext/craft-i18n", readOnly: true }] : []),
-  ] : [];
-  const env = ci ? workspaceEnvCi(s.arch, ci.prepared, ci.checkout) : workspaceEnv(s.arch);
+  const env = podEnv(s, ci);
   const helper = {
     name: COPY_CONTAINER, image: c.appImage, imagePullPolicy: "IfNotPresent",
     command: ["cp", WS_IMAGE_PATH, WS_POD_PATH],
@@ -131,10 +135,91 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
           { name: "ws-bin", mountPath: "/opt/ws", readOnly: true },
           { name: "tmp", mountPath: "/tmp" },
           { name: "run-user", mountPath: "/run/user" },
-          ...ciMounts,
+          ...ciMounts(ci),
         ],
       }],
     },
   };
 }
 
+
+// ---- the dependency fetch -----------------------------------------------------------------------------------------
+
+export const FETCH_CONTAINER = "fetch";
+/** cargo fetch's own time limit in the fetch pod. */
+export const FETCH_LIMIT_SEC = 600;
+/** The fetch pod's deadline from its start: the mirror wait (30 s) and cargo fetch, with room to spare. */
+export const FETCH_DEADLINE_SEC = FETCH_LIMIT_SEC + 120;
+/** How long a fetch pod may wait to be scheduled and start. */
+export const FETCH_START_MS = 3 * 60_000;
+/** The launcher deletes a fetch pod older than this, whatever its workspace's state. */
+export const FETCH_KEEP_MS = FETCH_START_MS + FETCH_DEADLINE_SEC * 1000 + 60_000;
+/** Bytes of cargo's output the fetch pod prints: the end of it. */
+export const FETCH_LOG_TAIL = 16 * 1024;
+export const FETCH_LABEL = "craft.build/workspace-fetch";
+
+/** `$1` is the directory to fetch in. Prints the end of cargo's output and exits with cargo's code (124: the time limit). */
+export const FETCH_SH = `cd "$1" || exit 2
+timeout -k 10 ${FETCH_LIMIT_SEC} cargo fetch >/tmp/fetch.log 2>&1
+rc=$?
+tail -c ${FETCH_LOG_TAIL} /tmp/fetch.log
+exit $rc`;
+
+/** The fetch pod of workspace call `row`, named after the workspace's pod: a job that restarts mid-fetch finds it again. */
+export const fetchPodName = (pod: string, row: number): string => `${pod}-fetch-${row}`;
+export const fetchSelector = (id: number): string => `app.kubernetes.io/name=${WORKSPACE_APP},${FETCH_LABEL}=${id}`;
+
+/**
+ * Whether the launcher keeps fetch pod `p`: its workspace is ready on the pod it is named after, and it is younger than
+ * FETCH_KEEP_MS. A workspace parked, ended or resumed on a new pod loses its fetch pod at the next pass.
+ */
+export function fetchPodKept(p: { metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string } }, rows: { id: number; state: string; pod: string | null }[], now: number): boolean {
+  const id = p.metadata.labels?.[FETCH_LABEL];
+  const w = id ? rows.find((r) => String(r.id) === id && r.state === "ready") : undefined;
+  const created = Date.parse(p.metadata.creationTimestamp ?? "");
+  return !!w?.pod && p.metadata.name.startsWith(`${w.pod}-fetch-`) && now - created < FETCH_KEEP_MS;
+}
+
+export type FetchPodCtx = { s: KubeSettings; envId: string; id: number; appImage: string; toolchainImage: string; name: string; pvc: string; ci?: WorkspaceCiLayout; dir: string };
+
+/**
+ * A short-lived pod with network `mirror` on the workspace's volume, at the workspace's paths and env (without
+ * CARGO_NET_OFFLINE and the display, with HOME=/tmp and no global or system git config), that runs `cargo fetch` in `dir`. Its mirror parts are a build pod's (mirrorParts):
+ * crates.io and GitHub resolve to the crate mirror and nothing else is reachable. The volume is local-path, so the pod runs
+ * on the workspace's node beside its pod.
+ */
+export function workspaceFetchPodSpec(c: FetchPodCtx) {
+  const { s, ci } = c;
+  const m = mirrorParts(s, c.appImage, "tmp");
+  const { CARGO_NET_OFFLINE: _offline, DISPLAY: _display, XDG_RUNTIME_DIR: _run, VK_ICD_FILENAMES: _vk, WGPU_BACKEND: _wgpu, LP_NUM_THREADS: _lp, ...own } = podEnv(s, ci);
+  // HOME and the global and system git config the session could have written are not read: only the repository's own
+  // config is, as in a build pod's mirror step, and the network policy bounds what it can reach.
+  const env = { ...own, ...m.env, HOME: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  return {
+    apiVersion: "v1", kind: "Pod",
+    metadata: { name: c.name, namespace: s.namespace, labels: { "app.kubernetes.io/name": WORKSPACE_APP, "craft.build/env": c.envId, [FETCH_LABEL]: String(c.id), "craft.build/network": "mirror" } },
+    spec: {
+      restartPolicy: "Never", automountServiceAccountToken: false, enableServiceLinks: false,
+      activeDeadlineSeconds: FETCH_DEADLINE_SEC, terminationGracePeriodSeconds: 5,
+      priorityClassName: "craft-workspace",
+      nodeSelector: { "kubernetes.io/arch": s.arch === "aarch64" ? "arm64" : "amd64" },
+      ...(s.runtimeClassName ? { runtimeClassName: s.runtimeClassName } : {}),
+      securityContext: { runAsNonRoot: true, runAsUser: POD_UID, runAsGroup: POD_UID, fsGroup: POD_UID, seccompProfile: { type: "RuntimeDefault" } },
+      volumes: [{ name: "work", persistentVolumeClaim: { claimName: c.pvc } }, { name: "tmp", emptyDir: { sizeLimit: "2Gi" } }, m.volume],
+      ...(m.wait.length ? { initContainers: m.wait } : {}),
+      containers: [{
+        name: FETCH_CONTAINER, image: c.toolchainImage, imagePullPolicy: "IfNotPresent",
+        command: ["/bin/sh", "-c", FETCH_SH, "fetch", c.dir],
+        workingDir: "/work",
+        env: Object.entries(env).map(([name, value]) => ({ name, value })),
+        resources: {
+          requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "256Mi" },
+          limits: { cpu: "2", memory: "4Gi", "ephemeral-storage": "2Gi" },
+        },
+        securityContext: SECURITY,
+        volumeMounts: [{ name: "work", mountPath: "/work" }, { name: "tmp", mountPath: "/tmp" }, m.mount, ...ciMounts(ci)],
+      }],
+      ...m.spec,
+    },
+  };
+}

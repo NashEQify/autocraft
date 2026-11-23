@@ -13,6 +13,7 @@ import {
   ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, imageSize, isToolName, OUTPUT_CAP, podPath,
   READ_LINE_CHARS, seconds, SESSION_IMAGES, SRC_ROOT, TOOL_DEFINITIONS, WORK_ROOT, type Args, type Rect, type WorkspaceToolName,
 } from "./workspace-tool-specs.ts";
+import { FETCH_CALL_MS, fetchDependencies } from "./workspace-fetch.ts";
 import { READY_LIMIT_MS } from "./workspace-launch.ts";
 import { CALL_GRACE_MS, cleanOutput, execHelper, resumeWorkspace, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
 
@@ -80,15 +81,31 @@ class Gate {
   constructor(max: number) {
     this.max = max;
   }
-  async run<T>(f: () => Promise<T>): Promise<T> {
+  private async take(): Promise<void> {
     if (this.active < this.max) this.active++;
     else await new Promise<void>((r) => this.waiting.push(r));
+  }
+  private release(): void {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.active--;
+  }
+  async run<T>(f: () => Promise<T>): Promise<T> {
+    await this.take();
     try {
       return await f();
     } finally {
-      const next = this.waiting.shift();
-      if (next) next();
-      else this.active--;
+      this.release();
+    }
+  }
+  /** Runs `f` holding every slot: after the tasks running now, before the ones that arrive later. */
+  async runAll<T>(f: () => Promise<T>): Promise<T> {
+    let held = 0;
+    try {
+      for (; held < this.max; held++) await this.take();
+      return await f();
+    } finally {
+      for (; held > 0; held--) this.release();
     }
   }
 }
@@ -263,6 +280,8 @@ export class WorkspaceSession {
       case "app_start": return await this.gate.run(() => this.appStart(a, row));
       case "app_stop": return await this.gate.run(() => this.appStop(a, row));
       case "screenshot": return await this.gate.run(() => this.screenshot(a, row));
+      // Every exec slot: no foreground command or other call runs while cargo fetch rewrites Cargo.lock and CARGO_HOME.
+      case "fetch_dependencies": return await this.gate.runAll(() => this.fetchDependencies(a, row));
     }
   }
 
@@ -413,6 +432,15 @@ export class WorkspaceSession {
     const c = this.cmds.get(id);
     const ms = c && ended ? this.ended(c) : h.ms;
     return { text: statusLine(h), acct: { ref: id, ms, ended: ended ? 1 : 0 } };
+  }
+
+  // ---- dependencies --------------------------------------------------------------
+
+  private async fetchDependencies(a: Args, row: number): Promise<Out> {
+    const dir = a.path !== undefined ? podPath(a.path as string) : SRC_ROOT;
+    // A call number marks the row as one a restarted job hands back to the session, which finds its fetch pod again.
+    await this.begin(row, FETCH_CALL_MS, await this.callNumber(row));
+    return await fetchDependencies(this.db, this.api, this.workspaceId, row, dir);
   }
 
   // ---- files -------------------------------------------------------------------
