@@ -22,12 +22,12 @@ export type RustPlanOptions = {
  * deleting the config files is local to it. The toolchain is the image's active one, read outside the
  * checkout (an image may pin it, as the nightly image does with RUSTUP_TOOLCHAIN).
  * `commands` are fixed command lines (never repository input), each run in that environment in turn. The CA variables
- * a `mirror` build pod sets (the crate mirror's certificate) pass through; the repository cannot set them.
+ * and CARGO_NET_RETRY that a `mirror` build pod sets pass through; the repository cannot set them.
  */
 export function fetchScript(commands: string[]): string {
   const env = 'env -i PATH=/usr/local/cargo/bin:/usr/bin:/bin HOME=/tmp CARGO_HOME=/cache/cargo RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}" RUSTUP_TOOLCHAIN="$tc" ' +
     "RUSTC=/usr/local/cargo/bin/rustc CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token CARGO_NET_GIT_FETCH_WITH_CLI=false " +
-    '${CARGO_HTTP_CAINFO:+"CARGO_HTTP_CAINFO=$CARGO_HTTP_CAINFO"} ${GIT_SSL_CAINFO:+"GIT_SSL_CAINFO=$GIT_SSL_CAINFO"} ${SSL_CERT_FILE:+"SSL_CERT_FILE=$SSL_CERT_FILE"}';
+    '${CARGO_HTTP_CAINFO:+"CARGO_HTTP_CAINFO=$CARGO_HTTP_CAINFO"} ${GIT_SSL_CAINFO:+"GIT_SSL_CAINFO=$GIT_SSL_CAINFO"} ${SSL_CERT_FILE:+"SSL_CERT_FILE=$SSL_CERT_FILE"} ${CARGO_NET_RETRY:+"CARGO_NET_RETRY=$CARGO_NET_RETRY"}';
   return [
     "cd /tmp",
     "tc=$(/usr/local/cargo/bin/rustup show active-toolchain 2>/dev/null | cut -d' ' -f1)",

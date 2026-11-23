@@ -261,7 +261,7 @@ export class GitMirrors {
     if (query.get("service") !== "git-upload-pack") return { status: 404 };
     const bad = await this.#ready(repo, true);
     if (bad) return { status: bad };
-    const release = this.#slots.take();
+    const release = await this.#slots.take();
     if (!release) return { status: 503 };
     let r: RunResult;
     try {
@@ -296,7 +296,7 @@ export class GitMirrors {
     }
     const bad = await this.#ready(repo, false);
     if (bad) return { status: bad };
-    const release = this.#slots.take();
+    const release = await this.#slots.take();
     if (!release) return { status: 503 };
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: this.#dir, LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     if (gitProtocol) env.GIT_PROTOCOL = gitProtocol;

@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, type TLSSocket } from "node:tls";
 import { MIRROR_HOSTS, startMirror, type Mirror } from "../src/cratemirror/server.ts";
+import { IndexCache } from "../src/cratemirror/crates.ts";
+import { Slots } from "../src/cratemirror/store.ts";
 
 const hasTools = spawnSync("openssl", ["version"]).status === 0 && spawnSync("git", ["--version"]).status === 0;
 const root = mkdtempSync(join(tmpdir(), "crate-mirror-test-"));
@@ -186,4 +188,23 @@ test("an unreadable allowlist keeps the previous list and deletes no mirror", { 
   await mirror.git.sync();
   assert.ok(!existsSync(mirrorDir), "a readable list without the repo removes its mirror");
   assert.equal((await get("github.com", "/storytold/craft-libs/info/refs?service=git-upload-pack")).status, 404);
+});
+
+test("requests past the upstream slots wait in line, and identical ones share one fetch", async () => {
+  let running = 0;
+  let peak = 0;
+  const fetched: string[] = [];
+  const slow = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    peak = Math.max(peak, ++running);
+    await new Promise((r) => setTimeout(r, 20));
+    running--;
+    return new Response("{}\n");
+  }) as typeof fetch;
+  const cache = new IndexCache({ dir: join(root, "queue-index"), capBytes: 1024 * 1024, upstream: "https://idx.test", fetch: slow, log: () => undefined, slots: new Slots(2, { queue: 100, waitMs: 10_000 }) });
+  const paths = ["/se/rd/serde", "/3/s/syn", "/2/cc", "/1/a", "/ra/nd/rand", "/to/ki/tokio", "/li/bc/libc", "/se/rd/serde", "/3/s/syn", "/se/rd/serde"];
+  const answers = await Promise.all(paths.map((p) => cache.get(p)));
+  assert.ok(answers.every((a) => a.status === 200), "every queued request is answered");
+  assert.ok(peak <= 2, "no more upstream requests at once than slots");
+  assert.equal(fetched.length, new Set(paths).size, "identical paths fetch once");
 });

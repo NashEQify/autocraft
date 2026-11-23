@@ -332,7 +332,8 @@ export const MIRROR_HOSTS = ["index.crates.io", "static.crates.io", "github.com"
 /** ConfigMap in the build namespace with the mirror's CA certificate (`ca.crt`). */
 export const MIRROR_CA_CONFIGMAP = "craft-mirror-ca";
 const MIRROR_CA = "/etc/craft-mirror/ca.crt";
-const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA };
+// CARGO_NET_RETRY: a 503 from the mirror (its queue full) is retried instead of failing the fetch.
+const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA, CARGO_NET_RETRY: "10" };
 const SIGNING_KEY = "/keys/signing/private.pem";
 /** ConfigMap in the build namespace with the public half of the signing key (`public.pem`): restore and gc verify with it, so only the publish holds the private key. */
 export { WARM_VERIFY_CONFIGMAP };
