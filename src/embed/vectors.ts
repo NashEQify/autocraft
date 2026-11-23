@@ -78,6 +78,7 @@ export class VectorIndex {
   private store: Store | null = null;
   private job: Promise<void> | null = null;
   private loading = false;
+  private checking: Promise<void> | null = null;
   private checked = 0;
   private tableRows = 0;
 
@@ -92,7 +93,12 @@ export class VectorIndex {
   }
 
   /** Starts loading or catching up when the table changed (checked at most every CHECK_MS). Returns at once. */
-  async refresh(db: Db): Promise<void> {
+  refresh(db: Db): Promise<void> {
+    // Concurrent callers share one check, so a warm-up and a search arriving together start one load.
+    return this.checking ??= this.check(db).finally(() => { this.checking = null; });
+  }
+
+  private async check(db: Db): Promise<void> {
     if (this.loading) return;
     const now = Date.now();
     if (this.store && now - this.checked < CHECK_MS) return;

@@ -112,10 +112,14 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
     await setStatus(db, "failed", (e as Error).message);
     return;
   }
-  // The embedding model loads on the first question and the vector index on its first search; nothing here waits for them.
   const rest = new RestClient({ token });
   const embedder = localEmbedder({ threads: 2 });
-  const search = new Search({ db, embedder, index: new VectorIndex(embedder), log });
+  const index = new VectorIndex(embedder);
+  // Start the model and index loads now so the first search is warm. Nothing waits for them; a search arriving earlier awaits the same in-flight loads.
+  for (const [what, load] of [["embedding model", async () => void await embedder.embed(["warm"], "query")], ["vector index", () => index.ready(db)]] as const) {
+    void Promise.resolve().then(load).catch((e) => log(`runner: Discord ${what} warm-up failed: ${(e as Error).message}`));
+  }
+  const search = new Search({ db, embedder, index, log });
   const interactions = new Interactions(rest, log);
   installSearchCommands(interactions, { db, keys, search });
   installAccountCommands(interactions, { db, keys });

@@ -17,7 +17,6 @@ import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, type BotRequest, t
 import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { trackedRepos } from "./store.ts";
-import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
@@ -201,7 +200,8 @@ export class IssueNew {
     if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft search." }));
     if (s.stage !== "form") return void (await call.edit({ content: USED }));
     const f = call.fields();
-    const repo = await findSeq((await trackedRepos(db)), async (t) => t.name === f.app && (await publicRepoNames(db)).includes(t.name));
+    const publicNames = new Set(await publicRepoNames(db));
+    const repo = (await trackedRepos(db)).find((t) => t.name === f.app && publicNames.has(t.name));
     const description = (f.description ?? "").trim().slice(0, ISSUE_FORM_BODY_CHARS);
     if (!repo || !description) return void (await call.edit({ content: "Pick an app and describe the problem. Start again with /autocraft search." }));
     const userKey = keys.hash("author", s.user), channelKey = keys.hash("channel", call.interaction.channel_id ?? "?");

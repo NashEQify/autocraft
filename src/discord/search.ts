@@ -85,18 +85,21 @@ export class Search {
     const [vec] = await embedder.embed([text], "query");
     if (!vec) return [];
     await index.ready(db);
-    const isPublic = new Map<string, boolean>();
     const now = (this.#d.now ?? Date.now)();
     const out: Candidate[] = [];
-    for (const h of await index.nearest(db, vec, SCAN, undefined, only)) {
-      if (!isPublic.has(h.repo)) isPublic.set(h.repo, await isPublicRepo(db, h.repo));
-      if (!isPublic.get(h.repo)) continue;
-      const r = await db.get(db.k.selectFrom("main.items as i").innerJoin("main.repos as r", "r.name", "i.repo")
-        .select((eb) => ["i.title", "i.body", "i.kind", "i.state", "i.state_reason", "i.closed_at", "i.merged_at", "i.updated_at", "i.comments_count", "i.reactions_count",
-          eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.case().when("i.kind", "=", "pr").then(eb.val("/pull/")).else(eb.val("/issues/")).end()),
-            "||", eb.cast<string>("i.number", "text"))).as("url")])
-        .where("i.repo", "=", h.repo).where("i.number", "=", h.number).where("i.kind", "in", ["issue", "pr"])
-        .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels"))));
+    const isPublic = new Set(await publicRepoNames(db));
+    const hits = (await index.nearest(db, vec, SCAN, undefined, only)).filter((h) => isPublic.has(h.repo));
+    if (!hits.length) return out;
+    const rows = await db.all(db.k.selectFrom("main.items as i").innerJoin("main.repos as r", "r.name", "i.repo")
+      .select((eb) => ["i.repo", "i.number", "i.title", "i.body", "i.kind", "i.state", "i.state_reason", "i.closed_at", "i.merged_at", "i.updated_at", "i.comments_count", "i.reactions_count",
+        eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.case().when("i.kind", "=", "pr").then(eb.val("/pull/")).else(eb.val("/issues/")).end()),
+          "||", eb.cast<string>("i.number", "text"))).as("url")])
+      .where((eb) => eb(eb.refTuple("i.repo", "i.number"), "in", hits.map((h) => eb.tuple(h.repo, h.number))))
+      .where("i.kind", "in", ["issue", "pr"])
+      .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels"))));
+    const facts = new Map(rows.map((x) => [`${x.repo}#${x.number}`, x]));
+    for (const h of hits) {
+      const r = facts.get(`${h.repo}#${h.number}`);
       if (!r) continue;
       const open = r.state === "OPEN";
       const pr = r.kind === "pr";
