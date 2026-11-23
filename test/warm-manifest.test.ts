@@ -2,12 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, walkTree, type Entry } from "../src/warm/manifest.ts";
+import { clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
 import { podPhase } from "../src/worker/pod.ts";
 
@@ -255,27 +255,47 @@ test("warm manifest: path traversal, absolute paths, escaping links and entries 
   ]) assert.throws(() => decodeManifest(bad), ManifestError);
 });
 
-test("warm restore onto a non-empty target: one built with this image and Cargo.lock is kept, any other is cleared; neither fails", async () => {
+test("warm restore onto a non-empty target: one built with this image and Cargo.lock is kept, any other is cleared; the marker stays in the target and never travels", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "warm-reuse-"));
+  const dav = await fakeDav();
+  t.after(() => {
+    dav.server.close();
+    chmodSync(join(tmp, "checkout"), 0o755);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  writeFileSync(join(tmp, "verify.pem"), publicKey.export({ type: "spki", format: "pem" }));
   const msg = join(tmp, "message");
   const work = join(tmp, "work");
   mkdirSync(join(work, "src"), { recursive: true });
   writeFileSync(join(work, "src/Cargo.lock"), "# lock a");
+  // A marker in the published tree must not be listed, so a restored version never arrives with one.
+  const src = makeTree(join(tmp, "src"));
+  writeFileSync(join(src.target, WARM_BASE_MARK), "{}");
+  assert.ok(!(await walkTree(src)).some((e) => e.path.endsWith(WARM_BASE_MARK)));
+  await new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "secret" } })
+    .publish({ key: "photocraft", repo: "storytold/photocraft", commit: "a".repeat(40), image: "rust:1", rustc: null, envHash: null, checkout: null, source: src, signKey: privateKey });
+  // The checkout is read-only, as in the build pod; the target dir is the writable volume inside it.
   const target = join(tmp, "checkout/target");
   mkdirSync(join(tmp, "checkout"));
-  writeFileSync(join(tmp, "verify.pem"), generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }));
   const env = (extra: Record<string, string> = {}) => ({
-    AUTOCRAFT_POD_WORK: work, AUTOCRAFT_POD_MESSAGE: msg, AUTOCRAFT_WARM_KEY: "photocraft", AUTOCRAFT_WARM_STORE_URL: "http://127.0.0.1:1", AUTOCRAFT_WARM_VERIFY_KEYS: join(tmp, "verify.pem"),
+    AUTOCRAFT_POD_WORK: work, AUTOCRAFT_POD_MESSAGE: msg, AUTOCRAFT_WARM_KEY: "photocraft", AUTOCRAFT_WARM_STORE_URL: dav.url, AUTOCRAFT_WARM_VERIFY_KEYS: join(tmp, "verify.pem"),
     AUTOCRAFT_WARM_TARGET: target, AUTOCRAFT_WARM_IMAGE: "rust:1", ...extra,
   });
-  const leftOver = () => { mkdirSync(join(target, "debug"), { recursive: true }); writeFileSync(join(target, "debug/a.o"), "x"); };
-  // The store is unreachable: a failed restore is a cold start (exit 0), never a refusal.
+  const mark = join(target, WARM_BASE_MARK);
+  mkdirSync(target);
+  chmodSync(join(tmp, "checkout"), 0o555);
   assert.equal(await podPhase("warm-restore", env()), 0);
-  leftOver();
+  assert.ok(JSON.parse(readFileSync(msg, "utf8")).warm, "restored from the store");
+  assert.ok(existsSync(mark), "the marker is written inside the target after a successful restore, though its parent is read-only");
+  writeFileSync(join(target, "leftover.o"), "x");
   assert.equal(await podPhase("warm-restore", env()), 0);
   assert.match(JSON.parse(readFileSync(msg, "utf8")).summary, /reusing the target/);
-  assert.deepEqual(readdirSync(target), ["debug"], "the same image and Cargo.lock keeps the target");
+  assert.ok(existsSync(join(target, "leftover.o")), "the same image and Cargo.lock keeps the target");
   assert.equal(await podPhase("warm-restore", env({ AUTOCRAFT_WARM_IMAGE: "rust:2" })), 0);
-  assert.deepEqual(readdirSync(target), [], "another image clears it");
-  rmSync(tmp, { recursive: true, force: true });
+  assert.deepEqual(readdirSync(target), [], "another image clears it, marker included");
+  // A restore that fails half-way leaves no marker on the partial dir.
+  dav.files.clear();
+  assert.equal(await podPhase("warm-restore", env()), 0);
+  assert.ok(!existsSync(mark));
 });

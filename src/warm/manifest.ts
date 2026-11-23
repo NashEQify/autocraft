@@ -24,6 +24,9 @@ export const CARGO_SUBSET = ["registry/index", "registry/cache", "registry/src",
 /** Paths a walk leaves out unless the exclusions setting says otherwise: incremental state is per-session and large. */
 export const DEFAULT_EXCLUDES = ["target/*/incremental", "target/*/*/incremental"];
 
+/** Written by a restore into the target dir to record what it was built with; a walk never lists it, so it never travels. */
+export const WARM_BASE_MARK = ".autocraft-warm-base.json";
+
 export const MAX_ENTRIES = 2_000_000;
 export const MAX_MANIFEST_BYTES = 1024 ** 3;
 const SHA = /^[0-9a-f]{64}$/;
@@ -175,7 +178,7 @@ export type WalkOptions = {
  */
 export async function walkTree(src: WalkSource, opts: WalkOptions = {}): Promise<Entry[]> {
   const excluded = excluder(opts.exclude ?? DEFAULT_EXCLUDES);
-  const skip = (path: string) => !!opts.omit?.has(path) || excluded(path);
+  const skip = (path: string) => path === `target/${WARM_BASE_MARK}` || !!opts.omit?.has(path) || excluded(path);
   const entries: Entry[] = [];
   const files: { entry: FileEntry; abs: string }[] = [];
   let odd = 0;

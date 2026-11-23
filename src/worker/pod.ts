@@ -17,11 +17,11 @@
 //   warm-copy     fills a build pod's target from its node's warm version (src/worker/warm-copy.ts)
 // Warm phases read AUTOCRAFT_WARM_* (warmOptions below). The store layout is in src/warm/store-client.ts.
 import type { KeyObject } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
-import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, type Roots } from "../warm/manifest.ts";
+import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, WARM_BASE_MARK, type Roots } from "../warm/manifest.ts";
 import { WarmStore } from "../warm/store-client.ts";
 import { markBuildStart, readBuildStart, trimTarget } from "../warm/trim.ts";
 import { checkServiceUrl } from "./config.ts";
@@ -294,7 +294,9 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
   // cleared, so two versions never mix in one dir. Only a dir that was empty is emptied again after a failure.
   const image = w.v("IMAGE");
   const lock = cargoLockOf(join(e.work, "src"));
-  const markFile = roots.target ? `${roots.target}.warm-base.json` : null;
+  // The marker lives in the target dir (the volume; its parent may be read-only) and only ever describes a dir that holds a start
+  // built with this image and Cargo.lock: it is written after a successful restore or on reuse, never before.
+  const markFile = roots.target ? join(roots.target, WARM_BASE_MARK) : null;
   const mark = JSON.stringify({ image: image ?? null, cargoLock: lock });
   const writeMark = () => {
     if (!markFile) return;
@@ -304,9 +306,10 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
       e.log(`warm restore: could not record what the target was built with (${(err as Error).message})`);
     }
   };
+  const holdsStart = (d: string) => readdirSync(d).some((n) => d !== roots.target || n !== WARM_BASE_MARK);
   let reuse = false;
   for (const d of dirs) {
-    if (!existsSync(d) || !readdirSync(d).length) continue;
+    if (!existsSync(d) || !holdsStart(d)) continue;
     const same = d === roots.target && !!image && !!lock && !!markFile && existsSync(markFile) && readFileSync(markFile, "utf8") === mark;
     if (same) {
       reuse = true;
@@ -315,7 +318,8 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
     clearDir(d);
     e.log(`warm restore: cleared ${d}, which an earlier build left`);
   }
-  writeMark();
+  // A mark beside no start (an empty dir, or one left by a cleared dir) must not vouch for what a restore then puts there.
+  if (!reuse && markFile) rmSync(markFile, { force: true });
   const t0 = Date.now();
   try {
     if (reuse) {
@@ -323,6 +327,7 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
       e.log(summary);
       const rest = roots.cargo ? { cargo: roots.cargo } : null;
       if (rest) await store.restore(key, rest, verifyKeys);
+      writeMark();
       out({ ok: true, warm: null, badBlobs: [], summary });
       return 0;
     }
@@ -333,6 +338,7 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
       for (const d of dirs) clearDir(d);
       return cold(`warm restore: ${key}@${r.latest.commit.slice(0, 12)} was built with ${r.manifest.header.image ?? "an unrecorded image"}, not ${image}`);
     }
+    writeMark();
     const s = r.stats;
     const summary = `warm restore: ${key}@${r.latest.commit.slice(0, 12)}, ${s.files} files (${(s.bytes / 1024 ** 3).toFixed(2)} GB), ${s.fetched} fetched, ${s.linked + s.copied} linked or copied, in ${((Date.now() - t0) / 1000).toFixed(1)} s`;
     e.log(summary);
