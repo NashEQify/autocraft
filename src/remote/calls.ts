@@ -589,6 +589,8 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   const refs = JSON.parse(q.items) as ItemRef[];
   const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "")));
   try {
+    // Under the login's lock, not the writer lock: the counts read here change only by this login's leases, and the lease is a
+    // compare-and-set on the queued row, so two claims never lease one call; a claim never waits for a long write elsewhere.
     return await db.write(async () => {
       if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
       if (interactiveCap !== null && await interactiveLeased(db, caller.login) >= interactiveCap) return "limit";
@@ -613,7 +615,7 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
       // The fast lane says nothing about the helper's other slots: only their claims mark it idle or busy.
       if (clearIdle) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: null }).where("id", "=", caller.tokenId));
       return { id, secret, title: titleOf(q.prompt_id, refs), requiredHelper: REQUIRED_HELPER };
-    });
+    }, { lock: `remote-lease:${caller.login}` });
   } catch (e) {
     if (e instanceof Taken) return null;
     throw e;
