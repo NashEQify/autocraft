@@ -133,6 +133,19 @@ test("shared reads: a repeated select is read once and handed out as copies; a w
   assert.equal((await db!.shareReads(read)).length, 3, "a new scope reads again");
 });
 
+test("a fresh read inside shared reads sees a row another connection changed", async () => {
+  const { dbs: [db, other] } = await handles(2);
+  const k = db!.k as unknown as Kysely<T>;
+  await db!.run(k.insertInto("t").values({ v: "old" }));
+  const read = async () => (await db!.get(k.selectFrom("t").select("v").where("id", "=", 1)))?.v;
+  const seen = await db!.shareReads(async () => {
+    const before = await read();
+    await other!.prepare("UPDATE t SET v = 'new' WHERE id = 1").run();
+    return [before, await read(), await db!.fresh(read)];
+  });
+  assert.deepEqual(seen, ["old", "old", "new"]);
+});
+
 test("rows are plain objects named by the statement's columns, also after the table gains a column", async () => {
   const { dbs: [db] } = await handles(1);
   await db!.prepare("INSERT INTO t (v) VALUES (?)").run("a");

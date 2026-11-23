@@ -98,6 +98,8 @@ export interface Db {
    * handle in the context, and the end of `fn`, forget them. For read-only requests, whose parts read the same rows.
    */
   shareReads<T>(fn: () => Promise<T>): Promise<T>;
+  /** Runs `fn` with every read going to the database, inside shareReads too: for code that reads until a row changes. */
+  fresh<T>(fn: () => Promise<T>): Promise<T>;
   /**
    * Runs `fn` in one read snapshot (SQLite BEGIN; Postgres REPEATABLE READ READ ONLY). Inside an open transaction it
    * joins that one.

@@ -104,7 +104,8 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
   if (fresh) return t.access;
   let p = refreshing.get(idHash);
   if (!p) {
-    p = (async () => {
+    // Fresh reads: the retry below reads the row until the vault's new pair lands, and the promise serves other requests too.
+    p = db.fresh(async () => {
       const end = async () => {
         await db.run(db.k.deleteFrom("sessions").where("id_hash", "=", idHash));
         return null;
@@ -132,7 +133,7 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
       // The old refresh token is dead now, so every other copy of it (user_tokens, sessions of the same sign-in) takes the new pair.
       if (mirror) await shareRefresh(db, box, row.login, t.refresh, next);
       return next.access;
-    })().finally(() => refreshing.delete(idHash));
+    }).finally(() => refreshing.delete(idHash));
     refreshing.set(idHash, p);
   }
   return p;

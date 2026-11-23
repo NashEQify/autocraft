@@ -300,11 +300,9 @@ async function screenshotsOf(c: Ctx, headNow: string | null): Promise<Screenshot
 
 export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPageUnchanged> {
   const c = await context(db, req);
-  const since = req.query.get("since");
-  // A poll with a stamp reads the stamp alone first, so an unchanged page costs only that; a first load reads both together.
-  const stamped = stampOf(c, req);
-  stamped.catch(() => {});
-  if (since !== null && since === await stamped) return { unchanged: true, stamp: since };
+  // The stamp is read before the page, so it is never newer than the data it goes with, and an unchanged page costs only the stamp.
+  const stamp = await stampOf(c, req);
+  if (req.query.get("since") === stamp) return { unchanged: true, stamp };
   // The parts read independently, so each starts as soon as what it needs is read.
   const core = itemCore(db, req);
   const events = gather(c, null);
@@ -313,7 +311,7 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
   const impl = implementationData(c);
   const status = core.then((it) => statusOf(c, it));
   const pr = core.then((it) => it.kind === "pr");
-  const [it, cost, statusNow, bar, header, reviews, timeline, github, prBuild, screenshots, implementation, stamp] = await Promise.all([
+  const [it, cost, statusNow, bar, header, reviews, timeline, github, prBuild, screenshots, implementation] = await Promise.all([
     core,
     db.get(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("r.cost_usd"), eb.lit(0)).as("cost"))
       .where("i.repo", "=", c.repo).where("i.number", "=", c.n).$if(filtered(c.hidden), (q) => q.where((eb) => hiddenExpr(db, eb, c.hidden)!))).then((r) => r!.cost),
@@ -324,7 +322,6 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
     Promise.all([pr.then((isPr) => (isPr ? preapprovalsOf(db, c.repo, c.n) : [])), events, impl]).then(([pre, ev, im]) => timelineOf(c, ev, pre, im)),
     Promise.all([core, events, row]).then(([i, ev, r]) => githubOf(c, i, ev, r.url ?? "", r.synced_at)),
     prBuildOf(c), row.then((r) => screenshotsOf(c, r.head_oid)), impl.then((im) => implementationView(c, im)),
-    stamped,
   ]);
   return {
     repo: c.repo, number: c.n, kind: it.kind, state: it.state, title: it.title, author: it.author, stamp,

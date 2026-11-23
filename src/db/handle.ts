@@ -89,12 +89,15 @@ export function withoutInsertId(changes: number): RunResult {
 /** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
 const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 
+/** The most statements one shareReads scope keeps. */
+const SHARED_READS_MAX = 2000;
+
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
   #engine: Engine;
   readonly #als = new AsyncLocalStorage<Tx>();
-  /** The reads shared in this async context (shareReads), by statement and parameters; `open` is false once its `fn` has ended. */
+  /** The reads shared in this async context (shareReads), by statement and parameters; `open` is false once its `fn` has ended, and inside fresh. */
   readonly #shared = new AsyncLocalStorage<{ open: boolean; rows: Map<string, Promise<readonly unknown[]>> }>();
   readonly #observers = new Set<(e: DbEvent) => void>();
   readonly #warned = new Set<string>();
@@ -144,6 +147,8 @@ export class Handle implements Db {
     if (c.query.kind !== "SelectQueryNode") return [...(await this.#forgetting(() => this.k.executeQuery(c))).rows];
     const key = `${c.sql}\0${JSON.stringify(c.parameters, (_, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))}`;
     let read = shared.get(key);
+    // A request that reads this many different statements reads the rest uncached.
+    if (!read && shared.size >= SHARED_READS_MAX) return [...(await this.k.executeQuery(c)).rows];
     if (!read) {
       read = this.#engine.kysely.executeQuery(c).then((r) => r.rows);
       shared.set(key, read);
@@ -167,6 +172,11 @@ export class Handle implements Db {
     } finally {
       this.#sharedReads()?.clear();
     }
+  }
+
+  async fresh<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.#sharedReads()) return await fn();
+    return await this.#shared.run({ open: false, rows: new Map() }, fn);
   }
 
   async shareReads<T>(fn: () => Promise<T>): Promise<T> {

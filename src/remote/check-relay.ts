@@ -46,7 +46,7 @@ export async function relayCheck(db: Db, call: { id: number; runId: number | nul
   let lastTick = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, allocation.pollMs));
-    const r = await db.get(db.k.selectFrom("main.remote_checks").select(["state", "result"]).where("id", "=", id));
+    const r = await db.fresh(() => db.get(db.k.selectFrom("main.remote_checks").select(["state", "result"]).where("id", "=", id)));
     if (r?.state === "done" && r.result) return JSON.parse(r.result) as CheckResult;
     const gone = opts.signal?.aborted ? "the request was cancelled" : !await opts.live() ? "the lease is gone" : null;
     if (gone || !r) {
