@@ -88,11 +88,9 @@ type Comp = { type: number; label?: string; custom_id?: string; url?: string; co
 const rows = (b: EditBody) => (b.components as Comp[]).flatMap((r) => (r.type === 9 ? [r.accessory!] : r.type === 10 ? [] : r.components!));
 const v2text = (b: EditBody) => (b.components as Comp[]).flatMap((c) => (c.type === 9 ? c.components! : [c])).filter((c) => c.type === 10).map((c) => c.content).join("\n");
 const NONE = "None of these, file a new one";
-/** Presses a button that starts the questions: the model picks them after a deferral, then Continue opens the form. Returns the form's callback. */
+/** Presses a button that asks the questions: the model's choice was made at submit, so the form opens as the response. */
 const pressToQuestions = async (user: string, id: string) => {
   await press(user, id);
-  assert.equal(rest.callbacks[0]!.type, 5, "the questions are chosen after a deferral");
-  await press(user, rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!);
   return rest.callbacks[0]!;
 };
 const draftUrl = (b: EditBody): URL => new URL(rows(b).find((x) => x.label === "Open on GitHub instead")!.url!);
@@ -118,8 +116,8 @@ describe("search and filing flow", () => {
     await submitForm("u1", "photocraft", "webp export quality slider does nothing");
     const b = rest.edits[0]!;
     assert.match(v2text(b), /photocraft#1 Export to WebP/);
-    // The first reply comes from the embeddings alone: no model call yet, and no reason line.
-    assert.equal(calls.length, 0);
+    // The first reply comes from the embeddings alone, with no reason line; the questions call runs in the background from submit.
+    assert.deepEqual(calls.map((c) => c.id), ["discord.issue-questions"]);
     assert.doesNotMatch(v2text(b), />/);
     assert.deepEqual(rows(b).map((x) => x.label), ["photocraft#1", NONE]);
     // Another person cannot press someone's button.
@@ -139,7 +137,7 @@ describe("search and filing flow", () => {
     await searchCmd("u4");
     await submitForm("u4", "photocraft", "webp export quality slider does nothing");
     const noneId = rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!;
-    assert.equal(calls.length, 0);
+    assert.equal(calls.filter((c) => c.id === "discord.issue-questions").length, 1, "started at submit");
     const modal = await pressToQuestions("u4", noneId);
     assert.equal(calls.filter((c) => c.id === "discord.issue-questions").length, 1);
     assert.equal(modal.type, 9);

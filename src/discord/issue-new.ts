@@ -60,6 +60,8 @@ type Session = {
   user: string; repo: string; repoUrl: string; expires: number;
   title: string; description: string;
   matches: Match[]; questions: FollowUpId[]; capped: boolean;
+  /** The follow-up questions call started at submit: `chosen` is set when it ends; kept in memory with the session only. */
+  asking?: { done: Promise<void>; chosen?: FollowUpId[] };
   answers: { question: string; answer: string }[];
   draft?: { title: string; body: string };
   kind: IssueKind;
@@ -207,7 +209,16 @@ export class IssueNew {
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
     s.description = description; s.title = titleOf(description);
     s.stage = "matched";
-    // No model call here: the matches come from the embedding search alone, so the reply is quick. Questions wait for "None of these".
+    // The questions are chosen in the background, so the matches reply does not wait for the model; "None of these" uses the result.
+    s.capped = await this.#overCap();
+    if (!s.capped) {
+      s.calls++;
+      const asking: NonNullable<Session["asking"]> = { done: Promise.resolve() };
+      asking.done = this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }) })
+        .then((reply) => { asking.chosen = ((reply === null ? null : parseQuestions(reply)) ?? fallbackQuestions(s.chosen)).slice(0, 3); })
+        .catch(() => { asking.chosen = fallbackQuestions(s.chosen).slice(0, 3); });
+      s.asking = asking;
+    }
     s.matches = (await this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo)).matches.filter((m) => m.repo === s.repo);
     if (!s.matches.length) return void (await call.edit({ content: "No similar issue was found.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
@@ -227,16 +238,23 @@ export class IssueNew {
     }
     if (s.stage !== "matched") return void (await call.reply({ content: USED }));
     if (!this.#slot(s, call)) return void (await call.reply({ content: `${TOO_MANY.trim()}` }));
-    // Set before the call so a second press is refused while the model works.
+    // Set first so a second press is refused while this one works.
     s.stage = "asking";
-    await call.defer();
-    s.capped = await this.#overCap();
-    if (!s.capped) {
-      s.calls++;
-      const reply = await this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }) });
-      // A failed or unparseable call asks the questions of the kind; a model that finds nothing missing asks none.
-      s.questions = ((reply === null ? null : parseQuestions(reply)) ?? fallbackQuestions(s.chosen)).slice(0, 3);
+    const open = async (): Promise<void> => {
+      await call.showModal({
+        custom_id: `inew:ans:${sid}`, title: "A few more details",
+        components: s.questions.map((id) => field(id, followUp(id).label, 2, ISSUE_ANSWER_CHARS, { required: false, placeholder: followUp(id).placeholder })),
+      });
+    };
+    // Ready: the form opens as the response to this press. A model that finds nothing missing asks none.
+    if (s.asking?.chosen) {
+      s.questions = s.asking.chosen;
+      if (s.questions.length) return void (await open());
     }
+    await call.defer();
+    if (s.asking && !s.asking.chosen) await s.asking.done;
+    s.questions = s.asking?.chosen ?? [];
+    s.asking = undefined;
     if (!s.questions.length) {
       s.stage = "drafted";
       return void (await this.#finish(call, s, sid));
