@@ -57,12 +57,13 @@ export type NodeStatus = {
   /** Why the agent cannot work at all (the assignment cannot be read); absent when it can. */
   error?: string;
 };
-export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number; cargoLock?: string | null };
+/** `rustc` and `toolchain`: what the version was built with besides its image (src/warm/toolchain.ts); absent from older agents. */
+export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; rustc?: string | null; toolchain?: string | null; envHash: string | null; synced: number; cargoLock?: string | null };
 
 /** meta.json of a version. Consumers build at `checkout`, `targetDir` and `cargoHome`: cargo fingerprints hold absolute paths. */
 export type GenMeta = {
   key: string; repo: string; commit: string; stored: number; bytes: number; files: number;
-  image: string | null; rustc: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string; cargoLock?: string | null;
+  image: string | null; rustc: string | null; toolchain?: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string; cargoLock?: string | null;
   manifestSha256: string; synced: number;
 };
 
@@ -428,7 +429,7 @@ export class SyncAgent {
       for (const p of [tmp, roots.target, roots.cargo]) chmodSync(p, 0o755);
       const hd = manifest.header;
       const meta: GenMeta = {
-        key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc,
+        key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc, toolchain: hd.toolchain ?? null,
         envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, cargoLock: hd.cargoLock ?? null, manifestSha256: l.sha256, synced: this.c.now(),
       };
       writeFileSync(join(tmp, "manifest.zst"), raw, { mode: 0o644 });
@@ -552,7 +553,7 @@ export class SyncAgent {
     const keys: Record<string, KeyStatus> = {};
     for (const k of this.keyDirs()) {
       const h = this.held(k);
-      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced, cargoLock: h.meta.cargoLock ?? null };
+      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, rustc: h.meta.rustc ?? null, toolchain: h.meta.toolchain ?? null, envHash: h.meta.envHash, synced: h.meta.synced, cargoLock: h.meta.cargoLock ?? null };
     }
     const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
     return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), warmBytes: this.warmBytes(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
