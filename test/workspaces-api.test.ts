@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { calls, detail, image, list } from "../src/dash/api/workspaces.ts";
+import { calls, detail, image, list, output } from "../src/dash/api/workspaces.ts";
 import { TOPICS } from "../src/live.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
@@ -27,14 +27,17 @@ test("a viewer sees a workspace's state but none of its prompts, replies, errors
   assert.deepEqual([rows[0]!.state, rows[0]!.canSee, rows[0]!.item], ["failed", false, 7]);
   const d = await detail(db, req("viewer", { id: "1" }));
   assert.equal(d.error, null);
-  assert.deepEqual([d.sessionList[0]!.prompt, d.sessionList[0]!.outcome], [null, null]);
+  assert.deepEqual([d.sessionList, d.env, d.layout], [[], null, null]);
   await assert.rejects(calls(db, req("viewer", { id: "1" })), /only operators and maintainers/);
   assert.equal((await image(db, req("viewer", { id: "1", call: "1" }))).status, 403);
 
   const op = await detail(db, req("operator", { id: "1" }));
   assert.deepEqual([op.error, op.sessionList[0]!.prompt], ["secret pod detail", "operator text"]);
   const c = (await calls(db, req("operator", { id: "1" }))).calls[0]!;
-  assert.deepEqual([c.summary, c.output, c.images], ["cargo build", "exit 0", 1]);
+  assert.deepEqual([c.summary, c.hasOutput, c.images, "output" in c], ["cargo build", true, 1, false]);
+  assert.equal((await output(db, req("operator", { id: "1", call: String(c.id) })).then((o) => o.output)), "exit 0");
+  await assert.rejects(output(db, req("viewer", { id: "1", call: String(c.id) })), /only operators and maintainers/);
+  assert.deepEqual((await calls(db, { ...req("operator", { id: "1" }), query: new URLSearchParams(`after=${c.id}`) })).calls, []);
   const img = await image(db, req("operator", { id: "1", call: String(c.id) }));
   assert.equal(img.headers?.["content-type"], "image/png");
 

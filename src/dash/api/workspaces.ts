@@ -2,7 +2,7 @@
 // signed in sees a workspace of a repo they can see (repo, state, node, times). Operators and maintainers with write on the
 // repo also read errors, sessions' prompts, replies and outcomes, call arguments, outputs and screenshots (the rule for job logs
 // and model outputs). Everything a pod or a model wrote is text, never HTML; images are served with a sandbox policy.
-import type { WorkspaceCall, WorkspaceCalls, WorkspaceDetail, WorkspacePage, WorkspaceSession, WorkspaceState, WorkspaceSummary } from "../../../web/src/api/types.ts";
+import type { WorkspaceCall, WorkspaceCallOutput, WorkspaceCalls, WorkspaceDetail, WorkspacePage, WorkspaceSession, WorkspaceState, WorkspaceSummary } from "../../../web/src/api/types.ts";
 import { OWN_CALLS } from "../../build/workspace-tools.ts";
 import { warmOf } from "../../build/workspace-layout.ts";
 import { LIVE_STATES } from "../../build/workspaces.ts";
@@ -11,7 +11,8 @@ import type { Db } from "../../db/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, Res } from "../types.ts";
-import { allVisibleRepos, excludeHiddenExpr, hiddenRepos } from "./visible.ts";
+import { isHiddenRepo } from "../../hidden-sql.ts";
+import { excludeHiddenExpr, hiddenRepos } from "./visible.ts";
 
 const PAGE = 30;
 const CALL_PAGE = 60;
@@ -49,14 +50,18 @@ const warmText = (w: { warm: string | null }): string | null => {
   return warm.why ? `started cold: ${warm.why}` : null;
 };
 
-const sessionRows = (db: Db, ids: number[]) => db.all(db.k.selectFrom("workspace_sessions as s").leftJoin("remote_calls as c", "c.id", "s.remote_call_id")
-  .select(["s.id", "s.kind", "s.item", "s.state", "s.outcome", "s.for_login", "s.requested_by", "s.created_at", "s.ended_at", "s.workspace_id", "s.job_id", "s.prompt", "c.reply", "c.usage"])
-  .where("s.workspace_id", "in", ids.length ? ids : [0]).orderBy("s.id"));
+/** Only what the cost needs: the list never reads prompts or replies. */
+const costRows = (db: Db, ids: number[]) => db.all(db.k.selectFrom("workspace_sessions as s").leftJoin("remote_calls as c", "c.id", "s.remote_call_id")
+  .select(["s.workspace_id", "s.item", "c.usage"]).where("s.workspace_id", "in", ids.length ? ids : [0]).orderBy("s.id"));
+
+const sessionRows = (db: Db, id: number) => db.all(db.k.selectFrom("workspace_sessions as s").leftJoin("remote_calls as c", "c.id", "s.remote_call_id")
+  .select(["s.id", "s.kind", "s.item", "s.state", "s.outcome", "s.for_login", "s.requested_by", "s.created_at", "s.ended_at", "s.job_id", "s.prompt", "c.reply", "c.usage"])
+  .where("s.workspace_id", "=", id).orderBy("s.id"));
 
 type Row = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; created_at: string; ended_at: string | null; error?: string | null };
 
 async function summaries(db: Db, req: Req, rows: Row[]): Promise<WorkspaceSummary[]> {
-  const sessions = await sessionRows(db, rows.map((r) => r.id));
+  const sessions = await costRows(db, rows.map((r) => r.id));
   const can = new Map<string, boolean>();
   for (const repo of new Set(rows.map((r) => r.repo))) can.set(repo, await mayRunRepo(req.user, repo));
   return rows.map((r) => {
@@ -92,8 +97,8 @@ export async function list(db: Db, req: Req): Promise<WorkspacePage> {
 
 async function visibleWorkspace(db: Db, req: Req, id: number) {
   const w = await db.get(db.k.selectFrom("workspaces").select([...COLUMNS, "error", "pod", "env_id", "layout"]).where("id", "=", id));
-  // The same answer for a workspace that does not exist and one of a repo the viewer cannot see.
-  if (!w || !(await allVisibleRepos(db, req)).includes(w.repo)) throw new HttpError(404, "no such workspace");
+  // The list's rule: the same answer for a workspace that does not exist and one of a repo the viewer cannot see.
+  if (!w || isHiddenRepo(await hiddenRepos(db, req), w.repo)) throw new HttpError(404, "no such workspace");
   return w;
 }
 
@@ -101,12 +106,11 @@ export async function detail(db: Db, req: Req): Promise<WorkspaceDetail> {
   const w = await visibleWorkspace(db, req, idOf(req.params.id, "workspace"));
   const [s] = await summaries(db, req, [w]);
   const see = s!.canSee;
-  const sessionList: WorkspaceSession[] = (await sessionRows(db, [w.id])).map((r) => ({
-    id: r.id, kind: r.kind, item: r.item, state: r.state as WorkspaceSession["state"], forLogin: r.for_login, requestedBy: see ? r.requested_by : null,
-    outcome: see ? r.outcome : null, createdAt: r.created_at, endedAt: r.ended_at, costUsd: see ? costOf(r.usage) : null,
-    reply: see ? r.reply : null, prompt: see ? r.prompt : null, jobId: see ? r.job_id : null,
+  const sessionList: WorkspaceSession[] = !see ? [] : (await sessionRows(db, w.id)).map((r) => ({
+    id: r.id, kind: r.kind, item: r.item, state: r.state as WorkspaceSession["state"], forLogin: r.for_login, requestedBy: r.requested_by,
+    outcome: r.outcome, createdAt: r.created_at, endedAt: r.ended_at, costUsd: costOf(r.usage), reply: r.reply, prompt: r.prompt, jobId: r.job_id,
   }));
-  return { ...s!, error: see ? w.error : null, pod: see ? w.pod : null, env: w.env_id, layout: w.layout, sessionList };
+  return { ...s!, error: see ? w.error : null, pod: see ? w.pod : null, env: see ? w.env_id : null, layout: see ? w.layout : null, sessionList };
 }
 
 const argsOf = (json: string): Record<string, unknown> => {
@@ -130,35 +134,64 @@ function cutOutput(text: string): { output: string; chars: number } {
   return text.length <= HEAD_CHARS + TAIL_CHARS ? { output: text, chars: text.length } : { output: `${text.slice(0, HEAD_CHARS)}\n[${text.length - HEAD_CHARS - TAIL_CHARS} characters left out]\n${text.slice(-TAIL_CHARS)}`, chars: text.length };
 }
 
-/** The calls of a workspace in pages of the newest first; each page is returned oldest first. Needs the right to see content. */
-export async function calls(db: Db, req: Req): Promise<WorkspaceCalls> {
+async function seenWorkspace(db: Db, req: Req) {
   const w = await visibleWorkspace(db, req, idOf(req.params.id, "workspace"));
   if (!(await mayRunRepo(req.user, w.repo))) throw new HttpError(403, "only operators and maintainers of the repo read a workspace's calls");
-  const before = req.query.get("before");
-  if (before && !/^\d{1,15}$/.test(before)) throw new HttpError(400, "bad cursor");
+  return w;
+}
+
+/**
+ * Call metadata, never output text or image data. Two json fields are read in SQL (isError and the image count, one parse each);
+ * the result is not read as a whole. Default: the newest page, oldest first. `before`: the page before a call id. `after` (with
+ * `running`, call ids the page still shows as running): the calls past `after` and those again, for a live refresh.
+ */
+export async function calls(db: Db, req: Req): Promise<WorkspaceCalls> {
+  const w = await seenWorkspace(db, req);
+  const num = (name: string): number | null => {
+    const v = req.query.get(name);
+    if (v === null || v === "") return null;
+    if (!/^\d{1,15}$/.test(v)) throw new HttpError(400, `bad ${name}`);
+    return Number(v);
+  };
+  const before = num("before"), after = num("after");
+  const runningParam = req.query.get("running") ?? "";
+  if (runningParam && !/^\d{1,15}(,\d{1,15}){0,49}$/.test(runningParam)) throw new HttpError(400, "bad running");
+  const running = runningParam ? runningParam.split(",").map(Number) : [];
   const limit = limitOf(req, CALL_PAGE, 200);
-  // The images stay in the row: the list reads the result without them and only counts them.
   let q = db.k.selectFrom("workspace_calls")
+    .select((eb) => ["id", "n", "tool", "args", "state", "created_at", "started_at", "finished_at", eb.case().when("result", "is not", null).then(1).else(0).end().as("has_result"),
+      kx.jsonBool(db, "result", "$.isError").as("is_error"), kx.jsonNum(db, "result", "$.acct.images").as("images")] as const)
+    .where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS);
+  if (after !== null) q = q.where((eb) => eb.or([eb("id", ">", after), ...(running.length ? [eb("id", "in", running)] : [])])).orderBy("id", "asc").limit(200);
+  else {
+    q = q.orderBy("id", "desc").limit(limit + 1);
+    if (before !== null) q = q.where("id", "<", before);
+  }
+  const rows = await db.all(q);
+  const page = after !== null ? rows : rows.slice(0, limit).reverse();
+  return {
+    older: after === null && rows.length > limit ? String(page[0]!.id) : null,
+    calls: page.map((r): WorkspaceCall => ({
+      id: r.id, n: r.n, tool: r.tool, summary: summaryOf(r.tool, argsOf(r.args)), state: r.state as WorkspaceCall["state"], isError: r.state === "failed" || Number(r.is_error) === 1,
+      createdAt: r.created_at, startedAt: r.started_at, finishedAt: r.finished_at, hasOutput: Number(r.has_result) === 1, images: Number(r.images ?? 0),
+    })),
+  };
+}
+
+/** One call's output text (the result's text, or its error), cut in the middle when long. */
+export async function output(db: Db, req: Req): Promise<WorkspaceCallOutput> {
+  const w = await seenWorkspace(db, req);
+  const r = await db.get(db.k.selectFrom("workspace_calls")
     .select((eb) => {
       const res = eb.case().when(kx.jsonValid(db, "result")).then(eb.ref("result")).end();
-      return ["id", "n", "tool", "args", "state", "created_at", "started_at", "finished_at", kx.jsonText(db, res, "$.text").as("text"), kx.jsonBool(db, res, "$.isError").as("is_error"),
-        kx.jsonNum(db, res, "$.acct.images").as("images"), kx.jsonText(db, res, "$.error").as("error")] as const;
+      return [kx.jsonText(db, res, "$.text").as("text"), kx.jsonText(db, res, "$.error").as("error")] as const;
     })
-    .where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS).orderBy("id", "desc").limit(limit + 1);
-  if (before) q = q.where("id", "<", Number(before));
-  const rows = await db.all(q);
-  const page = rows.slice(0, limit).reverse();
-  return {
-    older: rows.length > limit ? String(page[0]!.id) : null,
-    calls: page.map((r): WorkspaceCall => {
-      const text = r.text ?? r.error ?? null;
-      const cut = text === null ? null : cutOutput(text);
-      return {
-        id: r.id, n: r.n, tool: r.tool, summary: summaryOf(r.tool, argsOf(r.args)), state: r.state as WorkspaceCall["state"], isError: r.state === "failed" || Number(r.is_error) === 1,
-        createdAt: r.created_at, startedAt: r.started_at, finishedAt: r.finished_at, output: cut?.output ?? null, outputChars: cut?.chars ?? 0, images: Number(r.images ?? 0),
-      };
-    }),
-  };
+    .where("workspace_id", "=", w.id).where("id", "=", idOf(req.params.call, "call")).where("tool", "not in", OWN_CALLS));
+  if (!r) throw new HttpError(404, "no such call");
+  const text = r.text ?? r.error;
+  if (text === null) return { output: null, chars: 0 };
+  const cut = cutOutput(text);
+  return { output: cut.output, chars: cut.chars };
 }
 
 /** The image of a call (its first), for operators and maintainers of the repo. */
@@ -173,7 +206,7 @@ export async function image(db: Db, req: Req): Promise<Res> {
       })
       .where("workspace_id", "=", w.id).where("id", "=", idOf(req.params.call, "call")));
     if (!row?.data || !row.mime || !IMAGE_TYPES.has(row.mime)) throw new HttpError(404, "no such screenshot");
-    return { body: Buffer.from(row.data, "base64"), headers: { "content-type": row.mime, "content-disposition": "inline", "content-security-policy": "sandbox", "x-content-type-options": "nosniff", "cache-control": "private, max-age=3600" } };
+    return { body: Buffer.from(row.data, "base64"), headers: { "content-type": row.mime, "content-disposition": "inline", "content-security-policy": "sandbox", "x-content-type-options": "nosniff", "cache-control": "private, no-cache" } };
   } catch (e) {
     if (e instanceof HttpError) return { status: e.status, json: { error: e.message } };
     throw e;

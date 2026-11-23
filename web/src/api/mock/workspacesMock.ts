@@ -25,10 +25,10 @@ warning: unused variable: \`dirty\`
    |             ^^^^^ help: if this is intentional, prefix it with an underscore: \`_dirty\`
     Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 3m 41s`;
 
-type Raw = Pick<WorkspaceCall, "id" | "n" | "tool" | "summary" | "state" | "output" | "outputChars"> & { images?: number; isError?: boolean; durationMs?: number };
+type Raw = Pick<WorkspaceCall, "id" | "n" | "tool" | "summary" | "state"> & { output: string | null; outputChars: number; images?: number; isError?: boolean; durationMs?: number };
 const raw = (rows: Raw[]) => rows;
 
-const calls: Record<number, WorkspaceCall[]> = {
+const calls: Record<number, (Omit<WorkspaceCall, "hasOutput"> & { output: string | null; outputChars: number })[]> = {
   1: raw([
     { id: 9101, n: 1, tool: "shell", summary: "git log --oneline -5 && git status --short", state: "done", output: "exit 0 in 0.4 s\n4f1c2a9 Fix layer rename undo\n88d0b13 Add layer panel keyboard moves\nd3a7712 Bump egui\n", outputChars: 120 },
     { id: 9102, n: null, tool: "grep", summary: "fn rename_layer in crates", state: "done", output: "crates/ui/src/layers.rs:201:    pub fn rename_layer(&mut self, id: LayerId, name: String) {\ncrates/core/src/doc.rs:88:    pub fn rename_layer(&mut self, id: LayerId, name: &str) -> Result<()> {", outputChars: 190 },
@@ -71,9 +71,17 @@ export function createWorkspacesMock(me: User): Pick<Api, "workspaces"> {
         const w = workspaces.find((x) => x.id === id);
         if (!w) return Promise.reject(new Error("no such workspace"));
         const see = mayRunMock(me, w.repo);
-        return wait({ ...summary(w), error: see ? w.error : null, pod: see ? w.pod : null, env: w.env, layout: w.layout, sessionList: w.sessionList.map((s) => (see ? s : { ...s, outcome: null, costUsd: null, reply: null, prompt: null, jobId: null, requestedBy: null })) });
+        return wait({ ...summary(w), error: see ? w.error : null, pod: see ? w.pod : null, env: see ? w.env : null, layout: see ? w.layout : null, sessionList: see ? w.sessionList : [] });
       },
-      calls: (id) => (mayRunMock(me, workspaces.find((x) => x.id === id)?.repo ?? "") ? wait({ calls: calls[id] ?? [], older: null }) : Promise.reject(new Error("only operators and maintainers of the repo read a workspace's calls"))),
+      calls: (id, q) => {
+        if (!mayRunMock(me, workspaces.find((x) => x.id === id)?.repo ?? "")) return Promise.reject(new Error("only operators and maintainers of the repo read a workspace's calls"));
+        const rows = (calls[id] ?? []).filter((c) => (q?.after === undefined ? true : c.id > q.after || (q.running ?? []).includes(c.id)));
+        return wait({ calls: rows.map(({ output, outputChars: _chars, ...c }) => ({ ...c, hasOutput: output !== null })), older: null });
+      },
+      output: (id, call) => {
+        const c = (calls[id] ?? []).find((x) => x.id === call);
+        return c ? wait({ output: c.output, chars: c.outputChars }) : Promise.reject(new Error("no such call"));
+      },
       imageUrl: (_id, call) => SHOTS[call] ?? SHOTS[9106]!,
     },
   };

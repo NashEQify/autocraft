@@ -612,6 +612,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/workspaces", workspaces.list),
     get("/api/workspaces/:id", workspaces.detail),
     get("/api/workspaces/:id/calls", workspaces.calls),
+    get("/api/workspaces/:id/calls/:call", workspaces.output),
     { method: "GET", pattern: "/api/workspaces/:id/calls/:call/image", handler: workspaces.image },
     get("/api/tasks", build.tasks),
     get("/api/tasks/:id", build.task),

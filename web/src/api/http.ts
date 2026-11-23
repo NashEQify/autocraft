@@ -351,7 +351,8 @@ export function createHttpApi(): Api {
     workspaces: {
       list: (f) => get(`/api/workspaces${qs(f)}`),
       get: (id) => get(`/api/workspaces/${id}`),
-      calls: (id, before) => get(`/api/workspaces/${id}/calls${qs({ before })}`),
+      calls: (id, q) => get(`/api/workspaces/${id}/calls${qs({ before: q?.before, after: q?.after, running: q?.running?.join(",") })}`),
+      output: (id, call) => get(`/api/workspaces/${id}/calls/${call}`),
       imageUrl: (id, call) => `/api/workspaces/${id}/calls/${call}/image`,
     },
     tasks: {

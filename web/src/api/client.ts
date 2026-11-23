@@ -2,7 +2,7 @@ import { keepPreviousData, useInfiniteQuery, useQuery as useTanstackQuery } from
 import { createContext, useCallback, useContext, useRef } from "react";
 import { topicsFor } from "./topics";
 import { usePageProject, withProject } from "./scope";
-import type { WorkspaceCalls, WorkspaceDetail, WorkspacePage } from "./types";
+import type { WorkspaceCallOutput, WorkspaceCalls, WorkspaceDetail, WorkspacePage } from "./types";
 import type {
   CacheReport,
   DiscordAccount,
@@ -494,8 +494,10 @@ export interface Api {
   workspaces: {
     list(f: { state: "live" | "all"; cursor?: string }): Promise<WorkspacePage>;
     get(id: number): Promise<WorkspaceDetail>;
-    /** The newest calls (oldest first), or the page before `before`. */
-    calls(id: number, before?: string): Promise<WorkspaceCalls>;
+    /** The newest calls (oldest first), the page `before` a call id, or the calls after `after` plus the `running` ones again. */
+    calls(id: number, q?: { before?: string; after?: number; running?: number[] }): Promise<WorkspaceCalls>;
+    /** One settled call's output. */
+    output(id: number, call: number): Promise<WorkspaceCallOutput>;
     /** Where the first image of a call is served. */
     imageUrl(id: number, call: number): string;
   };

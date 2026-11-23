@@ -3236,13 +3236,15 @@ export type WorkspaceSession = {
 };
 
 export type WorkspaceDetail = WorkspaceSummary & {
+  /** The fields below are null or empty for readers who may not see the workspace's content. */
   error: string | null;
   pod: string | null;
-  env: string;
-  layout: number;
+  env: string | null;
+  layout: number | null;
   sessionList: WorkspaceSession[];
 };
 
+/** A call's metadata; its output is read when the row opens (WorkspaceCallOutput), its image from the image endpoint. */
 export type WorkspaceCall = {
   id: number;
   /** The `ws run` number; null for other calls. */
@@ -3255,10 +3257,11 @@ export type WorkspaceCall = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
-  /** Untrusted text, shown as text: the first 4000 and the last 20000 characters of a longer output; `outputChars` is the full length. */
-  output: string | null;
-  outputChars: number;
+  /** The call has settled with a result to read. */
+  hasOutput: boolean;
   images: number;
 };
 /** Calls oldest first; `older` is the cursor of the earlier page (the id to pass as `before`). */
 export type WorkspaceCalls = { calls: WorkspaceCall[]; older: string | null };
+/** Untrusted text, shown as text: the first 4000 and the last 20000 characters of a longer output; `chars` is the full length. */
+export type WorkspaceCallOutput = { output: string | null; chars: number };

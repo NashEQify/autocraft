@@ -98,9 +98,11 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["build-features", ["build-features", "repos"]],
   ["screenshot-setup", ["build-features"]],
   ["areas:", ["classify", "jobs"]],
-  // The caches report: the runner's node reads (envs), warm tasks, default-branch heads and the warm producer's settings.
-  ["workspaces", ["workspaces", "items", "repos"]],
+  // The workspace pages read only their own tables; a settled call's output never changes.
+  ["workspaces", ["workspaces"]],
   ["workspace:", ["workspaces"]],
+  ["workspace-output:", []],
+  // The caches report: the runner's node reads (envs), warm tasks, default-branch heads and the warm producer's settings.
   ["envs-caches", ["envs", "tasks", "mainci", "settings"]],
   ["envs", ["envs", "tasks"]],
   ["tasks:", ["tasks", "envs"]],

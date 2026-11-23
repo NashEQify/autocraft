@@ -1,10 +1,10 @@
 // Workspaces: the pods where a model session builds and runs code, and inside one the sessions and the log of its tool calls.
 // Everything a pod or a model wrote is plain text; screenshots are images served by their own endpoint.
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AppWindowIcon, CameraIcon, CaretDownIcon, CaretRightIcon, CubeIcon, DownloadSimpleIcon, FileTextIcon, MagnifyingGlassIcon, PencilSimpleIcon, TerminalWindowIcon, type Icon } from "@phosphor-icons/react";
 import { useApi, usePagedQuery, useQuery } from "../../api/client";
-import type { WorkspaceCall, WorkspaceDetail, WorkspaceSession, WorkspaceState, WorkspaceSummary } from "../../api/types";
+import type { WorkspaceCall, WorkspaceCallOutput, WorkspaceDetail, WorkspaceSession, WorkspaceState, WorkspaceSummary } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { nowMs, span, when } from "../../lib/format";
 import { useNow } from "../../lib/useNow";
@@ -60,7 +60,7 @@ function List() {
   const q = usePagedQuery(`workspaces:list:${which}`, (api, cursor) => api.workspaces.list({ state: which, cursor }), (p) => p.next);
   const rows = q.pages?.flatMap((p) => p.workspaces) ?? [];
   return (
-    <Page title="Workspaces" sub="Pods where sessions build and run code">
+    <Page title="Workspaces">
       <div className="mt-4 space-y-3">
         <Segmented label="Show" value={which} onChange={(v) => update({ show: v === "all" ? "all" : null })} options={[{ value: "live", label: "Live" }, { value: "all", label: "All" }]} />
         <ErrorLine error={q.error?.message} />
@@ -117,7 +117,8 @@ function CallRow({ c, wsId, imageUrl }: { c: WorkspaceCall; wsId: number; imageU
   const [open, setOpen] = useState(false);
   const ToolIcon = TOOL_ICON[c.tool] ?? TerminalWindowIcon;
   const ms = c.startedAt ? (c.finishedAt ? Date.parse(c.finishedAt) : nowMs()) - Date.parse(c.startedAt) : null;
-  const canOpen = c.output !== null || c.images > 0;
+  const canOpen = c.hasOutput || c.images > 0;
+  const out = useQuery<WorkspaceCallOutput>(`workspace-output:${wsId}:${c.id}`, (a) => a.workspaces.output(wsId, c.id), { enabled: open && c.hasOutput });
   const bad = c.state === "failed" || c.isError;
   return (
     <li className="min-w-0">
@@ -141,27 +142,69 @@ function CallRow({ c, wsId, imageUrl }: { c: WorkspaceCall; wsId: number; imageU
           <img src={imageUrl(wsId, c.id)} alt={`Screenshot of call ${c.id}`} loading="lazy" className={cn("rounded border border-line object-contain", open ? "max-h-[70vh]" : "max-h-40")} />
         </a>
       )}
-      {open && c.output !== null && (
+      {open && c.hasOutput && (
         <div className="mx-4 mb-3 ml-10 min-w-0">
-          <pre className="code max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded border border-line bg-sunken p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">{c.output}</pre>
-          {c.outputChars > c.output.length && <p className="num mt-1 text-2xs text-ink/50">{c.outputChars.toLocaleString("en")} characters, the middle left out</p>}
+          {out.error ? <ErrorLine error={out.error.message} /> : out.data?.output != null ? (
+            <>
+              <pre className="code max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded border border-line bg-sunken p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">{out.data.output}</pre>
+              {out.data.chars > out.data.output.length && <p className="num mt-1 text-2xs text-ink/50">{out.data.chars.toLocaleString("en")} characters, the middle left out</p>}
+            </>
+          ) : <p className="text-xs text-ink/50">{out.data ? "No output." : "Loading."}</p>}
         </div>
       )}
     </li>
   );
 }
 
+const active = (c: WorkspaceCall) => c.state === "running" || c.state === "queued";
+
+/** The loaded calls live in a ref: a live refresh asks only for calls past the last one and for those still running, and merges them. */
 function Calls({ w }: { w: WorkspaceDetail }) {
   const api = useApi();
-  const q = usePagedQuery(`workspaces:calls:${w.id}`, (a, before) => a.workspaces.calls(w.id, before), (p) => p.older);
-  const rows = [...(q.pages ?? [])].reverse().flatMap((p) => p.calls);
-  useNow(rows.some((c) => c.state === "running" || c.state === "queued") ? 1000 : undefined);
+  const store = useRef<{ rows: WorkspaceCall[]; older: string | null; ready: boolean }>({ rows: [], older: null, ready: false });
+  const [, redraw] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState<string>();
+  const merge = (rows: WorkspaceCall[]) => {
+    const byId = new Map(store.current.rows.map((c) => [c.id, c]));
+    for (const c of rows) byId.set(c.id, c);
+    store.current.rows = [...byId.values()].sort((a, b) => a.id - b.id);
+  };
+  const q = useQuery(`workspaces:calls:${w.id}`, async (a) => {
+    const s = store.current;
+    if (!s.ready) {
+      const r = await a.workspaces.calls(w.id);
+      s.rows = r.calls;
+      s.older = r.older;
+      s.ready = true;
+    } else {
+      merge((await a.workspaces.calls(w.id, { after: s.rows[s.rows.length - 1]?.id ?? 0, running: s.rows.filter(active).map((c) => c.id).slice(0, 50) })).calls);
+    }
+    return [...s.rows];
+  });
+  const rows = q.data ?? [];
+  useNow(rows.some(active) ? 1000 : undefined);
+  const older = store.current.older;
+  const loadOlder = async () => {
+    setLoadingOlder(true);
+    setOlderError(undefined);
+    try {
+      const r = await api.workspaces.calls(w.id, { before: older ?? undefined });
+      merge(r.calls);
+      store.current.older = r.older;
+      redraw((n) => n + 1);
+    } catch (e) {
+      setOlderError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
   return (
-    <Block title={<>Calls {q.pages && <span className="num ml-1 font-normal text-ink/50">{rows.length}{q.hasMore ? "+" : ""}</span>}</>} aside="oldest first" flush>
-      <ErrorLine error={q.error?.message} className="p-4" />
-      {q.hasMore && (
+    <Block title={<>Calls {q.data && <span className="num ml-1 font-normal text-ink/50">{rows.length}{older ? "+" : ""}</span>}</>} aside="oldest first" flush>
+      <ErrorLine error={q.error?.message ?? olderError} className="p-4" />
+      {older && (
         <div className="border-b border-line p-3">
-          <Button size="sm" loading={q.loadingMore} onClick={q.loadMore} className="max-md:h-11">Load earlier calls</Button>
+          <Button size="sm" loading={loadingOlder} onClick={() => void loadOlder()} className="max-md:h-11">Load earlier calls</Button>
         </div>
       )}
       {rows.length > 0 && <ul className="divide-y divide-line">{rows.map((c) => <CallRow key={c.id} c={c} wsId={w.id} imageUrl={api.workspaces.imageUrl} />)}</ul>}
@@ -189,7 +232,7 @@ function Detail({ id }: { id: number }) {
                 [STATE_LABEL[w.state], <span key="s">since <TimeAgo iso={w.stateAt} /></span>],
                 ["Created", when(w.createdAt)],
                 ["Ended", w.endedAt && when(w.endedAt)],
-                ["Environment", <span className="code" key="e">{w.env}</span>],
+                ["Environment", w.env && <span className="code" key="e">{w.env}</span>],
                 ["Node", w.node && <span className="code" key="n">{w.node}</span>],
                 ["Warm start", w.warm],
                 ["Cost", usd(w.costUsd)],
@@ -197,10 +240,12 @@ function Detail({ id }: { id: number }) {
               ]}
             />
           </Block>
-          <Block title={<>Sessions <span className="num ml-1 font-normal text-ink/50">{w.sessionList.length}</span></>} flush>
-            {w.sessionList.length > 0 ? <ul className="divide-y divide-line">{w.sessionList.map((s) => <SessionBlock key={s.id} s={s} canSee={w.canSee} />)}</ul> : <EmptyState icon={CubeIcon}>No session has run here.</EmptyState>}
-          </Block>
-          {w.canSee && <Calls w={w} />}
+          {w.canSee && (
+            <Block title={<>Sessions <span className="num ml-1 font-normal text-ink/50">{w.sessionList.length}</span></>} flush>
+              {w.sessionList.length > 0 ? <ul className="divide-y divide-line">{w.sessionList.map((s) => <SessionBlock key={s.id} s={s} canSee={w.canSee} />)}</ul> : <EmptyState icon={CubeIcon}>No session has run here.</EmptyState>}
+            </Block>
+          )}
+          {w.canSee && <Calls key={w.id} w={w} />}
         </div>
       )}
     </Page>
