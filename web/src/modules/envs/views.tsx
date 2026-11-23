@@ -5,7 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Dialog } from "radix-ui";
 import { CheckIcon, CopyIcon, DownloadSimpleIcon, PencilSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useApi, usePagedQuery, useQuery } from "../../api/client";
-import type { BuildEnv, BuildFeatureName, ScreenshotConfigJson, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, EnvKind, PrBuildScope, Requires, TaskBatch, TaskFilter, TaskState } from "../../api/types";
+import type { BuildEnv, EnvTask, BuildFeatureName, ScreenshotConfigJson, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, EnvKind, PrBuildScope, Requires, TaskBatch, TaskFilter, TaskState } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { memSize, nowMs, num, span, eventTime } from "../../lib/format";
 import { TimeAgo } from "../../ui/atoms/TimeAgo";
@@ -127,6 +127,20 @@ function EditEnv({ e, onDone }: { e: BuildEnv; onDone: () => void }) {
   );
 }
 
+const currentStep = (plan: { name: string }[], results: { step: string }[]) => plan.find((s) => !results.some((r) => r.step === s.name))?.name ?? null;
+
+function EnvTaskLine({ t }: { t: EnvTask }) {
+  const ms = Math.max(0, nowMs() - Date.parse(t.startedAt));
+  return (
+    <li>
+      <Link to={`/envs/${t.id}`} className="block min-w-0 break-words py-0.5 text-xs hover:underline max-md:py-2">
+        <span className="code">{t.repo.split("/").pop()}{t.number !== null && `#${t.number}`}</span>
+        <span className="text-ink/60"> · {t.step}{t.current && ` · ${t.current}`} · <span className="num">{span(ms)}</span></span>
+      </Link>
+    </li>
+  );
+}
+
 function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
   useNow();
   const api = useApi();
@@ -158,6 +172,7 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
             <span key={i} className={cn("h-2 flex-1 rounded-sm", i < e.running ? "bg-c1" : "bg-ink/[0.09]")} />
           ))}
         </div>
+        {e.tasks.length > 0 && <ul className="mt-1.5">{e.tasks.map((t) => <EnvTaskLine key={t.id} t={t} />)}</ul>}
       </div>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
         <dt className="text-ink/55">{e.settings ? "Each pod" : "Machine"}</dt>
@@ -579,6 +594,7 @@ function DetailBody({ id }: { id: number }) {
   const t = q.data;
   if (!t) return <div className="p-4">{q.error ? <ErrorLine error={q.error.message} /> : <span className="text-sm text-ink/50">Loading.</span>}</div>;
   const active = ACTIVE.includes(t.state);
+  const now = t.state === "running" || t.state === "claimed" ? currentStep(t.plan, t.results) : null;
   return (
     <div className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -658,6 +674,7 @@ function DetailBody({ id }: { id: number }) {
                   <span className="num ml-auto text-xs text-ink/60">
                     {r ? `${r.timedOut ? "timed out" : `exit ${r.exitCode ?? "–"}`} · ${span(r.durationMs)}`.replace("<1 m", `${(r.durationMs / 1000).toFixed(1)} s`) + (r.peakMemBytes !== undefined ? ` · peak ${memSize(r.peakMemBytes)}` : "") + (r.oomKilled ? " · out of memory" : "") : `limit ${s.timeoutSec} s`}
                   </span>
+                  {!r && now === s.name && <Badge tone="accent">Running now</Badge>}
                   {r && <Badge tone={r.exitCode === 0 && !r.timedOut ? "ok" : "bad"}>{r.exitCode === 0 && !r.timedOut ? "Passed" : "Failed"}</Badge>}
                 </div>
                 <code className="code mt-0.5 block break-all text-xs text-ink/60">{s.cmd.join(" ")}</code>

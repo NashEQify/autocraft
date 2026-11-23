@@ -2,7 +2,7 @@
 // code. The coordinator holds only a hash of each worker key. Everything a
 // worker reports is stored as data and shown as text.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { BuildEnv, Capabilities, EnvCreate, EnvInput, EnvKind } from "../../web/src/api/types.ts";
+import type { BuildEnv, EnvTask, Capabilities, EnvCreate, EnvInput, EnvKind } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { parseSettings, settingsOf } from "./pods.ts";
 import type { Db } from "../db/index.ts";
@@ -74,19 +74,34 @@ function parseCaps(s: string | null): Capabilities | null {
   }
 }
 
-async function runningCounts(db: Db): Promise<Map<string | null, number>> {
-  const rows = await db.all(db.k.selectFrom("build_tasks").select((eb) => ["env_id as id", eb.fn.countAll<number>().as("n")])
-    .where("state", "in", ["claimed", "running"]).groupBy("env_id"));
-  return new Map(rows.map((r) => [r.id, r.n]));
+/** The name of the first plan step with no result yet; null when the plan or results cannot be read. */
+export function currentStep(plan: string | null, results: string | null): string | null {
+  try {
+    const done = new Set((JSON.parse(results || "[]") as { step: string }[]).map((r) => r.step));
+    return (JSON.parse(plan || "[]") as { name: string }[]).find((s) => !done.has(s.name))?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function runningTasks(db: Db): Promise<Map<string | null, EnvTask[]>> {
+  const rows = await db.all(db.k.selectFrom("build_tasks").select(["id", "env_id", "step", "repo", "number", "plan", "results", "started_at", "claimed_at"])
+    .where("state", "in", ["claimed", "running"]).orderBy("id"));
+  const by = new Map<string | null, EnvTask[]>();
+  for (const r of rows) {
+    const t: EnvTask = { id: r.id, step: r.step, repo: r.repo, number: r.number, current: currentStep(r.plan, r.results), startedAt: r.started_at ?? r.claimed_at ?? "" };
+    by.set(r.env_id, [...(by.get(r.env_id) ?? []), t]);
+  }
+  return by;
 }
 
 export const slotsOf = (r: { slots: number; reported_slots: number | null }): number => Math.min(r.slots, r.reported_slots ?? r.slots);
 
-function toEnv(r: Row, running: number, nowMs: number): BuildEnv {
+function toEnv(r: Row, tasks: EnvTask[], nowMs: number): BuildEnv {
   const online = r.last_seen_at !== null && nowMs - Date.parse(r.last_seen_at) < ONLINE_MS;
   return {
     id: r.id, label: r.label, kind: r.kind, enabled: r.enabled === 1, online, lastSeenAt: r.last_seen_at,
-    slots: slotsOf(r), running, capabilities: parseCaps(r.capabilities), version: r.version,
+    slots: slotsOf(r), running: tasks.length, tasks, capabilities: parseCaps(r.capabilities), version: r.version,
     pausedReason: r.enabled === 1 && online ? r.paused_reason : null, confidential: r.confidential === 1,
     settings: r.kind === "kubernetes" ? settingsOf(r.settings) : null,
   };
@@ -94,8 +109,8 @@ function toEnv(r: Row, running: number, nowMs: number): BuildEnv {
 
 /** Every environment, in the order they were registered. */
 export async function listEnvs(db: Db, nowMs: number = Date.now()): Promise<BuildEnv[]> {
-  const counts = await runningCounts(db);
-  return (await db.all(db.k.selectFrom("build_envs").select(cols("build_envs")).$narrowType<{ kind: EnvKind }>().orderBy("created_at").orderBy("id"))).map((r) => toEnv(r, counts.get(r.id) ?? 0, nowMs));
+  const tasks = await runningTasks(db);
+  return (await db.all(db.k.selectFrom("build_envs").select(cols("build_envs")).$narrowType<{ kind: EnvKind }>().orderBy("created_at").orderBy("id"))).map((r) => toEnv(r, tasks.get(r.id) ?? [], nowMs));
 }
 
 export async function getEnv(db: Db, id: string, nowMs: number = Date.now()): Promise<BuildEnv | null> {
