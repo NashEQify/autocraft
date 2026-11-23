@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { OLD_MTIME_SEC } from "../worker/warm-copy.ts";
 import { gateEnvOf, warmEnvHash } from "./pods.ts";
 import { decideWarm, type WarmTarget, type WarmUse } from "./warm-mount.ts";
+import type { ToolchainId } from "../warm/toolchain.ts";
 import type { WarmNode } from "./warm-status.ts";
 
 export const LAYOUT_CI = 2;
@@ -75,6 +76,8 @@ export function ciStepEnv(p: WorkspacePrepared): Record<string, string> {
 
 export type WarmChoice = {
   target: WarmTarget; key: string; image: string; prepared: WorkspacePrepared; checkout: string;
+  /** The image's rustc and toolchain key (WarmStatus.toolchainOf). */
+  toolchain?: ToolchainId | null;
   /** Nodes whose status holds the key (WarmStatus.warmNodesFor), newest version first. */
   nodes: WarmNode[];
   /** Live workspaces per node, so the copies spread out. */
@@ -103,7 +106,7 @@ export function chooseWarm(c: WarmChoice): { use: WarmUse; why: null } | { use: 
   let why: string | null = null;
   for (const n of nodes) {
     const d = decideWarm({
-      target: c.target, key: c.key, node: n.node, status: n, image: c.image, envHash, checkout: c.checkout, cargoLock: c.prepared.cargoLock,
+      target: c.target, key: c.key, node: n.node, status: n, image: c.image, toolchain: c.toolchain, envHash, checkout: c.checkout, cargoLock: c.prepared.cargoLock,
       memoryLimitBytes: c.memoryLimitBytes, memoryRoomBytes: null, nodeMaxBytes: null,
     });
     if (d.use) return d;

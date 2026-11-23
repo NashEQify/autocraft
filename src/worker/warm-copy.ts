@@ -14,6 +14,7 @@ import { existsSync, lstatSync, lutimesSync, linkSync, mkdirSync, readdirSync, r
 import { dirname, join, relative } from "node:path";
 import { slugOf } from "../owners.ts";
 import { CHANGED_FILE, COPY_MARK_FILE } from "../build/warm-mount.ts";
+import { readToolchain, toolchainRefusal } from "../warm/toolchain.ts";
 import { clearDir, decodeManifest, removeCargoLocks, loadEd25519, parseLatest, verifyLatest } from "../warm/manifest.ts";
 
 /** 2001-01-01, as CI's restore-mtimes step uses: older than any warm build. */
@@ -301,7 +302,8 @@ export type CopyMark = { state: "copying" | "done" | "cold"; commit: string; tri
 
 /**
  * AUTOCRAFT_WARM_* of warm-copy: KEY, COMMIT (the version the runner chose), SOURCE (the key's dir on the node), VERIFY_KEYS,
- * TARGET, CARGO_HOME, CHECKOUT, IMAGE, ENV_HASH, MODE (tmpfs | pvc), SAME_LOCK (1: the version's Cargo.lock must be the
+ * TARGET, CARGO_HOME, CHECKOUT, IMAGE, TOOLCHAIN_DIR (what the pod's toolchain-id container wrote: a version of another image
+ * is taken when its rustc and toolchain key match, src/warm/toolchain.ts), ENV_HASH, MODE (tmpfs | pvc), SAME_LOCK (1: the version's Cargo.lock must be the
  * checkout's), CARGO_LOCK (that Cargo.lock's sha256, for a pod whose checkout arrives after the copy) and MTIMES (`later`:
  * the checkout arrives after the copy, and the runner sets its mtimes then). A version that does not verify or match is a
  * cold start (exit 0); a missing setting fails the pod.
@@ -371,7 +373,8 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   }
   if (header.commit !== commit || header.key !== key) return cold(`the manifest of ${at} names another version`);
   if (header.checkout !== need("CHECKOUT") || header.targetDir !== target || header.cargoHome !== cargoHome) return cold(`${at} was built at other paths`);
-  if (header.image !== need("IMAGE")) return cold(`${at} was built with ${header.image ?? "an unrecorded image"}`);
+  const refused = toolchainRefusal({ image: header.image, rustc: header.rustc, toolchain: header.toolchain ?? null }, { image: need("IMAGE"), ...readToolchain(env.AUTOCRAFT_WARM_TOOLCHAIN_DIR) });
+  if (refused) return cold(`${at} ${refused}`);
   if (header.envHash !== need("ENV_HASH")) return cold(`${at} was built with another CI env`);
   if (env.AUTOCRAFT_WARM_SAME_LOCK === "1") {
     const lock = env.AUTOCRAFT_WARM_CARGO_LOCK || cargoLockOf(join(work, "src"));
