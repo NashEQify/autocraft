@@ -12,20 +12,58 @@ export const jsonLog: Log = (event, fields) => console.log(JSON.stringify({ ts: 
 
 export class TooLarge extends Error {}
 
-/** A fixed number of slots, taken without waiting: a full set means the caller answers 503. */
+/**
+ * A fixed number of slots. Past that, callers wait in FIFO order, at most `queue` of them and each
+ * for at most `waitMs`; a caller the queue cannot hold or that waited too long gets no slot (the
+ * request answers 503).
+ */
 export class Slots {
   #free: number;
-  constructor(n: number) { this.#free = n; }
-  /** A release function, or undefined when every slot is taken. */
-  take(): (() => void) | undefined {
-    if (this.#free <= 0) return undefined;
-    this.#free--;
+  #queue: number;
+  #waitMs: number;
+  #waiting: { grant: (release: (() => void) | undefined) => void; timer: NodeJS.Timeout }[] = [];
+
+  constructor(n: number, o: { queue?: number; waitMs?: number } = {}) {
+    this.#free = n;
+    this.#queue = o.queue ?? 0;
+    this.#waitMs = o.waitMs ?? 0;
+  }
+
+  #release(): () => void {
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.#free++;
+      const next = this.#waiting.shift();
+      if (next) {
+        clearTimeout(next.timer);
+        next.grant(this.#release());
+      } else this.#free++;
     };
+  }
+
+  /** A release function, or undefined when every slot is taken. */
+  tryTake(): (() => void) | undefined {
+    if (this.#free <= 0) return undefined;
+    this.#free--;
+    return this.#release();
+  }
+
+  /** A release function once a slot is free; undefined when the queue is full or the wait passes `waitMs`. */
+  take(): Promise<(() => void) | undefined> {
+    const now = this.tryTake();
+    if (now || this.#waiting.length >= this.#queue) return Promise.resolve(now);
+    return new Promise((resolve) => {
+      const entry = {
+        grant: resolve,
+        timer: setTimeout(() => {
+          const i = this.#waiting.indexOf(entry);
+          if (i >= 0) this.#waiting.splice(i, 1);
+          resolve(undefined);
+        }, this.#waitMs),
+      };
+      this.#waiting.push(entry);
+    });
   }
 }
 

@@ -39,7 +39,7 @@ export type IndexAnswer =
 
 type IndexMeta = { fetched: number; etag?: string; lastModified?: string; tag: string };
 
-/** `slots` bounds upstream requests at once, shared by the index cache and the crate store. */
+/** `slots` bounds upstream requests at once (requests past it queue), shared by the index cache and the crate store. */
 export type UpstreamOpts = { fetch?: typeof fetch; log: Log; now?: () => number; slots: Slots };
 
 const NEGATIVE_MAX = 50_000;
@@ -115,12 +115,16 @@ export class IndexCache {
     if (!cached && (this.#notFound.get(path) ?? 0) > now) return Promise.resolve({ status: 404, source: "negative" });
     let p = this.#inflight.get(rel);
     if (!p) {
-      const release = this.#slots.take();
-      if (!release) return Promise.resolve(this.#staleAnswer(rel, cached) ?? { status: 503 });
-      p = this.#refresh(path, rel, cached).finally(() => {
-        release();
-        this.#inflight.delete(rel);
-      });
+      // With every slot taken, a copy under `staleMs` answers at once instead of queueing.
+      const now = this.#slots.tryTake();
+      const stale = now ? undefined : this.#staleAnswer(rel, cached);
+      if (stale) return Promise.resolve(stale);
+      // Registered before the wait, so identical requests share the queued fetch.
+      p = (async (): Promise<IndexAnswer> => {
+        const release = now ?? (await this.#slots.take());
+        if (!release) return this.#staleAnswer(rel, cached) ?? { status: 503 };
+        try { return await this.#refresh(path, rel, cached); } finally { release(); }
+      })().finally(() => this.#inflight.delete(rel));
       this.#inflight.set(rel, p);
     }
     return p;
@@ -214,12 +218,11 @@ export class CrateStore {
         this.#log("disk-low", { host: "static.crates.io", path, free });
         return Promise.resolve({ status: 503 });
       }
-      const release = this.#slots.take();
-      if (!release) return Promise.resolve({ status: 503 });
-      p = this.#download(name, version, rel).finally(() => {
-        release();
-        this.#inflight.delete(rel);
-      });
+      p = (async (): Promise<CrateAnswer> => {
+        const release = await this.#slots.take();
+        if (!release) return { status: 503 };
+        try { return await this.#download(name, version, rel); } finally { release(); }
+      })().finally(() => this.#inflight.delete(rel));
       this.#inflight.set(rel, p);
     }
     return p;

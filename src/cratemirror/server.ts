@@ -23,8 +23,10 @@ const MAX_CONNECTIONS = 1024;
 const MAX_STREAMS = 100;
 const IDLE_MS = 120_000;
 const BODY_MS = 30_000;
-const UPSTREAM_SLOTS = 32;
 const GIT_SLOTS = 8;
+// Requests past the slots wait in line: cargo's sparse index fetch sends hundreds at once.
+const QUEUE = 2_000;
+const QUEUE_WAIT_MS = 60_000;
 
 export type MirrorConfig = {
   /** host:port of the TLS listener. */
@@ -38,6 +40,8 @@ export type MirrorConfig = {
   gitRepos?: string;
   crateCapBytes: number;
   indexCapBytes: number;
+  /** Upstream requests (index refreshes and crate downloads) at once; default 64. */
+  upstreamSlots?: number;
 };
 
 /** Upstream bases and timings; the defaults are the public services. Tests point them at fakes. */
@@ -143,10 +147,11 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
   }, CERT_RELOAD_MS);
   reload.unref();
 
-  const slots = new Slots(UPSTREAM_SLOTS);
+  const queue = { queue: QUEUE, waitMs: QUEUE_WAIT_MS };
+  const slots = new Slots(cfg.upstreamSlots ?? 64, queue);
   const index = new IndexCache({ dir: join(cfg.dataDir, "index"), capBytes: cfg.indexCapBytes, upstream: deps.indexUpstream, ttlMs: deps.indexTtlMs, maxBytes: deps.indexMaxBytes, fetch: deps.fetch, log, now: deps.now, slots });
   const crates = new CrateStore({ dir: join(cfg.dataDir, "crates"), capBytes: cfg.crateCapBytes, indexUpstream: deps.indexUpstream, staticUpstream: deps.staticUpstream, maxBytes: deps.crateMaxBytes, minFreeBytes: deps.minFreeBytes, fetch: deps.fetch, log, slots });
-  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log), slots: new Slots(GIT_SLOTS), log });
+  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log), slots: new Slots(GIT_SLOTS, queue), log });
 
   async function handle(req: Req, res: Res): Promise<void> {
     const started = Date.now();
@@ -331,6 +336,12 @@ function gib(v: string | undefined, def: number, what: string): number {
   return n * GiB;
 }
 
+function count(v: string | undefined, def: number, what: string): number {
+  const n = v === undefined ? def : Number(v);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${what} must be a positive whole number`);
+  return n;
+}
+
 /** Config from flags, then AUTOCRAFT_MIRROR_* variables, then defaults. */
 export function mirrorConfig(args: string[], env: NodeJS.ProcessEnv = process.env): MirrorConfig {
   const v = (f: string, e: string): string | undefined => flag(args, f) ?? envVar(e, env);
@@ -343,6 +354,7 @@ export function mirrorConfig(args: string[], env: NodeJS.ProcessEnv = process.en
     gitRepos: v("--git-repos", "MIRROR_GIT_REPOS"),
     crateCapBytes: gib(v("--crate-cap-gb", "MIRROR_CRATE_CAP_GB"), 50, "crate cap"),
     indexCapBytes: gib(v("--index-cap-gb", "MIRROR_INDEX_CAP_GB"), 2, "index cap"),
+    upstreamSlots: count(v("--upstream-slots", "MIRROR_UPSTREAM_SLOTS"), 64, "upstream slots"),
   };
 }
 
@@ -351,7 +363,7 @@ export const commands = {
     summary: "serve the crates.io and GitHub git mirror for build pods (crate-mirror serve)",
     async run(args: string[]): Promise<void> {
       if (args[0] !== "serve") {
-        console.error("usage: autocraft-server crate-mirror serve [--listen host:port] [--health-listen host:port] [--data-dir DIR] [--tls-dir DIR] [--git-allowlist FILE] [--git-repos LIST] [--crate-cap-gb N] [--index-cap-gb N]");
+        console.error("usage: autocraft-server crate-mirror serve [--listen host:port] [--health-listen host:port] [--data-dir DIR] [--tls-dir DIR] [--git-allowlist FILE] [--git-repos LIST] [--crate-cap-gb N] [--index-cap-gb N] [--upstream-slots N]");
         process.exit(1);
       }
       const m = await startMirror(mirrorConfig(args.slice(1)));
