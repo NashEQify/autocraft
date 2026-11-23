@@ -202,11 +202,70 @@ export function copyFailure(stderr: string): string {
   return `cp: ${lines.slice(-2).join(" ")}`;
 }
 
-function cp(from: string, to: string): Promise<void> {
+/** Copies run at once, directory levels below the root that are split into separate copies, and entries per `cp` call. */
+export const COPY_PARALLEL = 8;
+const COPY_SPLIT_DEPTH = 4;
+const COPY_BATCH = 64;
+
+function cpRun(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("cp", ["-a", "--", `${from}/.`, `${to}/`], { timeout: 30 * 60_000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) =>
+    execFile("cp", args, { timeout: 30 * 60_000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) =>
       err ? reject(new Error(copyFailure(stderr || err.message))) : resolve());
   });
+}
+
+function attrs(from: string, to: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("chmod", [`--reference=${from}`, "--", to], (e1) => {
+      if (e1) return reject(e1);
+      execFile("touch", ["-r", from, "--", to], (e2) => (e2 ? reject(e2) : resolve()));
+    });
+  });
+}
+
+/**
+ * Like `cp -a from/. to/` (modes, mtimes, symlinks), with COPY_PARALLEL `cp` processes at once: the top COPY_SPLIT_DEPTH
+ * directory levels are created here and their entries copied in batches, and deeper trees are copied whole. Directory
+ * modes and mtimes are set after their contents. The first failure rejects once the running copies end.
+ */
+export async function copyTree(from: string, to: string): Promise<void> {
+  const dirs: { from: string; to: string }[] = [];
+  const jobs: string[][] = [];
+  const split = (a: string, b: string, depth: number) => {
+    dirs.push({ from: a, to: b });
+    let batch: string[] = [];
+    const flush = () => {
+      if (batch.length) jobs.push(["-a", "-t", b, "--", ...batch]);
+      batch = [];
+    };
+    for (const e of readdirSync(a, { withFileTypes: true })) {
+      if (e.isDirectory() && depth + 1 < COPY_SPLIT_DEPTH) {
+        mkdirSync(join(b, e.name));
+        split(join(a, e.name), join(b, e.name), depth + 1);
+        continue;
+      }
+      batch.push(join(a, e.name));
+      if (batch.length >= COPY_BATCH) flush();
+    }
+    flush();
+  };
+  mkdirSync(to, { recursive: true });
+  split(from, to, 0);
+  let next = 0;
+  let failure: Error | null = null;
+  const worker = async () => {
+    while (!failure && next < jobs.length) {
+      try {
+        await cpRun(jobs[next++]);
+      } catch (e) {
+        failure ??= e as Error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COPY_PARALLEL, jobs.length) }, worker));
+  if (failure) throw failure;
+  // Deepest first: setting a directory's mtime after its children keeps it.
+  for (const d of dirs.reverse()) await attrs(d.from, d.to);
 }
 
 const isEmpty = (d: string) => !existsSync(d) || readdirSync(d).length === 0;
@@ -297,11 +356,11 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   const t0 = performance.now();
   try {
     if (volume) write({ state: "copying", commit });
-    await cp(join(cur, "target"), target);
+    await copyTree(join(cur, "target"), target);
     // cp -a keeps hard links, and cargo deadlocks on flocks of lock files that share an inode.
     await removeCargoLocks(target);
     mkdirSync(cargoTmp, { recursive: true });
-    await cp(join(cur, "cargo"), cargoTmp);
+    await copyTree(join(cur, "cargo"), cargoTmp);
   } catch (e) {
     return cold(`copying ${at} failed (${(e as Error).message})`);
   }

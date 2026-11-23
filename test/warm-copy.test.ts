@@ -2,13 +2,14 @@
 // unchanged sources to an old mtime only when the version's manifest says its build checked every unit it holds.
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CHANGED_FILE } from "../src/build/warm-mount.ts";
 import { encodeManifest, makeHeader, signLatest } from "../src/warm/manifest.ts";
-import { OLD_MTIME_SEC, setExtMtimes, setMtimes, warmCopyPhase } from "../src/worker/warm-copy.ts";
+import { OLD_MTIME_SEC, copyTree, setExtMtimes, setMtimes, warmCopyPhase } from "../src/worker/warm-copy.ts";
 
 const A = "a".repeat(40), B = "b".repeat(40);
 
@@ -75,4 +76,27 @@ test("the gate's extra checkouts are set to the old mtime", (t) => {
   assert.equal(setExtMtimes(work), 1);
   assert.ok(statSync(join(dir, "manifest.txt")).mtimeMs / 1000 <= OLD_MTIME_SEC);
   assert.equal(setExtMtimes(join(work, "none")), 0);
+});
+
+test("the parallel copy of a tree matches cp -a", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "warm-cp-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const from = join(root, "from"), to = join(root, "to"), ref = join(root, "ref");
+  const deep = join(from, "debug", "deps", "u1", "a", "b", "c");
+  mkdirSync(deep, { recursive: true });
+  mkdirSync(to);
+  mkdirSync(ref);
+  writeFileSync(join(deep, "empty"), "");
+  for (let i = 0; i < 150; i++) writeFileSync(join(from, "debug", "deps", `f${i}`), String(i));
+  symlinkSync("f1", join(from, "debug", "deps", "link"));
+  chmodSync(join(from, "debug", "deps", "f2"), 0o755);
+  chmodSync(join(from, "debug", "deps"), 0o750);
+  utimesSync(join(from, "debug", "deps", "f3"), 1e9, 1e9);
+  utimesSync(join(from, "debug", "deps"), 1e9, 1e9);
+  await copyTree(from, to);
+  execFileSync("cp", ["-a", `${from}/.`, `${ref}/`]);
+  const listing = (d: string) => execFileSync("find", [d, "-printf", "%P %y %m %T@ %l %s\\n"]).toString().split("\\n").sort().join("\\n");
+  const [x, y] = [listing(to).split("\n"), listing(ref).split("\n")];
+  assert.equal(x.length, y.length);
+  assert.deepEqual(x.filter((l) => !y.includes(l)), y.filter((l) => !x.includes(l)));
 });
