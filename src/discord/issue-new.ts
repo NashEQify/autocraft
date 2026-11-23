@@ -14,7 +14,7 @@ import { fallbackQuestions, ISSUE_ANSWER_CHARS, ISSUE_BODY_CHARS, ISSUE_FORM_BOD
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, type BotRequest, type BotResult, type FileDeps, type FileRequest, type FileResult, type IssueKind } from "./file-issue.ts";
-import { fileRepoUrl, plain, renderMatches } from "./reply.ts";
+import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { trackedRepos } from "./store.ts";
 import { findSeq } from "../async-seq.ts";
@@ -224,7 +224,7 @@ export class IssueNew {
       return void (await call.edit({ content: "No existing issue looks like this.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     }
     const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
-    await call.edit({ content: r.content, components: r.components });
+    await deliver(r, (b) => call.edit(b), this.#d.log);
   }
 
   /** "None of these" or "Continue": the follow-up questions in a second form, or the draft at once when there are none. */

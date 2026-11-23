@@ -16,7 +16,7 @@ export type MessageBody = {
   flags?: number;
 };
 /** Body of an edit: only the given fields change. */
-export type EditBody = { content?: string; allowed_mentions?: AllowedMentions; components?: unknown[] };
+export type EditBody = { content?: string; allowed_mentions?: AllowedMentions; components?: unknown[]; flags?: number };
 
 export const EPHEMERAL = 64;
 /** Callback types: a message now, "thinking" now and an edit later, or the choices of an autocomplete option. */

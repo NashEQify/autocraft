@@ -85,7 +85,10 @@ const submitForm = (user: string, app: string, description: string) =>
 const press = (user: string, custom_id: string) => send(3, user, { custom_id });
 const choose = (user: string, custom_id: string, values: string[]) => send(3, user, { custom_id, values });
 const searchCmd = (user: string, channel = "c1") => send(2, user, { name: "autocraft", type: 1, options: [{ name: "search", type: 1 }] }, channel);
-const rows = (b: EditBody) => (b.components as { components: { label?: string; custom_id?: string; url?: string; options?: { value: string; default?: boolean }[] }[] }[]).flatMap((r) => r.components);
+type Comp = { type: number; label?: string; custom_id?: string; url?: string; content?: string; components?: Comp[]; accessory?: Comp; options?: { value: string; default?: boolean }[] };
+// Buttons and selects in order; a result section contributes its accessory button.
+const rows = (b: EditBody) => (b.components as Comp[]).flatMap((r) => (r.type === 9 ? [r.accessory!] : r.type === 10 ? [] : r.components!));
+const v2text = (b: EditBody) => (b.components as Comp[]).flatMap((c) => (c.type === 9 ? c.components! : [c])).filter((c) => c.type === 10).map((c) => c.content).join("\n");
 const NONE = "None of these, file a new one";
 const draftUrl = (b: EditBody): URL => new URL(rows(b).find((x) => x.label === "Open on GitHub instead")!.url!);
 
@@ -109,7 +112,7 @@ describe("search and filing flow", () => {
     assert.deepEqual(comps[0]!.component.options, [{ label: "photocraft", value: "photocraft", default: true }, { label: "Vector Studio", value: "vectorcraft" }].sort((a, b) => a.label.localeCompare(b.label)));
     await submitForm("u1", "photocraft", "webp export quality slider does nothing");
     const b = rest.edits[0]!;
-    assert.match(b.content!, /photocraft#1 Export to WebP/);
+    assert.match(v2text(b), /photocraft#1 Export to WebP/);
     assert.deepEqual(rows(b).map((x) => x.label), ["photocraft#1", NONE]);
     // Another person cannot press someone's button.
     await press("u3", rows(b).find((x) => x.label === NONE)!.custom_id!);
