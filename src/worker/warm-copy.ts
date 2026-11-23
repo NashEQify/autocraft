@@ -397,8 +397,8 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   const secs = (performance.now() - t0) / 1000;
   const trimmed = header.trimmed === true;
   const mtimes = env.AUTOCRAFT_WARM_MTIMES === "later" ? "the checkout's mtimes are set once it arrives" : setMtimes(work, commit, trimmed);
-  // The warm version's env hash covers the craft-fonts and craft-i18n commits, so the checkouts here are the ones it was built with.
-  const ext = env.AUTOCRAFT_WARM_MTIMES === "later" ? 0 : setExtMtimes(work);
+  // A version that is not `trimmed` may hold units built against other checkouts (the producer's restore does not check the env hash), so only a trimmed one gets old ext mtimes; its env hash covers the craft-fonts and craft-i18n commits, so the checkouts here are the ones it was built with.
+  const ext = env.AUTOCRAFT_WARM_MTIMES === "later" || !trimmed ? 0 : setExtMtimes(work);
   write({ state: "done", commit, trimmed, bytes: header.bytes, secs: Math.round(secs * 10) / 10 });
   log(`warm copy ${(header.bytes / 1e9).toFixed(1)} GB in ${secs.toFixed(1)} s: ${at} into ${volume ? "the volume" : "memory"}; ${mtimes}${ext ? `; ${ext} files of the gate's checkouts set to 2001-01-01` : ""}`);
   return 0;
