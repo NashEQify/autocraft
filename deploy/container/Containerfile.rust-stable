@@ -11,6 +11,10 @@
 # compile on the compiler's libraries and version and on its own release, so the Rust release here must be the one
 # the CI gate's `stable` installs (bump it with each stable release) and sccache the release the gate pins.
 #
+# Build pods are offline with a read-only rustup home, so rustup cannot install what a repository's
+# rust-toolchain.toml asks for: its `channel` must be the release here, and its `components` and `targets` must be
+# installed here. The wasm32 target is the one the pipeline repositories' toolchain files add.
+#
 #   podman build -f deploy/container/Containerfile.rust-stable -t rust-stable deploy/container
 FROM docker.io/library/rust:1.100.0-bookworm
 
@@ -24,6 +28,7 @@ RUN set -eux; \
       fonts-dejavu-core fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji; \
     rm -rf /var/lib/apt/lists/*; \
     rustup component add clippy rustfmt; \
+    rustup target add wasm32-unknown-unknown; \
     rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git"; \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo; \
     sccache=0.18.0; \
