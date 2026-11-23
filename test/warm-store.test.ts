@@ -29,7 +29,7 @@ test("a main build's target dir reaches another worker; bad keys and interrupted
   generateSigningKeys(k("a.key"), k("a.pub"));
   generateSigningKeys(k("other.key"), k("other.pub"));
   const worker = (name: string, warmStore: object) =>
-    parseWorkerConfig({ coordinatorUrl: "http://x.internal", keyFile: "/k", workDir: join(root, name, "w"), warmDir: join(root, name, "warm"), warmStore });
+    parseWorkerConfig({ coordinatorUrl: "http://x.internal", keyFile: "/k", workDir: join(root, name, "w"), warmDir: join(root, name, "warm"), limits: { minFreeDiskGb: 0 }, warmStore });
   const a = worker("a", { url, readKey: READ, writeKey: WRITE, signKeyFile: k("a.key"), verifyKeyFiles: [k("a.pub")] });
   const b = worker("b", { url, readKey: READ, verifyKeyFiles: [k("a.pub")] });
   const bad = worker("c", { url, readKey: "x".repeat(20), verifyKeyFiles: [k("a.pub")] });
