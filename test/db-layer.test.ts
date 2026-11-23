@@ -10,7 +10,7 @@ import type { Db } from "../src/db/index.ts";
 import { closeDb, dbFor, openDb } from "../src/db/open.ts";
 import { bindParams, parseParams } from "../src/db/params.ts";
 import { sql } from "../src/db/sql.ts";
-import type { Generated } from "kysely";
+import type { Generated, Kysely } from "kysely";
 
 /** The test table, for Kysely. */
 type T = { t: { id: Generated<number>; v: string | null } };
@@ -109,6 +109,28 @@ test("the counter totals round trips, rows, result bytes and write-lock time by 
   assert.ok(counts.bytes >= JSON.stringify(rows).length);
   assert.ok(counts.writeLockMs > 0);
   assert.ok([...counts.sites.keys()].some((s) => s.includes("db-layer.test.ts")), [...counts.sites.keys()].join("\n"));
+});
+
+test("shared reads: a repeated select is read once and handed out as copies; a write or the end of the scope forgets it", async () => {
+  const { dbs: [db] } = await handles(1);
+  const k = db!.k as unknown as Kysely<T>;
+  await db!.run(k.insertInto("t").values({ v: "a" }));
+  const read = () => db!.all(k.selectFrom("t").select(["id", "v"]).orderBy("id"));
+  const { counts, stop } = countQueries(db!);
+  const after = await db!.shareReads(async () => {
+    const [x, y] = await Promise.all([read(), read()]);
+    x[0]!.v = "changed";
+    x.push({ id: 0, v: "extra" });
+    assert.deepEqual(await read(), y, "a caller's changes do not reach the others");
+    const trips = counts.roundTrips;
+    await db!.run(k.insertInto("t").values({ v: "b" }));
+    return { trips, rows: await read() };
+  });
+  stop();
+  assert.equal(after.trips, 1);
+  assert.equal(after.rows.length, 2, "the write's row is read");
+  await db!.run(k.insertInto("t").values({ v: "c" }));
+  assert.equal((await db!.shareReads(read)).length, 3, "a new scope reads again");
 });
 
 test("rows are plain objects named by the statement's columns, also after the table gains a column", async () => {

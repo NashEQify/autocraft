@@ -9,6 +9,20 @@ export async function mapSeq<T, U>(xs: readonly T[], fn: Cb<T, U>): Promise<U[]>
   return out;
 }
 
+/** `fn` over `xs` with at most `limit` callbacks running at once; results in index order. */
+export async function mapLimit<T, U>(xs: readonly T[], limit: number, fn: Cb<T, U>): Promise<U[]> {
+  const out = new Array<U>(xs.length);
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < xs.length) {
+      const i = next++;
+      out[i] = await fn(xs[i], i, xs);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, xs.length) }, lane));
+  return out;
+}
+
 export async function flatMapSeq<T, U>(xs: readonly T[], fn: Cb<T, U | readonly U[]>): Promise<U[]> {
   const out: U[] = [];
   for (let i = 0; i < xs.length; i++) {

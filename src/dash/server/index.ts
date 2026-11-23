@@ -408,8 +408,9 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       scope: route.scoped && !writes ? scopeOf(req) : null,
       csrf: session.csrf, ip: clientIp(req), nonce,
     });
-    // A read request takes its settings from one reading of the table, as a planner pass does.
-    const res2 = writes ? await run() : await withSettingsSnapshot(db, run, snapshot);
+    // A read request takes its settings from one reading of the table, as a planner pass does, and its parts share the
+    // rows they read alike (the item row, the repo lists), so each costs one round trip.
+    const res2 = writes ? await run() : await db.shareReads(async () => await withSettingsSnapshot(db, run, snapshot));
     // The writer sees its own change at once; other processes' writes arrive on the watcher's next read.
     if (writes) await live.poke();
     return out(res2);

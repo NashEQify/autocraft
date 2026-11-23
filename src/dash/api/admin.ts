@@ -34,7 +34,7 @@ import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { pipelineState } from "../../runner/autopilot.ts";
 import { PilotError, setPilot } from "../../pilot.ts";
 import { canSeeInternals } from "./staff.ts";
-import { mapSeq } from "../../async-seq.ts";
+import { mapLimit } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Expression, SqlBool } from "kysely";
@@ -276,24 +276,25 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r, req));
+  // A few repos at a time: each reads about a dozen rows sets at once, and the pool serves other requests meanwhile.
+  return await mapLimit(await listAll(db), 4, async (r) => await toTrackedRepo(db, r, req));
 }
 
 async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo> {
-  const canSwitch = !!r.tracked && await maySwitch(req, r.name);
+  const t = !!r.tracked;
+  const approval = async (of: (db: Db, repo: string) => Promise<{ by: string; at: string } | null>) => (t ? approvalInfo(await of(db, r.name)) : null);
+  // The parts read independently, so they run together.
+  const [canSwitch, labels, merging, pushing, commenting, fixing, mainFixing, ciApproving, statusComments, optional, seen] = await Promise.all([
+    t && maySwitch(req, r.name),
+    t ? labelsInfo(db, r.name) : null, t ? mergeInfo(db, r.name) : null,
+    approval(pushApprovalOf), approval(commentApprovalOf), approval(fixIssueApprovalOf), approval(mainFixApprovalOf), approval(ciApprovalOf), approval(statusApprovalOf),
+    t ? optionalChecks(db, r.name) : [], t ? seenChecks(db, r.name) : [],
+  ]);
   return {
-    name: r.name, owner: r.owner, tracked: !!r.tracked, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
-    labels: r.tracked ? await labelsInfo(db, r.name) : null,
-    merging: r.tracked ? await mergeInfo(db, r.name) : null,
-    pushing: r.tracked ? approvalInfo(await pushApprovalOf(db, r.name)) : null,
-    commenting: r.tracked ? approvalInfo(await commentApprovalOf(db, r.name)) : null,
-    fixing: r.tracked ? approvalInfo(await fixIssueApprovalOf(db, r.name)) : null,
-    mainFixing: r.tracked ? approvalInfo(await mainFixApprovalOf(db, r.name)) : null,
-    ciApproving: r.tracked ? approvalInfo(await ciApprovalOf(db, r.name)) : null,
-    statusComments: r.tracked ? approvalInfo(await statusApprovalOf(db, r.name)) : null,
-    optionalChecks: r.tracked ? await optionalChecks(db, r.name) : [],
-    seenChecks: r.tracked ? await seenChecks(db, r.name) : [],
-    pipeline: !!r.tracked && !!r.pipeline,
+    name: r.name, owner: r.owner, tracked: t, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
+    labels, merging, pushing, commenting, fixing, mainFixing, ciApproving, statusComments,
+    optionalChecks: optional, seenChecks: seen,
+    pipeline: t && !!r.pipeline,
     canSwitch,
     canManage: canSwitch,
   };
@@ -316,8 +317,8 @@ async function mergeInfo(db: Db, repo: string): Promise<RepoApproval> {
 }
 
 async function labelsInfo(db: Db, repo: string): Promise<RepoLabels> {
-  const a = await approvalOf(db, repo);
-  const c = countPlan(await planLabels(db, repo));
+  const [a, plan] = await Promise.all([approvalOf(db, repo), planLabels(db, repo)]);
+  const c = countPlan(plan);
   return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null, toAdd: c.toAdd, skipped: c.already + c.unsettled, conflicts: c.conflicts };
 }
 

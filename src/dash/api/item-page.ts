@@ -300,27 +300,35 @@ async function screenshotsOf(c: Ctx, headNow: string | null): Promise<Screenshot
 
 export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPageUnchanged> {
   const c = await context(db, req);
-  const stamp = await stampOf(c, req);
-  if (req.query.get("since") === stamp) return { unchanged: true, stamp };
-  // The parts read independently, so they run together.
-  const [it, ev, row, cost, impl] = await Promise.all([
-    itemCore(db, req), gather(c, null),
-    db.get(db.k.selectFrom("items").select(["url", "head_oid", (eb) => eb.selectFrom("item_reads as r").select("r.synced_at").whereRef("r.repo", "=", "items.repo").whereRef("r.number", "=", "items.number").as("synced_at")])
-      .where("repo", "=", c.repo).where("number", "=", c.n)).then((r) => r!),
+  const since = req.query.get("since");
+  // A poll with a stamp reads the stamp alone first, so an unchanged page costs only that; a first load reads both together.
+  const stamped = stampOf(c, req);
+  stamped.catch(() => {});
+  if (since !== null && since === await stamped) return { unchanged: true, stamp: since };
+  // The parts read independently, so each starts as soon as what it needs is read.
+  const core = itemCore(db, req);
+  const events = gather(c, null);
+  const row = db.get(db.k.selectFrom("items").select(["url", "head_oid", (eb) => eb.selectFrom("item_reads as r").select("r.synced_at").whereRef("r.repo", "=", "items.repo").whereRef("r.number", "=", "items.number").as("synced_at")])
+    .where("repo", "=", c.repo).where("number", "=", c.n)).then((r) => r!);
+  const impl = implementationData(c);
+  const status = core.then((it) => statusOf(c, it));
+  const pr = core.then((it) => it.kind === "pr");
+  const [it, cost, statusNow, bar, header, reviews, timeline, github, prBuild, screenshots, implementation, stamp] = await Promise.all([
+    core,
     db.get(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("r.cost_usd"), eb.lit(0)).as("cost"))
       .where("i.repo", "=", c.repo).where("i.number", "=", c.n).$if(filtered(c.hidden), (q) => q.where((eb) => hiddenExpr(db, eb, c.hidden)!))).then((r) => r!.cost),
-    implementationData(c),
-  ]);
-  const pr = it.kind === "pr";
-  const [status, header, reviews, timeline, github, prBuild, screenshots, implementation] = await Promise.all([
-    statusOf(c, it), headerOf(c, it, it.queue ?? null, req),
-    pr ? reviewsOf(c, row.head_oid, ev) : { latest: null, earlier: [] },
-    (pr ? preapprovalsOf(db, c.repo, c.n) : Promise.resolve([])).then((pre) => timelineOf(c, ev, pre, impl)),
-    githubOf(c, it, ev, row.url ?? "", row.synced_at), prBuildOf(c), screenshotsOf(c, row.head_oid), implementationView(c, impl),
+    status,
+    Promise.all([core, status]).then(([i, s]) => barOf(c, { kind: i.kind, state: i.state, mergedAt: i.mergedAt, pipelineOn: i.pipelineOn === true }, s)),
+    core.then((i) => headerOf(c, i, i.queue ?? null, req)),
+    Promise.all([pr, row, events]).then(([isPr, r, ev]) => (isPr ? reviewsOf(c, r.head_oid, ev) : { latest: null, earlier: [] })),
+    Promise.all([pr.then((isPr) => (isPr ? preapprovalsOf(db, c.repo, c.n) : [])), events, impl]).then(([pre, ev, im]) => timelineOf(c, ev, pre, im)),
+    Promise.all([core, events, row]).then(([i, ev, r]) => githubOf(c, i, ev, r.url ?? "", r.synced_at)),
+    prBuildOf(c), row.then((r) => screenshotsOf(c, r.head_oid)), impl.then((im) => implementationView(c, im)),
+    stamped,
   ]);
   return {
     repo: c.repo, number: c.n, kind: it.kind, state: it.state, title: it.title, author: it.author, stamp,
-    header, status, bar: await barOf(c, { kind: it.kind, state: it.state, mergedAt: it.mergedAt, pipelineOn: it.pipelineOn === true }, status), costUsd: cost,
+    header, status: statusNow, bar, costUsd: cost,
     reviews,
     timeline: timeline.slice(-200),
     github,
