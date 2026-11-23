@@ -42,6 +42,10 @@ test("Workers AI stands in for the jev command: answers and usage come back, a r
     status = 401;
     const bad = await askJevCloudflare(cfg, "{\"state\":{},\"questions\":{}}", 5000, base);
     assert.equal(jevFailure(bad)?.kind, "account");
+    status = 402;
+    const broke = jevFailure(await askJevCloudflare(cfg, "{\"state\":{},\"questions\":{}}", 5000, base));
+    assert.equal(broke?.kind, "account");
+    assert.match(broke?.reason ?? "", /credit/);
     status = 503;
     assert.equal(jevFailure(await askJevCloudflare(cfg, "{\"state\":{},\"questions\":{}}", 5000, base)), null);
 
