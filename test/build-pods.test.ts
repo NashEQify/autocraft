@@ -456,6 +456,33 @@ test("a workspace is refused on a warm writer environment", async () => {
   await assert.rejects(createWorkspace(d, { repo: "app", baseSha: "a".repeat(40), envId: "warm", owner: null }), /warm writer/);
 });
 
+test("a failed warm build is retried under a new AutoCraft version, once per version", async () => {
+  const d = await connectDb(":memory:");
+  await d.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1); INSERT INTO repos (name, visibility) VALUES ('app', 'public')");
+  const at = "2026-01-01T00:00:00Z";
+  await d.run(d.k.insertInto("main_ci").values({
+    repo: "app", head_sha: "a".repeat(40), branch: "main", state: "green", failing: "[]", checks: "[]", committed_at: at, headline: null, first_seen_at: at, state_changed_at: at, updated_at: at,
+  }));
+  const saved = process.env.AUTOCRAFT_IMAGE;
+  try {
+    process.env.AUTOCRAFT_IMAGE = "autocraft@sha256:old";
+    const first = await queueWarm(d, "app", WARM);
+    assert.ok(first);
+    await d.run(d.k.updateTable("build_tasks").set({ state: "failed" }).where("id", "=", first));
+    assert.equal(await queueWarm(d, "app", WARM), null, "the same version does not retry its own failure");
+    process.env.AUTOCRAFT_IMAGE = "autocraft@sha256:new";
+    const second = await queueWarm(d, "app", WARM);
+    assert.ok(second, "a new version retries");
+    await d.run(d.k.updateTable("build_tasks").set({ state: "failed" }).where("id", "=", second));
+    assert.equal(await queueWarm(d, "app", WARM), null, "one attempt per version");
+    await d.run(d.k.updateTable("build_tasks").set({ state: "done" }).where("id", "=", second));
+    process.env.AUTOCRAFT_IMAGE = "autocraft@sha256:newer";
+    assert.equal(await queueWarm(d, "app", WARM), null, "a successful build blocks under any version");
+  } finally {
+    if (saved === undefined) delete process.env.AUTOCRAFT_IMAGE; else process.env.AUTOCRAFT_IMAGE = saved;
+  }
+});
+
 test("a warm writer takes only warm builds, at the newest default-branch head; no other environment takes them", async () => {
   const d = await connectDb(":memory:");
   await d.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1); INSERT INTO repos (name, visibility) VALUES ('app', 'public')");
