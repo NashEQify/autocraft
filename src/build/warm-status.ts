@@ -29,6 +29,8 @@ export function parseStatus(cm: KConfigMap): NodeStatus | null {
 export class WarmStatus {
   private statuses: NodeStatus[] = [];
   private readAt = -Infinity;
+  /** When the ConfigMaps were last read successfully; null before. */
+  readOkAt: number | null = null;
   private lastError: string | null = null;
   private readonly api: Pick<ConfigMapApi, "listConfigMaps">;
   private readonly ns: string;
@@ -49,6 +51,7 @@ export class WarmStatus {
     try {
       this.statuses = (await this.api.listConfigMaps(this.ns, `${STATUS_LABEL}=node`)).flatMap((cm) => parseStatus(cm) ?? []);
       this.lastError = null;
+      this.readOkAt = this.now();
     } catch (e) {
       const m = (e as Error).message;
       if (m !== this.lastError) this.log(`warm status: reading ConfigMaps in ${this.ns}: ${m}`);
@@ -58,6 +61,11 @@ export class WarmStatus {
 
   private fresh(): NodeStatus[] {
     return this.statuses.filter((s) => this.now() - s.updated <= STATUS_STALE_MS);
+  }
+
+  /** Every status the last read found, stale ones too, by node name. */
+  all(): NodeStatus[] {
+    return [...this.statuses].sort((a, b) => a.node.localeCompare(b.node));
   }
 
   /** The statuses written within `withinMs`, one per node, each marked fresh or not. */

@@ -4,10 +4,11 @@
 // file (mode 0600) and are printed only with --print. Text a worker sent is shown with control
 // characters removed, so it cannot drive the terminal.
 import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
-import type { EnvKind, KubeSettings } from "../../web/src/api/types.ts";
+import type { CacheReport, EnvKind, KubeSettings } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { trackedNames } from "../repos.ts";
 import { warmLineText } from "./warm-status.ts";
+import { cacheReport } from "./caches.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 import { autoBuildSize, clearBuildSize, gib, listSizings, setBuildSize, setWarmTarget, type RepoSizing } from "./sizing.ts";
@@ -38,6 +39,7 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server envs warm-repos [add|exclude|remove <owner/name>]   (repos the warm producer builds: every pipeline repo once a publish was trimmed; add and exclude override, remove undoes either)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
+       autocraft-server envs caches [--json]   (warm versions per node, placement, warm state per repo, crate mirror allowlist)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
@@ -217,6 +219,12 @@ async function envs(args: string[]): Promise<void> {
     if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && !["add", "exclude", "remove"].includes(rest[0]!))) die(USAGE);
     const cov = rest.length === 2 ? await run(async () => await changeWarmRepos(db, rest[0] as "add" | "exclude" | "remove", rest[1]!, "cli")) : await warmCoverage(db);
     printCoverage(cov);
+  } else if (sub === "caches") {
+    const { pos, opt } = options(rest, ["json"]);
+    if (pos.length) die(USAGE);
+    const r = await cacheReport(db, []);
+    if (opt.has("json")) console.log(JSON.stringify(r, null, 2));
+    else printCaches(r);
   } else if (sub === "warm-interval") {
     if (rest.length > 1) die(USAGE);
     if (rest[0] !== undefined) await run(async () => await setWarmMinInterval(db, rest[0]!, "cli"));
@@ -248,6 +256,41 @@ function sizingLine(r: RepoSizing): string {
   const version = r.warmBytes ? `${(r.warmBytes / 1e9).toFixed(1)} GB version` : "no version yet";
   const warmWhy = r.warmSource === "operator" ? `override (automatic would be ${r.autoWarmTarget}, ${version})` : `automatic (${version})`;
   return `${safe(r.repo).padEnd(24)} memory ${mem}, ${memWhy}; warm ${r.warmTarget}, ${warmWhy}${r.reason && r.updatedAt ? `  [${r.updatedAt.slice(0, 16)} ${safe(r.reason)}]` : ""}`;
+}
+
+const ago = (at: string | null): string => {
+  if (!at) return "never";
+  const m = Math.round((Date.now() - Date.parse(at)) / 60_000);
+  return m < 120 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+};
+
+function printCaches(r: CacheReport): void {
+  const name = (x: { key: string; repo: string | null }) => safe(x.repo ?? x.key);
+  console.log(`nodes (read ${ago(r.readAt)})`);
+  if (!r.nodes.length) console.log("  (no node reports a warm status)");
+  for (const n of r.nodes) {
+    const fs = n.fs ? `disk ${n.fs.usedPct}% of ${gib(n.fs.sizeBytes)}` : "disk unknown";
+    const warm = n.warmBytes ? `warm ${gib(n.warmBytes.current)}${n.warmBytes.grace ? ` + ${gib(n.warmBytes.grace)} in grace` : ""}` : "";
+    console.log(`  ${safe(n.node)}  ${n.fresh ? "" : "STALE  "}updated ${ago(n.updated)}  ${fs}  ${warm}`);
+    if (n.error) console.log(`    error: ${safe(n.error)}`);
+    for (const k of n.keys) console.log(`    holds ${name(k)} ${k.commit.slice(0, 12)} ${gib(k.bytes)}${k.newest ? "" : "  (older version)"}${k.placed === false ? "  (not placed here)" : ""}`);
+    for (const p of n.pending) console.log(`    pending ${name(p)}: ${safe(p.why)}`);
+    for (const b of n.badBlobs) console.log(`    bad blobs ${name(b)}: ${b.count}`);
+  }
+  console.log(r.placement ? "placement" : `placement: none${r.placementNote ? ` (${safe(r.placementNote)})` : ", every node keeps every key warm-assign lists"}`);
+  for (const p of r.placement ?? []) console.log(`  ${name(p)}  ${p.nodes.map((n) => `${safe(n.node)} ${n.holds === "newest" ? "holds it" : n.holds === "older" ? "holds an older version" : "not yet"}${n.fresh ? "" : " (stale)"}`).join(", ") || "no node"}`);
+  if (r.placement && r.placementNote) console.log(`  note: ${safe(r.placementNote)}`);
+  console.log(r.writer ? `repos (warm builds on ${safe(r.writer.env)}, image ${safe(r.writer.image ?? "unknown")})` : "repos (no enabled warm writer)");
+  for (const x of r.repos) {
+    const last = x.last ? `last task ${x.last.id} ${x.last.state}${x.last.endedAt ? ` ${ago(x.last.endedAt)}` : ""}` : "no warm task";
+    console.log(`  ${safe(x.repo)}  ${x.freshness}  ${x.coverage}  target ${x.warmTarget}${x.warmTargetSource === "operator" ? " (set)" : ""}${x.bytes ? ` ${gib(x.bytes)}` : ""}  on ${x.nodes}/${x.of} nodes  ${last}`);
+    if (x.last?.state === "failed" && x.last.summary) console.log(`    ${safe(x.last.summary).slice(0, 200)}`);
+  }
+  if (r.mirror) {
+    console.log(`crate mirror git allowlist (read ${ago(r.mirror.readAt)}; used by ${r.mirror.envs.map(safe).join(", ") || "no environment"})`);
+    if (r.mirror.error) console.log(`  error: ${safe(r.mirror.error)}`);
+    for (const repo of r.mirror.allowlist ?? []) console.log(`  ${safe(repo)}`);
+  }
 }
 
 function printCoverage(c: WarmCoverage): void {
@@ -481,7 +524,7 @@ async function workspace(args: string[]): Promise<void> {
 }
 
 export const commands = {
-  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id> | warm-interval [<minutes>]", run: async (args: string[]) => await envs(args) },
+  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id> | warm-repos | warm-interval [<minutes>] | caches", run: async (args: string[]) => await envs(args) },
   tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | sizes list|set|clear | enqueue-test", run: async (args: string[]) => await tasks(args) },
   workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | tool <id> <tool> <json> | try <repo> <sha> | end <id>", run: async (args: string[]) => await workspace(args) },
 };

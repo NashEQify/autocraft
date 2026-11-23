@@ -16,7 +16,8 @@ import { BUILD_FEATURES, REPO_SCOPED, featureStates, shownFeatures, isFeature, s
 import { ScreenshotConfigError, deleteConfig, listConfigs, putConfig } from "../../verify/screenshot-config.ts";
 import { audit } from "../audit.ts";
 import { scopeOf, perDayOf, setScope, setPerDay } from "../../prbuild/select.ts";
-import type { PrBuildScope } from "../../../web/src/api/types.ts";
+import type { CacheReport, PrBuildScope } from "../../../web/src/api/types.ts";
+import { cacheReport } from "../../build/caches.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, Res } from "../types.ts";
 import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
@@ -32,6 +33,9 @@ const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
     throw e;
   }
 };
+
+/** The warm caches; keys of repositories the reader cannot see are left out. */
+export const caches = async (db: Db, req: Req): Promise<CacheReport> => await cacheReport(db, await hiddenRepos(db, req));
 
 /** Operators see every environment; others only the enabled ones. */
 export const envs = async (db: Db, req: Req): Promise<BuildEnv[]> => (await listEnvs(db)).filter((e) => e.enabled || canSeeInternals(req));

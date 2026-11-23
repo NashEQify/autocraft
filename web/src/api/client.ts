@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useRef } from "react";
 import { topicsFor } from "./topics";
 import { usePageProject, withProject } from "./scope";
 import type {
+  CacheReport,
   DiscordAccount,
   InferenceMode,
   InferenceEffort,
@@ -461,6 +462,8 @@ export interface Api {
     create(input: EnvCreate): Promise<{ env: BuildEnv; key: string }>;
     update(id: string, input: EnvInput): Promise<BuildEnv>;
     rotateKey(id: string): Promise<{ key: string }>;
+    /** Warm versions per node, placement, warm state per repo and the crate mirror's allowlist. Everyone reads. */
+    caches(): Promise<CacheReport>;
   };
   /** The build feature switches. Anyone who sees internals reads; operators write. */
   buildFeatures: {

@@ -155,15 +155,31 @@ export async function queueWarm(db: Db, repo: string, s: KubeSettings): Promise<
   }
 }
 
-/** The settings of the enabled warm writers. */
-async function writers(db: Db): Promise<KubeSettings[]> {
-  return (await db.all(db.k.selectFrom("build_envs").select("settings").where("kind", "=", "kubernetes").where("enabled", "=", 1).orderBy("id")))
-    .map((r) => settingsOf(r.settings)).filter((s) => s.warmWriter);
+/** The enabled warm writers with their settings. */
+async function writers(db: Db): Promise<{ id: string; s: KubeSettings }[]> {
+  return (await db.all(db.k.selectFrom("build_envs").select(["id", "settings"]).where("kind", "=", "kubernetes").where("enabled", "=", 1).orderBy("id")))
+    .map((r) => ({ id: r.id, s: settingsOf(r.settings) })).filter((w) => w.s.warmWriter);
+}
+
+/** The warm writer warmPass queues for and the toolchain image its builds run with; null without an enabled writer. */
+export async function warmWriter(db: Db): Promise<{ env: string; image: string | null } | null> {
+  const w = (await writers(db))[0];
+  return w ? { env: w.id, image: toolchainImage(w.s, TOOLCHAINS) } : null;
+}
+
+/** The toolchain image a warm task ran with: its environment's, else the one it was queued with. */
+export function warmTaskImage(r: { sandbox_env: string | null; warm_image: string | null }): string | null {
+  if (!r.sandbox_env) return r.warm_image;
+  try {
+    return (JSON.parse(r.sandbox_env) as { image?: string }).image ?? r.warm_image;
+  } catch {
+    return r.warm_image;
+  }
 }
 
 /** Queues the warm builds the covered repos need (warmCoverage); returns how many. Nothing without an enabled warm writer. */
 export async function warmPass(db: Db): Promise<number> {
-  const w = (await writers(db))[0];
+  const w = (await writers(db))[0]?.s;
   if (!w) return 0;
   let n = 0;
   for (const { repo } of (await warmCoverage(db)).repos) if (await queueWarm(db, repo, w) !== null) n++;

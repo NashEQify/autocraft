@@ -35,7 +35,7 @@ export const BOOKKEEPING_SETTINGS = [
   "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "diff_facts_built", "mentions_built", "item_stage_built", "tracking_started_at",
   "pipeline_planned_at", "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_sync_seen", "pipeline_sync_at", "pipeline_review_cursor", "pipeline_verify_cursor",
   "full_sync_cursor", "org_high_water", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "sync_rate_remaining", "sync_rate_reset_at",
-  "flow_summary_marks", "warm_gc_at", "liveness_at", "liveness_open", "classify_run", "worker_update_pending", "worker_update_failures",
+  "flow_summary_marks", "warm_gc_at", "warm_report", "liveness_at", "liveness_open", "classify_run", "worker_update_pending", "worker_update_failures",
 ];
 const BOOKKEEPING_SETTING_LIKE = ["leader:%", "warm\\_bytes:%", "%\\_points\\_last\\_run", "pipeline\\_fp:%", "build\\_feature:%", "pr\\_builds\\_%"];
 
@@ -79,7 +79,8 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
   accounts: [{ table: "claude_accounts" }, { table: "claude_account_status" }, { table: "claude_account_tokens" }],
   agents: [{ table: "agent_runs" }, { table: "agent_run_items" }, { table: "agent_run_texts" }],
   // Every worker poll writes last_seen_at; only changes to what an environment is or reports matter.
-  envs: [{ table: "build_envs", ops: ["INSERT", "DELETE"] }, { table: "build_envs", ops: ["UPDATE"], when: "old.label IS NOT new.label OR old.kind IS NOT new.kind OR old.enabled IS NOT new.enabled OR old.slots IS NOT new.slots OR old.key_hash IS NOT new.key_hash OR old.capabilities IS NOT new.capabilities OR old.reported_slots IS NOT new.reported_slots OR old.version IS NOT new.version OR old.paused_reason IS NOT new.paused_reason OR old.confidential IS NOT new.confidential OR old.settings IS NOT new.settings OR old.health IS NOT new.health" }],
+  // The runner's caches report (settings row `warm_report`, src/build/caches.ts) is shown on the environments page.
+  envs: [{ table: "settings", when: "new_key = 'warm_report'" }, { table: "build_envs", ops: ["INSERT", "DELETE"] }, { table: "build_envs", ops: ["UPDATE"], when: "old.label IS NOT new.label OR old.kind IS NOT new.kind OR old.enabled IS NOT new.enabled OR old.slots IS NOT new.slots OR old.key_hash IS NOT new.key_hash OR old.capabilities IS NOT new.capabilities OR old.reported_slots IS NOT new.reported_slots OR old.version IS NOT new.version OR old.paused_reason IS NOT new.paused_reason OR old.confidential IS NOT new.confidential OR old.settings IS NOT new.settings OR old.health IS NOT new.health" }],
   // The build feature switches (settings rows `build_feature:*`); not planner input.
   "build-features": [{ table: "settings", when: "new_key LIKE 'build\\_feature:%' ESCAPE '\\' OR new_key LIKE 'pr\\_builds\\_%' ESCAPE '\\'" }, { table: "screenshot_config" }],
   // Our workspace builds of PR heads (pr-builds feature); read by the item page and queue cards, not planner input.

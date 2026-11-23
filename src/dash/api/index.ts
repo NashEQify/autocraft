@@ -604,6 +604,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/agents/:id", agents.detail),
     get("/api/rates", agents.rates),
     get("/api/envs", build.envs),
+    get("/api/envs/caches", build.caches),
     { method: "POST", pattern: "/api/envs", operator: true, handler: ok(build.postEnv) },
     { method: "PUT", pattern: "/api/envs/:id", operator: true, handler: ok(build.putEnv) },
     { method: "POST", pattern: "/api/envs/:id/rotate-key", operator: true, handler: ok(build.postRotate) },

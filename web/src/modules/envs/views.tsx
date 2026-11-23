@@ -17,6 +17,7 @@ import { repoSlug } from "../../lib/links";
 import { cn } from "../../ui/cn";
 import { Block, ConfirmButton, ErrorLine, Page, selectCls, TextInput, useUrlState, useWrite } from "../admin/parts";
 import { useNow } from "../../lib/useNow";
+import { Caches } from "./Caches";
 
 const STATE_TONE: Record<TaskState, Tone> = { queued: "neutral", claimed: "accent", running: "accent", done: "ok", failed: "bad", cancelled: "neutral", lost: "bad" };
 const STATE_LABEL: Record<TaskState, string> = { queued: "Queued", claimed: "Starting", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled", lost: "Lost" };
@@ -632,6 +633,7 @@ export function EnvsView({ params }: ViewProps) {
     <Page title="Build environments" sub="Where builds and tests run">
       <div className="mt-4 space-y-4">
         <EnvsPanel />
+        <Caches />
         <Tasks selected={id} />
       </div>
     </Page>

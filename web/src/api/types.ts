@@ -1786,6 +1786,78 @@ export type Capabilities = {
 };
 /** A warm key's newest version on the cluster's nodes: held by `nodes` of the `of` nodes that report. */
 export type WarmLine = { key: string; commit: string; nodes: number; of: number };
+
+/**
+ * The warm caches (GET /api/envs/caches, `envs caches`): what each node's warm-sync agent reports, where the runner placed
+ * each key, the warm producer's state per repository, and the crate mirror's git allowlist. Node data is the runner's last
+ * read of the status ConfigMaps (src/build/caches.ts). `repo` is null for a key no tracked repository maps to.
+ */
+export type CacheReport = {
+  /** When the runner last read the nodes' status ConfigMaps; null before it has. */
+  readAt: string | null;
+  nodes: CacheNode[];
+  /** The placement in force; null without one (every node then keeps every key warm-assign lists). */
+  placement: CachePlaced[] | null;
+  /** Why the runner could not place keys; null when it could. */
+  placementNote: string | null;
+  /** The environment warm builds run on and their toolchain image; null without an enabled warm writer. */
+  writer: { env: string; image: string | null } | null;
+  repos: CacheRepo[];
+  /** Null when the runner has not read the allowlist (no Kubernetes environment, or a runner without the reporter). */
+  mirror: CacheMirror | null;
+};
+export type CacheNode = {
+  node: string;
+  /** When the node's agent last wrote its status, by the node's clock. */
+  updated: string;
+  /** Written within the last 15 minutes; a stale node counts as not warm. */
+  fresh: boolean;
+  fs: { sizeBytes: number; usedBytes: number; usedPct: number } | null;
+  /** Bytes of the versions keys are current at, and of replaced versions still in their grace period. */
+  warmBytes: { current: number; grace: number } | null;
+  keys: CacheHeld[];
+  pending: { key: string; repo: string | null; why: string }[];
+  badBlobs: { key: string; repo: string | null; count: number }[];
+  /** Why the agent cannot work at all; null when it can. */
+  error: string | null;
+};
+export type CacheHeld = {
+  key: string; repo: string | null; commit: string; bytes: number; image: string | null;
+  /** When the version was published, and when this node finished syncing it. */
+  stored: string; synced: string;
+  /** The key's newest version: the last successful warm build's commit, else the newest any fresh node holds. */
+  newest: boolean;
+  /** Placed on this node; null without a placement. */
+  placed: boolean | null;
+};
+export type CachePlaced = { key: string; repo: string | null; nodes: { node: string; fresh: boolean; holds: "newest" | "older" | "none" }[] };
+/** `current`: the published version is of the current head and toolchain image; `behind`: of an older head; `image`: of another toolchain image; `never`: nothing published. */
+export type CacheFreshness = "current" | "behind" | "image" | "never";
+export type CacheRepo = {
+  repo: string; key: string;
+  /** Whether the warm producer builds the repo: as a pipeline repo, added by an operator, excluded, or not at all. */
+  coverage: "pipeline" | "added" | "excluded" | "none";
+  freshness: CacheFreshness;
+  /** The default-branch head the latest main-CI poll saw. */
+  head: string | null;
+  /** The newest warm task, in any state. */
+  last: { id: number; state: TaskState; summary: string | null; headSha: string; endedAt: string | null } | null;
+  /** The newest successful warm task: what the store holds for the key. */
+  published: { id: number; headSha: string; image: string | null; endedAt: string | null } | null;
+  warmTarget: "tmpfs" | "pvc" | "none"; warmTargetSource: "operator" | "auto";
+  /** Bytes of the last published version. */
+  bytes: number | null;
+  /** Fresh nodes that hold the published version, of the fresh nodes. */
+  nodes: number; of: number;
+};
+export type CacheMirror = {
+  /** The repositories the mirror serves over git; null when the ConfigMap could not be read. */
+  allowlist: string[] | null;
+  error: string | null;
+  readAt: string;
+  /** Environments whose pods fetch through the mirror. */
+  envs: string[];
+};
 export type Requires = Partial<Pick<Capabilities, "os" | "arch" | "display" | "gpu">> & {
   toolchains?: string[]; minMemGb?: number; minDiskGb?: number;
 };
