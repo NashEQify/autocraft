@@ -588,6 +588,7 @@ export interface DiscordChannels {
   position: number | null;
   category_id: string | null;
   panel_message: string | null;
+  viewable: Generated<number>;
 }
 
 export interface DiscordEvents {
@@ -2727,7 +2728,7 @@ export const COLUMNS = {
   discord_alert_msgs: ["decision_id", "user_hash", "sealed", "choices_id", "sent_at"],
   discord_alerts: ["user_hash", "sealed", "created_at"],
   discord_categories: ["category_id", "guild_id", "name", "position"],
-  discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id", "panel_message"],
+  discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id", "panel_message", "viewable"],
   discord_events: ["at", "kind"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
   discord_filing_repos: ["name", "owner", "added_by", "added_at"],

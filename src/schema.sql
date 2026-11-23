@@ -2398,7 +2398,8 @@ CREATE TABLE IF NOT EXISTS discord_channels (
   default_repo TEXT,                  -- tracked repo whose new-issue page the bot's "File a new issue" button opens
   position INTEGER,                   -- Discord's sort key within its category; NULL until the bot next connects
   category_id TEXT,                   -- the channel's category (discord_categories), not the thread parent
-  panel_message TEXT                  -- the bot's issue panel message in this channel (src/discord/panel.ts), edited in place on re-post
+  panel_message TEXT,                 -- the bot's issue panel message in this channel (src/discord/panel.ts), edited in place on re-post
+  viewable INTEGER NOT NULL DEFAULT 1 -- 0 when the bot lacks View Channel there (src/discord/perms.ts); the admin page omits such channels unless watched
 );
 -- Channel categories (type 4), for ordering the admin list like Discord's sidebar.
 CREATE TABLE IF NOT EXISTS discord_categories (
