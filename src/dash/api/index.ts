@@ -554,6 +554,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/repos/optional-check-remove", async (db, req) => await adm.optionalCheck(db, req, false)),
     post("/api/repos/pipeline-on", async (db, req) => await adm.pipelineSwitch(db, req, true)),
     post("/api/repos/pipeline-off", async (db, req) => await adm.pipelineSwitch(db, req, false)),
+    post("/api/repos/build-feature", adm.buildFeatureSwitch),
     { method: "GET", pattern: "/api/access", operator: true, handler: ok(adm.accessOverview) },
     { method: "POST", pattern: "/api/access/add", operator: true, handler: ok(async (db, req) => adm.accessAdd(db, req, opts.githubUserId ?? githubUserId)) },
     { method: "POST", pattern: "/api/access/remove", operator: true, handler: ok(adm.accessRemove) },

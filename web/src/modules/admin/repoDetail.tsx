@@ -15,6 +15,7 @@ import { FailingChecks } from "../mainci/parts";
 import { useNow } from "../../lib/useNow";
 import { ownerOfRepo } from "../../lib/links";
 import { SecuritySection } from "./securityParts";
+import { BuildFeatures } from "./buildFeatureParts";
 
 function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
@@ -142,6 +143,7 @@ export function RepoDetailView({ params }: ViewProps) {
                   ))}
                 </ul>
               </Block>
+              <BuildFeatures r={r} write={write} />
               <OptionalChecks r={r} write={write} />
               {l && (
                 <Block className="mt-4" title="Labels plan">

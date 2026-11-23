@@ -21,6 +21,8 @@ import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts"
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
 import { setRepoPipeline } from "../../pilot.ts";
+import { featureOn, isFeature, shownFeatures, type BuildFeature } from "../../build/features.ts";
+import { switchFeature } from "./build.ts";
 import { countPlan, planLabels } from "../../labels/plan.ts";
 import { listAll, RepoError, type RepoRow, trackRepoChecked, untrackRepo } from "../../repos.ts";
 import { contributors, getRule, OVERRIDE_LOGIN, setOverride, setRule, tierOf, type Contributor as Row, type Rule } from "../../whitelist.ts";
@@ -34,7 +36,7 @@ import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { pipelineState } from "../../runner/autopilot.ts";
 import { PilotError, setPilot } from "../../pilot.ts";
 import { canSeeInternals } from "./staff.ts";
-import { mapLimit } from "../../async-seq.ts";
+import { mapLimit, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Expression, SqlBool } from "kysely";
@@ -277,10 +279,11 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
   // A few repos at a time: each reads about a dozen rows sets at once, and the pool serves other requests meanwhile.
-  return await mapLimit(await listAll(db), 4, async (r) => await toTrackedRepo(db, r, req));
+  const shown = await shownFeatures(db);
+  return await mapLimit(await listAll(db), 4, async (r) => await toTrackedRepo(db, r, req, shown));
 }
 
-async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo> {
+async function toTrackedRepo(db: Db, r: RepoRow, req: Req, shown: BuildFeature[]): Promise<TrackedRepo> {
   const t = !!r.tracked;
   const approval = async (of: (db: Db, repo: string) => Promise<{ by: string; at: string } | null>) => (t ? approvalInfo(await of(db, r.name)) : null);
   // The parts read independently, so they run together.
@@ -297,6 +300,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
     pipeline: t && !!r.pipeline,
     canSwitch,
     canManage: canSwitch,
+    buildFeatures: r.tracked ? await mapSeq(shown, async (feature) => ({ feature, on: await featureOn(db, feature, r.name) })) : [],
   };
 }
 
@@ -304,7 +308,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
 async function oneRepo(db: Db, req: Req, name: string): Promise<TrackedRepo> {
   const r = (await listAll(db)).find((x) => x.name === name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return await toTrackedRepo(db, r, req);
+  return await toTrackedRepo(db, r, req, await shownFeatures(db));
 }
 
 function approvalInfo(a: { by: string; at: string } | null): RepoApproval {
@@ -441,6 +445,16 @@ export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Pro
 
 // An operator, or a maintainer with write permission on the repo (read live from GitHub), switches the pipeline stages on or off for it (off: sync only).
 const maySwitch = async (req: Req, repo: string): Promise<boolean> => await mayRunRepo(req.user, repo);
+
+/** One repo's build feature switch (src/dash/api/build.ts switchFeature holds the rule). */
+export async function buildFeatureSwitch(db: Db, req: Req): Promise<TrackedRepo> {
+  const b = body(req);
+  const name = required(b.name, "name");
+  if (!isFeature(b.feature)) throw new HttpError(400, "feature is not a build feature");
+  if (typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
+  await switchFeature(db, req, b.feature, b.on, name);
+  return await oneRepo(db, req, name);
+}
 
 export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
   const name = required(body(req).name, "name");

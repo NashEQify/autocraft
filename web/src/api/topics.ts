@@ -59,7 +59,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["security:scan:", ["security", "agents"]],
   ["security", ["security"]],
   ["repos", ["repos"]],
-  ["repo-admin", ["repos", "sync", "settings"]],
+  ["repo-admin", ["repos", "sync", "settings", "build-features", "envs"]],
   ["cls:", ["classify", "items"]],
   ["dis:", ["dupes", "items"]],
   ["contributors:", ["items", "settings"]],

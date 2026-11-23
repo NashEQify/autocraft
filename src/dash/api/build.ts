@@ -12,7 +12,7 @@ import { absolute, implementationShotPath, SHOT_FILE } from "../../build/artifac
 import { callRunner, runnerClient, RunnerError } from "../../remote/runner-client.ts";
 import { BuildError, createEnv, listEnvs, rotateKey, updateEnv } from "../../build/envs.ts";
 import { PRIVATE_STEPS, cancelTask, getTaskDetail, listTasks, summary } from "../../build/tasks.ts";
-import { BUILD_FEATURES, REPO_SCOPED, featureStates, isFeature, setFeature } from "../../build/features.ts";
+import { BUILD_FEATURES, REPO_SCOPED, featureStates, shownFeatures, isFeature, setFeature, type BuildFeature } from "../../build/features.ts";
 import { ScreenshotConfigError, deleteConfig, listConfigs, putConfig } from "../../verify/screenshot-config.ts";
 import { audit } from "../audit.ts";
 import { scopeOf, perDayOf, setScope, setPerDay } from "../../prbuild/select.ts";
@@ -83,7 +83,8 @@ async function featuresOf(db: Db, req: Req): Promise<BuildFeatures> {
   const tracked = new Set((await db.all(db.k.selectFrom("main.tracked_repos").select("name"))).map((r) => r.name));
   const repos = (await visibleRepos(db, req)).filter((r) => tracked.has(r)).sort();
   const shown = new Set(repos);
-  const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], repos: s.repos.filter((r) => shown.has(r)) }));
+  const visible = await shownFeatures(db);
+  const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], shown: visible.includes(s.feature), repos: s.repos.filter((r) => shown.has(r)) }));
   const scopes: Record<string, PrBuildScope> = {};
   for (const r of repos) scopes[r] = await scopeOf(db, r);
   const manageable = await filterSeq(repos, async (r) => await mayRunRepo(req.user, r));
@@ -95,33 +96,43 @@ export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
   return featuresOf(db, req);
 };
 
+/**
+ * Switches a feature for one repo. A shown feature (shownFeatures) goes to an operator or a maintainer with write access to
+ * the repo; a hidden one, and scan-tests' instance-wide switch, only to an operator.
+ */
+export async function switchFeature(db: Db, req: Req, feature: BuildFeature, on: boolean, repo: unknown): Promise<void> {
+  if (REPO_SCOPED[feature]) {
+    if (typeof repo !== "string" || !repo) throw new HttpError(400, `${feature} is switched per repo: repo is required`);
+    const shown = (await shownFeatures(db)).includes(feature);
+    if (shown ? !await mayRunRepo(req.user, repo) : req.user.role !== "operator") {
+      throw new HttpError(403, shown ? "only an operator, or a maintainer with write access to the repo, switches its build features" : "only an operator switches this build feature");
+    }
+    await trackedRepo(db, repo);
+    await setFeature(db, feature, on, req.user.login, repo);
+    return;
+  }
+  if (repo !== undefined && repo !== null) throw new HttpError(400, `${feature} has no per-repo switch`);
+  if (req.user.role !== "operator") throw new HttpError(403, "only an operator switches this build feature");
+  await setFeature(db, feature, on, req.user.login);
+}
+
 export const postFeature = async (db: Db, req: Req): Promise<BuildFeatures> => {
   const b = (req.json ?? {}) as { feature?: unknown; on?: unknown; repo?: unknown; scope?: unknown; perDay?: unknown };
   if (!isFeature(b.feature)) throw new HttpError(400, `feature must be one of ${BUILD_FEATURES.join(", ")}`);
-  // A repo's own Implement switch also goes to a maintainer with write access to that repo; every other change is an operator's.
-  const repoImplement = b.feature === "implement" && typeof b.on === "boolean" && typeof b.repo === "string" && b.scope === undefined && b.perDay === undefined;
-  if (repoImplement ? !await mayRunRepo(req.user, b.repo as string) : req.user.role !== "operator") {
-    throw new HttpError(403, repoImplement ? "only an operator, or a maintainer with write access to the repo, switches its issue implementations" : "only an operator changes the build features");
-  }
-  const tracked = async (r: string): Promise<boolean> => !!(await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", r)));
-  // Every field is checked before anything is written.
-  if (b.scope !== undefined || b.perDay !== undefined) {
-    if (b.feature !== "pr-builds") throw new HttpError(400, "only pr-builds has a scope and a daily cap");
-    if (b.scope !== undefined && b.scope !== "outside" && b.scope !== "all") throw new HttpError(400, "scope must be outside or all");
-    if (b.scope !== undefined && (typeof b.repo !== "string" || !await tracked(b.repo))) throw new HttpError(400, "repo must be a tracked repo");
-    if (b.perDay !== undefined && (typeof b.perDay !== "number" || !Number.isInteger(b.perDay) || b.perDay < 0 || b.perDay > 1000)) throw new HttpError(400, "perDay must be a whole number from 0 to 1000");
-  }
   if (b.on !== undefined && typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
   if (b.on === undefined && b.scope === undefined && b.perDay === undefined) throw new HttpError(400, "on must be true or false");
-  let repo: string | undefined;
-  if (b.on !== undefined && b.repo !== undefined && b.repo !== null) {
-    if (typeof b.repo !== "string" || !await tracked(b.repo)) throw new HttpError(400, "repo must be a tracked repo");
-    if (!REPO_SCOPED[b.feature]) throw new HttpError(400, `${b.feature} has no per-repo switch`);
-    repo = b.repo;
+  // Every field is checked before anything is written.
+  if (b.scope !== undefined || b.perDay !== undefined) {
+    if (req.user.role !== "operator") throw new HttpError(403, "only an operator changes the PR build scope and daily cap");
+    if (b.feature !== "pr-builds") throw new HttpError(400, "only pr-builds has a scope and a daily cap");
+    if (b.scope !== undefined && b.scope !== "outside" && b.scope !== "all") throw new HttpError(400, "scope must be outside or all");
+    if (b.scope !== undefined && typeof b.repo !== "string") throw new HttpError(400, "repo must be a tracked repo");
+    if (b.scope !== undefined) await trackedRepo(db, b.repo as string);
+    if (b.perDay !== undefined && (typeof b.perDay !== "number" || !Number.isInteger(b.perDay) || b.perDay < 0 || b.perDay > 1000)) throw new HttpError(400, "perDay must be a whole number from 0 to 1000");
   }
+  if (typeof b.on === "boolean") await switchFeature(db, req, b.feature, b.on, b.repo);
   if (b.scope !== undefined && await scopeOf(db, b.repo as string) !== b.scope) { await setScope(db, b.repo as string, b.scope as PrBuildScope); await audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", scope: b.scope, repo: b.repo }); }
   if (b.perDay !== undefined && await perDayOf(db) !== b.perDay) { await setPerDay(db, b.perDay as number); await audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", perDay: b.perDay }); }
-  if (typeof b.on === "boolean") await setFeature(db, b.feature, b.on, req.user.login, repo);
   return featuresOf(db, req);
 };
 

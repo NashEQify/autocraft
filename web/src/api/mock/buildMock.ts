@@ -36,7 +36,7 @@ const envs: BuildEnv[] = [
     settings: {
       namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "4", cpuLimit: "16", memoryRequest: "4Gi", memoryLimit: "8Gi",
       maxPodMemory: "64Gi", capacity: "cluster", nodeReserveCpu: "0", nodeReserveMemory: "0", priorityClassName: "craft-build-task",
-      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
+      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64", display: false,
       workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
       workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
       warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null, display: false,
@@ -127,13 +127,14 @@ const used = (e: string) => TASKS.filter((t) => t.envId === e && (t.state === "r
 for (const e of envs) e.running = used(e.id);
 
 export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs" | "tasks" | "buildFeatures" | "screenshotSetup"> {
-  const featureOn = new Set<string>(["implement", "implement:designcraft", "implement:photocraft", "screenshots", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
+  const featureOn = new Set<string>(["implement:designcraft", "implement:photocraft", "push-tests:designcraft", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
   const scopes: Record<string, PrBuildScope> = { pdfcraft: "all" };
   let perDay = 10;
+  const SHOWN: BuildFeatureName[] = ["screenshots", "push-tests", "batch-build", "nightly", "implement"];
   const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true };
   const features = (): BuildFeatures => ({
     features: (Object.keys(SCOPED) as BuildFeatureName[]).map((feature) => ({
-      feature, on: featureOn.has(feature), repoScoped: SCOPED[feature],
+      feature, on: !SCOPED[feature] && featureOn.has(feature), repoScoped: SCOPED[feature], shown: SHOWN.includes(feature),
       repos: SCOPED[feature] ? REPOS.filter((r) => featureOn.has(`${feature}:${r}`)) : [],
     })),
     repos: [...REPOS],
@@ -178,9 +179,10 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
     buildFeatures: {
       list: () => wait(features()),
       async set(input) {
-        if (input.feature === "implement" && input.repo && input.on !== undefined && input.scope === undefined && input.perDay === undefined) {
-          if (!mayRunMock(me, input.repo)) throw new Error("only an operator, or a maintainer with write access to the repo, switches its issue implementations");
+        if (SHOWN.includes(input.feature) && input.repo && input.on !== undefined && input.scope === undefined && input.perDay === undefined) {
+          if (!mayRunMock(me, input.repo)) throw new Error("only an operator, or a maintainer with write access to the repo, switches its build features");
         } else operator();
+        if (SCOPED[input.feature] && input.on !== undefined && !input.repo) throw new Error(`${input.feature} is switched per repo: repo is required`);
         const k = input.repo ? `${input.feature}:${input.repo}` : input.feature;
         if (input.scope && input.repo) scopes[input.repo] = input.scope;
         if (input.perDay !== undefined) perDay = input.perDay;

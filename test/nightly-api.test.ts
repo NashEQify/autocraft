@@ -18,7 +18,6 @@ const req = (json: unknown, params: Record<string, string> = {}): Req =>
 test("selection validates names, hidden repos are 404, the grid shows a bench delta, and the topic is not planner input", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "nq-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: "2026-01-01T00:00:00Z", pipeline: 1 }));
-  await setFeature(db, "nightly", true, "op");
   await setFeature(db, "nightly", true, "op", "app");
 
   await assert.rejects(select(db, req({ repo: "app", check: "miri", enabled: true, crates: ["ok", "a b; rm"] })), /crates must be/);

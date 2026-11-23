@@ -114,6 +114,7 @@ import type {
   StageLimit,
   BuildEnv,
   BuildFeatureInput,
+  BuildFeatureName,
   BuildFeatures,
   ScreenshotConfigJson,
   ScreenshotSetups,
@@ -300,6 +301,8 @@ export interface Api {
     setOptionalCheck(name: RepoName, check: string, on: boolean): Promise<TrackedRepo>;
     /** Switches the pipeline stages on or off for this repo (off: sync only). */
     setPipeline(name: RepoName, on: boolean): Promise<TrackedRepo>;
+    /** Switches one build feature for this repo. */
+    setBuildFeature(name: RepoName, feature: BuildFeatureName, on: boolean): Promise<TrackedRepo>;
   };
   /** Operator only: who runs the model calls, and the model families each tier accepts in the user-local mode. */
   inference: {

@@ -62,7 +62,7 @@ type Fake = {
 async function setup(prs: number[], o: { build?: boolean } = {}) {
   const w = (current = await (await world()).repo());
   for (const n of prs) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
-  if (o.build) { await setFeature(w.db, "batch-build", true, "op"); await setFeature(w.db, "batch-build", true, "op", "app"); }
+  if (o.build) await setFeature(w.db, "batch-build", true, "op", "app");
   const fake: Fake = { log: "", completedAt: "2026-01-01T23:00:00Z", files: {}, blame: {} };
   const reruns: string[] = [];
   const base = w.gh.batchDeps();

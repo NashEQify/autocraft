@@ -70,7 +70,6 @@ test("a stuck attempt's Close issue answer comments and closes through the GitHu
   const w = await (await (await world()).repo()).issue(7);
   const db = w.db;
   await db.run(db.k.insertInto("fast_track").values({ repo: "app", number: 7, added_by: OPERATOR, added_at: "2026-01-02T00:00:00Z" }));
-  await setFeature(db, "implement", true, OPERATOR);
   await setFeature(db, "implement", true, OPERATOR, "app");
   const it = (await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", "app").where("number", "=", 7)))!;
   const impl = await startImplementation(db, { repo: "app", number: 7, queuedBy: OPERATOR, textHash: textHash(it.title ?? "", it.body ?? "") });
