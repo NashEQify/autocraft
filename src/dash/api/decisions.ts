@@ -610,7 +610,7 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
     }
     return { total, byKind, oldestAskedAt };
   });
-  counts.catch(() => {});
+  void counts.catch(() => {});
 
   const answered = status === "answered" || status === "backlog";
   const after = q.get("after");

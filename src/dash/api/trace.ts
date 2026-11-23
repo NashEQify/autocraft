@@ -544,7 +544,7 @@ export async function context(db: Db, req: Req): Promise<Ctx> {
   // The rest reads alongside, and counts only once both checks passed.
   const staff = canSeeInternals(req);
   const rest = Promise.all([setting(db, "pipeline_login"), ownLogins(db, repo), !staff && isQuiet(db, repo, n), hiddenRepos(db, req)]);
-  rest.catch(() => {});
+  void rest.catch(() => {});
   const [, found] = await Promise.all([needVisible(db, req, repo), db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n))]);
   if (!found) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   const [box, own, veiled, hidden] = await rest;

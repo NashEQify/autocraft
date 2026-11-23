@@ -152,7 +152,7 @@ export class Handle implements Db {
     if (!read) {
       read = this.#engine.kysely.executeQuery(c).then((r) => r.rows);
       shared.set(key, read);
-      read.catch(() => shared.get(key) === read && shared.delete(key));
+      void read.catch(() => shared.get(key) === read && shared.delete(key));
     }
     // Copies, so a caller that changes its rows does not change another's.
     return (await read).map((r) => ({ ...(r as object) }) as O);

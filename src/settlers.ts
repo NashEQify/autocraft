@@ -50,7 +50,7 @@ const roles = async (db: Db, m: SettleMemo): Promise<void> => {
     m.operators = new Set(rows.filter((r) => r.role === "operator").map((r) => r.login));
   })();
   // A failed read is not kept: the next caller reads again.
-  m.roles.catch(() => { m.roles = undefined; });
+  void m.roles.catch(() => { m.roles = undefined; });
   await m.roles;
 };
 
