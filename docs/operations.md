@@ -1189,20 +1189,20 @@ A workspace of a repository with a warm target (layout 2, recorded on the row wh
 | Path | Layout 2 |
 |---|---|
 | `/home/runner/_work/<repo>/<repo>` | The checkout (volume subPath `checkout`). `/work/src` is a link to it, so the session's paths stay the same; `ws` accepts files below it (`WS_CHECKOUT`). |
-| `<checkout>/target` | The target dir, no `CARGO_TARGET_DIR`: volume subPath `cargo-target`, or memory for a `tmpfs` warm copy. `/work/target` is a link to it. `ws untar` ignores the mount point and excludes `/target` from git. |
+| `<checkout>/target` | The target dir, no `CARGO_TARGET_DIR`: volume subPath `cargo-target`. `/work/target` is a link to it. `ws untar` ignores the mount point and excludes `/target` from git. |
 | `/cache/cargo` | `CARGO_HOME` (volume subPath `cache`). |
-| `/craft-fonts`, `/craft-i18n` | The CI gate's checkouts at the commits the base commit names, read-only (subPaths under `ext/`), copied in while seeding from AutoCraft's clones. |
+| `/craft-fonts`, `/craft-i18n` | The session's own copies of the CI gate's checkouts at the commits the base commit names, read-only (subPaths under `ext/`), copied in while seeding from AutoCraft's clones. |
 
 The pod's env is the CI gate's step env at the base commit (as a build pod's source pod reads it, with `CI=1` and `CARGO_INCREMENTAL=0`) plus the workspace's own: `HOME=/work/home`, `CARGO_NET_OFFLINE=true` and the display. While requested, the runner reads the gate and the sha256 of the base commit's `Cargo.lock` from its clone, 3 tries 30 s apart before the workspace fails.
 
 How the target starts:
 
-1. A fresh volume is sized from the key's last published size: for `pvc`, 2.6 times it plus 8 GiB, at least the environment's `--workspace-storage` (photocraft's 27 GB target grows to 50-70 GB in a session). The runner picks a node whose fresh warm status lists the key with the workspace's toolchain image and CI env hash, and for `pvc` the base commit's Cargo.lock; the newest version wins, then the node with the fewest workspaces. Otherwise the target starts cold, and the reason is logged.
-2. A warm pod mounts that node's claim `craft-warm-<node>` read-only, which pins it there, and runs `warm-copy` before the workspace container, with the Cargo.lock sha256 from the runner (the checkout arrives later). A `tmpfs` copy goes into memory of the size build pods use, added to the workspace container's memory request and limit. Any node holding the version may run the workspace, the AutoCraft service's nodes included: the pod's isolation (restricted Pod Security, no service-account token, no network, no credentials) is what keeps it apart. A pod the scheduler cannot place on its warm node for 3 minutes is made again cold, without the claim.
+1. A fresh volume is sized from the key's last published size: 2.6 times it plus 8 GiB, at least the environment's `--workspace-storage` (photocraft's 27 GB target grows to 50-70 GB in a session). The runner picks a node whose fresh warm status lists the key with the workspace's toolchain image and CI env hash, and the base commit's Cargo.lock; the newest version wins, then the node with the fewest workspaces, then the lower disk usage; nodes whose disk is over 85% full are skipped. A workspace's target is always on its volume, whatever the repository's warm target (`tmpfs` and `pvc` alike): the warm target only decides whether the workspace starts warm (`none` starts cold), and the Cargo.lock check applies to every warm start. Otherwise the target starts cold, and the reason is logged.
+2. A warm pod mounts that node's claim `craft-warm-<node>` read-only, which pins it there, and runs `warm-copy` before the workspace container, with the Cargo.lock sha256 from the runner (the checkout arrives later). Any node holding the version may run the workspace, the AutoCraft service's nodes included: the pod's isolation (restricted Pod Security, no service-account token, no network, no credentials) is what keeps it apart. A pod the scheduler cannot place on its warm node for 3 minutes is made again cold, without the claim.
 3. Seeding unpacks the source, the gate's checkouts and then sets the checkout's mtimes against the warm commit: every file to 2001-01-01 and the files changed since the warm commit (from the runner's clone, with the build pods' deleted-file rule) to now, when the version is `trimmed`; otherwise every file to now. A checkpoint applied on a rebuild then gives its files newer mtimes.
 4. The result is the row's `warm` note (`warm copy N GB in X s from <key>@<commit> on <node>`, or `started cold: <why>`), shown on the item page's history and by `workspace show`; `warm_commit` names the version.
 
-A parked workspace resumed on its kept volume keeps its target and copies nothing. A `tmpfs` target is lost with the pod: a resume copies it again from the same warm commit on the volume's node, or starts cold with its target on the volume. A resume onto a new volume starts over from step 1.
+A parked workspace resumed on its kept volume keeps its target and copies nothing. A resume onto a new volume starts over from step 1.
 
 ### Warm sync on the nodes
 

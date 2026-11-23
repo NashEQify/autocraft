@@ -11,6 +11,9 @@ import { isCommitId, resolveGate, resolveI18nRev, type GateEnv } from "./gate.ts
 import { downloadAndExtract } from "./tarball.ts";
 import { slugOf } from "../owners.ts";
 
+/** The largest craft-fonts or craft-i18n archive a build pod or a workspace session takes in. */
+export const EXT_ARCHIVE_MAX_BYTES = 1024 ** 3;
+
 export type SandboxInfo = {
   /** The image the steps ran in: the derived tag, or the configured image when the gate needs no packages. */
   image: string;
@@ -97,7 +100,7 @@ export async function fetchCheckout(workDir: string, repo: "craft-fonts" | "craf
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   try {
-    await downloadAndExtract(`https://codeload.github.com/${slugOf(repo)}/tar.gz/${ref}`, tmp, 1024 * 1024 * 1024, undefined, fetchImpl);
+    await downloadAndExtract(`https://codeload.github.com/${slugOf(repo)}/tar.gz/${ref}`, tmp, EXT_ARCHIVE_MAX_BYTES, undefined, fetchImpl);
     writeFileSync(join(tmp, ".complete"), "");
     rmSync(dir, { recursive: true, force: true });
     try {

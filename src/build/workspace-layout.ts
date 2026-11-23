@@ -3,7 +3,7 @@
 // dir and CARGO_HOME sit where the warm producer built them:
 //
 //   /home/runner/_work/<repo>/<repo>          the checkout (volume subPath `checkout`); /work/src links to it
-//   /home/runner/_work/<repo>/<repo>/target   the target dir: volume subPath `cargo-target`, or memory for `tmpfs`;
+//   /home/runner/_work/<repo>/<repo>/target   the target dir: volume subPath `cargo-target`;
 //                                             /work/target links to it
 //   /cache/cargo                              CARGO_HOME (volume subPath `cache`)
 //   /craft-fonts, /craft-i18n                 the CI gate's checkouts, read-only (volume subPaths under `ext/`)
@@ -14,8 +14,8 @@
 // A fresh volume starts warm when a node's status holds the repository's key with the workspace's image and CI env, and (for
 // `pvc`) the base commit's Cargo.lock: the pod mounts that node's warm claim, which pins it there, and `warm-copy` fills the
 // target and CARGO_HOME before the workspace container starts. The checkout arrives later (seeding), so its mtimes are set
-// then (WARM_MTIMES_SH). A resume onto a kept volume never copies again: the target is already there. A `tmpfs` target is
-// lost with the pod, so a resume copies it again from the same warm commit, or starts it cold.
+// then (WARM_MTIMES_SH). A resume onto a kept volume never copies again: the target is already there. A workspace's target is
+// always on its volume, whatever the repository's warm target: that only decides whether the workspace starts warm.
 import { createHash } from "node:crypto";
 import { OLD_MTIME_SEC } from "../worker/warm-copy.ts";
 import { gateEnvOf, warmEnvHash } from "./pods.ts";
@@ -81,21 +81,25 @@ export type WarmChoice = {
   load: Map<string, number>;
   /** The workspace container's memory limit before a memory-backed target is added. */
   memoryLimitBytes: number;
-  /** Only this commit (a tmpfs target copied again on a resume). */
+  /** Only this commit. */
   commit?: string | null;
   /** Only this node (a resume onto a kept volume). */
   node?: string | null;
 };
 
+/** Nodes whose warm volume is fuller than this are not chosen: the session's target and CARGO_HOME grow on its own volume there. */
+export const WARM_NODE_MAX_FS_PCT = 85;
+
 /**
  * The node and version a fresh workspace target starts from, or why it starts cold. Nodes holding the newest version come
- * first, then the one with the fewest workspaces.
+ * first, then the one with the fewest workspaces, then the one with the lower disk usage; nodes above WARM_NODE_MAX_FS_PCT are skipped.
  */
 export function chooseWarm(c: WarmChoice): { use: WarmUse; why: null } | { use: null; why: string } {
   if (c.target === "none") return { use: null, why: "the repository has no warm target" };
   const envHash = workspaceEnvHash(c.prepared);
-  const nodes = c.nodes.filter((n) => (!c.node || n.node === c.node) && (!c.commit || n.commit === c.commit))
-    .sort((a, b) => b.stored - a.stored || (c.load.get(a.node) ?? 0) - (c.load.get(b.node) ?? 0) || a.node.localeCompare(b.node));
+  const holding = c.nodes.filter((n) => (!c.node || n.node === c.node) && (!c.commit || n.commit === c.commit));
+  const nodes = holding.filter((n) => n.fsUsedPct <= WARM_NODE_MAX_FS_PCT)
+    .sort((a, b) => b.stored - a.stored || (c.load.get(a.node) ?? 0) - (c.load.get(b.node) ?? 0) || a.fsUsedPct - b.fsUsedPct || a.node.localeCompare(b.node));
   let why: string | null = null;
   for (const n of nodes) {
     const d = decideWarm({
@@ -105,6 +109,7 @@ export function chooseWarm(c: WarmChoice): { use: WarmUse; why: null } | { use: 
     if (d.use) return d;
     why ??= d.why;
   }
+  if (!nodes.length && holding.length) return { use: null, why: `every node holding ${c.key} has its disk over ${WARM_NODE_MAX_FS_PCT}% full` };
   const where = c.node ? `node ${c.node}` : "no node";
   return { use: null, why: why ?? `${where} holds a version of ${c.key}${c.commit ? ` at ${c.commit.slice(0, 12)}` : ""}` };
 }

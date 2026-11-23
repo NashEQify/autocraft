@@ -104,9 +104,10 @@ let clock = Date.now();
 const kube = new FakeKube();
 // node-b holds the key, built with the workspace's image and env.
 let lock = sha256(LOCK);
+let usedPct = 10;
 const statusCm = (): KConfigMap => ({
   metadata: { name: "warm-status-node-b", labels: { [STATUS_LABEL]: "node" } },
-  data: { [STATUS_DATA_KEY]: JSON.stringify({ version: 1, node: "node-b", updated: clock, fs: { sizeBytes: 1e12, usedBytes: 1e11, usedPct: 10 }, keys: { [KEY]: { commit: WARM, stored: 1, bytes: WARM_BYTES, image: IMAGE, envHash: ENV_HASH, synced: 1, cargoLock: lock } } }) },
+  data: { [STATUS_DATA_KEY]: JSON.stringify({ version: 1, node: "node-b", updated: clock, fs: { sizeBytes: 1e12, usedBytes: 1e11, usedPct: usedPct }, keys: { [KEY]: { commit: WARM, stored: 1, bytes: WARM_BYTES, image: IMAGE, envHash: ENV_HASH, synced: 1, cargoLock: lock } } }) },
 });
 const state = new WorkspaceState();
 state.warm = new WarmStatus({ listConfigMaps: async () => [statusCm()] }, { now: () => clock });
@@ -171,4 +172,23 @@ test("a workspace whose repo has a warm version on a node starts warm on that no
   assert.equal(c.state, "ready");
   assert.equal(c.warm_commit, null);
   assert.match(warmOf(c)!.note!, /^started cold: .*Cargo\.lock/);
+});
+
+test("a tmpfs warm target still puts a workspace's target on its volume, and a nearly full node is skipped", async () => {
+  await db.script(`UPDATE build_sizes SET warm_target = 'tmpfs' WHERE repo = '${REPO}'`);
+  lock = sha256(LOCK);
+  const warmPod = async () => {
+    const id = await createWorkspace(db, { repo: REPO, baseSha: BASE, envId: "pods", owner: "cli" }, clock);
+    await pass();
+    await pass();
+    return kube.pods.get((await getWorkspace(db, id))!.pod!)!.spec;
+  };
+  const spec = await warmPod();
+  assert.ok(spec.initContainers.some((x: { name: string }) => x.name === WARM_COPY_CONTAINER), "starts warm");
+  assert.ok(!spec.volumes.some((v: any) => v.name === "warm-target"), "no memory-backed target");
+  assert.ok(spec.containers[0].volumeMounts.some((m: any) => m.mountPath.endsWith("/target") && m.name === "work"), "the target is on the volume");
+
+  usedPct = 90;
+  const full = await warmPod();
+  assert.ok(!full.initContainers.some((x: { name: string }) => x.name === WARM_COPY_CONTAINER), "a node over the disk limit starts the workspace cold");
 });

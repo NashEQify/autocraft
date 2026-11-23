@@ -2,8 +2,8 @@
 // Pod Security `restricted` with nothing added, no credentials and no network (craft.build/network=none). The source
 // arrives over exec stdin; the helper `ws` (deploy/container/ws) is copied from the AutoCraft image by an init container.
 // The labels are not the build tasks': the build launcher's orphan sweep deletes every autocraft-build pod it does not own.
-import { POD_UID, quantity, type KubeSettings } from "./pods.ts";
-import { warmCopyParts, warmNodeVolume, warmTmpfsBytes, warmVerifyVolume, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
+import { POD_UID, type KubeSettings } from "./pods.ts";
+import { warmCopyParts, warmNodeVolume, warmVerifyVolume, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { WS_IMAGE_PATH, WS_POD_PATH } from "./workspace.ts";
 import { ciStepEnv, LAYOUT_SH, workspaceEnvHash, type WorkspacePrepared } from "./workspace-layout.ts";
 
@@ -46,18 +46,14 @@ export function workspacePvcSpec(s: KubeSettings, envId: string, id: number, nam
   };
 }
 
-/** A layout-2 pod: the checkout path, the gate's inputs and the warm version it copies first (a `tmpfs` one into memory; otherwise the target is on the volume). */
+/** A layout-2 pod: the checkout path, the gate's inputs and the warm version it copies first (the target is always on the volume). */
 export type WorkspaceCiLayout = { checkout: string; prepared: WorkspacePrepared; copy: WarmUse | null };
 
 export type WorkspacePodCtx = { s: KubeSettings; envId: string; id: number; appImage: string; toolchainImage: string; limits: WorkspaceLimits; pod?: string; pvc?: string; ci?: WorkspaceCiLayout };
 
 export function workspacePodSpec(c: WorkspacePodCtx) {
   const { s, ci } = c;
-  // A memory-backed target is charged to the pod: the workspace container and warm-copy get its size on top of their memory.
-  const tmpfs = ci?.copy?.target === "tmpfs" ? warmTmpfsBytes(ci.copy.bytes) : null;
-  const extra = tmpfs ?? 0;
-  const mem = (q: string) => (extra ? String(Math.ceil(quantity(q) + extra)) : q);
-  const target = ci ? (tmpfs !== null ? { name: "warm-target" } : { name: "work", subPath: "cargo-target" }) : null;
+  const target = ci ? { name: "work", subPath: "cargo-target" } : null;
   const ciMounts = ci ? [
     { name: "work", mountPath: ci.checkout, subPath: "checkout" },
     { ...target!, mountPath: `${ci.checkout}/target` },
@@ -86,8 +82,8 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
       env: { ...(ci.prepared.cargoLock ? { AUTOCRAFT_WARM_CARGO_LOCK: ci.prepared.cargoLock } : {}), AUTOCRAFT_WARM_MTIMES: "later" },
     }),
     resources: {
-      requests: { cpu: "500m", memory: mem("1Gi"), "ephemeral-storage": "64Mi" },
-      limits: { cpu: s.workspaceCpuLimit, memory: mem("2Gi"), "ephemeral-storage": "256Mi" },
+      requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "64Mi" },
+      limits: { cpu: s.workspaceCpuLimit, memory: "2Gi", "ephemeral-storage": "256Mi" },
     },
     securityContext: SECURITY,
   }] : [];
@@ -116,7 +112,6 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
         { name: "ws-bin", emptyDir: { sizeLimit: "16Mi" } },
         { name: "tmp", emptyDir: { sizeLimit: s.workspaceEphemeralLimit } },
         { name: "run-user", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
-        ...(tmpfs !== null ? [{ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(tmpfs) } }] : []),
         ...(ci?.copy ? [warmNodeVolume(ci.copy), warmVerifyVolume()] : []),
       ],
       initContainers: [helper, ...layout, ...copy],
@@ -127,8 +122,8 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
         workingDir: "/work",
         env: Object.entries(env).map(([name, value]) => ({ name, value })),
         resources: {
-          requests: { cpu: s.workspaceCpuRequest, memory: mem(s.workspaceMemoryRequest), "ephemeral-storage": s.workspaceEphemeralRequest },
-          limits: { cpu: s.workspaceCpuLimit, memory: mem(s.workspaceMemoryLimit), "ephemeral-storage": s.workspaceEphemeralLimit },
+          requests: { cpu: s.workspaceCpuRequest, memory: s.workspaceMemoryRequest, "ephemeral-storage": s.workspaceEphemeralRequest },
+          limits: { cpu: s.workspaceCpuLimit, memory: s.workspaceMemoryLimit, "ephemeral-storage": s.workspaceEphemeralLimit },
         },
         securityContext: SECURITY,
         volumeMounts: [

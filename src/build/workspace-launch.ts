@@ -31,13 +31,13 @@ import type { LauncherDeps } from "./launcher.ts";
 import { CREATE_TRIES, ciCheckout, LIST_GRACE_MS, PENDING_LIMIT_MS, PULL_LIMIT_MS, PULL_REASONS, quantity, settingsOf, STUCK_MS, type KubeSettings } from "./pods.ts";
 import { repoWarmTarget } from "./sizing.ts";
 import { warmKeyOf } from "./tasks.ts";
-import { COPY_MARK_FILE } from "./warm-mount.ts";
+import { COPY_MARK_FILE, type WarmTarget } from "./warm-mount.ts";
 import { warmBytes } from "./warm-queue.ts";
 import type { WarmStatus } from "./warm-status.ts";
 import { chooseWarm, LAYOUT_CI, sha256, warmOf, WARM_CHANGED_DIRS, WARM_CHANGED_FILES, WARM_MTIMES_SH, workspaceStorageBytes, type WorkspacePrepared, type WorkspaceWarm } from "./workspace-layout.ts";
 import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER, type WorkspaceCiLayout } from "./workspace-pods.ts";
 import { resolveGate, resolveI18nRev } from "../worker/gate.ts";
-import { gateStepEnv } from "../worker/environment.ts";
+import { EXT_ARCHIVE_MAX_BYTES, gateStepEnv } from "../worker/environment.ts";
 import { changedFrom, parseLsTree, type CopyMark } from "../worker/warm-copy.ts";
 import { describeHeader, execInWorkspace, execWs, getCheckpoint, getWorkspace, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, RESUME_TRIES, resumeWorkspace, WORKSPACE_COLUMNS, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
 
@@ -259,7 +259,7 @@ async function start(c: Ctx, w: WorkspaceRow): Promise<boolean> {
   let ci: Partial<Pick<WorkspaceRow, "warm" | "warm_commit">> = {};
   if (w.layout === LAYOUT_CI) {
     const warm = await planWarm(c, w, fresh === 1, images.toolchainImage);
-    ci = { warm: JSON.stringify(warm), warm_commit: fresh || warm.target === "tmpfs" ? warm.use?.commit ?? null : w.warm_commit };
+    ci = { warm: JSON.stringify(warm), warm_commit: fresh ? warm.use?.commit ?? null : w.warm_commit };
     c.d.log(`workspace launcher: workspace ${w.id}: ${warm.use ? `starts warm from ${warm.use.key}@${warm.use.commit.slice(0, 12)} on ${warm.use.node} (${warm.use.target})` : warm.why ? `starts cold: ${warm.why}` : "keeps its volume's target"}`);
   }
   if (!await moveWorkspace(c.d.db, w.id, ["requested"], "starting", { pod: name, pvc, volume_fresh: fresh, create_tries: 0, error: null, ...ci }, c.now())) return true;
@@ -320,19 +320,19 @@ async function prepare(c: Ctx, id: number): Promise<void> {
 
 /**
  * How a layout-2 workspace's target starts. A fresh volume is sized for the repository's warm version and starts from the
- * best node's version, or cold. A kept volume keeps its target; only a memory-backed one, lost with the pod, is copied
- * again, from the same commit on the volume's node.
+ * best node's version, or cold. A kept volume keeps its target.
  */
 async function planWarm(c: Ctx, w: WorkspaceRow, fresh: boolean, image: string): Promise<WorkspaceWarm> {
   const { db } = c.d;
   const prev = warmOf(w);
   const key = warmKeyOf(w.repo);
-  const target = fresh ? await repoWarmTarget(db, w.repo) : prev?.target ?? "none";
+  // The session's target always lives on its volume, whatever the repository's warm target says; that only decides warm or cold.
+  const target: WarmTarget = fresh ? (await repoWarmTarget(db, w.repo) === "none" ? "none" : "pvc") : prev?.target === "pvc" ? "pvc" : "none";
   const storageBytes = fresh || !prev ? workspaceStorageBytes(quantity(c.s.workspaceStorage), target, await warmBytes(db, key)) : prev.storageBytes;
   const prepared = preparedOf(w);
   const checkout = ciCheckout(w.repo);
   if (!prepared || !checkout) return { target, storageBytes, use: null, why: "the workspace has no CI layout" };
-  if (!fresh && (target !== "tmpfs" || !w.warm_commit)) return { target, storageBytes, use: null, why: null };
+  if (!fresh) return { target, storageBytes, use: null, why: null };
   const nodes = c.state.warm?.warmNodesFor(key) ?? [];
   const load = new Map<string, number>();
   for (const r of await liveRows(c)) {
@@ -341,7 +341,6 @@ async function planWarm(c: Ctx, w: WorkspaceRow, fresh: boolean, image: string):
   }
   const d = chooseWarm({
     target, key, image, prepared, checkout, nodes, load, memoryLimitBytes: quantity(c.s.workspaceMemoryLimit),
-    ...(fresh ? {} : { commit: w.warm_commit, node: w.node }),
   });
   return { target, storageBytes, use: d.use, why: d.why };
 }
@@ -351,7 +350,7 @@ async function coldInstead(c: Ctx, w: WorkspaceRow, warm: WorkspaceWarm, why: st
   const name = workspaceName(w.id, c.now().toString(36));
   const next: WorkspaceWarm = { ...warm, use: null, why: `node ${warm.use?.node} had no room for it (${why})` };
   const at = new Date(c.now()).toISOString();
-  const r = await c.d.db.run(c.d.db.k.updateTable("workspaces").set({ pod: name, warm: JSON.stringify(next), warm_commit: null, create_tries: 0, pod_created_at: null, updated_at: at })
+  const r = await c.d.db.run(c.d.db.k.updateTable("workspaces").set({ pod: name, warm: JSON.stringify(next), warm_commit: null, create_tries: 0, pod_created_at: null, state_at: at, updated_at: at })
     .where("id", "=", w.id).where("state", "=", "starting").where("pod", "=", w.pod));
   if (!r.changes) return;
   c.d.log(`workspace launcher: workspace ${w.id}: ${next.why}; starting cold on another node`);
@@ -613,8 +612,8 @@ async function lost(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
 
 // ---- seeding ---------------------------------------------------------------------
 
-/** The tar of `sha` from AutoCraft's clone of `repo`, fetching the commit first when the clone lacks it. Refuses sources over MAX_SOURCE_BYTES. */
-export async function sourceArchive(repo: string, sha: string): Promise<{ bytes: number; open: () => AsyncIterable<Buffer> }> {
+/** The tar of `sha` from AutoCraft's clone of `repo`, fetching the commit first when the clone lacks it. Refuses sources over `maxBytes`. */
+export async function sourceArchive(repo: string, sha: string, maxBytes = MAX_SOURCE_BYTES): Promise<{ bytes: number; open: () => AsyncIterable<Buffer> }> {
   const g = await cloneWith(repo, sha);
   // The tar's size from the tree: a 512-byte header per entry and each blob padded to 512 bytes.
   let bytes = 1024;
@@ -622,7 +621,7 @@ export async function sourceArchive(repo: string, sha: string): Promise<{ bytes:
     const m = /^\d+ \w+ [0-9a-f]+ +(\d+|-)\t/.exec(e);
     if (m) bytes += 512 + (m[1] === "-" ? 0 : Math.ceil(Number(m[1]) / 512) * 512);
   }
-  if (bytes > MAX_SOURCE_BYTES) throw new Error(`the source of ${repo}@${sha.slice(0, 8)} is ${Math.round(bytes / 1024 ** 2)} MiB, over the ${MAX_SOURCE_BYTES / 1024 ** 2} MiB limit`);
+  if (bytes > maxBytes) throw new Error(`the source of ${repo}@${sha.slice(0, 8)} is ${Math.round(bytes / 1024 ** 2)} MiB, over the ${maxBytes / 1024 ** 2} MiB limit`);
   const env = { ...process.env, ...GIT_ENV, ...gitDirEnv(g.dir) };
   return {
     bytes,
@@ -716,11 +715,8 @@ async function seedKept(c: Ctx, w: WorkspaceRow, base: string, deadline: number)
       const r = await execWs(db, c.api, w.id, ["run", "60", "--", "git", "cat-file", "-e", `${base}^{commit}`], { tool: "seed", args: { resume: "check" }, timeoutMs: 70_000 }, c.now);
       if (r.header?.kind === "status" && r.header.state === "exited") {
         if (r.header.exit !== 0) return await giveUp(c, w, `The kept volume does not hold the base commit ${base.slice(0, 8)} (git exit ${r.header.exit}); the volume is left as it is`);
-        // A memory-backed target was copied again from the warm commit the checkout's mtimes were set for.
-        const warm = w.layout === LAYOUT_CI ? warmOf(w) : null;
-        const ci = warm?.use ? await warmDone(c, w, warm, false) : {};
         const at = new Date(c.now()).toISOString();
-        if (await moveWorkspace(db, w.id, ["seeding"], "ready", { resume_tries: 0, restored: "kept", restored_at: at, ...ci }, c.now())) c.d.log(`workspace launcher: workspace ${w.id} resumed on its volume`);
+        if (await moveWorkspace(db, w.id, ["seeding"], "ready", { resume_tries: 0, restored: "kept", restored_at: at }, c.now())) c.d.log(`workspace launcher: workspace ${w.id} resumed on its volume`);
         return;
       }
       why = r.error ?? describeHeader(r.header);
@@ -748,7 +744,7 @@ const EXT_SH = 'set -e; d=/work/ext/$1; find "$d" -mindepth 1 -delete; tar -x -f
 /** Copies a checkout the CI gate mounts (craft-fonts, craft-i18n) at `ref` from AutoCraft's clone into the volume's `ext/<name>`. */
 async function putExt(c: Ctx, id: number, name: "craft-fonts" | "craft-i18n", ref: string, deadline: number): Promise<void> {
   const { db } = c.d;
-  const src = await sourceArchive(name, ref);
+  const src = await sourceArchive(name, ref, EXT_ARCHIVE_MAX_BYTES);
   const left = () => Math.max(10_000, deadline - c.now());
   const put = await execWs(db, c.api, id, ["put", `/work/.ws/${name}.tar`], { tool: "seed", args: { ext: name, ref, bytes: src.bytes }, stdin: src.open(), timeoutMs: left() }, c.now);
   if (put.header?.kind !== "ok") throw new Error(`${name} could not be copied in: ${put.error ?? describeHeader(put.header)}`);
@@ -776,14 +772,20 @@ async function warmDone(c: Ctx, w: WorkspaceRow, warm: WorkspaceWarm, mtimes: bo
   let how = "";
   if (mtimes) {
     const ch = mark.trimmed ? await warmChanges(w.repo, use.commit, w.base_sha).catch((e: Error) => ({ error: errText(e) })) : null;
-    const list = ch && "files" in ch && ch.files ? { files: ch.files, dirs: ch.dirs ?? [] } : null;
+    let list = ch && "files" in ch && ch.files ? { files: ch.files, dirs: ch.dirs ?? [] } : null;
+    let putError: string | null = null;
     if (list) {
       const put = async (file: string, paths: string[]) => {
         const r = await execWs(db, c.api, w.id, ["put", file], { tool: "seed", args: { warm: "changed", paths: paths.length }, stdin: Buffer.from(paths.join("\0")), timeoutMs: 120_000 }, c.now);
         if (r.header?.kind !== "ok") throw new Error(`the changed-file list could not be copied in: ${r.error ?? describeHeader(r.header)}`);
       };
-      await put(WARM_CHANGED_FILES, list.files);
-      await put(WARM_CHANGED_DIRS, list.dirs.map((d) => d || "."));
+      try {
+        await put(WARM_CHANGED_FILES, list.files);
+        await put(WARM_CHANGED_DIRS, list.dirs.map((d) => d || "."));
+      } catch (e) {
+        putError = errText(e);
+        list = null;
+      }
     }
     const mode = list ? "list" : "all";
     const r = await execWs(db, c.api, w.id, ["run", "600", "--", "sh", "-c", WARM_MTIMES_SH, "mtimes", mode], { tool: "seed", args: { warm: "mtimes", mode }, timeoutMs: 610_000 }, c.now);
