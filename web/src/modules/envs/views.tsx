@@ -403,7 +403,7 @@ function FeaturesPanel() {
                 {q.data!.repos.map((r) => (
                   <li key={r} className="flex min-h-8 items-center gap-2 text-xs text-ink/75">
                     <span className="num">{r}</span>
-                    <FeatureState on={f.repos.includes(r)} label={`${FEATURE_LABEL[f.feature]} on ${r}`} operator={operator} busy={write.busy === `${f.feature}:${r}`} onChange={(on) => set(f.feature, on, r)} />
+                    <FeatureState on={f.repos.includes(r)} label={`${FEATURE_LABEL[f.feature]} on ${r}`} operator={operator || (f.feature === "implement" && (q.data?.manageable ?? []).includes(r))} busy={write.busy === `${f.feature}:${r}`} onChange={(on) => set(f.feature, on, r)} />
                     {f.feature === "pr-builds" && f.repos.includes(r) && (
                       <select
                         aria-label={`Which pull requests to build in ${r}`} disabled={!operator || write.busy === `pr-builds-${r}`} value={pb?.scopes[r] ?? "outside"}

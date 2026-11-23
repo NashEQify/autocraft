@@ -1902,7 +1902,8 @@ export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "s
 export type BuildFeatureState = { feature: BuildFeatureName; on: boolean; repoScoped: boolean; repos: string[] };
 export type PrBuildScope = "outside" | "all";
 /** `repos` is every tracked repo the viewer can see. `prBuilds`: the scope of each of those repos and the builds a repo may start a day. */
-export type BuildFeatures = { features: BuildFeatureState[]; repos: string[]; prBuilds: { scopes: Record<string, PrBuildScope>; perDay: number } };
+/** `manageable`: the repos whose Implement switch the viewer may flip (operators: all; maintainers: those they can write to). */
+export type BuildFeatures = { features: BuildFeatureState[]; repos: string[]; manageable: string[]; prBuilds: { scopes: Record<string, PrBuildScope>; perDay: number } };
 /** `on` switches; `scope` (with `repo`, pr-builds only) and `perDay` (pr-builds only) set the build scope and the daily cap. At least one of the three. */
 export type BuildFeatureInput = { feature: BuildFeatureName; on?: boolean; repo?: string; scope?: PrBuildScope; perDay?: number };
 
