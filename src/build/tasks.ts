@@ -426,7 +426,8 @@ export async function finishTask(db: Db, envId: string, id: number, body: unknow
   const results = parseResults(o.results);
   const summary = cleanLine(o.summary, 500);
   const sandbox = parseSandboxEnv(o.environment);
-  const ok = results.length > 0 && results.every((r) => r.exitCode === 0 && !r.timedOut);
+  // `failed`: the runner stopped the task for a reason no step result shows (a phase before or after the steps).
+  const ok = o.failed !== true && results.length > 0 && results.every((r) => r.exitCode === 0 && !r.timedOut);
   const state: TaskState = t.cancel_requested_at ? "cancelled" : ok ? "done" : "failed";
   const r = await db.run(db.k.updateTable("build_tasks").set({ state, ended_at: nowIso(), results: JSON.stringify(results), summary, sandbox_env: sandbox ? JSON.stringify(sandbox) : null })
     .where("id", "=", id).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]));

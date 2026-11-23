@@ -8,7 +8,7 @@ import type { BuildTaskDetail, TaskPage } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
 import { sniff } from "../src/build/artifacts.ts";
 import { authenticate, createEnv, hello, listEnvs, rotateKey, updateEnv } from "../src/build/envs.ts";
-import { appendLog, MAX_LOG_BYTES, cancelTask, claim, createTask, getTask } from "../src/build/tasks.ts";
+import { appendLog, MAX_LOG_BYTES, cancelTask, claim, createTask, finishTask, getTask } from "../src/build/tasks.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
 import { useRunnerClient } from "../src/remote/runner-client.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
@@ -68,6 +68,20 @@ describe("claim", () => {
 describe("lost workers and cancels", () => {
 
 
+});
+
+describe("finishing", () => {
+  test("a task the runner stopped for a reason no step shows is failed, though every step result passed", async () => {
+    await clear();
+    const e = await env();
+    const id = await task();
+    await claim(db, e.id, 1);
+    const ok = { step: "t", exitCode: 0, durationMs: 1, timedOut: false };
+    assert.equal((await finishTask(db, e.id, id, { results: [ok], summary: "the warm restore failed", failed: true })).state, "failed");
+    const id2 = await task();
+    await claim(db, e.id, 1);
+    assert.equal((await finishTask(db, e.id, id2, { results: [ok], summary: "1 step passed" })).state, "done");
+  });
 });
 
 describe("worker API", () => {

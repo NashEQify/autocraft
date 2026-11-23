@@ -254,3 +254,28 @@ test("warm manifest: path traversal, absolute paths, escaping links and entries 
     enc({ path: "target/l", type: "symlink", target: ".", mtime_ns: "1" }, file("target/l/x")),
   ]) assert.throws(() => decodeManifest(bad), ManifestError);
 });
+
+test("warm restore onto a non-empty target: one built with this image and Cargo.lock is kept, any other is cleared; neither fails", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-reuse-"));
+  const msg = join(tmp, "message");
+  const work = join(tmp, "work");
+  mkdirSync(join(work, "src"), { recursive: true });
+  writeFileSync(join(work, "src/Cargo.lock"), "# lock a");
+  const target = join(tmp, "checkout/target");
+  mkdirSync(join(tmp, "checkout"));
+  writeFileSync(join(tmp, "verify.pem"), generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }));
+  const env = (extra: Record<string, string> = {}) => ({
+    AUTOCRAFT_POD_WORK: work, AUTOCRAFT_POD_MESSAGE: msg, AUTOCRAFT_WARM_KEY: "photocraft", AUTOCRAFT_WARM_STORE_URL: "http://127.0.0.1:1", AUTOCRAFT_WARM_VERIFY_KEYS: join(tmp, "verify.pem"),
+    AUTOCRAFT_WARM_TARGET: target, AUTOCRAFT_WARM_IMAGE: "rust:1", ...extra,
+  });
+  const leftOver = () => { mkdirSync(join(target, "debug"), { recursive: true }); writeFileSync(join(target, "debug/a.o"), "x"); };
+  // The store is unreachable: a failed restore is a cold start (exit 0), never a refusal.
+  assert.equal(await podPhase("warm-restore", env()), 0);
+  leftOver();
+  assert.equal(await podPhase("warm-restore", env()), 0);
+  assert.match(JSON.parse(readFileSync(msg, "utf8")).summary, /reusing the target/);
+  assert.deepEqual(readdirSync(target), ["debug"], "the same image and Cargo.lock keeps the target");
+  assert.equal(await podPhase("warm-restore", env({ AUTOCRAFT_WARM_IMAGE: "rust:2" })), 0);
+  assert.deepEqual(readdirSync(target), [], "another image clears it");
+  rmSync(tmp, { recursive: true, force: true });
+});

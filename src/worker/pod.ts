@@ -290,14 +290,44 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
     return 0;
   };
   if (!dirs.length) throw new Error("AUTOCRAFT_WARM_TARGET or AUTOCRAFT_WARM_CARGO_HOME is required");
-  // Only a dir that was empty is emptied again after a failure.
-  const busy = dirs.filter((d) => existsSync(d) && readdirSync(d).length);
-  if (busy.length) throw new Error(`${busy.join(", ")} is not empty`);
+  // A dir left by an earlier build on the same volume. One built with this image and Cargo.lock is a valid start. Anything else is
+  // cleared, so two versions never mix in one dir. Only a dir that was empty is emptied again after a failure.
+  const image = w.v("IMAGE");
+  const lock = cargoLockOf(join(e.work, "src"));
+  const markFile = roots.target ? `${roots.target}.warm-base.json` : null;
+  const mark = JSON.stringify({ image: image ?? null, cargoLock: lock });
+  const writeMark = () => {
+    if (!markFile) return;
+    try {
+      writeFileSync(markFile, mark);
+    } catch (err) {
+      e.log(`warm restore: could not record what the target was built with (${(err as Error).message})`);
+    }
+  };
+  let reuse = false;
+  for (const d of dirs) {
+    if (!existsSync(d) || !readdirSync(d).length) continue;
+    const same = d === roots.target && !!image && !!lock && !!markFile && existsSync(markFile) && readFileSync(markFile, "utf8") === mark;
+    if (same) {
+      reuse = true;
+      continue;
+    }
+    clearDir(d);
+    e.log(`warm restore: cleared ${d}, which an earlier build left`);
+  }
+  writeMark();
   const t0 = Date.now();
   try {
+    if (reuse) {
+      const summary = "warm restore: reusing the target left on the volume";
+      e.log(summary);
+      const rest = roots.cargo ? { cargo: roots.cargo } : null;
+      if (rest) await store.restore(key, rest, verifyKeys);
+      out({ ok: true, warm: null, badBlobs: [], summary });
+      return 0;
+    }
     const r = await store.restore(key, roots, verifyKeys);
     if (!r) return cold(`warm restore: the store has no version of ${key}`);
-    const image = w.v("IMAGE");
     if (image && r.manifest.header.image !== image) {
       // Cargo would rebuild everything beside the old artifacts, and the next publish would carry both.
       for (const d of dirs) clearDir(d);

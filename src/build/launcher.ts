@@ -856,7 +856,7 @@ async function finish(c: EnvCtx, run: Run, failed: string | null): Promise<void>
     : undefined;
   const summary = failed ?? (results.length ? `${results.length} step${results.length === 1 ? "" : "s"} passed` : "no step ran");
   try {
-    await finishTask(c.d.db, c.env.id, run.task_id, { results, summary, ...(environment ? { environment } : {}) });
+    await finishTask(c.d.db, c.env.id, run.task_id, { results, summary, ...(failed ? { failed: true } : {}), ...(environment ? { environment } : {}) });
   } catch (e) {
     c.d.log(`pod launcher: task ${run.task_id}: finish: ${(e as Error).message}`);
   }
