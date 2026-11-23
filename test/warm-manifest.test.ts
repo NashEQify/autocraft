@@ -8,7 +8,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { applyManifest, clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, removeCargoLocks, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
+import { applyManifest, clearDir, countTouched, decodeManifest, ManifestError, MTIME_SLACK_NS, removeCargoLocks, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
 import { podPhase } from "../src/worker/pod.ts";
 
@@ -353,4 +353,33 @@ test("warm cargo locks: never published, empty files get their own inodes, and a
   await removeCargoLocks(dest);
   assert.equal(existsSync(join(dest, ".cargo-lock")), false);
   assert.equal(existsSync(join(dest, "a")), true);
+});
+
+test("warm link reuse: a file group-writable or changed after the version was applied is fetched again", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-reuse-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const mtimeNs = 1_700_000_000_000_000_000n;
+  const bodies = ["clean", "gwrite", "touched"].map((n) => Buffer.from(`content of ${n}`));
+  const shas = bodies.map((b) => createHash("sha256").update(b).digest("hex"));
+  const manifest: any = {
+    header: {},
+    entries: [
+      { path: "target/d", type: "dir", mode: 0o755, mtimeNs },
+      ...bodies.map((b, i) => ({ path: `target/d/f${i}`, type: "file", mode: 0o644, size: b.length, mtimeNs, sha256: shas[i] })),
+    ],
+  };
+  const fetch = async (sha: string) => (async function* () { yield zstdCompressSync(bodies[shas.indexOf(sha)]); })();
+  const prevRoot = join(tmp, "prev");
+  await applyManifest(manifest, { target: prevRoot }, fetch);
+  const appliedMs = Date.now() + 5000;
+  chmodSync(join(prevRoot, "d/f1"), 0o664);
+  const next = join(tmp, "next");
+  const stats = await applyManifest(manifest, { target: next }, fetch, { previous: { manifest, roots: { target: prevRoot }, appliedMs } });
+  assert.equal(stats.linked, 2, "g+w is refused, the rest of a clean tree is linked");
+  const next2 = join(tmp, "next2");
+  const late = await applyManifest(manifest, { target: next2 }, fetch, { previous: { manifest, roots: { target: prevRoot }, appliedMs: Date.now() - 60_000 } });
+  assert.equal(late.linked, 0, "every file changed after the version was applied");
+  assert.equal(statSync(join(next, "d/f0")).ino, statSync(join(prevRoot, "d/f0")).ino);
+  assert.notEqual(statSync(join(next, "d/f1")).ino, statSync(join(prevRoot, "d/f1")).ino);
+  assert.equal(countTouched({ manifest, roots: { target: prevRoot }, appliedMs }), 1);
 });
