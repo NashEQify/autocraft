@@ -26,7 +26,7 @@ import { WarmPlacer } from "./warm-place.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
-  PEAK_LINE, WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
+  stepPeak, WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
 } from "./pods.ts";
 import { recordTrimmedPublish, recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
@@ -283,11 +283,6 @@ function publishedTrimmed(message: string | undefined): boolean {
   } catch {
     return false;
   }
-}
-/** A step's peak anonymous memory from its wrapper's termination message (pods.ts PEAK_LINE), at most `max`; 0 without one. */
-function stepPeak(message: string | undefined, max: number): number {
-  const n = Number(PEAK_LINE.exec(message ?? "")?.[1]);
-  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : 0;
 }
 function publishedBytes(message: string | undefined): number {
   try {
@@ -696,7 +691,8 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       // running when the pod ended was stopped by the pod's deadline.
       const timedOut = !term || ((term.exitCode === 124 || term.exitCode === 137) && durationMs >= stepCap(c.s, step) * 1000 - 2000);
       const oomKilled = term?.reason === "OOMKilled";
-      const peak = stepPeak(term?.message, quantity(c.s.maxPodMemory));
+      const spec = [...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? [])].find((x) => x.name === stepContainer(i));
+      const peak = stepPeak(term?.message, quantity(spec?.resources?.limits?.memory ?? c.s.maxPodMemory));
       results.push({ step: step.name, exitCode: timedOut ? null : term!.exitCode, durationMs, timedOut, ...(peak ? { peakMemBytes: peak } : {}), ...(oomKilled ? { oomKilled } : {}) });
       ran = Math.max(ran, i + 1);
       if (timedOut) failed = `${step.name} timed out`;

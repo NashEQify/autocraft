@@ -5,8 +5,10 @@
 // (placedAssign). Without a placement (the ConfigMap is missing, empty or malformed) an agent keeps every key that
 // `warm-assign` lists, as before.
 //
-// Placement is sticky: a key stays on the nodes it was placed on while they report and have room, since moving it means
-// downloading the whole version again. Otherwise it goes to the nodes with the most room left: free disk plus the warm
+// Placement is sticky: a key stays on the nodes it was placed on while they have room and reported within the agents'
+// grace period (a node that missed a few status writes keeps its keys), since moving it means downloading the whole
+// version again. Only nodes with a fresh status take new keys.
+// Otherwise it goes to the nodes with the most room left: free disk plus the warm
 // bytes the node holds now, at most the `warm-assign` cap, less what keys placed before it take. Keys are placed largest
 // first; a key whose version is not published yet counts 0 bytes until it is.
 import { readFileSync } from "node:fs";
@@ -23,7 +25,7 @@ export const PLACEMENT_DISK_SHARE = 0.85;
 /** Keys in priority order (the agents' cap drops the lowest first), each with the nodes that keep it. */
 export type Placement = { version: 1; keys: { key: string; nodes: string[] }[] };
 
-export type PlaceNode = { node: string; fs: { sizeBytes: number; usedBytes: number }; warmBytes: { current: number }; keys: Record<string, KeyStatus> };
+export type PlaceNode = { node: string; fresh: boolean; fs: { sizeBytes: number; usedBytes: number }; warmBytes: { current: number }; keys: Record<string, KeyStatus> };
 
 /** The placement in `placement.json`, or null when there is none or it is malformed. */
 export function parsePlacement(text: string | null | undefined): Placement | null {
@@ -67,11 +69,11 @@ export function placeKeys(keys: { key: string; bytes: number | null }[], nodes: 
   for (const { key, bytes } of [...keys].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0) || a.key.localeCompare(b.key))) {
     const need = bytes ?? 0;
     const fits = (n: string) => (left.get(n) ?? -1) >= need;
-    const holding = nodes.filter((n) => n.keys[key]).map((n) => n.node);
-    const byRoom = [...left.keys()].sort((a, b) => left.get(b)! - left.get(a)! || a.localeCompare(b));
+    const holding = nodes.filter((n) => n.fresh && n.keys[key]).map((n) => n.node);
+    const byRoom = nodes.filter((n) => n.fresh).map((n) => n.node).sort((a, b) => left.get(b)! - left.get(a)! || a.localeCompare(b));
     const order = [...new Set([...(before.get(key) ?? []), ...holding, ...byRoom])].filter((n) => left.has(n));
     // Nodes with room first, in the order above; when fewer have room, the roomiest others (their agents report the cap).
-    const chosen = [...order.filter(fits), ...byRoom.filter((n) => !fits(n))].slice(0, Math.min(copies, left.size));
+    const chosen = [...new Set([...order.filter(fits), ...byRoom.filter((n) => !fits(n))])].slice(0, copies);
     for (const n of chosen) left.set(n, left.get(n)! - need);
     placed.set(key, chosen.sort());
   }

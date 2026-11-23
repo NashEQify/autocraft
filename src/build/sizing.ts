@@ -19,7 +19,7 @@ import { excluded } from "../db/kx.ts";
 import type { TaskResult } from "../../web/src/api/types.ts";
 import { BuildError } from "./envs.ts";
 import { quantity, type KubeSettings, type StepMemory } from "./pods.ts";
-import { warmKeyOf } from "./tasks.ts";
+import { WARM_STEP, warmKeyOf } from "./tasks.ts";
 import { WARM_TARGETS, warmTmpfsBytes, type WarmTarget } from "./warm-mount.ts";
 import { warmBytes } from "./warm-queue.ts";
 
@@ -66,6 +66,24 @@ export const autoWarmTarget = (bytes: number | null): WarmTarget =>
 const historyCache = new WeakMap<Db, Map<string, { at: number; v: RepoSizing["history"] }>>();
 const forget = (db: Db, repo: string) => historyCache.get(db)?.delete(repo);
 
+/**
+ * A build's largest step peak, or 0 unless every planned step ran to its end: all passed, or only the last one failed
+ * (the tests). A build that stopped early, timed out or was OOM-killed did not show what a whole build needs.
+ */
+function completedPeak(resultsJson: string, planJson: string): number {
+  let results: TaskResult[], plan: { name?: unknown }[];
+  try {
+    results = JSON.parse(resultsJson) as TaskResult[];
+    plan = JSON.parse(planJson) as { name?: unknown }[];
+  } catch {
+    return 0;
+  }
+  if (!Array.isArray(results) || !Array.isArray(plan) || !plan.length) return 0;
+  const ran = plan.map((s) => results.find((x) => x?.step === s.name));
+  const done = ran.every((x, i) => x && !x.timedOut && !x.oomKilled && x.exitCode !== null && (x.exitCode === 0 || i === ran.length - 1));
+  return done ? Math.max(0, ...ran.map((x) => typeof x?.peakMemBytes === "number" && Number.isFinite(x.peakMemBytes) ? x.peakMemBytes : 0)) : 0;
+}
+
 /** The size the repository's recent measured builds in Kubernetes environments call for; null below AUTO_MIN_BUILDS. */
 export async function historyMemory(db: Db, repo: string): Promise<RepoSizing["history"]> {
   const cache = historyCache.get(db) ?? new Map();
@@ -73,20 +91,20 @@ export async function historyMemory(db: Db, repo: string): Promise<RepoSizing["h
   const hit = cache.get(repo);
   if (hit && Date.now() - hit.at < HISTORY_TTL_MS) return hit.v;
   const since = new Date(Date.now() - AUTO_DAYS * 86400_000).toISOString();
-  const rows = await db.all(db.k.selectFrom("build_tasks").select("results").where("repo", "=", repo).where("ended_at", ">=", since)
+  // Default-branch builds only (warm builds, and unpatched builds of a head the main-CI poll saw): a PR head's code is
+  // not the repository's yet, and its author could make it use any amount of memory.
+  const rows = await db.all(db.k.selectFrom("build_tasks").select(["results", "plan"]).where("repo", "=", repo).where("ended_at", ">=", since)
     .where("state", "in", ["done", "failed"]).where("results", "!=", "[]")
     .where("env_id", "in", db.k.selectFrom("build_envs").select("id").where("kind", "=", "kubernetes"))
-    .orderBy("ended_at", "desc").limit(AUTO_BUILDS * 2));
+    .where((eb) => eb.or([
+      eb("step", "=", WARM_STEP),
+      eb.and([eb("number", "is", null), eb("patch", "is", null), eb("head_sha", "in", db.k.selectFrom("main_ci").select("head_sha").where("repo", "=", repo))]),
+    ]))
+    .orderBy("ended_at", "desc").limit(AUTO_BUILDS * 3));
   // One size serves every step of a task, so a build counts with its largest step.
   const peaks: number[] = [];
   for (const r of rows) {
-    let results: TaskResult[] = [];
-    try {
-      results = JSON.parse(r.results) as TaskResult[];
-    } catch {
-      continue;
-    }
-    const p = Math.max(0, ...(Array.isArray(results) ? results : []).map((x) => typeof x?.peakMemBytes === "number" && Number.isFinite(x.peakMemBytes) ? x.peakMemBytes : 0));
+    const p = completedPeak(r.results, r.plan);
     if (p > 0) peaks.push(p);
     if (peaks.length === AUTO_BUILDS) break;
   }

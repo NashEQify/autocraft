@@ -1,10 +1,11 @@
 // The runner's half of warm placement (src/warm/placement.ts): at most every PLACE_EVERY_MS it places the covered repos'
-// keys on the nodes whose warm status is fresh and writes `warm-placement` when the result changed. It never creates the
+// keys on the nodes that reported within the agents' default grace period (new keys only on fresh ones) and writes `warm-placement` when the result changed. It never creates the
 // ConfigMap (the cluster's configuration does, once), so without it nothing changes and every node keeps every key that
 // `warm-assign` lists. Nothing is written while no node reports or no repo is covered: an empty placement would make
 // every node drop what it holds.
 import type { Db } from "../db/index.ts";
 import { parsePlacement, PLACEMENT_CONFIGMAP, PLACEMENT_DATA_KEY, placeKeys } from "../warm/placement.ts";
+import { DEFAULT_GRACE_MS } from "../warm/sync-agent.ts";
 import type { ConfigMapApi } from "./kube-api.ts";
 import { warmKeyOf } from "./tasks.ts";
 import { warmBytes, warmCoverage } from "./warm-queue.ts";
@@ -33,9 +34,9 @@ export class WarmPlacer {
     this.at = this.o.now();
     const ns = this.o.namespace;
     try {
-      const nodes = status.freshNodes();
+      const nodes = status.recentNodes(DEFAULT_GRACE_MS);
       const repos = (await warmCoverage(db)).repos;
-      if (!nodes.length || !repos.length) return;
+      if (!nodes.some((n) => n.fresh) || !repos.length) return;
       const cm = await this.api.getConfigMap(ns, PLACEMENT_CONFIGMAP);
       if (!cm) return this.note(`ConfigMap ${PLACEMENT_CONFIGMAP} is missing in ${ns}, so every node keeps every key warm-assign lists`);
       const gb = Number((await this.api.getConfigMap(ns, ASSIGN_CONFIGMAP))?.data?.maxGbPerNode);

@@ -287,19 +287,36 @@ export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: nu
 const COPY_SOURCE = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }';
 /**
  * The step's peak anonymous memory (cgroup v2 `memory.stat` anon of the container, sampled once a second): page cache and
- * memory-backed volumes are left out, so it measures what the step's processes need (src/build/sizing.ts). The wrapper
- * writes it to the termination message as `autocraft-peak-anon <bytes>` (stepPeak). The container's own cgroup has a
- * `memory.max`; the root one does not, so a pod without its own cgroup namespace reports nothing.
+ * memory-backed volumes are left out, so it measures what the step's processes need (src/build/sizing.ts). The sampler
+ * keeps the peak in its own shell and writes it to the termination message as `autocraft-peak-anon <bytes>` (stepPeak)
+ * only when the wrapper stops it, after the step ended. The step runs as the same user and could still write that file;
+ * the launcher caps a reading at the container's memory limit. The container's own cgroup has a `memory.max`; the root
+ * one does not, so a pod without its own cgroup namespace reports nothing.
  */
 const PEAK_START = [
   "pk=; if [ -r /sys/fs/cgroup/memory.stat ] && [ -e /sys/fs/cgroup/memory.max ]; then",
-  '  ( m=0; while :; do a=0; while read -r k v; do if [ "$k" = anon ]; then a=$v; break; fi; done < /sys/fs/cgroup/memory.stat',
-  '    if [ "$a" -gt "$m" ] 2>/dev/null; then m=$a; echo "$m" > /tmp/.autocraft-peak; fi; sleep 1; done ) & pk=$!',
+  "  ( m=0; trap 'echo \"autocraft-peak-anon $m\" 2>/dev/null > /dev/termination-log; exit 0' TERM",
+  '    while :; do a=0; while read -r k v; do if [ "$k" = anon ]; then a=$v; break; fi; done < /sys/fs/cgroup/memory.stat',
+  '    if [ "$a" -gt "$m" ] 2>/dev/null; then m=$a; fi; sleep 1; done ) & pk=$!',
   "fi",
 ].join("\n");
-const PEAK_END = 'if [ -n "$pk" ]; then kill "$pk" 2>/dev/null; p=; read -r p 2>/dev/null < /tmp/.autocraft-peak; [ -n "$p" ] && echo "autocraft-peak-anon $p" 2>/dev/null > /dev/termination-log; fi';
+const PEAK_END = 'if [ -n "$pk" ]; then kill "$pk" 2>/dev/null; wait "$pk" 2>/dev/null; fi';
+/**
+ * Runs the step under `timeout` in the background, so the wrapper can stop the sampler afterwards; a TERM to the wrapper
+ * (the pod's deadline or deletion) is passed on to `timeout`, which passes it to the step.
+ */
+const RUN_STEP = [
+  't=$1; shift; timeout -k 10 "$t" "$@" & c=$!',
+  "trap 'kill -TERM \"$c\" 2>/dev/null' TERM",
+  'wait "$c"; s=$?; while kill -0 "$c" 2>/dev/null; do wait "$c"; s=$?; done; trap - TERM',
+].join("\n");
 export const PEAK_LINE = /^autocraft-peak-anon ([0-9]{1,15})$/m;
-export const STEP_WRAPPER = [COPY_SOURCE, PEAK_START, 't=$1; shift; timeout -k 10 "$t" "$@"; s=$?', PEAK_END, "exit $s"].join("\n");
+/** A step's peak from its termination message (PEAK_LINE), at most `max` (the container's memory limit); 0 without one. */
+export function stepPeak(message: string | undefined, max: number): number {
+  const n = Number(PEAK_LINE.exec(message ?? "")?.[1]);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : 0;
+}
+export const STEP_WRAPPER = [COPY_SOURCE, PEAK_START, RUN_STEP, PEAK_END, "exit $s"].join("\n");
 /**
  * A step that reads the compile cache: rustc runs through sccache, and the cache's hit counts end the step's output. sccache
  * keys a compile on every CARGO_* variable, and the CI gate builds with CARGO_TERM_COLOR set; the wrapper gives that value to
@@ -313,7 +330,7 @@ export const CACHE_STEP_WRAPPER = [
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
   PEAK_START,
-  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  RUN_STEP,
   PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
@@ -334,7 +351,7 @@ export const WARM_STEP_WRAPPER = [
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
   PEAK_START,
-  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  RUN_STEP,
   PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-write):"; timeout 60 sccache --show-stats; fi',
   "exit $s",

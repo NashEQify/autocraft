@@ -41,8 +41,10 @@ test("step memory follows measured builds; an OOM kill raises it for the next bu
   const db = await connectDb(":memory:");
   const s = parseSettings({ memoryRequest: "8Gi", memoryLimit: "16Gi", maxPodMemory: "64Gi", toolchainImages: { "rust-stable": "rust-stable:test" } });
   await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 1, settings: s }, "op");
+  const at = new Date().toISOString();
+  await db.run(db.k.insertInto("main_ci").values({ repo: "app", head_sha: "a".repeat(40), branch: "main", state: "green", failing: "[]", checks: "[]", committed_at: at, headline: null, first_seen_at: at, state_changed_at: at, updated_at: at }));
   const build = async (peak: number) => await db.run(db.k.insertInto("build_tasks").values({
-    step: "verify", repo: "app", head_sha: "a".repeat(40), requires: "{}", plan: "[]", state: "done", env_id: "pods",
+    step: "nightly", repo: "app", head_sha: "a".repeat(40), requires: "{}", plan: JSON.stringify([{ name: "build", cmd: ["cargo", "build"], network: "none", timeoutSec: 600 }]), state: "done", env_id: "pods",
     queued_at: new Date().toISOString(), ended_at: new Date().toISOString(), results: JSON.stringify([{ step: "build", exitCode: 0, durationMs: 5, timedOut: false, peakMemBytes: peak }]),
   }));
   for (const peak of [1.5e9, 2e9, 2.5e9]) await build(peak);
