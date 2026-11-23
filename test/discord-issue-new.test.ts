@@ -144,9 +144,16 @@ describe("search and filing flow", () => {
     const modal = await pressToQuestions("u21", rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!);
     await submit("u21", modal.data!.custom_id!, {});
     fileResult = { status: "refused", reason: "x" };
-    await press("u21", rows(rest.edits[0]!).find((x) => x.label === "File it")!.custom_id!);
+    const draftRows = rows(rest.edits[0]!);
+    const editId = draftRows.find((x) => x.label === "Edit")!.custom_id!;
+    await press("u21", draftRows.find((x) => x.label === "File it")!.custom_id!);
     assert.equal(junkCalls.length, 1, "only the first message was checked");
     assert.equal(filed[0]!.junkChecked, true);
+    // An edited draft is checked again at submit.
+    await press("u21", editId);
+    await submit("u21", modalId(), { title: "Edited title", body: "Edited body" });
+    await press("u21", rows(rest.edits[0]!).find((x) => x.label === "File it")!.custom_id!);
+    assert.equal(filed.at(-1)!.junkChecked, false);
     filed.length = 0;
   });
 

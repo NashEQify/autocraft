@@ -73,6 +73,8 @@ type Session = {
   bot: boolean;
   /** The Discord name a bot-filed issue credits. */
   name: string;
+  /** The person changed the draft in the Edit form: the junk check runs again at submit. */
+  edited?: boolean;
   /** True while File it runs, so a second press cannot file twice. */
   filing: boolean;
   /** The new-issue limit's slot was taken. */
@@ -363,7 +365,7 @@ export class IssueNew {
     const github = { type: 2, style: 5, label: "Open on GitHub instead", url };
     const githubText = asButton ? "" : `\n[Open on GitHub instead](<${url}>)`;
     try {
-      const r = await (this.#d.file ?? fileIssue)({ db: this.#d.db, log }, { reporter: keys.hash("author", s.user), repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, junkChecked: true });
+      const r = await (this.#d.file ?? fileIssue)({ db: this.#d.db, log }, { reporter: keys.hash("author", s.user), repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, junkChecked: !s.edited });
       if (r.status === "sign-in") {
         // The session stays, and gets time for the sign-in; File it works on the draft message afterwards.
         s.expires = this.#now() + SESSION_MS;
@@ -391,7 +393,7 @@ export class IssueNew {
     const asButton = url.length <= BUTTON_URL_MAX;
     try {
       const r = await (this.#d.fileBot ?? fileAsBot)({ db: this.#d.db, log }, {
-        reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted, junkChecked: true,
+        reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted, junkChecked: !s.edited,
       });
       if (r.status === "filed") {
         this.#sessions.delete(sid);
@@ -419,7 +421,7 @@ export class IssueNew {
     if (!s?.draft) return void (await call.edit({ content: "This draft has expired. Start again with /autocraft search." }));
     const f = call.fields();
     const d = cleanDraft({ title: f.title ?? "", body: f.body ?? "" }, await this.#repos());
-    if (d) s.draft = d;
+    if (d) { s.draft = d; s.edited = true; }
     await call.edit(await this.#rendered(s, sid));
   }
 }
