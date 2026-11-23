@@ -196,8 +196,9 @@ export type BotRequest = FileRequest & {
 
 export type BotResult = { status: "filed"; number: number; url: string } | { status: "refused"; reason: string };
 
-/** The reporter's name as the issue shows it: one line, no mentions, links or Markdown, capped. */
+/** The reporter as the issue shows them: a Discord handle (`@name`) in a code span so GitHub does not ping a user of that name; anything else is one line without mentions, links or Markdown, capped. */
 export function creditName(name: string): string {
+  if (/^@[a-z0-9_.]{2,32}$/.test(name)) return `\`${name}\``;
   const t = name.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\b[a-z][\w+.-]*:\/\/\S*|\bwww\.\S*/gi, " ").replace(/[@#*_~`|<>\[\]()\\]/g, "").replace(/\s+/g, " ").trim().slice(0, NAME_MAX);
   return t || "a Discord member";
 }
