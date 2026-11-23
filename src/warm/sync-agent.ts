@@ -17,7 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, type ApplyStats, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, type ApplyStats, BadBlobError, clearDir, countTouched, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -192,6 +192,7 @@ export class SyncAgent {
     const { dir, log } = this.c;
     mkdirSync(dir, { recursive: true });
     this.removeLeftovers();
+    this.dropTouched();
     this.fixModes();
     let assign: Assign;
     try {
@@ -322,6 +323,35 @@ export class SyncAgent {
     }
   }
 
+  private touchedChecked = false;
+
+  /**
+   * Once per agent start: removes versions with a file that was written to, relabelled or made group/other-writable
+   * since the version was finished (stat only). The normal flow fetches them again.
+   */
+  private dropTouched(): void {
+    if (this.touchedChecked) return;
+    this.touchedChecked = true;
+    for (const k of this.keyDirs()) {
+      for (const n of readdirSync(join(this.c.dir, k))) {
+        if (!GEN.test(n)) continue;
+        const gen = join(this.c.dir, k, n);
+        const meta = this.metaOf(gen);
+        if (!meta) continue;
+        try {
+          const prev = this.previousOf(gen, meta.synced);
+          const bad = prev ? countTouched(prev) : 0;
+          if (!bad) continue;
+          if (this.held(k)?.gen === n) unlinkSync(join(this.c.dir, k, "current"));
+          removeTree(gen);
+          this.c.log(`warm sync: ${k}/${n}: dropped, ${bad} files changed since it was applied`);
+        } catch (e) {
+          this.c.log(`warm sync: ${k}/${n}: integrity check failed: ${(e as Error).message}`.slice(0, 300));
+        }
+      }
+    }
+  }
+
   /** Builds dirs of an interrupted sync and a half-made `current` link. */
   private removeLeftovers(): void {
     for (const k of this.keyDirs()) {
@@ -414,7 +444,7 @@ export class SyncAgent {
     try {
       const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       progress = this.startProgress(key, l, manifest.header.bytes, manifest.header.files, t0);
-      const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
+      const previous = h ? this.previousOf(join(kd, h.gen), h.meta.synced) : undefined;
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
       const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
@@ -522,10 +552,10 @@ export class SyncAgent {
   }
 
   /** The current version as hard-link source; none when its manifest cannot be read (everything is fetched then). */
-  private previousOf(genDir: string): Previous | undefined {
+  private previousOf(genDir: string, appliedMs: number): Previous | undefined {
     try {
       const manifest: Manifest = decodeManifest(readFileSync(join(genDir, "manifest.zst")));
-      return { manifest, roots: { target: join(genDir, "target"), cargo: join(genDir, "cargo") } };
+      return { manifest, roots: { target: join(genDir, "target"), cargo: join(genDir, "cargo") }, appliedMs };
     } catch (e) {
       this.c.log(`warm sync: ${genDir}: the previous manifest cannot be read (${(e as Error).message}); fetching every file`);
       return undefined;

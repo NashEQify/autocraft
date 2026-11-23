@@ -65,13 +65,14 @@ test("warm sync: versions with hard links, grace, refused versions, the node cap
       const abs = join(p.startsWith("target/") ? tree(key).target : tree(key).cargoHome, p.slice(p.indexOf("/") + 1));
       mkdirSync(join(abs, ".."), { recursive: true });
       writeFileSync(abs, body);
+      chmodSync(abs, 0o644);
     }
   };
   let stored = Date.now();
   const publish = (key: string, commit: string, o: { signKey?: typeof privateKey; at?: number } = {}) =>
     store.publish({ key, repo: `org/${key}`, commit, image: "img@sha256:1", rustc: null, envHash: "e1", checkout: "/w/src", source: tree(key), signKey: o.signKey ?? privateKey, stored: o.at ?? (stored += 1000) });
 
-  let clock = Date.now();
+  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
   let assign: Assign = { keys: ["deckcraft", "photocraft"], maxBytes: 1024 ** 3 };
   const kube = new FakeConfigMaps();
   const dir = join(root, "node");
@@ -176,7 +177,7 @@ test("warm sync: a third publish of one commit keeps the version in its grace pe
   let stored = Date.now();
   const publish = (commit: string, at?: number) =>
     store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: at ?? (stored += 1000) });
-  let clock = Date.now();
+  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
   let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
   const dir = join(root, "node");
   const agent = new SyncAgent({
@@ -230,7 +231,7 @@ test("warm sync: a new version that fits the cap only after a grace version expi
     writeFileSync(join(src.target, "debug", "app"), body);
     await store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: (stored += 1000) });
   };
-  let clock = Date.now();
+  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
   let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
   const dir = join(root, "node");
   const agent = new SyncAgent({
