@@ -1046,7 +1046,7 @@ Settings (`envs add` and `envs set` options; `envs list` shows them):
 |---|---|---|
 | `--namespace` | `craft-builds` | Namespace of the pods and volumes. |
 | `--image` | `runner` | AutoCraft image of the task, source and upload pods. `runner` uses the runner's `AUTOCRAFT_IMAGE`. |
-| `--toolchain-image NAME=REF` | none | Image the steps of tasks naming toolchain `NAME` run in; `NAME=none` removes it. With none set, the environment takes no task that names a toolchain (every pipeline build names `rust-stable`). `deploy/container/Containerfile.rust-stable` builds the `rust-stable` image. |
+| `--toolchain-image NAME=REF` | none | Image the steps of tasks naming toolchain `NAME` run in; `NAME=none` removes it. With none set, the environment takes no task that names a toolchain (every pipeline build names `rust-stable`). `deploy/container/Containerfile.rust-stable` builds the `rust-stable` image. Steps run offline with a read-only rustup home, so a repository's `rust-toolchain.toml` must name the image's Rust release and only components and targets the image has; otherwise rustup's install attempt fails the step (`could not create temp file`). |
 | `--worker-url` | `http://autocraft-worker-api.craft.svc:8981` | The worker API as the `api` pods reach it. |
 | `--cpu-request`, `--cpu-limit` | `4`, `16` | Per step container. |
 | `--memory-request`, `--memory-limit` | `4Gi`, `8Gi` | Per step container, for a repository without its own size (Pod sizes above). |
