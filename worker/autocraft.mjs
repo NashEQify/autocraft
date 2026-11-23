@@ -20,7 +20,7 @@
 //   autocraft service install | uninstall | status  runs `work` as a systemd user unit or launchd agent
 //   autocraft runner status | logs | pause | resume | reserve  readiness and plan usage, the service log, pausing, the usage reserve
 //   autocraft inbox | queue | calls | settings | repos | fixups ...  the server's tools as commands (MCP over HTTP); `call <tool>` reaches any tool
-//   autocraft work [--parallel N]     claims, runs and submits in a loop
+//   autocraft work [--parallel N] [--no-auto-update]  claims, runs and submits in a loop; updates itself when the server has a newer runner
 //   autocraft claim                   claims one call; prints its lease id
 //   autocraft run [--detach] [<lease>]  runs a claimed lease (claims one when none is given)
 //   autocraft wait <lease>            waits for a detached run (at most 9 minutes)
@@ -96,7 +96,7 @@ export const ROUTES = {
 export const ENCODINGS = /** @type {const} */ (["gzip+base64"]);
 /** @typedef {(typeof ENCODINGS)[number]} Encoding */
 /** @typedef {{ encoding: Encoding, body: string }} Envelope  `body`: base64 of the gzip of the plain JSON body */
-/** @typedef {{ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number }} ClaimReply */
+/** @typedef {({ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number }) & { currentHelper?: string }} ClaimReply */
 /** @typedef {"ready" | "quota-held" | "paused" | "cooled-off" | "sandbox-failed" | "version-refused" | "harness-missing" | "failing"} Readiness */
 /** @typedef {{ usedPercent: number, resetsAt: string | null }} UsageWindow */
 /** @typedef {{ fiveHour: UsageWindow | null, weekly: UsageWindow | null, at: string }} UsageReading */
@@ -1716,6 +1716,7 @@ const ADAPTERS = { claude: claudeAdapter, codex: codexAdapter };
  * @property {string[]} [repos]
  * @property {Reserve} [reserve]  the local usage reserve: it only raises the server's, window by window
  * @property {number} [treeCacheGb]  the cap of the cached trees in GB (default TREE_CACHE_GB)
+ * @property {boolean} [autoUpdate]  false: `work` never replaces this file by itself (default true)
  */
 
 /** The runner's directory name under the config and cache directories. Not `autocraft`: a machine running the server keeps its data there. */
@@ -2482,6 +2483,8 @@ const helperStatusFile = () => join(cacheDir(), "status.json");
  * @property {Reserve} [reserve]  the effective reserve
  * @property {Reserve} [serverReserve]
  * @property {{ version: string, at: number, reason: string }} [refused]  the server refused this helper version
+ * @property {{ at: number, from: string, to: string }} [update]  the last update `work` or `update` made
+ * @property {{ version: string, at: number, reason: string }} [updateAvailable]  a newer runner exists that `work` did not apply (git checkout, opt-out) or is about to
  * @property {{ until: number, reason: string }} [cooloff]  the server gives this token no calls until then (repeated lost leases)
  * @property {Hold} [hold]  a `work` process holds its claims: a run's stop, or calls failed in a row
  * @property {number} [at]
@@ -3707,6 +3710,46 @@ async function cmdWork(argv) {
   // The interactive lanes run where the own lane does (same slot limits).
   const interactiveOn = own;
   const ac = new AbortController();
+  // Self-update: a newer runner on the server is downloaded and checked, then claiming stops, running calls finish, and the
+  // file is replaced before the process exits (the service starts it again).
+  const autoUpdate = loadConfig().autoUpdate !== false && !argv.includes("--no-auto-update");
+  const gitInstall = inGitCheckout(self);
+  /** @type {{ version: string, staged: string } | null} */
+  let updating = /** @type {{ version: string, staged: string } | null} */ (null);
+  const wake = new AbortController();
+  let updateCheckAt = 0, updateChecking = false, updateFailures = 0, updateSaid = "";
+  /** @param {string | undefined} hint the server's runner version when a reply carried it; absent after a refusal */
+  const checkUpdate = async (hint) => {
+    if (updating || updateChecking || ac.signal.aborted || Date.now() < updateCheckAt) return;
+    if (hint !== undefined && compareVersions(hint, HELPER_VERSION) <= 0) return;
+    if (hint !== undefined && selfUpdateDecision({ current: HELPER_VERSION, served: hint, inGit: gitInstall, enabled: autoUpdate }) === "available") {
+      const why = gitInstall ? "this install is a git checkout: update it with git" : "automatic updates are off";
+      if (updateSaid !== hint) { updateSaid = hint; console.log(`autocraft ${hint} is available (running ${HELPER_VERSION}); ${why}, or run: ${UPDATE_COMMAND}`); }
+      updateHelperStatus((s) => ({ ...s, updateAvailable: { version: hint, at: Date.now(), reason: why } }));
+      return;
+    }
+    if (hint === undefined && (gitInstall || !autoUpdate)) {
+      if (updateSaid !== "refused") { updateSaid = "refused"; console.log(`the server needs a newer runner than ${HELPER_VERSION}; ${gitInstall ? "this install is a git checkout: update it with git" : "automatic updates are off"}, or run: ${UPDATE_COMMAND}`); }
+      return;
+    }
+    updateChecking = true;
+    try {
+      const server = loadConfig().server;
+      if (!server) return;
+      const got = await downloadHelper(server);
+      if (selfUpdateDecision({ current: HELPER_VERSION, served: got.version, inGit: false, enabled: true }) !== "update") { updateCheckAt = Date.now() + SELF_UPDATE_RECHECK_MS; return; }
+      const staged = stageHelper(got.text);
+      updateFailures = 0;
+      updateHelperStatus((s) => ({ ...s, updateAvailable: { version: got.version, at: Date.now(), reason: "updating after the running calls finish" } }));
+      console.log(`autocraft ${got.version} is available (running ${HELPER_VERSION}): not claiming; running calls finish, then it updates and restarts`);
+      updating = { version: got.version, staged };
+      wake.abort();
+    } catch (e) {
+      updateFailures++;
+      updateCheckAt = Date.now() + Math.min(SELF_UPDATE_RECHECK_MS, SELF_UPDATE_RETRY_MS * 2 ** (updateFailures - 1));
+      console.log(`update check failed: ${msg(e)}; keeping ${HELPER_VERSION}, trying again in ${Math.round((updateCheckAt - Date.now()) / 60_000)} min`);
+    } finally { updateChecking = false; }
+  };
   for (const sig of STOP_SIGNALS) {
     process.on(sig, () => {
       if (ac.signal.aborted) process.exit(SIGNAL_EXIT[sig]);
@@ -3722,7 +3765,7 @@ async function cmdWork(argv) {
   capacity.busy = 0;
   let idleSaid = "", heldSaid = "", failures = 0, notBefore = 0;
   /** @param {number} ms */
-  const pause = (ms) => sleep(ms, undefined, { signal: ac.signal }).catch(() => {});
+  const pause = (ms) => sleep(ms, undefined, { signal: AbortSignal.any([ac.signal, wake.signal]) }).catch(() => {});
   /** @param {Readiness} readiness @param {string} reason @param {number | null} until */
   const hold = (readiness, reason, until) => {
     setHold(readiness, reason, until);
@@ -3746,13 +3789,14 @@ async function cmdWork(argv) {
   const claimLoop = async (slot, fastLane, ownLane, interactiveLane = false) => {
     let claimId = newClaimId();
     let blockedRun = 0;
-    while (!ac.signal.aborted) {
+    while (!ac.signal.aborted && !updating) {
       if (Date.now() < notBefore) { await pause(notBefore - Date.now()); continue; }
       let r;
       try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane, ownLaneOn, interactiveLane); claimId = newClaimId(); blockedRun = 0; } catch (e) {
         if (ac.signal.aborted) break;
         // A claim lost in transit may have leased a call: the next try sends the same id and gets that lease back.
         if (!transient(e)) claimId = newClaimId();
+        if (e instanceof HttpError && e.status === 409) void checkUpdate(undefined);
         blockedRun = e instanceof ProxyBlocked ? blockedRun + 1 : 0;
         if (blockedRun >= 10) {
           if (blockedRun === 10) console.log("the server's replies are blocked by a proxy, or the credential was revoked; run autocraft login if this persists");
@@ -3774,6 +3818,7 @@ async function cmdWork(argv) {
         continue;
       }
       if (heldSaid) { console.log("ready again"); heldSaid = ""; }
+      if (r.currentHelper) void checkUpdate(r.currentHelper);
       // A server older than the own lane ignores the field and offers any call: the lane runs what it got and then stops.
       const ownLaneUnknown = ownLane && r.ownLane !== true;
       if (ownLaneUnknown) ownLaneOn = false;
@@ -3800,8 +3845,10 @@ async function cmdWork(argv) {
       console.log(s.line);
       if (ownLaneUnknown) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
       if (interactiveUnknown) { console.log("the server has no interactive lane; that lane stops"); return; }
-      if (s.hold) hold(s.hold.readiness, s.line, s.hold.ms === null ? null : Date.now() + s.hold.ms);
-      else if (s.state === "submitted") {
+      if (s.hold) {
+        hold(s.hold.readiness, s.line, s.hold.ms === null ? null : Date.now() + s.hold.ms);
+        if (s.hold.readiness === "version-refused") void checkUpdate(undefined);
+      } else if (s.state === "submitted") {
         if (failures >= FAILURES_TO_HOLD) clearHold("failing");
         failures = 0; notBefore = 0;
       } else if ((s.state === "failed" || s.state === "released") && !ac.signal.aborted) {
@@ -3817,6 +3864,15 @@ async function cmdWork(argv) {
   };
   await Promise.all([...Array.from({ length: n }, () => loop(false)), ...(fast ? [loop(true)] : []), ...(own ? [loop(false, true)] : []), ...(interactiveOn ? [loop(false, false, true)] : [])]);
   await Promise.all(interactiveRuns);
+  if (updating && !ac.signal.aborted) {
+    const { version, staged } = updating;
+    const status = installStaged(staged);
+    updateHelperStatus(({ updateAvailable: _u, ...s }) => ({ ...s, update: { at: Date.now(), from: HELPER_VERSION, to: version } }));
+    const supervised = process.platform === "darwin" ? process.env.XPC_SERVICE_NAME === SERVICE_NAME : !!process.env.INVOCATION_ID;
+    console.log(`autocraft updated from ${HELPER_VERSION} to ${version}; ${supervised ? "restarting" : "start `autocraft work` again"}`);
+    return status;
+  }
+  if (updating) rmSync(updating.staged, { force: true });
   return 0;
 }
 
@@ -3832,6 +3888,8 @@ async function cmdStatus() {
   if (u) console.log(`usage: ${win("5-hour", u.fiveHour)}; ${win("weekly", u.weekly)} (read ${clock(Date.parse(u.at))})`);
   const server = s.serverReserve;
   console.log(`reserve kept free: 5-hour ${st.reserve.fiveHour}%, weekly ${st.reserve.weekly}% (server ${server ? `${server.fiveHour}%/${server.weekly}%` : "not heard yet, default 20%/20%"}${cfg.reserve ? `, local ${cfg.reserve.fiveHour}%/${cfg.reserve.weekly}%` : ""})`);
+  if (s.update) console.log(`updated from ${s.update.from} to ${s.update.to} at ${clock(s.update.at)}`);
+  if (s.updateAvailable) console.log(`update to ${s.updateAvailable.version} pending: ${s.updateAvailable.reason}`);
   if (c.pause) console.log(`paused ${c.pause.until === null ? "until `autocraft runner resume`" : `until ${clock(c.pause.until)}`}`);
   if (c.park) console.log(`held after a refusal ${c.park.until === null ? "until a usage reading shows headroom" : `until ${clock(c.park.until)}`}: ${c.park.reason}`);
   console.log(`status file: ${helperStatusFile()}`);
@@ -5152,7 +5210,7 @@ const CALL_HELP = [
 
 /** @type {HelpLine[]} */
 const TASK_HELP = [
-  ["autocraft work [--parallel N]", "claim, run and submit in a loop (what the service runs)"],
+  ["autocraft work [--parallel N] [--no-auto-update]", "claim, run and submit in a loop (what the service runs); updates itself when the server has a newer runner"],
   ["autocraft claim", "claim one call; prints its lease id"],
   ["autocraft run [--detach] [<lease>]", "run a claimed lease, or claim and run one"],
   ["autocraft wait <lease>", "wait for a detached run (returns after at most 9 minutes)"],
@@ -5224,19 +5282,19 @@ function groupHelp(group) {
 /** The command that replaces this runner; version refusals print it. */
 const UPDATE_COMMAND = `node ${realpathSync(fileURLToPath(import.meta.url))} update`;
 
-/**
- * Downloads the current runner from the server of the login, checks that it parses, replaces this file in one rename, and
- * runs `migrate` from the new file. A server from before the rename serves it only at its earlier path.
- */
-async function cmdUpdate() {
-  const cfg = loadConfig();
-  if (!cfg.server) throw new Error("not logged in: run `autocraft login <server-url>` first");
-  let res = await fetch(`${cfg.server}${ROUTES.helper}`, { signal: AbortSignal.timeout(60_000) });
-  if (res.status === 404) res = await fetch(`${cfg.server}${ROUTES.legacyHelper}`, { signal: AbortSignal.timeout(60_000) });
+/** Downloads the server's current runner. A server from before the rename serves it only at its earlier path. @param {string} server */
+async function downloadHelper(server) {
+  let res = await fetch(`${server}${ROUTES.helper}`, { signal: AbortSignal.timeout(60_000) });
+  if (res.status === 404) res = await fetch(`${server}${ROUTES.legacyHelper}`, { signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new Error(`${res.url}: HTTP ${res.status}`);
   const text = await res.text();
   const version = /export const HELPER_VERSION = "([^"]+)"/.exec(text)?.[1];
   if (!version) throw new Error("the download is not an AutoCraft Task Runner");
+  return { text, version };
+}
+
+/** Writes `text` beside this file and checks that it parses; returns the staged path (the caller renames or removes it). @param {string} text */
+function stageHelper(text) {
   const target = realpathSync(self);
   const tmp = join(dirname(target), `.autocraft-update-${process.pid}.mjs`);
   try {
@@ -5244,11 +5302,55 @@ async function cmdUpdate() {
     const c = spawnSync(process.execPath, ["--check", tmp], { encoding: "utf8" });
     if (c.status !== 0) throw new Error(`the download does not parse: ${(c.stderr || "").split("\n").find((l) => l.trim()) ?? "node --check failed"}`);
     chmodSync(tmp, statSync(target).mode & 0o777);
-    renameSync(tmp, target);
-  } finally { rmSync(tmp, { force: true }); }
+  } catch (e) { rmSync(tmp, { force: true }); throw e; }
+  return tmp;
+}
+
+/** Replaces this file with the staged one in one rename and runs `migrate` from it; returns migrate's exit code. @param {string} tmp */
+function installStaged(tmp) {
+  const target = realpathSync(self);
+  try { renameSync(tmp, target); } finally { rmSync(tmp, { force: true }); }
+  return spawnSync(process.execPath, [target, "migrate"], { stdio: "inherit" }).status ?? 1;
+}
+
+/** Whether the file lives in a git checkout (a `.git` in any parent directory): such an install updates by git. @param {string} file */
+export function inGitCheckout(file) {
+  let d = dirname(realpathSync(file));
+  for (;;) {
+    if (existsSync(join(d, ".git"))) return true;
+    const up = dirname(d);
+    if (up === d) return false;
+    d = up;
+  }
+}
+
+/**
+ * What `work` does about the server's runner version `served`: "update" replaces the file and restarts, "available" only
+ * reports it (opt-out or git checkout), "current" does nothing (the same or an older version is never installed).
+ * @param {{ current: string, served: string, inGit: boolean, enabled: boolean }} o
+ * @returns {"update" | "available" | "current"}
+ */
+export function selfUpdateDecision(o) {
+  if (compareVersions(o.served, o.current) <= 0) return "current";
+  return o.enabled && !o.inGit ? "update" : "available";
+}
+
+/** `work` asks the server again this long after finding no newer runner, and at most this long after a failed download. */
+const SELF_UPDATE_RECHECK_MS = scaled(3600_000);
+const SELF_UPDATE_RETRY_MS = scaled(5 * 60_000);
+
+/**
+ * Downloads the current runner from the server of the login, checks that it parses, replaces this file in one rename, and
+ * runs `migrate` from the new file.
+ */
+async function cmdUpdate() {
+  const cfg = loadConfig();
+  if (!cfg.server) throw new Error("not logged in: run `autocraft login <server-url>` first");
+  const { text, version } = await downloadHelper(cfg.server);
+  const status = installStaged(stageHelper(text));
+  if (version !== HELPER_VERSION) updateHelperStatus(({ updateAvailable: _u, ...s }) => ({ ...s, update: { at: Date.now(), from: HELPER_VERSION, to: version } }));
   console.log(version === HELPER_VERSION ? `autocraft ${version} is already the current version (file replaced)` : `autocraft updated from ${HELPER_VERSION} to ${version}`);
-  const m = spawnSync(process.execPath, [target, "migrate"], { stdio: "inherit" });
-  return m.status ?? 1;
+  return status;
 }
 
 /** @param {string[]} argv */
