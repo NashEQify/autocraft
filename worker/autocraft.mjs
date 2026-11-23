@@ -1827,7 +1827,8 @@ const dropLease = (id) => rmSync(leaseFile(id), { force: true });
 /**
  * `hold`: the helper can take no call for a while (`ms`; null: until it is restarted), shown as `readiness`.
  * @typedef {{ readiness: Readiness, ms: number | null }} RunHold
- * @typedef {{ state: "running" | "submitted" | "failed" | "lost" | "released", line: string, pid?: number, at: number, hold?: RunHold }} RunStatus
+ * `noStrike`: a release that says nothing about the helper's health (a call too long for its login), so it does not count toward `failing`.
+ * @typedef {{ state: "running" | "submitted" | "failed" | "lost" | "released", line: string, pid?: number, at: number, hold?: RunHold, noStrike?: boolean }} RunStatus
  */
 /** A run's hold for a missing harness, login or sandbox: they need the user, so they are checked again only after a while. */
 const STOP_HOLD_MS = 10 * 60_000;
@@ -3051,8 +3052,8 @@ async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), 
  */
 async function runLease(cfg, id, opt = {}) {
   const lease = readLease(id);
-  /** @param {RunStatus["state"]} state @param {string} line @param {RunHold} [hold] @returns {RunStatus} */
-  const end = (state, line, hold) => { const s = { state, line: redact(line), at: Date.now(), ...(hold && { hold }) }; writeStatus(id, s); if (state !== "running") dropLease(id); return s; };
+  /** @param {RunStatus["state"]} state @param {string} line @param {RunHold} [hold] @param {boolean} [noStrike] @returns {RunStatus} */
+  const end = (state, line, hold, noStrike) => { /** @type {RunStatus} */ const s = { state, line: redact(line), at: Date.now(), ...(hold && { hold }), ...(noStrike && { noStrike: true }) }; writeStatus(id, s); if (state !== "running") dropLease(id); return s; };
   if (!lease) return end("failed", `failed: no lease ${id} was claimed on this machine`);
   secretsInUse.add(lease.secret);
   writeStatus(id, { state: "running", line: `running: ${lease.title}`, pid: process.pid, at: Date.now() });
@@ -3081,13 +3082,13 @@ async function runLease(cfg, id, opt = {}) {
   };
   /**
    * The helper's own fault, not the call's: the call goes back to the queue without using an attempt.
-   * @param {string} reason @param {RunHold} [hold] the helper can take no call for a while
+   * @param {string} reason @param {RunHold} [hold] the helper can take no call for a while @param {boolean} [noStrike] RunStatus.noStrike
    */
-  const giveBack = async (reason, hold) => {
+  const giveBack = async (reason, hold, noStrike) => {
     /** @type {Release} */
     const body = { reason: redact(reason).slice(0, 300) };
     try { await call(ROUTES.release, body); } catch (e) { return undelivered(`the release (${reason})`, e); }
-    return end("released", `released: ${lease.title}: ${reason}`, hold);
+    return end("released", `released: ${lease.title}: ${reason}`, hold, noStrike);
   };
   /** Why the preparation stopped, when one of its signals did. */
   const prepStopped = () => (opt.signal?.aborted ? "stopped on the helper" : prepTimeout.aborted ? `preparing took longer than ${(PREPARE_MAX_MS - 2 * RETRY_MARGIN_MS) / 60_000} min` : null);
@@ -3137,7 +3138,7 @@ async function runLease(cfg, id, opt = {}) {
       let t = adapter.tokenFor(cfg, b.timeoutSeconds);
       if ("problem" in t && t.problem !== CLAUDE_LOGIN_EXPIRES) { await sleep(2000); t = adapter.tokenFor(cfg, b.timeoutSeconds); }
       // A call too long for the login goes back without a hold: shorter calls still fit, and readiness says when none does.
-      if ("problem" in t) return await giveBack(t.problem, t.problem === CLAUDE_LOGIN_EXPIRES ? undefined : { readiness: "harness-missing", ms: TOKEN_HOLD_MS });
+      if ("problem" in t) return t.problem === CLAUDE_LOGIN_EXPIRES ? await giveBack(t.problem, undefined, true) : await giveBack(t.problem, { readiness: "harness-missing", ms: TOKEN_HOLD_MS });
       runToken = t.token;
     }
     tokens.push(runToken); secretsInUse.add(runToken);
@@ -3145,7 +3146,7 @@ async function runLease(cfg, id, opt = {}) {
     taskDir = mkdtempSync(join(cacheDir(), "tasks", `${b.callId}-`));
     const late = adapter.tokenFor && (() => { const t = adapter.tokenFor?.(cfg, b.timeoutSeconds); return t && "problem" in t && t.problem === CLAUDE_LOGIN_EXPIRES ? t.problem : null; });
     const out = await execute(b, { adapter, bin: d.bin, token: runToken, model, taskDir, lease, root: lease.root ?? "", ...(lease.slot !== undefined && { slot: lease.slot }), ...(opt.signal && { signal: opt.signal }), prep, beat, ...(late && { late }) });
-    if ("giveBack" in out) return await giveBack(prepStopped() ?? out.giveBack);
+    if ("giveBack" in out) { const stopped = prepStopped(); return await giveBack(stopped ?? out.giveBack, undefined, !stopped && out.noStrike); }
     if ("fail" in out) return await fail(out.fail, out.usage);
     const { r, reply, tools } = out;
     if (r.gone) return lost();
@@ -3200,7 +3201,7 @@ async function runLease(cfg, id, opt = {}) {
  * @param {TaskBundle} b
  * `late`: why the call may no longer start once its files are ready (its login no longer outlasts it), or null.
  * @param {{ adapter: Adapter, bin: string, token: string, model: string, taskDir: string, lease: LeaseRecord | null, root: string, slot?: number, signal?: AbortSignal, prep?: AbortSignal, beat?: ReturnType<typeof heartbeats>, late?: () => string | null }} x
- * @returns {Promise<{ giveBack: string } | { fail: string, usage?: Usage } | { r: Awaited<ReturnType<typeof harness>>, reply: Reply, tools: SubmitTool[] }>}
+ * @returns {Promise<{ giveBack: string, noStrike?: boolean } | { fail: string, usage?: Usage } | { r: Awaited<ReturnType<typeof harness>>, reply: Reply, tools: SubmitTool[] }>}
  */
 async function execute(b, x) {
   const { adapter } = x;
@@ -3250,7 +3251,7 @@ async function execute(b, x) {
     const late = x.late?.();
     if (late) {
       if (sessionDir && !resumeId) rmSync(sessionDir, { recursive: true, force: true });
-      return { giveBack: late };
+      return { giveBack: late, noStrike: true };
     }
     const c = adapter.command({ bundle: b, model: x.model, bin: x.bin, token: x.token, mounts, taskDir: x.taskDir, mcpFile, sessionDir, resumeId, lease: { server, secret }, ...(files && { files: { url: files.url, token: files.token } }), ...(mac && { mac }) });
     const r = await harness(c, b, x.beat ?? null, x.signal, adapter, x.root);
@@ -3899,7 +3900,7 @@ async function cmdWork(argv) {
       } else if (s.state === "submitted") {
         if (failures >= FAILURES_TO_HOLD) clearHold("failing");
         failures = 0; notBefore = 0;
-      } else if ((s.state === "failed" || s.state === "released") && !ac.signal.aborted) {
+      } else if ((s.state === "failed" || s.state === "released") && !s.noStrike && !ac.signal.aborted) {
         // A broken helper fails every call: it waits longer after each failure in a row, and holds after FAILURES_TO_HOLD.
         // A released call also goes back to the queue, and claiming at once would likely hand it straight back.
         failures++;
