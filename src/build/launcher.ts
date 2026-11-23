@@ -19,9 +19,10 @@ import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
 import { computeCapacity, feedbackCapacity, overQuota, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
 import { classifyPodEnd, disruptionPolicy, MAX_DISRUPTIONS, pendingKind } from "./disruption.ts";
 import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQuota, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
-import { gib, raiseAfterOom, repoMemory, repoWarmTarget } from "./sizing.ts";
+import { gib, raiseAfterOom, repoMemory, repoSizing, repoWarmTarget } from "./sizing.ts";
 import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
-import { WarmStatus } from "./warm-status.ts";
+import { STATUS_NAMESPACE, WarmStatus } from "./warm-status.ts";
+import { WarmPlacer } from "./warm-place.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
@@ -66,6 +67,8 @@ export type LauncherDeps = {
   api: KubeApi | null;
   /** Reads the nodes' warm status (src/build/warm-status.ts); null or left out: no warm status is shown. */
   configMaps?: Pick<ConfigMapApi, "listConfigMaps"> | null;
+  /** Writes the warm placement (src/build/warm-place.ts); null or left out: none is written. */
+  placement?: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap"> | null;
   /** The runner's own image (AUTOCRAFT_IMAGE), for environments that name none. */
   defaultImage: string | null;
   log: (line: string) => void;
@@ -99,6 +102,7 @@ class PassReads {
 /** Caches between passes: the access review, a pause after a task could not be started, when a pod's node stopped reporting, and the nodes' warm status. */
 export class LauncherState {
   warm: WarmStatus | null = null;
+  placer: WarmPlacer | null = null;
   reads = new PassReads();
   access = new Map<string, { at: number; missing: string[] }>();
   /** `capacity`: the quota refused a first pod, a capacity wait rather than a fault. */
@@ -126,6 +130,10 @@ export async function launcherPass(d: LauncherDeps, state: LauncherState): Promi
   if (envs.length && d.configMaps) {
     state.warm ??= new WarmStatus(d.configMaps, { namespace: envVar("WARM_STATUS_NAMESPACE"), now: d.now, log: d.log });
     await state.warm.refresh();
+    if (d.placement) {
+      state.placer ??= new WarmPlacer(d.placement, { namespace: envVar("WARM_STATUS_NAMESPACE") ?? STATUS_NAMESPACE, now: d.now ?? Date.now, log: d.log });
+      await state.placer.pass(d.db, state.warm);
+    }
   }
   for (const env of envs) {
     try {
@@ -313,11 +321,12 @@ const quotaRefused = (e: unknown): boolean => e instanceof KubeError && e.status
  */
 async function requestOf(c: EnvCtx, repo: string, step: string): Promise<{ res: Res; memory: StepMemory }> {
   const { db } = c.d;
-  const memory = await repoMemory(db, repo, c.s);
+  const sizing = await repoSizing(db, repo);
+  const memory = sizing.memory ?? { requestBytes: quantity(c.s.memoryRequest), limitBytes: quantity(c.s.memoryLimit) };
   const key = warmKeyOf(repo);
   let extra = 0;
-  if (step === WARM_STEP && c.s.warmWriter) extra = warmMemory({ key, gc: false, bytes: await warmBytes(db, key) }) ?? 0;
-  else if (step !== WARM_STEP && !c.s.warmWriter && await repoWarmTarget(db, repo) === "tmpfs") extra = warmCopyMemory(await warmBytes(db, key)) ?? 0;
+  if (step === WARM_STEP && c.s.warmWriter) extra = warmMemory({ key, gc: false, bytes: sizing.warmBytes }) ?? 0;
+  else if (step !== WARM_STEP && !c.s.warmWriter && sizing.warmTarget === "tmpfs") extra = warmCopyMemory(sizing.warmBytes) ?? 0;
   const lim = taskLimits(c.s, memory, extra);
   return { res: { ...toRes(taskRequest(c.s, memory, extra)), limCpu: lim.cpuM, limMem: lim.memBytes, ephReq: lim.ephRequest, ephLim: lim.ephLimit }, memory };
 }
@@ -862,7 +871,11 @@ async function finish(c: EnvCtx, run: Run, failed: string | null): Promise<void>
 /** `guard` runs before every Kubernetes call that changes something, and stops it by throwing (src/build/kube-api.ts guardedApi). */
 export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string) => void, guard?: () => Promise<void>): void {
   const api = inClusterApi();
-  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
+  const placement = api && {
+    getConfigMap: api.getConfigMap,
+    patchConfigMap: async (ns: string, name: string, patch: object) => (await guard?.(), await api.patchConfigMap(ns, name, patch)),
+  };
+  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, placement, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
   const state = new LauncherState();
   const workspaces = new WorkspaceState();
   void (async () => {

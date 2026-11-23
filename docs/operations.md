@@ -1239,6 +1239,7 @@ Settings, all environment variables:
 | `AUTOCRAFT_WARM_NODE` | required | The node's name (downward API `spec.nodeName`). |
 | `AUTOCRAFT_WARM_DIR` | `/var/lib/craft-warm` | The node directory (hostPath). |
 | `AUTOCRAFT_WARM_ASSIGN_DIR` | `/etc/warm-assign` | The mounted `warm-assign` ConfigMap, read each cycle. |
+| `AUTOCRAFT_WARM_PLACEMENT_DIR` | `/etc/warm-placement` | The mounted `warm-placement` ConfigMap (optional), read each cycle. |
 | `AUTOCRAFT_WARM_STATUS_NAMESPACE` | the pod's namespace | Where the status ConfigMap is written. |
 | `AUTOCRAFT_WARM_WRITE_MB_PER_SEC` | 150 | Download write rate in MB/s; 0 for no limit. |
 | `AUTOCRAFT_WARM_POLL_SEC` | 60 | Time between cycles. |
@@ -1260,6 +1261,8 @@ data:
 
 `maxGbPerNode` is in GiB and counts the versions keys are current at. A replaced version stays for the grace period on top of it, and the filesystem limit bounds the total.
 
+Placement. The runner places each covered repo's key (Warm producer above) on 2 nodes, so a build has a choice of warm node without every node holding every repo. It writes `placement.json` in the ConfigMap `warm-placement` (`{"version":1,"keys":[{"key":…,"nodes":[…]}]}`, keys in priority order) at most every 5 minutes, when the result changed. A key stays on its nodes while they report and have room; otherwise it goes to the nodes with the most room: free disk up to 85% of the filesystem, plus the warm bytes the node holds, at most `maxGbPerNode`, less what larger keys placed before it take. When `placement.json` holds a placement, an agent keeps only the keys placed on its node, in its order, and `repos` is not used; without one (no ConfigMap, or the cluster's initial `{}`), it keeps every key `repos` lists. The runner never creates the ConfigMap, and writes nothing while no node reports or no repo is covered.
+
 The status ConfigMap holds one key, `status.json`: `node`, `updated` (ms, the node's clock), `fs` (`sizeBytes`, `usedBytes`, `usedPct`), `keys` (key → `commit`, `stored`, `bytes`, `image`, `envHash`, `synced`), `pending` (assigned key → why it is not at its newest version), and `error` (present when the assignment cannot be read; the agent then changes nothing), and `badBlobs` (key → sha256 of blobs that were missing or did not match their sha256 in a failed sync; the producer passes them to publish's recheck). The agent writes it with the in-cluster service-account token, so its service account needs `create` and `patch` on configmaps in its namespace. The status ConfigMaps carry the label `craft.build/warm-status=node`. One service account serves every node, so any node's agent can write any node's status; that is acceptable while the status is informational.
 
 What the DaemonSet needs:
@@ -1267,10 +1270,10 @@ What the DaemonSet needs:
 | Item | Detail |
 |---|---|
 | User | A uid of its own, not the build pods' uid, so build pods cannot write warm files. Read-only root filesystem, no capabilities. |
-| Volumes | hostPath `/var/lib/craft-warm` read-write; ConfigMaps `warm-assign` and `warm-verify-key` (key `public.pem`) mounted read-only. |
+| Volumes | hostPath `/var/lib/craft-warm` read-write; ConfigMaps `warm-assign` and `warm-verify-key` (key `public.pem`) mounted read-only, and `warm-placement` mounted read-only with `optional: true`. |
 | Network | Egress to the cache's read-only port and the API server. |
 
-**On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there (it selects by the label `craft.build/warm-status=node`). A status not rewritten for 15 minutes counts as not warm and is not counted in M. A node whose agent reports an error shows `node: message` on the environment's Warm row and in `envs list`. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
+**On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there (it selects by the label `craft.build/warm-status=node`). Placement needs `get` there and `patch` on the ConfigMap `warm-placement`, which the cluster's configuration creates once (with `{}`) and does not overwrite. A status not rewritten for 15 minutes counts as not warm and is not counted in M. A node whose agent reports an error shows `node: message` on the environment's Warm row and in `envs list`. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
 
 ## Similar items and semantic search
 

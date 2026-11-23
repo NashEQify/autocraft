@@ -60,6 +60,11 @@ export class WarmStatus {
     return this.statuses.filter((s) => this.now() - s.updated <= STATUS_STALE_MS);
   }
 
+  /** The fresh statuses, one per reporting node. */
+  freshNodes(): NodeStatus[] {
+    return this.fresh();
+  }
+
   /** Nodes whose fresh status holds `key` (at `commit`, when given), newest version first. */
   warmNodesFor(key: string, commit?: string): WarmNode[] {
     return this.fresh().flatMap((s) => {

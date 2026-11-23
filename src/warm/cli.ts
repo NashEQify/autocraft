@@ -5,6 +5,7 @@ import { inClusterApi, SA_DIR } from "../build/kube-api.ts";
 import { checkServiceUrl } from "../worker/config.ts";
 import { loadEd25519 } from "./manifest.ts";
 import { WarmStore } from "./store-client.ts";
+import { placedKeys, readPlacementDir } from "./placement.ts";
 import { DEFAULT_GRACE_MS, readAssignDir, SyncAgent } from "./sync-agent.ts";
 
 const USAGE = `usage: autocraft-server warm-sync [--once]
@@ -13,6 +14,8 @@ const USAGE = `usage: autocraft-server warm-sync [--once]
   AUTOCRAFT_WARM_NODE              this node's name (required; the status ConfigMap is warm-status-<node>)
   AUTOCRAFT_WARM_DIR               node directory (default /var/lib/craft-warm)
   AUTOCRAFT_WARM_ASSIGN_DIR        mounted warm-assign ConfigMap with files repos and maxGbPerNode (default /etc/warm-assign)
+  AUTOCRAFT_WARM_PLACEMENT_DIR     mounted warm-placement ConfigMap (file placement.json, written by the runner): when it holds
+                                   a placement, only the keys placed on this node are kept (default /etc/warm-placement)
   AUTOCRAFT_WARM_STATUS_NAMESPACE  namespace of the status ConfigMap (default: the pod's own)
   AUTOCRAFT_WARM_WRITE_MB_PER_SEC  disk write rate of downloads, 0 for none (default 150)
   AUTOCRAFT_WARM_POLL_SEC (60), AUTOCRAFT_WARM_GRACE_MIN (210), AUTOCRAFT_WARM_MAX_FS_PCT (80)`;
@@ -43,7 +46,7 @@ function config(env: NodeJS.ProcessEnv) {
     } catch { /* outside a cluster */ }
   }
   return {
-    url, keyFiles, node: need("NODE"), dir: path("DIR", "/var/lib/craft-warm"), assignDir: path("ASSIGN_DIR", "/etc/warm-assign"),
+    url, keyFiles, node: need("NODE"), dir: path("DIR", "/var/lib/craft-warm"), assignDir: path("ASSIGN_DIR", "/etc/warm-assign"), placementDir: path("PLACEMENT_DIR", "/etc/warm-placement"),
     namespace: namespace || "craft-cache", writeBytesPerSec: num("WRITE_MB_PER_SEC", 150, 0) * 1e6,
     pollMs: num("POLL_SEC", 60, 5) * 1000, graceMs: num("GRACE_MIN", DEFAULT_GRACE_MS / 60_000, 1) * 60_000, maxFsPct: pct,
   };
@@ -68,7 +71,10 @@ async function warmSync(args: string[]): Promise<void> {
     dir: c.dir, node: c.node, namespace: c.namespace, kube, log,
     store: new WarmStore({ readUrl: c.url }),
     verifyKeys: () => c.keyFiles.map((f) => loadEd25519(readFileSync(f), "public")),
-    assign: () => readAssignDir(c.assignDir),
+    assign: () => {
+      const a = readAssignDir(c.assignDir);
+      return { ...a, keys: placedKeys(a.keys, readPlacementDir(c.placementDir), c.node) };
+    },
     writeBytesPerSec: c.writeBytesPerSec, graceMs: c.graceMs, maxFsPct: c.maxFsPct,
   });
   log(`warm sync: node ${c.node}, dir ${c.dir}, every ${c.pollMs / 1000} s`);
