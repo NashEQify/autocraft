@@ -19,7 +19,7 @@ import { RestClient } from "./rest.ts";
 import { Reactor } from "./react.ts";
 import { forgetReporter } from "./file-issue.ts";
 import { forgetLink } from "./links.ts";
-import { Search, dropTexts } from "./search.ts";
+import { Search } from "./search.ts";
 import { installAccountCommands } from "./commands.ts";
 import { DecisionAlerts, installAlertCommands } from "./alerts.ts";
 import { installSearchCommands } from "./search-commands.ts";
@@ -125,7 +125,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });
   // A crash during a call can leave the question in a recorded prompt.
-  try { await dropTexts(db, true); await dropIssueTexts(db, true); await dropSignalTexts(db, true); } catch (e) { log(`runner: removing search texts failed: ${(e as Error).message}`); }
+  try { await dropIssueTexts(db, true); await dropSignalTexts(db, true); } catch (e) { log(`runner: removing search texts failed: ${(e as Error).message}`); }
   const gw = new Gateway({
     token,
     log,

@@ -207,42 +207,41 @@ export class IssueNew {
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
     s.description = description; s.title = titleOf(description);
     s.stage = "matched";
-    s.capped = await this.#overCap();
-    if (!s.capped) s.calls++;
-    const asking = s.capped ? Promise.resolve(null) : this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }) });
-    const [found, reply] = await Promise.all([this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo), asking]);
-    s.matches = found.matches.filter((m) => m.repo === s.repo);
-    // A failed or unparseable call asks the questions of the kind; a model that finds nothing missing asks none.
-    s.questions = s.capped ? [] : ((reply === null ? null : parseQuestions(reply)) ?? fallbackQuestions(s.chosen)).slice(0, 3);
-    if (!s.matches.length) {
-      // Nothing to compare with: go on at once. A form needs a button press, so questions wait behind one. Starting the new issue takes a slot of the new-issue limit.
-      if (!s.questions.length) {
-        if (!this.#slot(s, call)) return void (await call.edit({ content: `No matching issue found.${TOO_MANY}` }));
-        s.stage = "drafted";
-        return void (await this.#finish(call, s, sid));
-      }
-      return void (await call.edit({ content: "No existing issue looks like this.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
-    }
+    // No model call here: the matches come from the embedding search alone, so the reply is quick. Questions wait for "None of these".
+    s.matches = (await this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo)).matches.filter((m) => m.repo === s.repo);
+    if (!s.matches.length) return void (await call.edit({ content: "No similar issue was found.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
     await deliver(r, (b) => call.edit(b), this.#d.log);
   }
 
-  /** "None of these" or "Continue": the follow-up questions in a second form, or the draft at once when there are none. */
+  /** "None of these" or "Continue": the follow-up questions are chosen now (a model call, or the kind's fixed ones when it fails), then asked in a second form behind a Continue button; with none, the draft follows at once. */
   async none(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
     if (!s) return void (await call.reply({ content: "This form has expired. Start again with /autocraft search." }));
-    if (s.stage !== "matched" && !(s.stage === "asking" && s.questions.length)) return void (await call.reply({ content: USED }));
+    if (s.stage === "asking" && s.questions.length) {
+      await call.showModal({
+        custom_id: `inew:ans:${sid}`, title: "A few more details",
+        components: s.questions.map((id) => field(id, followUp(id).label, 2, ISSUE_ANSWER_CHARS, { required: false, placeholder: followUp(id).placeholder })),
+      });
+      return;
+    }
+    if (s.stage !== "matched") return void (await call.reply({ content: USED }));
     if (!this.#slot(s, call)) return void (await call.reply({ content: `${TOO_MANY.trim()}` }));
+    // Set before the call so a second press is refused while the model works.
+    s.stage = "asking";
+    await call.defer();
+    s.capped = await this.#overCap();
+    if (!s.capped) {
+      s.calls++;
+      const reply = await this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }) });
+      // A failed or unparseable call asks the questions of the kind; a model that finds nothing missing asks none.
+      s.questions = ((reply === null ? null : parseQuestions(reply)) ?? fallbackQuestions(s.chosen)).slice(0, 3);
+    }
     if (!s.questions.length) {
       s.stage = "drafted";
-      await call.defer();
       return void (await this.#finish(call, s, sid));
     }
-    s.stage = "asking";
-    await call.showModal({
-      custom_id: `inew:ans:${sid}`, title: "A few more details",
-      components: s.questions.map((id) => field(id, followUp(id).label, 2, ISSUE_ANSWER_CHARS, { required: false, placeholder: followUp(id).placeholder })),
-    });
+    await call.edit({ content: "A few questions will make the report clearer.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] });
   }
 
   async answers(call: Call, sid: string): Promise<void> {

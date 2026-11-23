@@ -1,32 +1,28 @@
 // Issue search for the Discord bot. The question is embedded in memory with the local model and compared with the stored
-// vectors of public issues; a Haiku call picks the best few of the closest ten and says why. When the daily dollar cap
-// is used up, or the call fails, the closest three from the embedding search are the answer. The question is
-// kept only for the length of the call: it is not stored, logged or sent anywhere but that one model call, and the
-// prompt and reply texts the call records are deleted when it ends.
-import { askClaude } from "../classify/run.ts";
+// vectors of public issues. The closest matches above a cosine floor are the answer, with no model call. The question is
+// kept only for the length of the call: it is not stored, logged or sent anywhere.
 import type { Embedder } from "../embed/model.ts";
 import type { VectorIndex } from "../embed/vectors.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { hiddenExpr, isPublicRepo, publicRepoNames } from "../public/status.ts";
-import { PICK_CANDIDATES, PICK_MAX, parsePicks, type PickInput } from "./pick.ts";
 import type { Db } from "../db/index.ts";
-import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
 const MERGED_WINDOW_MS = 7 * 86_400_000;
 /** How many nearest vectors are read before the filters (pull requests, private repos and old closed issues are dropped). */
 const SCAN = 300;
-/** Cosine floor of the embedding-only answer, where no model judges relevance. */
-export const FALLBACK_MIN_SCORE = 0.55;
-export const DAILY_CAP_KEY = "discord_search_daily_usd";
-export const DEFAULT_DAILY_CAP_USD = 1;
+/** Candidates read from the closest vectors, after the filters. */
+const CANDIDATES = 20;
+/** Most matches shown. */
+export const MAX_MATCHES = 10;
+/** Cosine floor of a match. */
+export const MIN_SCORE = 0.55;
 export const QUESTION_CHARS = 1000;
 const USER_LIMIT = { n: 5, ms: 60_000 };
 const CHANNEL_LIMIT = { n: 20, ms: 60_000 };
-/** Longest the call waits for a Claude account before the embedding answer is used. */
 
 export type Match = { repo: string; number: number; title: string; url: string; closed: boolean; /** A pull request; `merged` when it was merged. */ pr?: boolean; merged?: boolean; reason?: string };
-export type Found = { matches: Match[]; /** Whether a model chose and explained them. */ judged: boolean };
+export type Found = { matches: Match[] };
 
 type Candidate = Match & { body: string; score: number; activity: number; updatedAt: string };
 
@@ -35,38 +31,10 @@ function byActivity(a: Candidate, b: Candidate): number {
   return Number(a.closed) - Number(b.closed) || b.activity - a.activity || b.updatedAt.localeCompare(a.updatedAt);
 }
 
-/** The model step; tests replace it. Returns the reply text, or null when the call failed or got no answer. */
-export type Ask = (db: Db, input: PickInput) => Promise<string | null>;
-
-export const askHaiku = async (db: Db, input: PickInput, takeWaitMs = DISCORD_TAKE_WAIT_MS): Promise<string | null> => {
-  const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: takeWaitMs });
-  return reply?.text ?? null;
-};
-
 export type SearchDeps = {
   db: Db; embedder: Embedder; index: VectorIndex; log: (line: string) => void;
-  ask?: Ask; now?: () => number;
+  now?: () => number;
 };
-
-const oneLine = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
-export async function dailyCapUsd(db: Db): Promise<number> {
-  const v = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", DAILY_CAP_KEY)))?.value);
-  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_DAILY_CAP_USD;
-}
-
-/** What today's (UTC) search calls cost, from the agent runs. */
-export async function spentTodayUsd(db: Db, now: number): Promise<number> {
-  const day = new Date(now).toISOString().slice(0, 10);
-  return Number((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("cost_usd"), eb.lit(0)).as("c"))
-    .where("step", "=", "discord-search").where("started_at", ">=", day)))!.c);
-}
-
-/** The prompt and reply of a search call hold the question. After a call, the rows of finished calls are removed; `all` (at startup, when no call can be running) removes every row. */
-export async function dropTexts(db: Db, all = false): Promise<void> {
-  await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", "discord-search")
-    .$if(!all, (q) => q.where("state", "<>", "running"))));
-}
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -138,33 +106,15 @@ export class Search {
       if (!open && !(doneAt !== null && now - Date.parse(doneAt) <= (pr ? MERGED_WINDOW_MS : CLOSED_WINDOW_MS))) continue;
       out.push({ repo: h.repo, number: h.number, title: r.title ?? "", body: r.body ?? "", url: r.url, closed: !open, ...(pr && { pr: true }), ...(merged && { merged: true }), score: h.score,
         activity: (r.comments_count ?? 0) + (r.reactions_count ?? 0), updatedAt: r.updated_at ?? "" });
-      if (out.length >= PICK_CANDIDATES) break;
+      if (out.length >= CANDIDATES) break;
     }
     return out;
   }
 
-  /** Embedding search, then the model's pick when today's spend is under the cap. A failed call falls back to the embedding answer. */
+  /** The closest matches by cosine score (at least MIN_SCORE, at most MAX_MATCHES), open first, then by activity. */
   async find(question: string, repo?: string): Promise<Found> {
-    const { db, log } = this.#d;
-    const q = question.slice(0, QUESTION_CHARS);
-    const cands = await this.candidates(q, repo);
+    const cands = await this.candidates(question.slice(0, QUESTION_CHARS), repo);
     const strip = ({ body: _b, score: _s, activity: _a, updatedAt: _u, ...m }: Candidate): Match => m;
-    const fallback = (): Found => ({ matches: cands.filter((c) => c.score >= FALLBACK_MIN_SCORE).slice(0, PICK_MAX).sort(byActivity).map(strip), judged: false });
-    if (!cands.length) return { matches: [], judged: true };
-    if (await spentTodayUsd(db, (this.#d.now ?? Date.now)()) >= await dailyCapUsd(db)) return fallback();
-    const input: PickInput = { ref: "discord", question: q, candidates: cands.map((c) => ({ ref: `${c.repo}#${c.number}`, title: c.title, body: c.body, closed: c.closed, ...(c.pr && { kind: "pr" as const }) })) };
-    try {
-      const text = await (this.#d.ask ?? askHaiku)(db, input);
-      const picks = text === null ? null : parsePicks(text, input.candidates);
-      if (!picks) return fallback();
-      const by = new Map(cands.map((c) => [`${c.repo}#${c.number}`, c]));
-      return { matches: picks.map((p) => ({ c: by.get(p.ref)!, reason: p.reason })).sort((a, b) => byActivity(a.c, b.c))
-        .map(({ c, reason }) => ({ ...strip(c), ...(reason && { reason }) })), judged: true };
-    } catch (e) {
-      log(`discord: search model call failed: ${oneLine((e as Error).message, 200)}`);
-      return fallback();
-    } finally {
-      try { await dropTexts(db); } catch (e) { log(`discord: removing search texts failed: ${(e as Error).message}`); }
-    }
+    return { matches: cands.filter((c) => c.score >= MIN_SCORE).slice(0, MAX_MATCHES).sort(byActivity).map(strip) };
   }
 }

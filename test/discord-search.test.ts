@@ -1,4 +1,4 @@
-// Discord issue search: ping replies, the model pick limited to the candidates, the daily cap, deleting a reply with its
+// Discord issue search: ping replies from the embeddings alone, deleting a reply with its
 // ping, the commands, and that no message text reaches the database.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -7,7 +7,6 @@ import { after, before, describe, test } from "node:test";
 import type { Embedder } from "../src/embed/model.ts";
 import { toBlob } from "../src/embed/store.ts";
 import { VectorIndex } from "../src/embed/vectors.ts";
-import { setRunner } from "../src/classify/run.ts";
 import { dispatcher } from "../src/discord/index.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
@@ -16,10 +15,7 @@ import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
 import { RestClient, RestError, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
 import { deliver, renderMatches } from "../src/discord/reply.ts";
-import { Search, askHaiku, dropTexts, type Ask } from "../src/discord/search.ts";
-import { DISCORD_TAKE_WAIT_MS } from "../src/discord/limits.ts";
-import { allocation } from "../src/agents/call.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
+import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -65,12 +61,9 @@ class FakeRest implements DiscordRest {
   async overwriteGuildCommands(_a: string, guildId: string, commands: CommandDef[]) { this.commands.push({ guildId, commands }); }
 }
 
-let asked: unknown[] = [];
-let reply = (): string | null => JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "Same WebP quality problem" }, { ref: "evil#9", reason: "not a candidate" }, { ref: "photocraft#3", reason: "Closed with the original export" }] });
-const ask: Ask = async (_db, input) => { asked.push(input); return reply(); };
 
 const rest = new FakeRest();
-const search = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask });
+const search = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {} });
 const pings = new Pings({ db, keys, rest, search, log: (l) => assert.fail(l) });
 // The handler startDiscord gives the gateway: mention rows first, then pings, so a delete finds our reply.
 const dispatch = dispatcher(db, keys, new Interactions(rest, (l) => assert.fail(l)), pings);
@@ -126,20 +119,19 @@ describe("ping replies", () => {
     const { body } = rest.sent[0]!;
     assert.deepEqual(body.allowed_mentions, { parse: [] });
     assert.deepEqual(body.message_reference, { message_id: "p1", fail_if_not_exists: false });
-    assert.match(v2text(body), /photocraft#1 Export to WebP ignores the quality setting\n> Same WebP quality problem/);
+    assert.match(v2text(body), /photocraft#1 Export to WebP ignores the quality setting$/m);
     assert.match(v2text(body), /photocraft#3 Add WebP export \(closed\)/);
     const buttons = v2buttons(body) as { style: number; label: string; url?: string; custom_id?: string }[];
     // Each link button is the accessory of the section holding its result's text.
     const sections = body.components!.filter((c) => (c as V2).type === 9) as V2[];
-    assert.equal(sections.length, 2);
+    assert.equal(sections.length, 3);
     for (const sec of sections) assert.ok(sec.components![0]!.content!.startsWith(sec.accessory!.label!));
-    assert.deepEqual(buttons.map((b) => b.label), ["photocraft#1", "photocraft#3", "File a new issue"]);
-    assert.ok(buttons.slice(0, 2).every((b) => b.style === 5));
-    assert.match(buttons[2]!.custom_id!, /^inewi:open:photocraft:/);
-    // The model saw the quoted text, not the ping, and only public open issues and recently completed ones.
-    const input = asked[0] as { question: string; candidates: { ref: string; closed: boolean }[] };
-    assert.equal(input.question, QUESTION);
-    assert.deepEqual(input.candidates.map((c) => c.ref).sort(), ["photocraft#1", "photocraft#2", "photocraft#3", "photocraft#4"]);
+    assert.deepEqual(buttons.map((b) => b.label), ["photocraft#1", "photocraft#4", "photocraft#3", "File a new issue"]);
+    assert.ok(buttons.slice(0, 3).every((b) => b.style === 5));
+    assert.match(buttons[3]!.custom_id!, /^inewi:open:photocraft:/);
+    // The reply comes from the embeddings alone: no model call is recorded.
+    assert.equal((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
+    assert.equal((await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   });
 
   test("bots, unwatched channels and edits get no reply", async () => {
@@ -155,43 +147,20 @@ describe("ping replies", () => {
     assert.equal(rest.sent.length, before);
   });
 
-  test("the pick is limited to the candidates", async () => {
-    reply = () => JSON.stringify({ picks: [{ ref: "evil#9", reason: "invented" }, { ref: "photocraft#99", reason: "invented" }] });
-    await pings.dispatch("MESSAGE_CREATE", msg("p5", { referenced_message: { content: "crash in layers" } }));
-    await pings.idle();
-    const sent = v2text(rest.sent.at(-1)!.body);
-    assert.match(sent, /No matching issue found/);
-    assert.doesNotMatch(sent, /evil|#99/);
-  });
-
-  test("picks are shown open first, then by comments plus reactions, whatever order the model gave", async () => {
+  test("matches are shown open first, then by comments plus reactions", async () => {
     const set = (comments_count: number, reactions_count: number | null, number: number) => db.run(db.k.updateTable("items").set({ comments_count, reactions_count }).where("repo", "=", "photocraft").where("number", "=", number));
     await set(40, 10, 3); // closed, most active
     await set(1, null, 1); // open, little activity (no reactions stored)
     await set(2, 5, 2); // open, more activity
-    reply = () => JSON.stringify({ picks: [{ ref: "photocraft#3", reason: "c" }, { ref: "photocraft#1", reason: "a" }, { ref: "photocraft#2", reason: "b" }] });
     try {
       const found = await search.find("webp export quality dark mode layers");
-      assert.deepEqual(found.matches.map((m) => m.number), [2, 1, 3]);
+      assert.deepEqual(found.matches.map((m) => m.number), [2, 1, 4, 3]);
     } finally {
       await db.run(db.k.updateTable("items").set({ comments_count: null, reactions_count: null }).where("repo", "=", "photocraft"));
     }
   });
 
-  test("over the daily cap the closest issues come from the embeddings, without a model call", async () => {
-    await db.run(db.k.insertInto("agent_runs").values({ step: "discord-search", stage: 3, prompt_id: "discord.search", prompt_version: "1", provider: "claude", model: "haiku", items: "[]", item_count: 0, state: "done", started_at: new Date().toISOString(), cost_usd: 2.5 }));
-    const calls = asked.length;
-    await pings.dispatch("MESSAGE_CREATE", msg("p6", { referenced_message: { content: "webp export quality" } }));
-    await pings.idle();
-    assert.equal(asked.length, calls);
-    const sent = v2text(rest.sent.at(-1)!.body);
-    assert.match(sent, /photocraft#1 /);
-    assert.doesNotMatch(sent, />/);
-    await db.run(db.k.deleteFrom("agent_runs").where("step", "=", "discord-search"));
-  });
-
   test("deleting the ping, or the quoted message, deletes our reply through the combined dispatch", async () => {
-    reply = () => null;
     await pings.dispatch("MESSAGE_CREATE", msg("p7", { message_reference: { message_id: "q7" }, referenced_message: { content: "webp export quality" } }));
     await pings.dispatch("MESSAGE_CREATE", msg("p8", { message_reference: { message_id: "q8" }, referenced_message: { content: "webp export quality" }, author: { id: "u2" } }));
     await pings.idle();
@@ -211,39 +180,10 @@ describe("ping replies", () => {
   });
 });
 
-describe("model call", () => {
-  test("the question reaches only the model call, and its texts are gone after it and at startup", async () => {
-    let stdin = "";
-    const restore = setRunner(async (_cmd, _args, input) => {
-      stdin = input;
-      return { code: 0, stdout: JSON.stringify({ type: "result", subtype: "success", result: JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "same" }] }), usage: { input_tokens: 5, output_tokens: 2 }, total_cost_usd: 0.002 }), stderr: "" };
-    });
-    try {
-      const real = new Search({ db, embedder, index: new VectorIndex(embedder), log: (l) => assert.fail(l) });
-      const found = await real.find("zebra-unique webp export quality");
-      assert.equal(found.judged, true);
-      assert.match(stdin, /zebra-unique/);
-    } finally {
-      restore();
-    }
-    const runs = await db.all(db.k.selectFrom("agent_runs").select(["id", "state"]).where("step", "=", "discord-search"));
-    assert.ok(runs.length >= 1 && runs.every((r) => r.state === "done"));
-    const texts = async () => (await db.get(db.k.selectFrom("agent_run_texts").select((eb) => eb.fn.countAll<number>().as("n"))
-      .where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", "discord-search"))))!.n;
-    assert.equal(await texts(), 0);
-    // A crash can leave a call's text behind in any state; the startup sweep takes all of them.
-    await db.run(db.k.updateTable("agent_runs").set({ state: "running" }).where("id", "=", runs[0]!.id));
-    await db.run(db.k.insertInto("agent_run_texts").values({ run_id: runs[0]!.id, prompt: "x" }));
-    await dropTexts(db, true);
-    assert.equal(await texts(), 0);
-  });
-});
-
 describe("commands", () => {
   test("the message command is deferred as ephemeral, then edited with the result; guild commands register once", async () => {
     const ix = new Interactions(rest, (l) => assert.fail(l));
     installSearchCommands(ix, { db, keys, search });
-    reply = () => JSON.stringify({ picks: [{ ref: "photocraft#2", reason: "Same panel" }] });
     ix.dispatch("READY", { application: { id: "app1" } });
     ix.dispatch("GUILD_CREATE", { id: "g1" });
     ix.dispatch("GUILD_CREATE", { id: "g1" });
@@ -253,7 +193,7 @@ describe("commands", () => {
     ix.dispatch("INTERACTION_CREATE", { id: "i1", token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: "u9" } }, data: { name: "Find issue", type: 3, target_id: "m1", resolved: { messages: { m1: { content: "dark mode layers" } } } } });
     await new Promise((r) => setTimeout(r, 50));
     assert.deepEqual(rest.callbacks.at(-1), { type: 5, ephemeral: true, choices: undefined });
-    assert.match(v2text(rest.edits.at(-1)!), /photocraft#2 Dark mode for the layers panel\n> Same panel/);
+    assert.match(v2text(rest.edits.at(-1)!), /photocraft#2 Dark mode for the layers panel/);
   });
 
   test("/autocraft link, status, and stats: a code links the caller, hidden items are not found, repo choices are public repos", async () => {
@@ -330,7 +270,7 @@ describe("repo named in the question", () => {
     await db.run(db.k.insertInto("items").values({ repo: "vectorcraft", number: 1, kind: "issue", state: "OPEN", title, body: "", url: "https://github.com/storytold/vectorcraft/issues/1" }));
     await db.run(db.k.insertInto("item_embeddings").values({ repo: "vectorcraft", number: 1, model: "fake", hash: "h", vec: toBlob((await embedder.embed([title], "item"))[0]!), at: new Date().toISOString() }));
   });
-  const repos = async (q: string, repo?: string) => [...new Set((await new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask }).candidates(q, repo)).map((c) => c.repo))].sort();
+  const repos = async (q: string, repo?: string) => [...new Set((await new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {} }).candidates(q, repo)).map((c) => c.repo))].sort();
 
   test("a named repo restricts the search, an explicit repo wins, two named repos search everything", async () => {
     assert.deepEqual(await repos("crash in layers"), ["photocraft", "vectorcraft"]);
@@ -338,26 +278,6 @@ describe("repo named in the question", () => {
     assert.deepEqual(await repos("photocraft crash in layers", "vectorcraft"), ["vectorcraft"]);
     assert.deepEqual(await repos("photocraft or vectorcraft crash in layers"), ["photocraft", "vectorcraft"]);
     assert.deepEqual(await repos("crash in layers", "secret"), ["photocraft", "vectorcraft"]);
-  });
-});
-
-describe("no helper takes the call", () => {
-  test("the search falls back at once and the queued call is withdrawn", async () => {
-    assert.ok(DISCORD_TAKE_WAIT_MS <= 10_000, "a short deadline");
-    const poll = allocation.pollMs;
-    allocation.pollMs = 10;
-    await setInferenceMode(db, "user-local", "test");
-    try {
-      const waiting = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask: (d, i) => askHaiku(d, i, 80) });
-      const found = await waiting.find("zebra-unique webp export quality");
-      assert.equal(found.judged, false);
-      assert.ok(found.matches.length > 0);
-      const calls = await db.all(db.k.selectFrom("remote_calls").select(["state", "error"]).where("prompt_id", "=", "discord.search"));
-      assert.ok(calls.length >= 1 && calls.every((c) => c.state === "failed" && /in time/.test(c.error ?? "")));
-    } finally {
-      await setInferenceMode(db, "server", "test");
-      allocation.pollMs = poll;
-    }
   });
 });
 
@@ -370,7 +290,7 @@ describe("pull requests", () => {
       await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: n, kind: "pr", state, closed_at: merged ?? at, merged_at: merged, title: "WebP export quality merged change", body: "", url: `https://github.com/storytold/photocraft/pull/${n}` }));
       await emb("photocraft", n, vec, at);
     }
-    const fresh = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask });
+    const fresh = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {} });
     const found = { matches: await fresh.candidates("zebra-unique webp export quality") };
     const by = (n: number) => found.matches.find((m) => m.number === n);
     assert.equal(by(4)?.pr, true);

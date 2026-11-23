@@ -49,7 +49,7 @@ export async function deliver(r: Rendered, send: (body: Body) => Promise<unknown
   }
 }
 
-const sectionText = (m: Match): string => `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
+const sectionText = (m: Match): string => `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}`;
 
 /** Each result is a section: its text with its link button beside it, so a button is never far from the issue it opens. "File a new issue" and the other actions sit in a row at the end. */
 export async function renderMatches(db: Db, matches: Match[], question: string, channelId: string | undefined, noneId?: string): Promise<Rendered> {

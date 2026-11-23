@@ -15,7 +15,7 @@ import type { FileResult } from "../src/discord/file-issue.ts";
 import { installIssueNew, type IssueAsk } from "../src/discord/issue-new.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } from "../src/discord/rest.ts";
-import { Search, type Ask } from "../src/discord/search.ts";
+import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -55,13 +55,11 @@ class FakeRest implements DiscordRest {
 
 const rest = new FakeRest();
 const ix = new Interactions(rest, (l) => assert.fail(l));
-const pick: Ask = async () => (pickReply);
-let pickReply = JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "Same problem" }] });
 const calls: { id: string; input: unknown }[] = [];
 let draftReply: string | null = JSON.stringify({ title: "WebP export ignores quality", body: "Quality has no effect. See https://evil.example/x and https://github.com/storytold/photocraft/issues/1 ping @everyone <@123>" });
 let questionsReply: string | null = JSON.stringify({ ask: ["steps", "env", "bogus"] });
 const ask = (async (_db: unknown, id: string, input: unknown) => { calls.push({ id, input }); return id === "discord.issue-questions" ? questionsReply : draftReply; }) as IssueAsk;
-const search = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask: pick });
+const search = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {} });
 installSearchCommands(ix, { db, keys, search });
 const filed: { reporter: string; repo: string; title: string; body: string; kind: string }[] = [];
 let fileResult: FileResult = { status: "refused", reason: "x" };
@@ -90,6 +88,13 @@ type Comp = { type: number; label?: string; custom_id?: string; url?: string; co
 const rows = (b: EditBody) => (b.components as Comp[]).flatMap((r) => (r.type === 9 ? [r.accessory!] : r.type === 10 ? [] : r.components!));
 const v2text = (b: EditBody) => (b.components as Comp[]).flatMap((c) => (c.type === 9 ? c.components! : [c])).filter((c) => c.type === 10).map((c) => c.content).join("\n");
 const NONE = "None of these, file a new one";
+/** Presses a button that starts the questions: the model picks them after a deferral, then Continue opens the form. Returns the form's callback. */
+const pressToQuestions = async (user: string, id: string) => {
+  await press(user, id);
+  assert.equal(rest.callbacks[0]!.type, 5, "the questions are chosen after a deferral");
+  await press(user, rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!);
+  return rest.callbacks[0]!;
+};
 const draftUrl = (b: EditBody): URL => new URL(rows(b).find((x) => x.label === "Open on GitHub instead")!.url!);
 
 before(async () => {
@@ -113,6 +118,9 @@ describe("search and filing flow", () => {
     await submitForm("u1", "photocraft", "webp export quality slider does nothing");
     const b = rest.edits[0]!;
     assert.match(v2text(b), /photocraft#1 Export to WebP/);
+    // The first reply comes from the embeddings alone: no model call yet, and no reason line.
+    assert.equal(calls.length, 0);
+    assert.doesNotMatch(v2text(b), />/);
     assert.deepEqual(rows(b).map((x) => x.label), ["photocraft#1", NONE]);
     // Another person cannot press someone's button.
     await press("u3", rows(b).find((x) => x.label === NONE)!.custom_id!);
@@ -131,8 +139,9 @@ describe("search and filing flow", () => {
     await searchCmd("u4");
     await submitForm("u4", "photocraft", "webp export quality slider does nothing");
     const noneId = rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!;
-    await press("u4", noneId);
-    const modal = rest.callbacks[0]!;
+    assert.equal(calls.length, 0);
+    const modal = await pressToQuestions("u4", noneId);
+    assert.equal(calls.filter((c) => c.id === "discord.issue-questions").length, 1);
     assert.equal(modal.type, 9);
     const fields = (modal.data as unknown as { components: { components: { custom_id: string }[] }[] }).components.map((r) => r.components[0]!);
     assert.deepEqual(fields.map((f) => f.custom_id), ["steps", "env"]);
@@ -181,12 +190,12 @@ describe("search and filing flow", () => {
   });
 
   test("Edit reopens the draft in a form prefilled with title and body; the result replaces the draft", async () => {
-    pickReply = JSON.stringify({ picks: [] });
     draftReply = JSON.stringify({ title: "Long", body: "word ".repeat(600), kind: "bug" });
     await searchCmd("u5");
     await submitForm("u5", "photocraft", "dark mode layers panel stays light");
-    // Nothing matches: a Continue button leads to the questions.
-    await press("u5", rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!);
+    // Nothing matches: the reply says so and a Continue button leads to the questions.
+    assert.match(rest.edits[0]!.content!, /No similar issue was found/);
+    await pressToQuestions("u5", rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!);
     await submit("u5", modalId(), {});
     const out = rest.edits[0]!;
     assert.ok(out.content!.length <= 2000);
@@ -198,22 +207,19 @@ describe("search and filing flow", () => {
     assert.equal((edit.data as unknown as { components: { components: { value: string }[] }[] }).components[0]!.components[0]!.value, "Long");
     await submit("u5", edit.data!.custom_id!, { title: "Better title", body: "Own body" });
     assert.equal(draftUrl(rest.edits[0]!).searchParams.get("title"), "Better title");
-    pickReply = JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "Same problem" }] });
   });
 
   test("over the daily cap no model is asked and the draft is built from the form", async () => {
     await db.run(db.k.insertInto("settings").values({ key: "discord_issue_daily_usd", value: "0" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     calls.length = 0;
-    pickReply = JSON.stringify({ picks: [] });
     await searchCmd("u6");
     await submitForm("u6", "photocraft", "dark mode layers panel stays light");
-    // No match for this text: the draft comes at once.
+    await press("u6", rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!);
     assert.equal(calls.length, 0);
     const b = rest.edits[0]!;
     const u = draftUrl(b);
     assert.match(u.searchParams.get("body")!, /layers panel stays light/);
     await db.run(db.k.deleteFrom("settings").where("key", "=", "discord_issue_daily_usd"));
-    pickReply = JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "Same problem" }] });
   });
 
   test("only choosing a new issue takes a slot of the three an hour; searches do not", async () => {
@@ -221,8 +227,8 @@ describe("search and filing flow", () => {
     for (let k = 0; k < 3; k++) {
       await searchCmd("u7");
       await submitForm("u7", "photocraft", "webp export quality");
-      await press("u7", rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!);
-      assert.equal(rest.callbacks[0]!.type, 9, "the follow-up form opens");
+      const modal = await pressToQuestions("u7", rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!);
+      assert.equal(modal.type, 9, "the follow-up form opens");
     }
     await searchCmd("u7");
     await submitForm("u7", "photocraft", "webp export quality");
@@ -234,8 +240,7 @@ describe("search and filing flow", () => {
     draftReply = JSON.stringify({ title: "Long one", kind: "bug", body: "Details. ".repeat(150) });
     await searchCmd("u8");
     await submitForm("u8", "photocraft", "webp export quality slider does nothing");
-    await press("u8", rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!);
-    const modal = rest.callbacks[0]!;
+    const modal = await pressToQuestions("u8", rows(rest.edits[0]!).find((x) => x.label === NONE)!.custom_id!);
     await submit("u8", modal.data!.custom_id!, { steps: "x", env: "y" });
     fileResult = { status: "refused", reason: "No." };
     await press("u8", rows(rest.edits[0]!).find((x) => x.label === "File it")!.custom_id!);
