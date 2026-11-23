@@ -162,6 +162,19 @@ export function setMtimes(work: string, commit: string, trimmed: boolean): strin
 }
 
 /**
+ * Sets every file of the gate's extra checkouts (`<work>/ext/*`, mounted read-only in the steps, so set here while the
+ * volume is writable) to OLD_MTIME. Cargo's fingerprints of path dependencies there (e.g. a font manifest) compare against
+ * the warm build's dep-info; fresh mtimes make it rebuild every crate that reads them. Returns the file count.
+ */
+export function setExtMtimes(work: string): number {
+  const ext = join(work, "ext");
+  if (!isDir(ext)) return 0;
+  const files = walk(ext);
+  for (const p of files) lutimesSync(join(ext, p), OLD_MTIME_SEC, OLD_MTIME_SEC);
+  return files.length;
+}
+
+/**
  * Moves every entry of `from` into `to` with renames (same file system), then removes `from`. What `to` already holds is
  * kept: an earlier step fetched it for this checkout (a newer index cache, a newly pinned crate). Each file lands whole, so
  * a CARGO_HOME never holds a half-copied file.
@@ -301,7 +314,9 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   const secs = (performance.now() - t0) / 1000;
   const trimmed = header.trimmed === true;
   const mtimes = env.AUTOCRAFT_WARM_MTIMES === "later" ? "the checkout's mtimes are set once it arrives" : setMtimes(work, commit, trimmed);
+  // The warm version's env hash covers the craft-fonts and craft-i18n commits, so the checkouts here are the ones it was built with.
+  const ext = env.AUTOCRAFT_WARM_MTIMES === "later" ? 0 : setExtMtimes(work);
   write({ state: "done", commit, trimmed, bytes: header.bytes, secs: Math.round(secs * 10) / 10 });
-  log(`warm copy ${(header.bytes / 1e9).toFixed(1)} GB in ${secs.toFixed(1)} s: ${at} into ${volume ? "the volume" : "memory"}; ${mtimes}`);
+  log(`warm copy ${(header.bytes / 1e9).toFixed(1)} GB in ${secs.toFixed(1)} s: ${at} into ${volume ? "the volume" : "memory"}; ${mtimes}${ext ? `; ${ext} files of the gate's checkouts set to 2001-01-01` : ""}`);
   return 0;
 }

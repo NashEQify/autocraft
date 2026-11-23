@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CHANGED_FILE } from "../src/build/warm-mount.ts";
 import { encodeManifest, makeHeader, signLatest } from "../src/warm/manifest.ts";
-import { OLD_MTIME_SEC, setMtimes, warmCopyPhase } from "../src/worker/warm-copy.ts";
+import { OLD_MTIME_SEC, setExtMtimes, setMtimes, warmCopyPhase } from "../src/worker/warm-copy.ts";
 
 const A = "a".repeat(40), B = "b".repeat(40);
 
@@ -64,4 +64,15 @@ test("an untrimmed version counts every source as changed", (t) => {
   assert.ok(mtime("same.rs") <= OLD_MTIME_SEC && mtime("changed.rs") > OLD_MTIME_SEC);
   setMtimes(work, A, false);
   assert.ok(mtime("same.rs") > OLD_MTIME_SEC);
+});
+
+test("the gate's extra checkouts are set to the old mtime", (t) => {
+  const work = mkdtempSync(join(tmpdir(), "warm-ext-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const dir = join(work, "ext", "craft-fonts", "abc", "fonts");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.txt"), "x");
+  assert.equal(setExtMtimes(work), 1);
+  assert.ok(statSync(join(dir, "manifest.txt")).mtimeMs / 1000 <= OLD_MTIME_SEC);
+  assert.equal(setExtMtimes(join(work, "none")), 0);
 });

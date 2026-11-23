@@ -138,6 +138,8 @@ export const WARM_CHANGED_DIRS = "/work/.ws/warm-changed.dirs";
  */
 export const WARM_MTIMES_SH = `set -e
 files() { find . -path ./.git -prune -o -path ./target -prune -o \\( -type f -o -type l \\) -print0; }
+# The gate's checkouts (read-only mounts in the gate's steps) match the warm version's env: old like the checkout's unchanged files.
+if [ -d /work/ext ]; then find /work/ext \\( -type f -o -type l \\) -print0 | xargs -0 -r touch -h -d @${OLD_MTIME_SEC} --; fi
 if [ "$1" = list ]; then
   files | xargs -0 -r touch -h -d @${OLD_MTIME_SEC} --
   if [ -s ${WARM_CHANGED_FILES} ]; then xargs -0 -r touch -c -h -- <${WARM_CHANGED_FILES}; fi
