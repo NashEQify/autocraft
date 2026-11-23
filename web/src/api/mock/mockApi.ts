@@ -112,9 +112,10 @@ export function createMockApi(): Api {
         { prompt: "discord.signal.haiku", day: { calls: 120, usd: 0.0312 }, week: { calls: 806, usd: 0.2143 } },
       ],
       filed: [
-        { repo: "photocraft", number: 4182, login: "(app)", at: new Date(Date.now() - 25 * 60_000).toISOString() },
-        { repo: "pdfcraft", number: 977, login: "(app)", at: new Date(Date.now() - 3 * 3_600_000).toISOString() },
-        { repo: "wordcraft", number: 311, login: "tomas-vale", at: new Date(Date.now() - 9 * 3_600_000).toISOString() },
+        { repo: "sketchpad", number: 7731, login: "(app)", at: new Date(Date.now() - 10 * 60_000).toISOString(), githubUrl: "https://github.com/example-studio/sketchpad/issues/7731" },
+        { repo: "photocraft", number: 4182, login: "(app)", at: new Date(Date.now() - 25 * 60_000).toISOString(), githubUrl: null },
+        { repo: "pdfcraft", number: 977, login: "(app)", at: new Date(Date.now() - 3 * 3_600_000).toISOString(), githubUrl: null },
+        { repo: "wordcraft", number: 311, login: "tomas-vale", at: new Date(Date.now() - 9 * 3_600_000).toISOString(), githubUrl: null },
       ],
       capacity: { ready: false, why: "1 Task Runner has Interactive slots, and it is quota-held" },
     },

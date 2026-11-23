@@ -17,7 +17,7 @@ import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, JUNK_REFUSAL, junk
 import type { JunkAsk } from "./junk-ask.ts";
 import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
-import { botRepo, botRepos } from "./filing-repos.ts";
+import { botRepo, botRepos, FILING_MAX } from "./filing-repos.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
@@ -170,8 +170,8 @@ export class IssueNew {
 
   /**
    * The repos the bot offers as choices: app name (release_apps) else repo name. Discord allows 25 options; with more
-   * repos the preselected repo stays, then the filing-only ones (an operator chose each), then the tracked ones with the
-   * most open issues.
+   * repos the preselected repo stays, then the filing-only ones (an operator chose each; at most FILING_MAX), then the
+   * tracked ones with the most open issues.
    */
   async #apps(preselect: string | null): Promise<{ name: string; label: string }[]> {
     const { db } = this.#d;
@@ -180,7 +180,8 @@ export class IssueNew {
       .select((eb) => ["r.name as name", eb.fn.coalesce("a.name", "r.name").as("label"), eb.fn.coalesce("r.open_issues", eb.lit(0)).as("open")])
       .where("r.name", "in", offered.map((r) => r.name))) : [];
     const known = new Map(labels.map((l) => [l.name, l]));
-    const rows = offered.map((r) => ({ name: r.name, label: known.get(r.name)?.label ?? r.name, open: Number(known.get(r.name)?.open ?? 0), filingOnly: r.filingOnly }));
+    let filing = 0;
+    const rows = offered.filter((r) => r.name === preselect || !r.filingOnly || ++filing <= FILING_MAX).map((r) => ({ name: r.name, label: known.get(r.name)?.label ?? r.name, open: Number(known.get(r.name)?.open ?? 0), filingOnly: r.filingOnly }));
     const mine = rows.sort((x, y) => Number(y.name === preselect) - Number(x.name === preselect) || Number(y.filingOnly) - Number(x.filingOnly) || y.open - x.open || x.name.localeCompare(y.name));
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
   }

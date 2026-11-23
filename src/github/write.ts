@@ -87,11 +87,14 @@ async function appEnv(w: Writer, g: AnyGrant, scope?: TokenScope): Promise<Recor
     return appChildEnv(await (w.mint ?? installationToken)(owner, g.repo, scope));
   } catch (e) {
     const fix = "install it on the repository or set the repository's identity back to legacy";
-    if (e instanceof AppNotInstalledError) throw new Error(`app identity: the GitHub App is not installed on ${owner}; ${fix}`);
-    if (e instanceof RepoNotInInstallationError) throw new Error(`app identity: ${owner}/${g.repo} is not in the GitHub App's installation; ${fix}`);
+    if (e instanceof AppNotInstalledError) throw new AppNoAccessError(`app identity: the GitHub App is not installed on ${owner}; ${fix}`);
+    if (e instanceof RepoNotInInstallationError) throw new AppNoAccessError(`app identity: ${owner}/${g.repo} is not in the GitHub App's installation; ${fix}`);
     throw new Error(`app identity: no installation token for ${owner}/${g.repo}: ${oneLine(String((e as Error).message ?? e))}`);
   }
 }
+
+/** The GitHub App's installation does not reach the repo (not installed on its owner, or the repo left out). */
+export class AppNoAccessError extends Error {}
 
 /** A failed command result for a mint failure: callers already handle a non-zero exit. No request went out, so it is marked not sent. */
 const failedResult = (e: unknown): ExecResult => ({ code: 1, stdout: "", stderr: String((e as Error).message ?? e), sent: false });
@@ -682,7 +685,12 @@ export class IssueError extends Error {
   clear: boolean;
   /** The write pacing held the create back (WritePacedError): nothing was sent and a later run may simply try again. */
   paced: boolean;
-  constructor(message: string, clear: boolean, paced = false) { super(message); this.clear = clear; this.paced = paced; }
+  /** Nothing was sent: no token could be minted (`noAccess`: the installation does not reach the repo) or the write was not the app's. */
+  unsent: boolean;
+  noAccess: boolean;
+  constructor(message: string, clear: boolean, paced = false, o: { unsent?: boolean; noAccess?: boolean } = {}) {
+    super(message); this.clear = clear; this.paced = paced; this.unsent = o.unsent ?? false; this.noAccess = o.noAccess ?? false;
+  }
 }
 
 // gh's own wording when GitHub rejects the request before creating anything.
@@ -745,7 +753,10 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
 /** Runs `gh` under the grant's app lane; a not-sent failure when the write would not be the GitHub App's (the instance writes as the box account). Never the box account. */
 async function asBot(w: Writer, g: GuardedFiling, exec: Exec, args: string[], input?: string): Promise<ExecResult> {
   if (!await inAppLane(w, g)) return { code: 1, stdout: "", stderr: "app identity: the instance writes as the box account, not the GitHub App", sent: false };
-  return (await laneExec(w, g, exec))("gh", args, input === undefined ? undefined : { input });
+  let env: Record<string, string>;
+  // Lost access is thrown, so the caller can tell it from a failure to reach GitHub.
+  try { env = await appEnv(w, g); } catch (e) { if (e instanceof AppNoAccessError) throw e; return failedResult(e); }
+  return exec("gh", args, { ...(input === undefined ? {} : { input }), env, replaceEnv: true });
 }
 
 /**
@@ -762,10 +773,10 @@ export async function createBotIssue(w: Writer, g: GuardedFiling, exec: Exec, o:
       (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
       (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`), undefined, g.owner);
   } catch (e) {
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError, { unsent: true, noAccess: e instanceof AppNoAccessError });
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
-  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m)); }
+  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m), false, { unsent: r.sent === false }); }
   if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
   return { number: Number(url[1]), url: url[0] };
 }

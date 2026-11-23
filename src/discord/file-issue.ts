@@ -252,7 +252,9 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
       if (e instanceof IssueError && !e.clear) { filed = true; return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
       log(`discord: filing as the app failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
       // The installation no longer reaches the repo (the app was removed from it, or from its owner).
-      if (/^app identity:/.test(String((e as Error).message))) return { status: "refused", reason: "AutoCraft can no longer file issues in this repo." };
+      if (e instanceof IssueError && e.noAccess) return { status: "refused", reason: "AutoCraft can no longer file issues in this repo." };
+      // No token (GitHub 5xx, network, rate limit): nothing was sent, so the slot is freed.
+      if (e instanceof IssueError && e.unsent) return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." };
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;

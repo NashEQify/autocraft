@@ -9,7 +9,7 @@ import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
 import { countOf, linksOf } from "../../discord/store.ts";
-import { addFilingRepo, filingRepos, FilingRepoError, removeFilingRepo } from "../../discord/filing-repos.ts";
+import { addFilingRepo, botRepos, filingRepos, FilingRepoError, removeFilingRepo } from "../../discord/filing-repos.ts";
 import { reactOn } from "../../discord/react.ts";
 import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
@@ -64,10 +64,14 @@ export async function usageOf(db: Db, now: number = Date.now()): Promise<Discord
   }
   const filed = await db.all(db.k.selectFrom("discord_filed").select(["repo", "number", "login", "at"]).where("number", ">", 0).orderBy("at", "desc").limit(20));
   const cap = await interactiveTakers(db, now);
+  const filingOwner = new Map((await botRepos(db)).filter((r) => r.filingOnly).map((r) => [r.name, r.owner]));
   return {
     counts: await eventCounts(db, now),
     prompts: [...byPrompt.values()].sort((a, b) => a.prompt.localeCompare(b.prompt)),
-    filed: filed.map((f) => ({ repo: f.repo, number: Number(f.number), login: f.login, at: f.at })),
+    filed: filed.map((f) => {
+      const owner = filingOwner.get(f.repo);
+      return { repo: f.repo, number: Number(f.number), login: f.login, at: f.at, githubUrl: owner ? `https://github.com/${owner}/${f.repo}/issues/${Number(f.number)}` : null };
+    }),
     capacity: cap.applies ? { ready: cap.ready, why: cap.why } : null,
   };
 }

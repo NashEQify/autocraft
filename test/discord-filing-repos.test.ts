@@ -6,12 +6,12 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { botRefusal, fileAsBot, type FileHooks } from "../src/discord/file-issue.ts";
-import { addFilingRepo, botRepos, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
+import { addFilingRepo, botRepos, FILING_MAX, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { AppNotInstalledError } from "../src/github/install-token.ts";
 import { publicRepoNames } from "../src/public/status.ts";
 import { slugOf } from "../src/owners.ts";
-import { trackedNames } from "../src/repos.ts";
+import { trackRepo, trackedNames } from "../src/repos.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 
@@ -37,6 +37,7 @@ test("a filing-only repo is offered and filed into as the app under its owner, a
   assert.ok(!(await publicRepoNames(db)).includes("sketchpad"), "search stays on tracked repos");
   assert.ok(!(await trackedNames(db)).includes("sketchpad"), "sync and the pipeline never see it");
   assert.ok(!slugOf("sketchpad").startsWith("example-studio/"), "only the filing grant knows its owner");
+  await assert.rejects(trackRepo(db, "op", "other-org/sketchpad"), /filing-only/, "tracking cannot take a filing-only name");
   assert.equal(await botRefusal(db, "rep", "sketchpad"), null);
 
   const ran: { args: string[]; owner?: string }[] = [];
@@ -53,9 +54,13 @@ test("a filing-only repo is offered and filed into as the app under its owner, a
 
   const lost = { ...bot, mint: async (o: string) => { throw new AppNotInstalledError(o); } };
   assert.deepEqual(await fileAsBot({ db, log: () => {} }, ask, lost), { status: "refused", reason: "AutoCraft can no longer file issues in this repo." });
+  const down = { ...bot, mint: async () => { throw new Error("HTTP 502"); } };
+  assert.match((await fileAsBot({ db, log: () => {} }, ask, down) as { reason: string }).reason, /could not be reached/, "a failed mint is not lost access");
 
+  for (let i = 1; i < FILING_MAX; i++) await addFilingRepo(db, "op", `example-studio/pad-${i}`, { read, mint });
+  await assert.rejects(addFilingRepo(db, "op", "example-studio/one-more", { read, mint }), /at most/, "the list leaves the app select room for tracked repos");
   assert.equal(await removeFilingRepo(db, "op", "example-studio/sketchpad"), true);
   assert.notEqual(await botRefusal(db, "rep", "sketchpad"), null);
   const audited = await db.all(db.k.selectFrom("audit").select("action").where("action", "like", "discord-filing-%"));
-  assert.deepEqual(audited.map((a) => a.action).sort(), ["discord-filing-add", "discord-filing-remove"]);
+  assert.deepEqual([...new Set(audited.map((a) => a.action))].sort(), ["discord-filing-add", "discord-filing-remove"]);
 });

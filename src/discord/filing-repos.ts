@@ -17,6 +17,8 @@ export type FilingRepo = { owner: string; name: string; addedBy: string; addedAt
 export type BotRepo = { owner: string; name: string; filingOnly: boolean };
 
 const NAME = /^[A-Za-z0-9._-]{1,100}$/;
+/** At most this many, so the bot's app select (25 options) keeps room for the tracked repos. */
+export const FILING_MAX = 10;
 
 export async function filingRepos(db: Db): Promise<FilingRepo[]> {
   return await db.all(db.k.selectFrom("discord_filing_repos").select(["owner", "name", "added_by as addedBy", "added_at as addedAt"]).orderBy("owner").orderBy("name"));
@@ -69,6 +71,7 @@ function parseSlug(input: string): { owner: string; name: string } {
  */
 export async function addFilingRepo(db: Db, by: string, input: string, deps: { read?: ReadRepo; mint?: (owner: string, repo: string) => Promise<string> } = {}): Promise<FilingRepo> {
   const asked = parseSlug(input);
+  if ((await filingRepos(db)).length >= FILING_MAX) throw new FilingRepoError(`The bot files into at most ${FILING_MAX} filing-only repos; remove one first.`);
   const facts = await (deps.read ?? ghReadRepo)(asked.owner, asked.name);
   if (!facts) throw new FilingRepoError(`${asked.owner}/${asked.name} was not found.`);
   // GitHub's spelling: names are compared without case, and the bot shows them as GitHub does.
