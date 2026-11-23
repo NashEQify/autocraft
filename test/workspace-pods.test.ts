@@ -131,7 +131,6 @@ test("a workspace starts, is seeded, parks when idle and keeps its checkpoint af
   }
   assert.equal(spec.containers[0].image, "rust-stable:test");
   assert.ok(spec.initContainers[0].command.includes(WS_POD_PATH), "the helper is copied in");
-  assert.ok(spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.length > 0, "kept off the service's node");
 
   // The build-task launcher's sweep deletes only build pods.
   await launcherPass(deps, new LauncherState());

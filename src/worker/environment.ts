@@ -11,6 +11,9 @@ import { isCommitId, resolveGate, resolveI18nRev, type GateEnv } from "./gate.ts
 import { downloadAndExtract } from "./tarball.ts";
 import { slugOf } from "../owners.ts";
 
+/** The largest craft-fonts or craft-i18n archive a build pod or a workspace session takes in. */
+export const EXT_ARCHIVE_MAX_BYTES = 1024 ** 3;
+
 export type SandboxInfo = {
   /** The image the steps ran in: the derived tag, or the configured image when the gate needs no packages. */
   image: string;
@@ -97,7 +100,7 @@ export async function fetchCheckout(workDir: string, repo: "craft-fonts" | "craf
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   try {
-    await downloadAndExtract(`https://codeload.github.com/${slugOf(repo)}/tar.gz/${ref}`, tmp, 1024 * 1024 * 1024, undefined, fetchImpl);
+    await downloadAndExtract(`https://codeload.github.com/${slugOf(repo)}/tar.gz/${ref}`, tmp, EXT_ARCHIVE_MAX_BYTES, undefined, fetchImpl);
     writeFileSync(join(tmp, ".complete"), "");
     rmSync(dir, { recursive: true, force: true });
     try {
@@ -152,21 +155,22 @@ export async function prepareEnvironment(cfg: WorkerConfig, task: { repo: string
  * craft-i18n under `<workDir>/ext`. Shared by the container runtime and build pods.
  */
 export async function gateInputs(workDir: string, repo: string, base: string, gate: GateEnv, o: PrepareOptions): Promise<{ env: Record<string, string>; mounts: ExtraMount[]; craftI18nRev: string | null }> {
-  const env: Record<string, string> = { ...gate.env };
   const mounts: ExtraMount[] = [];
+  if (gate.craftFontsRef) mounts.push({ source: await fetchCheckout(workDir, "craft-fonts", gate.craftFontsRef, o.fetchImpl), target: "/craft-fonts" });
+  // The commit comes from the base commit, so a PR cannot make the host download a commit of its choosing.
+  const rev = await resolveI18nRev(repo, base, o.fetchImpl);
+  if (rev) mounts.push({ source: await fetchCheckout(workDir, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
+  if (gate.dropped.length) o.log(`gate env left out: ${gate.dropped.join(", ")}\n`);
+  return { env: gateStepEnv(gate, rev), mounts, craftI18nRev: rev };
+}
+
+/** The steps' env for a gate: its own env and the dirs of the craft-fonts and craft-i18n checkouts (mounted at fixed paths). */
+export function gateStepEnv(gate: GateEnv, i18nRev: string | null): Record<string, string> {
+  const env: Record<string, string> = { ...gate.env };
   if (gate.craftFontsRef) {
-    const dir = await fetchCheckout(workDir, "craft-fonts", gate.craftFontsRef, o.fetchImpl);
-    mounts.push({ source: dir, target: "/craft-fonts" });
     env.CRAFT_FONTS_DIR = "/craft-fonts";
     if (gate.requireFonts) env.CRAFT_FONTS_REQUIRED = "1";
   }
-  // The commit comes from the base commit, so a PR cannot make the host download a commit of its choosing.
-  const rev = await resolveI18nRev(repo, base, o.fetchImpl);
-  if (rev) {
-    mounts.push({ source: await fetchCheckout(workDir, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
-    env.CRAFT_I18N_DIR = "/craft-i18n";
-    env.CRAFT_I18N_REQUIRED = "1";
-  }
-  if (gate.dropped.length) o.log(`gate env left out: ${gate.dropped.join(", ")}\n`);
-  return { env, mounts, craftI18nRev: rev };
+  if (i18nRev) Object.assign(env, { CRAFT_I18N_DIR: "/craft-i18n", CRAFT_I18N_REQUIRED: "1" });
+  return env;
 }

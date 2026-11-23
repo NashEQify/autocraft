@@ -18,6 +18,7 @@ import { inClusterApi } from "./kube-api.ts";
 import { changeWarmRepos, setWarmMinInterval, WARM_REPOS_KEY, warmRepos, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
+import { LAYOUT_CI, warmOf } from "./workspace-layout.ts";
 import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
 import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
 import { capJson, createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
@@ -380,6 +381,10 @@ async function workspace(args: string[]): Promise<void> {
     console.log(`pod ${w.pod ?? "-"}  volume ${w.pvc ?? "-"}  since ${w.state_at}${w.last_call_at ? `  last call ${w.last_call_at}` : ""}${w.ended_at ? `  ended ${w.ended_at}` : ""}`);
     const size = (await db.get(db.k.selectFrom("workspaces").select((eb) => eb.fn<number | null>("length", ["checkpoint"]).as("bytes")).where("id", "=", w.id)))?.bytes;
     console.log(`checkpoint ${size != null ? `${size} bytes at ${w.checkpoint_at}` : "none"}`);
+    if (w.layout === LAYOUT_CI) {
+      const warm = warmOf(w);
+      console.log(`layout 2 (CI paths)  warm target ${warm?.target ?? "-"}  volume ${warm ? `${(warm.storageBytes / 1024 ** 3).toFixed(0)} GiB` : "-"}  ${warm?.note ? safe(warm.note) : warm?.use ? `copying ${warm.use.key}@${warm.use.commit.slice(0, 12)} on ${warm.use.node}` : warm?.why ? `cold: ${safe(warm.why)}` : w.prepared ? "" : "reading the CI gate"}`);
+    }
     if (w.error) console.log(`error: ${safe(w.error)}`);
     const calls = await db.all(db.k.selectFrom("workspace_calls").select(["id", "n", "tool", "state", "created_at", "finished_at", "result"]).where("workspace_id", "=", w.id).orderBy("id", "desc").limit(10));
     for (const c of calls.reverse()) {

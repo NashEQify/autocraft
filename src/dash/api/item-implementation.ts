@@ -18,6 +18,8 @@ export type ImplementationData = {
   impl: Implementation; attempts: number; rounds: ImplementationRound[];
   /** The agent run of each call id the rounds name. */
   runOf: Map<number, Run>;
+  /** How each of the attempt's workspaces started its build dir (layout 2: warm copy or cold, src/build/workspace-layout.ts). */
+  starts: { id: number; at: string; note: string; warm: boolean }[];
 };
 
 /** The screenshot route of a stored shot (`implementations/<id>/<file>` under the artifact directory). */
@@ -39,8 +41,25 @@ export async function implementationData(c: Ctx): Promise<ImplementationData | n
       .select(["q.id as call", "r.id", "r.cost_usd", "r.model", "r.user_login", "r.harness", "r.reported_model"]).where(inList(c.db, "q.id", callIds, "bigint")));
     for (const r of rows) runOf.set(Number(r.call), { id: Number(r.id), cost_usd: r.cost_usd, model: r.model, user_login: r.user_login, harness: r.harness, reported_model: r.reported_model });
   }
-  return { impl, attempts: all.length, rounds, runOf };
+  const wsIds = [...new Set([impl.workspaceId, ...rounds.map((r) => (r.kind === "workspace" ? (r.result as { workspaceId?: unknown } | null)?.workspaceId : null))]
+    .filter((x): x is number => typeof x === "number"))];
+  const starts: ImplementationData["starts"] = [];
+  if (wsIds.length) {
+    for (const r of await c.db.all(c.db.k.selectFrom("workspaces").select(["id", "warm", "warm_commit"]).where(inList(c.db, "id", wsIds, "bigint")).orderBy("id"))) {
+      const w = parseWarm(r.warm);
+      if (w?.note && w.at) starts.push({ id: Number(r.id), at: w.at, note: w.note, warm: r.warm_commit !== null && w.note.startsWith("warm copy") });
+    }
+  }
+  return { impl, attempts: all.length, rounds, runOf, starts };
 }
+
+const parseWarm = (s: string | null): { note?: string; at?: string } | null => {
+  try {
+    return s ? (JSON.parse(s) as { note?: string; at?: string }) : null;
+  } catch {
+    return null;
+  }
+};
 
 const part = (p: CheckPart | undefined): ImplementationCheckPart => ({ ran: p?.ran ?? false, exit: p?.exit ?? null, findings: p?.findings ?? 0, noVerdict: p?.noVerdict ?? false, note: p?.note ?? null });
 
@@ -200,6 +219,11 @@ export function implementationLines(c: Ctx, d: ImplementationData | null, line: 
       if (c.staff && x?.error) t.lines = [x.error];
       out.push(t);
     }
+  }
+  for (const w of d.starts) {
+    const t = line(`impl-ws:${w.id}:${w.at}`, w.at, "harness", "AutoCraft", "job", w.warm ? "The workspace started from the warm build" : "The workspace started without a warm build");
+    if (c.staff) t.lines = [w.note];
+    out.push(t);
   }
   if (impl.state === "stuck" || impl.state === "failed" || impl.state === "cancelled") {
     const t = line(`impl:${impl.id}:end`, impl.updatedAt, "harness", "AutoCraft", "fixup", `Implementation ${impl.state}${impl.reason ? `: ${clip(c.staff ? impl.reason : causeOf(impl.reason), 140)}` : ""}`);

@@ -290,6 +290,11 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["workspaces", "checkpoint_error", "TEXT"],
   ["workspaces", "restored", "TEXT"],
   ["workspaces", "restored_at", "TEXT"],
+  // Workspace layout 2 at the CI paths, started from the node's warm version (src/build/workspace-layout.ts).
+  ["workspaces", "layout", "INTEGER NOT NULL DEFAULT 1"],
+  ["workspaces", "prepared", "TEXT"],
+  ["workspaces", "warm", "TEXT"],
+  ["workspaces", "warm_commit", "TEXT"],
   ["remote_calls", "base_stdin", "TEXT"],
   // A call only this user's own Task Runners take: a maintainer's conversation turn runs on their own inference.
   ["remote_calls", "for_login", "TEXT COLLATE NOCASE"],

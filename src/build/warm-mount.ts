@@ -95,10 +95,11 @@ export const WARM_TMPFS_HEADROOM_BYTES = 4 * 1024 ** 3;
 export const warmTmpfsBytes = (bytes: number): number => Math.ceil(bytes * WARM_MEMORY_FACTOR) + WARM_TMPFS_HEADROOM_BYTES;
 
 /**
- * The warm-copy container's args, env and mounts (pods.ts adds image and resources). `target` is the target volume as the
- * steps mount it, at `checkout`/target; CARGO_HOME is /cache/cargo on the task's volume.
+ * The warm-copy container's args, env and mounts (pods.ts and workspace-pods.ts add image and resources). `target` is the
+ * target volume as the steps mount it, at `checkout`/target; CARGO_HOME is /cache/cargo on the volume `work`. `env` adds
+ * settings (a workspace's checkout arrives after the copy: warm-copy.ts warmCopyPhase).
  */
-export function warmCopyParts(use: WarmUse, o: { checkout: string; image: string; envHash: string; targetVolume: { name: string; subPath?: string }; tmpVolume: string }) {
+export function warmCopyParts(use: WarmUse, o: { checkout: string; image: string; envHash: string; targetVolume: { name: string; subPath?: string }; tmpVolume: string; env?: Record<string, string> }) {
   const target = `${o.checkout}/target`;
   const env: Record<string, string> = {
     HOME: "/tmp", AUTOCRAFT_POD_WORK: "/work",
@@ -106,6 +107,7 @@ export function warmCopyParts(use: WarmUse, o: { checkout: string; image: string
     AUTOCRAFT_WARM_TARGET: target, AUTOCRAFT_WARM_CARGO_HOME: "/cache/cargo", AUTOCRAFT_WARM_CHECKOUT: o.checkout,
     AUTOCRAFT_WARM_IMAGE: o.image, AUTOCRAFT_WARM_ENV_HASH: o.envHash, AUTOCRAFT_WARM_MODE: use.target,
     ...(use.sameLock ? { AUTOCRAFT_WARM_SAME_LOCK: "1" } : {}),
+    ...o.env,
   };
   return {
     args: ["worker", "pod", WARM_COPY_CONTAINER],

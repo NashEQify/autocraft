@@ -74,6 +74,8 @@ export type LauncherDeps = {
   warmRecheck?: (key: string) => Promise<string[]>;
   /** Node and quota reads for environments with capacity `cluster`; null or left out: they run their fixed slots. */
   capacity?: CapacityApi | null;
+  /** Reads of the CI gate files for workspaces (src/worker/gate.ts); the global fetch when left out. */
+  fetchImpl?: typeof fetch;
 };
 
 /**
@@ -853,6 +855,7 @@ export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string
       } catch (e) {
         log(`pod launcher: ${(e as Error).stack ?? e}`);
       }
+      workspaces.warm = state.warm;
       try {
         await workspacePass(deps, workspaces);
       } catch (e) {

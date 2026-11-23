@@ -17,6 +17,9 @@ IMG_LIMIT=10485760
 IMG_OUT=3750000  # bytes of image sent at most, so its base64 stays under 5 MB; larger PNGs go out as JPEG
 RG_RAW=16777216
 DNUM=${WS_DISPLAY:-0}  # the X display number; only a local run of the helper changes it
+# Layout 2: the checkout sits at the CI runner's path, outside ROOT, and $ROOT/src links to it. Writes and
+# app binaries may resolve below it as well as below ROOT; its `target` is a mount point, never part of the tree.
+CHECKOUT=${WS_CHECKOUT:-}
 DPY=:$DNUM
 APPS=$ROOT/.ws/apps
 SHOTS=$ROOT/.ws/shots
@@ -24,6 +27,18 @@ APP_MAX=4
 APP_WAIT=30       # seconds app-start waits for the app's window
 APP_LOG_START=4096
 APP_LOG_STOP=2048
+
+# Whether the resolved path $1 lies below ROOT (resolved as $2) or below the layout-2 checkout.
+inside() {
+  case $1 in
+    "$2"/*) return 0 ;;
+  esac
+  [ -n "$CHECKOUT" ] || return 1
+  case $1 in
+    "$CHECKOUT"/*) return 0 ;;
+  esac
+  return 1
+}
 
 die() { # code exit message...
   code=$1; st=$2; shift 2
@@ -410,10 +425,7 @@ cmd_put() {
   mkdir -p "$dir" || die io 2 "cannot create $dir"
   root=$(readlink -f -- "$ROOT") || die io 2 "cannot resolve $ROOT"
   real=$(readlink -f -- "$p") || die io 2 "cannot resolve $p"
-  case $real in
-    "$root"/*) ;;
-    *) die usage 2 "$p resolves to $real, outside $ROOT" ;;
-  esac
+  inside "$real" "$root" || die usage 2 "$p resolves to $real, outside $ROOT"
   [ -d "$real" ] && die isdir 2 "$p is a directory"
   rdir=$(dirname "$real")
   mkdir -p "$ROOT/.ws/locks" || die io 2 "cannot create lock dir"
@@ -565,10 +577,10 @@ cmd_rg() {
 cmd_untar() {
   [ $# -eq 0 ] || die usage 2 "untar takes no arguments"
   mkdir -p "$ROOT/src" "$ROOT/home" || die io 2 "cannot create $ROOT/src"
-  if [ -n "$(ls -A "$ROOT/src" 2>/dev/null)" ]; then
+  if [ -n "$(ls -A "$ROOT/src/" 2>/dev/null | { if [ -n "$CHECKOUT" ]; then grep -vx target; else cat; fi; })" ]; then
     die conflict 4 "$ROOT/src is not empty"
   fi
-  tar -x -f - -C "$ROOT/src" --no-same-owner --no-same-permissions >&2 || die tar 2 "tar extraction failed"
+  tar -x -f - -C "$ROOT/src/" --no-same-owner --no-same-permissions >&2 || die tar 2 "tar extraction failed"
   cd "$ROOT/src" || die io 2 "cannot enter $ROOT/src"
   HOME=$ROOT/home
   export HOME
@@ -578,6 +590,9 @@ cmd_untar() {
   GIT_AUTHOR_DATE="2000-01-01T00:00:00+0000" GIT_COMMITTER_DATE="2000-01-01T00:00:00+0000"
   export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_DATE
   git init -q >&2 || die git 2 "git init failed"
+  if [ -n "$CHECKOUT" ]; then
+    echo /target >>.git/info/exclude || die io 2 "cannot write .git/info/exclude"
+  fi
   git add -A >&2 || die git 2 "git add failed"
   git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=workspace -c user.email=workspace@localhost \
     commit -q --allow-empty -m base >&2 || die git 2 "git commit failed"
@@ -661,10 +676,7 @@ launch_app() {
   esac
   root=$(readlink -f -- "$ROOT") || die io 2 "cannot resolve $ROOT"
   real=$(readlink -f -- "$bin") || die nofile 3 "no such file $bin"
-  case $real in
-    "$root"/*) ;;
-    *) die usage 2 "$bin resolves to $real, outside $ROOT" ;;
-  esac
+  inside "$real" "$root" || die usage 2 "$bin resolves to $real, outside $ROOT"
   [ -f "$real" ] || die nofile 3 "no such file $bin"
   [ -x "$real" ] || die notexec 2 "$bin is not executable"
   { setsid_bin=$(command -v setsid) && env_bin=$(command -v env); } || die io 2 "setsid or env is not installed"
