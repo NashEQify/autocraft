@@ -72,7 +72,7 @@ test("warm sync: versions with hard links, grace, refused versions, the node cap
   const publish = (key: string, commit: string, o: { signKey?: typeof privateKey; at?: number } = {}) =>
     store.publish({ key, repo: `org/${key}`, commit, image: "img@sha256:1", rustc: null, envHash: "e1", checkout: "/w/src", source: tree(key), signKey: o.signKey ?? privateKey, stored: o.at ?? (stored += 1000) });
 
-  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
+  let clock = Date.now();
   let assign: Assign = { keys: ["deckcraft", "photocraft"], maxBytes: 1024 ** 3 };
   const kube = new FakeConfigMaps();
   const dir = join(root, "node");
@@ -108,6 +108,17 @@ test("warm sync: versions with hard links, grace, refused versions, the node cap
   assert.notEqual(inode("deckcraft", g2, "target/debug/app"), inode("deckcraft", g1, "target/debug/app"));
   assert.equal(dav.gets.filter((p) => p.includes("/blobs/")).length, 1);
   assert.equal(kube.status("k3s-1").keys.deckcraft!.commit, "c".repeat(40));
+
+  // A restart with an old mode mark and a group-writable file clears the bit and keeps `current`.
+  const big = join(dir, "deckcraft", g2, "target/debug/libbig.rlib");
+  chmodSync(big, 0o664);
+  rmSync(join(dir, "deckcraft", g2, ".modes-ok2"));
+  await new SyncAgent({
+    dir, node: "k3s-1", namespace: "craft-cache", kube, store, log: () => {}, verifyKeys: () => [publicKey], assign: () => assign,
+    writeBytesPerSec: 0, graceMs: 3600_000, now: () => clock, diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
+  }).cycle();
+  assert.equal(cur("deckcraft"), g2);
+  assert.equal(statSync(big).mode & 0o022, 0);
 
   // The replaced version stays through the grace period, then goes.
   clock += 30 * 60_000;
@@ -177,7 +188,7 @@ test("warm sync: a third publish of one commit keeps the version in its grace pe
   let stored = Date.now();
   const publish = (commit: string, at?: number) =>
     store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: at ?? (stored += 1000) });
-  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
+  let clock = Date.now();
   let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
   const dir = join(root, "node");
   const agent = new SyncAgent({
@@ -231,7 +242,7 @@ test("warm sync: a new version that fits the cap only after a grace version expi
     writeFileSync(join(src.target, "debug", "app"), body);
     await store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: (stored += 1000) });
   };
-  let clock = Date.now() + 600_000; // ahead of the files' real ctimes, as a running clock is
+  let clock = Date.now();
   let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
   const dir = join(root, "node");
   const agent = new SyncAgent({
@@ -332,6 +343,8 @@ test("warm sync: the startup fix-up adds read bits to files and directories of a
   writeFileSync(join(dir, "target/g"), "y");
   chmodSync(join(dir, "target/g"), 0o640);
   chmodSync(join(dir, "target/sub"), 0o700);
+  chmodSync(dir, 0o755);
+  chmodSync(join(dir, "target"), 0o755);
   t.after(() => { chmodSync(join(dir, "target/sub"), 0o755); rmSync(dir, { recursive: true, force: true }); });
   assert.equal(addReadBits(dir), 3);
   assert.equal(statSync(join(dir, "target/g")).mode & 0o777, 0o644);

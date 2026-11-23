@@ -17,14 +17,14 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, type ApplyStats, BadBlobError, clearDir, countTouched, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, type ApplyStats, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
 export const STATUS_DATA_KEY = "status.json";
 export const STATUS_LABEL = "craft.build/warm-status";
 /** Written into a version dir once every entry in it is readable to all uids. */
-const MODES_MARK = ".modes-ok";
+const MODES_MARK = ".modes-ok2";
 const GEN = /^gen-[0-9a-f]{7,12}(-[0-9]+)?$/;
 const NODE_NAME = /^[a-z0-9]([-a-z0-9.]{0,230}[a-z0-9])?$/;
 const MAX_BAD_BLOBS = 32;
@@ -192,7 +192,6 @@ export class SyncAgent {
     const { dir, log } = this.c;
     mkdirSync(dir, { recursive: true });
     this.removeLeftovers();
-    this.dropTouched();
     this.fixModes();
     let assign: Assign;
     try {
@@ -303,8 +302,10 @@ export class SyncAgent {
   }
 
   /**
-   * Versions built before modes were normalized may hold files other uids cannot read. Adds the read bits (search for
-   * directories) to every entry of a version that has no MODES_MARK yet, then writes the mark. Hard links make this
+   * Versions built before modes were normalized may hold files other uids cannot read or that group and others can
+   * write. Adds the read bits (search for directories) and clears group/other write on every entry of a version that
+   * has no MODES_MARK yet, then writes the mark. Nothing is deleted here: a file another uid or gid owns is only
+   * refused as a link source, so the next version fetches it. Hard links make this
    * fix older versions that share an inode too. A failure leaves no mark, so the next cycle retries.
    */
   private fixModes(): void {
@@ -318,35 +319,6 @@ export class SyncAgent {
           if (fixed) this.c.log(`warm sync: ${k}/${n}: made ${fixed} entries readable to all`);
         } catch (e) {
           this.c.log(`warm sync: ${k}/${n}: making files readable failed: ${(e as Error).message}`.slice(0, 300));
-        }
-      }
-    }
-  }
-
-  private touchedChecked = false;
-
-  /**
-   * Once per agent start: removes versions with a file that was written to, relabelled or made group/other-writable
-   * since the version was finished (stat only). The normal flow fetches them again.
-   */
-  private dropTouched(): void {
-    if (this.touchedChecked) return;
-    this.touchedChecked = true;
-    for (const k of this.keyDirs()) {
-      for (const n of readdirSync(join(this.c.dir, k))) {
-        if (!GEN.test(n)) continue;
-        const gen = join(this.c.dir, k, n);
-        const meta = this.metaOf(gen);
-        if (!meta) continue;
-        try {
-          const prev = this.previousOf(gen, meta.synced);
-          const bad = prev ? countTouched(prev) : 0;
-          if (!bad) continue;
-          if (this.held(k)?.gen === n) unlinkSync(join(this.c.dir, k, "current"));
-          removeTree(gen);
-          this.c.log(`warm sync: ${k}/${n}: dropped, ${bad} files changed since it was applied`);
-        } catch (e) {
-          this.c.log(`warm sync: ${k}/${n}: integrity check failed: ${(e as Error).message}`.slice(0, 300));
         }
       }
     }
@@ -444,7 +416,7 @@ export class SyncAgent {
     try {
       const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       progress = this.startProgress(key, l, manifest.header.bytes, manifest.header.files, t0);
-      const previous = h ? this.previousOf(join(kd, h.gen), h.meta.synced) : undefined;
+      const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
       const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
@@ -552,10 +524,10 @@ export class SyncAgent {
   }
 
   /** The current version as hard-link source; none when its manifest cannot be read (everything is fetched then). */
-  private previousOf(genDir: string, appliedMs: number): Previous | undefined {
+  private previousOf(genDir: string): Previous | undefined {
     try {
       const manifest: Manifest = decodeManifest(readFileSync(join(genDir, "manifest.zst")));
-      return { manifest, roots: { target: join(genDir, "target"), cargo: join(genDir, "cargo") }, appliedMs };
+      return { manifest, roots: { target: join(genDir, "target"), cargo: join(genDir, "cargo") } };
     } catch (e) {
       this.c.log(`warm sync: ${genDir}: the previous manifest cannot be read (${(e as Error).message}); fetching every file`);
       return undefined;
@@ -617,7 +589,7 @@ export class SyncAgent {
   }
 }
 
-/** Adds read bits to files and read+search bits to directories under `dir` (not following links); returns how many changed. */
+/** Adds read bits to files and read+search bits to directories under `dir`, and clears group/other write (not following links); returns how many changed. */
 export function addReadBits(dir: string): number {
   let n = 0;
   const walk = (d: string) => {
@@ -626,10 +598,10 @@ export function addReadBits(dir: string): number {
       if (e.isSymbolicLink()) continue;
       const st = lstatSync(p), mode = st.mode & 0o777;
       if (e.isDirectory()) {
-        if ((mode & 0o555) !== 0o555) { chmodSync(p, mode | 0o555); n++; }
+        if ((mode & 0o555) !== 0o555 || mode & 0o022) { chmodSync(p, (mode | 0o555) & ~0o022); n++; }
         walk(p);
-      } else if (e.isFile() && (mode & 0o444) !== 0o444) {
-        chmodSync(p, mode | 0o444);
+      } else if (e.isFile() && ((mode & 0o444) !== 0o444 || mode & 0o022)) {
+        chmodSync(p, (mode | 0o444) & ~0o022);
         n++;
       }
     }

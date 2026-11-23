@@ -385,39 +385,19 @@ export function verifyLatest(l: Latest, keys: KeyObject[]): boolean {
 
 /** Returns a blob's compressed bytes. The caller caps how much it reads; apply checks size and hash after decompressing. */
 export type BlobSource = (sha256: string, size: number) => Promise<AsyncIterable<Uint8Array>>;
-/**
- * `appliedMs` is when the previous tree was finished and `uid` the user that wrote it (default: this process's). With
- * `appliedMs` set, only files that look untouched since then are reused (see untouchedSince).
- */
-export type Previous = { manifest: Manifest; roots: Partial<Roots>; appliedMs?: number; uid?: number };
+/** `uid` and `gid` are the owner the agent wrote the previous tree as (default: this process's). */
+export type Previous = { manifest: Manifest; roots: Partial<Roots>; uid?: number; gid?: number };
 
 /**
- * Whether a file of a version finished at `appliedMs` still looks as the agent left it: owned by `uid`, not writable by
- * group or others, and its inode not changed since. A kubelet fsGroup relabel or an in-place write sets ctime, which
- * no caller can restore.
+ * Whether a file of the previous tree is still as the agent left it: owned by the agent's uid and gid and not writable
+ * by group or others. A kubelet fsGroup relabel changes the group and adds g+rw; a write in place needs write access
+ * the agent's own read-only files deny to other users. ctime is no test: the agent's own unlinks and chmods of other
+ * versions sharing the inode change it.
  */
-export function untouchedSince(st: { mode: bigint; uid: bigint; ctimeNs: bigint }, appliedMs: number, uid: number): boolean {
-  return (st.mode & 0o022n) === 0n && Number(st.uid) === uid && st.ctimeNs <= BigInt(Math.floor(appliedMs)) * 1_000_000n;
+export function reusableFile(st: { mode: bigint; uid: bigint; gid: bigint }, uid: number, gid: number): boolean {
+  return (st.mode & 0o022n) === 0n && Number(st.uid) === uid && Number(st.gid) === gid;
 }
 
-/** Counts the files of a version's manifest that are missing or fail untouchedSince. Stats only. */
-export function countTouched(prev: Previous): number {
-  if (prev.appliedMs === undefined) return 0;
-  const uid = prev.uid ?? process.getuid!();
-  let bad = 0;
-  for (const e of prev.manifest.entries) {
-    if (e.type !== "file") continue;
-    const i = e.path.indexOf("/"), root = prev.roots[e.path.slice(0, i) as RootName];
-    if (root === undefined) continue;
-    try {
-      const st = lstatSync(join(root, e.path.slice(i + 1)), { bigint: true });
-      if (!st.isFile() || !untouchedSince(st, prev.appliedMs, uid)) bad++;
-    } catch {
-      bad++;
-    }
-  }
-  return bad;
-}
 export type ApplyStats = { files: number; dirs: number; symlinks: number; linked: number; copied: number; fetched: number; fetchedBytes: number; bytes: number };
 
 /**
@@ -465,8 +445,7 @@ export const MTIME_SLACK_NS = 1000n;
  * copied; the rest come from `fetch`. Modes are restored exactly, mtimes as setMtimes describes. Throws on the first
  * failure (BadBlobError for a bad blob) and leaves the partial tree for the caller to remove (clearDir).
  *
- * With `previous.appliedMs` a file is also linked only if untouchedSince holds, so a file changed or relabelled in
- * place is fetched again.
+ * A file is linked only if reusableFile holds, so a relabelled or group-writable file is fetched again.
  *
  * `previous` must be a tree only the sync agent writes and consumers mount read-only: a linked file shares its inode,
  * so anything that can write the previous tree can change the new one. Pass no `previous` otherwise.
@@ -511,7 +490,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
       try {
         const st = lstatSync(c.abs, { bigint: true });
         if (!st.isFile() || Number(st.size) !== e.size || !near(st.mtimeNs, e.mtimeNs) || readableFileMode(Number(st.mode & 0o777n)) !== e.mode) continue;
-        if (opts.previous?.appliedMs !== undefined && !untouchedSince(st, opts.previous.appliedMs, opts.previous.uid ?? process.getuid!())) continue;
+        if (!reusableFile(st, opts.previous!.uid ?? process.getuid!(), opts.previous!.gid ?? process.getgid!())) continue;
         // The shared inode may predate the normalization: make it readable for both versions.
         if ((Number(st.mode & 0o777n) & 0o444) !== 0o444) chmodSync(c.abs, e.mode);
         linkSync(c.abs, dest);
