@@ -2,6 +2,7 @@ import { keepPreviousData, useInfiniteQuery, useQuery as useTanstackQuery } from
 import { createContext, useCallback, useContext, useRef } from "react";
 import { topicsFor } from "./topics";
 import { usePageProject, withProject } from "./scope";
+import type { WorkspaceCalls, WorkspaceDetail, WorkspacePage } from "./types";
 import type {
   CacheReport,
   DiscordAccount,
@@ -488,6 +489,15 @@ export interface Api {
     cancel(id: number): Promise<BuildTask>;
     /** Queued and running tasks and free slots, for the flowchart's Verify node. */
     summary(): Promise<BuildSummary>;
+  };
+  /** Workspace pods, their sessions and call logs. Operators and maintainers of the repo read calls and screenshots. */
+  workspaces: {
+    list(f: { state: "live" | "all"; cursor?: string }): Promise<WorkspacePage>;
+    get(id: number): Promise<WorkspaceDetail>;
+    /** The newest calls (oldest first), or the page before `before`. */
+    calls(id: number, before?: string): Promise<WorkspaceCalls>;
+    /** Where the first image of a call is served. */
+    imageUrl(id: number, call: number): string;
   };
   /** Items moved per stage and account use over time. */
   rates(window: "24h" | "7d"): Promise<Rates>;

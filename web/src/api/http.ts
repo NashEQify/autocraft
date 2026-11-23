@@ -348,6 +348,12 @@ export function createHttpApi(): Api {
       put: (repo, config) => put(`/api/build/screenshots/${encodeURIComponent(repo)}`, config),
       remove: (repo) => del(`/api/build/screenshots/${encodeURIComponent(repo)}`),
     },
+    workspaces: {
+      list: (f) => get(`/api/workspaces${qs(f)}`),
+      get: (id) => get(`/api/workspaces/${id}`),
+      calls: (id, before) => get(`/api/workspaces/${id}/calls${qs({ before })}`),
+      imageUrl: (id, call) => `/api/workspaces/${id}/calls/${call}/image`,
+    },
     tasks: {
       list: (f) => get(`/api/tasks${qs(f)}`),
       get: (id) => get(`/api/tasks/${id}`),
