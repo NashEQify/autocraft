@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -93,7 +93,14 @@ test("the parallel copy of a tree matches cp -a", async (t) => {
   chmodSync(join(from, "debug", "deps"), 0o750);
   utimesSync(join(from, "debug", "deps", "f3"), 1e9, 1e9);
   utimesSync(join(from, "debug", "deps"), 1e9, 1e9);
+  mkdirSync(join(from, "debug", "x"), { recursive: true });
+  writeFileSync(join(from, "debug", "deps", "bin-1"), "bin");
+  linkSync(join(from, "debug", "deps", "bin-1"), join(from, "debug", "x", "bin"));
+  linkSync(join(from, "debug", "deps", "bin-1"), join(from, "debug", "deps", "u1", "a", "b", "c", "bin"));
   await copyTree(from, to);
+  const ino = (f: string) => statSync(join(to, "debug", f)).ino;
+  assert.equal(ino("x/bin"), ino("deps/bin-1"));
+  assert.equal(ino("deps/u1/a/b/c/bin"), ino("deps/bin-1"));
   execFileSync("cp", ["-a", `${from}/.`, `${ref}/`]);
   const listing = (d: string) => execFileSync("find", [d, "-printf", "%P %y %m %T@ %l %s\\n"]).toString().split("\\n").sort().join("\\n");
   const [x, y] = [listing(to).split("\n"), listing(ref).split("\n")];

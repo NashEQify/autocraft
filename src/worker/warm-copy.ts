@@ -10,8 +10,8 @@
 // workspace crate rebuilds.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, lutimesSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, lutimesSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { slugOf } from "../owners.ts";
 import { CHANGED_FILE, COPY_MARK_FILE } from "../build/warm-mount.ts";
 import { clearDir, decodeManifest, removeCargoLocks, loadEd25519, parseLatest, verifyLatest } from "../warm/manifest.ts";
@@ -214,6 +214,13 @@ function cpRun(args: string[]): Promise<void> {
   });
 }
 
+/** `<inode>\t<path>` NUL-terminated, for the regular files under `dir` that have more than one link. */
+function listLinked(dir: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("find", [dir, "-type", "f", "-links", "+1", "-printf", "%i\\t%p\\0"], { maxBuffer: 1 << 28 }, (err, out) => (err ? reject(new Error(`find: ${err.message}`)) : resolve(out)));
+  });
+}
+
 function attrs(from: string, to: string): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile("chmod", [`--reference=${from}`, "--", to], (e1) => {
@@ -229,6 +236,21 @@ function attrs(from: string, to: string): Promise<void> {
  * modes and mtimes are set after their contents. The first failure rejects once the running copies end.
  */
 export async function copyTree(from: string, to: string): Promise<void> {
+  // Files with several links (cargo uplifts binaries as hard links): the first path of each inode is copied, the others
+  // are linked to its copy afterwards, so the copy shares inodes like the source does. A dir that holds a later path is
+  // split too, so that path can be left out of the batches.
+  const firstOf = new Map<string, string>();
+  const later = new Map<string, string>();
+  for (const rec of (await listLinked(from)).split("\0")) {
+    const t = rec.indexOf("\t");
+    if (t < 0) continue;
+    const ino = rec.slice(0, t), path = rec.slice(t + 1);
+    const first = firstOf.get(ino);
+    if (first === undefined) firstOf.set(ino, path);
+    else later.set(path, first);
+  }
+  const withLater = new Set<string>();
+  for (const path of later.keys()) for (let d = dirname(path); d.length >= from.length && !withLater.has(d); d = dirname(d)) withLater.add(d);
   const dirs: { from: string; to: string }[] = [];
   const jobs: string[][] = [];
   const split = (a: string, b: string, depth: number) => {
@@ -239,7 +261,8 @@ export async function copyTree(from: string, to: string): Promise<void> {
       batch = [];
     };
     for (const e of readdirSync(a, { withFileTypes: true })) {
-      if (e.isDirectory() && depth + 1 < COPY_SPLIT_DEPTH) {
+      if (later.has(join(a, e.name))) continue;
+      if (e.isDirectory() && (depth + 1 < COPY_SPLIT_DEPTH || withLater.has(join(a, e.name)))) {
         mkdirSync(join(b, e.name));
         split(join(a, e.name), join(b, e.name), depth + 1);
         continue;
@@ -264,6 +287,7 @@ export async function copyTree(from: string, to: string): Promise<void> {
   };
   await Promise.all(Array.from({ length: Math.min(COPY_PARALLEL, jobs.length) }, worker));
   if (failure) throw failure;
+  for (const [path, first] of later) linkSync(join(to, relative(from, first)), join(to, relative(from, path)));
   // Deepest first: setting a directory's mtime after its children keeps it.
   for (const d of dirs.reverse()) await attrs(d.from, d.to);
 }
