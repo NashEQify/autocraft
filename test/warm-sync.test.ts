@@ -295,3 +295,31 @@ test("warm sync: a key bigger than half the cap updates when nothing is in grace
   await agent.cycle();
   assert.equal(readlinkSync(join(dir, "deckcraft", "current")), `gen-${"b".repeat(12)}`);
 });
+
+test("warm sync: while a version downloads the status lists it as pending with progress, and drops it when done", async (t) => {
+  const root = join(SCRATCH, "warm-sync-progress");
+  const dav = await fakeDav();
+  t.after(dav.close);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const store = new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "p" } });
+  const src = { target: join(root, "src", "target"), cargoHome: join(root, "src", "cargo") };
+  mkdirSync(join(src.target, "debug"), { recursive: true });
+  mkdirSync(src.cargoHome, { recursive: true });
+  writeFileSync(join(src.target, "debug", "app"), "x".repeat(1000));
+  await store.publish({ key: "deckcraft", repo: "org/deckcraft", commit: "a".repeat(40), image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey });
+  const kube = new FakeConfigMaps();
+  const lines: string[] = [];
+  const realBlobs = store.blobs.bind(store);
+  store.blobs = () => { const f = realBlobs(); return async (sha, size) => { await new Promise((r) => setTimeout(r, 400)); return f(sha, size); }; };
+  const agent = new SyncAgent({
+    dir: join(root, "node"), node: "n1", namespace: "ns", kube: kube as never, store, log: (l) => lines.push(l), verifyKeys: () => [publicKey],
+    assign: () => ({ keys: ["deckcraft"], maxBytes: 1024 ** 3 }), writeBytesPerSec: 0, progressEveryMs: 50,
+    diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
+  });
+  const done = agent.cycle();
+  await new Promise((r) => setTimeout(r, 200));
+  assert.match(kube.status("n1").pending.deckcraft!, /^downloading aaaaaaaaaaaa: .* of .* GiB$/);
+  await done;
+  assert.equal(kube.status("n1").pending.deckcraft, undefined);
+  assert.ok(lines.some((l) => /download starts/.test(l)) && lines.some((l) => /download ok after/.test(l)));
+});

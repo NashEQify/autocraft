@@ -17,7 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, type ApplyStats, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -87,6 +87,8 @@ export type SyncConfig = {
   /** No new versions while the node's filesystem is at least this full. */
   maxFsPct?: number;
   statusEveryMs?: number;
+  /** How often a running download rewrites its progress into the status (default 15 s). */
+  progressEveryMs?: number;
   /** Wait before trying the same commit again after it failed. */
   retryMs?: number;
   concurrency?: number;
@@ -140,6 +142,10 @@ export function readAssignDir(dir: string): Assign {
 type Held = { gen: string; meta: GenMeta };
 const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
 
+const PROGRESS_LOG_MS = 60_000;
+
+type Progress = { stats: ApplyStats | undefined; written: number; end: (error: string | null) => void };
+
 export class SyncAgent {
   private readonly c: Required<Omit<SyncConfig, "kube">> & Pick<SyncConfig, "kube">;
   private readonly pacer: Pacer;
@@ -154,7 +160,7 @@ export class SyncAgent {
   constructor(c: SyncConfig) {
     if (!NODE_NAME.test(c.node)) throw new Error(`warm sync: node name refused: ${c.node.slice(0, 80)}`);
     this.c = {
-      writeBytesPerSec: 150e6, graceMs: DEFAULT_GRACE_MS, maxFsPct: 80, statusEveryMs: 5 * 60_000, retryMs: 10 * 60_000, concurrency: 8,
+      writeBytesPerSec: 150e6, graceMs: DEFAULT_GRACE_MS, maxFsPct: 80, statusEveryMs: 5 * 60_000, progressEveryMs: 15_000, retryMs: 10 * 60_000, concurrency: 8,
       now: Date.now, diskUse: statfsUse, ...c,
     };
     this.pacer = new Pacer(this.c.writeBytesPerSec);
@@ -380,13 +386,18 @@ export class SyncAgent {
     for (let i = 2; existsSync(join(kd, gen)) || gen === h?.gen; i++) gen = `${base}-${i}`;
     const final = join(kd, gen), tmp = `${final}.tmp`;
     const t0 = performance.now();
+    let progress: Progress | undefined;
     try {
       const { manifest, raw } = await this.c.store.manifestWithBytes(l);
+      progress = this.startProgress(key, l, manifest.header.bytes, manifest.header.files, t0);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
       const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
-      const s = await applyManifest(manifest, roots, this.c.store.blobs(), { previous, concurrency: this.c.concurrency, pace: async (n) => { await this.pacer.take(n); this.checkDisk(); } });
+      const s = await applyManifest(manifest, roots, this.c.store.blobs(), {
+        previous, concurrency: this.c.concurrency, onStats: (st) => { progress!.stats = st; },
+        pace: async (n) => { await this.pacer.take(n); progress!.written += n; this.checkDisk(); },
+      });
       // Consumers run as another uid: the roots applyManifest made must be readable to them.
       for (const p of [tmp, roots.target, roots.cargo]) chmodSync(p, 0o755);
       const hd = manifest.header;
@@ -401,9 +412,11 @@ export class SyncAgent {
       this.swap(key, gen, h);
       this.failed.delete(key);
       this.badBlobs.delete(key);
+      progress.end(null);
       log(`warm sync: ${key}@${l.commit.slice(0, 12)} current: ${s.files} files (${gb(s.bytes)} GiB), ${s.linked} linked from the previous version, ${s.fetched} fetched (${gb(s.fetchedBytes)} GiB), ${s.copied} copied, in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
       return null;
     } catch (e) {
+      progress?.end(`failed: ${(e as Error).message}`.slice(0, 200));
       removeTree(tmp);
       if (e instanceof BadBlobError) {
         const bad = this.badBlobs.get(key) ?? new Set<string>();
@@ -415,6 +428,38 @@ export class SyncAgent {
       log(`warm sync: ${key}: ${why}`);
       return why;
     }
+  }
+
+  /**
+   * While a version downloads: `pending[key]` carries the progress (rewritten to the status ConfigMap every
+   * PROGRESS_STATUS_MS) and the log gets a start line, a line a minute, and an end line.
+   */
+  private startProgress(key: string, l: Latest, totalBytes: number, totalFiles: number, t0: number): Progress {
+    const commit = l.commit.slice(0, 12), now = () => performance.now();
+    const p: Progress = {
+      stats: undefined, written: 0,
+      end: (err) => {
+        clearInterval(timer);
+        this.c.log(`warm sync: ${key}@${commit} download ${err ?? "ok"} after ${((now() - t0) / 1000).toFixed(1)} s`);
+      },
+    };
+    const amount = () => `${gb(p.stats?.bytes ?? 0)} of ${gb(totalBytes)} GiB`;
+    const reason = () => `downloading ${commit}: ${amount()}`;
+    let logged = { at: now(), written: 0 };
+    this.c.log(`warm sync: ${key}@${commit} download starts: ${gb(totalBytes)} GiB in ${totalFiles} files`);
+    this.pending[key] = reason();
+    void this.report();
+    const timer = setInterval(() => {
+      this.pending[key] = reason();
+      void this.report();
+      const t = now();
+      if (t - logged.at >= PROGRESS_LOG_MS) {
+        this.c.log(`warm sync: ${key}@${commit} ${amount()}, ${p.stats?.files ?? 0} of ${totalFiles} files, ${(((p.written - logged.written) / (t - logged.at)) / 1000).toFixed(1)} MB/s`);
+        logged = { at: t, written: p.written };
+      }
+    }, this.c.progressEveryMs);
+    timer.unref();
+    return p;
   }
 
   /** Aborts a running download once the node's disk use reaches the limit (looked at most once a second). */

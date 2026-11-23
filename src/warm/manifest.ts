@@ -371,7 +371,13 @@ export type ApplyStats = { files: number; dirs: number; symlinks: number; linked
  * `pace` is awaited before each chunk of file content is written (fetched or copied, not hard-linked) with its size in
  * bytes; a rate limiter there throttles the restore's disk writes.
  */
-export type ApplyOptions = { previous?: Previous; concurrency?: number; pace?: (bytes: number) => Promise<void> };
+export type ApplyOptions = {
+  previous?: Previous;
+  concurrency?: number;
+  pace?: (bytes: number) => Promise<void>;
+  /** Called once with the live counters, which the restore keeps updating (`bytes` counts the files started so far). */
+  onStats?: (stats: ApplyStats) => void;
+};
 
 /** Fails once more than `max` bytes have passed. */
 function capped(max: number, what: string): Transform {
@@ -421,6 +427,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined) };
   const abs = (rs: Partial<Roots>, p: string) => join(rs[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
   const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0 };
+  opts.onStats?.(stats);
   const prev = new Map<string, { abs: string; mtimeNs: bigint }[]>();
   if (opts.previous) {
     validateEntries(opts.previous.manifest.entries);
@@ -481,7 +488,8 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
         local = e;
       }
       await chmod(dest, e.mode);
-      times.push({ abs: dest, ns: e.mtimeNs });
+      // File times are set at once, so only directories and symlinks wait in `times` (a tree has millions of files).
+      await setMtimes([{ abs: dest, ns: e.mtimeNs }]);
     }
   });
   for (const e of m.entries) {
