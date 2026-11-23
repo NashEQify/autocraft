@@ -35,7 +35,7 @@ import { COPY_MARK_FILE } from "./warm-mount.ts";
 import { warmBytes } from "./warm-queue.ts";
 import type { WarmStatus } from "./warm-status.ts";
 import { chooseWarm, LAYOUT_CI, sha256, warmOf, WARM_CHANGED_DIRS, WARM_CHANGED_FILES, WARM_MTIMES_SH, workspaceStorageBytes, type WorkspacePrepared, type WorkspaceWarm } from "./workspace-layout.ts";
-import { SERVICE_SELECTOR, workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER, type WorkspaceCiLayout } from "./workspace-pods.ts";
+import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER, type WorkspaceCiLayout } from "./workspace-pods.ts";
 import { resolveGate, resolveI18nRev } from "../worker/gate.ts";
 import { gateStepEnv } from "../worker/environment.ts";
 import { changedFrom, parseLsTree, type CopyMark } from "../worker/warm-copy.ts";
@@ -334,27 +334,16 @@ async function planWarm(c: Ctx, w: WorkspaceRow, fresh: boolean, image: string):
   if (!prepared || !checkout) return { target, storageBytes, use: null, why: "the workspace has no CI layout" };
   if (!fresh && (target !== "tmpfs" || !w.warm_commit)) return { target, storageBytes, use: null, why: null };
   const nodes = c.state.warm?.warmNodesFor(key) ?? [];
-  const avoid = nodes.length ? await serviceNodes(c) : new Set<string>();
   const load = new Map<string, number>();
   for (const r of await liveRows(c)) {
     const n = r.node ?? warmOf(r)?.use?.node;
     if (n && r.id !== w.id) load.set(n, (load.get(n) ?? 0) + 1);
   }
   const d = chooseWarm({
-    target, key, image, prepared, checkout, nodes, avoid, load, memoryLimitBytes: quantity(c.s.workspaceMemoryLimit),
+    target, key, image, prepared, checkout, nodes, load, memoryLimitBytes: quantity(c.s.workspaceMemoryLimit),
     ...(fresh ? {} : { commit: w.warm_commit, node: w.node }),
   });
   return { target, storageBytes, use: d.use, why: d.why };
-}
-
-/** The nodes the AutoCraft service runs on, where no workspace pod may go; empty when the pods cannot be listed. */
-async function serviceNodes(c: Ctx): Promise<Set<string>> {
-  try {
-    const sel = Object.entries(SERVICE_SELECTOR.labels).map(([k, v]) => `${k}=${v}`).join(",");
-    return new Set((await c.api.listPods(SERVICE_SELECTOR.namespace, sel)).flatMap((p) => (p.spec?.nodeName ? [p.spec.nodeName] : [])));
-  } catch {
-    return new Set();
-  }
 }
 
 /** A starting pod pinned to its warm node that the scheduler cannot place there: it starts again cold, wherever it fits. */

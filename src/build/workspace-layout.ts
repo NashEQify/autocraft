@@ -77,8 +77,6 @@ export type WarmChoice = {
   target: WarmTarget; key: string; image: string; prepared: WorkspacePrepared; checkout: string;
   /** Nodes whose status holds the key (WarmStatus.warmNodesFor), newest version first. */
   nodes: WarmNode[];
-  /** Nodes a workspace pod may not use (the service's). */
-  avoid: Set<string>;
   /** Live workspaces per node, so the copies spread out. */
   load: Map<string, number>;
   /** The workspace container's memory limit before a memory-backed target is added. */
@@ -96,7 +94,7 @@ export type WarmChoice = {
 export function chooseWarm(c: WarmChoice): { use: WarmUse; why: null } | { use: null; why: string } {
   if (c.target === "none") return { use: null, why: "the repository has no warm target" };
   const envHash = workspaceEnvHash(c.prepared);
-  const nodes = c.nodes.filter((n) => !c.avoid.has(n.node) && (!c.node || n.node === c.node) && (!c.commit || n.commit === c.commit))
+  const nodes = c.nodes.filter((n) => (!c.node || n.node === c.node) && (!c.commit || n.commit === c.commit))
     .sort((a, b) => b.stored - a.stored || (c.load.get(a.node) ?? 0) - (c.load.get(b.node) ?? 0) || a.node.localeCompare(b.node));
   let why: string | null = null;
   for (const n of nodes) {
@@ -107,7 +105,7 @@ export function chooseWarm(c: WarmChoice): { use: WarmUse; why: null } | { use: 
     if (d.use) return d;
     why ??= d.why;
   }
-  const where = c.node ? `node ${c.node}` : "no node a workspace may use";
+  const where = c.node ? `node ${c.node}` : "no node";
   return { use: null, why: why ?? `${where} holds a version of ${c.key}${c.commit ? ` at ${c.commit.slice(0, 12)}` : ""}` };
 }
 
