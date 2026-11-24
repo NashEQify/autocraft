@@ -640,7 +640,7 @@ export class Runner {
     await this.recover();
     try {
       const read = await buildDiffFacts(this.db);
-      if (read !== null) this.o.log(`diff facts: stored from the diff cache for ${read} reviewed heads`);
+      if (read) this.o.log(`diff facts: computed again for new rules: ${read.computed} heads from the diff cache, ${read.pending} wait for a re-read`);
     } catch (e) {
       this.o.log(`diff facts: ${(e as Error).message}`);
     }
