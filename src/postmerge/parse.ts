@@ -10,6 +10,7 @@ export type Severity = (typeof SEVERITIES)[number];
 export const MAX_FINDINGS = 12;
 export const TITLE_CHARS = 120;
 export const BODY_CHARS = 2000;
+const FILE_CHARS = 300;
 /** The merged diff's size cap in characters, as for review.opus. */
 export const MAX_MERGED_DIFF_CHARS = 120_000;
 
@@ -87,8 +88,9 @@ export function parseFindings(text: string, drop: ReadonlySet<string> = new Set(
     if (REFERENCE_LEAK.test(title) || REFERENCE_LEAK.test(body) || drop.has(f.title as string) || drop.has(f.body as string)) { console.log("post-merge finding dropped: its public text mentions the reference documentation"); continue; }
     const dup = typeof f.duplicate_of === "number" && Number.isInteger(f.duplicate_of) && f.duplicate_of > 0 ? f.duplicate_of : null;
     const line = typeof f.line === "number" && Number.isInteger(f.line) && f.line > 0 ? f.line : null;
-    const reportedFile = str(f.file, 300);
-    const file = (checkLocation ? reportedFile.replace(/^\/repo\//, "") : reportedFile) || null;
+    const reportedFile = typeof f.file === "string" ? f.file.trim() : "";
+    const path = checkLocation ? reportedFile.replace(/^\/repo\//, "") : reportedFile;
+    const file = (checkLocation && path.length > FILE_CHARS ? null : path.slice(0, FILE_CHARS)) || null;
     const unverified = checkLocation && f.line != null && (line === null || !file || !checkLocation({ path: file, line }));
     out.push({
       severity, title, body, file, line, duplicate_of: dup,

@@ -127,17 +127,14 @@ export type Claim = { claim: string; status: ClaimStatus; evidence: string; impa
 export const MAX_CLAIMS = 12;
 export const CLAIM_CHARS = 300;
 export const CLAIM_EVIDENCE_CHARS = 600;
-/**
- * A claim's evidence names code as `path:line`. The path is repo-relative with a directory or has a known source extension, and
- * does not follow a scheme or a `/` ("v2.0:1" and URLs do not count). Groups: path, line.
- */
-const PATH_WORD = String.raw`[\w.-]+`;
-const PATH_PART = String.raw`${PATH_WORD}(?: ${PATH_WORD})*`;
+// Without a delimiter, require a directory, a recognizable root filename, or a known changed file.
+// A code span delimits paths with spaces or punctuation without guessing where the prose ends.
+const PATH_CHAR = String.raw`[\p{L}\p{M}\p{N}_@+.-]`;
+const PATH_WORD = String.raw`${PATH_CHAR}+`;
+const PATH_PART = String.raw`${PATH_WORD}(?: +${PATH_WORD})*`;
 const ROOT_EXTENSION = "ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh";
-// A slash before the first space distinguishes a bare path from introductory prose.
-// A code span can name a complete path with spaces anywhere.
-const EVIDENCE_PATH = String.raw`${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}\.\w+|[\w-]+\.(?:${ROOT_EXTENSION})`;
-const QUOTED_EVIDENCE_PATH = String.raw`(?:${PATH_PART}/)+${PATH_PART}\.\w+|${PATH_PART}\.(?:${ROOT_EXTENSION})`;
+const BARE_PATH = String.raw`/?${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}|/?${PATH_WORD}\.(?:${ROOT_EXTENSION})|/?\.[\p{L}_]${PATH_CHAR}*`;
+const LINE_TOKEN = String.raw`[+-]?\d+(?:\.\d+|[\p{L}\p{M}_][\p{L}\p{M}\p{N}_]*)?`;
 type ClaimLocation = { path: string; line: number };
 export type ClaimLocationCheck = (location: ClaimLocation) => boolean;
 
@@ -145,16 +142,19 @@ function* evidenceLocations(evidence: string, files: readonly string[]): Generat
   const known = files.filter((path) => evidence.includes(`${path}:`))
     .sort((a, b) => b.length - a.length)
     .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const bare = [...known, EVIDENCE_PATH].join("|");
-  const quoted = [...known, QUOTED_EVIDENCE_PATH].join("|");
-  const pattern = new RegExp(String.raw`\x60(${quoted}):(\d+)\x60|(?<![\w./:-])(${bare}):(\d+)`, "g");
+  const bare = [...known, BARE_PATH].join("|");
+  const pattern = new RegExp(String.raw`\x60([^\x60\r\n]+):(${LINE_TOKEN})\x60|(?<![\p{L}\p{M}\p{N}_@+./:-])(${bare}):(${LINE_TOKEN})`, "gu");
   for (const m of evidence.matchAll(pattern)) {
-    yield { path: (m[1] ?? m[3])!, line: Number(m[2] ?? m[4]) };
+    const rawPath = (m[1] ?? m[3])!;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rawPath)) continue;
+    const path = rawPath.replace(/^\/repo\//, "");
+    const line = (m[2] ?? m[4])!;
+    yield { path, line: /^\d+$/.test(line) ? Number(line) : NaN };
   }
 }
 
 /** The first repository-relative citation, including changed files without a familiar extension. */
-export function evidenceAt(evidence: string, files: readonly string[] = []): ClaimLocation | null {
+function evidenceAt(evidence: string, files: readonly string[] = []): ClaimLocation | null {
   const first = evidenceLocations(evidence, files).next();
   return first.done ? null : first.value;
 }
@@ -171,6 +171,8 @@ export type ParsedClaims = {
   claims: Claim[];
   /** The position of each claim in the reply's array. */
   indexes: number[];
+  /** The location for a pre-merge finding, in the same order as claims. */
+  findingLocations: (ClaimLocation | null)[];
   /** Entries that are not a claim (no text, unknown status, not an object) and entries past MAX_CLAIMS: the claims list was not fully read. */
   rejected: number;
   /** A claim offered a validly shaped fix that was withheld because its citation did not resolve. */
@@ -189,18 +191,23 @@ export type ParsedClaims = {
  */
 export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = [], checkLocation?: ClaimLocationCheck): ParsedClaims | null {
   if (!Array.isArray(v)) return null;
-  const out: ParsedClaims = { claims: [], indexes: [], rejected: Math.max(0, v.length - MAX_CLAIMS), withheldFix: false };
+  const out: ParsedClaims = { claims: [], indexes: [], findingLocations: [], rejected: Math.max(0, v.length - MAX_CLAIMS), withheldFix: false };
   v.slice(0, MAX_CLAIMS).forEach((x, index) => {
     const o = x as Record<string, unknown> | null;
     const text = o && typeof o === "object" && typeof o.claim === "string" ? squashText(stripSandboxPath(o.claim)).slice(0, CLAIM_CHARS) : "";
     if (!o || !text || (o.status !== "verified" && o.status !== "contradicted" && o.status !== "unverified")) { out.rejected++; return; }
-    const fullProof = typeof o.evidence === "string" ? squashText(stripSandboxPath(o.evidence)) : "";
-    const proof = fullProof.slice(0, CLAIM_EVIDENCE_CHARS);
+    const fullProof = typeof o.evidence === "string" ? o.evidence : "";
+    const displayProof = squashText(stripSandboxPath(fullProof));
+    const prefix = displayProof.slice(0, CLAIM_EVIDENCE_CHARS);
+    // A clipped line number can look like a different, valid location.
+    const proof = /\S/.test(displayProof[CLAIM_EVIDENCE_CHARS] ?? "") ? prefix.replace(/\S+$/, "").trimEnd() : prefix;
     const claim = !keep && (REFERENCE_LEAK.test(text) || drop.has(text)) ? NEUTRAL_CLAIM : text;
     const evidence = !keep && (REFERENCE_LEAK.test(proof) || drop.has(proof)) ? NEUTRAL_EVIDENCE : proof;
     const locations = evidenceLocations(checkLocation ? fullProof : proof, files);
     const first = locations.next();
-    const supported = !first.done && (!checkLocation || (checkLocation(first.value) && [...locations].every(checkLocation)));
+    const supported = !first.done && (checkLocation
+      ? checkLocation(first.value) && [...locations].every(checkLocation)
+      : safePath(first.value.path) && Number.isSafeInteger(first.value.line) && first.value.line > 0);
     const status: ClaimStatus = !supported && (o.status === "verified" || checkLocation) ? "unverified" : o.status;
     const f = o.fix as { file?: unknown; change?: unknown } | null | undefined;
     const file = f && typeof f === "object" && typeof f.file === "string" ? stripSandboxPath(f.file.trim()) : "";
@@ -208,8 +215,14 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
       ? { file: file.slice(0, 200), change: f.change.trim().slice(0, 800) } : undefined;
     if (checkLocation && !supported && o.status !== "verified" && o.impact === "code-wrong" && fix) out.withheldFix = true;
     out.indexes.push(index);
-    if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
     const impact: ClaimImpact = supported && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
+    let findingLocation: ClaimLocation | null = null;
+    if (status !== "verified" && impact === "code-wrong" && evidence !== NEUTRAL_EVIDENCE) {
+      const at = checkLocation && !first.done ? first.value : evidenceAt(evidence, files);
+      if (at && safePath(at.path) && !REFERENCE_LEAK.test(at.path) && dropMarkup(at.path) === at.path) findingLocation = at;
+    }
+    out.findingLocations.push(findingLocation);
+    if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
     out.claims.push(fix && impact === "code-wrong" ? { claim, status, evidence, impact, fix } : { claim, status, evidence, impact });
   });
   return out;
