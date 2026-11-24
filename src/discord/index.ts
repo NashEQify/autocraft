@@ -19,7 +19,7 @@ import { deleteRepliesOf } from "./replies.ts";
 import { RestClient } from "./rest.ts";
 import { Reactor, reactEmoji, setReactEmoji, validReactEmoji } from "./react.ts";
 import { forgetReporter } from "./file-issue.ts";
-import { addFilingRepo, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "./filing-repos.ts";
+import { addFilingRepo, filingReposWithMode, FilingRepoError, offerState, removeFilingRepo, setOffered } from "./filing-repos.ts";
 import { forgetLink } from "./links.ts";
 import { Search } from "./search.ts";
 import { installAccountCommands } from "./commands.ts";
@@ -234,10 +234,11 @@ async function discord(args: string[]): Promise<void> {
       console.log(`the bot reacts with ${a}`);
     }
   } else if (sub === "filing" && a === "list") {
-    for (const r of await filingRepos(db)) console.log(`${r.owner}/${r.name}  added ${r.addedAt.slice(0, 16).replace("T", " ")} by ${r.addedBy}`);
+    for (const r of await filingReposWithMode(db)) console.log(`${r.owner}/${r.name}  ${r.mode === "submit" ? "Submit for me" : "link only"}  added ${r.addedAt.slice(0, 16).replace("T", " ")} by ${r.addedBy}`);
   } else if (sub === "filing" && a === "add" && b) {
     const r = await addFilingRepo(db, "cli", b).catch((e: Error) => die(e instanceof FilingRepoError ? e.message : `adding failed: ${e.message}`));
-    console.log(`the Discord bot files into ${r.owner}/${r.name}`);
+    console.log(r.mode === "submit" ? `the Discord bot files into ${r.owner}/${r.name} as the GitHub App (Submit for me)`
+      : `the Discord bot offers ${r.owner}/${r.name} link only (${(r.why ?? "the GitHub App does not cover it").replace(/\.$/, "")}): drafts get only the GitHub link until the app covers it`);
   } else if (sub === "filing" && a === "remove" && b) {
     if (!await removeFilingRepo(db, "cli", b)) die(`${b} is not a filing-only repo`);
     console.log(`the Discord bot no longer files into ${b}`);

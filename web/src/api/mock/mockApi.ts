@@ -24,7 +24,7 @@ import { downloadsReport } from "./downloadsMock";
 import { classifierReport, costReport, disagreementList } from "./insightFixtures";
 import { pickDecision, shortRepo } from "../../lib/links";
 import { itemList, mockDiscordCount, mockDiscordLinks, settledFor } from "./itemsFixtures";
-import type { DiscordSetup } from "../types";
+import type { DiscordFilingAdded, DiscordSetup } from "../types";
 import { postmergeFor, premergeFor, prWorkFor } from "./verifyFixtures";
 import { nextPageFixture } from "./nextMock";
 import { queueBatchList, queueList } from "./queueFixtures";
@@ -106,8 +106,8 @@ export function createMockApi(): Api {
       used: 6, max: 25,
     },
     filingRepos: [
-      { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString() },
-      { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString() },
+      { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString(), mode: "submit", why: null },
+      { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString(), mode: "link", why: "The GitHub App is not installed on open-tools-collective." },
     ],
     contact: "discord-privacy@example.org", reactOn: true, reactEmoji: "bot", privacyPath: "/privacy",
     usage: {
@@ -363,10 +363,11 @@ export function createMockApi(): Api {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
         const [owner, name] = repo.trim().split("/");
         if (!owner || !name) throw new Error("Give the repo as owner/name.");
-        if (owner === "no-app-here") throw new Error(`The GitHub App is not installed on ${owner}.`);
-        discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso() }];
+        if (owner === "private-org") throw new Error(`${owner}/${name} is not public.`);
+        const added = owner === "example-studio" ? { owner, name, mode: "submit" as const, why: null } : { owner, name, mode: "link" as const, why: `The GitHub App is not installed on ${owner}.` };
+        discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso(), mode: added.mode, why: added.why }];
         changed();
-        return wait(structuredClone(discord));
+        return wait<DiscordFilingAdded>({ ...structuredClone(discord), added });
       },
       setOffer(repo, on) {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");

@@ -108,7 +108,7 @@ export function DiscordView(_: ViewProps) {
             ) : null}
           </Block>
           <DiscordOfferBlock offer={data.offer} filingCount={data.filingRepos.length} onSet={(r, on) => api.discord.setOffer(r, on).then(() => refetch())} />
-          <DiscordFilingBlock repos={data.filingRepos} onAdd={(r) => api.discord.addFilingRepo(r).then(() => refetch())} onRemove={(r) => api.discord.removeFilingRepo(r).then(() => refetch())} />
+          <DiscordFilingBlock repos={data.filingRepos} onAdd={(r) => api.discord.addFilingRepo(r).then((x) => { void refetch(); return x; })} onRemove={(r) => api.discord.removeFilingRepo(r).then(() => refetch())} />
           <DiscordUsageBlock usage={data.usage} />
           <LinksBlock links={data.links} busy={write.busy} onRemove={(id) => write.run(id, () => api.discord.removeLink(id)).then(() => refetch())} />
           <Block className="mt-4" title="Reactions">

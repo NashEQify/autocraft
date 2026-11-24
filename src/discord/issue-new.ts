@@ -22,7 +22,7 @@ import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, JUNK_REFUSAL, junk
 import type { JunkAsk } from "./junk-ask.ts";
 import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
-import { botRepo, botRepos, FILING_MAX } from "./filing-repos.ts";
+import { appCovers, botRepo, botRepos, FILING_MAX, type CoverageReading } from "./filing-repos.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 import { attachStoreFromEnv, copyAttachments, MAX_SCREENSHOTS, type AttachStore, type Attachment, type Copied, type Outcome } from "./attachments.ts";
@@ -77,6 +77,8 @@ type Session = {
   drafted: boolean;
   /** The draft offers "Submit for me": the app may file for this person in this repo now. */
   bot: boolean;
+  /** A filing-only repo the GitHub App does not cover: the draft offers only the GitHub link and says why. */
+  linkOnly?: boolean;
   /** The Discord name a bot-filed issue credits. */
   name: string;
   /** The "limits" event was counted for this session. */
@@ -107,6 +109,8 @@ export type IssueNewDeps = {
   fileBot?: (deps: FileDeps, req: BotRequest) => Promise<BotResult>;
   /** Why the app cannot file for this person now (null: it can); botRefusal unless a test sets it. */
   botRefusal?: (db: Db, reporter: string, repo: string) => Promise<string | null>;
+  /** Whether the GitHub App covers a filing-only repo; appCovers (a few minutes' cache) unless a test sets it. */
+  covers?: (owner: string, name: string) => Promise<CoverageReading>;
   /** The junk check on the first message; the model check (Jev, Haiku where unsure) unless a test sets it. */
   junk?: (db: Db, a: JunkAsk) => Promise<"junk" | "ok" | "unknown">;
   /** The screenshot bucket; read from the environment unless a test sets it (null: screenshots off). */
@@ -125,6 +129,7 @@ const KINDS: { value: IssueKind; label: string }[] = [{ value: "bug", label: "Bu
 const titleOf = (description: string): string => { const t = description.replace(/\s+/g, " ").trim(); return t.length > 80 ? `${t.slice(0, 79)}…` : t; };
 const TOO_MANY = "\nToo many new issues just now. Try again later.";
 const button = (label: string, custom_id: string, style: 1 | 2 = 2) => ({ type: 2, style, label: label.slice(0, 80), custom_id });
+const LINK_ONLY = "AutoCraft cannot file issues in this repo yet; open it on GitHub.";
 const SHOTS_ON_GITHUB = "\nThe GitHub page does not get your screenshots; attach them there.";
 
 export class IssueNew {
@@ -336,7 +341,10 @@ export class IssueNew {
     const { db, keys, log } = this.#d;
     try {
       const why = await (this.#d.botRefusal ?? ((d, r, repo) => botRefusal(d, r, repo, this.#now())))(db, keys.hash("author", s.user), s.repo);
-      s.bot = why === null;
+      // A filing-only repo is offered whether or not the app covers it; coverage is read here, so an installation made later shows at the next draft.
+      const repo = why === null ? await botRepo(db, s.repo) : null;
+      s.linkOnly = !!repo?.filingOnly && !(await (this.#d.covers ?? appCovers)(repo.owner, repo.name)).covered;
+      s.bot = why === null && !s.linkOnly;
       // Once per session: later renders (after an edit) are the same draft.
       if (why !== null && !s.limitCounted) { s.limitCounted = true; await recordEvent(db, "limits", log, this.#now()); }
     } catch (e) {
@@ -360,7 +368,7 @@ export class IssueNew {
     const fence = (t: string): string => `\`\`\`\n${t.replace(/`{3,}/g, "``")}\n\`\`\``;
     const head = `Your draft for ${s.repo}:\n**${plain(d.title)}**\n`;
     const asButton = url.length <= BUTTON_URL_MAX;
-    const credit = s.bot ? "\nSubmit for me files it from the AutoCraft bot and names you as the reporter." : "";
+    const credit = s.bot ? "\nSubmit for me files it from the AutoCraft bot and names you as the reporter." : s.linkOnly ? `\n${LINK_ONLY}` : "";
     const foot = `${credit}${this.#shots(s)}${asButton ? "" : `\n[Open on GitHub instead](<${url}>)`}${trimmed ? "\nThe GitHub link holds only the start of the text; Edit shows all of it." : ""}`;
     const room = MESSAGE_CHARS - head.length - foot.length - 10;
     const preview = room > 80 ? fence(d.body.length > room ? `${d.body.slice(0, room - 1)}…` : d.body) : "";
@@ -427,6 +435,7 @@ export class IssueNew {
     await call.defer();
     const { url } = issueUrl(s.repoUrl, s.draft.title, s.draft.body, ISSUE_URL_MAX);
     const asButton = url.length <= BUTTON_URL_MAX;
+    const linkReply = (reason: string) => call.edit({ content: `${reason}${this.#shots(s)}${asButton ? "" : `\n[Open on GitHub](<${url}>)`}`, components: asButton ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] });
     const store = this.#store;
     // The screenshot result of this press, for its reply.
     let copied: Copied | undefined;
@@ -434,6 +443,9 @@ export class IssueNew {
       ? async (): Promise<string> => (copied = await copyAttachments(store, s.attachments, { log, now: this.#now, ...(this.#d.fetch && { fetch: this.#d.fetch }) }, s.copies ??= new Map())).markdown
       : undefined;
     try {
+      // A press the draft did not offer (a stale or hand-built one), or on a filing-only repo the app does not cover, never reaches the junk model or the screenshot copies.
+      const repo = s.bot ? await botRepo(this.#d.db, s.repo) : null;
+      if (!s.bot || (repo?.filingOnly && !(await (this.#d.covers ?? appCovers)(repo.owner, repo.name)).covered)) return void (await linkReply(LINK_ONLY));
       const r = await (this.#d.fileBot ?? fileAsBot)({ db: this.#d.db, log }, {
         reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted, junkChecked: !s.edited,
         ...(attach && { attach }),
