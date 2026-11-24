@@ -10,7 +10,7 @@ import { add, askClaude, POOL_MAX, pool, saveUsage, type Usage } from "../classi
 import { poolRoom } from "../agents/call.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
-import { cloneTask } from "./tasks.ts";
+import { cloneTask, noFocusedTests, NO_FOCUSED_TESTS_SUMMARY } from "./tasks.ts";
 import { MAX_SUMMARY_WORDS, SUMMARY_LOG_BYTES, type VerifySummaryInput } from "./types.ts";
 import { pilotExprFor } from "../pilot.ts";
 import { backlogHeldExpr } from "../dupes/held.ts";
@@ -200,6 +200,7 @@ const fallbackSummary = (f: NonNullable<Verdict["failed"]>): string =>
 export async function summariseFailure(db: Db, v: { repo: string; number: number }, taskId: number, f: NonNullable<Verdict["failed"]>, deps: CollectDeps, runId: string): Promise<string> {
   const task = await getTask(db, taskId);
   const step = task?.plan.find((s: TaskStep) => s.name === f.step);
+  if (noFocusedTests(step?.cmd, f.exitCode)) return NO_FOCUSED_TESTS_SUMMARY;
   const input: VerifySummaryInput = {
     ref: `${v.repo}#${v.number}`, step: f.step, command: scrub((step?.cmd ?? []).join(" ")), log: scrub(await stepLog(db, taskId, f.step)),
   };
