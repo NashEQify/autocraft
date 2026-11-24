@@ -14,7 +14,7 @@ import type { CapacityApi, ExecResult, KNode, KPod, KResourceQuota, KubeApi } fr
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { DEFAULT_SETTINGS, groupsOf, kubeCapabilities, parseSettings, quantity, stepPod, type Prepared } from "../src/build/pods.ts";
 import { claim, createTask, getTask } from "../src/build/tasks.ts";
-import { queueWarm } from "../src/build/warm-queue.ts";
+import { queueWarm, WARM_PRODUCER_REV } from "../src/build/warm-queue.ts";
 import { createWorkspace } from "../src/build/workspaces.ts";
 import { warmPlan } from "../src/worker/rust.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
@@ -470,6 +470,27 @@ test("a workspace is refused on a warm writer environment", async () => {
   const d = await connectDb(":memory:");
   await createEnv(d, { id: "warm", label: "Warm", kind: "kubernetes", slots: 1, settings: WARM }, "op");
   await assert.rejects(createWorkspace(d, { repo: "app", baseSha: "a".repeat(40), envId: "warm", owner: null }), /warm writer/);
+});
+
+test("a finished warm build blocks a new one only when it was queued under the current producer revision", async () => {
+  const d = await connectDb(":memory:");
+  await d.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1); INSERT INTO repos (name, visibility) VALUES ('app', 'public')");
+  const at = "2026-01-01T00:00:00Z";
+  await d.run(d.k.insertInto("main_ci").values({
+    repo: "app", head_sha: "a".repeat(40), branch: "main", state: "green", failing: "[]", checks: "[]", committed_at: at, headline: null, first_seen_at: at, state_changed_at: at, updated_at: at,
+  }));
+  const first = await queueWarm(d, "app", WARM);
+  assert.ok(first);
+  await d.run(d.k.updateTable("build_tasks").set({ state: "done" }).where("id", "=", first));
+  assert.equal(await queueWarm(d, "app", WARM), null, "a done build of the current revision blocks");
+  for (const rev of [null, WARM_PRODUCER_REV - 1]) {
+    await d.run(d.k.updateTable("build_tasks").set({ warm_rev: rev }).where("id", "=", first));
+    const again = await queueWarm(d, "app", WARM);
+    assert.ok(again, `a done build of revision ${rev} does not block`);
+    await d.run(d.k.updateTable("build_tasks").set({ state: "cancelled" }).where("id", "=", again));
+  }
+  await d.run(d.k.updateTable("build_tasks").set({ warm_rev: WARM_PRODUCER_REV }).where("id", "=", first));
+  assert.ok(await queueWarm(d, "app", WARM, true), "a forced rebuild queues anyway");
 });
 
 test("a failed warm build is retried under a new AutoCraft version, once per version", async () => {

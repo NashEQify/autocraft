@@ -2589,6 +2589,7 @@ ALTER TABLE ci_fixes ADD COLUMN IF NOT EXISTS lint_state text COLLATE "C";
 ALTER TABLE build_tasks ADD COLUMN IF NOT EXISTS sandbox_env text COLLATE "C";
 ALTER TABLE build_tasks ADD COLUMN IF NOT EXISTS warm_image text COLLATE "C";
 ALTER TABLE build_tasks ADD COLUMN IF NOT EXISTS warm_version text COLLATE "C";
+ALTER TABLE build_tasks ADD COLUMN IF NOT EXISTS warm_rev bigint;
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS recommended_reason text COLLATE "C";
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS recommend_failures bigint;
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS recommend_failed_at text COLLATE "C";

@@ -17,7 +17,7 @@ import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { changeWarmRepos, setWarmMinInterval, warmCoverage, WARM_INTERVAL_KEY, warmMinInterval, type WarmCoverage } from "./warm-queue.ts";
+import { changeWarmRepos, rebuildWarm, setWarmMinInterval, warmCoverage, WARM_INTERVAL_KEY, warmMinInterval, type WarmCoverage } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { LAYOUT_CI, warmOf } from "./workspace-layout.ts";
@@ -39,6 +39,7 @@ const USAGE = `usage: autocraft-server envs list
            --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server envs warm-repos [add|exclude|remove <owner/name>]   (repos the warm producer builds: every pipeline repo once a publish was trimmed; add and exclude override, remove undoes either)
+       autocraft-server envs warm rebuild <owner/name>   (queue a warm build of the repo's current head now, even if it was built)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server envs caches [--json]   (warm versions per node, placement, warm state per repo, crate mirror allowlist)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
@@ -221,6 +222,10 @@ async function envs(args: string[]): Promise<void> {
     if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && !["add", "exclude", "remove"].includes(rest[0]!))) die(USAGE);
     const cov = rest.length === 2 ? await run(async () => await changeWarmRepos(db, rest[0] as "add" | "exclude" | "remove", rest[1]!, "cli")) : await warmCoverage(db);
     printCoverage(cov);
+  } else if (sub === "warm") {
+    if (rest.length !== 2 || rest[0] !== "rebuild") die(USAGE);
+    const id = await run(async () => await rebuildWarm(db, rest[1]!, "cli"));
+    console.log(`queued warm build task ${id} for ${safe(rest[1]!)}`);
   } else if (sub === "caches") {
     const { pos, opt } = options(rest, ["json"]);
     if (pos.length) die(USAGE);
