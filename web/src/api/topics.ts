@@ -7,7 +7,7 @@
  */
 export type Topic =
   | "repos" | "sync" | "items" | "ranks" | "stages" | "flow" | "checks" | "classify" | "dupes" | "decisions" | "reviews" | "queue" | "jobs" | "usage" | "accounts" | "agents"
-  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "fasttrack" | "outside" | "plans" | "conversations" | "held-followups" | "conversation-includes" | "decision-choices" | "decision-snooze" | "steps" | "mainci" | "limits" | "claims" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue";
+  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "fasttrack" | "outside" | "plans" | "conversations" | "held-followups" | "conversation-includes" | "decision-choices" | "decision-snooze" | "steps" | "mainci" | "limits" | "claims" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue" | "workflows";
 
 /** What moves an item's queue position (src/rank/position.ts), for every query that carries the badge. */
 const withSlot = (...topics: Topic[]): Topic[] => [...new Set<Topic>([...topics, "steps", "repos"])];
@@ -30,6 +30,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["items-status:", withSlot("items", "stages", "flow", "classify", "decisions", "plans", "pr-builds", "verify")],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers", "accounts"]],
+  ["maintain-home", ["workflows", "items", "remote-helpers", "access", "settings", "decisions", "plans", "jobs", "limits", "accounts", "security", "repos"]],
   ["home", withSlot("decisions", "decision-snooze", "plans", "jobs", "limits", "accounts", "settings", "queue", "items", "mainci", "github", "usage", "security")],
   // One opened event row: its detail reads what the timeline does; the run, task and decision behind it read one table each.
   ["item-trace-detail:", TRACE],
