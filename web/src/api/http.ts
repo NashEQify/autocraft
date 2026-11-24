@@ -399,6 +399,7 @@ export function createHttpApi(): Api {
     heldMerges: () => get("/api/merge/held"),
     next: () => get("/api/next"),
     queuePage: (f) => get(`/api/queue/page${qs(f)}`),
+    controls: { run: (input) => post("/api/controls", input) },
     queueControl: {
       fastTrackAdd: (item) => post("/api/fast-track", { item }),
       fastTrackRemove: (item) => post("/api/fast-track/remove", { item }),
