@@ -291,6 +291,11 @@ export function caseOf<V extends Param>(e: Ex, pairs: readonly (readonly [Param,
   return sql<V>`CASE ${x(e)} ${sql.join(pairs.map(([k, v]) => sql`WHEN ${k} THEN ${v}`), sql` `)} END`;
 }
 
+/** `CASE WHEN repo = r AND number = n THEN v ... END` over `[r, n, v]` triples: a different value per item in one statement (NULL for an item not listed). */
+export function refCase<V extends Param>(triples: readonly (readonly [string, number, V])[]): RawBuilder<V> {
+  return sql<V>`CASE ${sql.join(triples.map(([r, n, v]) => sql`WHEN ${sql.ref("repo")} = ${r} AND ${sql.ref("number")} = ${n} THEN ${v}`), sql` `)} END`;
+}
+
 /** Rows per multi-row statement: a row of ten bound values keeps a statement far under both engines' parameter limits. */
 export const BATCH_ROWS = 500;
 
