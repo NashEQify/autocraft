@@ -64,7 +64,7 @@ const ADMIN: Page[] = [
   { to: "/admin/limits", label: tk("Limits"), view: "pipeline/:id?" },
   { to: "/admin/audit", label: tk("Audit log"), view: "audit", also: ["/audit"] },
 ];
-const HELP: Page = { to: "/help", label: tk("Help"), icon: QuestionIcon, view: "about/:stage?", also: ["/about"] };
+const HELP: Page = { to: "/help", label: tk("Help"), icon: QuestionIcon, also: ["/about"] };
 const ALIASES = [...MAIN, RUNNER, ...REFERENCE, ...ADMIN, HELP].filter((p) => p.view);
 
 const under = (pathname: string, path: string) => (path === "/" ? pathname === "/" : pathname === path || pathname.startsWith(`${path}/`));
