@@ -464,6 +464,8 @@ export interface Api {
     ackDeadline(step: string): Promise<{ ok: true }>;
     /** Operator only: the model of the prepare step, one of `judgementModels`. */
     setJudgementModel(model: string): Promise<PipelineState>;
+    /** Operator only: the two blocker thresholds (changed lines). */
+    setBlockers(input: Partial<PipelineState["blockers"]>): Promise<PipelineState>;
     /** Limits the whole pipeline to these items ("repo#number"); an empty list clears the pilot. */
     setPilot(items: string[]): Promise<PipelineState>;
   };

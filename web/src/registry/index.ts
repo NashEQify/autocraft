@@ -11,6 +11,7 @@ import { itemsModule } from "../modules/items";
 import { classifiersModule } from "../modules/classifiers";
 import { costModule } from "../modules/cost";
 import { downloadsModule } from "../modules/downloads";
+import { adminHubModule } from "../modules/admin/v2";
 import { accessModule, auditModule, contributorsModule, githubAppModule, discordModule, reposModule } from "../modules/admin";
 import { aboutModule } from "../modules/about";
 import { connectModule } from "../modules/connect";
@@ -44,7 +45,7 @@ import { referenceModule } from "../modules/reference";
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
 /** Classic modules the new dashboard's own pages replace. */
-const replacedInV2: FeatureModule[] = [homeModule, itemsModule, itemModule, promptsModule];
+const replacedInV2: FeatureModule[] = [homeModule, itemsModule, itemModule, promptsModule, githubAppModule, discordModule];
 /** Classic routes the new dashboard replaces inside modules that stay. */
 const replacedRoutes = new Map<FeatureModule, string[]>([[envsModule, ["envs/:id?"]], [reposModule, ["repos", "repos/:name"]]]);
 const without = (m: FeatureModule): FeatureModule => {
@@ -62,6 +63,7 @@ export const v2Modules: FeatureModule[] = [
   maintainItemsModule,
   maintainItemModule,
   referenceModule,
+  adminHubModule,
   ...classicModules.filter((m) => !replacedInV2.includes(m)).map(without),
 ];
 
