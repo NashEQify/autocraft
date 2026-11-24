@@ -232,7 +232,7 @@ function NavDrawer({ open, onOpenChange, rail }: { open: boolean; onOpenChange: 
             </Dialog.Close>
           </div>
           <div className="px-2 pb-2">
-            <ScopePicker onPicked={() => onOpenChange(false)} />
+            <ScopePicker modal onPicked={() => onOpenChange(false)} />
           </div>
           <RailNav rail={rail} open tall className="min-h-0 flex-1 overscroll-contain" />
           {rail.help && (
