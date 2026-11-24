@@ -103,14 +103,26 @@ export function staleUnitDirs(units: UnitDir[]): { paths: string[]; units: numbe
  * the start stamp (the probe's ctime, set after every prepared file's) and whether a read updated the probe's atime
  * when it was newer than the mtime and older than the ctime, the case the prepared files are in. Run after the restore and
  * before the build.
+ *
+ * File times come from a clock that ticks every few milliseconds, so a read just before the stamp can share its value
+ * and look like a read by the build. The stamp is therefore taken again until it is later than every prepared file's
+ * atime; without that, a stale unit read by the restore could be kept in a publish called trimmed.
  */
 export function markBuildStart(target: string, file: string): BuildStart {
-  prepareFingerprints(target);
+  const { latestAtimeNs } = prepareFingerprints(target);
   const probe = join(target, `.autocraft-atime-probe-${process.pid}`);
   writeFileSync(probe, "x");
   try {
-    utimesSync(probe, Math.floor(Date.now() / 1000) - 60, 1_000_000_000);
-    const st0 = lstatSync(probe, { bigint: true });
+    const setProbe = () => {
+      utimesSync(probe, Math.floor(Date.now() / 1000) - 60, 1_000_000_000);
+      return lstatSync(probe, { bigint: true });
+    };
+    let st0 = setProbe();
+    for (let tries = 0; st0.ctimeNs <= latestAtimeNs; tries++) {
+      if (tries >= 1000) throw new Error("the file-system clock did not pass the fingerprint files' atimes");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      st0 = setProbe();
+    }
     const fd = openSync(probe, "r");
     try {
       readSync(fd, Buffer.alloc(1), 0, 1, 0);
@@ -169,20 +181,21 @@ const fingerprintDirs = (target: string): string[] =>
 
 /**
  * Sets each fingerprint file's ctime to now, so its atime is not newer than its ctime and relatime records the next
- * read. Returns how many files it prepared.
+ * read. Returns how many files it prepared and the latest atime among them (0 with none).
  */
-export function prepareFingerprints(target: string): number {
-  let n = 0;
+export function prepareFingerprints(target: string): { files: number; latestAtimeNs: bigint } {
+  let files = 0, latestAtimeNs = 0n;
   for (const d of fingerprintDirs(target)) {
     if (!isDir(d)) continue;
     for (const f of readdirSync(d)) {
-      const st = lstatSync(join(d, f));
+      const st = lstatSync(join(d, f), { bigint: true });
       if (!st.isFile()) continue;
-      chmodSync(join(d, f), st.mode & 0o7777);
-      n++;
+      chmodSync(join(d, f), Number(st.mode & 0o7777n));
+      files++;
+      if (st.atimeNs > latestAtimeNs) latestAtimeNs = st.atimeNs;
     }
   }
-  return n;
+  return { files, latestAtimeNs };
 }
 
 /** Bytes of the files under `p` (no links followed). */

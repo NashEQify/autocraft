@@ -76,7 +76,8 @@ test("a unit read before the build starts is still attributed: used when the bui
       utimesSync(join(fp(h), ".."), old, old);
     }
     // A read after the restore set the times (the restore copying a same-content file from it) leaves the atime newer
-    // than the mtime and ctime, where relatime ignores further reads.
+    // than the mtime and ctime, where relatime ignores further reads. The stamp follows at once, often in the same
+    // clock tick as that read, which must not make the stale unit look read by the build.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
     for (const h of [USED, STALE]) readFileSync(fp(h));
     const start = markBuildStart(root, join(root, "..", `${root.split("/").pop()}.stamp`));
