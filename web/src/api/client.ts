@@ -21,6 +21,8 @@ import type {
   DiscordSetup,
   Home,
   MaintainHome,
+  MaintainItem,
+  MaintainReply,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -250,6 +252,14 @@ export interface Api {
   maintain: {
     /** Home: what waits for the reader's answer, what they started, their Task Runner line and problems; the page's project narrows it. */
     home(): Promise<MaintainHome>;
+  };
+  /** The new item page (ui_v2): the item's workflow read, its command box and its controls. */
+  maintainItem: {
+    get(repo: RepoName, number: number): Promise<MaintainItem>;
+    /** A command written on the item; the reply is the confirmation, or what was understood when nothing ran. */
+    command(repo: RepoName, number: number, text: string): Promise<MaintainReply>;
+    /** A registered control on the item: release an outside hold, or resume a breaker by its key. */
+    control(body: { control: "release-outside"; repo: RepoName; number: number } | { control: "resume-breaker"; key: string }): Promise<MaintainReply>;
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;

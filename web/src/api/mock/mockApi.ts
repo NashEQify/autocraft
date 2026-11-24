@@ -8,6 +8,7 @@ import { createAgentsMock } from "./agentsMock";
 import { createTraceMock } from "./traceMock";
 import { createNowMock } from "./nowMock";
 import { createMaintainMock } from "./maintainMock";
+import { createMaintainItemMock } from "./maintainItemMock";
 import { createActivityMock } from "./activityMock";
 import { createAreasMock } from "./areasMock";
 import { createConversationMock } from "./conversationMock";
@@ -494,6 +495,7 @@ export function createMockApi(): Api {
     ...createSecurityMock(me, changed),
     ...createQueueMock(me, changed),
     ...createMaintainMock(me),
+    ...createMaintainItemMock(me, changed),
     prompts: () => wait(promptsReport(null), 60),
     next: () => wait(nextPageFixture(), 60),
     queue: (f) => wait(queueList(f), 60),

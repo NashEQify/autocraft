@@ -194,6 +194,17 @@ export function createHttpApi(): Api {
     progress: () => get("/api/progress"),
     home: () => get("/api/home"),
     maintain: { home: () => get("/api/maintain/home") },
+    maintainItem: {
+      get: (repo, number) => get(`/api/maintain/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`),
+      command: async (repo, number, text) => {
+        const r = await post<{ items: { outcome: string }[]; lines: string[] }>(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/command`, { text });
+        return { ok: r.items.length > 0 && r.items.every((i) => i.outcome === "run"), lines: r.lines };
+      },
+      control: async (body) => {
+        const r = await post<{ ok: boolean; line: string }>("/api/controls", body);
+        return { ok: r.ok, lines: [r.line] };
+      },
+    },
     itemPage: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/page${qs({ since })}`),
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
     itemStatusList: (f) => get(`/api/items/status${qs({ q: f.q, phase: f.phase, kind: f.kind, repo: f.repo?.join(","), area: f.area?.join(","), discord: f.discord ? "1" : undefined, cursor: f.cursor })}`),
