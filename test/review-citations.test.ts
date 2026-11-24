@@ -3,8 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PREMERGE_OPUS, REVIEW_OPUS } from "../src/agents/steps.ts";
+import { POSTMERGE_OPUS, PREMERGE_OPUS, REVIEW_OPUS } from "../src/agents/steps.ts";
 import type { OpusPr } from "../src/review/opus-parse.ts";
+import { connectDb } from "../src/db/open.ts";
+import { postmergeOf } from "../src/dash/api/postmerge.ts";
+import { fileFinding } from "../src/postmerge/file.ts";
+import { SAMPLE_POSTMERGE_PRS } from "../src/postmerge/parse.ts";
+import { saveReview } from "../src/postmerge/review.ts";
+import { pendingDefects } from "../src/postmerge/select.ts";
 
 test("Review and Pre-merge verify claim citations in the reviewed checkout", async (t) => {
   const checkout = mkdtempSync(join(tmpdir(), "autocraft-review-"));
@@ -47,4 +53,34 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
     assert.equal(review?.sure, resolves);
     assert.deepEqual(review?.fixes, resolves ? [fix] : []);
   }
+});
+
+test("Post-merge keeps unresolved citations in the review and out of issue filing", async (t) => {
+  const checkout = mkdtempSync(join(tmpdir(), "autocraft-postmerge-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  writeFileSync(join(checkout, "main.rs"), "the line in the merged tree\n");
+
+  const reply = JSON.stringify({ findings: [
+    { severity: "defect", title: "Valid", body: "A finding on the merged tree.", file: "/repo/main.rs", line: 1 },
+    { severity: "defect", title: "Past EOF", body: "A finding with a nonexistent line.", file: "main.rs", line: 2 },
+    { severity: "defect", title: "Missing", body: "A finding with a nonexistent file.", file: "gone.rs", line: 1 },
+  ] });
+  const input = SAMPLE_POSTMERGE_PRS[0]!;
+  const ctx = { attempt: 0, last: true };
+  const context = { dir: undefined, semantic: undefined };
+  const review = await POSTMERGE_OPUS.parse(reply, input, ctx, { ...context, checkout });
+  assert.ok(review);
+  assert.deepEqual(review.value.map((f) => f.citationUnverified), [undefined, true, true]);
+  assert.equal(review.value[0]?.file, "main.rs");
+  const diffOnly = await POSTMERGE_OPUS.parse(reply, input, ctx, context);
+  assert.ok(diffOnly?.value.every((f) => f.citationUnverified === undefined));
+
+  const db = await connectDb(":memory:");
+  t.after(() => db.close());
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
+  await saveReview(db, { repo: "app", number: 1 }, { sha: input.merge_sha, runId: null, model: null, findings: review.value, error: null });
+  assert.deepEqual((await pendingDefects(db, "app")).map((d) => d.finding), [0]);
+  await assert.rejects(fileFinding(db, "app#1", 1), /could not be verified at the merge commit/);
+  const item = await postmergeOf(db, "app", 1, true);
+  assert.deepEqual(item?.findings.map((f) => f.filing.state), ["pending", "unverified-citation", "unverified-citation"]);
 });

@@ -200,14 +200,17 @@ export const PREMERGE_OPUS: ClaudeStep<OpusPr & { ref: string }, PremergeReview,
   },
 };
 
-export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReferenceCtx> = {
+export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReviewCtx> = {
   provider: "claude", id: "postmerge.opus",
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["findings", "claims"], make: (_x, c) => async (text, stage) => {
     const own = lintReply(text);
     return own === null ? null : [...own, ...await referenceProblems(postmergeTexts(text), c.dir, c.semantic, { stage, otherProblems: own.length })];
   } },
-  parse: async (text, _x, ctx) => { const r = parseFindings(text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+  parse: async (text, _x, ctx, { checkout }) => {
+    const r = parseFindings(text, dropTexts(ctx.problems), checkout ? checkoutClaimLocation(checkout) : undefined);
+    return r === null ? null : { value: r };
+  },
 };
 
 /** Comment cards are public text: a reference mention or quote goes back to the model as one fix turn. A reply without text is not linted and keeps the whole-call retry. */
