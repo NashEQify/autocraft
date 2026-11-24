@@ -630,7 +630,7 @@ CREATE TABLE IF NOT EXISTS github_commands (
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
   pr INTEGER NOT NULL,                -- 1: the comment is on a pull request
-  command TEXT NOT NULL,              -- merge-queue | autorepin
+  command TEXT NOT NULL,              -- merge-queue | autorepin | answer (maintainer workflow repos)
   weight INTEGER,                     -- the fast-track weight given, or null for the default
   login TEXT NOT NULL,                -- the commenter, as GitHub sent it
   github_id INTEGER NOT NULL,         -- the commenter's numeric GitHub id
