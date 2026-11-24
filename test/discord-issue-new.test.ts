@@ -348,7 +348,10 @@ describe("search and filing flow", () => {
     const read: ReadRepo = async (owner, name) => ({ owner, name, private: false, hasIssues: true, archived: false });
     assert.equal((await addFilingRepo(db, "op", "example-studio/sketchpad", { read, mint })).mode, "link");
     const ix3 = new Interactions(rest, (l) => assert.fail(l));
-    installIssueNew(ix3, { db, keys, search, log: (l) => assert.fail(l), ask, store: null, junk: async () => "ok", botRefusal: async () => null, covers: coverageReader(mint, () => clock) });
+    // fileBot runs the junk model and copies the screenshots (req.attach): a press it never reaches does neither.
+    const pressed: BotRequest[] = [];
+    installIssueNew(ix3, { db, keys, search, log: (l) => assert.fail(l), ask, store: null, junk: async () => "ok", botRefusal: async () => null, covers: coverageReader(mint, () => clock),
+      fileBot: async (_d, req) => { pressed.push(req); return { status: "filed", number: 3, url: "https://github.com/example-studio/sketchpad/issues/3" }; } });
     const draft = async (user: string): Promise<EditBody> => {
       await send(2, user, { name: "autocraft", type: 1, options: [{ name: "report", type: 1 }] }, "c1", ix3);
       await send(5, user, { custom_id: modalId(), components: [
@@ -364,6 +367,10 @@ describe("search and filing flow", () => {
     assert.ok(!rows(linkOnly).some((x) => x.label === "Submit for me"));
     assert.ok(rows(linkOnly).some((x) => x.url?.startsWith("https://github.com/example-studio/sketchpad/issues/new")));
     assert.match(linkOnly.content!, /cannot file issues in this repo yet/);
+    // A hand-built Submit for me press on the link-only draft files and attaches nothing.
+    await send(3, "u50", { custom_id: rows(linkOnly).find((x) => x.label === "Edit")!.custom_id!.replace(":edit:", ":bot:") }, "c1", ix3);
+    assert.equal(pressed.length, 0);
+    assert.match(rest.edits[0]!.content!, /cannot file issues in this repo yet/);
     installed = true;
     const reads = minted.length;
     assert.ok(!rows(await draft("u51")).some((x) => x.label === "Submit for me"), "within the cache time the earlier reading holds");
@@ -372,6 +379,8 @@ describe("search and filing flow", () => {
     const covered = await draft("u52");
     assert.ok(rows(covered).some((x) => x.label === "Submit for me"));
     assert.doesNotMatch(covered.content!, /cannot file/);
+    await send(3, "u52", { custom_id: rows(covered).find((x) => x.label === "Submit for me")!.custom_id! }, "c1", ix3);
+    assert.equal(pressed.length, 1, "once covered, the press files");
     await removeFilingRepo(db, "op", "sketchpad");
   });
 });

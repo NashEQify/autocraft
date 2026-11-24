@@ -1,6 +1,6 @@
 // Discord mentions: the admin page's data and writes, and what the item page shows. The channel list and the
 // connection state are written by the runner's gateway client (src/discord/); this file only reads them.
-import type { DiscordAccount, DiscordLinkCode, DiscordInfo, DiscordSetup, DiscordUsage } from "../../../web/src/api/types.ts";
+import type { DiscordAccount, DiscordFilingAdded, DiscordLinkCode, DiscordInfo, DiscordSetup, DiscordUsage } from "../../../web/src/api/types.ts";
 import { envVar } from "../../env.ts";
 import { excluded } from "../../db/kx.ts";
 import { audit } from "../audit.ts";
@@ -137,18 +137,18 @@ export async function putContact(db: Db, req: Req): Promise<DiscordSetup> {
   return await setupOf(db);
 }
 
-/** Adds a filing-only repo (`repo`: owner/name) once GitHub confirms it is public with issues on; the refusal's reason is the error. The list shows its mode. */
-export async function addFiling(db: Db, req: Req): Promise<DiscordSetup> {
+/** Adds a filing-only repo (`repo`: owner/name) once GitHub confirms it is public with issues on; the refusal's reason is the error. `added` says whether it is link-only, and why. */
+export async function addFiling(db: Db, req: Req): Promise<DiscordFilingAdded> {
   operator(req);
   const repo = body(req).repo;
   if (typeof repo !== "string" || repo.length > 200) throw new HttpError(400, "repo (owner/name) is required");
   try {
-    await addFilingRepo(db, req.user.login, repo);
+    const r = await addFilingRepo(db, req.user.login, repo);
+    return { ...await setupOf(db), added: { owner: r.owner, name: r.name, mode: r.mode, why: r.why ?? null } };
   } catch (e) {
     if (e instanceof FilingRepoError) throw new HttpError(400, e.message);
     throw e;
   }
-  return await setupOf(db);
 }
 
 export async function removeFiling(db: Db, req: Req): Promise<DiscordSetup> {

@@ -967,6 +967,9 @@ export interface DiscordChannel {
   category: string | null;
 }
 
+/** The answer to adding a filing-only repo: the setup, and how the bot files into the repo just added. */
+export type DiscordFilingAdded = DiscordSetup & { added: { owner: string; name: string; mode: "submit" | "link"; why: string | null } };
+
 export interface DiscordSetup {
   /** `off` while the runner has not started the gateway client (no token file). */
   state: "off" | "connecting" | "connected" | "reconnecting" | "failed";
@@ -975,8 +978,8 @@ export interface DiscordSetup {
   channels: DiscordChannel[];
   /** Tracked repos a channel's default can be. */
   repos: string[];
-  /** Public repos of any owner the bot offers without tracking them. `mode`: "submit" when the GitHub App covers the repo (Submit for me), else "link" (only the GitHub link). */
-  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string; mode: "submit" | "link" }[];
+  /** Public repos of any owner the bot offers without tracking them. `mode`: "submit" when the GitHub App covers the repo (Submit for me), else "link" (only the GitHub link), with `why`. */
+  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string; mode: "submit" | "link"; why: string | null }[];
   /** Every public tracked repo with whether the bot offers it in its repo select; `used` of `max` places are filled (offered repos plus filing-only ones). */
   offer: { repos: { name: string; label: string; offered: boolean }[]; used: number; max: number };
   contact: string;

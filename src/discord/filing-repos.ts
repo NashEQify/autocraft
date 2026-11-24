@@ -115,30 +115,37 @@ export async function addFilingRepo(db: Db, by: string, input: string, deps: { r
 /** How long a coverage reading is kept: one Discord session or Settings visit asks GitHub once per repo. */
 export const COVERAGE_TTL_MS = 5 * 60_000;
 
+/** Whether the GitHub App covers a repo; `why` is the reason when it does not. */
+export type CoverageReading = { covered: boolean; why: string | null };
+
 /**
  * Whether the GitHub App covers `owner/name`, read with appCoverage and kept COVERAGE_TTL_MS. A reading GitHub could not
- * confirm is not kept and answers with the last kept one, else false.
+ * confirm is not kept and answers with the last kept one, else not covered with GitHub's reason.
  */
-export function coverageReader(mint?: (owner: string, repo: string) => Promise<string>, now: () => number = Date.now): (owner: string, name: string) => Promise<boolean> {
-  const memo = new Map<string, { at: number; covered: boolean }>();
+export function coverageReader(mint?: (owner: string, repo: string) => Promise<string>, now: () => number = Date.now): (owner: string, name: string) => Promise<CoverageReading> {
+  const memo = new Map<string, { at: number } & CoverageReading>();
   return async (owner, name) => {
     const key = `${owner}/${name}`.toLowerCase();
     const hit = memo.get(key);
-    if (hit && now() - hit.at < COVERAGE_TTL_MS) return hit.covered;
+    if (hit && now() - hit.at < COVERAGE_TTL_MS) return { covered: hit.covered, why: hit.why };
     const c = await appCoverage(owner, name, mint);
-    if (c.kind === "unconfirmed") return hit?.covered ?? false;
-    memo.set(key, { at: now(), covered: c.kind === "covered" });
-    return c.kind === "covered";
+    if (c.kind === "unconfirmed") return hit ? { covered: hit.covered, why: hit.why } : { covered: false, why: c.why };
+    const reading = { covered: c.kind === "covered", why: c.kind === "covered" ? null : c.why };
+    memo.set(key, { at: now(), ...reading });
+    return reading;
   };
 }
 
-/** The shared reader for the Discord draft and the Settings list. */
+/** The shared reader for the Discord draft, the Submit for me press and the Settings list. */
 export const appCovers = coverageReader();
 
-/** The filing-only repos with how the bot files into each now: Submit for me needs the app identity and the app's coverage. */
-export async function filingReposWithMode(db: Db, covers: (owner: string, name: string) => Promise<boolean> = appCovers): Promise<(FilingRepo & { mode: FilingMode })[]> {
+/** The filing-only repos with how the bot files into each now: Submit for me needs the app identity and the app's coverage; `why` says why a repo is link-only. */
+export async function filingReposWithMode(db: Db, covers: (owner: string, name: string) => Promise<CoverageReading> = appCovers): Promise<(FilingRepo & { mode: FilingMode; why: string | null })[]> {
   const app = await githubIdentity(db) === "app";
-  return await Promise.all((await filingRepos(db)).map(async (r) => ({ ...r, mode: app && await covers(r.owner, r.name) ? "submit" as const : "link" as const })));
+  return await Promise.all((await filingRepos(db)).map(async (r) => {
+    const c: CoverageReading = app ? await covers(r.owner, r.name) : { covered: false, why: "Filing from Discord needs the GitHub App identity." };
+    return { ...r, mode: c.covered ? "submit" as const : "link" as const, why: c.why };
+  }));
 }
 
 /** Removes a filing-only repo (`owner/name` or the bare name). Returns whether it was on the list. Audited as `discord-filing-remove`. */
