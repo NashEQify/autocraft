@@ -51,6 +51,19 @@ function walk(root: string): string[] {
   return out;
 }
 
+/** Every directory under `root` (relative, `""` for the root itself), symlinks not followed. */
+function walkDirs(root: string): string[] {
+  const out: string[] = [""];
+  const go = (rel: string) => {
+    for (const n of readdirSync(join(root, rel))) {
+      const p = rel ? `${rel}/${n}` : n;
+      if (lstatSync(join(root, p)).isDirectory()) { out.push(p); go(p); }
+    }
+  };
+  go("");
+  return out;
+}
+
 /** git's blob id of a file (or a symlink's target), as `git ls-tree` prints it. */
 function blobId(abs: string): string {
   const st = lstatSync(abs);
@@ -158,12 +171,14 @@ export function setMtimes(work: string, commit: string, trimmed: boolean): strin
   }
   const touch = new Set(changed.files);
   for (const p of all) lutimesSync(join(src, p), touch.has(p) ? now : OLD_MTIME_SEC, touch.has(p) ? now : OLD_MTIME_SEC);
-  for (const d of changed.dirs ?? []) if (d === "" || safeRel(d)) if (isDir(join(src, d))) lutimesSync(join(src, d), now, now);
+  // Directories too: cargo's rerun-if-changed on a directory compares the newest mtime under it, directories included.
+  const touchDirs = new Set((changed.dirs ?? []).filter((d) => d === "" || safeRel(d)));
+  for (const d of walkDirs(src)) lutimesSync(join(src, d), touchDirs.has(d) ? now : OLD_MTIME_SEC, touchDirs.has(d) ? now : OLD_MTIME_SEC);
   return `${touch.size} source files changed since ${commit.slice(0, 12)}`;
 }
 
 /**
- * Sets every file of the gate's extra checkouts (`<work>/ext/*`, mounted read-only in the steps, so set here while the
+ * Sets every file and directory of the gate's extra checkouts (`<work>/ext/*`, mounted read-only in the steps, so set here while the
  * volume is writable) to OLD_MTIME. Cargo's fingerprints of path dependencies there (e.g. a font manifest) compare against
  * the warm build's dep-info; fresh mtimes make it rebuild every crate that reads them. Returns the file count.
  */
@@ -172,6 +187,8 @@ export function setExtMtimes(work: string): number {
   if (!isDir(ext)) return 0;
   const files = walk(ext);
   for (const p of files) lutimesSync(join(ext, p), OLD_MTIME_SEC, OLD_MTIME_SEC);
+  // After the files, so nothing changes a directory's mtime again; cargo's rerun-if-changed on a directory counts directory mtimes.
+  for (const d of walkDirs(ext)) lutimesSync(join(ext, d), OLD_MTIME_SEC, OLD_MTIME_SEC);
   return files.length;
 }
 

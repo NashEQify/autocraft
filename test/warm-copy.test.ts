@@ -62,13 +62,15 @@ test("an untrimmed warm copy leaves the gate's checkouts' mtimes alone", swapTes
 test("an untrimmed version counts every source as changed", (t) => {
   const work = mkdtempSync(join(tmpdir(), "warm-mtimes-"));
   t.after(() => rmSync(work, { recursive: true, force: true }));
-  mkdirSync(join(work, "src"));
+  mkdirSync(join(work, "src", "same"), { recursive: true });
+  mkdirSync(join(work, "src", "grew"));
   for (const f of ["changed.rs", "same.rs"]) writeFileSync(join(work, "src", f), f);
-  writeFileSync(join(work, CHANGED_FILE), JSON.stringify({ commit: A, files: ["changed.rs"], dirs: [] }));
+  writeFileSync(join(work, CHANGED_FILE), JSON.stringify({ commit: A, files: ["changed.rs"], dirs: ["grew"] }));
   const mtime = (f: string) => statSync(join(work, "src", f)).mtimeMs / 1000;
 
   setMtimes(work, A, true);
   assert.ok(mtime("same.rs") <= OLD_MTIME_SEC && mtime("changed.rs") > OLD_MTIME_SEC);
+  assert.ok(mtime("same") <= OLD_MTIME_SEC && mtime("grew") > OLD_MTIME_SEC, "an unchanged directory is old, a listed one is new");
   setMtimes(work, A, false);
   assert.ok(mtime("same.rs") > OLD_MTIME_SEC);
 });
@@ -81,6 +83,8 @@ test("the gate's extra checkouts are set to the old mtime", (t) => {
   writeFileSync(join(dir, "manifest.txt"), "x");
   assert.equal(setExtMtimes(work), 1);
   assert.ok(statSync(join(dir, "manifest.txt")).mtimeMs / 1000 <= OLD_MTIME_SEC);
+  // cargo's rerun-if-changed on a directory counts the directories' own mtimes
+  for (const d of [dir, join(work, "ext", "craft-fonts")]) assert.ok(statSync(d).mtimeMs / 1000 <= OLD_MTIME_SEC, d);
   assert.equal(setExtMtimes(join(work, "none")), 0);
 });
 
