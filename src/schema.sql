@@ -732,6 +732,7 @@ CREATE TABLE IF NOT EXISTS opus_reviews (
   risks TEXT,                         -- JSON [string]
   -- public_review (added column): JSON {summary, points}, the text posted on the PR; NULL when the reply had none
   -- base_ref (added column): the base branch the reviewed diff was computed against; NULL for reviews stored before it was recorded
+  -- workflow (added column): for an item on the maintainer workflow, JSON {outside_purpose: {lines, note} | null, recommendation: string | null}
   PRIMARY KEY (repo, number, head_oid)
 );
 
