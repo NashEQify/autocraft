@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -84,7 +84,7 @@ test("the gate's extra checkouts are set to the old mtime", (t) => {
   assert.equal(setExtMtimes(join(work, "none")), 0);
 });
 
-test("the parallel copy of a tree matches cp -a", async (t) => {
+test("the split copy of a tree matches cp -a, keeps large hard links inside the copy only, and keeps what the target holds", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "warm-cp-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const from = join(root, "from"), to = join(root, "to"), ref = join(root, "ref");
@@ -100,16 +100,55 @@ test("the parallel copy of a tree matches cp -a", async (t) => {
   utimesSync(join(from, "debug", "deps", "f3"), 1e9, 1e9);
   utimesSync(join(from, "debug", "deps"), 1e9, 1e9);
   mkdirSync(join(from, "debug", "x"), { recursive: true });
-  writeFileSync(join(from, "debug", "deps", "bin-1"), "bin");
+  writeFileSync(join(from, "debug", "deps", "bin-1"), Buffer.alloc(2 << 20, 1));
   linkSync(join(from, "debug", "deps", "bin-1"), join(from, "debug", "x", "bin"));
-  linkSync(join(from, "debug", "deps", "bin-1"), join(from, "debug", "deps", "u1", "a", "b", "c", "bin"));
-  await copyTree(from, to);
+  linkSync(join(from, "debug", "deps", "bin-1"), join(deep, "bin"));
+  writeFileSync(join(deep, ".cargo-lock"), "");
+  // A low minimum splits this small tree into many cp calls, as a large one is.
+  await copyTree(from, to, { minChunk: 1 });
   const ino = (f: string) => statSync(join(to, "debug", f)).ino;
   assert.equal(ino("x/bin"), ino("deps/bin-1"));
   assert.equal(ino("deps/u1/a/b/c/bin"), ino("deps/bin-1"));
+  assert.notEqual(ino("deps/bin-1"), statSync(join(from, "debug", "deps", "bin-1")).ino);
+  assert.equal(statSync(join(from, "debug", "deps", "bin-1")).nlink, 3);
   execFileSync("cp", ["-a", `${from}/.`, `${ref}/`]);
+  rmSync(join(ref, "debug", "deps", "u1", "a", "b", "c", ".cargo-lock"));
+  execFileSync("touch", ["-r", deep, join(ref, "debug", "deps", "u1", "a", "b", "c")]);
   const listing = (d: string) => execFileSync("find", [d, "-printf", "%P %y %m %T@ %l %s\\n"]).toString().split("\\n").sort().join("\\n");
   const [x, y] = [listing(to).split("\n"), listing(ref).split("\n")];
   assert.equal(x.length, y.length);
   assert.deepEqual(x.filter((l) => !y.includes(l)), y.filter((l) => !x.includes(l)));
+  const into = join(root, "into");
+  mkdirSync(join(into, "debug", "deps"), { recursive: true });
+  writeFileSync(join(into, "debug", "deps", "f5"), "mine");
+  await copyTree(from, into, { minChunk: 1 });
+  assert.equal(readFileSync(join(into, "debug", "deps", "f5"), "utf8"), "mine");
+  assert.equal(readFileSync(join(into, "debug", "deps", "f6"), "utf8"), "6");
+  assert.ok(statSync(join(into, "debug", "x", "bin")).isFile());
+});
+
+test("a copy undoes the temp entries an interrupted copy's journal names inside the target, and nothing else", async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "warm-cp-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const from = join(root, "from"), to = join(root, "cargo"), journal = join(root, "journal.json");
+  mkdirSync(join(from, "registry", "src", "crate-1"), { recursive: true });
+  writeFileSync(join(from, "registry", "src", "crate-1", "lib.rs"), "fn a() {}");
+  writeFileSync(join(from, ".crates.toml"), "x");
+  mkdirSync(join(to, "registry", "src"), { recursive: true });
+  writeFileSync(join(to, "registry", "src", "fetched"), "mine");
+  const stale = join(to, "registry", "src", ".crate-1.warm-copy-tmp"), staged = join(to, ".warm-copy-tmp-0");
+  mkdirSync(stale);
+  writeFileSync(join(stale, "lib.rs"), "fn");
+  mkdirSync(staged);
+  writeFileSync(join(staged, ".crates.toml"), "");
+  const outside = join(root, ".other.warm-copy-tmp");
+  writeFileSync(outside, "not the copy's");
+  writeFileSync(journal, JSON.stringify([stale, staged, outside, join(to, "registry", "src", "fetched")]));
+  await copyTree(from, to, { journal, minChunk: 1 });
+  const names = execFileSync("find", [to, "-printf", "%P\\n"]).toString().trim().split("\n").sort();
+  assert.deepEqual(names, [".crates.toml", "registry", "registry/src", "registry/src/crate-1", "registry/src/crate-1/lib.rs", "registry/src/fetched"]);
+  assert.equal(readFileSync(join(to, "registry", "src", "crate-1", "lib.rs"), "utf8"), "fn a() {}");
+  assert.equal(readFileSync(join(to, "registry", "src", "fetched"), "utf8"), "mine");
+  assert.equal(readFileSync(outside, "utf8"), "not the copy's");
+  assert.ok(!existsSync(journal));
 });
