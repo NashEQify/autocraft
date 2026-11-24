@@ -15,7 +15,10 @@ import type { Req, Role, User } from "../dash/types.ts";
 import { BACKLOG, HANDLED, WITHDRAWN_OPTION, getDecision, itemsOf, optionsOf, reposOf, snoozedExpr, type DecisionRow, type Kind } from "../decisions.ts";
 import { readSeqs } from "../live.ts";
 import { trackedNames } from "../repos.ts";
-import { allAppIdentity, maintainerWritesOn } from "../settlers.ts";
+import { allAppIdentity, maintainerWritesFor } from "../settlers.ts";
+import { t } from "../i18n/index.ts";
+import { blockerLabel, recommendationLine } from "../workflow/status.ts";
+import { workflowOf } from "../workflow/store.ts";
 import type { ActDeps } from "../conversations/act.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { loginOf } from "./links.ts";
@@ -25,6 +28,7 @@ import { ghPermission, type PermissionReader } from "../fixup/author-permission.
 import { everySeq, exclusive, filterSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+import type { ItemWorkflow } from "../workflow/types.ts";
 
 /** What the alerts need from Discord beyond messages: the direct-message channel of a user. */
 export type DmRest = DiscordRest & { createDm(userId: string): Promise<{ id: string }> };
@@ -33,7 +37,7 @@ export const PER_HOUR = 20;
 const HOUR_MS = 3_600_000;
 const POLL_MS = 2000;
 /** The topics a decision alert depends on: the decisions, their prepared choices, snoozes, who may settle, and item activity that wakes a snooze. */
-const TOPICS = ["decisions", "decision-choices", "decision-snooze"];
+const TOPICS = ["decisions", "decision-choices", "decision-snooze", "workflows"];
 /** Who may settle and the activity that wakes a snooze change often and matter less: looked at this rarely. */
 const SLOW_TOPICS = ["access", "items"];
 const SLOW_MS = 60_000;
@@ -73,7 +77,7 @@ const permKey = (login: string, repo: string): string => `${login.toLowerCase()}
  */
 export async function mayReceive(db: Db, login: string, role: Role, repos: string[], now: number = Date.now(), kept: ReadonlySet<string> = new Set()): Promise<boolean> {
   if (role === "operator") return true;
-  if (role !== "maintainer" || !await maintainerWritesOn(db) || !await allAppIdentity(db, repos)) return false;
+  if (role !== "maintainer" || !await maintainerWritesFor(db, repos) || !await allAppIdentity(db, repos)) return false;
   const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
   return await everySeq(repos, async (r) => !!await db.get(db.k.selectFrom("main.repo_permissions").select((eb) => eb.lit(1).as("one"))
     .where("login", "=", login).where("repo", "=", r).where("permission", "in", ["write", "maintain", "admin"])
@@ -83,7 +87,7 @@ export async function mayReceive(db: Db, login: string, role: Role, repos: strin
 export async function mayAlert(db: Db, login: string): Promise<boolean> {
   const role = await roleOf(db, login);
   if (role === "operator") return true;
-  if (role !== "maintainer" || !await maintainerWritesOn(db)) return false;
+  if (role !== "maintainer") return false;
   // Turning alerts on takes a write permission of any age: the alert pass reads a stale one again before it sends.
   return await someSeq((await trackedNames(db)), async (r) => await mayReceive(db, login, role, [r], Date.now(), new Set([permKey(login, r)])));
 }
@@ -146,6 +150,24 @@ export async function buildMessage(db: Db, d: DecisionRow, baseUrl: string | nul
   // What the message shows, so it is edited when the choices or their list change, not only when their id does.
   const sig = view ? createHash("sha256").update(JSON.stringify([content, rows])).digest("base64url").slice(0, 22) : null;
   return { content, components: rows, choicesId: sig };
+}
+
+/** How long a workflow alert is remembered: a recommendation older than this is not sent. */
+const WORKFLOW_ALERT_DAYS = 7;
+const DAY_MS = 86_400_000;
+/** The message row of a workflow alert: one per workflow and recommendation, so a new recommendation is a new alert. */
+const workflowAlertId = (id: number, recAt: string): string => `wf:${id}:${recAt}`;
+
+/** The text alert for a workflow that stopped at a blocker or came back with a recommendation: no buttons, an answer is a command. */
+export async function buildWorkflowMessage(db: Db, w: ItemWorkflow, baseUrl: string | null): Promise<string> {
+  const ref = `${soft(w.repo, 60)}#${w.number}`;
+  const lines = [`**${ref}** ${soft(await itemTitle(db, w.repo, w.number), 120)}`];
+  lines.push(w.state === "blocked" && w.blocker ? t("Stopped at a blocker: {blocker}.", { blocker: blockerLabel(w.blocker) }) : t("Waiting for an answer."));
+  const rec = recommendationLine(w.rec);
+  if (rec) lines.push(soft(rec, 600));
+  lines.push(t("Answer with /autocraft do, for example: yes {ref}", { ref }));
+  if (baseUrl) lines.push(`${baseUrl.replace(/\/+$/, "")}/items/${encodeURIComponent(w.repo)}/${w.number}`);
+  return lines.join("\n").slice(0, 1990);
 }
 
 export type AlertDeps = {
@@ -272,6 +294,40 @@ export class DecisionAlerts {
       }
       if (overflow.length) await this.#summary(p, overflow, now);
     }
+    await this.#workflowAlerts(people, now);
+  }
+
+  /**
+   * Workflows on the maintainer workflow that stopped at a blocker or came back with a recommendation since the person turned alerts on,
+   * in repos where they may act: one text message per recommendation, within the same hourly limit as decision alerts.
+   */
+  async #workflowAlerts(people: Alerter[], now: number): Promise<void> {
+    const { db, rest, log } = this.#d;
+    const after = new Date(now - WORKFLOW_ALERT_DAYS * DAY_MS).toISOString();
+    const rows = (await db.all(db.k.selectFrom("main.item_workflows as w").innerJoin("main.tracked_repos as r", "r.name", "w.repo").selectAll("w")
+      .where("r.workflow", "=", "new").where("w.state", "in", ["blocked", "recommending"]).where("w.rec_at", "is not", null).where("w.rec_at", ">", after).orderBy("w.rec_at"))).map(workflowOf);
+    if (!rows.length) return;
+    for (const p of people) {
+      const created = (await db.get(db.k.selectFrom("discord_alerts").select("created_at").where("user_hash", "=", p.userHash)))?.created_at ?? "";
+      const have = new Set((await db.all(db.k.selectFrom("discord_alert_msgs").select("decision_id").where("user_hash", "=", p.userHash)
+        .where((eb) => kx.like(db, "decision_id", eb.val("wf:%"))))).map((r) => r.decision_id));
+      const fresh = await filterSeq(rows, async (w) => w.recAt! >= created && !have.has(workflowAlertId(w.id, w.recAt!)) && await mayReceive(db, p.login, p.role, [w.repo], now, this.#kept));
+      let room = (this.#d.perHour ?? PER_HOUR) - (await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.fn.countAll<number>().as("n"))
+        .where("user_hash", "=", p.userHash).where("sent_at", ">", new Date(now - HOUR_MS).toISOString())))!.n;
+      for (const w of fresh) {
+        if (room <= 0) break;
+        const id = workflowAlertId(w.id, w.recAt!);
+        try {
+          await rest.createMessage(p.channelId, { content: await buildWorkflowMessage(db, w, this.#d.baseUrl), allowed_mentions: { parse: [] } });
+          await db.run(db.k.insertInto("discord_alert_msgs").values({ decision_id: id, user_hash: p.userHash, sealed: null, choices_id: null, sent_at: new Date(now).toISOString() }).onConflict((oc) => oc.doNothing()));
+          room--;
+        } catch (e) {
+          log(`discord: workflow alert not sent: ${(e as Error).message}`);
+          if (e instanceof RestError && e.status === 403) await db.run(db.k.insertInto("discord_alert_msgs").values({ decision_id: id, user_hash: p.userHash, sealed: null, choices_id: null, sent_at: new Date(now).toISOString() }).onConflict((oc) => oc.doNothing()));
+          else break;
+        }
+      }
+    }
   }
 
   async #summary(p: Alerter, ds: DecisionRow[], now: number): Promise<void> {
@@ -303,9 +359,12 @@ export class DecisionAlerts {
   async #refreshPermissions(people: Alerter[], now: number): Promise<void> {
     const { db, log } = this.#d;
     const maintainers = people.filter((p) => p.role === "maintainer");
-    if (!maintainers.length || !await maintainerWritesOn(db)) return;
+    if (!maintainers.length) return;
     const repos = new Set<string>();
     for (const d of await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>().where("answer", "is", null).orderBy(kx.rowid("decisions")))) for (const r of reposOf(d)) repos.add(r);
+    // Workflows waiting for an answer: their repo's maintainers receive the alert.
+    for (const w of await db.all(db.k.selectFrom("main.item_workflows").select("repo").where("state", "in", ["blocked", "recommending"]).distinct())) repos.add(w.repo);
+    for (const r of [...repos]) if (!await maintainerWritesFor(db, [r])) repos.delete(r);
     if (!repos.size) return;
     const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
     const read = this.#d.readPermission ?? ghPermission;
@@ -333,6 +392,8 @@ export class DecisionAlerts {
       await db.run(db.k.deleteFrom("discord_alert_msgs").where("decision_id", "=", m.decision_id).where("user_hash", "=", m.user_hash));
     };
     if (m.decision_id.startsWith("summary:")) return Date.parse(m.sent_at) < (this.#d.now ?? Date.now)() - 2 * HOUR_MS ? await forget() : undefined;
+    // A workflow alert is text only: nothing to edit, and it is kept as long as its recommendation could still be sent.
+    if (m.decision_id.startsWith("wf:")) return Date.parse(m.sent_at) < (this.#d.now ?? Date.now)() - (WORKFLOW_ALERT_DAYS + 1) * DAY_MS ? await forget() : undefined;
     const d = await getDecision(db, m.decision_id);
     const open = d && d.answer === null;
     if (open && m.sealed === null) return;

@@ -32,6 +32,9 @@ const newRepos = async (db: Db): Promise<Set<string>> =>
  */
 const writesFor = (on: boolean, fresh: ReadonlySet<string>, repos: readonly string[]): boolean => on || (repos.length > 0 && repos.every((r) => fresh.has(r)));
 
+/** `maintainer_writes` is on, or every one of `repos` (at least one) runs the maintainer workflow. */
+export const maintainerWritesFor = async (db: Db, repos: readonly string[]): Promise<boolean> => writesFor(await maintainerWritesOn(db), await newRepos(db), repos);
+
 /** `maintainersSettle` for one repo: also true in a repo on the maintainer workflow. */
 export const maintainersSettleOn = async (db: Db, repo: string): Promise<boolean> =>
   await githubIdentity(db) === "app" && writesFor(await maintainerWritesOn(db), await newRepos(db), [repo]);

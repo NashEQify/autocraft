@@ -29,7 +29,7 @@ const WITHDRAWN_KINDS = ["merge", "hold", "scope"];
  * Whether the planner works item_workflows. Until it does, a flip to `new` would only withdraw questions the legacy planner
  * asks again, so a real flip is refused; a dry run still reports what it would do.
  */
-export const WORKFLOW_ENGINE_READY = false;
+export const WORKFLOW_ENGINE_READY = true;
 const ENGINE_NOT_READY = "the planner does not work maintainer workflows yet: a flip now would only withdraw questions the legacy planner asks again";
 
 export class FlipRefused extends Error {}
