@@ -66,6 +66,8 @@ export async function neighbourPairs(db: Db, index: VectorIndex, item: ScanItem,
 
 /** Stores the item's new pairs and marks it scanned. Pairs already checked at these hashes, and pairs an operator ruled on, are not added again. Returns the number added. */
 export async function scanItem(db: Db, index: VectorIndex, item: ScanItem, now: Date): Promise<number> {
+  // A planned item whose text changed after planning has no hash until it is embedded again; it is scanned then.
+  if (!item?.embed_hash) return 0;
   const pairs = await neighbourPairs(db, index, item, now.getTime());
   let added = 0;
   await db.write(async () => {
