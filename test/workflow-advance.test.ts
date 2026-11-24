@@ -201,6 +201,7 @@ test("an implement question comes back as one recommendation, and a yes answers 
 
   const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 7 }] });
   assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  assert.match(r.lines[0]!, /Per document/);
   const d = (await getDecision(db, (await currentImplementation(db, "app", 7))!.decisionId!))!;
   assert.equal(optionsOf(d).find((o) => o.key === d.answer)?.label, "Per document");
   assert.equal(d.answered_by, MAINT);

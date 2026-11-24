@@ -18,8 +18,8 @@ export type BlockerFacts = {
   fix: { lines: number; files: readonly string[] } | null;
   /** The files the planned parts name; empty when none names one. */
   plannedFiles: readonly string[];
-  /** An issue's implementation PR, when it opened after `since`: its changed files and the files the planned implement parts name. */
-  implementation?: { files: readonly string[]; plannedFiles: readonly string[] } | null;
+  /** Files an issue's implementation changed that no part of its plan names, not yet shown to a person. */
+  implementationBeyond?: readonly string[];
   /** The merge leg (the pre-approved merge) stopped or was cancelled since `since`, with its reason. */
   leg: { reason: string } | null;
   thresholds: { largeFix: number; outsideMin: number };
@@ -61,11 +61,7 @@ export function detectBlocker(f: BlockerFacts): Found | null {
     const beyond = f.fix.files.filter((x) => !planned.has(x));
     if (beyond.length) return { blocker: "beyond-agreed", params: { files: beyond.slice(0, 10) } };
   }
-  if (f.implementation) {
-    const planned = new Set(f.implementation.plannedFiles);
-    const beyond = f.implementation.files.filter((x) => !planned.has(x));
-    if (beyond.length) return { blocker: "beyond-agreed", params: { files: beyond.slice(0, 10) } };
-  }
+  if (f.implementationBeyond?.length) return { blocker: "beyond-agreed", params: { files: f.implementationBeyond.slice(0, 10) } };
   const r = f.review;
   if (r && r.outsideLines >= f.thresholds.outsideMin) return { blocker: "outside-purpose", params: { lines: r.outsideLines, limit: f.thresholds.outsideMin } };
   // An unsure review is no blocker: the approval says the change is wanted, so its fixes run and the merge still waits for the

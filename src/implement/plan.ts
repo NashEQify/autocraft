@@ -285,7 +285,9 @@ async function callPlan(ctx: StepContext, o: { repo: string; number: number; sha
     const first = reply;
     r = await turn(fixTurnMessage(flagged), r.callId);
     if (r.outcome.state !== "done") return failed(r);
-    const merged = mergeFixFields(JSON.stringify(first), r.outcome.text, flagged);
+    // The reply as the model wrote it: the maintainer-workflow fields are top-level there, as parsePlanReply reads them.
+    const { workflow: own, ...plain } = first;
+    const merged = mergeFixFields(JSON.stringify(own ? { ...plain, ...own } : plain), r.outcome.text, flagged);
     if (merged !== null) {
       try {
         const fixed = parsePlanReply(merged, o.input.assume);

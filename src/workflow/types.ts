@@ -26,6 +26,8 @@ export type PlanPart = {
   files?: string[];
   /** An implement question's option this part is (its key in the question): naming the part picks it. */
   option?: string;
+  /** The question (decision id) whose option the part is. */
+  question?: string;
   major?: boolean;
   state: "planned" | "dropped" | "fixed";
 };
@@ -41,7 +43,7 @@ export type Recommendation = {
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
   /** A yes answers this question of the legacy machinery as the person (a stuck implementation's Try again). */
-  answer?: { decision: string; option: string };
+  answer?: { decision: string; option: string; label?: string };
   /** The open question of the legacy machinery the recommendation stands for: once it is answered or set aside, the recommendation goes. */
   question?: string;
 };

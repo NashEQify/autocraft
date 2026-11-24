@@ -155,10 +155,11 @@ export async function buildMessage(db: Db, d: DecisionRow, baseUrl: string | nul
 /** Ids of an implementation's questions: a plan question, the question after the last round, and the stuck question. */
 const IMPLEMENT_QUESTION = /:implement(-q\d+-\d+|-limit-\d+)?$/;
 
-/** An implementation's question on an issue whose live maintainer workflow shows it as its recommendation: the workflow alert carries it. */
+/** An implementation's question that the issue's live maintainer workflow shows as its recommendation: the workflow alert carries it. */
 async function carriedByWorkflow(db: Db, d: DecisionRow): Promise<boolean> {
-  if (!d.repo || d.number === null || !IMPLEMENT_QUESTION.test(d.id)) return false;
-  return await repoWorkflow(db, d.repo) === "new" && !!await liveWorkflow(db, d.repo, d.number);
+  if (!d.repo || d.number === null || !IMPLEMENT_QUESTION.test(d.id) || await repoWorkflow(db, d.repo) !== "new") return false;
+  const rec = (await liveWorkflow(db, d.repo, d.number))?.rec;
+  return rec?.question === d.id || rec?.answer?.decision === d.id;
 }
 
 /** How long a workflow alert is remembered: a recommendation older than this is not sent. */

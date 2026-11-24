@@ -2269,7 +2269,7 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   started_by TEXT NOT NULL,
   started_at TEXT NOT NULL,
   started_via TEXT NOT NULL,          -- github | discord | agent | dashboard | cli
-  base_head TEXT,                     -- the PR head when it started: author commits after it are a blocker
+  base_head TEXT,                     -- the PR head the workflow accepted: author commits after it are a blocker; for an implement issue, the implementation PR head its files beyond the plan were shown at
   approved_by TEXT, approved_at TEXT, approved_via TEXT,
   stopped_by TEXT, stopped_at TEXT,
   blocker TEXT, blocker_params TEXT,

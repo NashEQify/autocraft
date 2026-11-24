@@ -32,7 +32,7 @@ export type Run = {
   /** It answers the open recommendation, which closes. */
   answers: boolean;
   /** A question of the legacy machinery the recommendation answers, as the person. */
-  decision: { decision: string; option: string } | null;
+  decision: { decision: string; option: string; label?: string } | null;
 };
 
 export type Ambiguity =
@@ -58,7 +58,9 @@ export type Refusal =
   | { why: "autorepin-not-pr" }
   | { why: "nothing-running" }
   | { why: "already-started"; entry: Entry; by: string; at: string }
-  | { why: "already-approved"; by: string; at: string };
+  | { why: "already-approved"; by: string; at: string }
+  /** A ready plan's part: the implementation is built from the whole plan, so a part can't be fixed or dropped on its own. */
+  | { why: "implement-part"; parts: number[] };
 
 export type Resolved =
   | { kind: "run"; run: Run }
@@ -159,19 +161,26 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     const into = p.word === "fix" ? fix : drop;
     if (!into.includes(n)) into.push(n);
   }
+  // A ready plan's parts are what the implementation builds; after it, the review's parts can be fixed or dropped.
+  // An option of a question that is no longer the open one is no part any more.
+  const stale = [...fix, ...drop].find((n) => wf.plan.some((q) => q.n === n && q.option !== undefined && q.question !== wf.rec?.question));
+  if (stale !== undefined) return ambiguous({ why: "no-such-part", part: stale });
+  const built = [...fix, ...drop].filter((n) => wf.plan.some((q) => q.n === n && q.source === "implement" && q.option === undefined));
+  if (built.length) return refused({ why: "implement-part", parts: built });
   if (fix.some((n) => drop.includes(n))) return ambiguous({ why: "conflict", words: named.map((p) => `${p.word} ${p.part}`) });
 
   const rec = wf.rec;
   const approved = !!wf.approvedBy;
   // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
   // left, else the one option left.
-  if (rec?.question && wf.plan.some((p) => p.option !== undefined) && (fix.length || drop.length) && !entry) {
-    const left = wf.plan.filter((p) => p.option !== undefined && p.state === "planned" && !drop.includes(p.n));
+  const options = rec?.question ? wf.plan.filter((p) => p.option !== undefined && p.question === rec.question) : [];
+  if (rec?.question && options.length && (fix.length || drop.length) && !entry) {
+    const left = options.filter((p) => p.state === "planned" && !drop.includes(p.n));
     if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
-    const chosen = fix.length ? wf.plan.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
+    const chosen = fix.length ? options.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
     if (!chosen?.option) return ambiguous({ why: "pick-one", parts: left.map((p) => p.n) });
     const approve = merge && !approved;
-    return run({ decision: { decision: rec.question, option: chosen.option }, drop, approve, merges: merge || approved, weight, answers: true, how: approve ? "approved" : "answered" });
+    return run({ decision: { decision: rec.question, option: chosen.option, label: chosen.title }, drop, approve, merges: merge || approved, weight, answers: true, how: approve ? "approved" : "answered" });
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry) {

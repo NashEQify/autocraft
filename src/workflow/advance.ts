@@ -8,11 +8,11 @@ import type { Db } from "../db/index.ts";
 import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { PrFacts } from "../core/plan.ts";
-import { isLimitDecision, LIMIT_IMPLEMENT } from "../implement/questions.ts";
+import { isLimitDecision, LIMIT_CLOSE, LIMIT_IMPLEMENT } from "../implement/questions.ts";
 import { currentImplementation } from "../implement/store.ts";
 import type { Implementation, PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
-import { BACKLOG, getDecision, optionsOf } from "../decisions.ts";
+import { BACKLOG, getDecision, optionsOf, type DecisionRow } from "../decisions.ts";
 import { implementDecisionId, STUCK_OPTIONS } from "../implement/stuck.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { t } from "../i18n/index.ts";
@@ -21,7 +21,7 @@ import { withSettingsSnapshot } from "../settings-read.ts";
 import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
 import { afterSteps, atBlocker, planOf, type ReviewView } from "./recommend.ts";
 import { largeFixLines, outsidePurposeMin } from "./settings.ts";
-import { stepsFor, type StepName } from "./status.ts";
+import { listText, stepsFor, type StepName } from "./status.ts";
 import { addEvent, goOnAt, liveWorkflows, repoWorkflows, updateWorkflow, type WorkflowPatch } from "./store.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "./types.ts";
 
@@ -87,11 +87,34 @@ async function latestFix(db: Db, w: ItemWorkflow, number: number, since: string)
   return { fix: { lines: patchLines(r.patch), files: json<string[]>(r.files, []).filter((f) => !LOCKFILE.test(f)) }, plannedFiles };
 }
 
-/** A stuck implementation's open question with Try again: what a yes on the workflow answers. */
-async function stuckQuestion(db: Db, w: ItemWorkflow): Promise<{ decision: string; option: string } | null> {
+/**
+ * Keys of a question's options that are no plan part: Backlog, and closing the issue or PR, are commands of their own (so no drop
+ * or part number ever closes anything), and "Answer in the note" needs words a command cannot carry.
+ */
+const NOT_A_PART = new Set([BACKLOG.key, "answer", LIMIT_CLOSE.key, STUCK_OPTIONS.close.key, STUCK_OPTIONS.closePr.key]);
+
+/** A question's options as numbered parts of the plan, tied to the question; a part a person dropped before (same title) stays dropped. */
+function questionParts(d: DecisionRow, before: readonly PlanPart[]): PlanPart[] {
+  const dropped = new Set(before.filter((p) => p.option !== undefined && p.state === "dropped").map((p) => p.title.toLowerCase()));
+  return optionsOf(d).filter((o) => !NOT_A_PART.has(o.key)).map((o, i) => ({
+    n: i + 1, title: o.label, source: "implement" as const, option: o.key, question: d.id, state: dropped.has(o.label.toLowerCase()) ? "dropped" as const : "planned" as const,
+  }));
+}
+
+/**
+ * A stuck implementation's open question: with Try again, what a yes answers; without it (only a draft PR, closing or the
+ * backlog are offered), its options as parts and a sentence that asks for a named option or a command, since a yes cannot choose.
+ */
+async function stuckQuestion(db: Db, w: ItemWorkflow): Promise<{ answer: { decision: string; option: string; label: string } } | { decision: string; parts: PlanPart[]; text: string } | null> {
   const id = implementDecisionId(w.repo, w.number);
   const d = await getDecision(db, id);
-  return d && d.answer === null && optionsOf(d).some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? { decision: id, option: STUCK_OPTIONS.tryAgain.key } : null;
+  if (!d || d.answer !== null) return null;
+  if (optionsOf(d).some((o) => o.key === STUCK_OPTIONS.tryAgain.key)) return { answer: { decision: id, option: STUCK_OPTIONS.tryAgain.key, label: STUCK_OPTIONS.tryAgain.label } };
+  const parts = questionParts(d, w.plan);
+  return {
+    decision: id, parts,
+    text: parts.length ? t("The implementation is stuck. Name the option to go with, such as “fix 1”, or reply close or stop.") : t("The implementation is stuck. Reply close or stop, or answer on the item page."),
+  };
 }
 
 /** The pre-merge review's findings at the head, as plan parts numbered after `plan`'s. */
@@ -140,8 +163,9 @@ export async function prOf(db: Db, w: ItemWorkflow): Promise<{ number: number; s
   const im = await currentImplementation(db, w.repo, w.number);
   if (im?.prNumber != null) return { number: im.prNumber, stuck: im.state === "stuck" };
   if (im?.state === "stuck") return { number: -1, stuck: true };
-  // The attempt may have ended with its PR: the latest one that opened a PR.
-  const ended = await db.get(db.k.selectFrom("main.implementations").select("pr_number").where("repo", "=", w.repo).where("number", "=", w.number).where("pr_number", "is not", null).orderBy("id", "desc").limit(1));
+  // The attempt may have ended with its PR: the latest one of this workflow that opened a PR.
+  const ended = await db.get(db.k.selectFrom("main.implementations").select("pr_number").where("repo", "=", w.repo).where("number", "=", w.number).where("pr_number", "is not", null)
+    .where("created_at", ">=", w.startedAt).orderBy("id", "desc").limit(1));
   return ended?.pr_number != null ? { number: ended.pr_number, stuck: false } : null;
 }
 
@@ -177,9 +201,6 @@ async function openQuestion(db: Db, id: string): Promise<boolean> {
   return !!d && d.answer === null;
 }
 
-/** Keys of an implement question's options that are no plan part: Backlog is its own command, and "Answer in the note" needs words a command cannot carry. */
-const NOT_A_PART = new Set([BACKLOG.key, "answer"]);
-
 /**
  * An implement attempt's open maintainer question, as the workflow shows it: its options as numbered parts (a part a person dropped
  * before, by its title, stays dropped) and one recommendation whose yes answers the question with the recommended option as the
@@ -191,10 +212,7 @@ async function implementQuestion(db: Db, w: ItemWorkflow, im: Implementation): P
   if (im.state !== "asked" || !im.decisionId) return null;
   const d = await getDecision(db, im.decisionId);
   if (!d || d.answer !== null) return null;
-  const dropped = new Set(w.plan.filter((p) => p.option !== undefined && p.state === "dropped").map((p) => p.title.toLowerCase()));
-  const plan: PlanPart[] = optionsOf(d).filter((o) => !NOT_A_PART.has(o.key)).map((o, i) => ({
-    n: i + 1, title: o.label, source: "implement" as const, option: o.key, state: dropped.has(o.label.toLowerCase()) ? "dropped" as const : "planned" as const,
-  }));
+  const plan = questionParts(d, w.plan);
   const drop = plan.filter((p) => p.state === "dropped").map((p) => p.n);
   const limit = isLimitDecision(d.id);
   const key = limit ? LIMIT_IMPLEMENT.key : d.recommended;
@@ -205,9 +223,11 @@ async function implementQuestion(db: Db, w: ItemWorkflow, im: Implementation): P
       : t("Answer the question “{question}” in a comment on the issue; the plan runs again with the answer.", { question: d.question });
     return { plan, rec: { text, parts: { fix: [], drop }, merges: false, question: d.id } };
   }
+  // The plan's own sentence only when the one option number it names is the one a yes answers.
   const own = !limit ? im.plan?.workflow?.recommendation ?? null : null;
-  const text = own ?? t("Go with {n}, {title}, then implement it.", { n: pick.n, title: pick.title });
-  return { plan, rec: { text, parts: { fix: [], drop }, merges: w.approvedBy !== null, answer: { decision: d.id, option: pick.option! }, question: d.id } };
+  const named = own ? [...new Set([...own.matchAll(/\b(\d+)\b/g)].map((m) => Number(m[1])).filter((n) => n >= 1 && n <= plan.length))] : [];
+  const text = own && named.length === 1 && named[0] === pick.n ? own : t("Go with {n}, {title}, then implement it.", { n: pick.n, title: pick.title });
+  return { plan, rec: { text, parts: { fix: [], drop }, merges: w.approvedBy !== null, answer: { decision: d.id, option: pick.option!, label: pick.title }, question: d.id } };
 }
 
 /** A ready plan's numbered parts; a part a person dropped before (same title) stays dropped. Null when the plan gave none. */
@@ -218,23 +238,21 @@ function implementParts(before: readonly PlanPart[], reply: PlanReply | null): P
   return parts.map((p, i) => ({ n: i + 1, title: p.title, source: "implement" as const, ...(p.files[0] ? { file: p.files[0] } : {}), files: p.files, state: dropped.has(p.title.toLowerCase()) ? "dropped" as const : "planned" as const }));
 }
 
+/** The files of a diff stat (src/build/workspaces.ts diffStat): one ` path | +a -d` line per file, at most its first 40. */
+const statFiles = (stat: string | null): string[] =>
+  (stat ?? "").split("\n").flatMap((l) => { const m = / (.+) \| (?:binary|\+\d+ -\d+)$/.exec(l); return m ? [m[1]!.trim()] : []; });
+
 /**
- * The implementation PR's files against the plan it was built from, when the PR opened after `since`: the files of the parts not
- * dropped (from the workflow's plan while it still holds them, else from the attempt's stored plan). Null before the PR's files
- * are read, or when no part names a file.
+ * The files the implementation itself changed (its own diff when its PR opened, not our later fix-ups or revisions) that no
+ * planned part of the plan it was built from names; null when the plan named no files or the attempt recorded no diff.
  */
-async function implementationFacts(db: Db, w: ItemWorkflow, pr: number, head: string, since: string): Promise<BlockerFacts["implementation"]> {
-  const opened = (await db.get(db.k.selectFrom("main.items").select("created_at").where("repo", "=", w.repo).where("number", "=", pr)))?.created_at ?? null;
-  if (!opened || opened <= since) return null;
-  let parts = w.plan.filter((p) => p.source === "implement" && p.option === undefined);
-  if (!parts.length) {
-    const im = await db.get(db.k.selectFrom("main.implementations").select("plan_json").where("repo", "=", w.repo).where("number", "=", w.number).where("pr_number", "=", pr).orderBy("id", "desc").limit(1));
-    parts = implementParts([], json<PlanReply | null>(im?.plan_json, null)) ?? [];
-  }
-  const plannedFiles = [...new Set(parts.filter((p) => p.state !== "dropped").flatMap((p) => p.files ?? []))];
-  if (!plannedFiles.length) return null;
-  const files = (await db.all(db.k.selectFrom("main.pr_files").select("path").where("repo", "=", w.repo).where("number", "=", pr).where("head", "=", head))).map((r) => r.path).filter((f) => !LOCKFILE.test(f));
-  return files.length ? { files, plannedFiles } : null;
+async function implementationBeyond(db: Db, w: ItemWorkflow, pr: number): Promise<string[] | null> {
+  const im = await db.get(db.k.selectFrom("main.implementations").select(["plan_json", "diff_stat"]).where("repo", "=", w.repo).where("number", "=", w.number).where("pr_number", "=", pr).orderBy("id", "desc").limit(1));
+  const parts = implementParts([], json<PlanReply | null>(im?.plan_json, null)) ?? [];
+  const plannedFiles = new Set(parts.flatMap((p) => p.files ?? []));
+  const files = statFiles(im?.diff_stat ?? null).filter((f) => !LOCKFILE.test(f));
+  if (!plannedFiles.size || !files.length) return null;
+  return files.filter((f) => !plannedFiles.has(f));
 }
 
 /** Whether an earlier head of the PR was reviewed: a review pending at the current head is the second one. */
@@ -276,13 +294,23 @@ async function advanceOne(db: Db, w0: ItemWorkflow, target: { number: number; st
   // (the classic page, a later plan round): the workflow runs on.
   const asks = w.rec?.question ?? w.rec?.answer?.decision ?? null;
   if ((w.state === "blocked" || w.state === "recommending") && asks && !await openQuestion(db, asks)) {
+    // Answered Backlog there: the item is kept open with nothing planned, which ends the workflow as the backlog command does.
+    if ((await getDecision(db, asks))?.answer === BACKLOG.key) return await write({ state: "backlog", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null });
     Object.assign(base, { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } satisfies WorkflowPatch);
     w = { ...w, state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null };
   }
   // A stuck implementation comes back once per stuck question (a yes answers it, Try again): blocked when approved, else as the recommendation.
+  // Without Try again, its options are the parts and a yes cannot choose.
   const stuck = async (head: string | null): Promise<ItemWorkflow["state"] | null> => {
-    const answer = await stuckQuestion(db, w);
-    if (!answer) return null;
+    const q = await stuckQuestion(db, w);
+    if (!q) return null;
+    if (!("answer" in q)) {
+      const found: Found = { blocker: "failed-twice", params: { step: "implement" } };
+      const rec: Recommendation = { text: q.text, parts: { fix: [], drop: q.parts.filter((p) => p.state === "dropped").map((p) => p.n) }, merges: false, question: q.decision };
+      const patch: WorkflowPatch = { ...base, plan: q.parts, rec, recAt: at, recHead: head };
+      return w.approvedBy ? await write({ ...patch, state: "blocked", blocker: found.blocker, blockerParams: found.params }, "blocked") : await write({ ...patch, state: "recommending" });
+    }
+    const answer = q.answer;
     const found: Found = { blocker: "failed-twice", params: { step: "implement", answer } };
     const rec = { ...atBlocker(found, null, w.plan), question: answer.decision };
     return w.approvedBy
@@ -350,6 +378,14 @@ async function advanceOne(db: Db, w0: ItemWorkflow, target: { number: number; st
     const moved = await stuck(head);
     if (moved) return moved;
   }
+  // An implementation's files beyond its plan are shown once: base_head of an implement issue is the implementation PR head the
+  // workflow showed them at, and it follows our own pushes; a new attempt's PR, or someone else's push, is shown again.
+  let beyond: string[] | null = null;
+  if (w.kind === "issue") {
+    const shown = w.baseHead !== null && (w.baseHead === head || await ownChain(db, w.repo, target.number, w.baseHead, head));
+    if (shown) { if (w.baseHead !== head) patch.baseHead = head; }
+    else beyond = await implementationBeyond(db, w, target.number);
+  }
   const approved = w.approvedBy !== null;
   const fresh = review && review.at > since ? review : null;
   const fixed = await latestFix(db, w, target.number, since);
@@ -359,7 +395,7 @@ async function advanceOne(db: Db, w0: ItemWorkflow, target: { number: number; st
     failures: await failures(db, w.repo, target.number, since),
     fix: fixed.fix,
     plannedFiles: fixed.plannedFiles,
-    implementation: w.kind === "issue" && approved ? await implementationFacts(db, w, target.number, head, since) : null,
+    ...(beyond?.length ? { implementationBeyond: beyond } : {}),
     leg: approved ? await endedLeg(db, w, since) : null,
     thresholds,
   });
@@ -382,13 +418,19 @@ async function advanceOne(db: Db, w0: ItemWorkflow, target: { number: number; st
       blockPlan = [...plan, ...extra];
       found.params.premerge = extra.map((p) => p.n);
     }
+    if (found.blocker === "beyond-agreed" && beyond?.length) patch.baseHead = head;
     return await write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, view, blockPlan), recAt: at, recHead: head }, "blocked");
   }
 
   const f = facts.get(`${w.repo}#${target.number}`);
   if (!approved) {
     if (f && f.head === head && waitsForAnswer(f)) {
-      const rec: Recommendation = afterSteps(view, plan);
+      let rec: Recommendation = afterSteps(view, plan);
+      // The end recommendation also says which files the implementation changed beyond its plan; they count as shown.
+      if (beyond?.length) {
+        rec = { ...rec, text: t("{text} The implementation also changes {files}, which no part of its plan names.", { text: rec.text, files: listText(beyond.slice(0, 10)) }) };
+        patch.baseHead = head;
+      }
       return await write({ ...patch, state: "recommending", rec, recAt: at, recHead: head });
     }
   } else {

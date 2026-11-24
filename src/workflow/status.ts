@@ -175,7 +175,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
-  if (r.decision) did.push(t("going on with the implementation"));
+  if (r.decision) did.push(r.decision.label ? t("going on with “{option}”", { option: r.decision.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.answers) {
     // A weight alone.
@@ -226,6 +226,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
     case "nothing-running": return t("Nothing is running on this item.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
+    case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or stop.", { parts: listText(r.parts) });
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }
 }

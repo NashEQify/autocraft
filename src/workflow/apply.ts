@@ -189,6 +189,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   let on = c;
   if (live.kind === "issue" && !r.decision && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await implementationPr(db, live);
+    // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
+    if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(t("The pull request changed after the command was written. Send it again."));
     if (pr) on = { ...c, item: pr, workflowId: live.id };
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
@@ -196,11 +198,15 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.decision) await fx.answerQuestion(c, r.decision.decision, r.decision.option);
   if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
+  // An answered question's options are no plan any more.
+  if (r.decision) patch.plan = live.plan.filter((p) => p.question !== r.decision!.decision);
   // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, ...(item.head ? { baseHead: item.head } : {}) });
   // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
   if (runs) patch.state = r.again !== null || r.merges || r.decision ? "running" : r.answers ? "done" : live.state;
+  // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
+  if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   await db.write(async () => {
     await updateWorkflow(db, live.id, patch, at);
     if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: live.id }).where("id", "=", preapproval).where("workflow_id", "is", null));
