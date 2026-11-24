@@ -17,7 +17,7 @@ import { Pings } from "./pings.ts";
 import { Signals, dropSignalTexts } from "./signals.ts";
 import { deleteRepliesOf } from "./replies.ts";
 import { RestClient } from "./rest.ts";
-import { Reactor } from "./react.ts";
+import { Reactor, reactEmoji, setReactEmoji, validReactEmoji } from "./react.ts";
 import { forgetReporter } from "./file-issue.ts";
 import { addFilingRepo, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "./filing-repos.ts";
 import { forgetLink } from "./links.ts";
@@ -87,7 +87,8 @@ export async function handleMeta(db: Db, type: string, d: unknown): Promise<void
 export function dispatcher(db: Db, keys: DiscordKeys, interactions: Interactions, pings: Pings, signals?: Signals, reactor?: Reactor): (type: string, d: unknown) => Promise<void> {
   return async (type, d) => {
     const recorded = await handleDispatch(db, keys, type, d);
-    if (recorded) await reactor?.recorded(recorded.channelId, recorded.messageId);
+    reactor?.observe(type, d);
+    if (recorded) await reactor?.recorded(recorded.channelId, recorded.messageId, recorded.guildId);
     await handleMeta(db, type, d);
     interactions.dispatch(type, d);
     await pings.dispatch(type, d);
@@ -223,6 +224,15 @@ async function discord(args: string[]): Promise<void> {
     if (!r) die("no such channel; the bot has not reported it");
     await audit(db, "cli", "discord-panel", b, { message: r.messageId, created: r.created });
     console.log(`${r.created ? "posted" : "updated"} the panel in ${b} (message ${r.messageId})${r.pinError ? `; not pinned: ${r.pinError}` : ""}`);
+  } else if (sub === "react-emoji") {
+    if (!a) {
+      console.log(await reactEmoji(db));
+    } else {
+      if (!validReactEmoji(a)) die("give a custom emoji name (2-32 letters, digits or underscores) or one Unicode emoji");
+      await setReactEmoji(db, a);
+      await audit(db, "cli", "discord-react-emoji", a);
+      console.log(`the bot reacts with ${a}`);
+    }
   } else if (sub === "filing" && a === "list") {
     for (const r of await filingRepos(db)) console.log(`${r.owner}/${r.name}  added ${r.addedAt.slice(0, 16).replace("T", " ")} by ${r.addedBy}`);
   } else if (sub === "filing" && a === "add" && b) {

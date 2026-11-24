@@ -109,7 +109,7 @@ export function createMockApi(): Api {
       { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString() },
       { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString() },
     ],
-    contact: "discord-privacy@example.org", reactOn: true, privacyPath: "/privacy",
+    contact: "discord-privacy@example.org", reactOn: true, reactEmoji: "bot", privacyPath: "/privacy",
     usage: {
       counts: { started: { day: 14, week: 63 }, junk: { day: 2, week: 9 }, filed: { day: 6, week: 31 }, link: { day: 3, week: 12 }, limits: { day: 1, week: 4 } },
       prompts: [
@@ -397,6 +397,13 @@ export function createMockApi(): Api {
       setReact(on) {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
         discord.reactOn = on;
+        changed();
+        return wait(structuredClone(discord));
+      },
+      setReactEmoji(emoji) {
+        if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
+        if (!/^[A-Za-z0-9_]{2,32}$/.test(emoji.trim()) && !/^\p{Extended_Pictographic}/u.test(emoji.trim())) throw new Error("emoji must be a custom emoji name (2-32 letters, digits or underscores) or one Unicode emoji");
+        discord.reactEmoji = emoji.trim();
         changed();
         return wait(structuredClone(discord));
       },

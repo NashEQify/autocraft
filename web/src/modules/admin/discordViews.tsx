@@ -116,11 +116,30 @@ export function DiscordView(_: ViewProps) {
               <span className="min-w-0 flex-1 text-sm">React to recorded messages</span>
               <Switch on={data.reactOn} label="React to recorded messages" busy={write.busy === "react"} onChange={(on) => void write.run("react", () => api.discord.setReact(on)).then(() => refetch())} />
             </div>
+            <EmojiField value={data.reactEmoji} busy={write.busy === "emoji"} onSave={(v) => write.run("emoji", () => api.discord.setReactEmoji(v)).then(() => refetch())} />
           </Block>
           <ContactBlock contact={data.contact} onSave={(c) => write.run("contact", () => api.discord.setContact(c)).then(() => refetch())} busy={write.busy === "contact"} />
         </>
       )}
     </Page>
+  );
+}
+
+const EMOJI_OK = /^(?:[A-Za-z0-9_]{2,32}|\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier}|\u200D\p{Extended_Pictographic})*)$/u;
+
+function EmojiField({ value, onSave, busy }: { value: string; onSave: (v: string) => void; busy: boolean }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  const bad = v.trim() !== "" && !EMOJI_OK.test(v.trim());
+  return (
+    <form className="flex flex-wrap items-center gap-2 border-t border-line pt-3" onSubmit={(e) => { e.preventDefault(); if (!bad) onSave(v.trim()); }}>
+      <label htmlFor="react-emoji" className="min-w-0 flex-1 text-sm max-md:basis-full">Reaction emoji</label>
+      <Input id="react-emoji" value={v} onChange={(e) => setV(e.target.value)} maxLength={40} aria-invalid={bad} aria-describedby={bad ? "react-emoji-err" : undefined} className="w-full sm:w-56" />
+      <Button type="submit" variant="primary" disabled={busy || bad || v.trim() === "" || v.trim() === value} className="max-md:h-11 max-md:w-full">
+        Save
+      </Button>
+      {bad && <div id="react-emoji-err" role="alert" className="basis-full text-xs text-bad">Use a custom emoji name (2-32 letters, digits or underscores) or one Unicode emoji.</div>}
+    </form>
   );
 }
 

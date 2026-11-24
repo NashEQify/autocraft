@@ -375,6 +375,7 @@ export interface Api {
     setChannelRepo(channelId: string, repo: string | null): Promise<DiscordSetup>;
     setContact(contact: string): Promise<DiscordSetup>;
     setReact(on: boolean): Promise<DiscordSetup>;
+    setReactEmoji(emoji: string): Promise<DiscordSetup>;
     removeLink(id: string): Promise<DiscordSetup>;
     addFilingRepo(repo: string): Promise<DiscordSetup>;
     removeFilingRepo(repo: string): Promise<DiscordSetup>;
