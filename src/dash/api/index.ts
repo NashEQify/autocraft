@@ -74,6 +74,7 @@ import { batchOne } from "./batch-page.ts";
 import { batchRemovePr, batchStop, fastTrackAdd, fastTrackRefs, fastTrackRemove, fastTrackWeight, queueAdd, heldMergeRefs, mergeHoldPr, pipelineRepoNames, queuePage } from "./queue-page.ts";
 import { VectorIndex } from "../../embed/vectors.ts";
 import { mainCiRepos, summarize } from "../../mainci/index.ts";
+import * as commands from "./commands.ts";
 import type { Db } from "../../db/index.ts";
 
 export type ApiOptions = {
@@ -456,6 +457,10 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/decisions/:id/reprepare", handler: ok(dec.reprepare) },
     post("/api/decisions/:id/reopen", dec.reopen),
     post("/api/items/:repo/:n/backlog", dec.backlogItemRoute),
+    // The maintainer workflow's commands and controls (src/workflow/apply.ts).
+    post("/api/items/:repo/:n/command", commands.itemCommand),
+    post("/api/commands", commands.listCommand),
+    post("/api/controls", commands.control),
     { method: "POST", pattern: "/api/decisions/backlog", handler: ok(dec.backlogBulk) },
     post("/api/decisions/:id/adopt", dec.adopt),
     post("/api/decisions/:id/feedback", async (db, req) => dec.feedback(db, req, limiter)),
