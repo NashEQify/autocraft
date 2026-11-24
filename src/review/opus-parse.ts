@@ -165,6 +165,8 @@ export type ParsedClaims = {
   indexes: number[];
   /** Entries that are not a claim (no text, unknown status, not an object) and entries past MAX_CLAIMS: the claims list was not fully read. */
   rejected: number;
+  /** A claim offered a validly shaped fix that was withheld because its citation did not resolve. */
+  withheldFix: boolean;
 };
 
 /**
@@ -179,7 +181,7 @@ export type ParsedClaims = {
  */
 export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = [], checkLocation?: ClaimLocationCheck): ParsedClaims | null {
   if (!Array.isArray(v)) return null;
-  const out: ParsedClaims = { claims: [], indexes: [], rejected: Math.max(0, v.length - MAX_CLAIMS) };
+  const out: ParsedClaims = { claims: [], indexes: [], rejected: Math.max(0, v.length - MAX_CLAIMS), withheldFix: false };
   v.slice(0, MAX_CLAIMS).forEach((x, index) => {
     const o = x as Record<string, unknown> | null;
     const text = o && typeof o === "object" && typeof o.claim === "string" ? squashText(stripSandboxPath(o.claim)).slice(0, CLAIM_CHARS) : "";
@@ -195,6 +197,7 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
     const file = f && typeof f === "object" && typeof f.file === "string" ? stripSandboxPath(f.file.trim()) : "";
     const fix = f && typeof f === "object" && typeof f.change === "string" && f.change.trim() && !drop.has(f.change) && safePath(file) && !REFERENCE_LEAK.test(file + f.change)
       ? { file: file.slice(0, 200), change: f.change.trim().slice(0, 800) } : undefined;
+    if (checkLocation && !supported && o.status !== "verified" && o.impact === "code-wrong" && fix) out.withheldFix = true;
     out.indexes.push(index);
     if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
     const impact: ClaimImpact = supported && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
@@ -264,10 +267,11 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
   const parsed = parseClaims(r.claims, drop, keepLeaky, files, checkLocation), listed = parsed?.claims ?? [];
   // Every valid claim reaches the verdict; only the texts stored and posted are cleaned. A list that was not fully read leaves the review unsure.
   const bad = listed.filter((c) => c.impact === "code-wrong"), unknownClaim = listed.find((c) => c.impact === "unknown");
-  // A take-fix needs a fix: its own list, or the fix of every claim that shows wrong code.
-  if (verdict === "take-fix" && !fixes.length && !(bad.length && bad.every((c) => c.fix))) return null;
+  // A take-fix needs a fix. If citation checking withheld it, keep the review for an operator.
+  const noFix = verdict === "take-fix" && !fixes.length && !(bad.length && bad.every((c) => c.fix));
+  if (noFix && !parsed?.withheldFix) return null;
   const unproven = parsed === null ? !!body.trim() : parsed.rejected > 0 || !!unknownClaim;
-  let outVerdict = verdict as ReviewVerdict, outFixes = verdict === "take-fix" ? fixes : [], outReason = r.reason, sure = r.sure;
+  let outVerdict = (noFix ? "take" : verdict) as ReviewVerdict, outFixes = verdict === "take-fix" ? fixes : [], outReason = r.reason, sure = r.sure;
   const notes: string[] = [];
   if (bad.length && (outVerdict === "take" || outVerdict === "take-fix")) {
     const withFix = bad.filter((c) => c.fix);

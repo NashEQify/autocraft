@@ -37,4 +37,14 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
       assert.equal(result?.claims[0]?.status, resolves ? "verified" : "unverified", evidence);
     }
   }
+
+  const fix = { file: "main.rs", change: "Restore the startup check." };
+  for (const [evidence, resolves] of [["main.rs:1", true], ["main.rs:3", false]] as const) {
+    const claims = [{ claim: input.body, status: "contradicted", evidence, impact: "code-wrong", fix }];
+    const reply = JSON.stringify({ ref: input.ref, verdict: "take-fix", sure: true, reason: "Needs a fix.", fixes: [], claims });
+    const review = (await REVIEW_OPUS.parse(reply, input, { attempt: 0, last: true }, context))?.value.review;
+    assert.equal(review?.verdict, resolves ? "take-fix" : "take");
+    assert.equal(review?.sure, resolves);
+    assert.deepEqual(review?.fixes, resolves ? [fix] : []);
+  }
 });
