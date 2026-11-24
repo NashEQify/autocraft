@@ -594,6 +594,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/pipeline/trips/:stage/resume", handler: ok(pipeline.resumeTrip) },
     { method: "PUT", pattern: "/api/pipeline/pilot", operator: true, handler: ok(adm.putPilot) },
     { method: "PUT", pattern: "/api/pipeline/outside-limits", operator: true, handler: ok(outside.putLimits) },
+    { method: "GET", pattern: "/api/pipeline/blocker-thresholds", handler: ok((db) => outside.getBlockerThresholds(db)) },
+    { method: "PUT", pattern: "/api/pipeline/blocker-thresholds", operator: true, handler: ok(outside.putBlockerThresholds) },
     { method: "POST", pattern: "/api/pipeline/outside/release", operator: true, handler: ok(outside.releaseAll) },
     { method: "POST", pattern: "/api/items/:repo/:n/release-outside", handler: ok(outside.release) },
     scoped(get("/api/needs/outside/:author", outside.held)),
