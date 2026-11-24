@@ -12,6 +12,7 @@ import { isWatched, trackedRepos, type DiscordLink } from "./store.ts";
 import { messageText, parseRefs, type ItemKey } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
+import { WindowLimits } from "./window-limit.ts";
 
 export const SIGNAL_CAP_KEY = "discord_signal_daily_usd";
 export const DEFAULT_SIGNAL_CAP_USD = 1;
@@ -78,7 +79,7 @@ type Msg = { id: string; channel_id: string; content?: string; message_snapshots
 export class Signals {
   #d: SignalDeps;
   #chain = new Map<string, Promise<void>>();
-  #hits = new Map<string, number[]>();
+  #limits = new WindowLimits();
   #running = 0;
   #waiting: (() => void)[] = [];
 
@@ -114,15 +115,7 @@ export class Signals {
 
   /** Sliding-window limits per author and channel; a refused message is not counted. */
   #allow(author: string, channel: string): boolean {
-    const now = (this.#d.now ?? Date.now)();
-    const live = (k: string, ms: number): number[] => (this.#hits.get(k) ?? []).filter((t) => now - t < ms);
-    const a = live(`a:${author}`, AUTHOR_LIMIT.ms), c = live(`c:${channel}`, CHANNEL_LIMIT.ms);
-    const pass = a.length < AUTHOR_LIMIT.n && c.length < CHANNEL_LIMIT.n;
-    if (pass) { a.push(now); c.push(now); }
-    this.#hits.set(`a:${author}`, a);
-    this.#hits.set(`c:${channel}`, c);
-    for (const [k, v] of this.#hits) if (!v.length) this.#hits.delete(k);
-    return pass;
+    return this.#limits.allow((this.#d.now ?? Date.now)(), [{ key: `a:${author}`, ...AUTHOR_LIMIT }, { key: `c:${channel}`, ...CHANNEL_LIMIT }]);
   }
 
   async #slot<T>(f: () => Promise<T>): Promise<T> {

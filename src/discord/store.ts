@@ -6,6 +6,12 @@ import { DEFAULT_OWNER } from "../owners.ts";
 import { messageText, parseRefs, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
+import { MENTION_AUTHOR_ROWS, MENTION_CHANNEL_ROWS, MENTION_MAX_ITEMS, MENTION_WINDOW_MS } from "./limits.ts";
+import { WindowLimits } from "./window-limit.ts";
+
+const mentionLimits = new WindowLimits();
+/** When each author or channel hash was last logged as over its limit, so a flood logs once per window. */
+const loggedOver = new Map<string, number>();
 
 export type DiscordMessage = {
   id: string; channel_id: string; guild_id?: string; content?: string; message_snapshots?: { message?: { content?: string } }[]; timestamp?: string;
@@ -29,12 +35,24 @@ export const isWatched = async (db: Db, channelId: string): Promise<boolean> =>
 export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage, guildId: string | undefined): Promise<number> {
   if ((m.content === undefined && !m.message_snapshots?.length) || !guildId) return -1;
   const msgHash = keys.hash("message", m.id);
-  const refs = m.author?.bot ? [] : parseRefs(messageText(m), await trackedRepos(db));
+  let refs = m.author?.bot ? [] : parseRefs(messageText(m), await trackedRepos(db));
+  if (refs.length > MENTION_MAX_ITEMS) refs = [];
   const have = await db.all(db.k.selectFrom("discord_mentions").select(["repo", "number", "sealed"]).where("msg_hash", "=", msgHash));
-  const want = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   // An edit event may carry no author: keep the one sealed with the existing rows.
   const author = m.author?.id ? keys.hash("author", m.author.id) : have.map((h) => keys.open(h.sealed, msgHash)?.author).find((a) => a);
   const sealed = keys.seal({ guildId, channelId: m.channel_id, messageId: m.id, at: m.timestamp ?? new Date().toISOString(), ...(author && { author }) }, msgHash);
+  const fresh = refs.filter((r) => !have.some((h) => h.repo === r.repo && h.number === r.number)).length;
+  if (fresh && !mentionLimits.allow(Date.now(), [
+    ...(author ? [{ key: `a:${author}`, n: MENTION_AUTHOR_ROWS, ms: MENTION_WINDOW_MS }] : []),
+    { key: `c:${keys.hash("channel", m.channel_id)}`, n: MENTION_CHANNEL_ROWS, ms: MENTION_WINDOW_MS },
+  ], fresh, (r) => {
+    const now = Date.now();
+    if (now - (loggedOver.get(r.key) ?? -Infinity) < MENTION_WINDOW_MS) return;
+    for (const [k, t] of loggedOver) if (now - t >= MENTION_WINDOW_MS) loggedOver.delete(k);
+    loggedOver.set(r.key, now);
+    console.log(`discord: mentions over the ${r.key.startsWith("a:") ? "author" : "channel"} limit, not recorded (${r.key.startsWith("a:") ? "author" : "channel"} ${r.key.slice(2, 10)}…)`);
+  })) refs = refs.filter((r) => have.some((h) => h.repo === r.repo && h.number === r.number));
+  const want = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   let added = 0;
   await db.write(async () => {
     for (const h of have) if (!want.has(`${h.repo}#${h.number}`)) await db.run(db.k.deleteFrom("discord_mentions").where("msg_hash", "=", msgHash).where("repo", "=", h.repo).where("number", "=", h.number));
