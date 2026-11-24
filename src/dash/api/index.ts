@@ -481,6 +481,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     scoped(get("/api/maintain/items", maintain.items)),
     // The new item page.
     get("/api/maintain/items/:repo/:n", maintainItem.item),
+    get("/api/maintain/repos", maintain.repos),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),

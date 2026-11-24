@@ -33,6 +33,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["maintain-queue", ["workflows", "items", "repos"]],
   // The new item page: the workflow row and its events, signals, findings, holds and breakers.
   ["maintain-item:", ["workflows", "trace", "items", "dupes", "decisions", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
+  ["maintain-repos", ["workflows", "items", "repos", "limits", "settings", "access"]],
   ["maintain-home", ["workflows", "items", "remote-helpers", "access", "settings", "decisions", "plans", "jobs", "limits", "accounts", "security", "repos"]],
   ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
   ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "decisions", "access", "security", "repos"]],

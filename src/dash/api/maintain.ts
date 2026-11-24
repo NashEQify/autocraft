@@ -3,7 +3,7 @@
 // recommendation is open or its last answer was unclear; it counts for the reader only where they may act on the repo
 // (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
 import type { Expression, SelectQueryBuilder, SqlBool } from "kysely";
-import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
+import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRepo, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { listHelpers } from "../../remote/helpers.ts";
 import { inferenceMode } from "../../remote/mode.ts";
@@ -16,7 +16,10 @@ import type { Req } from "../types.ts";
 import { problems } from "./home.ts";
 import { stopped } from "./needs.ts";
 import { canSeeInternals } from "./staff.ts";
-import { excludeHiddenExpr, hiddenRepos, visibleRepos } from "./visible.ts";
+import { allVisibleRepos, blankIfHidden, excludeHiddenExpr, hiddenRepos, visibleRepos } from "./visible.ts";
+import { stepTitle } from "./trace.ts";
+import { mayResumeTrip } from "../../push-outcomes.ts";
+import { parseTripKey } from "../../core/push-outcome.ts";
 import type { Db } from "../../db/index.ts";
 import { inList, refIn, type AnyEb } from "../../db/kx.ts";
 import type { Eb } from "../../db/kx.ts";
@@ -314,4 +317,37 @@ function wfLine(wf: ItemWorkflow | null, unclear: boolean): string | null {
   if (unclear) return t("Waiting for a clear answer");
   if (!wf) return null;
   return wf.state === "recommending" && wf.rec !== null ? wf.rec.text : stateLine(wf);
+}
+
+const WEEK_MS = 7 * 24 * 3600 * 1000;
+
+/** GET /api/maintain/repos: the Repos page, for every role. Counts and switches are the reader's visible tracked repos; only who may act differs. */
+export async function repos(db: Db, req: Req): Promise<MaintainRepo[]> {
+  const names = await allVisibleRepos(db, req);
+  if (!names.length) return [];
+  const hidden = await hiddenRepos(db, req);
+  const since = new Date(Date.now() - WEEK_MS).toISOString();
+  const [rows, open, merged, live, trips] = await Promise.all([
+    db.all(db.k.selectFrom("main.tracked_repos").select(["name", "pipeline", "workflow"]).where("name", "in", names)),
+    db.all(db.k.selectFrom("main.items").select((eb) => ["repo", eb.fn.countAll<number>().as("n")]).where("state", "=", "open").where("repo", "in", names).groupBy("repo")),
+    db.all(db.k.selectFrom("main.items").select((eb) => ["repo", eb.fn.countAll<number>().as("n")]).where("merged_at", ">=", since).where("repo", "in", names).groupBy("repo")),
+    liveWorkflows(db),
+    db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at")),
+  ]);
+  const count = (xs: { repo: string; n: number }[], repo: string) => Number(xs.find((x) => x.repo === repo)?.n ?? 0);
+  const out: MaintainRepo[] = [];
+  for (const r of rows.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const mine = live.filter((w) => w.repo === r.name);
+    const stops: MaintainRepo["trips"] = [];
+    for (const t of trips) {
+      const k = parseTripKey(t.stage);
+      if (k?.repo !== r.name) continue;
+      stops.push({ key: t.stage, text: `${stepTitle(k.stage)}: ${blankIfHidden(t.reason, hidden)}`, since: t.tripped_at, canResume: await mayResumeTrip(req.user, t.stage) });
+    }
+    out.push({
+      name: r.name, workflow: r.workflow === "new" ? "new" : "legacy", automatic: !!r.pipeline, canRun: await mayRunRepo(req.user, r.name),
+      open: count(open, r.name), started: mine.length, waiting: mine.filter((w) => w.state === "recommending" && w.rec !== null).length, mergedWeek: count(merged, r.name), trips: stops,
+    });
+  }
+  return out;
 }

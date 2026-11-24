@@ -21,6 +21,7 @@ import type {
   DiscordSetup,
   Home,
   MaintainHome,
+  MaintainRepo,
   MaintainQueueMeta,
   MaintainStats,
   MaintainItems,
@@ -265,6 +266,10 @@ export interface Api {
     items(query: MaintainItemsQuery): Promise<MaintainItems>;
     /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
     command(text: string): Promise<MaintainCommandResult>;
+    /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
+    repos(): Promise<MaintainRepo[]>;
+    /** A registered workflow control (resume a breaker, switch Automatic); answers with the line every surface shows. */
+    control(input: { control: "resume-breaker"; key: string } | { control: "set-automatic"; repo: RepoName; on: boolean }): Promise<{ ok: boolean; line: string }>;
   };
   /** The new item page (ui_v2): the item's workflow read, its command box and its controls. */
   maintainItem: {

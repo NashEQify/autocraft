@@ -50,7 +50,7 @@ const REFERENCE: Page[] = [
   { to: "/prompts", label: tk("Prompts") },
   { to: "/envs", label: tk("Environments"), also: ["/workspaces"] },
   { to: "/repos", label: tk("Repos") },
-  { to: "/scans", label: tk("Scans"), view: "security", also: ["/security"] },
+  { to: "/scans", label: tk("Scans"), also: ["/security"] },
 ];
 const ADMIN: Page[] = [
   { to: "/admin/users", label: tk("Users and access"), view: "access", also: ["/access", "/contributors"] },

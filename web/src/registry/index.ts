@@ -39,13 +39,20 @@ import { maintainStatsModule } from "../modules/maintain/stats";
 import { runnerModule } from "../modules/runner";
 import { maintainItemsModule } from "../modules/maintain/items";
 import { maintainItemModule } from "../modules/maintain/item";
+import { referenceModule } from "../modules/reference";
 
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
 /** Classic modules the new dashboard's own pages replace. */
-const replacedInV2: FeatureModule[] = [homeModule, itemsModule, itemModule];
+const replacedInV2: FeatureModule[] = [homeModule, itemsModule, itemModule, promptsModule];
+/** Classic routes the new dashboard replaces inside modules that stay. */
+const replacedRoutes = new Map<FeatureModule, string[]>([[envsModule, ["envs/:id?"]], [reposModule, ["repos", "repos/:name"]]]);
+const without = (m: FeatureModule): FeatureModule => {
+  const paths = replacedRoutes.get(m);
+  return paths ? { ...m, routes: m.routes.filter((r) => !paths.includes(r.path)) } : m;
+};
 
-/** The new dashboard: its own Home; the classic views serve the pages the new dashboard has not replaced yet. */
+/** The new dashboard: its own pages; the classic views serve the pages it has not replaced yet. */
 export const v2Modules: FeatureModule[] = [
   maintainHomeModule,
   maintainQueueModule,
@@ -54,7 +61,8 @@ export const v2Modules: FeatureModule[] = [
   runnerModule,
   maintainItemsModule,
   maintainItemModule,
-  ...classicModules.filter((m) => !replacedInV2.includes(m)),
+  referenceModule,
+  ...classicModules.filter((m) => !replacedInV2.includes(m)).map(without),
 ];
 
 /** Every module of either dashboard, for preloading code. */

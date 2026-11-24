@@ -1,6 +1,6 @@
 // The new Home's and Items page's mock reads: started items of several repos, so each role sees what it may act on.
 import type { Api } from "../client";
-import type { ItemPhase, MaintainCommandResult, MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsQuery, MaintainRow, MaintainStats, User } from "../types";
+import type { ItemPhase, MaintainCommandResult, MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsQuery, MaintainRepo, MaintainRow, MaintainStats, User } from "../types";
 import { requestProject } from "../scope";
 import { NOW } from "./fixtures";
 
@@ -98,7 +98,15 @@ function commandFor(me: User, text: string): MaintainCommandResult {
   return { items, lines: items.map((i) => i.line) };
 }
 
+const REPOS: MaintainRepo[] = [
+  { name: "photocraft", workflow: "new", automatic: true, canRun: false, open: 186, started: 9, waiting: 3, mergedWeek: 31, trips: [{ key: "cifix:photocraft", text: "CI fixes paused on photocraft: failed 5 times in an hour", since: ago(95), canResume: false }] },
+  { name: "designcraft", workflow: "new", automatic: true, canRun: false, open: 94, started: 3, waiting: 1, mergedWeek: 12, trips: [] },
+  { name: "wordcraft", workflow: "legacy", automatic: false, canRun: false, open: 41, started: 0, waiting: 0, mergedWeek: 6, trips: [] },
+  { name: "deckcraft", workflow: "legacy", automatic: false, canRun: false, open: 32, started: 1, waiting: 0, mergedWeek: 3, trips: [] },
+];
+
 export function createMaintainMock(me: User): Pick<Api, "maintain"> {
+  const repos = structuredClone(REPOS);
   return {
     maintain: {
       // designcraft is on the new workflow in the mock; the other repos use the classic routes.
@@ -113,6 +121,19 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
       },
       items: (query) => new Promise((r, j) => setTimeout(() => { try { r(structuredClone(itemsFor(me, query))); } catch (e) { j(e); } }, 60)),
       command: (text) => new Promise((r) => setTimeout(() => r(commandFor(me, text)), 120)),
+      async repos(): Promise<MaintainRepo[]> {
+        const mine = repos.map((r) => ({ ...r, canRun: me.runRepos.includes(r.name), trips: r.trips.map((t) => ({ ...t, canResume: me.runRepos.includes(r.name) })) }));
+        return new Promise((res) => setTimeout(() => res(structuredClone(mine)), 60));
+      },
+      async control(input) {
+        if (input.control === "set-automatic") {
+          const r = repos.find((x) => x.name === input.repo);
+          if (r) r.automatic = input.on;
+          return { ok: true, line: `Automatic work is ${input.on ? "on" : "off"} for ${input.repo}.` };
+        }
+        for (const r of repos) r.trips = r.trips.filter((t) => t.key !== input.key);
+        return { ok: true, line: `Resumed ${input.key}.` };
+      },
       async home(): Promise<MaintainHome> {
         const repo = requestProject();
         const rows = ROWS.filter((r) => !repo || r.repo === repo);
