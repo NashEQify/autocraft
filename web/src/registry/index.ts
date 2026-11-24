@@ -35,6 +35,7 @@ import { hubModule } from "../modules/hub";
 import { maintainHomeModule } from "../modules/maintain/home";
 import { helpModule } from "../modules/help";
 import { maintainQueueModule } from "../modules/maintain/queue";
+import { maintainStatsModule } from "../modules/maintain/stats";
 
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
@@ -42,6 +43,7 @@ export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule
 export const v2Modules: FeatureModule[] = [
   maintainHomeModule,
   maintainQueueModule,
+  maintainStatsModule,
   helpModule,
   ...classicModules.filter((m) => m !== homeModule),
 ];

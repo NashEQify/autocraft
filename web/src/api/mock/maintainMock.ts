@@ -1,6 +1,6 @@
 // The new Home's mock read: started items of several repos, so each role sees what it may act on.
 import type { Api } from "../client";
-import type { MaintainHome, MaintainRow, User } from "../types";
+import type { MaintainHome, MaintainRow, MaintainStats, User } from "../types";
 import { requestProject } from "../scope";
 import { NOW } from "./fixtures";
 
@@ -24,6 +24,12 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
       // designcraft is on the new workflow in the mock; the other repos use the classic routes.
       async queue() {
         return { newRepos: ["designcraft"], approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" } };
+      },
+      async stats(period): Promise<MaintainStats> {
+        const n = period === "30d" ? 30 : 7;
+        const perDay = Array.from({ length: n }, (_, i) => ({ day: new Date(Date.now() - (n - 1 - i) * 86400_000).toISOString().slice(0, 10), n: [14, 22, 9, 17, 25, 6, 3, 19, 21, 12][i % 10]! }));
+        const merged = perDay.reduce((a, d) => a + d.n, 0);
+        return new Promise((r) => setTimeout(() => r({ period, merged, implemented: Math.round(merged / 6), reviewed: Math.round(merged * 1.4), backlog: 25308, backlogChange: period === "30d" ? -212 : -48, spend: period === "30d" ? 412 : 96, perDay }), 60));
       },
       async home(): Promise<MaintainHome> {
         const repo = requestProject();

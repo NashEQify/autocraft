@@ -475,6 +475,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     // The new dashboard (ui_v2).
     scoped(get("/api/maintain/home", maintain.home)),
     get("/api/maintain/queue", maintain.queueMeta),
+    scoped(get("/api/maintain/stats", maintain.stats)),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),

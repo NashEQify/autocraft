@@ -32,6 +32,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers", "accounts"]],
   ["maintain-queue", ["workflows", "items", "repos"]],
   ["maintain-home", ["workflows", "items", "remote-helpers", "access", "settings", "decisions", "plans", "jobs", "limits", "accounts", "security", "repos"]],
+  ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
   ["home", withSlot("decisions", "decision-snooze", "plans", "jobs", "limits", "accounts", "settings", "queue", "items", "mainci", "github", "usage", "security")],
   // One opened event row: its detail reads what the timeline does; the run, task and decision behind it read one table each.
   ["item-trace-detail:", TRACE],

@@ -22,6 +22,7 @@ import type {
   Home,
   MaintainHome,
   MaintainQueueMeta,
+  MaintainStats,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -253,6 +254,8 @@ export interface Api {
     home(): Promise<MaintainHome>;
     /** Work queue: the repos on the new workflow and who approved each started item for merge. */
     queue(): Promise<MaintainQueueMeta>;
+    /** Stats: headline numbers and merges per day for 7 or 30 days. */
+    stats(period: "7d" | "30d"): Promise<MaintainStats>;
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
