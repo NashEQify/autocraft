@@ -2294,6 +2294,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
+CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);
 -- The last "link your account" reply to a GitHub commenter with no AutoCraft login; one a week per login. Bookkeeping: no live topic.
 CREATE TABLE IF NOT EXISTS github_link_nudges (
   login TEXT PRIMARY KEY COLLATE NOCASE,

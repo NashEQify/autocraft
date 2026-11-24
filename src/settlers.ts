@@ -201,3 +201,20 @@ export function canSettleExpr(db: Db, eb: kx.AnyEb, login: string, role: string,
     eb.not(eb.exists(t.selectFrom(kx.jsonEach(db, itemsJson(db, eb, a), "j")).select(eb.lit(1).as("one")).where(itemRepo(), "is not", null).where(eb.not(ok(itemRepo()))))),
   ]);
 }
+
+/** Why the maintainer workflow refuses someone: no AutoCraft login, a login that is neither operator nor maintainer, no live write access, or the box identity. */
+export type ActRefusal = "no-login" | "no-role" | "no-write" | "box-identity";
+
+/**
+ * May `user` act on `repo` in the maintainer workflow (repos on `new`): start, answer, approve a merge, stop. The rule is an AutoCraft
+ * login with the operator or maintainer role (read from `access`, whatever the caller claims) and live write access on the repo;
+ * `maintainer_writes` is not consulted. The app identity is a precondition, so merges and closes run as the person. Null when allowed.
+ */
+export async function actRefusal(db: Db, user: { login: string | null; canWrite: (repo: string) => Promise<boolean> }, repo: string): Promise<ActRefusal | null> {
+  if (!user.login) return "no-login";
+  const role = (await db.get(db.k.selectFrom("main.access").select("role").where("login", "=", user.login)))?.role;
+  if (role !== "operator" && role !== "maintainer") return role === undefined ? "no-login" : "no-role";
+  if (!await user.canWrite(repo).catch(() => false)) return "no-write";
+  if (await githubIdentity(db) !== "app") return "box-identity";
+  return null;
+}
