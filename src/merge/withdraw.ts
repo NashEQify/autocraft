@@ -10,7 +10,7 @@ import * as kx from "../db/kx.ts";
 export const WITHDRAWN = "withdrawn";
 
 /** Renames a decision and what hangs on its id, freeing the id for a new question. */
-async function renameDecision(db: Db, id: string, to: string): Promise<void> {
+export async function renameDecision(db: Db, id: string, to: string): Promise<void> {
   await db.run(db.k.updateTable("main.decisions").set({ id: to }).where("id", "=", id));
   await db.run(db.k.updateTable("decision_opinions").set({ decision_id: to }).where("decision_id", "=", id));
   await db.run(db.k.updateTable("decision_comments").set({ decision_id: to }).where("decision_id", "=", id));

@@ -29,6 +29,7 @@ export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
   item_plans: ["planned_at"],
   lane_next: ["at"],
   decisions: ["snoozed_by", "snoozed_at"],
+  item_workflows: ["updated_at"],
 };
 
 /** Settings the runner, the sync and the planner write for their own use; the dashboard shows none of them. */
@@ -69,6 +70,8 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
   reviews: [{ table: "opus_reviews" }, { table: "review_posts" }, { table: "diff_facts" }],
   queue: [{ table: "merges" }, { table: "merge_batches" }, { table: "merge_batch_prs" }, { table: "merge_holds" }, { table: "premerge_reviews" }],
   fasttrack: [{ table: "fast_track" }],
+  // Started items of the maintainer workflow: entry, approval, weight, plan, blocker, recommendation. Planner input.
+  workflows: [{ table: "item_workflows" }],
   // An operator released an outside-author item from its hold: the planner plans for it at once.
   outside: [{ table: "outside_released" }, { table: "stage_trips", when: "new.stage = 'outside-surge'" }],
   // The planner's Plan cache; its own output, so the planner does not plan again for it.
@@ -126,7 +129,7 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "classifications", ops: ["UPDATE"], when: ["classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"].map((c) => `old.${c} IS NOT new.${c}`).join(" OR ") },
     { table: "opus_reviews" }, { table: "verifications" },
     { table: "fix_attempts" }, { table: "implementations" }, { table: "postmerge_followups" }, { table: "premerge_reviews" }, { table: "pr_checks" }, { table: "push_outcomes" }, { table: "stage_trips" }, { table: "fast_track" }, { table: "merge_holds" }, { table: "merges" }, { table: "merge_batches" },
-    { table: "merge_batch_prs" }, { table: "tracked_repos" },
+    { table: "merge_batch_prs" }, { table: "tracked_repos" }, { table: "item_workflows" },
     { table: "settings", when: "new_key IN ('pilot_items', 'classify_run', 'pipeline_login')" },
   ],
   // What runRank reads (src/rank/index.ts): the rank lane's work test. Only the columns and settings that move a score.
@@ -145,6 +148,7 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
   trace: [
     { table: "model_checks" }, { table: "conflict_merges" }, { table: "job_items" }, { table: "opus_review_history" }, { table: "plan_history" }, { table: "patch_checks" },
     { table: "pr_files" }, { table: "pr_commits" }, { table: "screenshot_runs" }, { table: "item_activity" }, { table: "agent_run_items" }, { table: "agent_run_tools" },
+    { table: "workflow_events" },
     { table: "agent_runs", ops: ["INSERT"] },
     // The item page's status bar follows a job starting, queuing and ending, not its progress lines.
     { table: "jobs", ops: ["INSERT"] },
