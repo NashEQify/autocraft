@@ -125,6 +125,21 @@ export const pilotSqlFor = (db: Db, repo: string, number: string): string => {
 /** The same for a row `alias` of items. */
 export const pilotSql = (db: Db, alias: string): string => pilotSqlFor(db, `${alias}.repo`, `${alias}.number`);
 
+/**
+ * Condition: a maintainer started work on the item, in a repo on the maintainer workflow: the item has a live workflow, or it
+ * is the PR of an issue's live implement workflow. Such an item is in scope (pilotExprFor), and steps take it first.
+ */
+export function startedExprFor(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  return eb.exists(t.selectFrom("main.item_workflows as pw").innerJoin("main.tracked_repos as pwt", (j) => j.onRef("pwt.name", "=", "pw.repo").on("pwt.workflow", "=", "new"))
+    .select(eb.lit(1).as("one")).where("pw.repo", "=", r).where("pw.state", "in", WF_LIVE_LIST)
+    .where((w) => w.or([
+      w("pw.number", "=", n),
+      w.and([w("pw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as pwi").select(eb.lit(1).as("one"))
+        .where("pwi.repo", "=", w.ref("pw.repo")).where("pwi.number", "=", w.ref("pw.number")).where("pwi.pr_number", "=", n))]),
+    ])));
+}
+
 /** `pilotSqlFor` as an expression; `repo` and `number` are column references or expressions of the item. */
 export function pilotExprFor(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
@@ -135,13 +150,7 @@ export function pilotExprFor(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): 
   const prOf = (url: string) => kx.like(db, url, eb(eb.val("%/pull/"), "||", n));
   return eb.or([
     eb.exists(t.selectFrom("main.fast_track as pft").select(eb.lit(1).as("one")).where("pft.repo", "=", r).where("pft.number", "=", n)),
-    eb.exists(t.selectFrom("main.item_workflows as pw").innerJoin("main.tracked_repos as pwt", (j) => j.onRef("pwt.name", "=", "pw.repo").on("pwt.workflow", "=", "new"))
-      .select(eb.lit(1).as("one")).where("pw.repo", "=", r).where("pw.state", "in", WF_LIVE_LIST)
-      .where((w) => w.or([
-        w("pw.number", "=", n),
-        w.and([w("pw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as pwi").select(eb.lit(1).as("one"))
-          .where("pwi.repo", "=", w.ref("pw.repo")).where("pwi.number", "=", w.ref("pw.number")).where("pwi.pr_number", "=", n))]),
-      ]))),
+    startedExprFor(eb, repo, number),
     eb.and([
       eb.exists(t.selectFrom("main.tracked_repos as pt").select(eb.lit(1).as("one")).where("pt.name", "=", r).where("pt.pipeline", "=", 1)),
       eb.not(eb.exists(t.selectFrom("main.outside_holds as oh").select(eb.lit(1).as("one")).where("oh.repo", "=", r).where("oh.number", "=", n))),
@@ -168,4 +177,13 @@ export const pilotExpr = (db: Db, eb: kx.AnyEb, alias: string): AliasableExpress
 /** True when the item is in scope. */
 export async function inPilot(db: Db, repo: string, number: number): Promise<boolean> {
   return !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => pilotExprFor(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
+}
+
+/** The items of `refs` a maintainer started work on (startedExprFor), as "repo#number": one query. */
+export async function startedRefs(db: Db, refs: readonly { repo: string; number: number }[]): Promise<Set<string>> {
+  if (!refs.length) return new Set();
+  const rows = await db.all(db.k.selectFrom(kx.refPairs(db, refs.map((x) => [x.repo, x.number] as const), "j"))
+    .select((eb) => eb(eb(eb.ref("j.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "j.number")).as("ref"))
+    .where((eb) => startedExprFor(eb, "j.repo", "j.number")));
+  return new Set(rows.map((r) => r.ref));
 }

@@ -14,11 +14,11 @@ import { freeSlots } from "../agents/accounts.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { haikuBatches, runHaiku, runJev } from "../classify/run.ts";
 import { fillClassHashes } from "../itemhash.ts";
-import { itemOf, plannedItems } from "../core/select-items.ts";
+import { itemPlans, itemsOf, plannedItems, type ItemPlans, type PlannedItem } from "../core/select-items.ts";
+import { startedRefs } from "../pilot.ts";
 import type { StepContext } from "./steps.ts";
 import { latestRun } from "../classify/settled.ts";
 import { assignAreas, type AssignResult } from "../areas/assign.ts";
-import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
 
@@ -67,9 +67,32 @@ async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<
   return done;
 }
 
-/** The items the Plans send to Haiku for a second opinion in `run`: Jev is unsure of the type or of a flag and Haiku has no verdict as new as Jev's. */
-async function haikuItems(db: Db, run: string, limit: number): Promise<Item[]> {
-  return await mapSeq((await takersFirst(db, await plannedItems(db, "classify", { run, bucket: "haiku" }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, limit), async (p) => await itemOf(db, p.facts.repo, p.facts.number));
+/**
+ * The classify Plans of one job: loaded once, at its start, with the items a maintainer started work on (src/pilot.ts startedExprFor),
+ * which go first in both passes.
+ */
+export type ClassifyPlans = ItemPlans & { started: Set<string> };
+
+export async function classifyPlans(db: Db, run: string): Promise<ClassifyPlans> {
+  const plans = await itemPlans(db, "classify", { run });
+  return { ...plans, started: await startedRefs(db, plans.items.filter((p) => p.plan.actions.some((a) => a.kind === "classify")).map((p) => p.facts)) };
+}
+
+/** The classify actions of `bucket` in the step's order, with started items first (stable). */
+async function bucketItems(db: Db, plans: ClassifyPlans, bucket: "jev" | "haiku"): Promise<PlannedItem[]> {
+  const started = (p: PlannedItem) => (plans.started.has(`${p.facts.repo}#${p.facts.number}`) ? 0 : 1);
+  return (await plannedItems(db, "classify", { plans, bucket })).map((p, i) => ({ p, i })).sort((a, b) => started(a.p) - started(b.p) || a.i - b.i).map((x) => x.p);
+}
+
+/**
+ * The items the Plans send to Haiku for a second opinion in `run`: Jev is unsure of the type or of a flag and Haiku has no verdict as new as Jev's.
+ * `jevDone`: the items Jev classified in this job since `plans` were loaded; they are decided again on their new verdicts.
+ */
+async function haikuItems(db: Db, run: string, limit: number, plans: ClassifyPlans, jevDone: ReadonlySet<string>): Promise<Item[]> {
+  const fresh = jevDone.size ? (await itemPlans(db, "classify", { run, refs: jevDone })).items : [];
+  const now: ClassifyPlans = { started: plans.started, items: [...plans.items.filter((p) => !jevDone.has(`${p.facts.repo}#${p.facts.number}`)), ...fresh] };
+  const todo = (await takersFirst(db, await bucketItems(db, now, "haiku"), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, limit);
+  return await itemsOf(db, todo.map((p) => p.facts));
 }
 
 async function haikuPass(ctx: StepContext, run: string, todo: Item[], sent: (n: number) => void): Promise<number> {
@@ -115,16 +138,13 @@ async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashe
  * Open items the Plans send to Jev in `run`, with each due item's input hash. "all" takes only items without a verdict.
  * The hashes are stored on the item row (src/itemhash.ts), so no body is read for items that are up to date.
  */
-async function jevItems(db: Db, run: string, mode: "new" | "all"): Promise<{ open: number; due: Item[]; hashes: Map<string, string> }> {
-  await fillClassHashes(db);
+export async function jevItems(db: Db, run: string, mode: "new" | "all", plans: ClassifyPlans): Promise<{ open: number; due: Item[]; hashes: Map<string, string> }> {
   const open = (await db.get(db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
     .select((eb) => eb.fn.countAll<number>().as("n")).where("i.state", "=", "OPEN")))!.n;
   const due: Item[] = [], hashes = new Map<string, string>();
-  for (const p of await plannedItems(db, "classify", { run, bucket: "jev" })) {
-    if (mode === "all" && p.facts.classification.jev) continue;
-    const x = await itemOf(db, p.facts.repo, p.facts.number);
+  for (const { classHash, ...x } of await itemsOf(db, (await bucketItems(db, plans, "jev")).filter((p) => mode === "new" || !p.facts.classification.jev).map((p) => p.facts))) {
     due.push(x);
-    hashes.set(refOf(x), (await db.get(db.k.selectFrom("items").select("class_hash as h").where("repo", "=", x.repo).where("number", "=", x.number)))!.h!);
+    hashes.set(refOf(x), classHash!);
   }
   return { open, due, hashes };
 }
@@ -133,7 +153,9 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   const limit = Number(ctx.params.limit);
   ctx.usageRun(run);
   await ctx.progress("Finding items to classify");
-  const { open, due, hashes } = await jevItems(ctx.db, run, mode);
+  await fillClassHashes(ctx.db);
+  const plans = await classifyPlans(ctx.db, run);
+  const { open, due, hashes } = await jevItems(ctx.db, run, mode, plans);
   const todo = (await takersFirst(ctx.db, due, (x) => [x.repo], (x) => [x])).slice(0, limit);
   ctx.log(`run ${run}: ${open} open items, ${due.length} due for Jev, taking ${todo.length}`);
   const sent = sentCounter(ctx);
@@ -143,7 +165,7 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   const haikuAlone = alone.length ? await haikuOnlyPass(ctx, run, alone, hashes, sent) : 0;
   if (alone.length) ctx.log(`Jev unavailable: Haiku classified ${haikuAlone} of ${alone.length} items`);
   const aloneRefs = new Set(alone.map(refOf));
-  const unsure = await ctx.cancelled() ? [] : (await haikuItems(ctx.db, run, limit)).filter((x) => !aloneRefs.has(refOf(x)));
+  const unsure = await ctx.cancelled() ? [] : (await haikuItems(ctx.db, run, limit, plans, jevDone)).filter((x) => !aloneRefs.has(refOf(x)));
   ctx.log(`Haiku: ${unsure.length} items where Jev is unsure of the type (under ${SURE * 100} %) or of a flag`);
   const haiku = await haikuPass(ctx, run, unsure, sent);
   const jev = jevDone.size;
