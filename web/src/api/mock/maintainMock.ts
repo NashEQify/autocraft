@@ -21,6 +21,10 @@ const ROWS: MaintainRow[] = [
 export function createMaintainMock(me: User): Pick<Api, "maintain"> {
   return {
     maintain: {
+      // designcraft is on the new workflow in the mock; the other repos use the classic routes.
+      async queue() {
+        return { newRepos: ["designcraft"], approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" } };
+      },
       async home(): Promise<MaintainHome> {
         const repo = requestProject();
         const rows = ROWS.filter((r) => !repo || r.repo === repo);
