@@ -60,8 +60,7 @@ const BUILD_TONE: Record<Build, Tone> = { queued: "neutral", running: "accent", 
 export function checkCells(c: ItemChecks | null | undefined): Record<string, ReactNode> {
   if (!c) return {};
   const verify = c.verify;
-  // A passing regression check carries a note only when the base comparison was inconclusive.
-  const inconclusive = verify?.kind === "regression" && verify.state === "passed" && !!verify.note;
+  const inconclusive = verify?.regressionInconclusive;
   return {
     review: <Check label="Review" tone={c.verdict === "take" ? "ok" : "warn"} state={c.verdict} />,
     ci: <Check label="CI" tone={CI_TONE[c.ci]} state={c.ci} />,
