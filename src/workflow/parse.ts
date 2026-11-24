@@ -1,0 +1,226 @@
+// Free text to commands, the same on every surface: a GitHub comment, the Discord slash command, the agent's tools and the
+// dashboard's text box. Deterministic and without a model call. Anything it cannot read in full comes back `ambiguous` with
+// what it did read, and nothing runs from it; resolve.ts then applies the item's state.
+//
+//   fix-up and merge, urgent         combined commands; a weight word anywhere (urgent, high, low, or weight <1-10>)
+//   fix 1 and 2, drop 3, then merge  an answer naming plan parts by number
+//   drop export dialog               a part named by words from its title (resolve.ts matches them)
+//   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
+//   yes / lgtm / go                  runs the open recommendation
+import { commentLines } from "../github/comment-lines.ts";
+import { parseBranch, parsePrRef } from "../repin/manifest.ts";
+import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
+import { commandOf, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
+
+export type ParseOptions = {
+  /** The app's slug: a leading `@<slug>` (or `@<slug>[bot]`) is not part of the command. */
+  slug?: string;
+  /** The repo of the item the text was written on: a bare number before any `repo#n` in a list takes it. */
+  repo?: string;
+};
+
+/** GitHub caps a comment body at 65536 characters. */
+const BODY_MAX = 65_536;
+
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const mentionRe = (slug: string): RegExp => new RegExp(`^@${escape(slug)}(?:\\[bot\\])?(?=[\\s,:]|$)[\\s,:]*`, "i");
+const isWeightWord = (w: string): w is WeightWord => Object.hasOwn(WEIGHT_WORDS, w);
+const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+/** The canonical text of parts and items, as an ambiguous reply quotes what was understood: `fix 1, merge, urgent: photocraft#12`. */
+export function describe(parts: readonly CommandPart[], items: readonly ItemRef[] = []): string {
+  const words = parts.map((p) => {
+    if ("part" in p) return `${p.word} ${p.part}`;
+    if ("weight" in p) return weightWord(p.weight) ?? `weight ${p.weight}`;
+    return p.args ? `${p.word} ${p.args}` : p.word;
+  }).join(", ");
+  return items.length ? `${words}: ${items.map((i) => `${i.repo}#${i.number}`).join(" ")}` : words;
+}
+
+/** Reads text written to AutoCraft. */
+export function parse(text: string, opts: ParseOptions = {}): Parsed {
+  let s = text.trim();
+  if (opts.slug) s = s.replace(mentionRe(opts.slug), "");
+  let items: ItemRef[] = [];
+  // The list form: the command, a colon, then the items. A colon that starts `://` belongs to a URL.
+  const list = /^([^:\n]+?):(?!\/\/)([\s\S]*)$/.exec(s);
+  if (list) {
+    const read = readItems(list[2]!, opts.repo);
+    if (read.bad.length || !read.items.length) {
+      const head = readWords(list[1]!);
+      return { kind: "ambiguous", understood: describe(head.parts, read.items), rest: [...head.unknown, ...read.bad].join(" ") };
+    }
+    items = read.items;
+    s = list[1]!;
+  }
+  const yes = readYes(s);
+  if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
+  const r = readWords(s);
+  if (r.unknown.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, items), rest: r.unknown.join(", ") };
+  return { kind: "commands", items, parts: r.parts };
+}
+
+/**
+ * The command in a GitHub comment, or null when no line of it is addressed to the app. A command starts on a line of its own with
+ * `@<slug>`; quoted, fenced, indented and HTML-commented lines never count (commentLines). In the list form, the lines after
+ * `@<slug> merge:` up to the next blank or hidden line are the items. Several addressed lines are read as one text, so an unclear
+ * mix is ambiguous rather than half run.
+ */
+export function parseComment(body: unknown, slug: string, opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
+  if (typeof body !== "string" || !slug) return null;
+  const lines = commentLines(body.slice(0, BODY_MAX));
+  const mention = mentionRe(slug);
+  const texts: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!mention.test(line)) continue;
+    let text = line.replace(mention, "");
+    if (/^[^:]+:(?!\/\/)/.test(text)) {
+      while (i + 1 < lines.length && lines[i + 1] && !mention.test(lines[i + 1]!)) text += `\n${lines[++i]}`;
+    }
+    texts.push(text);
+  }
+  return texts.length ? parse(texts.join("\n"), opts) : null;
+}
+
+type Read = { parts: CommandPart[]; unknown: string[]; conflict: boolean };
+
+/** A yes-word with nothing else but a weight and politeness: `yes`, `lgtm, thanks`, `go ahead, urgent`. */
+function readYes(s: string): { weight: number | null } | null {
+  let weight: number | null = null;
+  let bad = false;
+  const setW = (w: number) => { if (weight !== null && weight !== w) bad = true; weight = w; };
+  let t = norm(s.replace(/[,.!?;]+/g, " "));
+  t = t.replace(/(^| )weight (\d+)(?= |$)/g, (_m, pre: string, n: string) => {
+    const w = Number(n);
+    if (w < WEIGHT_MIN || w > WEIGHT_MAX) bad = true;
+    else setW(w);
+    return pre;
+  });
+  const words = t.split(" ").filter((w) => {
+    if (!isWeightWord(w)) return true;
+    setW(WEIGHT_WORDS[w]);
+    return false;
+  });
+  let rest = words.join(" ");
+  for (let again = true; again;) {
+    again = false;
+    for (const tr of YES_TRAILERS) if (rest.endsWith(` ${tr}`)) { rest = rest.slice(0, -tr.length - 1); again = true; }
+  }
+  return !bad && YES_WORDS.includes(rest) ? { weight } : null;
+}
+
+/** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
+function readWords(src: string): Read {
+  const parts: CommandPart[] = [];
+  const unknown: string[] = [];
+  const weights: { text: string; w: number }[] = [];
+  let s = src.trim().replace(/[.!]+$/, "");
+  s = s.replace(/(^|[\s,;])weight\s+(\d+)(?=$|[\s,;])/gi, (m, pre: string, n: string) => {
+    const w = Number(n);
+    if (w < WEIGHT_MIN || w > WEIGHT_MAX) unknown.push(m.trim());
+    else weights.push({ text: m.trim(), w });
+    return `${pre} `;
+  });
+  const takeWeights = (tokens: string[]): string[] => tokens.filter((tok) => {
+    const low = tok.toLowerCase();
+    if (!isWeightWord(low)) return true;
+    weights.push({ text: tok, w: WEIGHT_WORDS[low] });
+    return false;
+  });
+  const push = (p: CommandPart) => {
+    const key = JSON.stringify(p);
+    if (!parts.some((q) => JSON.stringify(q) === key)) parts.push(p);
+  };
+  for (const raw of s.split(/\s*[,;\n]\s*|\s+(?:and\s+then|then|and|&)\s+/i)) {
+    const seg = raw.trim().replace(/^(?:(?:and\s+then|then|and|please)\s+)+/i, "").trim();
+    if (!seg) continue;
+    const repin = /^auto[-\s]?repin(?:\s+(.+))?$/i.exec(seg);
+    if (repin) {
+      const args = repin[1]?.trim().replace(/\s+/g, " ") ?? "";
+      if (validRepin(args)) push({ word: "autorepin", args });
+      else unknown.push(seg);
+      continue;
+    }
+    const named = /^(drop|fix)\s+(.+)$/i.exec(seg);
+    if (named && !/^fix\s+up(?:\s|$)/i.test(seg)) {
+      const word = named[1]!.toLowerCase() as "drop" | "fix";
+      const tokens = named[2]!.split(/\s+/);
+      const rest = takeWeightsIfNumbers(tokens, weights);
+      if (rest) for (const n of rest) push({ word, part: n });
+      else push({ word, part: named[2]!.trim().replace(/\s+/g, " ") });
+      continue;
+    }
+    if (/^#?\d+(?:\s+#?\d+)*$/.test(seg)) {
+      // "fix 1 and 2": a bare number continues the fix or drop before it.
+      const last = parts[parts.length - 1];
+      if (last && (last.word === "fix" || last.word === "drop") && typeof last.part === "number") {
+        for (const n of seg.split(/\s+/)) push({ word: last.word, part: Number(n.replace("#", "")) });
+      } else unknown.push(seg);
+      continue;
+    }
+    const tokens = takeWeights(seg.split(/\s+/));
+    if (!tokens.length) continue;
+    const text = norm(tokens.join(" "));
+    const legacy = /^merge[- ]?queue (\d{1,2})$/.exec(text);
+    if (legacy) {
+      const w = Number(legacy[1]);
+      if (w < WEIGHT_MIN || w > WEIGHT_MAX) unknown.push(seg);
+      else { weights.push({ text: legacy[1]!, w }); push({ word: "merge" }); }
+      continue;
+    }
+    const c = commandOf(text);
+    if (c && c.word !== "drop" && c.word !== "fix" && c.word !== "autorepin") push({ word: c.word });
+    else unknown.push(seg);
+  }
+  const distinct = [...new Set(weights.map((w) => w.w))];
+  const conflict = distinct.length > 1;
+  if (conflict) unknown.push(...weights.map((w) => w.text));
+  else if (distinct.length) push({ word: "weight", weight: distinct[0]! });
+  return { parts, unknown, conflict };
+}
+
+/** The part numbers when the tokens are numbers (with `part`, `finding` or `change` before them, and weight words), else null. */
+function takeWeightsIfNumbers(tokens: string[], weights: { text: string; w: number }[]): number[] | null {
+  const ns: number[] = [];
+  const ws: { text: string; w: number }[] = [];
+  for (const tok of tokens) {
+    const low = tok.toLowerCase();
+    if (isWeightWord(low)) ws.push({ text: tok, w: WEIGHT_WORDS[low] });
+    else if (/^#?\d+$/.test(tok) && Number(tok.replace("#", "")) > 0) ns.push(Number(tok.replace("#", "")));
+    else if (!["part", "parts", "finding", "findings", "change", "changes"].includes(low)) return null;
+  }
+  if (!ns.length) return null;
+  weights.push(...ws);
+  return ns;
+}
+
+/** `<pull request> [via <branch>]` or `off`, as the existing autorepin command takes them. */
+function validRepin(args: string): boolean {
+  const m = /^(\S+)(?:\s+via\s+(\S+))?$/i.exec(args);
+  if (!m) return false;
+  if (m[1]!.toLowerCase() === "off") return m[2] === undefined;
+  return !!parsePrRef(m[1]!) && (m[2] === undefined || !!parseBranch(m[2]));
+}
+
+/** Items in a list: `owner/name#12`, `name#12`, a GitHub URL, or a bare `#12`/`12` taking the repo before it. */
+function readItems(text: string, repo: string | undefined): { items: ItemRef[]; bad: string[] } {
+  const items: ItemRef[] = [];
+  const bad: string[] = [];
+  let last = repo ?? null;
+  for (const raw of text.split(/[\s,;]+/)) {
+    const tok = raw.replace(/[.)]+$/, "");
+    if (!tok || /^(?:and|&)$/i.test(tok)) continue;
+    const url = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/(\d+)(?:[/?#]\S*)?$/i.exec(tok);
+    const full = /^((?:[\w.-]+\/)?[\w.-]+)#(\d+)$/.exec(tok);
+    const short = /^#?(\d+)$/.exec(tok);
+    let ref: ItemRef | null = null;
+    if (url) ref = { repo: `${url[1]}/${url[2]}`, number: Number(url[3]) };
+    else if (full) ref = { repo: full[1]!, number: Number(full[2]) };
+    else if (short && last) ref = { repo: last, number: Number(short[1]) };
+    if (!ref || !Number.isSafeInteger(ref.number) || ref.number < 1) { bad.push(tok); continue; }
+    last = ref.repo;
+    if (!items.some((i) => i.repo === ref.repo && i.number === ref.number)) items.push(ref);
+  }
+  return { items, bad };
+}

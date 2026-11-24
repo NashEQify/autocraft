@@ -1,0 +1,150 @@
+// The words maintainers use on every surface, in one list: the commands, the answer words, the yes-words, the weight words
+// and the registered controls. The parser reads its words from here, and Help, Discord help and the agent's tool
+// descriptions are generated from it. Text is stored as translation keys (tk) and shown through t(). Plain data; the
+// dashboard bundle loads it too.
+import { tk } from "../i18n/index.ts";
+import { WEIGHT_NORMAL, WEIGHT_WORDS, type Control, type Entry, type WeightWord } from "./types.ts";
+
+export type CommandWord = "review" | "fix-up" | "implement" | "merge" | "drop" | "fix" | "backlog" | "close" | "stop" | "autorepin";
+
+export type CommandDef = {
+  word: CommandWord;
+  /** As Help writes it, with its argument. */
+  usage: string;
+  /** Other spellings the parser accepts, lower case. */
+  aliases: readonly string[];
+  /** The entry it starts at on an item nobody started; null for words that start nothing. */
+  entry: Entry | null;
+  /** Only in an answer to a started item: it names parts of the plan. */
+  answer?: boolean;
+  /** One line for lists and tool descriptions. */
+  short: string;
+  /** What it does, for Help. */
+  does: string;
+  /** When AutoCraft comes back to a person afterwards. */
+  back: string;
+  /** The example every surface shows. */
+  example: string;
+  /** Listed under "More commands" in Help. */
+  more?: boolean;
+};
+
+export const COMMANDS: readonly CommandDef[] = [
+  {
+    word: "review", usage: "review", aliases: ["review again"], entry: "review",
+    short: tk("Start at Review."),
+    does: tk("Reviews the pull request. On a started item, reviews it again."),
+    back: tk("When the review is done, with one recommendation. If the merge is approved: only at a blocker."),
+    example: "review",
+  },
+  {
+    word: "fix-up", usage: "fix-up", aliases: ["fixup", "fix up"], entry: "fixup",
+    short: tk("Start at Fix-up: review, fix-up, review again."),
+    does: tk("Reviews the pull request, fixes what the review finds, and reviews the fixes."),
+    back: tk("When the second review is done, with one recommendation. If the merge is approved: only at a blocker."),
+    example: "fix-up and merge",
+  },
+  {
+    word: "implement", usage: "implement", aliases: [], entry: "implement",
+    short: tk("Start at Implement (issues)."),
+    does: tk("Issues only. Writes the change and its tests in a new pull request, then reviews and fixes it."),
+    back: tk("When the pull request is reviewed and fixed, with one recommendation. If the merge is approved: only at a blocker."),
+    example: "implement",
+  },
+  {
+    word: "merge", usage: "merge", aliases: ["merge queue", "merge-queue", "mergequeue"], entry: "merge",
+    short: tk("Approve for merge; on a pull request nobody started, the merge queue."),
+    does: tk("Approves the merge. On a started item the steps stay the same and end in a merge. A pull request nobody started goes straight to the merge queue, with no review."),
+    back: tk("Only at a blocker."),
+    example: "merge",
+  },
+  {
+    word: "drop", usage: "drop <part>", aliases: [], entry: null, answer: true,
+    short: tk("Remove a finding or change from the plan."),
+    does: tk("Leaves one finding or change out, named by its number or by words from its title. Words that match no part or several parts run nothing."),
+    back: tk("As the plan said before."),
+    example: "drop 2",
+  },
+  {
+    word: "fix", usage: "fix <part>", aliases: [], entry: null, answer: true,
+    short: tk("Fix only the named findings."),
+    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again."),
+    back: tk("As the plan said before."),
+    example: "fix 1, drop 2, then merge",
+  },
+  {
+    word: "backlog", usage: "backlog", aliases: [], entry: null,
+    short: tk("Keep it open, with no work planned."),
+    does: tk("The item stays open with nothing planned and leaves the active lists."),
+    back: tk("Never; send any command to start it again."),
+    example: "backlog",
+  },
+  {
+    word: "close", usage: "close", aliases: [], entry: null,
+    short: tk("Close the item."),
+    does: tk("Closes the issue or pull request on GitHub. Nothing more runs."),
+    back: tk("Never."),
+    example: "close",
+  },
+  {
+    word: "stop", usage: "stop", aliases: [], entry: null,
+    short: tk("Stop all work on the item."),
+    does: tk("Stops every step at once. Nothing runs until someone sends a new command."),
+    back: tk("Never; send any command to start again."),
+    example: "stop",
+  },
+  {
+    word: "autorepin", usage: "autorepin <pull request> [via <branch>]", aliases: ["auto-repin", "auto repin"], entry: null,
+    short: tk("Repin Cargo dependencies when the pull request merges."),
+    does: tk("Once this pull request merges, the named pull request's Cargo dependencies on this repository are repinned to the merge commit, or with via, to the first commit of that branch that holds it. off drops it."),
+    back: tk("Never."),
+    example: "autorepin photocraft#812",
+    more: true,
+  },
+];
+
+/** Answers that run the open recommendation as it stands, lower case and without punctuation. */
+export const YES_WORDS: readonly string[] = [
+  "yes", "y", "yep", "yeah", "yup", "ok", "okay", "approve", "approved", "lgtm", "go", "go ahead", "sounds good", "do it", "ship it",
+];
+/** Words a yes may carry after it without changing it: "yes please", "lgtm, thanks". */
+export const YES_TRAILERS: readonly string[] = ["please", "thanks", "thank you", "thx"];
+
+export const WEIGHT_HELP: readonly { word: string; weight: string }[] = [
+  { word: "urgent", weight: tk("10, first in every queue") },
+  { word: "high", weight: "8" },
+  { word: tk("(none)"), weight: tk("5, normal") },
+  { word: "low", weight: "2" },
+  { word: "weight <1-10>", weight: tk("an exact value") },
+];
+
+/** The word a weight shows as; the normal weight shows nothing. */
+export function weightWord(w: number | null | undefined): string | null {
+  if (w == null || w === WEIGHT_NORMAL) return null;
+  const word = (Object.keys(WEIGHT_WORDS) as WeightWord[]).find((k) => WEIGHT_WORDS[k] === w);
+  return word ?? `weight ${w}`;
+}
+
+export type ControlDef = { control: Control; name: string; short: string };
+
+/** State changes panels need beyond the command words; each is a registered command, so the agent can do it too. */
+export const CONTROLS: readonly ControlDef[] = [
+  { control: "hold-merge", name: tk("Hold merge"), short: tk("Keep an approved item out of the next merge until it is released.") },
+  { control: "release-merge", name: tk("Release merge"), short: tk("Let a held item merge again.") },
+  { control: "resume-breaker", name: tk("Resume"), short: tk("Resume a step its circuit breaker paused.") },
+  { control: "release-outside", name: tk("Release"), short: tk("Release an outside author's held items.") },
+  { control: "set-automatic", name: tk("Automatic"), short: tk("Turn automatic work on a repository on or off.") },
+  { control: "runner-settings", name: tk("Task Runner settings"), short: tk("Choose what your Task Runner takes.") },
+];
+
+export const ENTRY_LABEL: Record<Entry, string> = {
+  review: tk("Review"),
+  fixup: tk("Fix-up"),
+  implement: tk("Implement"),
+  merge: tk("Merge queue"),
+};
+
+/** The command a word or alias names, or null. `text` is lower case with single spaces. */
+export function commandOf(text: string): CommandDef | null {
+  return COMMANDS.find((c) => c.word === text || c.aliases.includes(text)) ?? null;
+}

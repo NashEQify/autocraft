@@ -1,0 +1,88 @@
+// Maintainer text to workflow actions: the parser and the resolver decide what runs, and anything unclear runs nothing.
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import { parse, parseComment } from "../src/workflow/parse.ts";
+import { resolve, type ItemState } from "../src/workflow/resolve.ts";
+import type { ItemWorkflow, PlanPart, Recommendation } from "../src/workflow/types.ts";
+
+const SLUG = "autocraft-bot";
+
+const started = (over: Partial<ItemWorkflow> = {}): ItemWorkflow => ({
+  id: 1, repo: "storytold/photocraft", number: 812, kind: "pr", entry: "review", weight: 5, state: "running",
+  startedBy: "mira", startedAt: "2026-11-24T09:02:00Z", startedVia: "github", baseHead: "abc",
+  approvedBy: null, approvedAt: null, approvedVia: null, stoppedBy: null, stoppedAt: null,
+  blocker: null, blockerParams: null, rec: null, recAt: null, recHead: null, plan: [], legacyPreapprovalId: null,
+  updatedAt: "2026-11-24T09:02:00Z", ...over,
+});
+const part = (n: number, title: string): PlanPart => ({ n, title, source: "review", state: "planned" });
+const pr = (workflow: ItemWorkflow | null = null): ItemState => ({ kind: "pr", workflow });
+const run = (text: string, state: ItemState) => resolve(parse(text), state);
+
+describe("workflow commands", () => {
+  test("text that is not fully a command runs nothing and says what was understood", () => {
+    const p = parse("fix-up and frobnicate");
+    assert.equal(p.kind, "ambiguous");
+    assert.ok(p.kind === "ambiguous" && p.understood.includes("fix-up") && p.rest.includes("frobnicate"));
+    assert.equal(resolve(p, pr()).kind, "ambiguous");
+    assert.equal(run("please merge it soon", pr()).kind, "ambiguous");
+    assert.equal(run("weight 12, merge", pr()).kind, "ambiguous");
+    assert.equal(run("review and implement", { kind: "issue", workflow: null }).kind, "ambiguous");
+  });
+
+  test("combined commands and a weight word anywhere", () => {
+    const p = parse("@autocraft-bot fix-up and merge, urgent", { slug: SLUG });
+    assert.deepEqual(p, { kind: "commands", items: [], parts: [{ word: "fix-up" }, { word: "merge" }, { word: "weight", weight: 10 }] });
+    const r = resolve(p, pr());
+    assert.ok(r.kind === "run" && r.run.start === "fixup" && r.run.approve && r.run.weight === 10);
+  });
+
+  test("quoted, fenced and commented commands run nothing", () => {
+    assert.equal(parseComment(`> @${SLUG} merge`, SLUG), null);
+    assert.equal(parseComment(["```", `@${SLUG} merge`, "```"].join("\n"), SLUG), null);
+    assert.equal(parseComment(`<!-- @${SLUG} merge -->`, SLUG), null);
+    assert.equal(parseComment(`    @${SLUG} merge`, SLUG), null);
+    assert.equal(parseComment(`Thanks!\n@${SLUG} merge\nLooks good.`, SLUG)?.kind, "commands");
+  });
+
+  test("a list after a colon: a bare number takes the repo before it", () => {
+    const p = parseComment(`@${SLUG} merge:\nphotocraft#123\n#456 storytold/designcraft#7 8\n\nunrelated text`, SLUG);
+    assert.deepEqual(p?.kind === "commands" && p.items, [
+      { repo: "photocraft", number: 123 }, { repo: "photocraft", number: 456 },
+      { repo: "storytold/designcraft", number: 7 }, { repo: "storytold/designcraft", number: 8 },
+    ]);
+    assert.equal(parse("merge: #12").kind, "ambiguous");
+    assert.deepEqual((parse("merge: #12", { repo: "photocraft" }) as { items: unknown }).items, [{ repo: "photocraft", number: 12 }]);
+  });
+
+  test("drop by words must name exactly one planned part", () => {
+    const wf = started({ state: "recommending", plan: [part(1, "Export dialog loses focus"), part(2, "Export dialog title typo"), part(3, "Unused import")] });
+    const several = run("drop export dialog", pr(wf));
+    assert.ok(several.kind === "ambiguous" && several.ambiguity.why === "part-matches-several");
+    assert.equal(run("drop crash on save", pr(wf)).kind, "ambiguous");
+    const one = run("drop title typo", pr(wf));
+    assert.ok(one.kind === "run" && one.run.drop.includes(2) && one.run.drop.length === 1);
+    const fix = run("fix 1 and 3, drop 2, then merge", pr(wf));
+    assert.ok(fix.kind === "run" && fix.run.fix.join() === "1,3" && fix.run.drop.join() === "2" && fix.run.approve);
+  });
+
+  test("merge is the merge queue on an unstarted pull request and approval on a started item", () => {
+    const fresh = run("merge", pr());
+    assert.ok(fresh.kind === "run" && fresh.run.start === "merge" && fresh.run.approve);
+    const going = run("merge", pr(started()));
+    assert.ok(going.kind === "run" && going.run.start === null && going.run.approve && going.run.merges);
+    assert.equal(run("merge", { kind: "issue", workflow: null }).kind, "refused");
+  });
+
+  test("yes needs an open recommendation, and a yes to one ending in a merge approves it", () => {
+    assert.equal(run("yes", pr(started())).kind, "ambiguous");
+    const rec: Recommendation = { text: "Fix both problems, then merge?", parts: { fix: [1, 2], drop: [] }, merges: true };
+    const r = run("LGTM, thanks!", pr(started({ state: "recommending", rec, plan: [part(1, "a"), part(2, "b")] })));
+    assert.ok(r.kind === "run" && r.run.approve && r.run.answers && r.run.fix.join() === "1,2");
+  });
+
+  test("a weight word alone needs a started item", () => {
+    assert.equal(run("urgent", pr()).kind, "ambiguous");
+    const r = run("urgent", pr(started()));
+    assert.ok(r.kind === "run" && r.run.weight === 10 && !r.run.approve && r.run.start === null);
+  });
+});

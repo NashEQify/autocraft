@@ -61,16 +61,21 @@ export type ItemWorkflow = {
   updatedAt: string;
 };
 
+/** An item as written in a command: `repo` is `owner/name` or a bare name, resolved against the tracked repos by the caller. */
 export type ItemRef = { repo: string; number: number };
 
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
   | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "close" | "stop" | "autorepin"; args?: string }
-  | { word: "drop"; part: number | string }
+  | { word: "drop" | "fix"; part: number | string }
   | { word: "weight"; weight: number };
 
+/**
+ * `items` is the list after a colon; empty means the item the text was written on. `understood` is the canonical text of what was
+ * read (`fix-up, merge, urgent`) and `rest` the words that were not, as written.
+ */
 export type Parsed =
-  | { kind: "yes" }
+  | { kind: "yes"; items?: ItemRef[]; weight?: number }
   | { kind: "commands"; items: ItemRef[]; parts: CommandPart[] }
   | { kind: "ambiguous"; understood: string; rest: string };
 

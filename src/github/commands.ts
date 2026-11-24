@@ -33,6 +33,7 @@ import { appPermission, type AppPermission } from "../remote/permission.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { settleRefusal } from "../settlers.ts";
 import { AppError, call, GITHUB_API } from "./app.ts";
+import { commentLines } from "./comment-lines.ts";
 import { appSlug } from "./identity.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError } from "./write.ts";
@@ -69,38 +70,14 @@ const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * The command in a comment addressed to the app, or null. The command is a line of its own: `@<slug> merge queue`, with an
- * optional weight (`8` or `weight 8`). Quoted lines (`> ...`), fenced and indented code and HTML comments are skipped, so quoting or
- * hiding a command runs nothing. A fence closes as CommonMark closes it: the opening character, at least as many of it, and nothing
- * after but spaces. `@<slug> autorepin <pull request>` names the pull request as `owner/name#12`, `name#12` or its URL; `off` drops it.
+ * optional weight (`8` or `weight 8`). Only the lines commentLines leaves visible count, so quoting or hiding a command runs
+ * nothing. `@<slug> autorepin <pull request>` names the pull request as `owner/name#12`, `name#12` or its URL; `off` drops it.
  */
 export function parseCommand(body: unknown, slug: string): Command | null {
   if (typeof body !== "string" || !slug) return null;
   const re = new RegExp(`^@${escape(slug)}(?:\\[bot\\])?[\\s,:]+merge[-\\s]?queue(?:\\s+(?:weight\\s+)?(\\d{1,2}))?\\s*[.!]?$`, "i");
   const repin = new RegExp(`^@${escape(slug)}(?:\\[bot\\])?[\\s,:]+auto[-\\s]?repin\\s+(\\S+)(?:\\s+via\\s+(\\S+))?$`, "i");
-  let fence: { ch: string; len: number } | null = null;
-  let comment = false;
-  for (const raw of body.slice(0, BODY_MAX).split(/\r?\n/)) {
-    let text = raw;
-    if (!fence) {
-      if (comment) {
-        const end = text.indexOf("-->");
-        if (end < 0) continue;
-        comment = false;
-        text = text.slice(end + 3);
-      }
-      text = text.replace(/<!--[\s\S]*?-->/g, "");
-      const open = text.indexOf("<!--");
-      if (open >= 0) { comment = true; text = text.slice(0, open); }
-    }
-    const line = text.trim();
-    const f = /^(`{3,}|~{3,})/.exec(line)?.[1];
-    if (fence) {
-      if (f && f[0] === fence.ch && f.length >= fence.len && line.slice(f.length).trim() === "") fence = null;
-      continue;
-    }
-    if (f) { fence = { ch: f[0]!, len: f.length }; continue; }
-    // Indented code: four columns of leading space, a tab counting up to the next multiple of four.
-    if (/^(?: {4}| {0,3}\t)/.test(text)) continue;
+  for (const line of commentLines(body.slice(0, BODY_MAX))) {
     const m = re.exec(line);
     if (m) return { command: "merge-queue", weight: m[1] === undefined ? null : Number(m[1]) };
     const rm = repin.exec(line);
