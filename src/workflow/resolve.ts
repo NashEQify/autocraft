@@ -181,6 +181,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
 /** Runs the recommendation's plan with these parts; approves the merge when it ends in one (or `merge` was said) and nobody has. */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
+  if (wf.rec!.close && !fix.length && !merge) return run({ end: "close", how: "answered", answers: true, weight });
   const merges = wf.rec!.merges || merge;
   const approve = merges && !wf.approvedBy;
   return run({

@@ -185,7 +185,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (runs) preapproval = (await fx.again(c, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via });
-  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null });
+  // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
+  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
   if (runs) patch.state = r.again !== null || r.merges ? "running" : r.answers ? "done" : live.state;
   await db.write(async () => {
     await updateWorkflow(db, live.id, patch, at);

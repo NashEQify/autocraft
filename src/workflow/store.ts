@@ -143,3 +143,30 @@ export async function lastNudge(db: Db, login: string): Promise<string | null> {
 export async function recordNudge(db: Db, login: string, at = new Date().toISOString()): Promise<void> {
   await db.run(db.k.insertInto("main.github_link_nudges").values({ login, at }).onConflict((oc) => oc.column("login").doUpdateSet({ at })));
 }
+
+/** What a pre-approved merge needs to know of the maintainer workflow it is the merge leg of. */
+export type LegContext = {
+  workflowId: number;
+  entry: Entry;
+  /** When a person last started, approved or answered the workflow: what they had seen by then, they chose to go on with. */
+  since: string;
+};
+
+/** The events that say a person chose to go on with the workflow. */
+export const GO_ON_EVENTS = ["started", "approved", "answered"] as const satisfies readonly WorkflowEventKind[];
+
+/** When a person last started, approved or answered the workflow; its start when no such event is recorded. */
+export async function goOnAt(db: Db, w: Pick<ItemWorkflow, "id" | "startedAt">): Promise<string> {
+  const r = await db.get(db.k.selectFrom("main.workflow_events").select((eb) => eb.fn.max("at").as("at")).where("workflow_id", "=", w.id).where("kind", "in", GO_ON_EVENTS));
+  const at = r?.at ?? null;
+  return at !== null && at > w.startedAt ? at : w.startedAt;
+}
+
+/** The live workflow, in a repo on the maintainer workflow, whose merge leg the pre-approved merge is; null for any other pre-approval. */
+export async function legContext(db: Db, preapprovalId: number): Promise<LegContext | null> {
+  const r = await db.get(db.k.selectFrom("main.preapprovals as p")
+    .innerJoin("main.item_workflows as w", "w.id", "p.workflow_id")
+    .innerJoin("main.tracked_repos as t", "t.name", "w.repo")
+    .select(["w.id", "w.entry", "w.started_at"]).where("p.id", "=", preapprovalId).where("t.workflow", "=", "new").where("w.state", "in", LIVE_STATES));
+  return r ? { workflowId: r.id, entry: r.entry as Entry, since: await goOnAt(db, { id: r.id, startedAt: r.started_at }) } : null;
+}

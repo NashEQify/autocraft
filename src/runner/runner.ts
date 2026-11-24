@@ -4,6 +4,7 @@
 // stops jobs whose cancel was requested, runs the autopilot (queues jobs while the
 // pipeline switch is on) and puts jobs that a stop or an earlier runner left
 // unfinished back in the queue to resume (src/runner/resuming.ts).
+import { advanceWorkflows } from "../workflow/advance.ts";
 import { copyLogs, JobLogCopy, pruneJobLogs } from "./job-log.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
@@ -343,6 +344,8 @@ export class Runner {
     if (m && m.sig === sig && t < m.wakeAt) return;
     this.preapprovalMark = null;
     const next = { sig, wakeAt: Infinity };
+    // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on.
+    try { await advanceWorkflows(this.db, this.o.log); } catch (e) { this.o.log(`workflows: ${(e as Error).message}`); }
     await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < next.wakeAt) next.wakeAt = at; });
     this.preapprovalMark = next;
   }

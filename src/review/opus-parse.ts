@@ -221,20 +221,26 @@ export function parsePublic(v: unknown, drop: ReadonlySet<string> = new Set()): 
 
 /** A fix of the review. On the maintainer workflow it is a numbered plan part: `title` names it in a few words, `major` marks a finding a person must see before a merge. */
 export type ReviewFix = { file: string; change: string; title?: string; major?: boolean };
-/** Lines the change has outside what the pull request sets out to do, and the one sentence the review recommends. */
-export type ReviewWorkflow = { outside_purpose: { lines: number; note: string } | null; recommendation: string | null };
+/** What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes). */
+export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
+/** Lines the change has outside what the pull request sets out to do, and the review's one recommendation. */
+export type ReviewWorkflow = { outside_purpose: { lines: number; note: string } | null; recommendation: ReviewRecommendation | null };
 
 export const PART_TITLE_CHARS = 80;
 export const OUTSIDE_NOTE_CHARS = 200;
 export const RECOMMENDATION_CHARS = 300;
 
-/** The maintainer-workflow fields of a reply; null when it has neither. Anything malformed reads as absent. */
-export function parseReviewWorkflow(r: Record<string, unknown>): ReviewWorkflow | null {
+/** The maintainer-workflow fields of a reply; null when it has neither. Anything malformed reads as absent; `parts` is the number of fixes. */
+export function parseReviewWorkflow(r: Record<string, unknown>, parts: number): ReviewWorkflow | null {
   const o = r.outside_purpose as { lines?: unknown; note?: unknown } | null | undefined;
   const lines = o && typeof o === "object" && typeof o.lines === "number" && Number.isFinite(o.lines) && o.lines > 0 ? Math.round(o.lines) : 0;
   const note = lines && typeof o!.note === "string" ? o!.note : "";
   const outside = lines ? { lines, note: note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS) } : null;
-  const rec = typeof r.recommendation === "string" && r.recommendation.trim() && !REFERENCE_LEAK.test(r.recommendation) ? firstSentence(r.recommendation.replace(/\s+/g, " ").trim()).slice(0, RECOMMENDATION_CHARS) : null;
+  const x = r.recommendation as { text?: unknown; fix?: unknown; merge?: unknown; close?: unknown } | null | undefined;
+  const text = x && typeof x === "object" && typeof x.text === "string" && x.text.trim() && !REFERENCE_LEAK.test(x.text) ? firstSentence(x.text.replace(/\s+/g, " ").trim()).slice(0, RECOMMENDATION_CHARS) : null;
+  const fix = text && Array.isArray(x!.fix) ? [...new Set(x!.fix.filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= parts))] : [];
+  const close = !!text && x!.close === true && !fix.length;
+  const rec = text ? { text, fix, merge: !close && x!.merge === true, close } : null;
   return outside || rec ? { outside_purpose: outside, recommendation: rec } : null;
 }
 
@@ -294,7 +300,7 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
     sure = false;
     notes.push(parsed === null ? "the PR description's claims were not checked" : unknownClaim ? `claim ${unknownClaim.status}, impact unknown: ${unknownClaim.claim}`.slice(0, 300) : `${parsed.rejected} entries of the claims list were not read`);
   }
-  return { ref, verdict: outVerdict, sure, reason: words(outReason, OPUS_REASON_WORDS), fixes: outFixes, risks: [...risks, ...notes], workflow: parseReviewWorkflow(r), summary: summary.text, why: oneSentence(why.text), public: parsePublic(r.public, drop), conflicts: parseStatementConflicts(r.conflicts, known), claims: listed, blocked_by: outVerdict === "hold" ? parseBlockedBy(r.blocked_by, ref) : [] };
+  return { ref, verdict: outVerdict, sure, reason: words(outReason, OPUS_REASON_WORDS), fixes: outFixes, risks: [...risks, ...notes], workflow: parseReviewWorkflow(r, outFixes.length), summary: summary.text, why: oneSentence(why.text), public: parsePublic(r.public, drop), conflicts: parseStatementConflicts(r.conflicts, known), claims: listed, blocked_by: outVerdict === "hold" ? parseBlockedBy(r.blocked_by, ref) : [] };
 }
 
 /** The reply's reason before the word cut that the stored review applies. */
