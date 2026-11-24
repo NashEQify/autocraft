@@ -19,7 +19,8 @@ import { setInferenceMode } from "../src/remote/mode.ts";
 import { pickCall, setPickMinutes, unpickCall } from "../src/remote/picks.ts";
 import { PROTOCOL_VERSION, type Claim, type Tier } from "../src/remote/protocol.ts";
 import { whyWaiting, type ReadyRunner } from "../src/remote/queue-view.ts";
-import { remoteRoom } from "../src/remote/room.ts";
+import { remoteRoom, roomOf, roomState } from "../src/remote/room.ts";
+import { setManualOnly } from "../src/remote/manual-only.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
 import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
@@ -410,6 +411,27 @@ describe("picks and Manual only", async () => {
     await setUserMaxCalls(db, "bob", null);
     await updateWorkflow(db, wf, { state: "done" });
     await ready("alice");
+    await clear();
+  });
+
+  test("a starter's runner on Manual only, not taking the repo, is room and a taker for their started item alone", async () => {
+    await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 7, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "in", ["bob", "olga"]));
+    await setManualOnly(db, "alice", true);
+    await setUserRepos(db, "alice", ["deckcraft"]);
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("login", "=", "alice"));
+    const now = Date.now(), st = await roomState(db, now), takes = takerTest(db, now);
+    const started = [{ repo: "photocraft", number: 7 }], auto = [{ repo: "photocraft", number: 8 }];
+    assert.ok(await roomOf(db, st, 0, now, ["photocraft"], "opus-review", started) > 0, "room for her started item");
+    assert.equal(await roomOf(db, st, 0, now, ["photocraft"], "opus-review", auto), 0, "no room for an automatic item");
+    assert.ok(await roomOf(db, st, 0, now, ["photocraft"], "opus-review") > 0, "a job on the repo of her started item has room");
+    assert.ok(await takes({ prompt_id: "", repos: ["photocraft"], step: "opus-review", refs: started }), "a taker for her started item");
+    assert.equal(await takes({ prompt_id: "", repos: ["photocraft"], step: "opus-review", refs: auto }), false, "none for an automatic item");
+    await setUserRepos(db, "alice", []);
+    await setManualOnly(db, "alice", false);
+    await updateWorkflow(db, wf, { state: "done" });
+    for (const login of ["bob", "olga"]) await ready(login);
     await clear();
   });
 

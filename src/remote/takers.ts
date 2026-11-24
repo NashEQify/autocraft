@@ -2,7 +2,7 @@
 // can. A taker is a fresh, ready Task Runner (helpers.ts) of a user who is not cooled off (cooloff.ts) and who may take the
 // call (runnerTakes: role rules, write permission by the room's rule roomCanWrite, My repos narrowed by the runner's own
 // list), busy or not. A Manual only user's runner (manual-only.ts) is a taker, since the user may pick the call, though it is
-// no room. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
+// no room. For work its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
@@ -103,11 +103,22 @@ async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; 
 }
 
 async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
-  const { runners, canWrite } = await readRunners(db, nowMs);
-  if (!runners.length) return () => false;
+  const [{ runners, canWrite }, owner] = await Promise.all([readRunners(db, nowMs), ownerTakes(db, nowMs)]);
   return (c) => c.forLogin
     ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
-    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
+    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite)) || owner(c);
+}
+
+/**
+ * The taker rule for work a person started or approved (started.ts): one of their fresh Task Runners takes such a call (or a
+ * job on a repo where they have such an item) under the role rules and write permission alone, whatever their Manual only, My
+ * repos, My tasks and items. It counts as a runner that takes only some items (`filtered`), as the call waits for it.
+ */
+async function ownerTakes(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
+  const s = await readStartedCalls(db, nowMs);
+  if (!s.runnerLogins.length) return () => false;
+  const canWrite = await roomCanWrite(db, s.runnerLogins, nowMs);
+  return (c) => [...s.ownersFor(c)].some((o) => (c.tier === undefined ? s.tiersOf(o).size > 0 : s.tiersOf(o).has(c.tier)) && roleFits(s.roleOf(o), c) && c.repos.every((x) => canWrite(o, x)));
 }
 
 /**
