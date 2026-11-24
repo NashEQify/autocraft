@@ -316,6 +316,7 @@ export function createHttpApi(): Api {
       setOutsideLimits: (input) => put("/api/pipeline/outside-limits", input),
       releaseOutsideAuthor: async (author) => void (await post("/api/pipeline/outside/release", { author })),
       setJudgementModel: (model) => put("/api/pipeline/judgement-model", { model }),
+      setBlockers: (input) => put("/api/pipeline/blocker-thresholds", input),
     },
     accounts: {
       list: () => get("/api/accounts"),

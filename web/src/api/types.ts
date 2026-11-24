@@ -1281,7 +1281,7 @@ export type StageLimit = { step: string; title: string; perDay: number | null; u
   trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
-export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState };
+export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState; /** Thresholds of the workflow blockers for large fixes and for changes outside a PR's purpose. */ blockers: { largeFixLines: number; outsidePurposeMin: number } };
 
 export interface PipelineStep {
   name: string;

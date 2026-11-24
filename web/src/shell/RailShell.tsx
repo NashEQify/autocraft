@@ -53,16 +53,15 @@ const REFERENCE: Page[] = [
   { to: "/scans", label: tk("Scans"), view: "security", also: ["/security"] },
 ];
 const ADMIN: Page[] = [
-  { to: "/admin/users", label: tk("Users and access"), view: "access", also: ["/access", "/contributors"] },
-  { to: "/admin/health", label: tk("Health"), view: "pipeline/:id?" },
-  { to: "/admin/sweeps", label: tk("Sweeps"), view: "pipeline/:id?" },
-  { to: "/admin/settings", label: tk("Instance settings"), view: "pipeline/:id?", also: ["/pipeline", "/flow"] },
-  { to: "/admin/accounts", label: tk("Accounts"), view: "accounts", also: ["/accounts"], serverOnly: true },
-  { to: "/admin/inference", label: tk("Inference"), view: "inference", also: ["/inference"] },
+  { to: "/admin/users", label: tk("Users and access"), also: ["/access", "/contributors"] },
+  { to: "/admin/health", label: tk("Health") },
+  { to: "/admin/sweeps", label: tk("Sweeps"), also: ["/nightly"] },
+  { to: "/admin/settings", label: tk("Instance settings"), also: ["/pipeline", "/flow"] },
+  { to: "/admin/inference", label: tk("Inference"), also: ["/inference"] },
   { to: "/admin/github-app", label: tk("GitHub App") },
   { to: "/admin/discord", label: tk("Discord") },
-  { to: "/admin/limits", label: tk("Limits"), view: "pipeline/:id?" },
-  { to: "/admin/audit", label: tk("Audit log"), view: "audit", also: ["/audit"] },
+  { to: "/admin/limits", label: tk("Limits") },
+  { to: "/admin/audit", label: tk("Audit log"), also: ["/audit"] },
 ];
 const HELP: Page = { to: "/help", label: tk("Help"), icon: QuestionIcon, also: ["/about"] };
 const ALIASES = [...MAIN, RUNNER, ...REFERENCE, ...ADMIN, HELP].filter((p) => p.view);

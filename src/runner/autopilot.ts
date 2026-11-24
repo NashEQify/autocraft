@@ -1073,7 +1073,7 @@ export async function stageLimits(db: Db): Promise<StageLimit[]> {
   });
 }
 
-export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside">> {
+export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside" | "blockers">> {
   return {
     judgementModel: await judgementModel(db), judgementModels: [...JUDGEMENT_MODELS],
     enabled: await isEnabled(db), draining: await isDraining(db), changedBy: await getSetting(db, KEY_BY), changedAt: await getSetting(db, KEY_AT),
