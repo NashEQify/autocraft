@@ -35,6 +35,7 @@ import { nextUtcMidnight } from "../review/discussion.ts";
 import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
+import { loadWorkflowFacts } from "../workflow/facts.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 
@@ -222,9 +223,16 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     }
     return m;
   };
-  // Implement: who queued each issue (its fast_track row), its latest attempt, and the live attempts per repo.
-  const queuedBy = new Map((await db.all(db.k.selectFrom("fast_track").select(["repo", "number", "added_by", "added_at"]).$if(!!opts.repo, (q) => q.where("repo", "=", opts.repo!))))
+  // Implement: who queued each issue (its fast_track row; in a repo on the maintainer workflow, who started its live implement
+  // workflow), its latest attempt, and the live attempts per repo.
+  const wfs = await loadWorkflowFacts(db, opts.repo);
+  const fastQueued = new Map((await db.all(db.k.selectFrom("fast_track").select(["repo", "number", "added_by", "added_at"]).$if(!!opts.repo, (q) => q.where("repo", "=", opts.repo!))))
     .map((r) => [`${r.repo}#${r.number}`, { by: r.added_by, at: r.added_at }]));
+  const queuedOf = (repo: string, number: number): { by: string; at: string } | null => {
+    if (wfs.model(repo) !== "new") return fastQueued.get(`${repo}#${number}`) ?? null;
+    const w = wfs.live(repo, number);
+    return w?.entry === "implement" ? { by: w.startedBy, at: w.startedAt } : null;
+  };
   const attempts = await latestAttempts(db, opts.repo);
   const liveImpl = await liveByRepo(db);
   const implDecisions = [...new Set([...attempts.values()].flatMap((a) => (a.decisionId ? [a.decisionId] : [])))];
@@ -302,7 +310,8 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
       repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped: tripsOfRepo(tripped, r.repo), inFlight: r.state === "OPEN" && ((r.kind === "issue" && LIVE_STATES.has(attempts.get(ref)?.state ?? "failed")) || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
       inScope: !!r.in_pilot, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration: !r.not_integration,
       held: r.held_backlog ? "backlog" : r.held_dup ? "duplicate" : null,
-      fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: await labelsApproved(r.repo), commentApproved: (await repoOf(r.repo)).comment, fixIssueApproved: (await repoOf(r.repo)).fix },
+      fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: await labelsApproved(r.repo), commentApproved: (await repoOf(r.repo)).comment, fixIssueApproved: (await repoOf(r.repo)).fix, workflow: wfs.model(r.repo) },
+      ...(wfs.model(r.repo) === "new" ? { workflow: wfs.live(r.repo, r.number), endedWorkflow: wfs.ended(r.repo, r.number) } : {}),
       run,
       classification: {
         status: settled.status, label: settled.label, flags: settled.flags, jevLabel: settled.jevLabel, haikuLabel: settled.haikuLabel,
@@ -325,7 +334,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
         scopeDecision: latestScope.get(ref) ?? null,
       },
       implement: await (async () => {
-        const q = r.kind === "issue" ? queuedBy.get(ref) ?? null : null, by = q?.by ?? null;
+        const q = r.kind === "issue" ? queuedOf(r.repo, r.number) : null, by = q?.by ?? null;
         const a = r.kind === "issue" ? attempts.get(ref) : undefined;
         const live = liveImpl.get(r.repo);
         return {

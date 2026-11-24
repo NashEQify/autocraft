@@ -3,7 +3,7 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { decidePr, implementOffWait } from "./decide.ts";
+import { decidePr, implementOffWait, notStarted } from "./decide.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
@@ -59,8 +59,11 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
 /** Jev and Haiku chose different labels and it is not a scope call: a referee (Sonnet, then Opus when Sonnet was unsure) still has to settle it. An unsure Opus settles the label too and flags a scope decision. */
 const labelDisagreement = (f: ItemFacts): boolean => f.classification.status === "disagree" && scopeReason(f) !== "scope-disagreement";
 
-/** A scope decision should be asked: the reason holds and no open decision, scope decision or Backlog answer covers the item. Labelling or a later stage does not suppress it. */
-const scopeNeeded = (f: ItemFacts): boolean => scopeReason(f) !== null && !f.scope.covered;
+/**
+ * A scope decision should be asked: the reason holds and no open decision, scope decision or Backlog answer covers the item. Labelling or a later stage does not suppress it.
+ * Never in a repo on the maintainer workflow, where a maintainer picks what enters.
+ */
+const scopeNeeded = (f: ItemFacts): boolean => scopeReason(f) !== null && !f.scope.covered && f.repoFacts.workflow !== "new";
 
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
 export const TRIAGE_WAIT = "an open request for a person to pick up";
@@ -113,8 +116,10 @@ export function decideItem(f: ItemFacts): ItemPlan {
   if (f.dupeAnswers.length) actions.push(act("dupe-answer", null, { decisions: f.dupeAnswers }));
   if (f.inCompareSet) actions.push(act("dupes-compare", null));
   // decide: a new scope decision, or the prepare step for an open decision of the item (any kind, held or not; in scope only) that has no prepare for its current state.
-  if (f.run && live && !f.draft && state === "scope-due") actions.push(act("decide", null, { source: "new" }));
-  else if (live && f.scope.recommend && f.scope.recommend.failures < RECOMMEND_MAX_FAILURES
+  // A repo on the maintainer workflow asks no scope question and prepares no decision: a maintainer picks what enters, and the workflow's own steps write the recommendation.
+  const newRepo = f.repoFacts.workflow === "new";
+  if (!newRepo && f.run && live && !f.draft && state === "scope-due") actions.push(act("decide", null, { source: "new" }));
+  else if (!newRepo && live && f.scope.recommend && f.scope.recommend.failures < RECOMMEND_MAX_FAILURES
     && (f.scope.recommend.failedAt === null || Date.parse(f.scope.recommend.failedAt) < f.now - RECOMMEND_RETRY_MS)) actions.push(act("decide", null, { source: "prepare" }));
   // label: the repo's labelling approval is applied by gates().
   if (f.run && live && f.held !== "backlog") {
@@ -127,9 +132,11 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // act: answers that close the item (in scope, or asked by a security scan; not held by Backlog; no final action row yet)
   // and Close? questions for PRs the final review says close (asked once per head). Selecting applies nothing; the repo's comment approval is applied by gates().
   for (const t of f.answeredClose) {
-    if ((f.inScope || t.security || t.group) && !backlog && !t.waiting && (t.action === null || t.action === "failed")) actions.push(act("act", null, { bucket: t.kind, decisionId: t.decisionId, security: t.security, ...(t.group ? { group: true } : {}) }));
+    // A Close answer that ended an item's workflow (`closed`) is carried out whatever the item's scope.
+    if ((f.inScope || t.security || t.group || (f.repoFacts.workflow === "new" && f.endedWorkflow === "closed")) && !backlog && !t.waiting && (t.action === null || t.action === "failed")) actions.push(act("act", null, { bucket: t.kind, decisionId: t.decisionId, security: t.security, ...(t.group ? { group: true } : {}) }));
   }
-  if (live && !backlog && f.kind === "pr" && f.closeReview && f.closeReview.atHead && !f.closeReview.asked) actions.push(act("act", f.closeReview.head, { bucket: "close", ask: true }));
+  // Not in a repo on the maintainer workflow, which asks no Close? question: the close review is a blocker of the item's workflow.
+  if (live && !backlog && !newRepo && f.kind === "pr" && f.closeReview && f.closeReview.atHead && !f.closeReview.asked) actions.push(act("act", f.closeReview.head, { bucket: "close", ask: true }));
   // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
   const fix = f.fix, step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
@@ -169,7 +176,7 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
   const c = f.classification;
   if (item.state === "classified" && pluginPr(f)) return "Stays open as a plugin candidate";
   if (item.state === "scope-due" && c.status === "disagree") return "Decide";
-  const needsDecision = c.flags.includes("needs decision");
+  const needsDecision = c.flags.includes("needs decision") && f.repoFacts.workflow !== "new";
   if (f.kind === "issue") {
     const im = f.implement, s = im.row?.state;
     if (im.queuedBy !== null && im.settles) {
@@ -184,6 +191,7 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
     }
     return needsDecision ? "Decide" : "Triage by a person";
   }
+  if (pr && pr.ghState === "OPEN" && pr.inScope && notStarted(pr)) return "Waiting for a maintainer to start it";
   const o = pr && !pr.inScope ? pr.outside ?? null : null;
   const r = o ? o.review : pr?.review && pr.review.head === pr.head && !pr.review.stale ? pr.review.verdict : null;
   if (needsDecision && !r) return "Decide";
