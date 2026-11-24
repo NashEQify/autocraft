@@ -1,6 +1,6 @@
-// The new Home's mock read: started items of several repos, so each role sees what it may act on.
+// The new Home's and Items page's mock reads: started items of several repos, so each role sees what it may act on.
 import type { Api } from "../client";
-import type { MaintainHome, MaintainRow, User } from "../types";
+import type { ItemPhase, MaintainCommandResult, MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsQuery, MaintainRow, User } from "../types";
 import { requestProject } from "../scope";
 import { NOW } from "./fixtures";
 
@@ -18,9 +18,91 @@ const ROWS: MaintainRow[] = [
   row({ repo: "photocraft", number: 840, title: "Selection tools: four changes", author: "pixel-wrangler", line: "Waiting: batch", entry: "merge", startedBy: "ochre-fox", approvedBy: "ochre-fox", updatedAt: ago(30) }),
 ];
 
+// ---- Items ----
+
+type ItemSeed = Partial<MaintainItemRow> & Pick<MaintainItemRow, "repo" | "number" | "title" | "group"> & { phase?: ItemPhase; waiting?: string | null; next?: string | null; rank?: number; sec?: boolean };
+const item = (s: ItemSeed): ItemSeed => s;
+const ITEMS: ItemSeed[] = [
+  ...ROWS.map((r, i) => item({ ...r, group: r.waits ? "needs" : "started", rank: 40 - i })),
+  item({ repo: "photocraft", number: 851, title: "Brush size slider jumps on high-DPI screens", author: "larkspur-dev", group: "automatic", phase: "In queue", waiting: "CI on the PR (4 of 5 checks done)", next: "merge when CI is green", area: "Canvas", rank: 30 }),
+  item({ repo: "designcraft", number: 461, title: "Guides menu shows twice after reload", author: "sable-ui", group: "automatic", phase: "Review", waiting: null, next: "review the PR", area: "Canvas", rank: 22 }),
+  item({ repo: "pdfcraft", number: 1204, kind: "issue", title: "Crash when placing an encrypted PDF page", author: "brushstroke42", group: "automatic", phase: "Fixing", waiting: null, next: "write the fix", area: "PDF import", rank: 35, sec: true }),
+  item({ repo: "photocraft", number: 866, kind: "issue", title: "Exported PNG loses the colour profile", author: "night-owl-77", group: "rest", phase: "Triage", rank: 28, area: "Export" }),
+  item({ repo: "photocraft", number: 867, kind: "issue", title: "Exported PNG drops the embedded colour profile", author: "palette-jo", group: "rest", phase: "Held", waiting: "the duplicate question", duplicate: true, area: "Export", rank: 27 }),
+  item({ repo: "wordcraft", number: 241, title: "Add a word count to the status bar", author: "first-timer-9", group: "rest", phase: "Held", waiting: "the author's daily limit", outside: true, area: "Text", rank: 12 }),
+  item({ repo: "filmcraft", number: 318, title: "Timeline thumbnails flicker while scrubbing", author: "quietgrid", group: "rest", phase: "Waiting for a person", waiting: "an answer to the scope question", stuck: true, rank: 18 }),
+  item({ repo: "deckcraft", number: 90, kind: "issue", title: "Speaker view should show the next slide", author: "rhea-m", group: "rest", phase: "Triage", rank: 8 }),
+  item({ repo: "vectorcraft", number: 512, title: "Boolean union leaves a hairline gap", author: "pixel-wrangler", group: "rest", phase: "Pipeline off", rank: 15, area: "Canvas" }),
+  item({ repo: "photocraft", number: 702, kind: "issue", title: "Support JPEG XL import", author: "brushstroke42", group: "backlog", phase: "Held", waiting: "the Backlog", rank: 5 }),
+  item({ repo: "designcraft", number: 390, title: "Ruler units follow the document setting", author: "sable-ui", group: "done", state: "merged", phase: "Merged", rank: 0 }),
+];
+
+const ZERO: Record<MaintainItemGroup, number> = { needs: 0, started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 };
+const ORDER: MaintainItemGroup[] = ["needs", "started", "automatic", "rest", "backlog", "done"];
+const WEIGHTS: Record<string, number> = { urgent: 10, high: 8, low: 2 };
+
+function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
+  const repo = requestProject();
+  const show = query.show ?? "open";
+  const staff = me.role !== "viewer";
+  if (!staff && query.filters?.some((f) => f === "security" || f === "stuck")) throw new Error("only operators and maintainers filter by security findings or stuck items");
+  const text = query.q?.trim().toLowerCase();
+  const hits = query.refs;
+  const shown = ITEMS.filter((s) => {
+    if (repo && s.repo !== repo) return false;
+    if (show === "closed" ? s.group !== "done" : show === "backlog" ? s.group !== "backlog" : s.group === "done" || s.group === "backlog") return false;
+    if (text && !`${s.repo}#${s.number} ${s.title}`.toLowerCase().includes(text)) return false;
+    if (hits && !hits.includes(`${s.repo}#${s.number}`)) return false;
+    for (const f of query.filters ?? []) {
+      if (f === "security" && !s.sec) return false;
+      if (f === "outside" && !s.outside) return false;
+      if (f === "stuck" && !s.stuck) return false;
+      if (f === "duplicates" && !s.duplicate) return false;
+    }
+    if (query.areas?.length && !query.areas.some((a) => (a === "none" ? !s.area : a === s.area))) return false;
+    return true;
+  });
+  const weight = (s: ItemSeed) => (s.weight ? (WEIGHTS[s.weight] ?? 5) : 5);
+  const order = (a: ItemSeed, b: ItemSeed) =>
+    query.sort === "updated" ? (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") : weight(b) - weight(a) || (b.rank ?? 0) - (a.rank ?? 0);
+  const counts = { ...ZERO };
+  for (const s of shown) counts[s.group]++;
+  const limit = query.limit ?? 50;
+  const rows = ORDER.flatMap((g) => shown.filter((s) => s.group === g).sort(order).slice(0, limit)).map((s): MaintainItemRow => {
+    const started = s.group === "needs" || s.group === "started";
+    const { phase, waiting, next, rank: _r, sec: _s, ...rest } = s;
+    return {
+      kind: "pr", state: "open", author: null, line: null, status: null, blocked: false, weight: null, startedBy: null, approvedBy: null, stoppedBy: null,
+      duplicate: false, outside: false, area: null, updatedAt: ago(60 + (s.number % 300)), ...rest,
+      ...(started ? {} : { status: { phase: phase ?? "Triage", waiting: staff ? (waiting ?? null) : null, next: next ?? null, since: ago(90) } }),
+      stuck: staff && !!s.stuck,
+      may: me.runRepos.includes(s.repo),
+    };
+  });
+  return { rows, counts };
+}
+
+function commandFor(me: User, text: string): MaintainCommandResult {
+  const m = /^([^:\n]+):([\s\S]*)$/.exec(text.trim());
+  const refs = m ? m[2]!.split(/[\s,]+/).filter(Boolean) : [];
+  const words = (m ? m[1]! : text).trim();
+  if (!m || !refs.length || !/^(review|fix-up|implement|merge|backlog|close|stop)\b/i.test(words)) {
+    const line = `Not run: "${text.trim().split("\n")[0]}" is not clear. Write a command, then a colon and the items, e.g. "merge: photocraft#123".`;
+    return { items: [], lines: [line] };
+  }
+  const items = refs.map((ref) => {
+    const [repo, n] = ref.split("#");
+    const ok = me.runRepos.includes(repo ?? "");
+    return { repo: repo ?? "", number: Number(n), outcome: ok ? ("run" as const) : ("refused" as const), line: ok ? `${ref}: ${words} (by ${me.login})` : `${me.login} has no write access to ${repo}.`, workflowId: ok ? 1 : null };
+  });
+  return { items, lines: items.map((i) => i.line) };
+}
+
 export function createMaintainMock(me: User): Pick<Api, "maintain"> {
   return {
     maintain: {
+      items: (query) => new Promise((r, j) => setTimeout(() => { try { r(structuredClone(itemsFor(me, query))); } catch (e) { j(e); } }, 60)),
+      command: (text) => new Promise((r) => setTimeout(() => r(commandFor(me, text)), 120)),
       async home(): Promise<MaintainHome> {
         const repo = requestProject();
         const rows = ROWS.filter((r) => !repo || r.repo === repo);
