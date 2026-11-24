@@ -69,7 +69,8 @@ export function effectText(message: string): string {
 }
 
 export type Target = { repo: string; number: number; kind: ItemKind; head: string | null };
-export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec };
+/** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a stop ends. */
+export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number };
 
 const ref = (t: Target): string => `${t.repo}#${t.number}`;
 const ACTIVE_PREAPPROVAL = ["fixup", "review", "ci", "queued"];
@@ -203,6 +204,13 @@ export async function stopAll(c: Ctx): Promise<string[]> {
       await audit(db, by, "implement-cancel", ref(item), { id: impl.id, reason: why });
     }
   }
+  // The workflow's merge legs on other items: an issue's implementation PR.
+  if (c.workflowId !== undefined) {
+    for (const p of await db.all(db.k.selectFrom("main.preapprovals").select("number").where("workflow_id", "=", c.workflowId).where("state", "in", ACTIVE_PREAPPROVAL)
+      .where((eb) => eb.or([eb("repo", "!=", item.repo), eb("number", "!=", item.number)])))) {
+      await attempt(() => cancelPreapproval(db, by, item.repo, p.number, c.exec, c.via));
+    }
+  }
   const calls = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items"]).where("repo", "=", item.repo).where("state", "=", "queued"));
   for (const k of calls) {
     let items: { repo?: unknown; number?: unknown }[] = [];
@@ -246,6 +254,13 @@ export async function close(c: Ctx): Promise<string[]> {
   if (!had) await ask(db, [question]);
   await step(async () => applyAnswer(db, (await getDecision(db, id))!, by, { answer: "close" }, "workflow", c.via));
   return failed;
+}
+
+/** Answers a question of the legacy machinery (a stuck implementation's Try again) as the person, as the dashboard would. */
+export async function answerQuestion(c: Ctx, id: string, option: string): Promise<void> {
+  const d = await getDecision(c.db, id);
+  if (!d || d.answer) throw new EffectError(t("The question this recommendation answers is no longer open."));
+  await step(() => applyAnswer(c.db, d, c.by, { answer: option }, "workflow", c.via));
 }
 
 // ---- autorepin -----------------------------------------------------------------------------------------------------------

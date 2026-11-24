@@ -9,10 +9,14 @@ import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { currentImplementation } from "../implement/store.ts";
-import { cancelPreapproval, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
+import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
+import { getDecision, optionsOf } from "../decisions.ts";
+import { implementDecisionId, STUCK_OPTIONS } from "../implement/stuck.ts";
+import { findingsOf, premergeAt } from "../premerge/store.ts";
+import { t } from "../i18n/index.ts";
 import type { ReviewFix, ReviewWorkflow } from "../review/opus-parse.ts";
 import { withSettingsSnapshot } from "../settings-read.ts";
-import { detectBlocker, type BlockerFacts, type Found } from "./blockers.ts";
+import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
 import { afterSteps, atBlocker, planOf, type ReviewView } from "./recommend.ts";
 import { largeFixLines, outsidePurposeMin } from "./settings.ts";
 import { addEvent, goOnAt, liveWorkflows, repoWorkflows, updateWorkflow, type WorkflowPatch } from "./store.ts";
@@ -64,11 +68,34 @@ async function failures(db: Db, repo: string, number: number, since: string): Pr
   return [{ step: "fix-up", count: await count("main.fixups") }, { step: "CI fix", count: await count("main.ci_fixes") }];
 }
 
-/** Our latest pushed fix-up of the PR after `since`: its changed lines and files. */
-async function latestFix(db: Db, repo: string, number: number, since: string): Promise<BlockerFacts["fix"]> {
-  const r = await db.get(db.k.selectFrom("main.fixups").select(["patch", "files"]).where("repo", "=", repo).where("number", "=", number).where("state", "=", "pushed").where("created_at", ">", since)
-    .orderBy("created_at", "desc").limit(1));
-  return r ? { lines: patchLines(r.patch), files: json<string[]>(r.files, []) } : null;
+/** Lockfiles a fix-up may touch as a side effect of its change: never "beyond what was agreed". */
+const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
+
+/**
+ * Our latest pushed fix-up of the PR's review findings (the review's own, or one a person asked for) after `since`: its changed lines,
+ * its files, and the files the plan of the review it fixed names (that review is at the head it started from).
+ */
+async function latestFix(db: Db, w: ItemWorkflow, number: number, since: string): Promise<{ fix: BlockerFacts["fix"]; plannedFiles: string[] }> {
+  const r = await db.get(db.k.selectFrom("main.fixups").select(["patch", "files", "from_head"]).where("repo", "=", w.repo).where("number", "=", number).where("state", "=", "pushed")
+    .where("created_at", ">", since).where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "in", ["review", "operator"])).orderBy("created_at", "desc").limit(1));
+  if (!r) return { fix: null, plannedFiles: [] };
+  const fixed = await reviewAt(db, w.repo, number, r.from_head);
+  const plannedFiles = fixed ? planOf(fixed.fixes, w.plan).filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!) : [];
+  return { fix: { lines: patchLines(r.patch), files: json<string[]>(r.files, []).filter((f) => !LOCKFILE.test(f)) }, plannedFiles };
+}
+
+/** A stuck implementation's open question with Try again: what a yes on the workflow answers. */
+async function stuckQuestion(db: Db, w: ItemWorkflow): Promise<{ decision: string; option: string } | null> {
+  const id = implementDecisionId(w.repo, w.number);
+  const d = await getDecision(db, id);
+  return d && d.answer === null && optionsOf(d).some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? { decision: id, option: STUCK_OPTIONS.tryAgain.key } : null;
+}
+
+/** The pre-merge review's findings at the head, as plan parts numbered after `plan`'s. */
+async function premergeParts(db: Db, repo: string, number: number, head: string, plan: readonly PlanPart[]): Promise<PlanPart[]> {
+  const fs = findingsOf(await premergeAt(db, repo, number, head) ?? null).filter((f) => f.fix);
+  const from = plan.reduce((m, p) => Math.max(m, p.n), 0);
+  return fs.map((f, i) => ({ n: from + i + 1, title: f.title, source: "review" as const, file: f.file, ...(f.severity === "defect" ? { major: true } : {}), state: "planned" as const }));
 }
 
 /** The merge leg of the workflow that ended after `since` (and none active), with its reason. */
@@ -90,8 +117,10 @@ const waitsForAnswer = (f: PrFacts): boolean => {
 async function ensureLeg(db: Db, w: ItemWorkflow, repo: string, pr: number, head: string): Promise<string | null> {
   const active = await db.get(db.k.selectFrom("main.preapprovals").select(["id", "workflow_id"]).where("repo", "=", repo).where("number", "=", pr).where("state", "in", ACTIVE_LEG).orderBy("id", "desc").limit(1));
   if (!active) {
+    // The queue merged the leg and the mirror does not show it yet: no new leg on a merged PR.
+    if ((await db.get(db.k.selectFrom("main.preapprovals").select("state").where("repo", "=", repo).where("number", "=", pr).orderBy("id", "desc").limit(1)))?.state === "merged") return null;
     try {
-      await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head });
+      await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
       if (e instanceof PreapprovalRefused) return e.message;
@@ -147,13 +176,20 @@ async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stu
     return patch.state !== undefined && patch.state !== w.state ? patch.state : null;
   };
   const self = await db.get(db.k.selectFrom("main.items").select(["state"]).where("repo", "=", w.repo).where("number", "=", w.number));
+  // A stuck implementation comes back once per stuck question (a yes answers it, Try again): blocked when approved, else as the recommendation.
+  const stuck = async (head: string | null): Promise<ItemWorkflow["state"] | null> => {
+    const answer = await stuckQuestion(db, w);
+    if (!answer) return null;
+    const found: Found = { blocker: "failed-twice", params: { step: "implement", answer } };
+    const rec = atBlocker(found, null, w.plan);
+    return w.approvedBy
+      ? await write({ state: "blocked", blocker: found.blocker, blockerParams: found.params, rec, recAt: at, recHead: head }, "blocked")
+      : await write({ state: "recommending", rec: { ...rec, merges: false, text: t("Start the implementation again, then come back.") }, recAt: at, recHead: head });
+  };
   if (!target || target.number < 0) {
     // An issue with no PR yet: it ends when the issue closes, and stops when its implementation is stuck.
     if (self && self.state !== "OPEN") return await write({ state: "closed", rec: null, blocker: null, blockerParams: null });
-    if (target?.stuck && w.state !== "blocked" && w.approvedBy) {
-      const found: Found = { blocker: "failed-twice", params: { step: "implement" } };
-      return await write({ state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, null, w.plan), recAt: at, recHead: null }, "blocked");
-    }
+    if (target?.stuck && (w.state === "running" || w.state === "waiting")) return await stuck(null);
     return null;
   }
   const pr = await db.get(db.k.selectFrom("main.items").select(["state", "head_oid"]).where("repo", "=", w.repo).where("number", "=", target.number));
@@ -183,23 +219,43 @@ async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stu
   if (!sameJson(plan, w.plan)) patch.plan = plan;
   const view: ReviewView | null = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
 
+  if (target.stuck && w.kind === "issue") {
+    const moved = await stuck(head);
+    if (moved) return moved;
+  }
   const approved = w.approvedBy !== null;
   const fresh = review && review.at > since ? review : null;
+  const fixed = await latestFix(db, w, target.number, since);
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     review: fresh ? { verdict: fresh.verdict, sure: fresh.sure, majors: plan.filter((p) => p.major && p.state === "planned").map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0 } : null,
-    failures: target.stuck ? [{ step: "implement", count: 2 }, ...await failures(db, w.repo, target.number, since)] : await failures(db, w.repo, target.number, since),
-    fix: await latestFix(db, w.repo, target.number, since),
-    plannedFiles: plan.filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!),
+    failures: await failures(db, w.repo, target.number, since),
+    fix: fixed.fix,
+    plannedFiles: fixed.plannedFiles,
     leg: approved ? await endedLeg(db, w, since) : null,
     thresholds,
   });
   if (found) {
-    // The merge leg stops before it can merge; one the merge queue already holds goes through (the approval said merge).
+    // The merge leg stops before it can merge. One an integration batch holds goes through (cancelling it would undo the batch
+    // under its running CI); a queued leg outside a batch is cancelled like any other.
     const leg = await db.get(db.k.selectFrom("main.preapprovals").select("state").where("repo", "=", w.repo).where("number", "=", target.number).where("state", "in", ACTIVE_LEG).orderBy("id", "desc").limit(1));
-    if (leg?.state === "queued") return patch.plan || patch.baseHead ? await write(patch) : null;
-    if (leg) await cancelPreapproval(db, ACTOR, w.repo, target.number, undefined, "workflow");
-    return await write({ ...patch, state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, view, plan), recAt: at, recHead: head }, "blocked");
+    if (leg?.state === "queued" && await inActiveBatch(db, w.repo, target.number)) return patch.plan || patch.baseHead ? await write(patch) : null;
+    if (leg) {
+      try {
+        await cancelPreapproval(db, ACTOR, w.repo, target.number, undefined, "workflow");
+      } catch {
+        // A merge of the repo is running, or the leg changed a moment ago: the next pass looks again.
+        return patch.plan || patch.baseHead ? await write(patch) : null;
+      }
+    }
+    // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
+    let blockPlan = plan;
+    if (typeof found.params.reason === "string" && PREMERGE_STOP.test(found.params.reason)) {
+      const extra = await premergeParts(db, w.repo, target.number, head, plan);
+      blockPlan = [...plan, ...extra];
+      found.params.premerge = extra.map((p) => p.n);
+    }
+    return await write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, view, blockPlan), recAt: at, recHead: head }, "blocked");
   }
 
   const f = facts.get(`${w.repo}#${target.number}`);

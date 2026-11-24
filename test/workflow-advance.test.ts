@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
+import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { mergeDecisionId } from "../src/core/rules.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
@@ -134,4 +135,26 @@ test("a started PR that is not approved comes back with the review's recommendat
   await advanceWorkflows(db);
   const wf = (await liveWorkflow(db, "app", 2))!;
   assert.deepEqual([wf.state, wf.rec?.text, wf.rec?.parts.fix, wf.rec?.merges, wf.plan.map((p) => p.title)], ["recommending", "Fix 1, then merge.", [1], true, ["guard empty input", "typo"]]);
+});
+
+test("a recommendation's fix numbers follow the stored fixes, not the model's list", () => {
+  const reply = JSON.stringify({
+    ref: "app#1", verdict: "take-fix", sure: true, reason: "two fixes", risks: [],
+    fixes: [{ file: "src/a.rs", change: "guard a" }, { file: "src/b.rs", change: "guard b" }],
+    claims: [{ claim: "handles empty input", status: "contradicted", evidence: "src/c.rs:3 indexes element 0", impact: "code-wrong", fix: { file: "src/c.rs", change: "check the length" } }],
+    recommendation: { text: "Fix 2, then merge.", fix: [2], merge: true, close: false },
+  });
+  const r = parseOpusReply(reply, "app#1", true, new Set(), false, [], "Handles empty input.", ["src/a.rs", "src/b.rs", "src/c.rs"])!;
+  assert.deepEqual([r.fixes.map((f) => f.file), r.workflow?.recommendation?.fix], [["src/c.rs", "src/a.rs", "src/b.rs"], [3]], "the claim's fix goes first, so the model's 2 is the stored 3");
+});
+
+test("a plain approval does not accept a hold review nobody was shown", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] });
+  await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r" }));
+  await runCommand(db, actor, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 2 }], at: new Date(Date.now() + 10_000).toISOString() });
+  await advanceWorkflows(db);
+  assert.equal((await liveWorkflow(db, "app", 2))!.blocker, "major-finding");
 });

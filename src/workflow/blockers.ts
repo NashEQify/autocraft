@@ -28,11 +28,16 @@ export type Found = { blocker: Blocker; params: Record<string, unknown> };
 /** A step failing this many times stops the item (blocker 3). */
 export const FAILED_TWICE = 2;
 
-/** The blocker a stopped merge leg's reason (src/preapproval) stands for. */
+/** A stopped merge leg's reason that is the pre-merge review's finding (defects, or unsure). */
+export const PREMERGE_STOP = /pre-merge review (is unsure|found)/;
+
+/**
+ * The blocker a stopped merge leg's reason (src/preapproval) stands for. One failed try is `other`, shown with its reason: a step
+ * failing twice is counted from the tries themselves (`failures`).
+ */
 export function legBlocker(reason: string): Blocker {
   if (/another push moved the head|the head went back/.test(reason)) return "author-commits";
-  if (/the review says (hold|close)|pre-merge review is unsure|pre-merge review found|verification failed/.test(reason)) return "major-finding";
-  if (/fix-up (failed|refused|rejected|cannot-push|push-denied|asked|comment-failed|superseded)|CI failed|pre-merge review of .* failed/.test(reason)) return "failed-twice";
+  if (/the review says (hold|close)|verification failed/.test(reason) || PREMERGE_STOP.test(reason)) return "major-finding";
   if (/too-large/.test(reason)) return "large-fix";
   return "other";
 }

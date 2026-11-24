@@ -134,8 +134,9 @@ function eventKind(r: Run): WorkflowEventKind {
   if (r.end === "backlog") return "backlog";
   if (r.autorepin !== null) return "set";
   if (r.start) return "started";
-  if (r.approve) return "approved";
+  // An answer to the open recommendation is an answer also when it approves the merge: it accepts what the recommendation showed.
   if (r.answers) return "answered";
+  if (r.approve) return "approved";
   if (r.weight !== null && !r.again && !r.fix.length && !r.drop.length) return "weighted";
   return "set";
 }
@@ -150,9 +151,10 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     if (wf) await updateWorkflow(db, wf.id, { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null }, at);
     return { workflowId: wfId, failed };
   };
-  if (r.end === "stop") return await ended("stopped", await fx.stopAll(c));
-  if (r.end === "close") return await ended("closed", await fx.close(c));
-  if (r.end === "backlog") return await ended("backlog", await fx.backlog(c));
+  const cw: fx.Ctx = wf ? { ...c, workflowId: wf.id } : c;
+  if (r.end === "stop") return await ended("stopped", await fx.stopAll(cw));
+  if (r.end === "close") return await ended("closed", await fx.close(cw));
+  if (r.end === "backlog") return await ended("backlog", await fx.backlog(cw));
   if (r.autorepin !== null) {
     const githubId = actor.githubId ?? (await db.get(db.k.selectFrom("main.access").select("github_id").where("login", "=", by)))?.github_id ?? null;
     await fx.autorepin(c, r.autorepin, githubId);
@@ -182,12 +184,14 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   }
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   let preapproval: number | null = null;
+  if (r.decision) await fx.answerQuestion(c, r.decision.decision, r.decision.option);
   if (runs) preapproval = (await fx.again(c, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
-  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via });
+  // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
+  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, ...(item.head ? { baseHead: item.head } : {}) });
   // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
-  if (runs) patch.state = r.again !== null || r.merges ? "running" : r.answers ? "done" : live.state;
+  if (runs) patch.state = r.again !== null || r.merges || r.decision ? "running" : r.answers ? "done" : live.state;
   await db.write(async () => {
     await updateWorkflow(db, live.id, patch, at);
     if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: live.id }).where("id", "=", preapproval).where("workflow_id", "is", null));

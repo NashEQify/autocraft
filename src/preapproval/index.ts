@@ -233,7 +233,7 @@ export class PreapprovalRefused extends Error {
  * The PR's label does not matter (the pre-approval lifts the label gate); a draft, the backlog, a duplicate hold or a scope question still refuse it.
  * `head`, when given, is the only head it may pre-approve: the head the person saw (a command's comment-time head).
  */
-export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string }): Promise<{ label: string }> {
+export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; workflowId?: number }): Promise<{ label: string }> {
   const { repo, number, by, via } = o;
   const ref = `${repo}#${number}`;
   const it = await prRow(db, repo, number);
@@ -253,7 +253,8 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
   await db.write(async () => {
     // Checked again under the write lock: another writer may have started one since the first check.
     if (await active()) throw new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
-    const id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions: "", state: "review", from_head: head, head, updated_at: at, fix_id: null }).returning("id")))!.id;
+    // `workflowId`: the maintainer workflow whose merge leg this is, written with the row so no pass sees it unowned.
+    const id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions: "", state: "review", from_head: head, head, updated_at: at, fix_id: null, workflow_id: o.workflowId ?? null }).returning("id")))!.id;
     await audit(db, by, "preapproval", ref, { id, state: "review", head, queued: "merge-queue", ...(via ? { via } : {}) });
   });
   await say(db, repo, number, `${by} added the PR to the merge queue at ${short(head)}: it merges once the review there says take, the pre-merge review is clean and CI is green.`);
@@ -414,8 +415,13 @@ const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large
  */
 async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => Promise<PrFacts | null>, wake: Wake): Promise<void> {
   const it = await prRow(db, p.repo, p.number);
-  const leg = await legContext(db, p.id);
+  const ctx = await legContext(db, p.id);
   const cancel = async (reason: string) => void await cancelRow(db, p.id, ACTOR, reason, `The pre-approved merge was cancelled: ${reason}.`);
+  // In a repo on the maintainer workflow a row never acts as a legacy pre-approval: the leg of an ended workflow ends with it, and a
+  // row no workflow owns waits for the start that is writing its workflow (stop, backlog and close cancel it by its PR).
+  if (ctx === "ended") return cancel("its workflow ended");
+  if (ctx === "unlinked") return;
+  const leg = ctx;
   const stop = async (to: "asked" | "failed", why: string, head: string, facts: string[] = [why]) => {
     if (leg) return void await move(db, p, to, { reason: why, line: `The pre-approved merge stopped: ${why}.` });
     if (await move(db, p, to, { reason: why, line: `The pre-approved merge stopped: ${why}. A Merge? question was asked.` })) await askMerge(db, p, head, why, facts);

@@ -360,9 +360,7 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
       // On the maintainer workflow the approver's merge leg belongs to the issue's workflow (src/workflow/advance.ts).
       const wf = await repoWorkflow(db, repo) === "new" ? await liveWorkflow(db, repo, number) : null;
       try {
-        await preapproveMerge(db, { repo, number: prNumber, by: wf?.approvedBy ?? im.queuedBy, via: "implement", head: pushed.commit });
-        if (wf) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: wf.id }).where("repo", "=", repo).where("number", "=", prNumber)
-          .where("state", "in", ["fixup", "review", "ci", "queued"]).where("workflow_id", "is", null));
+        await preapproveMerge(db, { repo, number: prNumber, by: wf?.approvedBy ?? im.queuedBy, via: "implement", head: pushed.commit, ...(wf ? { workflowId: wf.id } : {}) });
       } catch (e) {
         const why = oneLine(String((e as Error).message ?? e));
         if (!(e instanceof PreapprovalRefused)) return fail(`#${prNumber} could not be pre-approved: ${why}`, true);
