@@ -1,4 +1,4 @@
-// The Discord search and filing flow: /autocraft search opens a form (app select and description), the reply lists
+// The Discord search and filing flow: /autocraft report opens a form (app select and description), the reply lists
 // matches with "None of these", which goes through the follow-up questions to a checked draft with a type select and
 // File it / Edit / Open on GitHub; File it shows each result of fileIssue(). The daily cap builds the draft from the
 // form alone, and the rate limit refuses.
@@ -12,6 +12,7 @@ import { VectorIndex } from "../src/embed/vectors.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { sanitize } from "../src/discord/issue-draft.ts";
 import type { FileResult } from "../src/discord/file-issue.ts";
+import { installPanel } from "../src/discord/panel.ts";
 import { installIssueNew, type IssueAsk } from "../src/discord/issue-new.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } from "../src/discord/rest.ts";
@@ -65,7 +66,8 @@ const junkCalls: { title: string; body: string; kind?: string }[] = [];
 let junkResult: "junk" | "ok" | "unknown" = "ok";
 const filed: { reporter: string; repo: string; title: string; body: string; kind: string; junkChecked?: boolean }[] = [];
 let fileResult: FileResult = { status: "refused", reason: "x" };
-installIssueNew(ix, { db, keys, search, log: (l) => assert.fail(l), ask, filing: true, junk: async (_d, a) => { junkCalls.push(a); return junkResult; }, file: async (_d, req) => { filed.push(req); return fileResult; } });
+const flow = installIssueNew(ix, { db, keys, search, log: (l) => assert.fail(l), ask, filing: true, junk: async (_d, a) => { junkCalls.push(a); return junkResult; }, file: async (_d, req) => { filed.push(req); return fileResult; } });
+installPanel(ix, db, flow);
 
 let n = 0;
 const send = async (type: number, user: string, data: unknown, channel = "c1") => {
@@ -84,7 +86,7 @@ const submitForm = (user: string, app: string, description: string) =>
   ] });
 const press = (user: string, custom_id: string) => send(3, user, { custom_id });
 const choose = (user: string, custom_id: string, values: string[]) => send(3, user, { custom_id, values });
-const searchCmd = (user: string, channel = "c1") => send(2, user, { name: "autocraft", type: 1, options: [{ name: "search", type: 1 }] }, channel);
+const searchCmd = (user: string, channel = "c1") => send(2, user, { name: "autocraft", type: 1, options: [{ name: "report", type: 1 }] }, channel);
 type Comp = { type: number; label?: string; custom_id?: string; url?: string; content?: string; components?: Comp[]; accessory?: Comp; options?: { value: string; default?: boolean }[] };
 // Buttons and selects in order; a result section contributes its accessory button.
 const rows = (b: EditBody) => (b.components as Comp[]).flatMap((r) => (r.type === 9 ? [r.accessory!] : r.type === 10 ? [] : r.components!));
@@ -109,7 +111,7 @@ before(async () => {
 });
 
 describe("search and filing flow", () => {
-  test("/autocraft search answers with the form: app select preselected, description box; the reply lists matches and the None button", async () => {
+  test("/autocraft report answers with the form: app select preselected, description box; the reply lists matches and the None button", async () => {
     await searchCmd("u1");
     assert.equal(rest.callbacks[0]!.type, 9);
     const comps = rest.callbacks[0]!.data!.components as { type: number; label: string; component: { type: number; custom_id: string; options?: { label: string; value: string; default?: boolean }[]; style?: number } }[];
@@ -125,6 +127,21 @@ describe("search and filing flow", () => {
     // Another person cannot press someone's button.
     await press("u3", rows(b).find((x) => x.label === NONE)!.custom_id!);
     assert.match(rest.callbacks[0]!.data!.content!, /expired/);
+  });
+
+  test("the panel's find button and /autocraft search open a search-only form whose submit replies with matches, not the issue form", async () => {
+    calls.length = 0;
+    for (const open of [() => press("u30", "panel:find"), () => send(2, "u30", { name: "autocraft", type: 1, options: [{ name: "search", type: 1 }] })]) {
+      await open();
+      const modal = rest.callbacks[0]!;
+      assert.equal(modal.type, 9);
+      const comps = modal.data!.components as { component: { type: number; custom_id: string } }[];
+      assert.deepEqual(comps.map((c) => [c.component.type, c.component.custom_id]), [[4, "q"]]);
+      await send(5, "u30", { custom_id: modalId(), components: [{ type: 18, component: { type: 4, custom_id: "q", value: "webp export quality slider does nothing" } }] });
+      assert.match(v2text(rest.edits[0]!), /photocraft#1 Export to WebP/);
+      assert.ok(rows(rest.edits[0]!).some((x) => x.label === "File a new issue"));
+    }
+    assert.deepEqual(calls, []);
   });
 
   test("a junk first message is refused with the GitHub link before any question; a clean one is not checked again at submit", async () => {
