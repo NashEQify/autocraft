@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -125,4 +125,30 @@ test("the split copy of a tree matches cp -a, keeps large hard links inside the 
   assert.equal(readFileSync(join(into, "debug", "deps", "f5"), "utf8"), "mine");
   assert.equal(readFileSync(join(into, "debug", "deps", "f6"), "utf8"), "6");
   assert.ok(statSync(join(into, "debug", "x", "bin")).isFile());
+});
+
+test("a copy undoes the temp entries an interrupted copy's journal names inside the target, and nothing else", async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "warm-cp-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const from = join(root, "from"), to = join(root, "cargo"), journal = join(root, "journal.json");
+  mkdirSync(join(from, "registry", "src", "crate-1"), { recursive: true });
+  writeFileSync(join(from, "registry", "src", "crate-1", "lib.rs"), "fn a() {}");
+  writeFileSync(join(from, ".crates.toml"), "x");
+  mkdirSync(join(to, "registry", "src"), { recursive: true });
+  writeFileSync(join(to, "registry", "src", "fetched"), "mine");
+  const stale = join(to, "registry", "src", ".crate-1.warm-copy-tmp"), staged = join(to, ".warm-copy-tmp-0");
+  mkdirSync(stale);
+  writeFileSync(join(stale, "lib.rs"), "fn");
+  mkdirSync(staged);
+  writeFileSync(join(staged, ".crates.toml"), "");
+  const outside = join(root, ".other.warm-copy-tmp");
+  writeFileSync(outside, "not the copy's");
+  writeFileSync(journal, JSON.stringify([stale, staged, outside, join(to, "registry", "src", "fetched")]));
+  await copyTree(from, to, { journal, minChunk: 1 });
+  const names = execFileSync("find", [to, "-printf", "%P\\n"]).toString().trim().split("\n").sort();
+  assert.deepEqual(names, [".crates.toml", "registry", "registry/src", "registry/src/crate-1", "registry/src/crate-1/lib.rs", "registry/src/fetched"]);
+  assert.equal(readFileSync(join(to, "registry", "src", "crate-1", "lib.rs"), "utf8"), "fn a() {}");
+  assert.equal(readFileSync(join(to, "registry", "src", "fetched"), "utf8"), "mine");
+  assert.equal(readFileSync(outside, "utf8"), "not the copy's");
+  assert.ok(!existsSync(journal));
 });
