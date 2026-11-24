@@ -2,7 +2,8 @@
 //   changedSince   in the source pod: the checkout's files whose content differs from the warm commit's tree, written to
 //                  the task's volume (CHANGED_FILE)
 //   warmCopyPhase  `worker pod warm-copy`, before the steps of an offline step pod: verifies the node's warm version,
-//                  copies its target and CARGO_HOME, and sets the checkout's mtimes
+//                  copies its target and CARGO_HOME, and sets the checkout's mtimes; before the fetch of a network step pod
+//                  (PART=cargo): copies only CARGO_HOME, so the fetch downloads only what the version lacks
 // cargo decides freshness by mtime: a source file older than the dep-info of the unit that read it counts as unchanged.
 // So every checkout file is set to OLD_MTIME (before any warm build), and only the files that changed since the warm
 // commit are set to now. That is sound only when every unit in the warm target was checked by the build at the warm commit,
@@ -221,6 +222,8 @@ const MIN_CALL_BYTES = 64 << 20;
 const LINK_MIN_BYTES = 1 << 20;
 /** The file in the work dir that names what the CARGO_HOME copy adds while it runs. */
 const CARGO_JOURNAL = "warm-copy-cargo.json";
+/** The file in the work dir that names the commit whose CARGO_HOME a finished copy put there: a later copy of it skips CARGO_HOME. */
+export const CARGO_MARK_FILE = "warm-cargo.json";
 
 export type CopyStats = { files: number; bytes: number; calls: number; kept: number; listSecs: number; copySecs: number };
 
@@ -480,6 +483,10 @@ export type CopyMark = { state: "copying" | "done" | "cold"; commit: string; tri
  * checkout's), CARGO_LOCK (that Cargo.lock's sha256, for a pod whose checkout arrives after the copy) and MTIMES (`later`:
  * the checkout arrives after the copy, and the runner sets its mtimes then). A version that does not verify or match is a
  * cold start (exit 0); a missing setting fails the pod.
+ *
+ * PART `cargo` (a network step pod before the fetch): the same checks except the Cargo.lock, since the fetch adds what the
+ * checkout's lock needs; copies only CARGO_HOME and records it in CARGO_MARK_FILE, which the offline pod's copy of the same
+ * commit then skips. It never touches the target, the copy mark or the mtimes, and a refusal leaves CARGO_HOME to the fetch.
  */
 export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: Log): Promise<number> {
   const need = (n: string) => env[`AUTOCRAFT_WARM_${n}`] || (() => {
@@ -492,11 +499,23 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   const keyFiles = need("VERIFY_KEYS").split(",").map((f) => f.trim()).filter(Boolean);
   const volume = need("MODE") === "pvc";
   const journal = join(work, CARGO_JOURNAL);
+  const cargoOnly = env.AUTOCRAFT_WARM_PART === "cargo";
+  const cargoMark = join(work, CARGO_MARK_FILE);
+  let cargoDone = false;
+  try {
+    cargoDone = existsSync(cargoMark) && (JSON.parse(readFileSync(cargoMark, "utf8")) as { commit?: unknown }).commit === commit;
+  } catch {
+    // An unreadable mark copies CARGO_HOME again, which keeps what is there.
+  }
   // A volume-backed target that a finished copy (or an earlier step pod) filled is kept, and so is a cold start's; a
   // half-done copy is redone.
   const state = volume && existsSync(mark) ? (JSON.parse(readFileSync(mark, "utf8")) as Partial<CopyMark>).state : undefined;
   const write = (m: CopyMark) => writeFileSync(mark, JSON.stringify(m));
   const cold = (why: string) => {
+    if (cargoOnly) {
+      log(`warm copy: ${why}; the fetch fills CARGO_HOME`);
+      return 0;
+    }
     if (!isEmpty(target)) clearDir(target);
     write({ state: "cold", commit, why });
     log(`warm copy: ${why}; cold start`);
@@ -508,11 +527,15 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   } catch (e) {
     return cold(`removing what an interrupted copy left in CARGO_HOME failed (${(e as Error).message})`);
   }
-  if (state === "cold") {
+  if (cargoOnly && cargoDone) {
+    log("warm copy: CARGO_HOME already holds this version's copy; kept");
+    return 0;
+  }
+  if (state === "cold" && !cargoOnly) {
     log("warm copy: an earlier step pod of this task started cold; kept cold");
     return 0;
   }
-  if (!isEmpty(target)) {
+  if (!cargoOnly && !isEmpty(target)) {
     if (state !== "copying") {
       log(`warm copy: the target already holds ${state === "done" ? "the warm copy" : "a build"}; kept`);
       return 0;
@@ -553,19 +576,29 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   const refused = toolchainRefusal({ image: header.image, rustc: header.rustc, toolchain: header.toolchain ?? null }, { image: need("IMAGE"), ...readToolchain(env.AUTOCRAFT_WARM_TOOLCHAIN_DIR) });
   if (refused) return cold(`${at} ${refused}`);
   if (header.envHash !== need("ENV_HASH")) return cold(`${at} was built with another CI env`);
-  if (env.AUTOCRAFT_WARM_SAME_LOCK === "1") {
+  if (env.AUTOCRAFT_WARM_SAME_LOCK === "1" && !cargoOnly) {
     const lock = env.AUTOCRAFT_WARM_CARGO_LOCK || cargoLockOf(join(work, "src"));
     if (!header.cargoLock || header.cargoLock !== lock) return cold(`${at} was built from another Cargo.lock`);
   }
   const t0 = performance.now();
   const logTree = (name: string, s: CopyStats) => log(`warm copy: ${name} ${s.files} files, ${(s.bytes / 1e9).toFixed(1)} GB in ${(s.listSecs + s.copySecs).toFixed(1)} s (list ${s.listSecs.toFixed(1)} s, ${s.calls} cp${s.kept ? `, ${s.kept} entries already there kept` : ""})`);
   try {
-    if (volume) write({ state: "copying", commit });
-    logTree("target", await copyTree(join(cur, "target"), target));
-    // CARGO_HOME may already hold what an earlier step fetched: that is kept.
-    logTree("CARGO_HOME", await copyTree(join(cur, "cargo"), cargoHome, { journal }));
+    if (!cargoOnly) {
+      if (volume) write({ state: "copying", commit });
+      logTree("target", await copyTree(join(cur, "target"), target));
+    }
+    if (cargoDone) log("warm copy: CARGO_HOME already holds this version's copy (an earlier step pod made it); kept");
+    else {
+      // CARGO_HOME may already hold what an earlier step fetched: that is kept.
+      logTree("CARGO_HOME", await copyTree(join(cur, "cargo"), cargoHome, { journal }));
+      writeFileSync(cargoMark, JSON.stringify({ commit }));
+    }
   } catch (e) {
     return cold(`copying ${at} failed (${(e as Error).message})`);
+  }
+  if (cargoOnly) {
+    log(`warm copy: CARGO_HOME of ${at} in ${((performance.now() - t0) / 1000).toFixed(1)} s, before the fetch`);
+    return 0;
   }
   const secs = (performance.now() - t0) / 1000;
   const trimmed = header.trimmed === true;

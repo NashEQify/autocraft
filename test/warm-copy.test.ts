@@ -13,7 +13,8 @@ import { OLD_MTIME_SEC, copyTree, setExtMtimes, setMtimes, warmCopyPhase } from 
 
 const A = "a".repeat(40), B = "b".repeat(40);
 
-const swapTest = (trimmed: boolean) => async (t: TestContext) => {
+/** A node's warm dir with signed versions of commits A and B (`current` is A), a task's work dir, and warm-copy's env for A. */
+function fixture(t: TestContext, trimmed: boolean) {
   const root = mkdtempSync(join(tmpdir(), "warm-copy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -44,6 +45,11 @@ const swapTest = (trimmed: boolean) => async (t: TestContext) => {
     AUTOCRAFT_WARM_TARGET: target, AUTOCRAFT_WARM_CARGO_HOME: cargoHome, AUTOCRAFT_WARM_CHECKOUT: checkout, AUTOCRAFT_WARM_IMAGE: "img",
     AUTOCRAFT_WARM_ENV_HASH: "h", AUTOCRAFT_WARM_MODE: "tmpfs",
   };
+  return { source, work, target, cargoHome, env };
+}
+
+const swapTest = (trimmed: boolean) => async (t: TestContext) => {
+  const { source, work, target, cargoHome, env } = fixture(t, trimmed);
   const logs: string[] = [];
   const run = warmCopyPhase(work, env, (s) => logs.push(s));
   // warm-sync's swap, while the copy runs.
@@ -58,6 +64,24 @@ const swapTest = (trimmed: boolean) => async (t: TestContext) => {
 };
 test("a swap of current during the copy does not mix versions", swapTest(true));
 test("an untrimmed warm copy leaves the gate's checkouts' mtimes alone", swapTest(false));
+
+test("the copy before the fetch fills only CARGO_HOME, and the offline pod's copy keeps what the fetch added", async (t) => {
+  const { work, target, cargoHome, env } = fixture(t, true);
+  const logs: string[] = [];
+  const srcMtime = () => statSync(join(work, "src", "lib.rs")).mtimeMs;
+  const before = srcMtime();
+  assert.equal(await warmCopyPhase(work, { ...env, AUTOCRAFT_WARM_PART: "cargo" }, (s) => logs.push(s)), 0);
+  assert.equal(readFileSync(join(cargoHome, "which"), "utf8"), A, logs.join("\n"));
+  assert.ok(!existsSync(target), "the target is left to the offline pod");
+  assert.equal(srcMtime(), before, "the checkout's mtimes are left to the offline pod");
+  // The fetch adds a crate the version lacks and the version's file is replaced: the offline copy keeps both.
+  writeFileSync(join(cargoHome, "fetched"), "f");
+  writeFileSync(join(cargoHome, "which"), "fetch");
+  assert.equal(await warmCopyPhase(work, env, (s) => logs.push(s)), 0);
+  assert.equal(readFileSync(join(target, "which"), "utf8"), A, logs.join("\n"));
+  assert.equal(readFileSync(join(cargoHome, "which"), "utf8"), "fetch");
+  assert.ok(existsSync(join(cargoHome, "fetched")));
+});
 
 test("an untrimmed version counts every source as changed", (t) => {
   const work = mkdtempSync(join(tmpdir(), "warm-mtimes-"));
