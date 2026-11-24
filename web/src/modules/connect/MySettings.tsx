@@ -26,7 +26,8 @@ const ITEMS_LABEL: Record<TaskItems, string> = { all: "All items", fast: "Fast-t
 type ListSaves<T = string[]> = { chain: Promise<unknown>; n: number; confirmed: T };
 const listSaves = <T = string[],>(confirmed: T): ListSaves<T> => ({ chain: Promise.resolve(), n: 0, confirmed });
 
-export function MySettings() {
+/** `advanced`: interactive slots and the Live board privacy sit in an Advanced fold at the end, for the Runner page. */
+export function MySettings({ advanced = false }: { advanced?: boolean }) {
   const api = useApi();
   const write = useWrite({ latestOnly: true });
   const { data, error } = useQuery("my-settings", (a) => a.me.settings.get());
@@ -185,6 +186,36 @@ export function MySettings() {
     </label>
   );
   const item = "flex items-center gap-3 max-sm:justify-between";
+  const slotsRow = (
+        <label className={item}>
+          <span className="text-ink/80">Interactive slots</span>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={4}
+            step={1}
+            value={slots}
+            invalid={!validSlots(slots)}
+            onChange={(e) => {
+              setSlots(e.target.value);
+              edited();
+            }}
+            onBlur={() => saveSlots(slots)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveSlots(slots);
+            }}
+            aria-label="Interactive slots"
+            className="w-20 text-right"
+          />
+        </label>
+  );
+  const privRow = (
+        <span className={item}>
+          <span className="text-ink/80">Private on the Live board</span>
+          <Switch on={priv} onChange={savePrivate} label="Private on the Live board" busy={write.busy === "runner-private"} />
+        </span>
+  );
   return (
     <Block
       dense
@@ -233,36 +264,12 @@ export function MySettings() {
             className="w-20 text-right"
           />
         </label>
-        <label className={item}>
-          <span className="text-ink/80">Interactive slots</span>
-          <Input
-            type="number"
-            inputMode="numeric"
-            min={0}
-            max={4}
-            step={1}
-            value={slots}
-            invalid={!validSlots(slots)}
-            onChange={(e) => {
-              setSlots(e.target.value);
-              edited();
-            }}
-            onBlur={() => saveSlots(slots)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") saveSlots(slots);
-            }}
-            aria-label="Interactive slots"
-            className="w-20 text-right"
-          />
-        </label>
+        {!advanced && slotsRow}
         <span className={item}>
           <span className="text-ink/80">Manual only</span>
           <Switch on={manual} onChange={saveManual} label="Manual only" busy={write.busy === "manual-only"} />
         </span>
-        <span className={item}>
-          <span className="text-ink/80">Private on the Live board</span>
-          <Switch on={priv} onChange={savePrivate} label="Private on the Live board" busy={write.busy === "runner-private"} />
-        </span>
+        {!advanced && privRow}
       </div>
       <Fold className="mt-2" title="My repos" summary={picks.length ? `${picks.length} of ${shown.length} repos` : "All repos"}>
         <div role="group" aria-label="My repos" className="mt-1 rounded-md border border-line p-1 sm:max-w-3xl">
@@ -317,6 +324,14 @@ export function MySettings() {
           </div>
         </div>
       </Fold>
+      {advanced && (
+        <Fold className="mt-1" title="Advanced">
+          <div className="mt-2 flex flex-col gap-2 text-sm sm:max-w-md">
+            {slotsRow}
+            {privRow}
+          </div>
+        </Fold>
+      )}
       <ErrorLine error={problem ?? write.error} className="mt-2" />
     </Block>
   );

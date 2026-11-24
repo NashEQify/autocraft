@@ -34,11 +34,12 @@ import { homeModule } from "../modules/home";
 import { hubModule } from "../modules/hub";
 import { maintainHomeModule } from "../modules/maintain/home";
 import { helpModule } from "../modules/help";
+import { runnerModule } from "../modules/runner";
 
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
 /** The new dashboard: its own Home; the classic views serve the pages the new dashboard has not replaced yet. */
-export const v2Modules: FeatureModule[] = [maintainHomeModule, helpModule, ...classicModules.filter((m) => m !== homeModule)];
+export const v2Modules: FeatureModule[] = [maintainHomeModule, helpModule, runnerModule, ...classicModules.filter((m) => m !== homeModule)];
 
 /** Every module of either dashboard, for preloading code. */
 export const allModules: FeatureModule[] = [...new Set([...classicModules, ...v2Modules])];

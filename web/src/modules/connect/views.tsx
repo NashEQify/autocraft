@@ -72,7 +72,7 @@ export function ConnectView({ user }: ViewProps) {
   );
 }
 
-function Connector({ user }: Pick<ViewProps, "user">) {
+export function Connector({ user }: Pick<ViewProps, "user">) {
   const api = useApi();
   const write = useWrite();
   const { data, error } = useQuery("mcp-tokens", (a) => a.mcp.tokens());

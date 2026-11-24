@@ -45,7 +45,7 @@ const MAIN: Page[] = [
   { to: "/queue", label: tk("Work queue"), icon: QueueIcon, view: "next/:tab?", also: ["/next", "/batches", "/model-queue"] },
   { to: "/stats", label: tk("Stats"), icon: ChartLineUpIcon, view: "progress", also: ["/progress", "/activity", "/cost", "/downloads", "/rates", "/agents", "/classifiers", "/main-ci", "/nightly", "/now", "/stuck"] },
 ];
-const RUNNER: Page = { to: "/runner", label: tk("Runner"), icon: CpuIcon, view: "connect/:tab?", also: ["/connect"] };
+const RUNNER: Page = { to: "/runner", label: tk("Runner"), icon: CpuIcon, also: ["/connect"] };
 const REFERENCE: Page[] = [
   { to: "/prompts", label: tk("Prompts") },
   { to: "/envs", label: tk("Environments"), also: ["/workspaces"] },
