@@ -329,6 +329,11 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["build_sizes", "memory_source", "TEXT NOT NULL DEFAULT 'operator'"],
   // The login whose own Task Runners run a try session's model call (src/build/workspace-session.ts).
   ["workspace_sessions", "for_login", "TEXT COLLATE NOCASE"],
+  // Maintainer workflow (src/workflow): which model a repo runs (legacy | new, set by `workflow flip`), the parsed answer of a
+  // GitHub comment, and the workflow a pre-approved merge works for.
+  ["tracked_repos", "workflow", "TEXT NOT NULL DEFAULT 'legacy'"],
+  ["github_commands", "parsed", "TEXT"],
+  ["preapprovals", "workflow_id", "INTEGER"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

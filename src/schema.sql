@@ -645,7 +645,8 @@ CREATE TABLE IF NOT EXISTS github_commands (
   reply TEXT,                         -- posted | failed | none (no answer is given); null while the answer is still to post
   ref_repo TEXT,                      -- autorepin: the repository of the pull request it names, as written (`owner/name` or `name`); null with ref_number: autorepin off
   ref_number INTEGER,
-  ref_branch TEXT                     -- autorepin `via <branch>`: the dependency's branch to pin from; null: its default branch
+  ref_branch TEXT,                    -- autorepin `via <branch>`: the dependency's branch to pin from; null: its default branch
+  parsed TEXT                         -- answer (maintainer workflow repos): JSON Parsed (src/workflow/types.ts); null for the other commands
 );
 CREATE INDEX IF NOT EXISTS github_commands_state ON github_commands(state, reply);
 -- Autorepin (src/repin): once the pull request `ref_repo#ref_number` is merged, the pull request `repo#number` gets a commit that
@@ -2247,9 +2248,57 @@ CREATE TABLE IF NOT EXISTS preapprovals (
   head TEXT,
   reason TEXT,
   updated_at TEXT NOT NULL,
-  fix_id INTEGER
+  fix_id INTEGER,
+  workflow_id INTEGER                 -- the item_workflows row whose merge leg this is; null outside the maintainer workflow
 );
 CREATE INDEX IF NOT EXISTS preapprovals_item ON preapprovals(repo, number, id);
+
+-- The maintainer workflow (src/workflow): one live row per started item, in repos whose tracked_repos.workflow is 'new'.
+-- entry: review | fixup | implement | merge. state: running | waiting | blocked | recommending (live) | done | stopped |
+-- closed | backlog. JSON columns: blocker_params (the blocker's facts), rec (Recommendation in src/workflow/types.ts),
+-- plan (PlanPart[]). legacy_preapproval_id: the preapprovals row that works the merge leg.
+CREATE TABLE IF NOT EXISTS item_workflows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  kind TEXT NOT NULL,                 -- pr | issue
+  entry TEXT NOT NULL,
+  weight INTEGER NOT NULL DEFAULT 5,
+  state TEXT NOT NULL,
+  started_by TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  started_via TEXT NOT NULL,          -- github | discord | agent | dashboard | cli
+  base_head TEXT,                     -- the PR head when it started: author commits after it are a blocker
+  approved_by TEXT, approved_at TEXT, approved_via TEXT,
+  stopped_by TEXT, stopped_at TEXT,
+  blocker TEXT, blocker_params TEXT,
+  rec TEXT, rec_at TEXT, rec_head TEXT,
+  plan TEXT NOT NULL DEFAULT '[]',
+  legacy_preapproval_id INTEGER,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
+CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);
+-- What people did to an item's workflow, with the parsed command (never the raw text): started, approved, answered,
+-- ambiguous, blocked, stopped, weighted. workflow_id is null for an ambiguous answer on an item with no workflow.
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id INTEGER,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  login TEXT NOT NULL,
+  via TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  parsed TEXT,                        -- JSON Parsed (src/workflow/types.ts)
+  line TEXT,                          -- the confirmation line given
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
+-- The last "link your account" reply to a GitHub commenter with no AutoCraft login; one a week per login. Bookkeeping: no live topic.
+CREATE TABLE IF NOT EXISTS github_link_nudges (
+  login TEXT PRIMARY KEY COLLATE NOCASE,
+  at TEXT NOT NULL
+) WITHOUT ROWID;
 
 -- Security deep scan (src/security). Private to operators and maintainers; never an input of the planner.
 -- security_scans.state: modeling | scanning | verifying | done | stopped | capped | failed (modeling includes waiting in the job queue).

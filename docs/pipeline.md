@@ -902,6 +902,7 @@ Dry run is the default for every writing command; `--apply` writes (and still re
 | `autocraft-server security scan\|stop\|list\|show\|act` | Security deep scan |
 | `autocraft-server conversation show\|say\|do` | Conversations |
 | `autocraft-server decisions test-repo [REPO on\|off]` | Marks a tracked repo as a test repo |
+| `autocraft-server workflow flip <repo> [--dry-run] [--legacy]`, `workflow status [repo]` | Moves a repo and its in-flight items to the maintainer workflow, or back (`--legacy`); lists the repos on it and their live workflows |
 | `autocraft-server decisions answer ID OPTION --as LOGIN [--note TEXT]`, `cards REPO#N`, `card ID --as LOGIN [--skip N,N] [--note TEXT]`, `retry ID --as LOGIN` | Answer, run a card or retry a write on test repos |
 | `autocraft-server pipeline on\|off\|limit`, `accounts list\|set\|jev` | Switch, limits, accounts |
 
