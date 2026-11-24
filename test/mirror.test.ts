@@ -77,15 +77,19 @@ test("search mode writes tracked results, ignores untracked, advances the high w
   assert.deepEqual(at, [{ name: "a", synced_at: "2026-11-02T10:05:00Z" }, { name: "b", synced_at: "2026-11-02T10:05:00Z" }], "every tracked repo counts as synced");
 });
 
-// A fake search over `all`: honours `updated:A..B`, pages by cursor, and reports the true match count.
-function searchClient(all: ReturnType<typeof node>[]) {
+// A fake search over `all`: honours `updated:A..B` and the updatedAt sort on the index time (`indexedAt`, else
+// `updatedAt`), pages by cursor, and reports the true match count.
+type Indexed = ReturnType<typeof node> & { indexedAt?: string };
+const indexTime = (n: Indexed) => n.indexedAt ?? n.updatedAt;
+function searchClient(all: Indexed[]) {
   const c = validating({
     spent: 0, remaining: 4000 as number | null, queries: [] as string[], windows: [] as { from: string; to: string; matches: number }[],
     async query(query: string, v: Record<string, unknown>) {
       c.queries.push(query);
       assert.ok(query.includes("search("), "only search queries are expected");
       const m = /updated:(\S+)\.\.(\S+)/.exec(String(v.q))!;
-      const hits = all.filter((n) => n.updatedAt >= m[1] && n.updatedAt <= m[2]);
+      const hits = all.filter((n) => indexTime(n) >= m[1] && indexTime(n) <= m[2]);
+      if (/ sort:updated-asc\b/.test(String(v.q))) hits.sort((x, y) => indexTime(x).localeCompare(indexTime(y)));
       const start = Number(v.after ?? 0), size = Number(v.first);
       if (!v.after) c.windows.push({ from: m[1], to: m[2], matches: hits.length });
       const end = Math.min(start + size, 1000, hits.length);
@@ -113,6 +117,31 @@ test("a window with more than 1,000 matches is split into slices; nothing falls 
 
 
 
+
+test("a search run stopped mid-way keeps the pages it stored, and the high water passes no unstored item", async () => {
+  const { db } = await scratch();
+  // Three items per second, so equal times straddle page boundaries; listed out of order, the search sorts them.
+  const all: Indexed[] = Array.from({ length: 70 }, (_, i) => node(i % 2 ? "a" : "b", i + 1, i % 3 ? "OPEN" : "CLOSED", at(Math.floor(i / 3) * 5))).reverse();
+  // The last item of the first page changed just now, and the index still sorts it at its old time.
+  const ahead = [...all].sort((x, y) => x.updatedAt.localeCompare(y.updatedAt))[19];
+  ahead.indexedAt = ahead.updatedAt;
+  ahead.updatedAt = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const c = searchClient(all);
+  const query = c.query;
+  let calls = 0;
+  c.query = async (q, v) => { if (++calls === 3) throw new Error("stopped"); return query(q, v); };
+  await assert.rejects(runSync(db, c, opts, new Date("2026-11-02T10:30:00Z")), /stopped/);
+  const stored = new Set((await db.all(db.k.selectFrom("items").select("number"))).map((r) => Number(r.number)));
+  const mark = (await hw(db))!;
+  assert.ok(stored.size > 0 && stored.size < all.length);
+  assert.ok(mark > "2026-11-02T09:30:00Z", "the high water moved with the stored pages");
+  assert.ok(all.every((n) => stored.has(n.number) || n.updatedAt >= mark), "every item before the high water is stored");
+
+  const again = searchClient(all);
+  await runSync(db, again, opts, new Date("2026-11-02T10:31:00Z"));
+  assert.ok(again.windows[0].from > "2026-11-02T09:20:00Z", "the next run starts from the kept high water");
+  assert.equal((await db.all(db.k.selectFrom("items").select("number"))).length, all.length);
+});
 
 test("sync stores the text hashes the planner compares", async () => {
   const { db } = await scratch();

@@ -17,6 +17,7 @@ import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/
 import { DEFAULT_OWNER, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { exclusive } from "./async-seq.ts";
+import { isFenced } from "./db/fence.ts";
 import type { Expression, Insertable } from "kysely";
 import type { Db } from "./db/index.ts";
 import * as kx from "./db/kx.ts";
@@ -340,48 +341,72 @@ export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<
     eb(eb.ref("excluded.mergeable"), "is distinct from", "MERGEABLE"),
   ])).then(eb.ref(`${table}.mergeable`)).else(eb.ref("excluded.mergeable")).end();
 
+/** One item read: its repo, kind and detail level, and the node GitHub returned. */
+type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node };
+
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**
  * `readAt` is when the read of these nodes started (before its first GitHub request), stored as `item_reads.synced_at`, so a
  * read that began before a change never passes for one made after it (src/github/commands.ts compares it with a comment's time).
  */
 async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes: Node[], force = false, readAt: string = iso(new Date())): Promise<void> {
+  await writeNodes(db, nodes.map((n) => ({ repo, kind, detail, n })), { force, readAt });
+}
+
+/**
+ * Writes items of any repos, kinds and detail levels in one write transaction. `inside` runs last in that transaction, also
+ * when nothing needed writing, so what it records commits with the items or not at all.
+ */
+async function writeNodes(db: Db, nodes: readonly NodeWrite[], opts: { force?: boolean; readAt?: string; inside?: () => Promise<void> } = {}): Promise<void> {
+  const force = opts.force ?? false;
+  const readAt = opts.readAt ?? iso(new Date());
   // Upserts keep each row's rowid, which the full-text index (schema.sql) is keyed on.
   const itemUpsert = COLUMNS.filter((c) => c !== "repo" && c !== "number" && c !== "mergeable");
   const commentUpsert = ["repo", "number", "kind", "author", "created_at", "body", "review_state", "commit_oid", "counted", "author_association", "mentions_pipeline", "url"] as const;
   const live = appSlug();
   if (live) { try { await rememberSlug(db, live); } catch { /* read-only connection */ } }
   const own = await mentionNames(db, live);
-  // Rows are built before the write lock, and the lock covers a fixed number of statements per page (multi-row, in
-  // batches), not statements per item: on Postgres each one is a network round trip. A number read twice keeps its last read.
-  const page = [...new Map(nodes.map((n) => [Number(n.number), n])).values()].map((n) => ({
-    n, row: toRow(repo, kind, n, detail), comments: detail === "full" ? commentRows(repo, kind, n, own) : [],
+  // Rows are built before the write lock, and the lock covers a fixed number of statements per call (multi-row, in
+  // batches), not statements per item: on Postgres each one is a network round trip. An item read twice keeps its last read.
+  const key = (repo: string, number: number) => `${repo}#${number}`;
+  const page = [...new Map(nodes.map((w) => [key(w.repo, Number(w.n.number)), w])).values()].map((w) => ({
+    n: w.n, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [],
   }));
-  if (!page.length) return;
-  const numbersOf = (xs: readonly { row: ItemRow }[]) => xs.map((x) => x.row.number);
+  if (!page.length) {
+    if (opts.inside) await db.write(opts.inside);
+    return;
+  }
+  type Entry = (typeof page)[number];
+  const pairsOf = (xs: readonly Entry[]) => xs.map((x) => [x.row.repo, x.row.number] as const);
+  const isRef = (xs: readonly Entry[]) => kx.tupleIn(db, ["repo", "number"], pairsOf(xs), ["text", "bigint"]);
   await db.write(async () => {
     // A read never replaces what a later-started read stored: the item, its comments and its read time stay the newer read's.
-    const reads = new Map<number, string>();
+    const reads = new Map<string, string>();
     for (const b of kx.batches(page)) {
-      for (const r of await db.all(db.k.selectFrom("main.item_reads").select(["number", "synced_at"]).where("repo", "=", repo).where(kx.inList(db, "number", numbersOf(b), "bigint")))) reads.set(Number(r.number), r.synced_at);
+      for (const r of await db.all(db.k.selectFrom("main.item_reads").select(["repo", "number", "synced_at"]).where(isRef(b)))) reads.set(key(r.repo, Number(r.number)), r.synced_at);
     }
-    const current = page.filter((x) => { const last = reads.get(x.row.number); return last === undefined || !(Date.parse(last) > Date.parse(readAt)); });
-    if (!current.length) return;
+    const current = page.filter((x) => { const last = reads.get(key(x.row.repo, x.row.number)); return last === undefined || !(Date.parse(last) > Date.parse(readAt)); });
+    if (current.length) await writeCurrent(current);
+    if (opts.inside) await opts.inside();
+  });
+
+  async function writeCurrent(current: Entry[]): Promise<void> {
     // A row identical to the stored one (overlapping reads re-fetch many) writes nothing.
-    const stored = new Map<number, Record<string, unknown>>();
+    const stored = new Map<string, Record<string, unknown>>();
     for (const b of kx.batches(current)) {
-      for (const r of await db.all(db.k.selectFrom("items").select(COLUMNS).where("repo", "=", repo).where(kx.inList(db, "number", numbersOf(b), "bigint")))) stored.set(Number(r.number), r);
+      for (const r of await db.all(db.k.selectFrom("items").select(COLUMNS).where(isRef(b)))) stored.set(key(r.repo, Number(r.number)), r);
     }
-    const changed = force ? current : current.filter((x) => { const old = stored.get(x.row.number); return !old || !COLUMNS.every((c) => old[c] === x.row[c]); });
+    const changed = force ? current : current.filter((x) => { const old = stored.get(key(x.row.repo, x.row.number)); return !old || !COLUMNS.every((c) => old[c] === x.row[c]); });
     for (const b of kx.batches(changed)) {
       await db.run(db.k.insertInto("main.items").values(b.map((x) => x.row)).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
         ...kx.excluded(itemUpsert)(eb),
         mergeable: keepKnownMergeableExpr(eb, "items"),
       }))));
       // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
-      if (kind === "pr") {
-        const refs = kx.caseOf("number", b.map((x) => [x.row.number, textRefs(x.row.title, x.row.body)] as const));
-        await db.run(db.k.updateTable("main.items").set({ text_refs: refs }).where("repo", "=", repo).where(kx.inList(db, "number", numbersOf(b), "bigint")));
+      const prs = b.filter((x) => x.kind === "pr");
+      if (prs.length) {
+        const refs = kx.refCase(prs.map((x) => [x.row.repo, x.row.number, textRefs(x.row.title, x.row.body)] as const));
+        await db.run(db.k.updateTable("main.items").set({ text_refs: refs }).where(isRef(prs)));
       }
     }
     // The account seen under a login string owns its id-less history for the whitelist; a later account with the same login does not inherit it.
@@ -394,19 +419,20 @@ async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes
       const bind = [...ids].filter(([login]) => !unbound.has(login)).map(([login, id]) => ({ login, id }));
       for (const b of kx.batches(bind)) await db.run(db.k.insertInto("main.author_ids").values(b).onConflict((oc) => oc.doNothing()));
     }
-    if (detail === "full" && changed.length) {
+    const full = changed.filter((x) => x.detail === "full");
+    if (full.length) {
       // A forced re-read of an unchanged item upserts in place: an identical comment bumps no topic. Comments past the newest 20 go.
-      if (!force) for (const b of kx.batches(changed)) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", repo).where(kx.inList(db, "number", numbersOf(b), "bigint")));
-      const comments = [...new Map(changed.flatMap((x) => x.comments).map((c) => [c.id, c])).values()];
+      if (!force) for (const b of kx.batches(full)) await db.run(db.k.deleteFrom("main.comments").where(isRef(b)));
+      const comments = [...new Map(full.flatMap((x) => x.comments).map((c) => [c.id, c])).values()];
       for (const b of kx.batches(comments)) await db.run(db.k.insertInto("main.comments").values(b).onConflict((oc) => oc.column("id").doUpdateSet(kx.excluded(commentUpsert))));
-      if (force) for (const x of changed) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", repo).where("number", "=", x.row.number).where(kx.inList(db, "id", x.comments.map((r) => r.id), "text", true)));
+      if (force) for (const x of full) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", x.row.repo).where("number", "=", x.row.number).where(kx.inList(db, "id", x.comments.map((r) => r.id), "text", true)));
     }
     for (const b of kx.batches(current)) {
-      await db.run(db.k.insertInto("main.item_reads").values(b.map((x) => ({ repo, number: x.row.number, synced_at: readAt })))
+      await db.run(db.k.insertInto("main.item_reads").values(b.map((x) => ({ repo: x.row.repo, number: x.row.number, synced_at: readAt })))
         .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["synced_at"]))
           .where((eb) => eb(eb.fn<number>("julianday", [eb.ref("excluded.synced_at")]), ">=", eb.fn<number>("julianday", [eb.ref("main.item_reads.synced_at")])))));
     }
-  });
+  }
 }
 
 // `repositoryOwner` serves organizations and users alike.
@@ -543,15 +569,41 @@ const setSetting = async (db: Db, key: string, value: string): Promise<void> => 
   await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
 };
 
+/**
+ * How far a page of a slice `..to` searched in updatedAt order lets the org high water move once it is stored, or null.
+ * A finished slice is stored up to its newest item (at most `to`: later slices are unread). Mid-slice, search sorts on
+ * the time the index holds, which lags a recent change: only items last updated before `settledBefore` (the page's
+ * request time less the index lag bound) sort at their updatedAt. Every unread item sorts after them, so the mark is the
+ * newest of them. They must be in order on the page and not older than `prev`, the newest such item of the slice's
+ * earlier pages; otherwise (the sort not applied) the page moves nothing until its slice is finished.
+ */
+export function pageMark(nodes: readonly { updatedAt: string }[], o: { to: string; done: boolean; sliceNewest: string | null; settledBefore: string; prev: string | null }): string | null {
+  const cap = (t: string | null) => (t === null ? null : t < o.to ? t : o.to);
+  if (o.done) return cap(o.sliceNewest);
+  const settled = settledTimes(nodes, o.settledBefore);
+  if (!settled.length || (o.prev !== null && settled[0] < o.prev) || settled.some((t, i) => i > 0 && t < settled[i - 1])) return null;
+  return cap(settled[settled.length - 1]);
+}
+
+const settledTimes = (nodes: readonly { updatedAt: string }[], before: string): string[] => nodes.map((n) => n.updatedAt).filter((t) => t < before);
+
+/** Moves `org_high_water` to `t` unless it is already there or later. */
+const advanceHighWater = async (db: Db, t: string): Promise<void> => {
+  await db.run(db.k.insertInto("main.settings").values({ key: "org_high_water", value: t })
+    .onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"])).where((eb) => eb("main.settings.value", "<", eb.ref("excluded.value")))));
+};
+
 // Search returns at most SEARCH_CAP results per query. A window with more matches is cut in half
 // (`updated:A..B` is inclusive, in whole seconds) until every slice fits. A one-second slice with
 // more matches than the cap cannot be read by search; the tracked repos are listed for that
 // second instead.
 export type SearchResult = { count: number; newest: string | null; slices: number; fallbacks: number };
 
-// Everything updated from `since` to `until`, oldest slice first. `newest` is the largest updatedAt
-// returned (tracked repos or not), the next sync's starting point; null when nothing matched.
-export async function syncBySearch(db: Db, client: Querier, tracked: string[], since: string, until: string): Promise<SearchResult> {
+// Everything updated from `since` to `until`, oldest slice first, each slice in updatedAt order. `newest` is the largest
+// updatedAt returned (tracked repos or not), the next sync's starting point; null when nothing matched.
+// `progress(t)` runs in the write transaction of a page once every item updated before `t` is stored (see pageMark), so
+// a stopped run keeps what it finished.
+export async function syncBySearch(db: Db, client: Querier, tracked: string[], since: string, until: string, progress?: (t: string) => Promise<void>): Promise<SearchResult> {
   const trackedSet = new Set(tracked);
   // Before the first request: the read start every page of this run is stored with (see writePage).
   const startedAt = iso(new Date());
@@ -576,27 +628,40 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
     }
   }
 
-  async function write(nodes: Node[]): Promise<void> {
-    const groups = new Map<string, Node[]>();
+  // One write transaction per page. When it fails for another reason than the fence, the items are written one by one,
+  // so every item that can be stored is, and the run then fails with the first error, the page's mark unrecorded.
+  async function write(nodes: Node[], mark: string | null): Promise<void> {
+    const items: NodeWrite[] = [];
     for (const n of nodes) {
       if (n?.updatedAt && n.updatedAt > (out.newest ?? "")) out.newest = n.updatedAt;
       // Untracked repos are dropped here, before anything else is done with the node.
       if (!n?.repository || !trackedSet.has(n.repository.name) || !ownedBy(n, n.repository.name)) continue;
-      const kind: Kind = n.__typename === "PullRequest" ? "pr" : "issue";
-      const detail: Detail = n.state === "OPEN" ? "full" : "light";
-      const key = `${n.repository.name}\t${kind}\t${detail}`;
-      groups.set(key, [...(groups.get(key) ?? []), n]);
-      if (n.updatedAt > (repoNewest.get(n.repository.name) ?? "")) repoNewest.set(n.repository.name, n.updatedAt);
+      items.push({ repo: n.repository.name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n });
     }
-    for (const [key, group] of groups) {
-      const [repo, kind, detail] = key.split("\t");
-      await writePage(db, repo, kind as Kind, detail as Detail, group, false, startedAt);
-      out.count += group.length;
+    const inside = mark && progress ? () => progress(mark) : undefined;
+    try {
+      await writeNodes(db, items, { readAt: startedAt, inside });
+    } catch (e) {
+      if (isFenced(e) || items.length < 2) throw e;
+      console.warn(`  a page of ${items.length} items failed to write (${(e as Error).message}): writing them one by one`);
+      let first: unknown = null;
+      for (const w of items) {
+        try { await writeNodes(db, [w], { readAt: startedAt }); } catch (e1) {
+          if (isFenced(e1)) throw e1;
+          first ??= e1;
+          console.warn(`  ${w.repo}#${w.n.number}: not stored: ${(e1 as Error).message}`);
+        }
+      }
+      if (first) throw first;
+      if (inside) await db.write(inside);
     }
+    out.count += items.length;
+    for (const w of items) if (w.n.updatedAt > (repoNewest.get(w.repo) ?? "")) repoNewest.set(w.repo, w.n.updatedAt);
   }
 
   async function window(from: Date, to: Date): Promise<void> {
-    const q = `${scope} updated:${iso(from)}..${iso(to)}`;
+    const q = `${scope} updated:${iso(from)}..${iso(to)} sort:updated-asc`;
+    let askedAt = Date.now();
     let conn = await page(q, null);
     const seconds = Math.floor((to.getTime() - from.getTime()) / 1000);
     if (conn.issueCount > SEARCH_CAP && seconds >= 1) {
@@ -622,9 +687,18 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
       return;
     }
     out.slices++;
+    let sliceNewest: string | null = null;
+    let prev: string | null = null;
     for (;;) {
-      await write(conn.nodes);
-      if (!conn.pageInfo.hasNextPage) return;
+      const nodes: Node[] = conn.nodes.filter((n: Node) => n?.updatedAt);
+      for (const n of nodes) if (n.updatedAt > (sliceNewest ?? "")) sliceNewest = n.updatedAt;
+      const done = !conn.pageInfo.hasNextPage;
+      // The search overlap is the bound on how far the index lags (see searchSince).
+      const settledBefore = iso(new Date(askedAt - SEARCH_OVERLAP_MS));
+      await write(conn.nodes, pageMark(nodes, { to: iso(to), done, sliceNewest, settledBefore, prev }));
+      if (done) return;
+      for (const t of settledTimes(nodes, settledBefore)) if (t > (prev ?? "")) prev = t;
+      askedAt = Date.now();
       conn = await page(q, conn.pageInfo.endCursor);
     }
   }
@@ -920,7 +994,8 @@ export async function reconcileNext(db: Db, client: Querier, now: Date = new Dat
 }
 
 // Runs one sync. `org_high_water` is the newest updatedAt stored, so the next search starts ten
-// minutes before it; it does not move for --repo runs, and a full re-sync leaves an existing one alone.
+// minutes before it; a search run moves it page by page as it stores them (syncBySearch). It does not move for --repo
+// runs, and a full re-sync leaves an existing one alone.
 export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date = new Date()): Promise<{ mode: string; items: number }> {
   const started = iso(now);
   const orgHigh = await getSetting(db, "org_high_water");
@@ -936,11 +1011,13 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
   let items: number;
   try {
     if (wantsSearch) {
-      const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started);
+      // Runs inside each page's transaction; a compare-and-set, so a rolled-back page leaves nothing to remember.
+      const progress = (t: string) => advanceHighWater(db, t);
+      const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started, progress);
       mode = "search";
       items = r.count;
       const high = r.newest && r.newest > (orgHigh as string) ? r.newest : (orgHigh as string);
-      if (high !== orgHigh) await setSetting(db, "org_high_water", high);
+      await advanceHighWater(db, high);
       const last = await getSetting(db, "search_catchup_at");
       if (!last || now.getTime() - new Date(last).getTime() >= CATCHUP_EVERY_MS) {
         const c = await syncBySearch(db, client, tracked, iso(new Date(new Date(high).getTime() - CATCHUP_SPAN_MS)), iso(new Date(high)));
