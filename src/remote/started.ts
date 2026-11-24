@@ -125,7 +125,8 @@ export function startedCallsCached(db: Db, nowMs: number): Promise<StartedCalls>
   if (hit && nowMs >= hit.at && nowMs - hit.at < CACHE_MS) return hit.v;
   const v = readStartedCalls(db, nowMs);
   caches.set(db, { at: nowMs, v });
-  v.catch(() => { if (caches.get(db)?.v === v) caches.delete(db); });
+  // The caller awaits v; this only drops a failed reading from the cache.
+  void v.catch(() => { if (caches.get(db)?.v === v) caches.delete(db); });
   return v;
 }
 /** Drops the cached reading (with the queue cache, calls.ts dropQueueCache). */
