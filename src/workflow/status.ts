@@ -49,6 +49,30 @@ const STATE_LABEL: Record<StepState, string> = { done: tk("done"), running: tk("
 
 export const stepLabel = (s: Step): string => (s.note ? t("{step}: {note}", { step: t(STEP_LABEL[s.name]), note: s.note }) : t(STEP_LABEL[s.name]));
 
+/** Where the item's machinery is, as the mirror shows it: the public step, read for the workflow's steps. */
+export type Progress = "implementing" | "reviewing" | "fixing" | "waiting-ci" | "queued" | "batched" | "merged" | "other";
+
+/**
+ * The workflow's steps with their states: the step the machinery is at runs (or waits, or stopped, by the workflow's state),
+ * those before it are done. A review entry with a fixed part is at its second review; an open recommendation waits at the end.
+ */
+export function workflowSteps(wf: Pick<ItemWorkflow, "entry" | "kind" | "state" | "approvedBy" | "plan">, progress: Progress): Step[] {
+  const names = stepsFor(wf.entry, wf.approvedBy !== null);
+  if (progress === "merged" || wf.state === "done" || wf.state === "closed") return stepsAt(names, names.length);
+  const idx = (n: StepName): number => names.indexOf(n);
+  const last = names.length - 1;
+  let at: number;
+  if (wf.entry === "merge") at = progress === "batched" ? idx("batch") : progress === "fixing" ? idx("fix CI and conflicts") : idx("update from main");
+  else if (wf.state === "recommending" && names[last] === "recommend") at = last;
+  else if (progress === "implementing" || (wf.kind === "issue" && wf.entry === "implement")) at = idx("implement");
+  else if (progress === "fixing") at = idx("fix-up");
+  else if (progress === "waiting-ci" || progress === "queued" || progress === "batched") at = last;
+  else at = wf.plan.some((p) => p.state === "fixed") && idx("review again") >= 0 ? idx("review again") : idx("review");
+  if (at < 0) at = Math.max(0, idx("review"));
+  const now: StepState = wf.state === "running" ? "running" : wf.state === "blocked" || wf.state === "stopped" || wf.state === "backlog" ? "stopped" : "waiting";
+  return stepsAt(names, at, now);
+}
+
 /** One line per step: `2. fix-up: 1 and 2 (running)`. */
 export const stepLines = (steps: readonly Step[]): string[] =>
   steps.map((s, i) => t("{n}. {step} ({state})", { n: i + 1, step: stepLabel(s), state: t(STATE_LABEL[s.state]) }));
