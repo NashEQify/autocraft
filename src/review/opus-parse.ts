@@ -247,7 +247,7 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
   const named = text && Array.isArray(x!.fix) ? [...new Set(x!.fix)] : [];
   const fix = named.map((n) => (Number.isInteger(n) ? partOf(n as number) : null));
   const close = !!text && x!.close === true && !named.length;
-  const merge = !close && x!.merge === true;
+  const merge = !!text && !close && x!.merge === true;
   const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close);
   const exact = fix.every((n, i) => n === named[i]);
   const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close } : null;
