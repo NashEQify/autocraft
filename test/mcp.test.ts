@@ -248,7 +248,7 @@ describe("transport", () => {
     assert.match(init.body.result.instructions, /untrusted/);
     assert.equal((await rpc(t, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion, "2025-06-18");
     const tools = (await rpc(t, "tools/list")).body.result.tools.map((x: { name: string }) => x.name).sort();
-    assert.deepEqual(tools, ["get_inbox_item", "list_fixups", "list_inbox", "list_merge_queue", "list_repos", "my_settings", "send_feedback", "set_my_settings", "set_weight"]);
+    assert.deepEqual(tools, ["get_inbox_item", "get_item", "help", "list_fixups", "list_inbox", "list_merge_queue", "list_repos", "my_items", "my_settings", "send_feedback", "set_my_settings", "set_weight"]);
     assert.equal((await rpc(t, "no/such")).body.error.code, -32601);
   });
 });
@@ -399,6 +399,26 @@ describe("answering", () => {
     assert.equal((await actionable(db)).length, 0);
   });
 
+
+  test("workflow commands: every token reads, only an answering token of an operator or maintainer is offered command", async () => {
+    const b = await signedIn("boss");
+    const plain = (await b.json<McpTokenCreated>("POST", "/api/mcp/tokens", { label: "plain" })).token;
+    const names = await toolNames(plain);
+    for (const n of ["get_item", "my_items", "help"]) assert.ok(names.includes(n), n);
+    assert.equal(names.includes("command"), false);
+    const refused = await call(plain, "command", { item: "photocraft#10", text: "stop" });
+    assert.equal(refused.isError, true);
+    assert.match((await call(plain, "help")).text, /fix-up/);
+    // A repository that is not switched to AutoCraft commands reads with the command core's line.
+    assert.match((await call(plain, "get_item", { item: "photocraft#10" })).text, /commands are not switched on for/);
+    const made = await b.json<McpTokenCreated>("POST", "/api/mcp/tokens", { label: "cmd", answer: true });
+    const answering_ = made.token;
+    assert.ok((await toolNames(answering_)).includes("command"));
+    const r = await call(answering_, "command", { item: "photocraft#10", text: "stop" });
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.text, /commands are not switched on for/);
+    for (const row of (await b.json<McpTokens>("GET", "/api/mcp/tokens")).tokens) await b.json("POST", "/api/mcp/tokens/revoke", { id: row.id });
+  });
 
   test("an answering token answers as the operator, the pipeline sees it, and undo takes it back", async () => {
     const t = await (async () => {
