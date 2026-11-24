@@ -91,9 +91,10 @@ test("a yes after a blocker resumes the merge leg and does not stop again on wha
 test("an approved review entry with minor findings is fixed, reviewed again and handed to the merge queue as the approver", async () => {
   const w = await approvedReview();
   const db = w.db;
-  await review(w, { head: "sha1", verdict: "take-fix", fixes: [{ file: "src/lib.rs", change: "rename a to b", title: "clearer name", major: false }] });
+  // Reviews in the order a real run makes them: this one, the next at the pushed head, then the hand-over's Merge answer.
+  await review(w, { head: "sha1", verdict: "take-fix", sure: false, at: new Date().toISOString(), fixes: [{ file: "src/lib.rs", change: "rename a to b", title: "clearer name", major: false }] });
   await advanceWorkflows(db);
-  assert.equal((await liveWorkflow(db, "app", 1))!.state, "running", "a minor finding is no blocker");
+  assert.equal((await liveWorkflow(db, "app", 1))!.state, "running", "a minor finding of an unsure review is no blocker for an approved item");
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "review"), "the review's fix-up runs");
 
   // The fix-up pushes; our own push moves the head the workflow accepted.
@@ -105,7 +106,7 @@ test("an approved review entry with minor findings is fixed, reviewed again and 
   await advancePreapprovals(db);
   assert.equal(await legState(w), "review");
 
-  await review(w, { head: "sha2", verdict: "take" });
+  await review(w, { head: "sha2", verdict: "take", at: new Date().toISOString() });
   await w.premerge(1, "clean");
   await advanceWorkflows(db);
   for (let i = 0; i < 3; i++) await advancePreapprovals(db);

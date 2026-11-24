@@ -31,7 +31,7 @@ export const FAILED_TWICE = 2;
 /** The blocker a stopped merge leg's reason (src/preapproval) stands for. */
 export function legBlocker(reason: string): Blocker {
   if (/another push moved the head|the head went back/.test(reason)) return "author-commits";
-  if (/the review says (hold|close)|unsure|pre-merge review found|verification failed/.test(reason)) return "major-finding";
+  if (/the review says (hold|close)|pre-merge review is unsure|pre-merge review found|verification failed/.test(reason)) return "major-finding";
   if (/fix-up (failed|refused|rejected|cannot-push|push-denied|asked|comment-failed|superseded)|CI failed|pre-merge review of .* failed/.test(reason)) return "failed-twice";
   if (/too-large/.test(reason)) return "large-fix";
   return "other";
@@ -56,7 +56,9 @@ export function detectBlocker(f: BlockerFacts): Found | null {
   }
   const r = f.review;
   if (r && r.outsideLines >= f.thresholds.outsideMin) return { blocker: "outside-purpose", params: { lines: r.outsideLines, limit: f.thresholds.outsideMin } };
-  if (r && (r.verdict === "hold" || r.verdict === "close" || !r.sure || r.majors.length)) {
+  // An unsure review is no blocker: the approval says the change is wanted, so its fixes run and the merge still waits for the
+  // pre-merge review and green CI.
+  if (r && (r.verdict === "hold" || r.verdict === "close" || r.majors.length)) {
     return { blocker: "major-finding", params: { verdict: r.verdict, sure: r.sure, parts: r.majors } };
   }
   if (f.leg) return { blocker: legBlocker(f.leg.reason), params: { reason: f.leg.reason } };
