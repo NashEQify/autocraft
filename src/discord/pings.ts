@@ -16,7 +16,7 @@ export type PingMessage = {
   id: string; channel_id: string; guild_id?: string; content?: string; type?: number; webhook_id?: string;
   author?: { id: string; bot?: boolean };
   mentions?: Mentionable[]; mention_roles?: string[];
-  message_reference?: { message_id?: string };
+  message_reference?: { message_id?: string; type?: number };
   referenced_message?: { content?: string | null; author?: { id?: string } } | null;
 };
 type Role = { id: string; tags?: { bot_id?: string } };
@@ -92,7 +92,9 @@ export class Pings {
     const { db, keys, rest, search } = this.#d;
     const pingHash = keys.hash("message", m.id);
     if (this.#inflight.has(pingHash) || await db.get(db.k.selectFrom("discord_replies").select("ping_hash").where("ping_hash", "=", pingHash))) return;
-    const quotedId = m.message_reference?.message_id;
+    // A forward (type 1) is not a reply: its text is not a quoted message.
+    const isReply = !m.message_reference?.type;
+    const quotedId = isReply ? m.message_reference?.message_id : undefined;
     const question = (quotedId ? strip(m.referenced_message?.content ?? "") : "") || strip(m.content ?? "");
     if (!question) return;
     if (!search.allow(keys.hash("author", m.author!.id), keys.hash("channel", m.channel_id))) return;

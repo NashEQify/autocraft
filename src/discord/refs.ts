@@ -6,6 +6,11 @@ const URL_RE = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9
 // `repo#123` or `owner/repo#123`, not glued to a longer word or path.
 const SHORT_RE = /(?<![\w./#-])(?:([A-Za-z0-9._-]+)\/)?([A-Za-z0-9._-]+)#(\d{1,9})(?![\w])/g;
 
+/** A message's own text plus the text of each forwarded message (snapshot), one per line. */
+export type TextMessage = { content?: string | null; message_snapshots?: { message?: { content?: string | null } }[] };
+export const messageText = (m: TextMessage): string =>
+  [m.content ?? "", ...(m.message_snapshots ?? []).map((s) => s.message?.content ?? "")].join("\n").replace(/^\n+|\n+$/g, "");
+
 /** Each referenced item once, in order of first appearance. A repo that is not tracked never matches. */
 export function parseRefs(text: string, repos: TrackedRepo[]): ItemKey[] {
   const byName = new Map(repos.map((r) => [r.name.toLowerCase(), r]));

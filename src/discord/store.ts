@@ -3,12 +3,12 @@
 // kept only as a keyed hash that serves a deletion request.
 import type { DiscordKeys } from "./keys.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
-import { parseRefs, type TrackedRepo } from "./refs.ts";
+import { messageText, parseRefs, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
 
 export type DiscordMessage = {
-  id: string; channel_id: string; guild_id?: string; content?: string; timestamp?: string;
+  id: string; channel_id: string; guild_id?: string; content?: string; message_snapshots?: { message?: { content?: string } }[]; timestamp?: string;
   author?: { id: string; bot?: boolean };
 };
 
@@ -27,9 +27,9 @@ export const isWatched = async (db: Db, channelId: string): Promise<boolean> =>
 
 /** Sets a message's rows to exactly the items its text names. Returns the number of rows newly recorded (0 for a repeat), or -1 when the event carries no text. */
 export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage, guildId: string | undefined): Promise<number> {
-  if (m.content === undefined || !guildId) return -1;
+  if ((m.content === undefined && !m.message_snapshots?.length) || !guildId) return -1;
   const msgHash = keys.hash("message", m.id);
-  const refs = m.author?.bot ? [] : parseRefs(m.content, await trackedRepos(db));
+  const refs = m.author?.bot ? [] : parseRefs(messageText(m), await trackedRepos(db));
   const have = await db.all(db.k.selectFrom("discord_mentions").select(["repo", "number", "sealed"]).where("msg_hash", "=", msgHash));
   const want = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   // An edit event may carry no author: keep the one sealed with the existing rows.
