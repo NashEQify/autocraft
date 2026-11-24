@@ -3,7 +3,7 @@
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { safePath } from "../fixup/patch.ts";
 import type { LintProblem } from "../replylint.ts";
-import { evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
+import { evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, type ClaimLocationCheck, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
 import type { PremergeFinding } from "./types.ts";
 
 export const PREMERGE_MAX_FINDINGS = 30;
@@ -70,7 +70,7 @@ const leaks = (...s: string[]) => s.some((x) => REFERENCE_LEAK.test(x));
  * Claims: a claim of the title or body with impact "code-wrong" is a defect finding of its own. An "unknown" impact, or a missing
  * `claims` list when `body` is not empty, is no finding: it sets `unsure`, which sends the PR to a person. "description-only" is shown only.
  */
-export function parsePremerge(text: string, ref: string, drop: ReadonlySet<string> = new Set(), known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = []): PremergeReview | null {
+export function parsePremerge(text: string, ref: string, drop: ReadonlySet<string> = new Set(), known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = [], checkLocation?: ClaimLocationCheck): PremergeReview | null {
   const r = entries(text, ref);
   if (!r) return null;
   const findings: PremergeFinding[] = [];
@@ -82,7 +82,7 @@ export function parsePremerge(text: string, ref: string, drop: ReadonlySet<strin
   }
   // A dropped fix does not free its place under the cap: the cap counts the fixes the model offered.
   // Every valid claim reaches the findings and `unsure`; only the stored and posted texts are cleaned. A list that was not fully read is unsure.
-  const parsed = parseClaims((replyObject(text) ?? {}).claims, drop, false, files), claims = parsed?.claims ?? [];
+  const parsed = parseClaims((replyObject(text) ?? {}).claims, drop, false, files, checkLocation), claims = parsed?.claims ?? [];
   const unsure = parsed === null ? !!body.trim() : parsed.rejected > 0 || claims.some((c) => c.impact === "unknown");
   return { unsure, claims, findings: [...claimFindings(claims, files), ...findings].slice(0, PREMERGE_MAX_FINDINGS), searched: r.searched, conflicts: parseStatementConflicts(r.conflicts, known) };
 }

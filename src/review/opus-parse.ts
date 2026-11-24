@@ -131,16 +131,24 @@ export const CLAIM_EVIDENCE_CHARS = 600;
  * A claim's evidence names code as `path:line`. The path is repo-relative with a directory or has a known source extension, and
  * does not follow a scheme or a `/` ("v2.0:1" and URLs do not count). Groups: path, line.
  */
-export const EVIDENCE_AT = /(?<![\w./:-])((?:[\w.-]+\/)+[\w.-]+\.\w+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh)):(\d+)/;
-/** The `path:line` an evidence text names, or null: a path of EVIDENCE_AT, or one of the PR's changed `files` (which may have no directory or listed extension). */
-export function evidenceAt(evidence: string, files: readonly string[] = []): { path: string; line: number } | null {
-  const m = EVIDENCE_AT.exec(evidence);
-  if (m) return { path: m[1]!, line: Number(m[2]) };
-  for (const f of files) {
-    const k = new RegExp(`(?<![\\w./:-])${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:(\\d+)`).exec(evidence);
-    if (k) return { path: f, line: Number(k[1]) };
+const EVIDENCE_PATH = String.raw`(?:[\w.-]+/)+[\w.-]+\.\w+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh)`;
+type ClaimLocation = { path: string; line: number };
+export type ClaimLocationCheck = (location: ClaimLocation) => boolean;
+
+function* evidenceLocations(evidence: string, files: readonly string[]): Generator<ClaimLocation, void> {
+  const known = files.filter((path) => evidence.includes(`${path}:`))
+    .sort((a, b) => b.length - a.length)
+    .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = new RegExp(String.raw`(?<![\w./:-])(${[...known, EVIDENCE_PATH].join("|")}):(\d+)`, "g");
+  for (const m of evidence.matchAll(pattern)) {
+    yield { path: m[1]!, line: Number(m[2]) };
   }
-  return null;
+}
+
+/** The first repository-relative citation, including changed files without a familiar extension. */
+export function evidenceAt(evidence: string, files: readonly string[] = []): ClaimLocation | null {
+  const first = evidenceLocations(evidence, files).next();
+  return first.done ? null : first.value;
 }
 const SANDBOX_PREFIX = new RegExp(`(^|[^\\w./-])${REPO_PATH}/`, "g");
 /** The model reads the repository at the sandbox path; the posted text names repo-relative paths. */
@@ -163,12 +171,13 @@ export type ParsedClaims = {
  * The `claims` of a reply, or null when it is not an array. Every valid entry is returned, so each one reaches the verdict:
  * it needs a claim and a status. Entries that are not valid, and those past MAX_CLAIMS, are counted in `rejected`.
  * Every claim needs file:line evidence: without it a "verified" counts as unverified and any impact is "unknown", so a claim is
- * only settled when the model points at code. A contradicted or unverified claim carries the model's `impact` judgment; a missing
+ * only settled when the model points at code. With a checkout, every citation must also resolve there.
+ * A contradicted or unverified claim carries the model's `impact` judgment; a missing
  * or invalid one is "unknown". Status and impact are judged on the evidence as written; the returned texts are the ones that
  * are stored and posted: a text that mentions the reference documentation or is in `drop` is replaced by a neutral line
  * (`keep`: leave them, for the lint). Evidence and fix files are repo-relative; a fix with an unsafe path is dropped.
  */
-export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = []): ParsedClaims | null {
+export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), keep = false, files: readonly string[] = [], checkLocation?: ClaimLocationCheck): ParsedClaims | null {
   if (!Array.isArray(v)) return null;
   const out: ParsedClaims = { claims: [], indexes: [], rejected: Math.max(0, v.length - MAX_CLAIMS) };
   v.slice(0, MAX_CLAIMS).forEach((x, index) => {
@@ -178,14 +187,17 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
     const proof = typeof o.evidence === "string" ? squashText(stripSandboxPath(o.evidence)).slice(0, CLAIM_EVIDENCE_CHARS) : "";
     const claim = !keep && (REFERENCE_LEAK.test(text) || drop.has(text)) ? NEUTRAL_CLAIM : text;
     const evidence = !keep && (REFERENCE_LEAK.test(proof) || drop.has(proof)) ? NEUTRAL_EVIDENCE : proof;
-    const status: ClaimStatus = o.status === "verified" && !evidenceAt(proof, files) ? "unverified" : o.status;
+    const locations = evidenceLocations(proof, files);
+    const first = locations.next();
+    const supported = !first.done && (!checkLocation || (checkLocation(first.value) && [...locations].every(checkLocation)));
+    const status: ClaimStatus = !supported && (o.status === "verified" || checkLocation) ? "unverified" : o.status;
     const f = o.fix as { file?: unknown; change?: unknown } | null | undefined;
     const file = f && typeof f === "object" && typeof f.file === "string" ? stripSandboxPath(f.file.trim()) : "";
     const fix = f && typeof f === "object" && typeof f.change === "string" && f.change.trim() && !drop.has(f.change) && safePath(file) && !REFERENCE_LEAK.test(file + f.change)
       ? { file: file.slice(0, 200), change: f.change.trim().slice(0, 800) } : undefined;
     out.indexes.push(index);
     if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
-    const impact: ClaimImpact = evidenceAt(proof, files) && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
+    const impact: ClaimImpact = supported && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
     out.claims.push(fix && impact === "code-wrong" ? { claim, status, evidence, impact, fix } : { claim, status, evidence, impact });
   });
   return out;
@@ -234,7 +246,7 @@ function replyObject(text: string): unknown {
  * `claims` list for a PR with a body (`body`), makes a take or take-fix unsure.
  * `files`: the PR's changed files, accepted as evidence paths. `drop`: see parsePublic. `keepLeaky`: keep fixes that mention the reference (the lint checks validity this way, so the fix turn can handle them; the stored review always drops them).
  */
-export function parseOpusReply(text: string, ref: string, last = true, drop: ReadonlySet<string> = new Set(), keepLeaky = false, known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = []): OpusReview | null {
+export function parseOpusReply(text: string, ref: string, last = true, drop: ReadonlySet<string> = new Set(), keepLeaky = false, known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = [], checkLocation?: ClaimLocationCheck): OpusReview | null {
   const o = replyObject(text);
   if (!o || typeof o !== "object") return null;
   const r = o as Record<string, unknown>;
@@ -249,7 +261,7 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
   const risks = Array.isArray(r.risks) ? r.risks.filter((x): x is string => typeof x === "string").slice(0, 8).map((x) => x.slice(0, 300)) : [];
   const summary = proseField(r.summary, SUMMARY_MAX_WORDS, last), why = proseField(r.why, WHY_MAX_WORDS, last);
   if (!summary.ok || !why.ok) return null;
-  const parsed = parseClaims(r.claims, drop, keepLeaky, files), listed = parsed?.claims ?? [];
+  const parsed = parseClaims(r.claims, drop, keepLeaky, files, checkLocation), listed = parsed?.claims ?? [];
   // Every valid claim reaches the verdict; only the texts stored and posted are cleaned. A list that was not fully read leaves the review unsure.
   const bad = listed.filter((c) => c.impact === "code-wrong"), unknownClaim = listed.find((c) => c.impact === "unknown");
   // A take-fix needs a fix: its own list, or the fix of every claim that shows wrong code.
