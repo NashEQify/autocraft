@@ -41,6 +41,14 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
     ["See `dir/other guide.md:1` for the check", true],
     ["src/missing dir/main.rs:1", false],
     ["`missing dir/main.rs:1` and main.rs:1", false],
+    ["`missing dir/main.rs:1 `", false],
+    ["main.rs:1 and `missing dir/main.rs:1 trailing text`", false],
+    ["main.rs:1 and `missing dir/main.rs:1", false],
+    ["` dir/main.rs:1 `", true],
+    ["``dir/main.rs:1`` and main.rs:1", true],
+    ["main.rs:1 and the token `enabled`", true],
+    ["main.rs:1 " + "note ".repeat(4_000) + "missing.rs:1", false],
+    ["``missing dir/main.rs:1 `` and main.rs:1", false],
     ["main.rs:1 " + "note ".repeat(CLAIM_EVIDENCE_CHARS / 5) + "missing.rs:1", false],
     ["main.rs:1 " + "note ".repeat(CLAIM_EVIDENCE_CHARS / 5) + "dir/main.rs:1", true],
     ["main.rs:2 and missing.rs:1", false],
@@ -95,13 +103,21 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
   assert.doesNotMatch(finding?.scenario ?? "", /long\.rs:1$/);
 
   const fix = { file: "main.rs", change: "Restore the startup check." };
-  for (const [evidence, resolves] of [["main.rs:1", true], ["main.rs:3", false]] as const) {
+  const duplicate = { file: "/repo/main.rs", change: ` ${fix.change} ` };
+  const independent = { file: "main.rs", change: "Clarify the error message." };
+  for (const [evidence, topLevel, verdict, sure, expected] of [
+    ["main.rs:1", [], "take-fix", true, [fix]],
+    ["main.rs:3", [], "take", false, []],
+    ["main.rs:3", [duplicate], "take", false, []],
+    ["main.rs:3", [duplicate, independent], "take-fix", false, [independent]],
+    ["main.rs:1", [duplicate], "take-fix", true, [fix, { ...duplicate, file: "main.rs" }]],
+  ] as const) {
     const claims = [{ claim: input.body, status: "contradicted", evidence, impact: "code-wrong", fix }];
-    const reply = JSON.stringify({ ref: input.ref, verdict: "take-fix", sure: true, reason: "Needs a fix.", fixes: [], claims });
+    const reply = JSON.stringify({ ref: input.ref, verdict: "take-fix", sure: true, reason: "Needs a fix.", fixes: topLevel, claims });
     const review = (await REVIEW_OPUS.parse(reply, input, { attempt: 0, last: true }, context))?.value.review;
-    assert.equal(review?.verdict, resolves ? "take-fix" : "take");
-    assert.equal(review?.sure, resolves);
-    assert.deepEqual(review?.fixes, resolves ? [fix] : []);
+    assert.equal(review?.verdict, verdict, evidence);
+    assert.equal(review?.sure, sure, evidence);
+    assert.deepEqual(review?.fixes, expected, evidence);
   }
 });
 
