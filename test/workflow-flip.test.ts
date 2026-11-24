@@ -17,7 +17,7 @@ const opts = (o: { key: string; label: string }[]) => JSON.stringify(o);
 async function inFlight(): Promise<World> {
   const w = current = await (await world()).repo();
   const db = w.db;
-  for (const n of [1, 3, 4, 5, 7, 8]) await w.pr(n);
+  for (const n of [1, 3, 4, 5, 7, 8, 10]) await w.pr(n);
   for (const n of [2, 6, 9]) await w.issue(n);
   const ft = (number: number, added_by: string, weight = 5) => db.run(db.k.insertInto("main.fast_track").values({ repo: "app", number, added_by, added_at: T0, weight }));
   const pre = (number: number, state: string, o: { reason?: string; fix_id?: number } = {}) => db.run(db.k.insertInto("main.preapprovals").values({
@@ -31,6 +31,10 @@ async function inFlight(): Promise<World> {
   await pre(3, "ci", { fix_id: 11 });
   await pre(4, "asked", { reason: "the pre-merge review found 2 defects" });
   await ask(mergeDecisionId("app", 4, "sha4"), "merge", 4, MERGE, "hold", "Two defects need a fix first.");
+  // An `asked` row whose Merge? question was answered has ended in the legacy pipeline.
+  await pre(10, "asked", { reason: "the pre-merge review is unsure" });
+  await ask(mergeDecisionId("app", 10, "sha10"), "merge", 10, MERGE, "merge");
+  await db.run(db.k.updateTable("main.decisions").set({ answer: "hold", answered_by: OPERATOR, answered_at: T0 }).where("id", "=", mergeDecisionId("app", 10, "sha10")));
   await ask(mergeDecisionId("app", 5, "sha5"), "merge", 5, MERGE, "merge");
   await ask("app#6:scope", "scope", 6, [{ key: "in", label: "In scope" }, { key: "out", label: "Out of scope" }]);
   await ask("app#7:duplicate@8", "duplicate", 7, [{ key: "keep-7", label: "Keep #7" }]);
@@ -51,17 +55,18 @@ const counts = async (w: World) => {
   };
 };
 
-test("a flip maps each in-flight kind and refuses while the identity is box", async () => {
+test("a flip maps each in-flight kind, and a real one is refused under the box identity or before the planner works workflows", async () => {
   const w = await inFlight();
   const db = w.db;
   await db.run(db.k.updateTable("main.settings").set({ value: "box" }).where("key", "=", "github_identity"));
-  await assert.rejects(flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true }), FlipRefused);
+  await assert.rejects(flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true }), FlipRefused);
   assert.equal(await repoWorkflow(db, "app"), "legacy");
   await db.run(db.k.updateTable("main.settings").set({ value: "app" }).where("key", "=", "github_identity"));
+  await assert.rejects(flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true }), FlipRefused, "refused until the planner works workflows");
 
-  const dry = await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: false });
+  const dry = await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: false, engineReady: true });
   assert.equal((await counts(w)).workflows, 0, "a dry run writes nothing");
-  await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true });
+  await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
   assert.deepEqual((await liveWorkflows(db, "app")).map((x) => x.number), dry.started.map((s) => s.number));
 
   const pr1 = (await liveWorkflow(db, "app", 1))!;
@@ -80,6 +85,7 @@ test("a flip maps each in-flight kind and refuses while the identity is box", as
   assert.deepEqual([issue9.state, issue9.plan.map((p) => p.title), issue9.rec?.parts.fix], ["recommending", ["Cache the result", "Compute it lazily"], [2]]);
 
   assert.equal(await liveWorkflow(db, "app", 5), null);
+  assert.equal(await liveWorkflow(db, "app", 10), null, "an answered stop is not in flight");
   assert.equal(await getDecision(db, mergeDecisionId("app", 5, "sha5")), undefined, "an unstarted PR's Merge? question is set aside");
   const set = await db.get(db.k.selectFrom("main.decisions").select("answer").where("id", "like", `${mergeDecisionId("app", 5, "sha5")}~%`));
   assert.equal(set?.answer, "withdrawn");
@@ -89,9 +95,9 @@ test("a flip maps each in-flight kind and refuses while the identity is box", as
 
 test("a second flip changes nothing", async () => {
   const w = await inFlight();
-  await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true });
+  await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
   const before = await counts(w);
-  const again = await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true });
+  const again = await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
   assert.equal(again.applied, false);
   assert.deepEqual(await counts(w), before);
 });
@@ -104,15 +110,17 @@ test("a flip back to legacy stops the workflows and leaves the legacy rows worki
     pre: await db.all(db.k.selectFrom("main.preapprovals").select(["number", "state", "reason", "head"]).orderBy("id")),
   });
   const was = await legacy();
-  await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true });
-  await flipRepo(db, "app", { to: "legacy", by: OPERATOR, apply: true });
+  await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
+  const rollback = await flipRepo(db, "app", { to: "legacy", by: OPERATOR, apply: true });
+  assert.ok(rollback.reasked > 0, "the rollback reports the questions the legacy planner asks again");
   assert.equal(await repoWorkflow(db, "app"), "legacy");
+  assert.equal((await db.get(db.k.selectFrom("main.preapprovals").select("workflow_id").where("number", "=", 3)))?.workflow_id, null);
   assert.deepEqual(await liveWorkflows(db, "app"), []);
   assert.deepEqual(await legacy(), was, "fast track and pre-approvals are as they were");
   // The withdrawn Merge? question's id is free again, so the legacy planner asks it anew.
   await db.run(db.k.insertInto("main.decisions").values({ id: mergeDecisionId("app", 5, "sha5"), kind: "merge", repo: "app", number: 5, question: "Merge?", options: "[]", asked_at: T0 }));
   // And the repo can move forward again from the same legacy rows.
-  const back = await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true });
+  const back = await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
   assert.ok(back.started.some((s) => s.number === 3));
   assert.equal((await liveWorkflow(db, "app", 3))?.approvedBy, OPERATOR);
 });

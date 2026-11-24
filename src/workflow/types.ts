@@ -7,8 +7,8 @@ export type Entry = "review" | "fixup" | "implement" | "merge";
 export type WorkflowState = "running" | "waiting" | "blocked" | "recommending" | "done" | "stopped" | "closed" | "backlog";
 export type Surface = "github" | "discord" | "agent" | "dashboard" | "cli";
 
-/** The six blockers that bring an approved item back to a person. */
-export type Blocker = "major-finding" | "author-commits" | "failed-twice" | "beyond-agreed" | "large-fix" | "outside-purpose";
+/** The six blockers that bring an approved item back to a person, and `other` for a stop outside them (its reason shown as given). */
+export type Blocker = "major-finding" | "author-commits" | "failed-twice" | "beyond-agreed" | "large-fix" | "outside-purpose" | "other";
 
 export const WEIGHT_MIN = 1;
 export const WEIGHT_MAX = 10;
