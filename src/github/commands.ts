@@ -43,6 +43,7 @@ import { actRefusal, settleRefusal } from "../settlers.ts";
 import { AppError, call, GITHUB_API } from "./app.ts";
 import { commentLines } from "./comment-lines.ts";
 import { appSlug } from "./identity.ts";
+import { commentNames } from "./slugs.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError } from "./write.ts";
 import { envVar } from "../env.ts";
@@ -87,10 +88,11 @@ const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * optional weight (`8` or `weight 8`). Only the lines commentLines leaves visible count, so quoting or hiding a command runs
  * nothing. `@<slug> autorepin <pull request>` names the pull request as `owner/name#12`, `name#12` or its URL; `off` drops it.
  */
-export function parseCommand(body: unknown, slug: string): Command | null {
-  if (typeof body !== "string" || !slug) return null;
-  const re = new RegExp(`^@${escape(slug)}(?:\\[bot\\])?[\\s,:]+merge[-\\s]?queue(?:\\s+(?:weight\\s+)?(\\d{1,2}))?\\s*[.!]?$`, "i");
-  const repin = new RegExp(`^@${escape(slug)}(?:\\[bot\\])?[\\s,:]+auto[-\\s]?repin\\s+(\\S+)(?:\\s+via\\s+(\\S+))?$`, "i");
+export function parseCommand(body: unknown, slug: string | readonly string[]): Command | null {
+  const names = [slug].flat().filter(Boolean).map(escape).join("|");
+  if (typeof body !== "string" || !names) return null;
+  const re = new RegExp(`^@(?:${names})(?:\\[bot\\])?[\\s,:]+merge[-\\s]?queue(?:\\s+(?:weight\\s+)?(\\d{1,2}))?\\s*[.!]?$`, "i");
+  const repin = new RegExp(`^@(?:${names})(?:\\[bot\\])?[\\s,:]+auto[-\\s]?repin\\s+(\\S+)(?:\\s+via\\s+(\\S+))?$`, "i");
   for (const line of commentLines(body.slice(0, BODY_MAX))) {
     const m = re.exec(line);
     if (m) return { command: "merge-queue", weight: m[1] === undefined ? null : Number(m[1]) };
@@ -130,8 +132,9 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
   const created = typeof comment.created_at === "string" ? Date.parse(comment.created_at) : NaN;
   if (!login || !githubId || !commentId || !number || !Number.isFinite(created)) return false;
   if (now.getTime() - created > STALE_MS) return false;
+  const names = await commentNames(db, slug);
   if (await repoWorkflow(db, repo) === "new") {
-    const parsed = parseComment(comment.body, slug, { repo });
+    const parsed = parseComment(comment.body, names, { repo });
     if (!parsed) return false;
     const r = await db.run(db.k.insertInto("main.github_commands").values({
       comment_id: commentId, repo, number, pr: issue.pull_request ? 1 : 0, command: "answer", weight: null, ref_repo: null, ref_number: null, ref_branch: null,
@@ -139,7 +142,7 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
     }).onConflict((oc) => oc.doNothing()));
     return r.changes > 0;
   }
-  const cmd = parseCommand(comment.body, slug);
+  const cmd = parseCommand(comment.body, names);
   if (!cmd) return false;
   const ref = cmd.command === "autorepin" ? cmd.ref : null;
   const branch = cmd.command === "autorepin" ? cmd.branch : null;
@@ -320,7 +323,7 @@ async function carryOut(db: Db, r: Row, deps: CommandDeps, now: Date, qp: QueueP
     return "retry";
   }
   const slug = deps.slug === undefined ? appSlug() : deps.slug;
-  const cmd = c.kind === "ok" && c.authorId === r.github_id ? parseCommand(c.body, slug ?? "") : null;
+  const cmd = c.kind === "ok" && c.authorId === r.github_id ? parseCommand(c.body, await commentNames(db, slug)) : null;
   if (!cmd || !sameCommand(cmd, r)) {
     await settle(db, r, "ignored", c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command", clock());
     return "settled";
@@ -438,7 +441,7 @@ async function carryOutAnswer(db: Db, r: Row, deps: CommandDeps, now: Date, qp: 
     return "retry";
   }
   const slug = deps.slug === undefined ? appSlug() : deps.slug;
-  const again = c.kind === "ok" && c.authorId === r.github_id ? parseComment(c.body, slug ?? "", { repo: r.repo }) : null;
+  const again = c.kind === "ok" && c.authorId === r.github_id ? parseComment(c.body, await commentNames(db, slug), { repo: r.repo }) : null;
   if (!again || JSON.stringify(again) !== r.parsed) {
     await settle(db, r, "ignored", c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command", clock());
     return "settled";

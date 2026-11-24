@@ -1038,7 +1038,7 @@ export interface GithubAppStatus {
   csrf: string;
   /** The signed-in operator has let the app act as them; null when no app is registered. */
   authorized: boolean | null;
-  app: { id: string; slug: string; name: string | null; installUrl: string; transferUrl: string } | null;
+  app: { id: string; slug: string; mention: string | null; name: string | null; installUrl: string; transferUrl: string } | null;
   /** Each account the app is installed on, with the repos it covers; `allowed`: the account is on the allowed owners list; `protected`: it owns a tracked or filing-only repo or the app, so its installation is never removed. */
   installations: { id: number; owner: string; type: "User" | "Organization" | null; selection: "all" | "selected"; repos: string[]; createdAt: string | null; allowed: boolean; protected: boolean }[];
   /** Accounts the app may be installed on; empty: any account, nothing is removed. `kept`: why the account cannot be taken off the list. */

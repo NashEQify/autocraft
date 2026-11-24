@@ -8,6 +8,8 @@ import type { Db } from "../../db/index.ts";
 import type { Req } from "../types.ts";
 import { HttpError } from "../server/util.ts";
 import { needVisible, allVisibleRepos } from "./visible.ts";
+import { appSlug } from "../../github/identity.ts";
+import { mentionName, shownMention } from "../../github/slugs.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runCommand, runControl, type CommandResult, type ControlInput } from "../../workflow/apply.ts";
 import type { ItemRef } from "../../workflow/types.ts";
@@ -86,4 +88,9 @@ export async function control(db: Db, req: Req): Promise<{ ok: boolean; line: st
       throw new HttpError(400, "control must be hold-merge, release-merge, release-outside, resume-breaker or set-automatic");
   }
   return await runControl(db, actorOf(req), "dashboard", input);
+}
+
+/** GET /api/mention: the name to type to address the app in a GitHub comment (the mention name, else the app's slug); null without an app. */
+export async function mention(db: Db): Promise<{ mention: string | null }> {
+  return { mention: shownMention(appSlug(), await mentionName(db)) };
 }

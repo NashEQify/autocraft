@@ -14,6 +14,7 @@ import { commentStatuses, type PublicStatus, type PublicStep } from "../public/s
 import { guardRepo } from "../core/guard.ts";
 import type { By } from "../core/gates.ts";
 import { ghComment, ghEditComment, WritePacedError, type Writer } from "../github/write.ts";
+import { mentionName, shownMention } from "../github/slugs.ts";
 import { appSlug, githubIdentity, ownLoginTest, plainLogin } from "../github/identity.ts";
 import { setting } from "../settings-read.ts";
 import { leaseItem } from "../runner/leases.ts";
@@ -305,7 +306,7 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
     const w: Writer = { db, login: ACTOR };
     const q = p.querier ?? new Client(500), run = p.exec ?? realExec;
     const base = (p.base === undefined ? envVar("BASE_URL") ?? null : p.base)?.replace(/\/+$/, "") || null;
-    const me = await writerLogin(db), ours = await ownLoginTest(db, p.repo), slug = appSlug();
+    const me = await writerLogin(db), ours = await ownLoginTest(db, p.repo), slug = shownMention(appSlug(), await mentionName(db));
     for (const d of due.slice(0, Math.max(0, p.limit))) {
       const ref = `${p.repo}#${d.number}`, at = now().toISOString();
       const issue = d.facts.status.kind === "issue";

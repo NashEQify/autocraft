@@ -14,8 +14,8 @@ import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CommandPart, type ItemRef, t
 import { commandOf, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
 
 export type ParseOptions = {
-  /** The app's slug: a leading `@<slug>` (or `@<slug>[bot]`) is not part of the command. */
-  slug?: string;
+  /** The app's slug, and its mention name when set: a leading `@<slug>` (or `@<slug>[bot]`) is not part of the command. */
+  slug?: string | readonly string[];
   /** The repo of the item the text was written on: a bare number before any `repo#n` in a list, or an inline `#n`, takes it. */
   repo?: string;
 };
@@ -24,7 +24,7 @@ export type ParseOptions = {
 const BODY_MAX = 65_536;
 
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const mentionRe = (slug: string): RegExp => new RegExp(`^@${escape(slug)}(?:\\[bot\\])?(?=[\\s,:]|$)[\\s,:]*`, "i");
+const mentionRe = (names: readonly string[]): RegExp => new RegExp(`^@(?:${names.map(escape).join("|")})(?:\\[bot\\])?(?=[\\s,:]|$)[\\s,:]*`, "i");
 const isWeightWord = (w: string): w is WeightWord => Object.hasOwn(WEIGHT_WORDS, w);
 const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
 
@@ -42,7 +42,8 @@ export function describe(parts: readonly CommandPart[], items: readonly ItemRef[
 /** Reads text written to AutoCraft. */
 export function parse(text: string, opts: ParseOptions = {}): Parsed {
   let s = text.trim();
-  if (opts.slug) s = s.replace(mentionRe(opts.slug), "");
+  const names = [opts.slug ?? []].flat().filter(Boolean);
+  if (names.length) s = s.replace(mentionRe(names), "");
   // The list form: the command, a colon, then the items. A colon that starts `://` belongs to a URL.
   const list = /^([^:\n]+?):(?!\/\/)([\s\S]*)$/.exec(s);
   const inline = pullItems(list ? list[1]! : s, opts.repo);
@@ -69,10 +70,11 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
  * `@<slug> merge:` up to the next blank or hidden line are the items. Several addressed lines are read as one text, so an unclear
  * mix is ambiguous rather than half run.
  */
-export function parseComment(body: unknown, slug: string, opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
-  if (typeof body !== "string" || !slug) return null;
+export function parseComment(body: unknown, slug: string | readonly string[], opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
+  const names = [slug].flat().filter(Boolean);
+  if (typeof body !== "string" || !names.length) return null;
   const lines = commentLines(body.slice(0, BODY_MAX));
-  const mention = mentionRe(slug);
+  const mention = mentionRe(names);
   const texts: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;

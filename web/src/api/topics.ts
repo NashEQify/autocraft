@@ -94,6 +94,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["agents-recent:", ["agents"]],
   ["agent-", ["agents"]],
   ["queue:", ["queue", "items", "checks", "classify", "decisions", "reviews", "verify", "fixes", "tasks", "settings", "repos", "pr-builds", "build-features"]],
+  ["mention", ["settings"]],
   ["next-page", ["plans", "jobs", "settings", "repos", "items", "ranks", "fasttrack", "usage", "accounts", "stages", "flow", "tasks"]],
   ["batch:", ["queue", "tasks", "items", "checks", "access"]],
   ["queue-batches:", ["queue", "tasks", "items"]],

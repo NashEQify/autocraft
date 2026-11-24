@@ -14,7 +14,7 @@ import { envVar } from "./env.ts";
 import { isLockTimeout } from "./db/errors.ts";
 import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
-import { SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
+import { MENTION_KEY, SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
 import { SIM_THRESHOLD } from "./dupes/scan.ts";
 import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
@@ -537,7 +537,7 @@ function migrateValues(db: DatabaseSync): void {
   }
   // The mention flag for the pipeline login and app slugs the comments were last flagged for.
   const settingOf = (key: string) => (db.prepare("SELECT value FROM main.settings WHERE key = ?").get(key) as { value: string } | undefined)?.value;
-  const names = JSON.stringify(namesOf(settingOf("pipeline_login"), parseSlugs(settingOf(SLUGS_KEY))));
+  const names = JSON.stringify(namesOf(settingOf("pipeline_login"), parseSlugs(settingOf(SLUGS_KEY)), null, settingOf(MENTION_KEY) || null));
   const built = (db.prepare("SELECT value FROM main.settings WHERE key = 'mentions_built'").get() as { value: string } | undefined)?.value ?? "";
   if (names !== built) {
     db.exec("BEGIN IMMEDIATE");

@@ -9,6 +9,13 @@ import type { Blocker, Entry } from "../../../../src/workflow/types.ts";
 import type { ViewProps } from "../../registry/types";
 import { modules } from "../../registry";
 import { cn } from "../../ui/cn";
+import { useQuery } from "../../api/client";
+
+/** What to type after the `@` in a GitHub comment: the app's mention name or slug; a placeholder until it is known or without an app. */
+function useMention(): string {
+  const { data } = useQuery("mention", (api) => api.mention());
+  return data?.mention ?? "app";
+}
 
 const MAIN = COMMANDS.filter((c) => !c.more);
 const MORE = COMMANDS.filter((c) => c.more);
@@ -63,6 +70,7 @@ function Page({ id, children }: { id: string; children: ReactNode }) {
 }
 
 function Start() {
+  const mention = useMention();
   return (
     <Page id="start">
       <p>{t("AutoCraft reviews, fixes, implements and merges issues and pull requests. It classifies everything new on its own. It does more only when a maintainer sends a command, except small and medium bug fixes, which it handles itself.")}</p>
@@ -84,7 +92,7 @@ function Start() {
       <Part title={t("Where to type commands")}>
         <ul className="flex list-disc flex-col gap-1 pl-5">
           <li>
-            {t("GitHub: a comment that starts with the app's name,")} <Code>{`@<app> ${COMMANDS[1]!.example}`}</Code>
+            {t("GitHub: a comment that starts with the app's name,")} <Code>{`@${mention} ${COMMANDS[1]!.example}`}</Code>
           </li>
           <li>
             {t("Discord:")} <Code>{`/autocraft do text:${COMMANDS[1]!.example} ${ITEM}`}</Code>
@@ -98,12 +106,13 @@ function Start() {
 }
 
 function Surfaces({ c }: { c: CommandDef }) {
+  const mention = useMention();
   const dt = "text-ink/70";
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
       <dt className={dt}>GitHub</dt>
       <dd className="min-w-0 break-words">
-        <Code>{`@<app> ${c.example}`}</Code>
+        <Code>{`@${mention} ${c.example}`}</Code>
       </dd>
       <dt className={dt}>Discord</dt>
       <dd className="min-w-0 break-words">

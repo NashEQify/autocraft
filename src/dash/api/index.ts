@@ -463,6 +463,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/items/:repo/:n/backlog", dec.backlogItemRoute),
     // The maintainer workflow's commands and controls (src/workflow/apply.ts).
     post("/api/items/:repo/:n/command", commands.itemCommand),
+    get("/api/mention", (db) => commands.mention(db)),
     post("/api/commands", commands.listCommand),
     post("/api/controls", commands.control),
     { method: "POST", pattern: "/api/decisions/backlog", handler: ok(dec.backlogBulk) },

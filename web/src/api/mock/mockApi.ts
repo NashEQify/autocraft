@@ -498,6 +498,7 @@ export function createMockApi(): Api {
     ...createMaintainItemMock(me, changed),
     prompts: () => wait(promptsReport(null), 60),
     next: () => wait(nextPageFixture(), 60),
+    mention: () => wait({ mention: "autocraft" }, 20),
     queue: (f) => wait(queueList(f), 60),
     needs: (f) => wait(needsPage(f), 60),
     needsFixes: (repo, cursor) => wait(needsFixesPage(repo, cursor), 60),
