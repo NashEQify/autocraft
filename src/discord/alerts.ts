@@ -2,6 +2,7 @@
 // with one button per prepared core choice; a press runs the dashboard's "Do it" for that choice as the linked login. After an
 // answer from anywhere the message is edited: buttons removed, the answer named. Stored per message: the channel and message ids
 // (sealed), nothing else about the content. Free text (notes, extras, messages to Opus) stays on the dashboard.
+import { repoWorkflow } from "../workflow/store.ts";
 import { createHash } from "node:crypto";
 import { applyDrafts, choicesById, coresFor, currentChoices, type Core } from "../decide/choices.ts";
 import type { ActionTag } from "../decide/choices-types.ts";
@@ -122,9 +123,12 @@ export async function buildMessage(db: Db, d: DecisionRow, baseUrl: string | nul
   const items = itemsOf(d);
   const first = items[0]!;
   const head = `**${soft(first.repo, 60)}#${first.number}** ${soft(await itemTitle(db, first.repo, first.number), 120)}${items.length > 1 ? ` and ${items.length - 1} more` : ""}`;
-  const view = d.repo && d.number ? await choicesView(db, d.repo, d.number) : null;
+  // Repos on the maintainer workflow get text and a link: an answer is a command (`/autocraft do`), never a button.
+  const onWorkflow = await repoWorkflow(db, first.repo) === "new";
+  const view = !onWorkflow && d.repo && d.number ? await choicesView(db, d.repo, d.number) : null;
   const lines = [head, soft(d.question, 600)];
   if (view?.pick?.reason) lines.push(`Opus: ${soft(view.pick.reason, 400)}`);
+  if (onWorkflow) lines.push(`Answer with /autocraft do, for example: merge: ${soft(first.repo, 60)}#${first.number}`);
   const buttons: unknown[] = [];
   if (view) {
     const pick = view.pick?.core;
@@ -422,6 +426,8 @@ export function installAlertCommands(ix: Interactions, alerts: DecisionAlerts): 
       const row = await choicesById(db, choicesId);
       const d = row && await getDecision(db, row.decisionId);
       if (!row || !d) throw new HttpError(404, `no choices ${choicesId}`);
+      const wfRepo = itemsOf(d)[0]?.repo;
+      if (wfRepo && await repoWorkflow(db, wfRepo) === "new") throw new HttpError(409, "This repo takes commands now. Use /autocraft do.");
       // The same list the dashboard shows for these choices; the core is found by its key, never by position.
       const core = (await applyDrafts(db, d, await coresFor(db, d), row)).find((c) => coreId(c.key) === id);
       if (!core) throw new HttpError(409, "replaced by newer choices");
