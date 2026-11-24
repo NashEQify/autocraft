@@ -3335,3 +3335,16 @@ export interface MaintainHome {
   runner: MaintainRunnerLine | null;
   attention: HomeProblem[];
 }
+
+/** GET /api/maintain/stats: headline numbers for the last 7 or 30 days and merges per UTC day (today last). Backlog change is items opened minus items closed in the period. */
+export interface MaintainStats {
+  period: "7d" | "30d";
+  merged: number;
+  implemented: number;
+  reviewed: number;
+  backlog: number;
+  backlogChange: number;
+  /** USD, whole dollars, where the model call reported a cost. */
+  spend: number;
+  perDay: { day: string; n: number }[];
+}
