@@ -32,6 +32,8 @@ import * as dec from "./decisions.ts";
 import * as conv from "./conversations.ts";
 import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
+import * as maintain from "./maintain.ts";
+import { uiV2 } from "../../workflow/settings.ts";
 import * as runners from "./runners.ts";
 import * as modelQueue from "./model-queue.ts";
 import * as areas from "./areas.ts";
@@ -122,6 +124,7 @@ async function me(db: Db, req: Req): Promise<User> {
     maintainerWrites: mw?.value === "1",
     maintainerSettles: await maintainersSettle(db),
     inference: await inferenceMode(db),
+    uiV2: await uiV2(db, req.user.login),
   };
 }
 
@@ -464,6 +467,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/mcp/tokens", mcp.tokens),
     post("/api/mcp/tokens", mcp.create),
     post("/api/mcp/tokens/revoke", mcp.revoke),
+    // The new dashboard (ui_v2).
+    scoped(get("/api/maintain/home", maintain.home)),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),

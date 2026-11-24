@@ -741,6 +741,8 @@ export interface User {
   maintainerSettles: boolean;
   /** Who runs the model calls: the registered accounts (`server`) or the users' own helpers (`user-local`). */
   inference: InferenceMode;
+  /** The user's switch for the new dashboard (`ui_v2`, src/workflow/settings.ts). */
+  uiV2: boolean;
 }
 export type InferenceMode = "server" | "user-local";
 export type InferenceTier = "top" | "mid" | "small";
@@ -2790,8 +2792,8 @@ export type { HelperInfo as RemoteHelper, Readiness as HelperReadiness, UsageWin
  * the runners' labels, slots or models.
  */
 export type TaskItems = "all" | "fast" | "mine";
-export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean };
-export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean };
+export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
+export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
 export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
@@ -3291,3 +3293,45 @@ export type WorkspaceCall = {
 export type WorkspaceCalls = { calls: WorkspaceCall[]; older: string | null };
 /** Untrusted text, shown as text: the first 4000 and the last 20000 characters of a longer output; `chars` is the full length. */
 export type WorkspaceCallOutput = { output: string | null; chars: number };
+
+/** One started item on the new Home (GET /api/maintain/home), from its live workflow row (src/workflow/). */
+export interface MaintainRow {
+  repo: RepoName;
+  number: number;
+  kind: "pr" | "issue";
+  title: string;
+  author: string | null;
+  entry: "review" | "fixup" | "implement" | "merge";
+  /** The open recommendation, a note that the last answer was unclear, or where the item stands; already translated. */
+  line: string;
+  /** Waiting for an answer: an open recommendation or an unclear answer. */
+  waits: boolean;
+  /** Stopped at a blocker. */
+  blocked: boolean;
+  /** The weight word or `weight n`; null for the normal weight. */
+  weight: string | null;
+  startedBy: string;
+  approvedBy: string | null;
+  stoppedBy: string | null;
+  updatedAt: string;
+}
+
+/** The reader's Task Runner line: their own runners (fresh status = online) and other users' ready runners that take shared work. */
+export interface MaintainRunnerLine {
+  mine: { name: string; online: boolean; running: number }[];
+  others: number;
+}
+
+/**
+ * The new Home. `needs` holds items waiting for an answer on repos the reader may act on (operators: every repo; maintainers:
+ * repos with GitHub write; viewers: none). Viewers get `waiting` (every waiting item) and `running`; others get `mine` (items
+ * they started, approved or stopped). `runner` is null for viewers and when model calls run on the server's own accounts.
+ */
+export interface MaintainHome {
+  needs: MaintainRow[];
+  mine: MaintainRow[];
+  waiting: MaintainRow[];
+  running: MaintainRow[];
+  runner: MaintainRunnerLine | null;
+  attention: HomeProblem[];
+}
