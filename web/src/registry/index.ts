@@ -37,8 +37,12 @@ import { helpModule } from "../modules/help";
 import { maintainQueueModule } from "../modules/maintain/queue";
 import { maintainStatsModule } from "../modules/maintain/stats";
 import { runnerModule } from "../modules/runner";
+import { maintainItemsModule } from "../modules/maintain/items";
 
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
+
+/** Classic modules the new dashboard's own pages replace. */
+const replacedInV2: FeatureModule[] = [homeModule, itemsModule];
 
 /** The new dashboard: its own Home; the classic views serve the pages the new dashboard has not replaced yet. */
 export const v2Modules: FeatureModule[] = [
@@ -47,7 +51,8 @@ export const v2Modules: FeatureModule[] = [
   maintainStatsModule,
   helpModule,
   runnerModule,
-  ...classicModules.filter((m) => m !== homeModule),
+  maintainItemsModule,
+  ...classicModules.filter((m) => !replacedInV2.includes(m)),
 ];
 
 /** Every module of either dashboard, for preloading code. */

@@ -3355,3 +3355,68 @@ export interface MaintainStats {
   spend: number;
   perDay: { day: string; n: number }[];
 }
+
+// ---- the new Items page (GET /api/maintain/items) ----
+
+/**
+ * Which list an item is in: `needs` (an open recommendation or an unclear last answer), `started` (a live workflow), `automatic`
+ * (AutoCraft works it without anyone picking it: review, fix, verify or merge queue), `rest` (open, nothing running), `backlog`
+ * (open, nothing planned) and `done` (merged or closed).
+ */
+export type MaintainItemGroup = "needs" | "started" | "automatic" | "rest" | "backlog" | "done";
+export type MaintainItemsShow = "open" | "backlog" | "closed";
+/** `security` and `stuck` are for operators and maintainers. */
+export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates";
+
+export interface MaintainItemRow {
+  repo: RepoName;
+  number: number;
+  kind: "pr" | "issue";
+  state: ItemState;
+  title: string;
+  author: string | null;
+  group: MaintainItemGroup;
+  /** A started item's line (the open recommendation, an unclear-answer note or where it stands), already translated; null otherwise. */
+  line: string | null;
+  /** The pipeline's status line of an item nobody started; null for a started item. */
+  status: ItemStatus | null;
+  blocked: boolean;
+  /** The weight word or `weight n`; null for the normal weight. */
+  weight: string | null;
+  startedBy: string | null;
+  approvedBy: string | null;
+  stoppedBy: string | null;
+  duplicate: boolean;
+  /** Held for model work because its author is outside the team. */
+  outside: boolean;
+  /** Nothing moves it (the liveness check); always false for viewers. */
+  stuck: boolean;
+  area: string | null;
+  /** The reader may send commands on its repo. */
+  may: boolean;
+  updatedAt: string;
+}
+
+export interface MaintainItemsQuery {
+  show?: MaintainItemsShow;
+  filters?: MaintainItemsFilter[];
+  areas?: string[];
+  q?: string;
+  /** `repo#n` of semantic search hits, best first: only these, in this order within each group. */
+  refs?: string[];
+  sort?: "priority" | "updated";
+  /** Rows per group at most. */
+  limit?: number;
+}
+
+/** Rows in group order (needs, started, automatic, rest; or backlog; or done), each group cut at the query's limit; `counts` has every match. */
+export interface MaintainItems {
+  rows: MaintainItemRow[];
+  counts: Record<MaintainItemGroup, number>;
+}
+
+/** What a command did to each item, and the lines to show the sender (confirmation, ambiguity or refusal). */
+export interface MaintainCommandResult {
+  items: { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null }[];
+  lines: string[];
+}

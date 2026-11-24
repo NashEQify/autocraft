@@ -197,6 +197,8 @@ export function createHttpApi(): Api {
       home: () => get("/api/maintain/home"),
       queue: () => get("/api/maintain/queue"),
       stats: (period) => get(`/api/maintain/stats${qs({ period })}`),
+      items: (q) => get(`/api/maintain/items${qs({ ...q, filters: undefined, filter: q.filters?.join(","), areas: undefined, area: q.areas?.join(","), refs: q.refs?.join(",") })}`),
+      command: (text) => post("/api/commands", { text }),
     },
     itemPage: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/page${qs({ since })}`),
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),

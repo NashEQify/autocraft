@@ -476,6 +476,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     scoped(get("/api/maintain/home", maintain.home)),
     get("/api/maintain/queue", maintain.queueMeta),
     scoped(get("/api/maintain/stats", maintain.stats)),
+    // The new Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
+    scoped(get("/api/maintain/items", maintain.items)),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),

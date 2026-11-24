@@ -23,6 +23,9 @@ import type {
   MaintainHome,
   MaintainQueueMeta,
   MaintainStats,
+  MaintainItems,
+  MaintainItemsQuery,
+  MaintainCommandResult,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -256,6 +259,10 @@ export interface Api {
     queue(): Promise<MaintainQueueMeta>;
     /** Stats: headline numbers and merges per day for 7 or 30 days. */
     stats(period: "7d" | "30d"): Promise<MaintainStats>;
+    /** Items: four lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
+    items(query: MaintainItemsQuery): Promise<MaintainItems>;
+    /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
+    command(text: string): Promise<MaintainCommandResult>;
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
