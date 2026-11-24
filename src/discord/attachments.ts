@@ -12,6 +12,9 @@ export type Attachment = { url: string; filename: string; contentType: string; s
 
 export type Copied = { markdown: string; skipped: { filename: string; why: string }[] };
 
+/** What became of one attachment. A transient failure (download or storage error) is tried again on the next press; the rest are kept. */
+export type Outcome = { line: string } | { why: string; transient: boolean };
+
 export const MAX_SCREENSHOTS = 3;
 export const MAX_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_MS = 20_000;
@@ -73,14 +76,19 @@ export function signV4(req: { method: string; host: string; path: string; query?
 
 export type CopyDeps = { fetch?: typeof fetch; now?: () => number; log: (line: string) => void };
 
-class Skip extends Error {}
+class Skip extends Error {
+  transient: boolean;
+  constructor(why: string, transient = false) { super(why); this.transient = transient; }
+}
+const NOT_DOWNLOADED = "it could not be downloaded from Discord";
 
 async function download(a: Attachment, f: typeof fetch): Promise<Uint8Array<ArrayBuffer>> {
   let u: URL;
-  try { u = new URL(a.url); } catch { throw new Skip("it could not be downloaded from Discord"); }
-  if (u.protocol !== "https:" || !DISCORD_HOSTS.has(u.hostname)) throw new Skip("it could not be downloaded from Discord");
-  const res = await f(u, { signal: AbortSignal.timeout(TIMEOUT_MS) }).catch(() => null);
-  if (!res?.ok || !res.body) throw new Skip("it could not be downloaded from Discord");
+  try { u = new URL(a.url); } catch { throw new Skip(NOT_DOWNLOADED, true); }
+  if (u.protocol !== "https:" || !DISCORD_HOSTS.has(u.hostname)) throw new Skip(NOT_DOWNLOADED, true);
+  // Any redirect counts as a failure, so only Discord's own hosts are ever fetched.
+  const res = await f(u, { redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS) }).catch(() => null);
+  if (!res?.ok || !res.body) throw new Skip(NOT_DOWNLOADED, true);
   if (Number(res.headers.get("content-length") ?? 0) > MAX_BYTES) { await res.body.cancel().catch(() => undefined); throw new Skip("it is larger than 10 MB"); }
   const parts: Uint8Array[] = [];
   let total = 0;
@@ -95,14 +103,14 @@ async function download(a: Attachment, f: typeof fetch): Promise<Uint8Array<Arra
     }
   } catch (e) {
     if (e instanceof Skip) throw e;
-    throw new Skip("it could not be downloaded from Discord");
+    throw new Skip(NOT_DOWNLOADED, true);
   }
   return new Uint8Array(Buffer.concat(parts));
 }
 
 async function upload(store: AttachStore, bytes: Uint8Array<ArrayBuffer>, type: ImageType, now: Date, f: typeof fetch): Promise<string> {
   const iso = now.toISOString();
-  const key = `discord/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${randomBytes(16).toString("base64url")}.${type.ext}`;
+  const key = `discord/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${randomBytes(16).toString("hex")}.${type.ext}`;
   const base = new URL(store.endpoint);
   const path = `${base.pathname.replace(/\/+$/, "")}/${[store.bucket, ...key.split("/")].map(encSegment).join("/")}`;
   const amzDate = iso.replace(/[-:]/g, "").replace(/\.\d{3}/, "");
@@ -112,35 +120,45 @@ async function upload(store: AttachStore, bytes: Uint8Array<ArrayBuffer>, type: 
   };
   const authorization = signV4({ method: "PUT", host: base.host, path, headers, payloadHash },
     { accessKeyId: store.accessKeyId, secretAccessKey: store.secretAccessKey, region: "auto", service: "s3" }, amzDate);
-  const res = await f(`${base.origin}${path}`, { method: "PUT", headers: { ...headers, authorization }, body: bytes, signal: AbortSignal.timeout(TIMEOUT_MS) });
+  const res = await f(`${base.origin}${path}`, { method: "PUT", headers: { ...headers, authorization }, body: bytes, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
   await res.body?.cancel().catch(() => undefined);
-  if (!res.ok) throw new Error(`storage answered ${res.status}`);
+  if (!res.ok || res.type === "opaqueredirect") throw new Error(`storage answered ${res.status}`);
   return `${store.publicUrl}/${key}`;
 }
 
-/** Downloads, checks and uploads each attachment (at most MAX_SCREENSHOTS); one that fails is left out with the reason, in plain words. */
-export async function copyAttachments(store: AttachStore, list: Attachment[], deps: CopyDeps): Promise<Copied> {
+/**
+ * Downloads, checks and uploads each attachment (at most MAX_SCREENSHOTS); one that fails is left out with the reason,
+ * in plain words. `done` (by Discord link) keeps the stored ones and those refused for type or size across presses, so
+ * a later press uploads nothing twice and retries only transient failures.
+ */
+export async function copyAttachments(store: AttachStore, list: Attachment[], deps: CopyDeps, done = new Map<string, Outcome>()): Promise<Copied> {
   const f = deps.fetch ?? fetch;
   const lines: string[] = [];
   const skipped: Copied["skipped"] = [];
   for (const a of list.slice(0, MAX_SCREENSHOTS)) {
     const name = safeName(a.filename);
-    try {
-      if (a.size > MAX_BYTES) throw new Skip("it is larger than 10 MB");
-      const bytes = await download(a, f);
-      const type = sniffImage(bytes);
-      if (!type) throw new Skip("it is not a PNG, JPEG, GIF or WebP image");
-      let url: string;
+    let out = done.get(a.url);
+    if (!out) {
       try {
-        url = await upload(store, bytes, type, new Date((deps.now ?? Date.now)()), f);
+        if (a.size > MAX_BYTES) throw new Skip("it is larger than 10 MB");
+        const bytes = await download(a, f);
+        const type = sniffImage(bytes);
+        if (!type) throw new Skip("it is not a PNG, JPEG, GIF or WebP image");
+        let url: string;
+        try {
+          url = await upload(store, bytes, type, new Date((deps.now ?? Date.now)()), f);
+        } catch (e) {
+          deps.log(`discord: storing a screenshot failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
+          throw new Skip("it could not be stored", true);
+        }
+        out = { line: `![${name}](${url})` };
       } catch (e) {
-        deps.log(`discord: storing a screenshot failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
-        throw new Skip("it could not be stored");
+        out = e instanceof Skip ? { why: e.message, transient: e.transient } : { why: "it could not be stored", transient: true };
       }
-      lines.push(`![${name}](${url})`);
-    } catch (e) {
-      skipped.push({ filename: name, why: e instanceof Skip ? e.message : "it could not be stored" });
+      if ("line" in out || !out.transient) done.set(a.url, out);
     }
+    if ("line" in out) lines.push(out.line);
+    else skipped.push({ filename: name, why: out.why });
   }
   return { markdown: lines.length ? `### Screenshots\n\n${lines.join("\n\n")}` : "", skipped };
 }

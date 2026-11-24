@@ -332,7 +332,7 @@ describe("search and filing flow", () => {
     assert.equal(puts.length, 0, "nothing is uploaded before Submit for me");
     await send(3, "u40", { custom_id: rows(rest.edits[0]!).find((x) => x.label === "Submit for me")!.custom_id! }, "c1", ix2);
     assert.equal(puts.length, 1);
-    assert.match(puts[0]!.url, /^https:\/\/store\.example\.test\/shots\/discord\/\d{4}\/\d{2}\/[\w-]{22}\.png$/);
+    assert.match(puts[0]!.url, /^https:\/\/store\.example\.test\/shots\/discord\/\d{4}\/\d{2}\/[0-9a-f]{32}\.png$/);
     const key = puts[0]!.url.split("/shots/")[1];
     assert.ok(bodies[0]!.includes(`![shot.png](https://files.example.test/${key})`));
     assert.doesNotMatch(bodies[0]!, /notes/);

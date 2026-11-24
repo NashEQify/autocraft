@@ -25,7 +25,7 @@ import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { botRepo, botRepos, FILING_MAX } from "./filing-repos.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
-import { attachStoreFromEnv, copyAttachments, MAX_SCREENSHOTS, type AttachStore, type Attachment, type Copied } from "./attachments.ts";
+import { attachStoreFromEnv, copyAttachments, MAX_SCREENSHOTS, type AttachStore, type Attachment, type Copied, type Outcome } from "./attachments.ts";
 
 export const ISSUE_CAP_KEY = "discord_issue_daily_usd";
 export const DEFAULT_ISSUE_CAP_USD = 2;
@@ -93,8 +93,8 @@ type Session = {
   calls: number;
   /** Screenshots attached to the form: Discord's links only, nothing downloaded. */
   attachments: Attachment[];
-  /** The screenshots as copied by an earlier Submit for me that GitHub then refused, so a second press does not upload them again. */
-  copied?: Copied;
+  /** The screenshots stored, or refused for type or size, by an earlier Submit for me that GitHub then refused: a second press uploads them not again and retries only the rest. */
+  copies?: Map<string, Outcome>;
 };
 
 export type IssueNewDeps = {
@@ -408,7 +408,7 @@ export class IssueNew {
         await call.edit({ content: "Sign in with GitHub to file this issue under your account, then press File it again.", components: [{ type: 1, components: [{ type: 2, style: 5, label: "Sign in with GitHub", url: r.url }] }] });
       } else if (r.status === "filed") {
         this.#sessions.delete(sid);
-        await call.edit({ content: `Filed as ${s.repo}#${r.number}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
+        await call.edit({ content: `Filed as ${s.repo}#${r.number}${s.attachments.length ? "\nYour screenshots are not in it; attach them on GitHub's page." : ""}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
       } else {
         await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${this.#shots(s)}${githubText}`, components: asButton ? [{ type: 1, components: [github] }] : [] });
       }
@@ -428,8 +428,10 @@ export class IssueNew {
     const { url } = issueUrl(s.repoUrl, s.draft.title, s.draft.body, ISSUE_URL_MAX);
     const asButton = url.length <= BUTTON_URL_MAX;
     const store = this.#store;
+    // The screenshot result of this press, for its reply.
+    let copied: Copied | undefined;
     const attach = store && s.attachments.length
-      ? async (): Promise<string> => (s.copied ??= await copyAttachments(store, s.attachments, { log, now: this.#now, ...(this.#d.fetch && { fetch: this.#d.fetch }) })).markdown
+      ? async (): Promise<string> => (copied = await copyAttachments(store, s.attachments, { log, now: this.#now, ...(this.#d.fetch && { fetch: this.#d.fetch }) }, s.copies ??= new Map())).markdown
       : undefined;
     try {
       const r = await (this.#d.fileBot ?? fileAsBot)({ db: this.#d.db, log }, {
@@ -439,7 +441,7 @@ export class IssueNew {
       if (r.status === "filed") {
         await recordEvent(this.#d.db, "filed", log, this.#now());
         this.#sessions.delete(sid);
-        const left = (s.copied?.skipped ?? []).map((k) => `\n${plain(k.filename)} was left out: ${k.why}.`).join("");
+        const left = (copied?.skipped ?? []).map((k) => `\n${plain(k.filename)} was left out: ${k.why}.`).join("");
         await call.edit({ content: `Filed as ${s.repo}#${r.number}${left}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
       } else {
         await recordEvent(this.#d.db, r.reason === JUNK_REFUSAL ? "junk" : "link", log, this.#now());
