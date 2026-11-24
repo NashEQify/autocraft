@@ -20,6 +20,7 @@ import type {
   DiscordFilingAdded,
   DiscordSetup,
   Home,
+  MaintainHome,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -245,6 +246,11 @@ export interface Api {
   progress(): Promise<Progress>;
   /** Home: needs, problems, phase counts, progress and what was done today, in one payload; the page's project narrows all of it. */
   home(): Promise<Home>;
+  /** The new dashboard (ui_v2). */
+  maintain: {
+    /** Home: what waits for the reader's answer, what they started, their Task Runner line and problems; the page's project narrows it. */
+    home(): Promise<MaintainHome>;
+  };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
   /** The Items list with a status per row, one page at a time. */

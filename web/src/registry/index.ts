@@ -1,5 +1,5 @@
-// The one list of feature modules. Adding a feature means adding its module here;
-// the shell builds nav, routes, panels and shortcut help from these declarations.
+// The lists of feature modules: the classic dashboard's, and the new dashboard's for users with `ui_v2` on. Adding a feature
+// means adding its module here; the shell builds routes, panels and shortcut help from these declarations.
 import type { FeatureModule } from "./types";
 import { setListPages } from "../api/scope";
 import { needsModule } from "../modules/needs";
@@ -32,7 +32,24 @@ import { batchModule } from "../modules/batch";
 import { securityModule } from "../modules/security";
 import { homeModule } from "../modules/home";
 import { hubModule } from "../modules/hub";
+import { maintainHomeModule } from "../modules/maintain/home";
 
-export const modules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
+export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
-setListPages(modules.flatMap((m) => m.routes.filter((r) => r.scoped).map((r) => r.path)));
+/** The new dashboard: its own Home; the classic views serve the pages the new dashboard has not replaced yet. */
+export const v2Modules: FeatureModule[] = [maintainHomeModule, ...classicModules.filter((m) => m !== homeModule)];
+
+/** Every module of either dashboard, for preloading code. */
+export const allModules: FeatureModule[] = [...new Set([...classicModules, ...v2Modules])];
+
+/** The signed-in user's list; selectModules sets it before the app renders. */
+export let modules: FeatureModule[] = classicModules;
+
+/** Picks the module list by the user's `ui_v2` switch. */
+export function selectModules(uiV2: boolean): FeatureModule[] {
+  modules = uiV2 ? v2Modules : classicModules;
+  setListPages(modules.flatMap((m) => m.routes.filter((r) => r.scoped).map((r) => r.path)));
+  return modules;
+}
+
+selectModules(false);
