@@ -2,6 +2,11 @@
 // existing issue, up to three follow-up questions, and a draft the GitHub App files for the person ("Submit for me",
 // file-issue.ts) or the person opens on GitHub themselves.
 //
+// When screenshot storage is configured (attachments.ts), the bug and undecided forms take up to three images. Only
+// their Discord links are kept with the session; "Submit for me" copies them to our bucket after the limits and the
+// junk check pass and embeds them in the issue body, and its reply names each file left out and why. The prefilled
+// GitHub link cannot carry files, so the person is told to attach them there. Images never reach a model prompt.
+//
 // What a person typed lives in memory for the session only (15 minutes) and is never stored or logged. The model calls
 // (step `discord-issue`) record their cost under a daily cap of their own; their prompt and reply texts are deleted when
 // a call ends, and at startup. Model output is data: questions are picked by id from a fixed list, and the draft is
@@ -20,6 +25,7 @@ import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { botRepo, botRepos, FILING_MAX } from "./filing-repos.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
+import { attachStoreFromEnv, copyAttachments, MAX_SCREENSHOTS, type AttachStore, type Attachment, type Copied } from "./attachments.ts";
 
 export const ISSUE_CAP_KEY = "discord_issue_daily_usd";
 export const DEFAULT_ISSUE_CAP_USD = 2;
@@ -85,6 +91,10 @@ type Session = {
   stage: "form" | "matched" | "asking" | "drafted";
   /** Model calls made; at most MAX_CALLS (the questions and one draft). */
   calls: number;
+  /** Screenshots attached to the form: Discord's links only, nothing downloaded. */
+  attachments: Attachment[];
+  /** The screenshots as copied by an earlier Submit for me that GitHub then refused, so a second press does not upload them again. */
+  copied?: Copied;
 };
 
 export type IssueNewDeps = {
@@ -99,6 +109,10 @@ export type IssueNewDeps = {
   botRefusal?: (db: Db, reporter: string, repo: string) => Promise<string | null>;
   /** The junk check on the first message; the model check (Jev, Haiku where unsure) unless a test sets it. */
   junk?: (db: Db, a: JunkAsk) => Promise<"junk" | "ok" | "unknown">;
+  /** The screenshot bucket; read from the environment unless a test sets it (null: screenshots off). */
+  store?: AttachStore | null;
+  /** Downloads from Discord and uploads to the bucket; replaced in tests. */
+  fetch?: typeof fetch;
 };
 
 const field = (custom_id: string, label: string, style: 1 | 2, max: number, opts: { required?: boolean; value?: string; placeholder?: string } = {}) => ({
@@ -111,14 +125,17 @@ const KINDS: { value: IssueKind; label: string }[] = [{ value: "bug", label: "Bu
 const titleOf = (description: string): string => { const t = description.replace(/\s+/g, " ").trim(); return t.length > 80 ? `${t.slice(0, 79)}…` : t; };
 const TOO_MANY = "\nToo many new issues just now. Try again later.";
 const button = (label: string, custom_id: string, style: 1 | 2 = 2) => ({ type: 2, style, label: label.slice(0, 80), custom_id });
+const SHOTS_ON_GITHUB = "\nThe GitHub page does not get your screenshots; attach them there.";
 
 export class IssueNew {
   #d: IssueNewDeps;
   #sessions = new Map<string, Session>();
   #hits = new Map<string, number[]>();
+  #store: AttachStore | null;
 
   constructor(deps: IssueNewDeps) {
     this.#d = deps;
+    this.#store = deps.store === undefined ? attachStoreFromEnv() : deps.store;
   }
 
   get #filing(): boolean {
@@ -195,7 +212,7 @@ export class IssueNew {
     this.#sessions.set(sid, {
       user: call.userId, repo: "", repoUrl: "", expires: this.#now() + SESSION_MS,
       title: "", description: "", matches: [], questions: [], capped: false, answers: [], stage: "form", calls: 0, kind: kind ?? "bug", chosen: kind, filing: false, counted: false,
-      drafted: false, bot: false, name: call.userName ?? "",
+      drafted: false, bot: false, name: call.userName ?? "", attachments: [],
     });
     await call.showModal({
       custom_id: `inew:form:${sid}`, title: kind === "bug" ? "Report a bug" : kind === "feature" ? "Request a feature" : "Find or report an issue",
@@ -203,6 +220,9 @@ export class IssueNew {
         labelled("App", { type: 3, custom_id: "app", required: true, options: apps.map((a) => ({ label: a.label.slice(0, 100), value: a.name, ...(a.name === repo ? { default: true } : {}) })) }),
         labelled(kind === "bug" ? "Describe the problem" : kind === "feature" ? "Describe the idea" : "Describe the problem or the idea", { type: 4, custom_id: "description", style: 2, required: true, max_length: ISSUE_FORM_BODY_CHARS, placeholder: "What happened, or what would you like?",
           ...(question.trim() ? { value: question.replace(/\s+/g, " ").trim().slice(0, ISSUE_FORM_BODY_CHARS) } : {}) }),
+        // Offered only where Submit for me can store the files: a control that cannot work is never shown.
+        ...(this.#store && kind !== "feature" ? [{ type: 18, label: "Screenshots", description: `Optional, up to ${MAX_SCREENSHOTS} images`,
+          component: { type: 19, custom_id: "screenshots", min_values: 0, max_values: MAX_SCREENSHOTS, required: false, file_types: [".png", ".jpg", ".jpeg", ".gif", ".webp"] } }] : []),
       ],
     });
   }
@@ -221,6 +241,7 @@ export class IssueNew {
     if (!this.#d.search.allow(userKey, channelKey)) return void (await call.edit({ content: "Too many searches just now. Try again in a minute." }));
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
     s.description = description; s.title = titleOf(description);
+    s.attachments = this.#store ? (call.files().screenshots ?? []).slice(0, MAX_SCREENSHOTS).map((a) => ({ url: a.url, filename: a.filename, contentType: a.content_type ?? "", size: Number(a.size) || 0 })) : [];
     await recordEvent(db, "started", this.#d.log, this.#now());
     // The first message is checked before anything else is asked; no answer from a model lets the flow go on.
     const ask: JunkAsk = { title: s.title, body: description, ...(s.chosen && { kind: s.chosen }) };
@@ -228,7 +249,7 @@ export class IssueNew {
       await recordEvent(db, "junk", this.#d.log, this.#now());
       const { url } = issueUrl(s.repoUrl, s.title, description, ISSUE_URL_MAX);
       this.#sessions.delete(sid);
-      return void (await call.edit({ content: `${JUNK_REFUSAL}\nYou can still open it on GitHub yourself.${url.length <= BUTTON_URL_MAX ? "" : `\n[Open on GitHub](<${url}>)`}`, components: url.length <= BUTTON_URL_MAX ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] }));
+      return void (await call.edit({ content: `${JUNK_REFUSAL}\nYou can still open it on GitHub yourself.${this.#shots(s)}${url.length <= BUTTON_URL_MAX ? "" : `\n[Open on GitHub](<${url}>)`}`, components: url.length <= BUTTON_URL_MAX ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] }));
     }
     s.stage = "matched";
     // The questions are chosen in the background, so the matches reply does not wait for the model; "None of these" uses the result.
@@ -340,7 +361,7 @@ export class IssueNew {
     const head = `Your draft for ${s.repo}:\n**${plain(d.title)}**\n`;
     const asButton = url.length <= BUTTON_URL_MAX;
     const credit = s.bot ? "\nSubmit for me files it from the AutoCraft bot and names you as the reporter." : "";
-    const foot = `${credit}${asButton ? "" : `\n[Open on GitHub instead](<${url}>)`}${trimmed ? "\nThe GitHub link holds only the start of the text; Edit shows all of it." : ""}`;
+    const foot = `${credit}${this.#shots(s)}${asButton ? "" : `\n[Open on GitHub instead](<${url}>)`}${trimmed ? "\nThe GitHub link holds only the start of the text; Edit shows all of it." : ""}`;
     const room = MESSAGE_CHARS - head.length - foot.length - 10;
     const preview = room > 80 ? fence(d.body.length > room ? `${d.body.slice(0, room - 1)}…` : d.body) : "";
     return {
@@ -389,7 +410,7 @@ export class IssueNew {
         this.#sessions.delete(sid);
         await call.edit({ content: `Filed as ${s.repo}#${r.number}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
       } else {
-        await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${githubText}`, components: asButton ? [{ type: 1, components: [github] }] : [] });
+        await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${this.#shots(s)}${githubText}`, components: asButton ? [{ type: 1, components: [github] }] : [] });
       }
     } finally {
       s.filing = false;
@@ -406,21 +427,32 @@ export class IssueNew {
     await call.defer();
     const { url } = issueUrl(s.repoUrl, s.draft.title, s.draft.body, ISSUE_URL_MAX);
     const asButton = url.length <= BUTTON_URL_MAX;
+    const store = this.#store;
+    const attach = store && s.attachments.length
+      ? async (): Promise<string> => (s.copied ??= await copyAttachments(store, s.attachments, { log, now: this.#now, ...(this.#d.fetch && { fetch: this.#d.fetch }) })).markdown
+      : undefined;
     try {
       const r = await (this.#d.fileBot ?? fileAsBot)({ db: this.#d.db, log }, {
         reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted, junkChecked: !s.edited,
+        ...(attach && { attach }),
       });
       if (r.status === "filed") {
         await recordEvent(this.#d.db, "filed", log, this.#now());
         this.#sessions.delete(sid);
-        await call.edit({ content: `Filed as ${s.repo}#${r.number}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
+        const left = (s.copied?.skipped ?? []).map((k) => `\n${plain(k.filename)} was left out: ${k.why}.`).join("");
+        await call.edit({ content: `Filed as ${s.repo}#${r.number}${left}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
       } else {
         await recordEvent(this.#d.db, r.reason === JUNK_REFUSAL ? "junk" : "link", log, this.#now());
-        await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${asButton ? "" : `\n[Open on GitHub](<${url}>)`}`, components: asButton ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] });
+        await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${this.#shots(s)}${asButton ? "" : `\n[Open on GitHub](<${url}>)`}`, components: asButton ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] });
       }
     } finally {
       s.filing = false;
     }
+  }
+
+  /** The note that the prefilled GitHub link leaves the person's screenshots behind. */
+  #shots(s: Session): string {
+    return s.attachments.length ? SHOTS_ON_GITHUB : "";
   }
 
   /** "Edit": the draft's title and body in a form. */
