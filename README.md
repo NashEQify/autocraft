@@ -191,6 +191,8 @@ AutoCraft can count how often tracked items are mentioned in Discord channels yo
 | `backup.sh` | Consistent SQLite snapshots |
 | `craft-runner.service`, `craft-worker.service` | User units for the runner and the sandbox worker |
 
+On Kubernetes, every push to `main` publishes the image with the tag `main` (`.github/workflows/docker-publish.yml`). A cluster that runs Flux image automation can follow that tag's digest: Flux commits each new digest to the cluster's GitOps repository and rolls it out, so a merge to `main` deploys itself. Roll back by reverting the commit on `main`; a digest pinned by hand is overwritten at the next scan until the automation is suspended.
+
 A Docker Compose deployment is available in `deploy/compose/compose.yaml`. This deploys the dashboard, runner, and periodic sync/backup service, while sandbox workers run separately. See [Running in a container](docs/operations.md#running-in-a-container) and [VPS with Docker Compose](docs/migration.md#vps-with-docker-compose).
 
 Details, including the worker and build environments: [docs/operations.md](docs/operations.md).
