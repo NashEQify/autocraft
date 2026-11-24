@@ -2,7 +2,7 @@
 // can. A taker is a fresh, ready Task Runner (helpers.ts) of a user who is not cooled off (cooloff.ts) and who may take the
 // call (runnerTakes: role rules, write permission by the room's rule roomCanWrite, My repos narrowed by the runner's own
 // list), busy or not. A Manual only user's runner (manual-only.ts) is a taker, since the user may pick the call, though it is
-// no room. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
+// no room. For work its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
@@ -10,6 +10,7 @@
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
+import { heldForOwner, readStartedCalls } from "./started.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { acceptedModels, familyOf, inferenceMode, isTier } from "./mode.ts";
 import type { Tier } from "./protocol.ts";
@@ -102,11 +103,22 @@ async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; 
 }
 
 async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
-  const { runners, canWrite } = await readRunners(db, nowMs);
-  if (!runners.length) return () => false;
+  const [{ runners, canWrite }, owner] = await Promise.all([readRunners(db, nowMs), ownerTakes(db, nowMs)]);
   return (c) => c.forLogin
     ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
-    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
+    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite)) || owner(c);
+}
+
+/**
+ * The taker rule for work a person started or approved (started.ts): one of their fresh Task Runners takes such a call (or a
+ * job of a step their live workflow runs, on its repo; StartedCalls.ownersFor) under the role rules and write permission alone,
+ * whatever their Manual only, My repos, My tasks and items. It counts as a runner that takes only some items (`filtered`), as
+ * the call waits for it.
+ */
+async function ownerTakes(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
+  const s = await readStartedCalls(db, nowMs);
+  if (!s.runnerLogins.length) return () => false;
+  return (c) => [...s.ownersFor(c)].some((o) => s.canTake(o, c));
 }
 
 /**
@@ -189,8 +201,8 @@ export async function noTakerFor(db: Db, repo: string, step: string, nowMs: numb
 
 /**
  * One maintenance pass at `nowMs`. Each pipeline-on repo with no taker whose user takes some task keeps the time it was first seen so
- * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up and has no pick
- * that counts gets the same mark (no_taker_since), and is withdrawn once the mark is NO_TAKER_MS old. Returns the number of
+ * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up, has no pick
+ * that counts and is not held for the user who started its work (started.ts) gets the same mark (no_taker_since), and is withdrawn once the mark is NO_TAKER_MS old. Returns the number of
  * calls withdrawn. Outside the user-local mode the repo marks are cleared.
  */
 export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<number> {
@@ -209,9 +221,11 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
   const set = async (since: number | null, id: number): Promise<unknown> => await db.run(db.k.updateTable("main.remote_calls").set({ no_taker_since: since }).where("id", "=", id).where("state", "=", "queued"));
   let pickers: Set<string> | null = null;
   let withdrawn = 0;
+  const started = await readStartedCalls(db, nowMs);
   for (const c of await queueSnapshot(db, nowMs)) {
     const since = marked.get(c.id);
-    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || await pickCounts(c, nowMs, async (who) => (pickers ??= await pickerLogins(db, nowMs)).has(who));
+    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || heldForOwner(started, c, null, nowMs)
+      || await pickCounts(c, nowMs, async (who) => (pickers ??= await pickerLogins(db, nowMs)).has(who));
     if (own || await takes(c)) {
       if (since !== undefined) await set(null, c.id);
     } else if (since === undefined) await set(nowMs, c.id);
