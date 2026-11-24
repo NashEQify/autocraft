@@ -1,4 +1,4 @@
-// `/autocraft search`, the panel's buttons and the "File a new issue" button: a form (app and description), a look for an
+// `/autocraft report`, the panel's bug and feature buttons and the "File a new issue" button: a form (app and description), a look for an
 // existing issue, up to three follow-up questions, and a draft the GitHub App files for the person ("Submit for me",
 // file-issue.ts) or the person opens on GitHub themselves.
 //
@@ -30,7 +30,7 @@ const USER_LIMIT = 3, CHANNEL_LIMIT = 10;
 const MAX_APPS = 25;
 const MESSAGE_CHARS = 1900;
 const MAX_CALLS = 2;
-const USED = "That button was already used. Start again with /autocraft search.";
+const USED = "That button was already used. Start again with /autocraft report.";
 
 /** The model step; tests replace it. Null when the call failed or got no answer. */
 export type IssueAsk = {
@@ -186,7 +186,7 @@ export class IssueNew {
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
   }
 
-  /** `/autocraft search`, the panel and the "File a new issue" button: the form with the app select (`repo` preselected) and the description box. `kind`: what the person said they are reporting. */
+  /** `/autocraft report`, the panel and the "File a new issue" button: the form with the app select (`repo` preselected) and the description box. `kind`: what the person said they are reporting. */
   async open(call: Call, repo: string | null, question = "", kind?: IssueKind): Promise<void> {
     const apps = await this.#apps(repo);
     if (!apps.length) return void (await call.reply({ content: "No public repo to search yet." }));
@@ -211,12 +211,12 @@ export class IssueNew {
   async form(call: Call, sid: string): Promise<void> {
     const { db, keys } = this.#d;
     const s = this.#session(call, sid);
-    if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft search." }));
+    if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft report." }));
     if (s.stage !== "form") return void (await call.edit({ content: USED }));
     const f = call.fields();
     const repo = f.app ? await botRepo(db, f.app) : null;
     const description = (f.description ?? "").trim().slice(0, ISSUE_FORM_BODY_CHARS);
-    if (!repo || !description) return void (await call.edit({ content: "Pick an app and describe the problem. Start again with /autocraft search." }));
+    if (!repo || !description) return void (await call.edit({ content: "Pick an app and describe the problem. Start again with /autocraft report." }));
     const userKey = keys.hash("author", s.user), channelKey = keys.hash("channel", call.interaction.channel_id ?? "?");
     if (!this.#d.search.allow(userKey, channelKey)) return void (await call.edit({ content: "Too many searches just now. Try again in a minute." }));
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
@@ -252,7 +252,7 @@ export class IssueNew {
   /** "None of these" or "Continue": the follow-up questions are chosen now (a model call, or the kind's fixed ones when it fails), then asked in a second form behind a Continue button; with none, the draft follows at once. */
   async none(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
-    if (!s) return void (await call.reply({ content: "This form has expired. Start again with /autocraft search." }));
+    if (!s) return void (await call.reply({ content: "This form has expired. Start again with /autocraft report." }));
     if (s.stage === "asking" && s.questions.length) {
       await call.showModal({
         custom_id: `inew:ans:${sid}`, title: "A few more details",
@@ -288,7 +288,7 @@ export class IssueNew {
 
   async answers(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
-    if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft search." }));
+    if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft report." }));
     if (s.stage !== "asking") return void (await call.edit({ content: USED }));
     s.stage = "drafted";
     const f = call.fields();
@@ -361,7 +361,7 @@ export class IssueNew {
   async kind(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
     const v = call.values()[0];
-    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft report." }));
     if (v === "bug" || v === "feature") s.kind = v;
     await call.ack();
   }
@@ -370,7 +370,7 @@ export class IssueNew {
   async file(call: Call, sid: string): Promise<void> {
     const { keys, log } = this.#d;
     const s = this.#session(call, sid);
-    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft report." }));
     if (s.filing) return void (await call.reply({ content: "Filing is already in progress." }));
     s.filing = true;
     await call.defer();
@@ -400,7 +400,7 @@ export class IssueNew {
   async bot(call: Call, sid: string): Promise<void> {
     const { keys, log } = this.#d;
     const s = this.#session(call, sid);
-    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft report." }));
     if (s.filing) return void (await call.reply({ content: "Filing is already in progress." }));
     s.filing = true;
     await call.defer();
@@ -426,7 +426,7 @@ export class IssueNew {
   /** "Edit": the draft's title and body in a form. */
   async edit(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
-    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft report." }));
     await call.showModal({
       custom_id: `inew:fix:${sid}`, title: "Edit the draft",
       components: [field("title", "Title", 1, ISSUE_TITLE_CHARS, { value: s.draft.title }), field("body", "Body", 2, 4000, { value: s.draft.body })],
@@ -435,7 +435,7 @@ export class IssueNew {
 
   async fix(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
-    if (!s?.draft) return void (await call.edit({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (!s?.draft) return void (await call.edit({ content: "This draft has expired. Start again with /autocraft report." }));
     const f = call.fields();
     const d = cleanDraft({ title: f.title ?? "", body: f.body ?? "" }, await this.#repos());
     if (d) { s.draft = d; s.edited = true; }
@@ -447,7 +447,7 @@ export function installIssueNew(ix: Interactions, deps: IssueNewDeps): IssueNew 
   const { db } = deps;
   const flow = new IssueNew(deps);
   // No fields: Discord shows the command's form at once, and the form is the first response.
-  ix.command("autocraft search", { name: "autocraft", type: 1, description: "AutoCraft", dm_permission: false, options: [{ type: 1, name: "search", description: "Find existing issues or report a new one" }] }, async (call) => {
+  ix.command("autocraft report", { name: "autocraft", type: 1, description: "AutoCraft", dm_permission: false, options: [{ type: 1, name: "report", description: "Report a bug or request a feature" }] }, async (call) => {
     await flow.open(call, (await fileRepoUrl(db, call.interaction.channel_id, []))?.split("/").pop() ?? null);
   }, { immediate: true });
   // The "File a new issue" button of search results: `inewi:open:<repo>[:<seed>]`; the other actions belong to a session.
@@ -459,14 +459,14 @@ export function installIssueNew(ix: Interactions, deps: IssueNewDeps): IssueNew 
     else if (action === "kind") await flow.kind(call, a ?? "");
     else if (action === "bot") await flow.bot(call, a ?? "");
     else if (action === "file" && (deps.filing ?? FILING_IN_DISCORD)) await flow.file(call, a ?? "");
-    else await call.reply({ content: "This form has expired. Start again with /autocraft search." });
+    else await call.reply({ content: "This form has expired. Start again with /autocraft report." });
   }, { immediate: true });
   ix.component("inew", async (call) => {
     const [, action, sid] = (call.interaction.data?.custom_id ?? "").split(":");
     if (action === "form") await flow.form(call, sid ?? "");
     else if (action === "ans") await flow.answers(call, sid ?? "");
     else if (action === "fix") await flow.fix(call, sid ?? "");
-    else await call.edit({ content: "This form has expired. Start again with /autocraft search." });
+    else await call.edit({ content: "This form has expired. Start again with /autocraft report." });
   });
   return flow;
 }

@@ -171,7 +171,7 @@ Maintainers (and operators) can work the Inbox from their own agent: from the us
 
 ### Discord mentions (optional)
 
-AutoCraft can count how often tracked items are mentioned in Discord channels you choose, and answer people who mention the bot or use its `/autocraft search` form to find matching public issues and draft a new one. It reads new messages only and keeps no text and no names. See [Discord mentions, replies and search](docs/pipeline.md#discord-mentions-replies-and-search).
+AutoCraft can count how often tracked items are mentioned in Discord channels you choose, and answer people who mention the bot or use the issue panel or `/autocraft search` to find matching public issues, and `/autocraft report` (or the panel's bug and feature buttons) to draft a new one. It reads new messages only and keeps no text and no names. See [Discord mentions, replies and search](docs/pipeline.md#discord-mentions-replies-and-search).
 
 1. In the Discord developer portal, create an application and add a bot. Under Bot, turn on the Message Content intent.
 2. Invite the bot with the `bot` and `applications.commands` scopes and the View Channels, Send Messages, Send Messages in Threads, Add Reactions and Read Message History permissions. Leave everything else off. Under Installation, allow Guild Install only.
