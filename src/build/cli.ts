@@ -3,7 +3,7 @@
 // Recorded as `cli`: only someone with a shell on the host can run these. Worker keys go to a
 // file (mode 0600) and are printed only with --print. Text a worker sent is shown with control
 // characters removed, so it cannot drive the terminal.
-import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, openSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import type { CacheReport, EnvKind, KubeSettings } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { trackedNames } from "../repos.ts";
@@ -51,7 +51,8 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server workspace list [--all]
        autocraft-server workspace show <id>
        autocraft-server workspace run <id> -- <command...>     (in the runner container: needs pods/exec)
-       autocraft-server workspace tool <id> <tool> '<json args>'  (a session tool call, as a session makes it; same container)
+       autocraft-server workspace tool <id> <tool> '<json args>' [--out FILE]  (a session tool call, as a session makes it; same container;
+         --out writes the result's image to FILE, or to stdout with -, the text then going to stderr)
        autocraft-server workspace try <repo> <sha> --item N --prompt TEXT [--workspace ID] [--env ID] --for LOGIN [--keep] [--deadline-sec N]
          (queues a test session job; its log has the result)
        autocraft-server workspace end <id>`;
@@ -479,11 +480,13 @@ async function workspace(args: string[]): Promise<void> {
     if (r.stderr) process.stderr.write(r.stderr);
     if (r.error) console.error(`exec: ${r.error}`);
   } else if (sub === "tool") {
-    const id = idOf(rest[0]);
-    const name = rest[1] ?? die(USAGE);
+    const { pos, opt } = options(rest);
+    const id = idOf(pos[0]);
+    const name = pos[1] ?? die(USAGE);
+    const outFile = opt.get("out");
     let args: unknown;
     try {
-      args = JSON.parse(rest[2] ?? "{}");
+      args = JSON.parse(pos[2] ?? "{}");
     } catch {
       die("the arguments must be JSON");
     }
@@ -492,9 +495,20 @@ async function workspace(args: string[]): Promise<void> {
     const at = new Date().toISOString();
     const row = Number((await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, tool: name, args: JSON.stringify(capJson(args)), state: "queued", created_at: at }).returning("id")))!.id);
     const r = await new WorkspaceSession(db, api, id).call(name, args, row);
-    console.log(`call ${row}${r.isError ? " (error)" : ""}`);
-    process.stdout.write(r.text.endsWith("\n") ? r.text : `${r.text}\n`);
-    for (const im of r.images ?? []) console.log(`[image ${im.mimeType}, ${Buffer.from(im.data, "base64").length} bytes]`);
+    // With the image on stdout, the text goes to stderr so the bytes stay whole.
+    const say = (line: string): void => void (outFile === "-" ? process.stderr : process.stdout).write(line.endsWith("\n") ? line : `${line}\n`);
+    say(`call ${row}${r.isError ? " (error)" : ""}`);
+    say(r.text);
+    for (const im of r.images ?? []) say(`[image ${im.mimeType}, ${Buffer.from(im.data, "base64").length} bytes]`);
+    if (outFile !== undefined) {
+      const im = r.images?.[0] ?? die("the call returned no image");
+      const bytes = Buffer.from(im.data, "base64");
+      if (outFile === "-") process.stdout.write(bytes);
+      else {
+        writeFileSync(outFile, bytes);
+        say(`wrote ${bytes.length} bytes to ${safe(outFile)}`);
+      }
+    }
   } else if (sub === "try") {
     const { pos, opt } = options(rest, ["keep"]);
     const [repo, sha] = pos;
