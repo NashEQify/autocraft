@@ -87,7 +87,8 @@ export async function handleMeta(db: Db, type: string, d: unknown): Promise<void
 export function dispatcher(db: Db, keys: DiscordKeys, interactions: Interactions, pings: Pings, signals?: Signals, reactor?: Reactor): (type: string, d: unknown) => Promise<void> {
   return async (type, d) => {
     const recorded = await handleDispatch(db, keys, type, d);
-    if (recorded) await reactor?.recorded(recorded.channelId, recorded.messageId);
+    reactor?.observe(type, d);
+    if (recorded) await reactor?.recorded(recorded.channelId, recorded.messageId, recorded.guildId);
     await handleMeta(db, type, d);
     interactions.dispatch(type, d);
     await pings.dispatch(type, d);
