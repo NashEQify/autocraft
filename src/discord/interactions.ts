@@ -5,6 +5,7 @@
 // registered when the bot sees a guild.
 import { createHash } from "node:crypto";
 import type { CommandDef, DiscordRest, EditBody } from "./rest.ts";
+import { messageText } from "./refs.ts";
 
 /** A submitted modal's components: action rows hold `components`; a Label (type 18) holds one `component`. A select gives `values`, a text input `value`. */
 export type ModalComponent = { type?: number; custom_id?: string; value?: string; values?: string[]; component?: ModalComponent; components?: ModalComponent[] };
@@ -22,7 +23,7 @@ export type Interaction = {
     values?: string[];
     components?: ModalComponent[];
     options?: { name: string; type: number; value?: unknown; focused?: boolean; options?: { name: string; type: number; value?: unknown; focused?: boolean }[] }[];
-    resolved?: { messages?: Record<string, { content?: string }>; attachments?: Record<string, DiscordAttachment> };
+    resolved?: { messages?: Record<string, { content?: string; message_snapshots?: { message?: { content?: string } }[] }>; attachments?: Record<string, DiscordAttachment> };
   };
 };
 
@@ -189,7 +190,10 @@ export class Interactions {
         userName: nameOf(i),
         option: (name) => { const v = opts.find((o) => o.name === name)?.value; return typeof v === "string" ? v : undefined; },
         focused: () => { const o = opts.find((x) => x.focused); return o ? { name: o.name, value: typeof o.value === "string" ? o.value : "" } : undefined; },
-        targetText: () => (i.data?.type === MESSAGE_COMMAND && i.data.target_id ? i.data.resolved?.messages?.[i.data.target_id]?.content : undefined),
+        targetText: () => {
+          const t = i.data?.type === MESSAGE_COMMAND && i.data.target_id ? i.data.resolved?.messages?.[i.data.target_id] : undefined;
+          return t ? messageText(t) : undefined;
+        },
         edit: (body) => this.#rest.editInteractionResponse(appId, i.token, body),
         fields: () => Object.fromEntries((i.data?.components ?? []).flatMap((r) => (r.component ? [r.component] : (r.components ?? []))).filter((c) => c.custom_id).map((c) => [c.custom_id!, c.value ?? c.values?.[0] ?? ""])),
         files: () => Object.fromEntries((i.data?.components ?? []).flatMap((r) => (r.component ? [r.component] : (r.components ?? []))).filter((c) => c.type === FILE_UPLOAD && c.custom_id)

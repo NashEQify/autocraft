@@ -47,6 +47,13 @@ describe("event handler", () => {
   });
   const msg = (id: string, content: string, channel = "c1") => ({ id, channel_id: channel, guild_id: "g1", content, timestamp: "2026-11-01T10:00:00.000Z", author: { id: "u1" } });
 
+  test("a forwarded message counts the items its snapshot names", async () => {
+    const fwd = { ...msg("mf1", ""), content: "", message_reference: { type: 1 }, message_snapshots: [{ message: { content: "see https://github.com/storytold/photocraft/issues/77" } }] };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", fwd);
+    assert.equal(await countOf(db, "photocraft", 77), 1);
+    await handleDispatch(db, keys, "MESSAGE_DELETE", { id: "mf1", channel_id: "c1" });
+  });
+
   test("create, edit and delete keep counts right and rows encrypted", async () => {
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m1", "look at photocraft#1 and photocraft#2"));
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m2", "photocraft#1 again"));

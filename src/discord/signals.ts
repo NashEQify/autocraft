@@ -9,7 +9,7 @@ import { JEV_PROMPTS } from "../prompts/index.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { jevSignal, parseSignal, signalBand, signalState, type SignalAsk } from "./signal-ask.ts";
 import { isWatched, trackedRepos, type DiscordLink } from "./store.ts";
-import { parseRefs, type ItemKey } from "./refs.ts";
+import { messageText, parseRefs, type ItemKey } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
@@ -73,7 +73,7 @@ export async function dropSignalTexts(db: Db, all = false): Promise<void> {
 }
 
 export type SignalDeps = { db: Db; keys: DiscordKeys; log: (line: string) => void; judge?: Judge; now?: () => number };
-type Msg = { id: string; channel_id: string; content?: string; type?: number; webhook_id?: string; edited_timestamp?: string | null; author?: { id: string; bot?: boolean } };
+type Msg = { id: string; channel_id: string; content?: string; message_snapshots?: { message?: { content?: string } }[]; type?: number; webhook_id?: string; edited_timestamp?: string | null; author?: { id: string; bot?: boolean } };
 
 export class Signals {
   #d: SignalDeps;
@@ -95,18 +95,19 @@ export class Signals {
   async dispatch(type: string, d: unknown): Promise<void> {
     if (type !== "MESSAGE_CREATE" && type !== "MESSAGE_UPDATE") return;
     const m = d as Msg;
-    if (typeof m.id !== "string" || typeof m.channel_id !== "string" || typeof m.content !== "string" || !m.content) return;
+    const text = messageText(m);
+    if (typeof m.id !== "string" || typeof m.channel_id !== "string" || !text) return;
     if (m.author?.bot || m.webhook_id || (m.type !== undefined && m.type !== 0 && m.type !== 19)) return;
     // An update without an edit time is Discord adding a link preview: the text is the same.
     if (type === "MESSAGE_UPDATE" && !m.edited_timestamp) return;
     if (!await isWatched(this.#d.db, m.channel_id)) return;
     // Only a message that names one to MAX_ITEMS items is checked, so only those use up the limits.
-    const refs = parseRefs(m.content, await trackedRepos(this.#d.db));
+    const refs = parseRefs(text, await trackedRepos(this.#d.db));
     if (!refs.length || refs.length > MAX_ITEMS) return;
     if (!this.#allow(m.author?.id ? this.#d.keys.hash("author", m.author.id) : "", this.#d.keys.hash("channel", m.channel_id))) return;
     const hash = this.#d.keys.hash("message", m.id);
     // An edit that arrives during a call waits for it, so the later text decides.
-    const run = (this.#chain.get(hash) ?? Promise.resolve()).then(() => this.#check(hash, m.content!, refs)).catch((e: Error) => this.#d.log(`discord: signal check failed: ${e.message.slice(0, 200)}`));
+    const run = (this.#chain.get(hash) ?? Promise.resolve()).then(() => this.#check(hash, text, refs)).catch((e: Error) => this.#d.log(`discord: signal check failed: ${e.message.slice(0, 200)}`));
     const tail: Promise<void> = run.finally(() => { if (this.#chain.get(hash) === tail) this.#chain.delete(hash); });
     this.#chain.set(hash, tail);
   }
