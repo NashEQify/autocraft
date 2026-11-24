@@ -8,9 +8,11 @@ import type { Db } from "../db/index.ts";
 import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { PrFacts } from "../core/plan.ts";
+import { isLimitDecision, LIMIT_IMPLEMENT } from "../implement/questions.ts";
 import { currentImplementation } from "../implement/store.ts";
+import type { Implementation, PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
-import { getDecision, optionsOf } from "../decisions.ts";
+import { BACKLOG, getDecision, optionsOf } from "../decisions.ts";
 import { implementDecisionId, STUCK_OPTIONS } from "../implement/stuck.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { t } from "../i18n/index.ts";
@@ -19,6 +21,7 @@ import { withSettingsSnapshot } from "../settings-read.ts";
 import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
 import { afterSteps, atBlocker, planOf, type ReviewView } from "./recommend.ts";
 import { largeFixLines, outsidePurposeMin } from "./settings.ts";
+import { stepsFor, type StepName } from "./status.ts";
 import { addEvent, goOnAt, liveWorkflows, repoWorkflows, updateWorkflow, type WorkflowPatch } from "./store.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "./types.ts";
 
@@ -132,7 +135,7 @@ async function ensureLeg(db: Db, w: ItemWorkflow, repo: string, pr: number, head
 }
 
 /** The PR a workflow works on: its own item, or an implement workflow's implementation PR; null while an issue has none. */
-async function prOf(db: Db, w: ItemWorkflow): Promise<{ number: number; stuck: boolean } | null> {
+export async function prOf(db: Db, w: ItemWorkflow): Promise<{ number: number; stuck: boolean } | null> {
   if (w.kind === "pr") return { number: w.number, stuck: false };
   const im = await currentImplementation(db, w.repo, w.number);
   if (im?.prNumber != null) return { number: im.prNumber, stuck: im.state === "stuck" };
@@ -168,49 +171,162 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
   return moved;
 }
 
-async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stuck: boolean } | null, facts: Map<string, PrFacts>, thresholds: BlockerFacts["thresholds"]): Promise<ItemWorkflow["state"] | null> {
+/** Whether a question of the legacy machinery is still open (asked and unanswered). */
+async function openQuestion(db: Db, id: string): Promise<boolean> {
+  const d = await getDecision(db, id);
+  return !!d && d.answer === null;
+}
+
+/** Keys of an implement question's options that are no plan part: Backlog is its own command, and "Answer in the note" needs words a command cannot carry. */
+const NOT_A_PART = new Set([BACKLOG.key, "answer"]);
+
+/**
+ * An implement attempt's open maintainer question, as the workflow shows it: its options as numbered parts (a part a person dropped
+ * before, by its title, stays dropped) and one recommendation whose yes answers the question with the recommended option as the
+ * person. The plan's own sentence is used when it gave one for this question; the question after the last round of questions
+ * recommends going on with the stated assumptions, since a maintainer asked for the implementation. A question with no
+ * recommended option, or one only words answer, gets a recommendation a yes cannot run: the person names an option or comments.
+ */
+async function implementQuestion(db: Db, w: ItemWorkflow, im: Implementation): Promise<{ plan: PlanPart[]; rec: Recommendation } | null> {
+  if (im.state !== "asked" || !im.decisionId) return null;
+  const d = await getDecision(db, im.decisionId);
+  if (!d || d.answer !== null) return null;
+  const dropped = new Set(w.plan.filter((p) => p.option !== undefined && p.state === "dropped").map((p) => p.title.toLowerCase()));
+  const plan: PlanPart[] = optionsOf(d).filter((o) => !NOT_A_PART.has(o.key)).map((o, i) => ({
+    n: i + 1, title: o.label, source: "implement" as const, option: o.key, state: dropped.has(o.label.toLowerCase()) ? "dropped" as const : "planned" as const,
+  }));
+  const drop = plan.filter((p) => p.state === "dropped").map((p) => p.n);
+  const limit = isLimitDecision(d.id);
+  const key = limit ? LIMIT_IMPLEMENT.key : d.recommended;
+  const pick = plan.find((p) => p.option === key && p.state === "planned");
+  if (!pick) {
+    const text = plan.length
+      ? t("Answer the question “{question}” by naming the option to go with, such as “fix 1”.", { question: d.question })
+      : t("Answer the question “{question}” in a comment on the issue; the plan runs again with the answer.", { question: d.question });
+    return { plan, rec: { text, parts: { fix: [], drop }, merges: false, question: d.id } };
+  }
+  const own = !limit ? im.plan?.workflow?.recommendation ?? null : null;
+  const text = own ?? t("Go with {n}, {title}, then implement it.", { n: pick.n, title: pick.title });
+  return { plan, rec: { text, parts: { fix: [], drop }, merges: w.approvedBy !== null, answer: { decision: d.id, option: pick.option! }, question: d.id } };
+}
+
+/** A ready plan's numbered parts; a part a person dropped before (same title) stays dropped. Null when the plan gave none. */
+function implementParts(before: readonly PlanPart[], reply: PlanReply | null): PlanPart[] | null {
+  const parts = reply?.ready ? reply.workflow?.parts ?? [] : [];
+  if (!parts.length) return null;
+  const dropped = new Set(before.filter((p) => p.source === "implement" && p.state === "dropped").map((p) => p.title.toLowerCase()));
+  return parts.map((p, i) => ({ n: i + 1, title: p.title, source: "implement" as const, ...(p.files[0] ? { file: p.files[0] } : {}), files: p.files, state: dropped.has(p.title.toLowerCase()) ? "dropped" as const : "planned" as const }));
+}
+
+/**
+ * The implementation PR's files against the plan it was built from, when the PR opened after `since`: the files of the parts not
+ * dropped (from the workflow's plan while it still holds them, else from the attempt's stored plan). Null before the PR's files
+ * are read, or when no part names a file.
+ */
+async function implementationFacts(db: Db, w: ItemWorkflow, pr: number, head: string, since: string): Promise<BlockerFacts["implementation"]> {
+  const opened = (await db.get(db.k.selectFrom("main.items").select("created_at").where("repo", "=", w.repo).where("number", "=", pr)))?.created_at ?? null;
+  if (!opened || opened <= since) return null;
+  let parts = w.plan.filter((p) => p.source === "implement" && p.option === undefined);
+  if (!parts.length) {
+    const im = await db.get(db.k.selectFrom("main.implementations").select("plan_json").where("repo", "=", w.repo).where("number", "=", w.number).where("pr_number", "=", pr).orderBy("id", "desc").limit(1));
+    parts = implementParts([], json<PlanReply | null>(im?.plan_json, null)) ?? [];
+  }
+  const plannedFiles = [...new Set(parts.filter((p) => p.state !== "dropped").flatMap((p) => p.files ?? []))];
+  if (!plannedFiles.length) return null;
+  const files = (await db.all(db.k.selectFrom("main.pr_files").select("path").where("repo", "=", w.repo).where("number", "=", pr).where("head", "=", head))).map((r) => r.path).filter((f) => !LOCKFILE.test(f));
+  return files.length ? { files, plannedFiles } : null;
+}
+
+/** Whether an earlier head of the PR was reviewed: a review pending at the current head is the second one. */
+async function reviewedBefore(db: Db, repo: string, number: number, head: string): Promise<boolean> {
+  return !!await db.get(db.k.selectFrom("main.opus_reviews").select("head_oid").where("repo", "=", repo).where("number", "=", number).where("head_oid", "!=", head).where("verdict", "is not", null).limit(1));
+}
+
+/** The first of `names` the workflow's steps have, else its first step. */
+const stepIn = (w: ItemWorkflow, ...names: StepName[]): StepName => {
+  const steps = stepsFor(w.entry, w.approvedBy !== null);
+  return names.find((n) => steps.includes(n)) ?? steps[0]!;
+};
+
+async function advanceOne(db: Db, w0: ItemWorkflow, target: { number: number; stuck: boolean } | null, facts: Map<string, PrFacts>, thresholds: BlockerFacts["thresholds"]): Promise<ItemWorkflow["state"] | null> {
   const at = new Date().toISOString();
+  let w = w0;
+  /** The step the pass found the workflow at; written with the pass's other changes, or alone when only it changed. */
+  let step: StepName | null = null;
+  /** The step to record: an item back with its end recommendation is at "recommend"; one back with a question waits at its step. */
+  const stepTo = (patch: WorkflowPatch): StepName | null => {
+    const rec = patch.rec !== undefined ? patch.rec : w.rec;
+    return (patch.state ?? w.state) === "recommending" && !rec?.question ? stepIn(w, "recommend", "merge") : step;
+  };
   const write = async (patch: WorkflowPatch, event?: "blocked"): Promise<ItemWorkflow["state"] | null> => {
-    await updateWorkflow(db, w.id, patch, at);
+    const next = patch.state ?? w.state;
+    const s = stepTo(patch);
+    await updateWorkflow(db, w.id, { ...patch, ...(s !== null && s !== w0.step ? { step: s } : {}) }, at);
     if (event) await addEvent(db, { workflowId: w.id, repo: w.repo, number: w.number, login: ACTOR, via: "cli", kind: event, line: patch.rec?.text ?? null, at });
-    return patch.state !== undefined && patch.state !== w.state ? patch.state : null;
+    return next !== w0.state ? next : null;
+  };
+  /** Ends the pass: writes what changed (the step included). */
+  const settle = async (patch: WorkflowPatch): Promise<ItemWorkflow["state"] | null> => {
+    const s = stepTo(patch);
+    return Object.keys(patch).length || (s !== null && s !== w0.step) ? await write(patch) : null;
   };
   const self = await db.get(db.k.selectFrom("main.items").select(["state"]).where("repo", "=", w.repo).where("number", "=", w.number));
+  const base: WorkflowPatch = {};
+  // A recommendation that stands for a question of the legacy machinery goes once the question is answered or set aside elsewhere
+  // (the classic page, a later plan round): the workflow runs on.
+  const asks = w.rec?.question ?? w.rec?.answer?.decision ?? null;
+  if ((w.state === "blocked" || w.state === "recommending") && asks && !await openQuestion(db, asks)) {
+    Object.assign(base, { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } satisfies WorkflowPatch);
+    w = { ...w, state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null };
+  }
   // A stuck implementation comes back once per stuck question (a yes answers it, Try again): blocked when approved, else as the recommendation.
   const stuck = async (head: string | null): Promise<ItemWorkflow["state"] | null> => {
     const answer = await stuckQuestion(db, w);
     if (!answer) return null;
     const found: Found = { blocker: "failed-twice", params: { step: "implement", answer } };
-    const rec = atBlocker(found, null, w.plan);
+    const rec = { ...atBlocker(found, null, w.plan), question: answer.decision };
     return w.approvedBy
-      ? await write({ state: "blocked", blocker: found.blocker, blockerParams: found.params, rec, recAt: at, recHead: head }, "blocked")
-      : await write({ state: "recommending", rec: { ...rec, merges: false, text: t("Start the implementation again, then come back.") }, recAt: at, recHead: head });
+      ? await write({ ...base, state: "blocked", blocker: found.blocker, blockerParams: found.params, rec, recAt: at, recHead: head }, "blocked")
+      : await write({ ...base, state: "recommending", rec: { ...rec, merges: false, text: t("Start the implementation again, then come back.") }, recAt: at, recHead: head });
   };
   if (!target || target.number < 0) {
-    // An issue with no PR yet: it ends when the issue closes, and stops when its implementation is stuck.
+    // An issue with no PR yet: it ends when the issue closes, stops when its implementation is stuck, comes back with the plan's
+    // question, and shows a ready plan's parts.
     if (self && self.state !== "OPEN") return await write({ state: "closed", rec: null, blocker: null, blockerParams: null });
-    if (target?.stuck && (w.state === "running" || w.state === "waiting")) return await stuck(null);
-    return null;
+    step = stepIn(w, "implement");
+    if (w.state === "blocked" || w.state === "recommending") return await settle(base);
+    if (target?.stuck) {
+      const moved = await stuck(null);
+      if (moved) return moved;
+    }
+    const im = w.kind === "issue" ? await currentImplementation(db, w.repo, w.number) : null;
+    if (!im) return await settle(base);
+    const q = await implementQuestion(db, w, im);
+    if (q) return await write({ ...base, state: "recommending", plan: q.plan, rec: q.rec, recAt: at, recHead: null });
+    // A ready plan's parts; an answered question's options are no plan any more.
+    const parts = implementParts(w.plan, im.plan) ?? (w.plan.some((p) => p.option !== undefined) ? [] : null);
+    if (parts && !sameJson(parts, w.plan)) base.plan = parts;
+    return await settle(base);
   }
   const pr = await db.get(db.k.selectFrom("main.items").select(["state", "head_oid"]).where("repo", "=", w.repo).where("number", "=", target.number));
-  if (!pr) return null;
+  if (!pr) return await settle(base);
   if (pr.state === "MERGED") return await write({ state: "done", rec: null, blocker: null, blockerParams: null });
   if (pr.state !== "OPEN") return await write({ state: "closed", rec: null, blocker: null, blockerParams: null });
   // Waiting for a person: nothing moves until they answer.
-  if (w.state === "blocked" || w.state === "recommending") return null;
+  if (w.state === "blocked" || w.state === "recommending") return await settle(base);
   const head = pr.head_oid;
-  if (!head) return null;
+  if (!head) return await settle(base);
   const since = await goOnAt(db, w);
-  const patch: WorkflowPatch = {};
+  const patch: WorkflowPatch = { ...base };
 
   // The head the workflow accepted moves along our own pushes; any other push is the author's.
   let authorPush: BlockerFacts["authorPush"] = null;
-  const base = w.kind === "pr" ? w.baseHead : null;
-  if (!base || w.kind !== "pr") {
+  const baseHead = w.kind === "pr" ? w.baseHead : null;
+  if (!baseHead || w.kind !== "pr") {
     if (w.kind === "pr") patch.baseHead = head;
-  } else if (base !== head) {
-    if (await ownChain(db, w.repo, target.number, base, head)) patch.baseHead = head;
-    else authorPush = { from: base, to: head };
+  } else if (baseHead !== head) {
+    if (await ownChain(db, w.repo, target.number, baseHead, head)) patch.baseHead = head;
+    else authorPush = { from: baseHead, to: head };
   }
 
   // The numbered plan follows the latest review at the head; a merge-queue entry has no review.
@@ -218,6 +334,17 @@ async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stu
   const plan: PlanPart[] = review ? planOf(review.fixes, w.plan) : w.plan;
   if (!sameJson(plan, w.plan)) patch.plan = plan;
   const view: ReviewView | null = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
+
+  // The step: the merge leg's state for the merge part, else where the review and its fixes are.
+  const leg = (await db.get(db.k.selectFrom("main.preapprovals").select("state").where("repo", "=", w.repo).where("number", "=", target.number).where("state", "in", ACTIVE_LEG).orderBy("id", "desc").limit(1)))?.state ?? null;
+  if (leg === "fixup") step = stepIn(w, "fix-up", "update from main");
+  else if (leg === "review") step = stepIn(w, "review again", "update from main");
+  else if (leg === "ci") step = stepIn(w, "fix CI and conflicts", "merge");
+  else if (leg === "queued") step = stepIn(w, "batch", "merge");
+  else if (w.entry === "merge") step = stepIn(w, "update from main");
+  else if (!review) step = await reviewedBefore(db, w.repo, target.number, head) ? stepIn(w, "review again", "review") : stepIn(w, "review");
+  else if (review.verdict === "take-fix" && plan.some((p) => p.state === "planned") && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
+  else step = stepIn(w, "merge", "recommend");
 
   if (target.stuck && w.kind === "issue") {
     const moved = await stuck(head);
@@ -232,20 +359,20 @@ async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stu
     failures: await failures(db, w.repo, target.number, since),
     fix: fixed.fix,
     plannedFiles: fixed.plannedFiles,
+    implementation: w.kind === "issue" && approved ? await implementationFacts(db, w, target.number, head, since) : null,
     leg: approved ? await endedLeg(db, w, since) : null,
     thresholds,
   });
   if (found) {
     // The merge leg stops before it can merge. One an integration batch holds goes through (cancelling it would undo the batch
     // under its running CI); a queued leg outside a batch is cancelled like any other.
-    const leg = await db.get(db.k.selectFrom("main.preapprovals").select("state").where("repo", "=", w.repo).where("number", "=", target.number).where("state", "in", ACTIVE_LEG).orderBy("id", "desc").limit(1));
-    if (leg?.state === "queued" && await inActiveBatch(db, w.repo, target.number)) return patch.plan || patch.baseHead ? await write(patch) : null;
+    if (leg === "queued" && await inActiveBatch(db, w.repo, target.number)) return await settle(patch);
     if (leg) {
       try {
         await cancelPreapproval(db, ACTOR, w.repo, target.number, undefined, "workflow");
       } catch {
         // A merge of the repo is running, or the leg changed a moment ago: the next pass looks again.
-        return patch.plan || patch.baseHead ? await write(patch) : null;
+        return await settle(patch);
       }
     }
     // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
@@ -271,5 +398,5 @@ async function advanceOne(db: Db, w: ItemWorkflow, target: { number: number; stu
       return await write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: atBlocker(stop, view, plan), recAt: at, recHead: head }, "blocked");
     }
   }
-  return Object.keys(patch).length ? await write(patch) : null;
+  return await settle(patch);
 }

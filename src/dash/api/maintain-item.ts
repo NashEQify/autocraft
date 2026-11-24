@@ -9,7 +9,7 @@ import { activeTripRows, mayResumeTrip } from "../../push-outcomes.ts";
 import { tripKey } from "../../core/push-outcome.ts";
 import { INTERNAL_FINDING_STATES } from "../../security/store.ts";
 import { isQuiet } from "../../security/quiet.ts";
-import { attributionLines, blockerLabel, listText, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
+import { attributionLines, blockerLabel, listText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { eventsOf, isLive, repoWorkflow, workflowHistory, type StoredEvent } from "../../workflow/store.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -27,8 +27,9 @@ const FLIP_WITHDRAWN = "~replaced-flip-";
 const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped"]);
 
 /**
- * The item's steps with the current one marked. The row does not record the step yet, so it is read from what the row and its
- * merge leg (the pre-approval it owns) show: the leg's state for the merge part, the plan's parts for review and fix-up.
+ * The item's steps with the current one marked: the step the advance pass recorded on the row. A row with no recorded step yet
+ * reads it from what the row and its merge leg (the pre-approval it owns) show: the leg's state for the merge part, the plan's
+ * parts for review and fix-up.
  */
 export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
   if (wf.state === "stopped" || wf.state === "closed" || wf.state === "backlog") return null;
@@ -40,16 +41,18 @@ export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
   if (wf.state === "done") return stepsAt(names, names.length, "running", notes);
   const now: StepState = wf.state === "blocked" ? "stopped" : wf.state === "running" ? "running" : "waiting";
   const at = (n: StepName, or = 0) => (names.includes(n) ? names.indexOf(n) : or);
-  let i: number;
-  if (wf.state === "recommending" && names.includes("recommend")) i = at("recommend");
-  else if (leg === "fixup") i = at("fix-up");
-  else if (leg === "review") i = at("review again");
-  else if (leg === "ci") i = at("fix CI and conflicts", at("merge"));
-  else if (leg === "queued") i = at("batch", at("merge"));
-  else if (wf.entry === "merge") i = 0;
-  else if (!wf.plan.length) i = wf.entry === "implement" && wf.kind === "issue" ? at("implement") : at("review");
-  else if (fix >= 0) i = wf.plan.some((p) => p.state === "planned") ? fix : at("review again");
-  else i = names.length - 1;
+  let i = recordedStep(wf, names);
+  if (i < 0) {
+    if (wf.state === "recommending" && names.includes("recommend")) i = at("recommend");
+    else if (leg === "fixup") i = at("fix-up");
+    else if (leg === "review") i = at("review again");
+    else if (leg === "ci") i = at("fix CI and conflicts", at("merge"));
+    else if (leg === "queued") i = at("batch", at("merge"));
+    else if (wf.entry === "merge") i = 0;
+    else if (!wf.plan.length) i = wf.entry === "implement" && wf.kind === "issue" ? at("implement") : at("review");
+    else if (fix >= 0) i = wf.plan.some((p) => p.state === "planned") ? fix : at("review again");
+    else i = names.length - 1;
+  }
   return stepsAt(names, i, now, notes);
 }
 

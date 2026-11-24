@@ -22,6 +22,10 @@ export type PlanPart = {
   title: string;
   source: "review" | "change" | "implement";
   file?: string;
+  /** An implement part: every file it changes or adds (the implementation PR comes back when it changes a file no planned part names). */
+  files?: string[];
+  /** An implement question's option this part is (its key in the question): naming the part picks it. */
+  option?: string;
   major?: boolean;
   state: "planned" | "dropped" | "fixed";
 };
@@ -38,6 +42,8 @@ export type Recommendation = {
   again?: "review" | "fixup";
   /** A yes answers this question of the legacy machinery as the person (a stuck implementation's Try again). */
   answer?: { decision: string; option: string };
+  /** The open question of the legacy machinery the recommendation stands for: once it is answered or set aside, the recommendation goes. */
+  question?: string;
 };
 
 export type ItemWorkflow = {
@@ -63,6 +69,8 @@ export type ItemWorkflow = {
   recAt: string | null;
   recHead: string | null;
   plan: PlanPart[];
+  /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */
+  step: string | null;
   legacyPreapprovalId: number | null;
   updatedAt: string;
 };

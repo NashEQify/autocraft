@@ -35,7 +35,7 @@ export function workflowOf(r: Row): ItemWorkflow {
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: json<Record<string, unknown> | null>(r.blocker_params, null),
     rec: json<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: json<PlanPart[]>(r.plan, []), legacyPreapprovalId: r.legacy_preapproval_id, updatedAt: r.updated_at,
+    plan: json<PlanPart[]>(r.plan, []), step: r.step, legacyPreapprovalId: r.legacy_preapproval_id, updatedAt: r.updated_at,
   };
 }
 
@@ -71,7 +71,7 @@ export async function insertWorkflow(db: Db, w: NewWorkflow, at = new Date().toI
     stopped_by: w.stoppedBy ?? null, stopped_at: w.stoppedAt ?? null,
     blocker: w.blocker ?? null, blocker_params: w.blockerParams ? JSON.stringify(w.blockerParams) : null,
     rec: w.rec ? JSON.stringify(w.rec) : null, rec_at: w.recAt ?? null, rec_head: w.recHead ?? null,
-    plan: JSON.stringify(w.plan ?? []), legacy_preapproval_id: w.legacyPreapprovalId ?? null, updated_at: at,
+    plan: JSON.stringify(w.plan ?? []), step: w.step ?? null, legacy_preapproval_id: w.legacyPreapprovalId ?? null, updated_at: at,
   }).returning("id"));
   return r!.id;
 }
@@ -96,6 +96,7 @@ export async function updateWorkflow(db: Db, id: number, p: WorkflowPatch, at = 
   if (p.recAt !== undefined) set.rec_at = p.recAt;
   if (p.recHead !== undefined) set.rec_head = p.recHead;
   if (p.plan !== undefined) set.plan = JSON.stringify(p.plan);
+  if (p.step !== undefined) set.step = p.step;
   if (p.legacyPreapprovalId !== undefined) set.legacy_preapproval_id = p.legacyPreapprovalId;
   return (await db.run(db.k.updateTable("main.item_workflows").set(set).where("id", "=", id))).changes === 1;
 }

@@ -45,7 +45,11 @@ export type Ambiguity =
   | { why: "weight-unstarted"; weight: number }
   | { why: "conflict"; words: string[] }
   /** `merge` while the open recommendation fixes parts first: merge without them, or the recommendation? */
-  | { why: "merge-skips-fixes"; parts: number[] };
+  | { why: "merge-skips-fixes"; parts: number[] }
+  /** An implement question's options: the answer leaves several to go with, or names more than one. */
+  | { why: "pick-one"; parts: number[] }
+  /** A yes to a recommendation that runs nothing by itself: `text` says what answers it. */
+  | { why: "needs-words"; text: string };
 
 export type Refusal =
   | { why: "implement-not-issue" }
@@ -92,6 +96,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (parsed.kind === "yes") {
     const understood = "yes";
     if (!live || !wf.rec) return { kind: "ambiguous", understood, ambiguity: { why: "nothing-to-answer" } };
+    // A recommendation a yes cannot run (a question only an option's name or a comment answers) needs other words.
+    if (runsNothing(wf.rec)) return { kind: "ambiguous", understood, ambiguity: { why: "needs-words", text: wf.rec.text } };
     return accept(wf, wf.rec.parts.fix, wf.rec.parts.drop, parsed.weight ?? null);
   }
 
@@ -157,6 +163,16 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
   const rec = wf.rec;
   const approved = !!wf.approvedBy;
+  // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
+  // left, else the one option left.
+  if (rec?.question && wf.plan.some((p) => p.option !== undefined) && (fix.length || drop.length) && !entry) {
+    const left = wf.plan.filter((p) => p.option !== undefined && p.state === "planned" && !drop.includes(p.n));
+    if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
+    const chosen = fix.length ? wf.plan.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
+    if (!chosen?.option) return ambiguous({ why: "pick-one", parts: left.map((p) => p.n) });
+    const approve = merge && !approved;
+    return run({ decision: { decision: rec.question, option: chosen.option }, drop, approve, merges: merge || approved, weight, answers: true, how: approve ? "approved" : "answered" });
+  }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry) {
     // A close drops nothing: dropping parts of it could mean "close anyway" or "don't close".
@@ -182,6 +198,9 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     how: approve ? "approved" : rec ? "answered" : null,
   });
 }
+
+/** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
+const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges;
 
 /** Runs the recommendation's plan with these parts; approves the merge when it ends in one (or `merge` was said) and nobody has. */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {

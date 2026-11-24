@@ -336,6 +336,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["preapprovals", "workflow_id", "INTEGER"],
   // What a review of an item on the maintainer workflow adds (JSON {outside_purpose: {lines, note} | null, recommendation: string | null}).
   ["opus_reviews", "workflow", "TEXT"],
+  // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
+  ["item_workflows", "step", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
