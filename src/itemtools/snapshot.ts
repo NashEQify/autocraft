@@ -310,8 +310,8 @@ let held: DatabaseSync | undefined;
 
 /**
  * Runs `fn` as the only snapshot build for `dest`: after the builds already running in this process, and while holding
- * an exclusive SQLite lock on `<dest>.lock`. Builders are separate processes in separate containers that share the
- * directory (the sync in one, Task Runner job processes in another), so a pid in a lock file cannot tell whether its
+ * an exclusive SQLite lock on `<dest>.lock`. Builders are separate processes (the runner leader's build child, embed
+ * jobs, the `item-tools snapshot` command), possibly in separate containers that share the directory, so a pid in a lock file cannot tell whether its
  * holder is alive; the lock is a POSIX file lock, which the kernel releases when the holding process dies. A waiter
  * polls without blocking the event loop. Holding the lock means no other build is writing, so every partial file in the
  * directory is left over from an interrupted one and is deleted.
@@ -411,7 +411,7 @@ function hasVersion(file: string): boolean {
   }
 }
 
-/** Rebuilds the snapshot after a sync that changed something; a failure is logged, never thrown into the sync. */
+/** Updates the snapshot after a run that changed what it copies; a failure is logged, never thrown into the run. */
 export async function refreshSnapshot(log: (line: string) => void = console.log, db?: Db): Promise<void> {
   try {
     const r = await buildSnapshot(db);
