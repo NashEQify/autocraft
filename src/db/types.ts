@@ -1112,6 +1112,7 @@ export interface ItemWorkflows {
   plan: Generated<string>;
   legacy_preapproval_id: number | null;
   updated_at: string;
+  step: string | null;
 }
 
 export interface Items {
@@ -2841,7 +2842,7 @@ export const COLUMNS = {
   item_settled_dirty: ["run_id", "repo", "number", "n"],
   item_settled_runs: ["run", "refreshed_at"],
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
-  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at"],
+  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "text_refs", "author_id"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
   job_log_chunks: ["job_id", "seq", "start", "next_start", "chunk", "at"],

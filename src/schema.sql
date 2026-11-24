@@ -2268,14 +2268,15 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   started_by TEXT NOT NULL,
   started_at TEXT NOT NULL,
   started_via TEXT NOT NULL,          -- github | discord | agent | dashboard | cli
-  base_head TEXT,                     -- the PR head when it started: author commits after it are a blocker
+  base_head TEXT,                     -- the PR head the workflow accepted: author commits after it are a blocker; for an implement issue, the implementation PR head its files beyond the plan were shown at
   approved_by TEXT, approved_at TEXT, approved_via TEXT,
   stopped_by TEXT, stopped_at TEXT,
   blocker TEXT, blocker_params TEXT,
   rec TEXT, rec_at TEXT, rec_head TEXT,
   plan TEXT NOT NULL DEFAULT '[]',
   legacy_preapproval_id INTEGER,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  step TEXT                           -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);

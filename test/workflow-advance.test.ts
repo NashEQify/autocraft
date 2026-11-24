@@ -1,5 +1,6 @@
 // The advance pass of the maintainer workflow (src/workflow/advance.ts) with the merge leg (src/preapproval): blockers stop an
 // approved item and keep its approval, a yes resumes it, and an approved review entry with minor findings is fixed, then merged.
+// An implement issue's plan question comes back as its recommendation, and answers on the issue reach its implementation PR.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
@@ -11,6 +12,14 @@ import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import type { Blocker } from "../src/workflow/types.ts";
 import { world, type World } from "./world-db.ts";
+import { setFeature } from "../src/build/features.ts";
+import { textHash } from "../src/core/open-prs.ts";
+import { implementStep } from "../src/core/decide-item.ts";
+import { loadItemFact } from "../src/core/issue-facts.ts";
+import { getDecision, optionsOf } from "../src/decisions.ts";
+import { recordPlan } from "../src/implement/plan.ts";
+import { currentImplementation, setImplementationState, startImplementation } from "../src/implement/store.ts";
+import type { PlanReply } from "../src/implement/types.ts";
 
 let current: World | undefined;
 afterEach(() => current?.close());
@@ -157,4 +166,66 @@ test("a plain approval does not accept a hold review nobody was shown", async ()
   await runCommand(db, actor, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 2 }], at: new Date(Date.now() + 10_000).toISOString() });
   await advanceWorkflows(db);
   assert.equal((await liveWorkflow(db, "app", 2))!.blocker, "major-finding");
+});
+
+/** The repo "app" on the maintainer workflow with a maintainer who may act, issue 7 started with `implement`, and its first attempt. */
+async function implementIssue(): Promise<World> {
+  const w = current = await (await (await world()).repo()).issue(7);
+  const db = w.db;
+  await db.run(db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
+  await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
+  await db.run(db.k.insertInto("main.access").values({ login: MAINT, role: "maintainer" }));
+  await db.run(db.k.insertInto("main.repo_permissions").values({ login: MAINT, repo: "app", permission: "write", checked_at: new Date().toISOString() }));
+  await setFeature(db, "implement", true, MAINT, "app");
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("implement"), items: [{ repo: "app", number: 7 }] });
+  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  const it = (await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", "app").where("number", "=", 7)))!;
+  await startImplementation(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: textHash(it.title ?? "", it.body ?? "") });
+  return w;
+}
+
+test("an implement question comes back as one recommendation, and a yes answers it so the implementation plans again", async () => {
+  const w = await implementIssue();
+  const db = w.db;
+  const asks: PlanReply = {
+    ready: false, kind: "feature", summary: "Remember the export folder.", plan: "The dialog keeps no folder.", acceptance: [], verification: { tests: [], app: null }, size: "S", risks: [],
+    questions: [{ audience: "maintainer", text: "Remember the folder globally or per document?", options: [{ label: "Globally", hint: "One folder." }, { label: "Per document", hint: "Stored with the file." }], recommended: "Per document" }],
+    workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
+  };
+  await recordPlan(db, (await currentImplementation(db, "app", 7))!, { callId: null, reply: asks }, { commentsApproved: true, postComment: async () => null, log: () => {} });
+  await advanceWorkflows(db);
+  const wf = (await liveWorkflow(db, "app", 7))!;
+  assert.equal(wf.state, "recommending");
+  assert.deepEqual(wf.plan.map((p) => p.title), ["Globally", "Per document"]);
+  assert.equal(wf.rec?.text, asks.workflow!.recommendation);
+
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 7 }] });
+  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  assert.match(r.lines[0]!, /Per document/);
+  const d = (await getDecision(db, (await currentImplementation(db, "app", 7))!.decisionId!))!;
+  assert.equal(optionsOf(d).find((o) => o.key === d.answer)?.label, "Per document");
+  assert.equal(d.answered_by, MAINT);
+  assert.deepEqual(implementStep((await loadItemFact(db, "app", 7))!), { bucket: "plan" });
+  assert.equal((await liveWorkflow(db, "app", 7))!.state, "running");
+});
+
+test("an answer on an implement issue queues a fix-up of the named part on its implementation PR", async () => {
+  const w = await implementIssue();
+  const db = w.db;
+  await w.pr(8, { author: "craft-bot" });
+  const im = (await currentImplementation(db, "app", 7))!;
+  await setImplementationState(db, im.id, "pr-opened", { branch: "fix-8", prNumber: 8, prUrl: "https://example.invalid/8" });
+  await db.run(db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 8, head_oid: "sha8", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "take-fix", sure: 1, reason: "r",
+    fixes: JSON.stringify([{ file: "src/export.rs", change: "store the folder on the document", title: "folder per document" }]),
+  }));
+  await advanceWorkflows(db);
+  assert.deepEqual((await liveWorkflow(db, "app", 7))!.plan.map((p) => p.title), ["folder per document"]);
+
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("fix 1"), items: [{ repo: "app", number: 7 }] });
+  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  const fx = await db.all(db.k.selectFrom("main.operator_fixups").select(["number", "state", "instructions"]).where("repo", "=", "app"));
+  assert.equal(fx.length, 1);
+  assert.equal(fx[0]!.number, 8);
+  assert.match(fx[0]!.instructions ?? "", /folder per document/);
 });

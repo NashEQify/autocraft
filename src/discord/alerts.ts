@@ -18,7 +18,7 @@ import { trackedNames } from "../repos.ts";
 import { allAppIdentity, maintainerWritesFor } from "../settlers.ts";
 import { t } from "../i18n/index.ts";
 import { blockerLabel, recommendationLine } from "../workflow/status.ts";
-import { workflowOf } from "../workflow/store.ts";
+import { liveWorkflow, workflowOf } from "../workflow/store.ts";
 import type { ActDeps } from "../conversations/act.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { loginOf } from "./links.ts";
@@ -152,6 +152,16 @@ export async function buildMessage(db: Db, d: DecisionRow, baseUrl: string | nul
   return { content, components: rows, choicesId: sig };
 }
 
+/** Ids of an implementation's questions: a plan question, the question after the last round, and the stuck question. */
+const IMPLEMENT_QUESTION = /:implement(-q\d+-\d+|-limit-\d+)?$/;
+
+/** An implementation's question that the issue's live maintainer workflow shows as its recommendation: the workflow alert carries it. */
+async function carriedByWorkflow(db: Db, d: DecisionRow): Promise<boolean> {
+  if (!d.repo || d.number === null || !IMPLEMENT_QUESTION.test(d.id) || await repoWorkflow(db, d.repo) !== "new") return false;
+  const rec = (await liveWorkflow(db, d.repo, d.number))?.rec;
+  return rec?.question === d.id || rec?.answer?.decision === d.id;
+}
+
 /** How long a workflow alert is remembered: a recommendation older than this is not sent. */
 const WORKFLOW_ALERT_DAYS = 7;
 const DAY_MS = 86_400_000;
@@ -270,7 +280,7 @@ export class DecisionAlerts {
         .where((eb) => eb("asked_at", ">=", eb.selectFrom("discord_alerts").select("created_at").where("user_hash", "=", p.userHash)))
         .orderBy("asked_at").orderBy(kx.rowid("decisions")));
       const have = new Set((await db.all(db.k.selectFrom("discord_alert_msgs").select("decision_id").where("user_hash", "=", p.userHash))).map((r) => r.decision_id));
-      const fresh = await filterSeq(open, async (d) => !have.has(d.id) && itemsOf(d).length > 0 && await mayReceive(db, p.login, p.role, reposOf(d), now, this.#kept));
+      const fresh = await filterSeq(open, async (d) => !have.has(d.id) && itemsOf(d).length > 0 && !await carriedByWorkflow(db, d) && await mayReceive(db, p.login, p.role, reposOf(d), now, this.#kept));
       if (!fresh.length) continue;
       let room = (this.#d.perHour ?? PER_HOUR) - (await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.fn.countAll<number>().as("n"))
         .where("user_hash", "=", p.userHash).where((eb) => eb.or([eb("sealed", "is not", null), kx.like(db, "decision_id", eb.val("summary:%"))]))

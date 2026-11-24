@@ -52,22 +52,28 @@ export const stepLabel = (s: Step): string => (s.note ? t("{step}: {note}", { st
 /** Where the item's machinery is, as the mirror shows it: the public step, read for the workflow's steps. */
 export type Progress = "implementing" | "reviewing" | "fixing" | "waiting-ci" | "queued" | "batched" | "merged" | "other";
 
+/** The index of the step the advance pass recorded on the row, or -1 when it recorded none (a row before its first pass). */
+export const recordedStep = (wf: Pick<ItemWorkflow, "step">, names: readonly StepName[]): number =>
+  wf.step === null ? -1 : names.indexOf(wf.step as StepName);
+
 /**
- * The workflow's steps with their states: the step the machinery is at runs (or waits, or stopped, by the workflow's state),
- * those before it are done. A review entry with a fixed part is at its second review; an open recommendation waits at the end.
+ * The workflow's steps with their states: the step the advance pass recorded runs (or waits, or stopped, by the workflow's state),
+ * those before it are done. A row with no recorded step yet reads it from where the machinery is.
  */
-export function workflowSteps(wf: Pick<ItemWorkflow, "entry" | "kind" | "state" | "approvedBy" | "plan">, progress: Progress): Step[] {
+export function workflowSteps(wf: Pick<ItemWorkflow, "entry" | "kind" | "state" | "approvedBy" | "plan" | "step">, progress: Progress): Step[] {
   const names = stepsFor(wf.entry, wf.approvedBy !== null);
   if (progress === "merged" || wf.state === "done" || wf.state === "closed") return stepsAt(names, names.length);
   const idx = (n: StepName): number => names.indexOf(n);
   const last = names.length - 1;
-  let at: number;
-  if (wf.entry === "merge") at = progress === "batched" ? idx("batch") : progress === "fixing" ? idx("fix CI and conflicts") : idx("update from main");
-  else if (wf.state === "recommending" && names[last] === "recommend") at = last;
-  else if (progress === "implementing" || (wf.kind === "issue" && wf.entry === "implement")) at = idx("implement");
-  else if (progress === "fixing") at = idx("fix-up");
-  else if (progress === "waiting-ci" || progress === "queued" || progress === "batched") at = last;
-  else at = wf.plan.some((p) => p.state === "fixed") && idx("review again") >= 0 ? idx("review again") : idx("review");
+  let at = recordedStep(wf, names);
+  if (at < 0) {
+    if (wf.entry === "merge") at = progress === "batched" ? idx("batch") : progress === "fixing" ? idx("fix CI and conflicts") : idx("update from main");
+    else if (wf.state === "recommending" && names[last] === "recommend") at = last;
+    else if (progress === "implementing" || (wf.kind === "issue" && wf.entry === "implement")) at = idx("implement");
+    else if (progress === "fixing") at = idx("fix-up");
+    else if (progress === "waiting-ci" || progress === "queued" || progress === "batched") at = last;
+    else at = wf.plan.some((p) => p.state === "fixed") && idx("review again") >= 0 ? idx("review again") : idx("review");
+  }
   if (at < 0) at = Math.max(0, idx("review"));
   const now: StepState = wf.state === "running" ? "running" : wf.state === "blocked" || wf.state === "stopped" || wf.state === "backlog" ? "stopped" : "waiting";
   return stepsAt(names, at, now);
@@ -169,6 +175,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  if (r.decision) did.push(r.decision.label ? t("going on with “{option}”", { option: r.decision.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.answers) {
     // A weight alone.
@@ -203,6 +210,10 @@ function ambiguityText(understood: string, a: Ambiguity): string {
     case "part-matches-several": return t("“{words}” matches parts {parts}. Nothing runs until you name one, by number or words.", { words: a.words, parts: listText(a.parts) });
     case "weight-unstarted": return t("Nothing runs on this item yet. Give the weight with a command, such as “review, {weight}”.", { weight: weightLabel(a.weight) ?? "urgent" });
     case "conflict": return t("“{words}” can't run together. Nothing runs.", { words: a.words.join(", ") });
+    case "pick-one": return a.parts.length
+      ? t("Name one of {parts} to go with. Nothing runs until you do.", { parts: listText(a.parts) })
+      : t("Every option is dropped. Nothing runs: name one to go with, or answer in a comment on the issue.");
+    case "needs-words": return t("A yes can't answer this. {text} Nothing runs until then.", { text: a.text });
     case "merge-skips-fixes": return t("“merge” could mean merging without fixing {parts}, or the recommendation. Nothing runs: reply yes for the recommendation, or “drop {parts}, merge” to merge without them.", { parts: listText(a.parts) });
   }
 }
@@ -215,6 +226,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
     case "nothing-running": return t("Nothing is running on this item.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
+    case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or stop.", { parts: listText(r.parts) });
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }
 }

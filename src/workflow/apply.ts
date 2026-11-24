@@ -12,9 +12,10 @@ import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { actRefusal, type ActRefusal } from "../settlers.ts";
+import { prOf } from "./advance.ts";
 import * as fx from "./effects.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
-import { confirmLine, listText, replyLine, utcClock, type Clock } from "./status.ts";
+import { confirmLine, listText, replyLine, stepsFor, utcClock, type Clock } from "./status.ts";
 import { addEvent, insertWorkflow, liveWorkflow, repoWorkflow, updateWorkflow, type WorkflowPatch } from "./store.ts";
 import { WEIGHT_NORMAL, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type Surface, type WorkflowEventKind } from "./types.ts";
 
@@ -167,6 +168,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const id = await db.write(async () => {
       const id = await insertWorkflow(db, {
         repo: item.repo, number: item.number, kind: item.kind, entry: r.start!, weight, state: "running", startedBy: by, startedAt: at, startedVia: via, baseHead: item.head,
+        step: stepsFor(r.start!, r.approve)[0]!,
         ...(r.approve ? { approvedBy: by, approvedAt: at, approvedVia: via } : {}),
       }, at);
       if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: id }).where("id", "=", preapproval));
@@ -183,20 +185,41 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     patch.weight = r.weight;
   }
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
+  // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
+  let on = c;
+  if (live.kind === "issue" && !r.decision && (r.again !== null || r.fix.length > 0 || r.merges)) {
+    const pr = await implementationPr(db, live);
+    // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
+    if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(t("The pull request changed after the command was written. Send it again."));
+    if (pr) on = { ...c, item: pr, workflowId: live.id };
+    else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
+  }
   let preapproval: number | null = null;
   if (r.decision) await fx.answerQuestion(c, r.decision.decision, r.decision.option);
-  if (runs) preapproval = (await fx.again(c, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
+  if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
+  // An answered question's options are no plan any more.
+  if (r.decision) patch.plan = live.plan.filter((p) => p.question !== r.decision!.decision);
   // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, ...(item.head ? { baseHead: item.head } : {}) });
   // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
   if (runs) patch.state = r.again !== null || r.merges || r.decision ? "running" : r.answers ? "done" : live.state;
+  // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
+  if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   await db.write(async () => {
     await updateWorkflow(db, live.id, patch, at);
     if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: live.id }).where("id", "=", preapproval).where("workflow_id", "is", null));
   });
   return { workflowId: live.id, failed: [] };
+}
+
+/** The open implementation PR of an implement workflow, with its head; null while the issue has none. */
+async function implementationPr(db: Db, w: ItemWorkflow): Promise<fx.Target | null> {
+  const pr = await prOf(db, w);
+  if (!pr || pr.number < 0) return null;
+  const it = await db.get(db.k.selectFrom("main.items").select(["state", "head_oid"]).where("repo", "=", w.repo).where("number", "=", pr.number));
+  return it?.state === "OPEN" ? { repo: w.repo, number: pr.number, kind: "pr", head: it.head_oid } : null;
 }
 
 // ---- controls ------------------------------------------------------------------------------------------------------------
