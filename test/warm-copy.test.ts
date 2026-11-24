@@ -13,7 +13,8 @@ import { OLD_MTIME_SEC, copyTree, setExtMtimes, setMtimes, warmCopyPhase } from 
 
 const A = "a".repeat(40), B = "b".repeat(40);
 
-const swapTest = (trimmed: boolean) => async (t: TestContext) => {
+/** A node's warm dir with signed versions of commits A and B (`current` is A), a task's work dir, and warm-copy's env for A. */
+function fixture(t: TestContext, trimmed: boolean) {
   const root = mkdtempSync(join(tmpdir(), "warm-copy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -24,13 +25,13 @@ const swapTest = (trimmed: boolean) => async (t: TestContext) => {
   writeFileSync(join(work, "src", "lib.rs"), "x");
   mkdirSync(join(work, "ext", "craft-fonts"), { recursive: true });
   writeFileSync(join(work, "ext", "craft-fonts", "manifest.txt"), "m");
-  const gen = (commit: string) => {
-    const dir = join(source, `gen-${commit.slice(0, 12)}`);
+  const gen = (commit: string, suffix = "", stored = 1) => {
+    const dir = join(source, `gen-${commit.slice(0, 12)}${suffix}`);
     for (const r of ["target", "cargo"]) {
       mkdirSync(join(dir, r), { recursive: true });
       writeFileSync(join(dir, r, "which"), commit);
     }
-    const header = makeHeader({ key: "app-0123", repo: "o/app", commit, stored: 1, image: "img", rustc: null, envHash: "h", checkout, targetDir: target, cargoHome, trimmed }, []);
+    const header = makeHeader({ key: "app-0123", repo: "o/app", commit, stored, image: "img", rustc: null, envHash: "h", checkout, targetDir: target, cargoHome, trimmed }, []);
     const buf = encodeManifest({ header, entries: [] });
     writeFileSync(join(dir, "manifest.zst"), buf);
     const latest = signLatest("app-0123", { commit, sha256: createHash("sha256").update(buf).digest("hex"), size: buf.length, stored: 1, bytes: 0 }, privateKey);
@@ -44,6 +45,11 @@ const swapTest = (trimmed: boolean) => async (t: TestContext) => {
     AUTOCRAFT_WARM_TARGET: target, AUTOCRAFT_WARM_CARGO_HOME: cargoHome, AUTOCRAFT_WARM_CHECKOUT: checkout, AUTOCRAFT_WARM_IMAGE: "img",
     AUTOCRAFT_WARM_ENV_HASH: "h", AUTOCRAFT_WARM_MODE: "tmpfs",
   };
+  return { source, work, target, cargoHome, env, gen };
+}
+
+const swapTest = (trimmed: boolean) => async (t: TestContext) => {
+  const { source, work, target, cargoHome, env } = fixture(t, trimmed);
   const logs: string[] = [];
   const run = warmCopyPhase(work, env, (s) => logs.push(s));
   // warm-sync's swap, while the copy runs.
@@ -58,6 +64,29 @@ const swapTest = (trimmed: boolean) => async (t: TestContext) => {
 };
 test("a swap of current during the copy does not mix versions", swapTest(true));
 test("an untrimmed warm copy leaves the gate's checkouts' mtimes alone", swapTest(false));
+
+test("the copy before the fetch fills only CARGO_HOME, the offline copy of that version skips it, and a republish of the commit does not", async (t) => {
+  const { source, work, target, cargoHome, env, gen } = fixture(t, true);
+  const logs: string[] = [];
+  const srcMtime = () => statSync(join(work, "src", "lib.rs")).mtimeMs;
+  const before = srcMtime();
+  const seed = { ...env, AUTOCRAFT_WARM_PART: "cargo" };
+  assert.equal(await warmCopyPhase(work, seed, (s) => logs.push(s)), 0);
+  assert.equal(readFileSync(join(cargoHome, "which"), "utf8"), A, logs.join("\n"));
+  assert.ok(!existsSync(target), "the target is left to the offline pod");
+  assert.equal(srcMtime(), before, "the checkout's mtimes are left to the offline pod");
+  // A file of the version gone from CARGO_HOME shows whether a later copy walked it again.
+  rmSync(join(cargoHome, "which"));
+  assert.equal(await warmCopyPhase(work, env, (s) => logs.push(s)), 0);
+  assert.equal(readFileSync(join(target, "which"), "utf8"), A, logs.join("\n"));
+  assert.ok(!existsSync(join(cargoHome, "which")), "the offline copy of the same version skips CARGO_HOME");
+  // warm-sync takes a republished version of the same commit.
+  gen(A, "-2", 2);
+  symlinkSync(`gen-${A.slice(0, 12)}-2`, join(source, "current.tmp"));
+  renameSync(join(source, "current.tmp"), join(source, "current"));
+  assert.equal(await warmCopyPhase(work, seed, (s) => logs.push(s)), 0);
+  assert.equal(readFileSync(join(cargoHome, "which"), "utf8"), A, "another version of the commit is copied");
+});
 
 test("an untrimmed version counts every source as changed", (t) => {
   const work = mkdtempSync(join(tmpdir(), "warm-mtimes-"));

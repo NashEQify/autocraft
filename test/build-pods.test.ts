@@ -398,6 +398,30 @@ test("with a compile cache, offline build steps read it at the CI runners' paths
   assert.equal(podOf(offlineGroup, { ...gate, cacheVersion: null }).metadata.labels!["craft.build/cache"], undefined, "no CI gate, no cache");
 });
 
+test("a fetch pod before a warm offline pod copies only CARGO_HOME first; only that copy mounts the node's warm dir", () => {
+  const plan = [
+    { name: "fetch deps", cmd: ["cargo", "fetch"], network: "fetch" as const, timeoutSec: 600 },
+    { name: "build", cmd: ["cargo", "build"], network: "none" as const, timeoutSec: 600 },
+  ];
+  const gate: Prepared = { env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null, cacheVersion: "v2" };
+  const [fetchGroup] = groupsOf(plan);
+  const ctx = { s: DEFAULT_SETTINGS, envId: "pods", taskId: 1, stage: 2, name: "p", pvc: "v", deadlineSec: 600 };
+  const use = { target: "pvc" as const, node: "node-1", key: "open-app-0123", commit: SHA, bytes: 1e9, sameLock: true };
+  const podOf = (u?: typeof use) => stepPod(ctx, "rust-stable:test", "autocraft:test", plan, fetchGroup!, gate, false, "open-app", undefined, u) as unknown as Pod;
+  const all = (p: Pod): Record<string, any>[] => [...(p.spec.initContainers ?? []), ...p.spec.containers];
+  const seeded = podOf(use), plain = podOf();
+  const warmMounts = all(seeded).filter((c) => (c.volumeMounts ?? []).some((m: { name: string }) => m.name === "warm-node")).map((c) => c.name);
+  assert.deepEqual(warmMounts, ["warm-copy"]);
+  const copy = all(seeded).find((c) => c.name === "warm-copy")!;
+  assert.equal(envOf(copy).AUTOCRAFT_WARM_PART, "cargo");
+  assert.equal(envOf(copy).AUTOCRAFT_WARM_SAME_LOCK, undefined, "the fetch adds what another Cargo.lock needs");
+  assert.ok(!copy.volumeMounts.some((m: { mountPath: string }) => m.mountPath.endsWith("/target")), "the copy before the fetch has no target");
+  const step = (p: Pod) => all(p).find((c) => c.name === "step-0")!;
+  assert.deepEqual(step(seeded).env, step(plain).env);
+  assert.deepEqual(step(seeded).volumeMounts, step(plain).volumeMounts);
+  assert.equal(seeded.metadata.labels!["craft.build/network"], "fetch");
+});
+
 const WARM = parseSettings({
   namespace: "craft-warm", image: "autocraft:test", toolchainImages: { "rust-stable": "rust-stable:test" }, warmWriter: true, crateMirror: "10.43.250.25",
   sccacheUrl: "http://cache.test:8080", cacheWriteUrl: "http://cache.test:8081", writerSecret: "writer", signingSecret: "signing",
