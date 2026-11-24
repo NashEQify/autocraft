@@ -570,18 +570,22 @@ const setSetting = async (db: Db, key: string, value: string): Promise<void> => 
 };
 
 /**
- * How far a page of an updatedAt-ascending slice `..to` lets the org high water move once it is stored, or null.
- * A finished slice is stored up to its newest item (at most `to`: later slices are unread). Mid-slice, every item
- * not yet read sorts at or after the page's last item, so the mark is that item's updatedAt; the index lags the live
- * updatedAt by less than the search overlap, which the next run starts before the mark. A page out of order (the sort
- * not applied) moves nothing until its slice is finished.
+ * How far a page of a slice `..to` searched in updatedAt order lets the org high water move once it is stored, or null.
+ * A finished slice is stored up to its newest item (at most `to`: later slices are unread). Mid-slice, search sorts on
+ * the time the index holds, which lags a recent change: only items last updated before `settledBefore` (the page's
+ * request time less the index lag bound) sort at their updatedAt. Every unread item sorts after them, so the mark is the
+ * newest of them. They must be in order on the page and not older than `prev`, the newest such item of the slice's
+ * earlier pages; otherwise (the sort not applied) the page moves nothing until its slice is finished.
  */
-export function pageMark(nodes: readonly { updatedAt: string }[], sliceNewest: string | null, to: string, done: boolean): string | null {
-  const cap = (t: string | null) => (t === null ? null : t < to ? t : to);
-  if (done) return cap(sliceNewest);
-  if (!nodes.length || nodes.some((n, i) => i > 0 && n.updatedAt < nodes[i - 1].updatedAt)) return null;
-  return cap(nodes[nodes.length - 1].updatedAt);
+export function pageMark(nodes: readonly { updatedAt: string }[], o: { to: string; done: boolean; sliceNewest: string | null; settledBefore: string; prev: string | null }): string | null {
+  const cap = (t: string | null) => (t === null ? null : t < o.to ? t : o.to);
+  if (o.done) return cap(o.sliceNewest);
+  const settled = settledTimes(nodes, o.settledBefore);
+  if (!settled.length || (o.prev !== null && settled[0] < o.prev) || settled.some((t, i) => i > 0 && t < settled[i - 1])) return null;
+  return cap(settled[settled.length - 1]);
 }
+
+const settledTimes = (nodes: readonly { updatedAt: string }[], before: string): string[] => nodes.map((n) => n.updatedAt).filter((t) => t < before);
 
 /** Moves `org_high_water` to `t` unless it is already there or later. */
 const advanceHighWater = async (db: Db, t: string): Promise<void> => {
@@ -657,6 +661,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
 
   async function window(from: Date, to: Date): Promise<void> {
     const q = `${scope} updated:${iso(from)}..${iso(to)} sort:updated-asc`;
+    let askedAt = Date.now();
     let conn = await page(q, null);
     const seconds = Math.floor((to.getTime() - from.getTime()) / 1000);
     if (conn.issueCount > SEARCH_CAP && seconds >= 1) {
@@ -683,12 +688,17 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
     }
     out.slices++;
     let sliceNewest: string | null = null;
+    let prev: string | null = null;
     for (;;) {
       const nodes: Node[] = conn.nodes.filter((n: Node) => n?.updatedAt);
       for (const n of nodes) if (n.updatedAt > (sliceNewest ?? "")) sliceNewest = n.updatedAt;
       const done = !conn.pageInfo.hasNextPage;
-      await write(conn.nodes, pageMark(nodes, sliceNewest, iso(to), done));
+      // The search overlap is the bound on how far the index lags (see searchSince).
+      const settledBefore = iso(new Date(askedAt - SEARCH_OVERLAP_MS));
+      await write(conn.nodes, pageMark(nodes, { to: iso(to), done, sliceNewest, settledBefore, prev }));
       if (done) return;
+      for (const t of settledTimes(nodes, settledBefore)) if (t > (prev ?? "")) prev = t;
+      askedAt = Date.now();
       conn = await page(q, conn.pageInfo.endCursor);
     }
   }
@@ -1001,8 +1011,8 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
   let items: number;
   try {
     if (wantsSearch) {
-      let mark = orgHigh as string;
-      const progress = async (t: string) => { if (t > mark) { await advanceHighWater(db, t); mark = t; } };
+      // Runs inside each page's transaction; a compare-and-set, so a rolled-back page leaves nothing to remember.
+      const progress = (t: string) => advanceHighWater(db, t);
       const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started, progress);
       mode = "search";
       items = r.count;
