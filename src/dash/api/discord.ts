@@ -10,7 +10,7 @@ import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
 import { countOf, linksOf } from "../../discord/store.ts";
 import { addFilingRepo, botRepos, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
-import { reactOn } from "../../discord/react.ts";
+import { reactEmoji, reactOn, setReactEmoji, validReactEmoji } from "../../discord/react.ts";
 import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
 import type { Req } from "../types.ts";
@@ -97,7 +97,7 @@ async function setupOf(db: Db): Promise<DiscordSetup> {
     repos: await publicRepoNames(db),
     filingRepos: await filingRepos(db),
     offer: await offerState(db),
-    contact: await contactOf(db), reactOn: await reactOn(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
+    contact: await contactOf(db), reactOn: await reactOn(db), reactEmoji: await reactEmoji(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
     usage: await usageOf(db),
   };
 }
@@ -168,12 +168,21 @@ export async function setOffer(db: Db, req: Req): Promise<DiscordSetup> {
   return await setupOf(db);
 }
 
+/** Sets the Reactions switch (`on`) and/or the reaction emoji (`emoji`: a custom emoji name or one Unicode emoji). */
 export async function putReact(db: Db, req: Req): Promise<DiscordSetup> {
   operator(req);
-  const on = body(req).on;
-  if (typeof on !== "boolean") throw new HttpError(400, "on must be true or false");
-  await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: on ? "on" : "off" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-  await audit(db, req.user.login, on ? "discord-react-on" : "discord-react-off", null);
+  const { on, emoji } = body(req);
+  if (on === undefined && emoji === undefined) throw new HttpError(400, "on or emoji is required");
+  if (on !== undefined && typeof on !== "boolean") throw new HttpError(400, "on must be true or false");
+  if (emoji !== undefined && (typeof emoji !== "string" || !validReactEmoji(emoji.trim()))) throw new HttpError(400, "emoji must be a custom emoji name (2-32 letters, digits or underscores) or one Unicode emoji");
+  if (typeof on === "boolean") {
+    await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: on ? "on" : "off" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await audit(db, req.user.login, on ? "discord-react-on" : "discord-react-off", null);
+  }
+  if (typeof emoji === "string") {
+    await setReactEmoji(db, emoji.trim());
+    await audit(db, req.user.login, "discord-react-emoji", emoji.trim());
+  }
   return await setupOf(db);
 }
 

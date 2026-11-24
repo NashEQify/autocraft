@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import { dispatcher } from "../src/discord/index.ts";
-import { Reactor } from "../src/discord/react.ts";
+import { Reactor, setReactEmoji } from "../src/discord/react.ts";
 import { RestError } from "../src/discord/rest.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -44,10 +44,20 @@ test("one reaction per newly recorded message", async () => {
   assert.deepEqual(calls.slice(1), [["c1", "m7", "bot:77"], ["c3", "m8", "🤖"]]);
   await dispatch("GUILD_EMOJIS_UPDATE", { guild_id: "g1", emojis: [] });
 
+  // The configured name picks that guild's emoji; a Unicode value is used as is.
+  await guildWith("g1", [{ id: "77", name: "bot", available: true }, { id: "99", name: "robot_face", available: true }]);
+  await setReactEmoji(db, "robot_face");
+  await dispatch("MESSAGE_CREATE", msg("m7b", "photocraft#6"));
+  await setReactEmoji(db, "🦾");
+  await dispatch("MESSAGE_CREATE", msg("m7c", "photocraft#7"));
+  await settle();
+  assert.deepEqual(calls.slice(3), [["c1", "m7b", "robot_face:99"], ["c1", "m7c", "🦾"]]);
+  await setReactEmoji(db, "bot");
+
   await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: "off" }));
   await dispatch("MESSAGE_CREATE", msg("m4", "photocraft#2"));
   await settle();
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 5);
 
   await db.run(db.k.updateTable("settings").set({ value: "on" }).where("key", "=", "discord_react"));
   fail = new RestError(403, "forbidden");

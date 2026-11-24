@@ -982,6 +982,8 @@ export interface DiscordSetup {
   contact: string;
   /** Whether the bot adds a reaction to messages it recorded against items. */
   reactOn: boolean;
+  /** A custom emoji name (resolved per server) or one Unicode emoji. */
+  reactEmoji: string;
   /** The public privacy page. */
   privacyPath: string;
   /** Linked Discord accounts: the opaque row id, the dashboard login and when. */
