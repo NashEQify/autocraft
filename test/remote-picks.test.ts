@@ -22,6 +22,7 @@ import { whyWaiting, type ReadyRunner } from "../src/remote/queue-view.ts";
 import { remoteRoom } from "../src/remote/room.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
+import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { addFastTrack } from "../src/fasttrack.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
@@ -366,6 +367,49 @@ describe("picks and Manual only", async () => {
     assert.ok(await room.room(3) > 0, "room for the fast unit on alice's runner");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "all" } }));
     for (const login of ["alice", "bob", "olga"]) await ready(login);
+    await clear();
+  });
+
+  test("calls for an item a user started go to their runner first, in a slot under their Max calls at once, and past their cool-off", async () => {
+    await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 5, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
+    await setUserMaxCalls(db, "alice", 1);
+    const auto = await q({ ageMs: 10 * 60_000 });
+    await db.run(db.k.insertInto("remote_cooloffs").values({ login: "alice", until: Date.now() + 60_000, reason: "testing cool-off" }));
+    assert.equal(await leased("alice"), null, "cooling off: no automatic call");
+    const first = await q({ items: [{ repo: "photocraft", number: 5 }] });
+    assert.equal(await leased("alice"), first, "cooling off: still the call for her own item");
+    await db.run(db.k.deleteFrom("remote_cooloffs").where("login", "=", "alice"));
+    const second = await q({ items: [{ repo: "photocraft", number: 5 }] });
+    assert.equal(await leased("alice"), null, "at her Max calls at once: nothing");
+    await db.run(db.k.updateTable("remote_calls").set({ state: "done" }).where("id", "=", first));
+    assert.equal(await leased("alice"), second, "a free slot takes her own item's call ahead of the older automatic one");
+    await db.run(db.k.updateTable("remote_calls").set({ state: "done" }).where("id", "=", second));
+    assert.equal(await leased("alice"), auto);
+    await setUserMaxCalls(db, "alice", null);
+    await updateWorkflow(db, wf, { state: "done" });
+    await clear();
+  });
+
+  test("another user's runner takes a started item's call only while the starter has no fresh runner, under its own limits", async () => {
+    await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 6, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
+    const call = await q({ items: [{ repo: "photocraft", number: 6 }] });
+    assert.equal(await leased("bob"), null, "alice's runner is fresh: bob passes it over");
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "=", "alice"));
+    await setUserMaxCalls(db, "bob", 1);
+    const busy = await q({ ageMs: 60_000 });
+    await db.run(db.k.updateTable("remote_calls").set({ state: "leased", user_login: "bob", leased_at: Date.now(), heartbeat_at: Date.now() }).where("id", "=", busy));
+    dropQueueCache(db);
+    assert.equal(await leased("bob"), null, "bob runs his Max calls at once");
+    await db.run(db.k.updateTable("remote_calls").set({ state: "done" }).where("id", "=", busy));
+    await db.run(db.k.insertInto("remote_cooloffs").values({ login: "bob", until: Date.now() + 60_000, reason: "testing cool-off" }));
+    assert.equal(await leased("bob"), null, "bob's cool-off holds it back: the call is not his");
+    await db.run(db.k.deleteFrom("remote_cooloffs").where("login", "=", "bob"));
+    assert.equal(await leased("bob"), call);
+    await setUserMaxCalls(db, "bob", null);
+    await updateWorkflow(db, wf, { state: "done" });
+    await ready("alice");
     await clear();
   });
 

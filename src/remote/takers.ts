@@ -9,7 +9,8 @@
 // in that user's runners.
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
+import { judges, NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
+import { heldForOwner, readStartedCalls } from "./started.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { acceptedModels, familyOf, inferenceMode, isTier } from "./mode.ts";
 import type { Tier } from "./protocol.ts";
@@ -189,8 +190,8 @@ export async function noTakerFor(db: Db, repo: string, step: string, nowMs: numb
 
 /**
  * One maintenance pass at `nowMs`. Each pipeline-on repo with no taker whose user takes some task keeps the time it was first seen so
- * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up and has no pick
- * that counts gets the same mark (no_taker_since), and is withdrawn once the mark is NO_TAKER_MS old. Returns the number of
+ * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up, has no pick
+ * that counts and is not held for the user who started its work (started.ts) gets the same mark (no_taker_since), and is withdrawn once the mark is NO_TAKER_MS old. Returns the number of
  * calls withdrawn. Outside the user-local mode the repo marks are cleared.
  */
 export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<number> {
@@ -209,9 +210,11 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
   const set = async (since: number | null, id: number): Promise<unknown> => await db.run(db.k.updateTable("main.remote_calls").set({ no_taker_since: since }).where("id", "=", id).where("state", "=", "queued"));
   let pickers: Set<string> | null = null;
   let withdrawn = 0;
+  const started = await readStartedCalls(db, nowMs);
   for (const c of await queueSnapshot(db, nowMs)) {
     const since = marked.get(c.id);
-    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || await pickCounts(c, nowMs, async (who) => (pickers ??= await pickerLogins(db, nowMs)).has(who));
+    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || heldForOwner(started, { ...c, judging: judges(c.prompt_id) }, null)
+      || await pickCounts(c, nowMs, async (who) => (pickers ??= await pickerLogins(db, nowMs)).has(who));
     if (own || await takes(c)) {
       if (since !== undefined) await set(null, c.id);
     } else if (since === undefined) await set(nowMs, c.id);
