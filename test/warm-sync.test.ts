@@ -2,7 +2,7 @@
 // refusals, the node cap, and the runner's reading of the status.
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -351,4 +351,63 @@ test("warm sync: the startup fix-up adds read bits to files and directories of a
   assert.equal(statSync(join(dir, "target/sub/f")).mode & 0o777, 0o754);
   assert.equal(statSync(join(dir, "target/sub")).mode & 0o555, 0o555);
   assert.equal(addReadBits(dir), 0);
+});
+
+test("warm sync: a stopped download continues where it stopped, and a newer manifest keeps only the files it shares", async (t) => {
+  const root = join(SCRATCH, "warm-sync-resume");
+  const dav = await fakeDav();
+  t.after(dav.close);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const store = new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "p" } });
+  const src = { target: join(root, "src", "target"), cargoHome: join(root, "src", "cargo") };
+  mkdirSync(join(src.target, "debug"), { recursive: true });
+  mkdirSync(src.cargoHome, { recursive: true });
+  const put = (name: string, body: string) => writeFileSync(join(src.target, "debug", name), body);
+  const publish = (c: string) => store.publish({ key: "deckcraft", repo: "org/deckcraft", commit: c.repeat(40), image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey });
+  const dir = join(root, "node");
+  const realBlobs = store.blobs.bind(store);
+  const blobGets = () => dav.gets.filter((p) => p.includes("/blobs/")).length;
+  const agent = () => new SyncAgent({
+    dir, node: "n1", namespace: "ns", kube: null, store, log: () => {}, verifyKeys: () => [publicKey],
+    assign: () => ({ keys: ["deckcraft"], maxBytes: 1024 ** 3 }), writeBytesPerSec: 0, concurrency: 1,
+    diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
+  });
+  /** Runs an agent until it has fetched `n` blobs, then stops it as SIGTERM does. */
+  const stopAfter = async (n: number) => {
+    const ac = new AbortController();
+    let got = 0;
+    store.blobs = () => { const f = realBlobs(); return async (sha, size) => { if (++got > n) { ac.abort(); throw new Error("stopped"); } return f(sha, size); }; };
+    await agent().run(ac.signal, 5_000);
+    store.blobs = realBlobs;
+  };
+  const current = (p: string) => readFileSync(join(dir, "deckcraft", "current", "target", "debug", p), "utf8");
+
+  for (let i = 0; i < 6; i++) put(`f${i}`, `f${i} `.repeat(100));
+  await publish("a");
+  let before = blobGets();
+  await stopAfter(3);
+  const firstRun = blobGets() - before;
+  assert.ok(!existsSync(join(dir, "deckcraft", "current")) && existsSync(join(dir, "deckcraft", "staging")));
+  assert.ok(!existsSync(join(dir, ".agent-lock")), "a stopped agent releases the node dir");
+  before = blobGets();
+  await agent().cycle();
+  assert.equal(blobGets() - before, 6 - firstRun, "the restarted agent fetches only the files the first one did not finish");
+  assert.equal(current("f5"), "f5 ".repeat(100));
+
+  // A download of b stops; c changes one of the files b fetched: that one is fetched again, the other is kept. The
+  // changed file keeps its size and mtime, so only its sha256 in the manifest tells it apart.
+  const g0 = join(src.target, "debug", "g0");
+  for (let i = 0; i < 3; i++) put(`g${i}`, `g${i} `.repeat(100));
+  utimesSync(g0, 1_700_000_000, 1_700_000_000);
+  await publish("b");
+  await stopAfter(2);
+  put("g0", "G0 ".repeat(100));
+  utimesSync(g0, 1_700_000_000, 1_700_000_000);
+  await publish("c");
+  before = blobGets();
+  await agent().cycle();
+  assert.equal(blobGets() - before, 2, "g0 (changed) and g2 (never fetched) come from the store; g1 is kept");
+  assert.equal(current("g0"), "G0 ".repeat(100));
+  assert.equal(current("g1"), "g1 ".repeat(100));
+  assert.ok(!existsSync(join(dir, "deckcraft", "staging")) && !existsSync(join(dir, "deckcraft", "staging.json")));
 });

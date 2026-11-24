@@ -3,21 +3,28 @@
 //   <dir>/<key>/gen-<sha12>/{target,cargo,meta.json,manifest.zst}   one version of the key
 //   <dir>/<key>/gen-<sha12>/latest.json                            its signed record, which consumers verify
 //   <dir>/<key>/current -> gen-<sha12>                             the version consumers start from
-// A new version is built as `gen-<sha12>.tmp` with the current one as `previous`, so files that did not change are hard
-// links and only the rest is downloaded (writes paced to a byte rate). The finished dir is renamed into place and
-// `current` is swapped with a rename. A version that stopped being current keeps its files for `graceMs`, so copies (and
+// A new version is built in `<key>/staging` with the current one as `previous`, so files that did not change are hard
+// links and only the rest is downloaded (writes paced to a byte rate). `<key>/staging.json` names the manifest it is
+// built from, so a download that stopped (a pod restart, a failure) continues where it was: files it finished stay,
+// and a newer manifest keeps those it lists unchanged (applyManifest's `resume`, pruneTo). The finished dir is renamed
+// to `gen-<sha12>` and `current` is swapped with a rename. A version that stopped being current keeps its files for `graceMs`, so copies (and
 // builds that run directly from the read-only mount) that started from it can finish; its dir mtime records when it
 // stopped. The grace period must exceed the longest build deadline plus 30 minutes: the default is 3.5 h, for the
 // 3 h default deadline of a build pod. The agent writes what it holds to the ConfigMap
 // `warm-status-<node>`, which the runner reads (src/build/warm-status.ts).
-import type { KeyObject } from "node:crypto";
+//
+// One agent works on a node dir at a time: run() holds `<dir>/.agent-lock`, which it touches every LOCK_BEAT_MS. A
+// second agent (a rolling update that starts the new pod before the old one is gone) waits until the holder removes
+// it or stops touching it for LOCK_STALE_MS.
+import { randomUUID, type KeyObject } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, type ApplyStats, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, type ApplyStats, BadBlobError, decodeManifest, type Latest, type Manifest, type Previous, pruneTo, removeTree, type Roots } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -31,13 +38,27 @@ const MAX_BAD_BLOBS = 32;
 /** Longest build deadline (3 h by default) plus 30 minutes. */
 export const DEFAULT_GRACE_MS = 3.5 * 3600_000;
 
-/** Removes a tree the agent made, read-only directories inside it included. */
-function removeTree(p: string): void {
-  const st = lstatSync(p, { throwIfNoEntry: false });
-  if (!st) return;
-  if (st.isDirectory()) clearDir(p);
-  rmSync(p, { recursive: true, force: true });
+/** The version a key downloads, as far as it got, and which manifest it follows (StagingState). */
+const STAGING = "staging";
+const STAGING_STATE = "staging.json";
+/**
+ * `boot` is the node's boot id when the staging dir was made or last checked by hash; null when unknown. Under another
+ * boot id the files written before may not have reached the disk, so a resume checks every kept file's sha256.
+ */
+type StagingState = { sha256: string; commit: string; boot: string | null };
+const LOCK = ".agent-lock";
+const LOCK_BEAT_MS = 15_000;
+const LOCK_STALE_MS = 3 * 60_000;
+
+function bootId(): string | null {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
+  } catch {
+    return null;
+  }
 }
+
+const stagingRoots = (staging: string): Roots => ({ target: join(staging, "target"), cargo: join(staging, "cargo") });
 
 /** What `warm-status-<node>` holds (data key `status.json`). */
 export type NodeStatus = {
@@ -119,12 +140,13 @@ export class Pacer {
     this.bytesPerSec = bytesPerSec;
     this.burstMs = burstMs;
   }
-  async take(n: number): Promise<void> {
+  /** Rejects when `signal` aborts during the wait. */
+  async take(n: number, signal?: AbortSignal): Promise<void> {
     if (this.bytesPerSec <= 0 || n <= 0) return;
     const t = performance.now();
     this.next = Math.max(this.next, t - this.burstMs) + (n / this.bytesPerSec) * 1000;
     const wait = this.next - t;
-    if (wait >= 1) await sleep(wait);
+    if (wait >= 1) await sleep(wait, undefined, { signal });
   }
 }
 
@@ -159,6 +181,8 @@ export class SyncAgent {
   private assignError: string | undefined;
   private writing: Promise<void> = Promise.resolve();
   private diskCheckedAt = 0;
+  /** run()'s stop signal: a sync stops at the next file and leaves its staging dir to resume. */
+  private signal: AbortSignal | undefined;
 
   constructor(c: SyncConfig) {
     if (!NODE_NAME.test(c.node)) throw new Error(`warm sync: node name refused: ${c.node.slice(0, 80)}`);
@@ -170,7 +194,14 @@ export class SyncAgent {
   }
 
   /** Polls every `pollMs` until `signal` aborts. */
-  async run(signal: AbortSignal, pollMs = 60_000): Promise<void> {
+  async run(outer: AbortSignal, pollMs = 60_000): Promise<void> {
+    const ac = new AbortController();
+    if (outer.aborted) ac.abort();
+    outer.addEventListener("abort", () => ac.abort(), { once: true });
+    const signal = ac.signal;
+    this.signal = signal;
+    const release = await this.lock(signal, () => ac.abort());
+    if (!release) return;
     // A sync can take longer than the runner's staleness limit, so the status is rewritten from a timer, not between syncs.
     const beat = setInterval(() => void this.report(true), this.c.statusEveryMs);
     beat.unref();
@@ -185,7 +216,58 @@ export class SyncAgent {
       }
     } finally {
       clearInterval(beat);
+      release();
     }
+  }
+
+  /** Takes `<dir>/.agent-lock` (see the top of this file); null when `signal` aborts first. `lost` runs if another agent takes it over. */
+  private async lock(signal: AbortSignal, lost: () => void): Promise<(() => void) | null> {
+    const { dir, log } = this.c;
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, LOCK), me = `${hostname()} ${process.pid} ${randomUUID()}`;
+    const holder = () => {
+      try {
+        return readFileSync(path, "utf8").trim();
+      } catch {
+        return "";
+      }
+    };
+    let waitingFor: string | null = null;
+    while (!signal.aborted) {
+      try {
+        writeFileSync(path, `${me}\n`, { flag: "wx", mode: 0o644 });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      const st = lstatSync(path, { throwIfNoEntry: false });
+      const h = holder().slice(0, 200);
+      if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+        log(`warm sync: taking over ${path} from ${h || "an agent"}, untouched for ${Math.round((Date.now() - st.mtimeMs) / 1000)} s`);
+        rmSync(path, { force: true });
+        continue;
+      }
+      if (h !== waitingFor) log(`warm sync: waiting for the agent holding ${path} (${h || "unknown"}) to stop`);
+      waitingFor = h;
+      await sleep(5000, undefined, { signal }).catch(() => {});
+    }
+    if (signal.aborted) return null;
+    const beat = setInterval(() => {
+      if (holder() !== me) {
+        log(`warm sync: another agent took over ${path}; stopping`);
+        clearInterval(beat);
+        return lost();
+      }
+      const t = Date.now() / 1000;
+      try {
+        utimesSync(path, t, t);
+      } catch { /* checked again at the next beat */ }
+    }, LOCK_BEAT_MS);
+    beat.unref();
+    return () => {
+      clearInterval(beat);
+      if (holder() === me) rmSync(path, { force: true });
+    };
   }
 
   /** One pass: read the assignment and every key's latest.json, retire what does not fit, sync, clean up, report. */
@@ -232,7 +314,7 @@ export class SyncAgent {
 
     // Keys in priority order; a key that does not fit under the cap after the keys above it is left out. A key counts
     // with the bytes of the version it holds until its newer version is current, so lower keys stay until then.
-    const fit = new Set<string>();
+    const fit = new Set<string>(), capped = new Set<string>();
     let planned = 0;
     for (const k of assign.keys) {
       const h = this.held(k);
@@ -241,19 +323,28 @@ export class SyncAgent {
       if (bytes === undefined) continue;
       if (planned + bytes > assign.maxBytes) {
         pending[k] = `over the node cap (${gb(planned + bytes)} of ${gb(assign.maxBytes)} GiB)`;
+        capped.add(k);
         continue;
       }
       planned += bytes;
       fit.add(k);
     }
-    for (const k of this.keyDirs()) if (!fit.has(k) && this.held(k)) this.retire(k, assign.keys.includes(k) ? "over the node cap" : "no longer assigned");
+    for (const k of this.keyDirs()) {
+      if (!fit.has(k) && this.held(k)) this.retire(k, assign.keys.includes(k) ? "over the node cap" : "no longer assigned");
+      // A store that cannot be read says nothing about the key: its download stays for when it can.
+      if (capped.has(k) || !assign.keys.includes(k)) this.dropStaging(k, capped.has(k) ? "over the node cap" : "no longer assigned");
+    }
 
     this.pending = pending;
     for (const k of assign.keys) {
+      if (this.signal?.aborted) break;
       const l = latest.get(k);
       if (!fit.has(k) || !l) continue;
       const h = this.held(k);
-      if (h && h.meta.commit === l.commit && h.meta.manifestSha256 === l.sha256) continue;
+      if (h && h.meta.commit === l.commit && h.meta.manifestSha256 === l.sha256) {
+        this.dropStaging(k, `${l.commit.slice(0, 12)} is current`);
+        continue;
+      }
       const why = await this.sync(k, l, h, assign.maxBytes);
       if (why) pending[k] = why;
       else delete pending[k];
@@ -325,7 +416,7 @@ export class SyncAgent {
     }
   }
 
-  /** Builds dirs of an interrupted sync and a half-made `current` link. */
+  /** Build dirs older agents left (`gen-*.tmp`), half-written state files and a half-made `current` link. */
   private removeLeftovers(): void {
     for (const k of this.keyDirs()) {
       for (const n of readdirSync(join(this.c.dir, k))) {
@@ -402,50 +493,64 @@ export class SyncAgent {
     const fs = this.fsUse();
     if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
     // The version's whole size is the bound: files that turn out to be hard links from the held version cost nothing.
+    // What its staging dir already holds is on the disk already.
     const d = this.c.diskUse(dir);
-    const after = Math.round(((d.usedBytes + l.bytes) / Math.max(1, d.usedBytes + d.availBytes)) * 1000) / 10;
+    const pctAfter = (more: number) => Math.round(((d.usedBytes + more) / Math.max(1, d.usedBytes + d.availBytes)) * 1000) / 10;
+    let after = pctAfter(l.bytes);
+    if (after >= this.c.maxFsPct) after = pctAfter(Math.max(0, l.bytes - this.stagingBytes(key, l.sha256)));
     if (after >= this.c.maxFsPct) return `not enough disk: ${gb(l.bytes)} GiB would take the node to ${after} % (limit ${this.c.maxFsPct} %)`;
     const f = this.failed.get(key);
     if (f && f.sha256 === l.sha256 && this.c.now() - f.at < this.c.retryMs) return f.why;
 
-    // A name that is free on disk: a version of the same commit may still be in its grace period.
-    let gen = base;
-    for (let i = 2; existsSync(join(kd, gen)) || gen === h?.gen; i++) gen = `${base}-${i}`;
-    const final = join(kd, gen), tmp = `${final}.tmp`;
+    const staging = join(kd, STAGING);
     const t0 = performance.now();
     let progress: Progress | undefined;
+    let full: string | null = null;
     try {
       const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       progress = this.startProgress(key, l, manifest.header.bytes, manifest.header.files, t0);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
-      removeTree(tmp);
-      mkdirSync(tmp, { mode: 0o755 });
-      const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
+      const hash = this.prepareStaging(key, l, manifest, raw);
+      const roots = stagingRoots(staging);
       const s = await applyManifest(manifest, roots, this.c.store.blobs(), {
-        previous, concurrency: this.c.concurrency, onStats: (st) => { progress!.stats = st; },
-        pace: async (n) => { await this.pacer.take(n); progress!.written += n; this.checkDisk(); },
+        previous, concurrency: this.c.concurrency, resume: { hash }, signal: this.signal, onStats: (st) => { progress!.stats = st; },
+        pace: async (n) => {
+          await this.pacer.take(n, this.signal);
+          progress!.written += n;
+          full = this.diskFull();
+          if (full) throw new Error(full);
+        },
       });
       // Consumers run as another uid: the roots applyManifest made must be readable to them.
-      for (const p of [tmp, roots.target, roots.cargo]) chmodSync(p, 0o755);
+      for (const p of [staging, roots.target, roots.cargo]) chmodSync(p, 0o755);
       const hd = manifest.header;
       const meta: GenMeta = {
         key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc, toolchain: hd.toolchain ?? null,
         envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, cargoLock: hd.cargoLock ?? null, manifestSha256: l.sha256, synced: this.c.now(),
       };
-      writeFileSync(join(tmp, "manifest.zst"), raw, { mode: 0o644 });
-      writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
-      writeFileSync(join(tmp, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
-      writeFileSync(join(tmp, MODES_MARK), "", { mode: 0o644 });
-      renameSync(tmp, final);
+      writeFileSync(join(staging, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
+      writeFileSync(join(staging, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
+      writeFileSync(join(staging, MODES_MARK), "", { mode: 0o644 });
+      // A name that is free on disk: a version of the same commit may still be in its grace period.
+      let gen = base;
+      for (let i = 2; existsSync(join(kd, gen)) || gen === h?.gen; i++) gen = `${base}-${i}`;
+      renameSync(staging, join(kd, gen));
+      rmSync(join(kd, STAGING_STATE), { force: true });
       this.swap(key, gen, h);
       this.failed.delete(key);
       this.badBlobs.delete(key);
       progress.end(null);
-      log(`warm sync: ${key}@${l.commit.slice(0, 12)} current: ${s.files} files (${gb(s.bytes)} GiB), ${s.linked} linked from the previous version, ${s.fetched} fetched (${gb(s.fetchedBytes)} GiB), ${s.copied} copied, in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+      log(`warm sync: ${key}@${l.commit.slice(0, 12)} current: ${s.files} files (${gb(s.bytes)} GiB), ${s.resumed} kept from an earlier download, ${s.linked} linked from the previous version, ${s.fetched} fetched (${gb(s.fetchedBytes)} GiB), ${s.copied} copied, in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
       return null;
     } catch (e) {
+      if (this.signal?.aborted) {
+        // What is written stays in the staging dir: the next agent continues from it.
+        progress?.end("stopped");
+        return `download of ${l.commit.slice(0, 12)} stopped; it continues at the next start`;
+      }
       progress?.end(`failed: ${(e as Error).message}`.slice(0, 200));
-      removeTree(tmp);
+      // A full disk needs the space back; after any other failure the next try continues from what is there.
+      if (full) this.dropStaging(key, "the node disk is full");
       if (e instanceof BadBlobError) {
         const bad = this.badBlobs.get(key) ?? new Set<string>();
         if (bad.size < MAX_BAD_BLOBS) bad.add(e.sha256);
@@ -456,6 +561,76 @@ export class SyncAgent {
       log(`warm sync: ${key}: ${why}`);
       return why;
     }
+  }
+
+  private readStaging(key: string): StagingState | null {
+    const kd = join(this.c.dir, key);
+    try {
+      if (!lstatSync(join(kd, STAGING)).isDirectory()) return null;
+      const st = JSON.parse(readFileSync(join(kd, STAGING_STATE), "utf8")) as StagingState;
+      return typeof st.sha256 === "string" && typeof st.commit === "string" ? st : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeStaging(key: string, st: StagingState): void {
+    const f = join(this.c.dir, key, STAGING_STATE);
+    writeFileSync(`${f}.tmp`, `${JSON.stringify(st)}\n`, { mode: 0o644 });
+    renameSync(`${f}.tmp`, f);
+  }
+
+  /**
+   * Readies `<key>/staging` for `l`: continues a staging dir of the same manifest, prunes one of another manifest to
+   * what this one shares with it, or starts an empty one. Returns whether the files kept must be checked by hash.
+   */
+  private prepareStaging(key: string, l: Latest, manifest: Manifest, raw: Buffer): boolean {
+    const kd = join(this.c.dir, key), staging = join(kd, STAGING);
+    const boot = bootId();
+    const was = this.readStaging(key);
+    let resumed = was !== null;
+    if (was && was.sha256 !== l.sha256) {
+      try {
+        pruneTo(decodeManifest(readFileSync(join(staging, "manifest.zst"))), manifest, stagingRoots(staging));
+      } catch (e) {
+        this.c.log(`warm sync: ${key}: the staging dir of ${was.commit.slice(0, 12)} cannot be reused (${(e as Error).message}); starting over`.slice(0, 300));
+        resumed = false;
+      }
+    }
+    if (!resumed) removeTree(staging);
+    mkdirSync(staging, { recursive: true, mode: 0o755 });
+    chmodSync(staging, 0o755);
+    // Until the download finishes, a staging dir checked under another boot id stays unchecked (boot null).
+    const hash = resumed && (was!.boot === null || was!.boot !== boot);
+    const m = join(staging, "manifest.zst");
+    writeFileSync(`${m}.tmp`, raw, { mode: 0o644 });
+    renameSync(`${m}.tmp`, m);
+    this.writeStaging(key, { sha256: l.sha256, commit: l.commit, boot: hash ? null : boot });
+    if (resumed) this.c.log(`warm sync: ${key}@${l.commit.slice(0, 12)} continues the download of ${was!.commit.slice(0, 12)}${hash ? ", checking kept files by sha256" : ""}`);
+    return hash;
+  }
+
+  /** Removes a key's staging dir and its state. */
+  private dropStaging(key: string, why: string): void {
+    const kd = join(this.c.dir, key);
+    const had = existsSync(join(kd, STAGING));
+    removeTree(join(kd, STAGING));
+    rmSync(join(kd, STAGING_STATE), { force: true });
+    if (had) this.c.log(`warm sync: ${key}: removed the unfinished download: ${why}`);
+  }
+
+  /** Bytes of the staging dir's files that no other version shares, when it follows `sha256`. */
+  private stagingBytes(key: string, sha256: string): number {
+    if (this.readStaging(key)?.sha256 !== sha256) return 0;
+    let n = 0;
+    try {
+      for (const e of readdirSync(join(this.c.dir, key, STAGING), { recursive: true, withFileTypes: true })) {
+        if (!e.isFile()) continue;
+        const st = lstatSync(join(e.parentPath, e.name));
+        if (st.nlink === 1) n += st.blocks * 512;
+      }
+    } catch { /* counts what it saw */ }
+    return n;
   }
 
   /**
@@ -490,13 +665,13 @@ export class SyncAgent {
     return p;
   }
 
-  /** Aborts a running download once the node's disk use reaches the limit (looked at most once a second). */
-  private checkDisk(): void {
+  /** Why a running download must stop for the node's disk use, or null (looked at most once a second). */
+  private diskFull(): string | null {
     const t = performance.now();
-    if (t - this.diskCheckedAt < 1000) return;
+    if (t - this.diskCheckedAt < 1000) return null;
     this.diskCheckedAt = t;
     const u = this.fsUse();
-    if (u.usedPct >= this.c.maxFsPct) throw new Error(`node disk ${u.usedPct} % full during the download (limit ${this.c.maxFsPct} %)`);
+    return u.usedPct >= this.c.maxFsPct ? `node disk ${u.usedPct} % full during the download (limit ${this.c.maxFsPct} %)` : null;
   }
 
   private metaOf(genDir: string): GenMeta | null {
