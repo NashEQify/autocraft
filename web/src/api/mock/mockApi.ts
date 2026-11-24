@@ -131,20 +131,18 @@ export function createMockApi(): Api {
       { id: "l1", login: "mira-anders", linkedAt: new Date(Date.now() - 3 * 86_400_000).toISOString() },
       { id: "l2", login: "tomas-vale", linkedAt: new Date(Date.now() - 40 * 3_600_000).toISOString() },
     ],
-    channels: [
-      { channelId: "9000000000000004", guildId: "9000000000000001", guildName: "Glasswing Community", name: "general", watched: false, defaultRepo: null, category: null },
-      { channelId: "9000000000000005", guildId: "9000000000000001", guildName: "Glasswing Community", name: "announcements", watched: false, defaultRepo: null, category: null },
-      { channelId: "9000000000000006", guildId: "9000000000000001", guildName: "Glasswing Community", name: "rules", watched: false, defaultRepo: null, category: null },
-      { channelId: "9000000000000002", guildId: "9000000000000001", guildName: "Glasswing Community", name: "dev-chat", watched: true, defaultRepo: "photocraft", category: "Development" },
-      { channelId: "9000000000000007", guildId: "9000000000000001", guildName: "Glasswing Community", name: "release-notes", watched: false, defaultRepo: null, category: "Development" },
-      { channelId: "9000000000000003", guildId: "9000000000000001", guildName: "Glasswing Community", name: "support", watched: true, defaultRepo: null, category: "Community" },
-      { channelId: "9000000000000008", guildId: "9000000000000001", guildName: "Glasswing Community", name: "help-desk", watched: false, defaultRepo: null, category: "Community" },
-      { channelId: "9100000000000011", guildId: "9100000000000001", guildName: "Open Tools Collective", name: "general", watched: false, defaultRepo: null, category: null },
-      { channelId: "9100000000000012", guildId: "9100000000000001", guildName: "Open Tools Collective", name: "showcase", watched: false, defaultRepo: null, category: "Community" },
-      { channelId: "9100000000000013", guildId: "9100000000000001", guildName: "Open Tools Collective", name: "bug-reports", watched: true, defaultRepo: "pdfcraft", category: "Support" },
-      { channelId: "9100000000000014", guildId: "9100000000000001", guildName: "Open Tools Collective", name: "off-topic", watched: false, defaultRepo: null, category: "Community" },
-      { channelId: "9100000000000015", guildId: "9100000000000001", guildName: "Open Tools Collective", name: "voice-lounge", watched: false, defaultRepo: null, category: "Community" },
-    ],
+    channels: Array.from({ length: 70 }, (_, i) => {
+      const first = i < 35;
+      return {
+        channelId: `${first ? "90" : "91"}0000000000${String(100 + i)}`,
+        guildId: first ? "9000000000000001" : "9100000000000001",
+        guildName: first ? "Glasswing Community" : "Open Tools Collective",
+        name: `channel-${i + 1}`,
+        watched: new URLSearchParams(location.search).get("inuse") === "1" && i === 3,
+        defaultRepo: null,
+        category: i % 10 < 5 ? "Community" : "Development",
+      };
+    }),
   };
   const find = (id: string) => {
     const d = decisions.find((x) => x.id === id);
