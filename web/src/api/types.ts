@@ -3279,6 +3279,8 @@ export type WorkspaceCall = {
   /** The call has settled with a result to read. */
   hasOutput: boolean;
   images: number;
+  /** The image's bytes are gone: its size, hash and why (the session's image limit, or the time after the workspace ended); null while they are kept. */
+  notKept: { bytes: number; sha256: string; note: string | null } | null;
 };
 /** Calls oldest first; `older` is the cursor of the earlier page (the id to pass as `before`). */
 export type WorkspaceCalls = { calls: WorkspaceCall[]; older: string | null };

@@ -31,6 +31,7 @@ import { loadSteps, modelsOf, usesClaude, type Params } from "./steps.ts";
 import { jobBlock } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
+import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
 import { noTakerFor } from "../remote/takers.ts";
 import { stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
@@ -400,6 +401,11 @@ export class Runner {
         await pruneTasks(this.db, t);
       } catch (e) {
         this.o.log(`prune build tasks: ${(e as Error).message}`);
+      }
+      try {
+        await pruneWorkspaceImages(this.db, t);
+      } catch (e) {
+        this.o.log(`prune workspace images: ${(e as Error).message}`);
       }
       try {
         await pruneBench(this.db, t);
