@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { useApi, useQuery } from "../../api/client";
 import type { DiscordSetup } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
@@ -25,14 +25,30 @@ const STATE: Record<DiscordSetup["state"], [string, Tone]> = {
   off: ["Off", "neutral"], connecting: ["Connecting", "warn"], connected: ["Connected", "ok"], reconnecting: ["Reconnecting", "warn"], failed: ["Failed", "bad"],
 };
 
+function GuildSection({ guildId, name, count, defaultOpen, children }: { guildId: string; name: string; count: number; defaultOpen: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const id = `discord-guild-${guildId}`;
+  return (
+    <div className="border-b border-line last:border-0">
+      <DisclosureButton open={open} onToggle={setOpen} controls={id} className="bg-ink/[0.03] text-ink">
+        <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+          {name}
+          <span className="num text-2xs font-normal text-ink/45">{guildId}</span>
+        </span>
+        <span className="num shrink-0 text-xs font-normal text-ink/55">{count} {count === 1 ? "channel" : "channels"}</span>
+      </DisclosureButton>
+      {open && <div id={id}>{children}</div>}
+    </div>
+  );
+}
+
 export function DiscordView(_: ViewProps) {
   const { data, error, refetch } = useQuery("discord-setup", (api) => api.discord.setup());
   const api = useApi();
   const write = useWrite();
   const [showAll, setShowAll] = useRememberedOpen("discord-channels");
   const inUse = data ? data.channels.filter((c) => c.watched || c.defaultRepo !== null) : [];
-  const allShown = showAll || inUse.length === 0;
-  const shown = data ? (allShown ? data.channels : inUse) : [];
+  const shown = data ? (showAll ? data.channels : inUse) : [];
   const guilds = [...new Set(shown.map((c) => c.guildId))];
   return (
     <Page title="Discord">
@@ -51,13 +67,10 @@ export function DiscordView(_: ViewProps) {
           </Block>
           <Block className="mt-4" title="Channels" aside={`${data.channels.filter((c) => c.watched).length} watched`} flush>
             {data.channels.length === 0 && <div className="px-4 py-3 text-sm text-ink/55">The bot has reported no channels.</div>}
+            {data.channels.length > 0 && !showAll && inUse.length === 0 && <div className="px-4 py-3 text-sm text-ink/55">No channel is watched or has a default repo.</div>}
             <div id="discord-channel-list">
             {guilds.map((g) => (
-              <div key={g} className="border-b border-line last:border-0">
-                <div className="flex flex-wrap items-baseline gap-x-2 bg-ink/[0.03] px-4 py-2 text-sm font-medium">
-                  {data.channels.find((c) => c.guildId === g)?.guildName ?? "Server"}
-                  <span className="num text-2xs font-normal text-ink/45">{g}</span>
-                </div>
+              <GuildSection key={`${g}:${showAll}`} guildId={g} name={data.channels.find((c) => c.guildId === g)?.guildName ?? "Server"} count={data.channels.filter((c) => c.guildId === g).length} defaultOpen={!showAll}>
                 <ul>
                   {shown.filter((c) => c.guildId === g).map((c, i, all) => (
                     <Fragment key={c.channelId}>
@@ -85,10 +98,10 @@ export function DiscordView(_: ViewProps) {
                     </Fragment>
                   ))}
                 </ul>
-              </div>
+              </GuildSection>
             ))}
             </div>
-            {inUse.length > 0 && inUse.length < data.channels.length ? (
+            {inUse.length < data.channels.length ? (
               <DisclosureButton open={showAll} onToggle={setShowAll} controls="discord-channel-list" className="border-t border-line">
                 {showAll ? "Show fewer" : `Show all channels (${data.channels.length})`}
               </DisclosureButton>
