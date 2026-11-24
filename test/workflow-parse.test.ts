@@ -54,6 +54,24 @@ describe("workflow commands", () => {
     assert.deepEqual((parse("merge: #12", { repo: "photocraft" }) as { items: unknown }).items, [{ repo: "photocraft", number: 12 }]);
   });
 
+  test("items written inline, for surfaces without an item context", () => {
+    const pc12 = { repo: "photocraft", number: 12 };
+    assert.deepEqual(parse("merge photocraft#12"), { kind: "commands", items: [pc12], parts: [{ word: "merge" }] });
+    assert.deepEqual(parse("photocraft#12 yes"), { kind: "yes", items: [pc12] });
+    assert.deepEqual(parse("yes photocraft#12"), { kind: "yes", items: [pc12] });
+    assert.deepEqual(parse("review photocraft#12 urgent"), { kind: "commands", items: [pc12], parts: [{ word: "review" }, { word: "weight", weight: 10 }] });
+    const two = parse("fix-up and merge photocraft#12 and #14");
+    assert.deepEqual(two.kind === "commands" && two.items, [pc12, { repo: "photocraft", number: 14 }]);
+    assert.equal(parse("merge photocraft#12 junk").kind, "ambiguous");
+    assert.equal(parse("merge #12").kind, "ambiguous");
+    assert.equal(parse("merge 12", { repo: "photocraft" }).kind, "ambiguous");
+    assert.deepEqual(parse("merge #12", { repo: "photocraft" }), { kind: "commands", items: [pc12], parts: [{ word: "merge" }] });
+    // In an item's context a number after fix or drop is still a part of the plan, and autorepin keeps its argument.
+    assert.deepEqual(parse("fix 1 and #2, drop #3", { repo: "photocraft" }), { kind: "commands", items: [], parts: [{ word: "fix", part: 1 }, { word: "fix", part: 2 }, { word: "drop", part: 3 }] });
+    assert.deepEqual(parse("autorepin storytold/foo#3"), { kind: "commands", items: [], parts: [{ word: "autorepin", args: "storytold/foo#3" }] });
+    assert.equal(parseComment(`> @${SLUG} merge photocraft#12`, SLUG), null);
+  });
+
   test("drop by words must name exactly one planned part", () => {
     const wf = started({ state: "recommending", plan: [part(1, "Export dialog loses focus"), part(2, "Export dialog title typo"), part(3, "Unused import")] });
     const several = run("drop export dialog", pr(wf));
