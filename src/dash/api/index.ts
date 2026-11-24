@@ -33,6 +33,7 @@ import * as conv from "./conversations.ts";
 import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
 import * as maintain from "./maintain.ts";
+import * as maintainItem from "./maintain-item.ts";
 import { uiV2 } from "../../workflow/settings.ts";
 import * as runners from "./runners.ts";
 import * as modelQueue from "./model-queue.ts";
@@ -478,6 +479,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     scoped(get("/api/maintain/stats", maintain.stats)),
     // The new Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
     scoped(get("/api/maintain/items", maintain.items)),
+    // The new item page.
+    get("/api/maintain/items/:repo/:n", maintainItem.item),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),

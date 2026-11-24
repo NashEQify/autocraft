@@ -3420,3 +3420,63 @@ export interface MaintainCommandResult {
   items: { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null }[];
   lines: string[];
 }
+/** One step of a started item: the name and note already translated. */
+export interface MaintainStep { label: string; state: "done" | "running" | "waiting" | "stopped" | "next" }
+/** A numbered part of the item's plan: a review finding, a separate change, or a piece of an implementation. */
+export interface MaintainPart { n: number; title: string; source: "review" | "change" | "implement"; file: string | null; major: boolean; state: "planned" | "dropped" | "fixed" }
+/** A workflow event, oldest first: who sent what, where, and the line AutoCraft answered. */
+export interface MaintainEvent { id: number; at: string; login: string; via: "github" | "discord" | "agent" | "dashboard" | "cli"; kind: string; line: string | null }
+
+/** Where a started item stands (src/workflow/status.ts builds every line). */
+export interface MaintainItemStatus {
+  /** The state line: "Running: fix-up: 1 and 2", "Waiting for an answer", "Stopped by …". */
+  headline: string;
+  live: boolean;
+  entry: "review" | "fixup" | "implement" | "merge";
+  /** Started by, approved for merge by, answered by, stopped by. */
+  lines: string[];
+  approved: boolean;
+  weight: string | null;
+  blocker: string | null;
+  /** Null when nothing runs any more (stopped, closed, backlog). */
+  steps: MaintainStep[] | null;
+  parts: MaintainPart[];
+  /** The open recommendation, one sentence; null when none is open. */
+  rec: string | null;
+  /** The last answer was unclear: who wrote it and what AutoCraft replied. */
+  unclear: { by: string; at: string; line: string } | null;
+  /** The confirmation line of the last accepted command. */
+  confirm: string | null;
+}
+
+/** A security finding fixed by this pull request: operators and maintainers only. */
+export interface MaintainFinding { number: number; title: string; severity: FindingSeverity; state: FindingState }
+/** An item a duplicate check found to be the same as this one. */
+export interface MaintainDuplicate { repo: RepoName; number: number; kind: "pr" | "issue"; state: ItemState; title: string; canonical: boolean }
+/** A question set aside when the repo moved to the maintainer workflow; its findings stay readable. Operators and maintainers only. */
+export interface MaintainWithdrawn { id: string; kind: string; question: string; summary: string | null; at: string | null }
+
+/**
+ * The new item page's AutoCraft side (GET /api/maintain/items/:repo/:n). `workflowRepo` false means the repo still runs the decision
+ * pipeline: the classic item page serves the item. `canAct`: the reader may send commands and controls here (operators, and
+ * maintainers with GitHub write on the repo). Viewers get no security findings and no withdrawn questions.
+ */
+export interface MaintainItem {
+  repo: RepoName;
+  number: number;
+  kind: "pr" | "issue";
+  workflowRepo: boolean;
+  canAct: boolean;
+  /** Null until someone starts the item. */
+  status: MaintainItemStatus | null;
+  events: MaintainEvent[];
+  duplicates: MaintainDuplicate[];
+  withdrawn: MaintainWithdrawn[];
+  security: MaintainFinding[];
+  /** Held for model work because its author is outside the team. */
+  outside: { reason: "limit" | "surge"; author: string; canRelease: boolean } | null;
+  /** Breakers that pause a step of this item's repo; only those the reader may resume carry `canResume`. */
+  breakers: { key: string; reason: string; since: string; canResume: boolean }[];
+}
+/** The answer to a command or a control: the lines every surface shows. `ok` false when nothing ran. */
+export interface MaintainReply { ok: boolean; lines: string[] }
