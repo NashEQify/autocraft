@@ -31,6 +31,8 @@ export type Run = {
   autorepin: string | null;
   /** It answers the open recommendation, which closes. */
   answers: boolean;
+  /** A question of the legacy machinery the recommendation answers, as the person. */
+  decision: { decision: string; option: string } | null;
 };
 
 export type Ambiguity =
@@ -66,7 +68,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, merges: false, weight: null, end: null, autorepin: null, answers: false, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, merges: false, weight: null, end: null, autorepin: null, answers: false, decision: null, ...r },
 });
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
@@ -157,6 +159,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const approved = !!wf.approvedBy;
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry) {
+    // A close drops nothing: dropping parts of it could mean "close anyway" or "don't close".
+    if (rec.close) return ambiguous({ why: "conflict", words: ["close", ...named.map((p) => `drop ${p.part}`)] });
     return accept(wf, rec.parts.fix.filter((n) => !drop.includes(n)), [...new Set([...rec.parts.drop, ...drop])], weight, merge);
   }
   if (!entry && !named.length && merge) {
@@ -181,10 +185,13 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
 /** Runs the recommendation's plan with these parts; approves the merge when it ends in one (or `merge` was said) and nobody has. */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
-  const merges = wf.rec!.merges || merge;
+  const rec = wf.rec!;
+  if (rec.close && !fix.length && !merge) return run({ end: "close", how: "answered", answers: true, weight });
+  const merges = rec.merges || merge;
   const approve = merges && !wf.approvedBy;
+  if (rec.answer && !fix.length) return run({ decision: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
   return run({
-    again: fix.length ? "fixup" : null, fix, drop, approve, merges, weight, answers: true,
+    again: fix.length ? "fixup" : rec.again ?? null, fix, drop, approve, merges, weight, answers: true,
     how: approve ? "approved" : "answered",
   });
 }

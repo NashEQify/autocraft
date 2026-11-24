@@ -1474,6 +1474,7 @@ export interface OpusReviews {
   conflicts: string | null;
   claims: string | null;
   blocked_by: string | null;
+  workflow: string | null;
 }
 
 export interface OutsideAdmitted {
@@ -2865,7 +2866,7 @@ export const COLUMNS = {
   operator_fixups: ["id", "repo", "number", "from_head", "instructions", "by", "at", "state", "preapproval_id"],
   opus_carried_fixes: ["repo", "number", "head_oid", "from_head", "file", "change", "outcome", "at"],
   opus_review_history: ["repo", "number", "head_oid", "at", "model", "mode", "verdict", "sure", "reason", "risks", "fixes", "summary", "why", "public_review", "claims", "blocked_by", "trigger", "job_id"],
-  opus_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "base_ref", "seen_at", "disc_hash", "public_review", "summary", "why", "conflicts", "claims", "blocked_by"],
+  opus_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "base_ref", "seen_at", "disc_hash", "public_review", "summary", "why", "conflicts", "claims", "blocked_by", "workflow"],
   outside_admitted: ["repo", "number", "at"],
   outside_holds: ["repo", "number", "author", "kind", "reason"],
   outside_released: ["repo", "number", "by", "at"],

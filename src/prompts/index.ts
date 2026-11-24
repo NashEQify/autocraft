@@ -15,7 +15,7 @@ import { markHarness, stripMarks } from "./harness.ts";
 import { WORKSPACE_BUILD_COMMANDS } from "../worker/rust-targets.ts";
 import { AGENT_TOOL, EXPLORER, EXPLORER_MODEL, EXPLORER_TOOLS, MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { AGENTS_PATH, DENIED_READS, REFERENCE_PATH, REPO_DOCS_PATH, REPOS_ROOT, REPO_PATH, WORK_PATH, sandboxCommand } from "../sandbox/command.ts";
-import { CLAIM_CHARS, CLAIM_EVIDENCE_CHARS, MAX_CLAIMS, OPUS_MAX_FIXES, OPUS_REASON_WORDS, STATEMENT_PROMPT_CHARS, statementsList, type OpusPr } from "../review/opus-parse.ts";
+import { CLAIM_CHARS, CLAIM_EVIDENCE_CHARS, MAX_CLAIMS, OPUS_MAX_FIXES, OPUS_REASON_WORDS, PART_TITLE_CHARS, STATEMENT_PROMPT_CHARS, statementsList, type OpusPr } from "../review/opus-parse.ts";
 import { BODY_CHARS, MAX_FINDINGS, MAX_MERGED_DIFF_CHARS, SAMPLE_POSTMERGE_PRS, TITLE_CHARS, type PostmergePr } from "../postmerge/parse.ts";
 import { PREMERGE_MAX_FINDINGS, PREMERGE_SCENARIO_CHARS, PREMERGE_TITLE_CHARS } from "../premerge/parse.ts";
 import { COMMENT_TEMPLATES, REASON_MAX } from "../act/templates.ts";
@@ -192,6 +192,15 @@ const CLAIMS_PUBLIC_RULE = `The claim and evidence texts of claims are posted pu
 
 const STATEMENTS_RULE = `Owner statements: the <owner_statements> block after the pull request lists things the repository owners said earlier about related work, each with an id. Name in "conflicts" only a statement this change actually goes against: judge what the statement asks for, not whether the topic is the same. A change that follows a statement, or only shares its topic, is not a conflict. Each entry is {"id": <the number>, "reason": "<one line: what the statement asks for and how the change goes against it>"}. A PR with a conflict is not merged without a person's answer, so name one only when the change really goes against it. Use the ids as given; with no statements, or none that the change goes against, "conflicts" is [].`;
 
+/** The review block for a pull request on the maintainer workflow: a person answers one recommendation, and blockers stop an approved merge. */
+const REVIEW_WORKFLOW_RULE = `
+
+Maintainer workflow: a maintainer reads your fixes as a numbered plan and answers one recommendation, so add these to the JSON object of the reply:
+- Each entry of fixes also has "title": a few plain words naming the finding (at most ${PART_TITLE_CHARS} characters, no file paths), and "major": true when a maintainer must see it before a merge (a wrong behaviour users would notice, data loss, a security problem, a design choice), false for a small mechanical fix. A hold or close verdict always comes back to a person, so major marks findings only.
+- "outside_purpose": {"lines": <changed lines that do something other than what the title and body set out to do>, "note": "<one line: what they do>"}, or null when every changed line serves the pull request's purpose. Count only lines of the diff, not your fixes.
+- "recommendation": {"text": "<one plain sentence>", "fix": [<numbers of the fixes to make, 1 being the first entry of fixes>], "merge": true|false, "close": true|false}. text says what AutoCraft does next and whether it then merges, closes or comes back to the maintainer, for example "Fix 1 and 2, then merge." or "Close it: the main branch already has this fix.", naming findings by their number; fix, merge and close say exactly the same, because a maintainer's yes runs them. It is shown to the maintainer, not posted on the pull request.
+`;
+
 const OPUS_REVIEW: ClaudePrompt = {
   id: "review.opus",
   stage: "Review",
@@ -204,6 +213,7 @@ const OPUS_REVIEW: ClaudePrompt = {
     discussion: DISCUSSION_DOC,
     owner_statements: STATEMENTS_DOC,
     repo_access: REPO_ACCESS_DOC,
+    workflow: `Empty, except for a pull request on the maintainer workflow (a person started it, or it is a small or medium bug fix the workflow runs by itself): then the rules for titled parts, major findings, outside_purpose and recommendation.`,
   },
   sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, workspace: true, reference: true },
   lint: true,
@@ -271,7 +281,7 @@ Reply with ONLY one JSON object:
 
 <owner_statements>
 {{owner_statements}}
-</owner_statements>`,
+</owner_statements>{{workflow}}`,
   output: `One JSON object: {"ref", "verdict", "sure", "reason", "fixes", "risks", "summary", "why", "public", "conflicts", "claims", "blocked_by"?}.`,
   validation: `${CLAUDE_RESULT} The reply must be exactly one JSON value: with a fenced code block the reply holds exactly one block, its whole content is the JSON, and the text outside it may not hold a second JSON value with one of its keys; without a fence the answer is the first object with a key (or list holding an object) and the text around it may not hold another JSON value with one of its keys; an object that repeats a key makes the reply invalid. The object is kept only when its ref is the one asked, verdict is one of ${VERDICTS.join(", ")}, reason is text, sure is a boolean, and a take-fix has at least one fix with a file and a change. reason is cut to ${OPUS_REASON_WORDS} words. ${FIX_TURN} Lint problems: ${SUMMARY_LINT} When unapplied_fixes is present, a take with no fixes whose reason does not name the file of an unapplied fix is a problem for that fix. A mention of the reference folder or a page file in the public summary, a public point or a fix (file or change) is a problem; for a repo with reference documentation, so is a run of ${QUOTE_WORDS} or more consecutive words of the public text that appears in the reference pages, and a public summary or point that refers to documentation, a manual, a user guide or help pages of another product, or names a commercial application or vendor (Jev first, at ${REFERENCE_JEV_ACCEPT} or more yes and below ${REFERENCE_JEV_REJECT} no, Haiku for the rest and while Jev is unavailable: lint.reference.jev, lint.reference.haiku). Fallback: the offending public summary (which drops the whole public text), public point or fix is left out; an unapplied-fix problem has no fallback and the reply is kept as it is. A reply that is not a valid review is no kept object and counts as no answer: the call is repeated once, then the PR stays without an Opus review and is tried again by a later job. A take or take-fix with sure false keeps its verdict; the merge queue asks a person before merging it. public is kept when it has a summary and a points list (at most 8 points); otherwise it is stored empty and the review still counts, but nothing is posted on the PR for that head. conflicts is optional: an entry is kept only when its id is one of the numbers shown and it has a reason of text (cut to 300 characters); one entry per id, others are dropped. claims: at most ${MAX_CLAIMS} entries are kept, each with a claim, a status of verified, contradicted or unverified, and evidence (a claim and its evidence are cut to ${CLAIM_CHARS} and ${CLAIM_EVIDENCE_CHARS} characters); a claim without a path:line in its evidence counts as unverified with unknown impact; impact (code-wrong, description-only or unknown; unknown when missing) is kept on a contradicted or unverified claim, and fix only on a code-wrong one. Code applies the claims: a code-wrong claim turns a take or take-fix into take-fix when every such claim has a fix (added to fixes), and into hold otherwise; an unknown claim, or no claims list when the PR has a body (a lint problem the fix turn handles first), makes a take or take-fix not sure; description-only changes nothing. Claims are posted on the pull request, so they get the same reference checks as the public text.`,
   limits: { perCall: 1, attempts: 2, timeoutSeconds: 1200 },
@@ -1653,8 +1663,9 @@ const VALUES: { [K in ClaudePromptId]: (input: ClaudeInput[K]) => Record<string,
     return { pr: untrustedJson(rest), repo_access: repoAccess(repo_dir, "the pull request's head commit, for callers and conventions around the files") + quietRule(quiet) };
   },
   "review.opus": ([pr]) => {
-    const { repo_dir, reference, discussion, statements, ...rest } = pr!;
+    const { repo_dir, reference, discussion, statements, workflow, ...rest } = pr!;
     return {
+      workflow: workflow ? REVIEW_WORKFLOW_RULE : "",
       pr: untrustedJson({ ...rest, body: (rest.body ?? "").slice(0, REVIEW_BODY_LIMIT) }),
       discussion: untrustedJson(discussion ?? []),
       owner_statements: statementsList(statements),
@@ -1662,7 +1673,7 @@ const VALUES: { [K in ClaudePromptId]: (input: ClaudeInput[K]) => Record<string,
     };
   },
   "premerge.opus": ([pr]) => {
-    const { repo_dir, reference, discussion: _d, statements, ...rest } = pr!;
+    const { repo_dir, reference, discussion: _d, statements, workflow: _w, ...rest } = pr!;
     return {
       pr: untrustedJson({ ...rest, body: (rest.body ?? "").slice(0, REVIEW_BODY_LIMIT) }),
       owner_statements: statementsList(statements),

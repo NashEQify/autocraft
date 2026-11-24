@@ -32,6 +32,12 @@ export type Recommendation = {
   /** What a yes runs. */
   parts: { fix: number[]; drop: number[] };
   merges: boolean;
+  /** A yes closes the item (the review says close); no parts are fixed and nothing merges. */
+  close?: boolean;
+  /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
+  again?: "review" | "fixup";
+  /** A yes answers this question of the legacy machinery as the person (a stuck implementation's Try again). */
+  answer?: { decision: string; option: string };
 };
 
 export type ItemWorkflow = {

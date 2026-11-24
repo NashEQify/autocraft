@@ -77,3 +77,25 @@ test("stop ends the pre-approved merge, the queued fix-up and the item's queued 
   const row = (await db.get(db.k.selectFrom("main.item_workflows").select(["state", "stopped_by", "approved_by"]).where("id", "=", wfId)))!;
   assert.deepEqual([row.state, row.stopped_by, row.approved_by], ["stopped", MAINT, MAINT], "who approved stays recorded");
 });
+
+test("stop on an issue ends the merge leg of its implementation PR", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.issue(5);
+  await w.pr(9);
+  const wfId = await insertWorkflow(db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: MAINT, startedAt: T0, startedVia: "dashboard", approvedBy: MAINT, approvedAt: T0, approvedVia: "dashboard" });
+  await db.run(db.k.insertInto("main.preapprovals").values({ repo: "app", number: 9, by: MAINT, at: T0, instructions: "", state: "review", from_head: "sha9", head: "sha9", updated_at: T0, fix_id: null, workflow_id: wfId }));
+  const r = await runCommand(db, actor(MAINT), "dashboard", { parsed: parse("stop"), items: [{ repo: "app", number: 5 }] });
+  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  assert.equal((await db.get(db.k.selectFrom("main.preapprovals").select("state").where("number", "=", 9)))!.state, "cancelled");
+});
+
+test("drop on a close recommendation is ambiguous, so nothing closes", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.pr(1);
+  await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "review", state: "recommending", startedBy: MAINT, startedAt: T0, startedVia: "dashboard",
+    plan: [{ n: 1, title: "typo", source: "review", state: "planned" }], rec: { text: "Close it.", parts: { fix: [], drop: [] }, merges: false, close: true } });
+  const r = await runCommand(db, actor(MAINT), "dashboard", { parsed: parse("drop 1"), items: [{ repo: "app", number: 1 }] });
+  assert.equal(r.items[0]!.outcome, "ambiguous", r.lines.join("\n"));
+});

@@ -6,6 +6,7 @@
 // Every start also writes the legacy rows (fast_track, preapprovals, operator_fixups), so `workflow flip <repo> --legacy`
 // leaves the old planner with everything it needs.
 import { audit } from "../dash/audit.ts";
+import { t } from "../i18n/index.ts";
 import { backlogItem } from "../dash/api/decisions.ts";
 import { applyAnswer } from "../dash/api/decisions.ts";
 import { queueIssue } from "../dash/api/queue-page.ts";
@@ -29,11 +30,47 @@ import { requestRepin } from "../repin/index.ts";
 import { markReviewsStale } from "../review/discussion.ts";
 import type { ItemKind, ItemWorkflow, PlanPart, Surface } from "./types.ts";
 
-/** A legacy step refused the command; its message says why. */
+/** A legacy step refused the command; its message says why, translated (`effectText`). */
 export class EffectError extends Error {}
 
+/**
+ * The refusals of the legacy steps a command runs on, as translated text. The steps write English for logs and the classic pages; a
+ * refusal this table does not know stays as written.
+ */
+const LEGACY_TEXT: [RegExp, (m: RegExpExecArray) => string][] = [
+  [/^(\S+#\d+) is not a pull request$/, (m) => t("{ref} is not a pull request.", { ref: m[1]! })],
+  [/^(\S+#\d+) is not open$/, (m) => t("{ref} is not open.", { ref: m[1]! })],
+  [/^(\S+#\d+) is outside the pipeline's scope/, (m) => t("{ref} is outside the pipeline's scope.", { ref: m[1]! })],
+  [/^(\S+#\d+) cannot be reviewed yet: it is a draft$/, (m) => t("{ref} is a draft, so it cannot be reviewed yet.", { ref: m[1]! })],
+  [/^(\S+#\d+) cannot be reviewed yet: it is in the backlog$/, (m) => t("{ref} is in the backlog, so it cannot be reviewed yet.", { ref: m[1]! })],
+  [/^(\S+#\d+) cannot be reviewed yet: it is held as a duplicate$/, (m) => t("{ref} is held as a duplicate, so it cannot be reviewed yet.", { ref: m[1]! })],
+  [/^(\S+#\d+) cannot be reviewed yet: (.+)$/, (m) => t("{ref} cannot be reviewed yet: {why}", { ref: m[1]!, why: m[2]! })],
+  [/^(\S+#\d+) has no head commit in the mirror yet$/, (m) => t("AutoCraft has not read the head commit of {ref} yet.", { ref: m[1]! })],
+  [/^the PR changed after your comment; comment again$/, () => t("The pull request changed after the command was written. Send it again.")],
+  [/^merging is not approved for (\S+)$/, (m) => t("Merging is not approved for {repo}.", { repo: m[1]! })],
+  [/^pushing is not approved for (\S+)$/, (m) => t("Pushing is not approved for {repo}.", { repo: m[1]! })],
+  [/^(\S+#\d+) already has a pre-approved merge in progress$/, (m) => t("{ref} is already on its way to a merge.", { ref: m[1]! })],
+  [/^(\S+#\d+) conflicts with its base branch/, (m) => t("{ref} conflicts with its base branch: the conflict merge comes first.", { ref: m[1]! })],
+  [/^can't push to the contributor's branch$/, () => t("AutoCraft can't push to the contributor's branch.")],
+  [/^the fix-up tries for this PR are used up$/, () => t("The fix-up tries for this pull request are used up.")],
+  [/^a fix-up of (\S+#\d+) is already queued$/, (m) => t("A fix-up of {ref} is already queued.", { ref: m[1]! })],
+  [/^the instructions are over (\d+) characters$/, (m) => t("The fix-up instructions are over {n} characters.", { n: m[1]! })],
+  [/^the author's permission on the repository could not be read yet/, () => t("The author's permission on the repository could not be read yet. Try again.")],
+  [/^(\S+#\d+) has no pre-approved merge in progress$/, (m) => t("{ref} is not on its way to a merge.", { ref: m[1]! })],
+];
+
+/** A legacy step's refusal as translated text; unknown text stays as written. */
+export function effectText(message: string): string {
+  for (const [re, text] of LEGACY_TEXT) {
+    const m = re.exec(message);
+    if (m) return text(m);
+  }
+  return message;
+}
+
 export type Target = { repo: string; number: number; kind: ItemKind; head: string | null };
-export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec };
+/** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a stop ends. */
+export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number };
 
 const ref = (t: Target): string => `${t.repo}#${t.number}`;
 const ACTIVE_PREAPPROVAL = ["fixup", "review", "ci", "queued"];
@@ -43,7 +80,7 @@ async function step<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    throw e instanceof EffectError ? e : new EffectError((e as Error).message);
+    throw e instanceof EffectError ? e : new EffectError(effectText((e as Error).message));
   }
 }
 
@@ -72,10 +109,10 @@ async function mergeLeg(c: Ctx): Promise<number> {
   try {
     await preapproveMerge(c.db, { repo: c.item.repo, number: c.item.number, by: c.by, via: c.via, ...(c.item.head ? { head: c.item.head } : {}) });
   } catch (e) {
-    if (!(e instanceof PreapprovalRefused && e.active)) throw new EffectError((e as Error).message);
+    if (!(e instanceof PreapprovalRefused && e.active)) throw new EffectError(effectText((e as Error).message));
   }
   const id = await activePreapproval(c.db, c.item);
-  if (id === null) throw new EffectError(`${ref(c.item)} has no pre-approved merge in progress`);
+  if (id === null) throw new EffectError(t("{ref} is not on its way to a merge.", { ref: ref(c.item) }));
   return id;
 }
 
@@ -143,7 +180,7 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   const why = `stopped by ${by}`;
   const failed: string[] = [];
   const attempt = async (fn: () => Promise<unknown>) => {
-    try { await fn(); } catch (e) { failed.push((e as Error).message); }
+    try { await fn(); } catch (e) { failed.push(effectText((e as Error).message)); }
   };
   if (item.kind === "pr") {
     if (await activePreapproval(db, item) !== null) await attempt(() => cancelPreapproval(db, by, item.repo, item.number, c.exec, c.via));
@@ -165,6 +202,13 @@ export async function stopAll(c: Ctx): Promise<string[]> {
     if (impl && impl.prNumber === null && await moveImplementationIf(db, impl.id, [impl.state], "cancelled", { reason: why }, at)) {
       if (impl.workspaceId !== null) await endWorkspace(db, impl.workspaceId);
       await audit(db, by, "implement-cancel", ref(item), { id: impl.id, reason: why });
+    }
+  }
+  // The workflow's merge legs on other items: an issue's implementation PR.
+  if (c.workflowId !== undefined) {
+    for (const p of await db.all(db.k.selectFrom("main.preapprovals").select("number").where("workflow_id", "=", c.workflowId).where("state", "in", ACTIVE_PREAPPROVAL)
+      .where((eb) => eb.or([eb("repo", "!=", item.repo), eb("number", "!=", item.number)])))) {
+      await attempt(() => cancelPreapproval(db, by, item.repo, p.number, c.exec, c.via));
     }
   }
   const calls = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items"]).where("repo", "=", item.repo).where("state", "=", "queued"));
@@ -195,7 +239,7 @@ export async function close(c: Ctx): Promise<string[]> {
   let id: string;
   let question: Record<string, unknown>;
   if (item.kind === "pr") {
-    if (!item.head) throw new EffectError(`${ref(item)} has no head commit in the mirror yet`);
+    if (!item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: ref(item) }));
     id = closeDecisionId(item.repo, item.number, item.head);
     question = { id, kind: "close", repo: item.repo, number: item.number, question: "Close this PR?", context: `${by} asked to close it.`,
       facts: [`${HEAD_FACT}${item.head}`], options: Object.values(CLOSE_OPTIONS).map((o) => ({ ...o })), asked_by: by, asked_at: at };
@@ -205,11 +249,18 @@ export async function close(c: Ctx): Promise<string[]> {
       facts: [], options: [{ ...SCOPE_OPTIONS.close }, { ...SCOPE_OPTIONS.take }], recommended: null, asked_by: by, asked_at: at };
   }
   const had = await getDecision(db, id);
-  if (had?.answer === "close") throw new EffectError(`${ref(item)} is already being closed on ${had.answered_by}'s answer`);
-  if (had?.answer) throw new EffectError(`the close question at this head was already answered ${had.answer} by ${had.answered_by}`);
+  if (had?.answer === "close") throw new EffectError(t("{ref} is already being closed on the answer of {login}.", { ref: ref(item), login: had.answered_by ?? "" }));
+  if (had?.answer) throw new EffectError(t("The close question at this head was already answered {answer} by {login}.", { answer: had.answer, login: had.answered_by ?? "" }));
   if (!had) await ask(db, [question]);
   await step(async () => applyAnswer(db, (await getDecision(db, id))!, by, { answer: "close" }, "workflow", c.via));
   return failed;
+}
+
+/** Answers a question of the legacy machinery (a stuck implementation's Try again) as the person, as the dashboard would. */
+export async function answerQuestion(c: Ctx, id: string, option: string): Promise<void> {
+  const d = await getDecision(c.db, id);
+  if (!d || d.answer) throw new EffectError(t("The question this recommendation answers is no longer open."));
+  await step(() => applyAnswer(c.db, d, c.by, { answer: option }, "workflow", c.via));
 }
 
 // ---- autorepin -----------------------------------------------------------------------------------------------------------
@@ -217,11 +268,11 @@ export async function close(c: Ctx): Promise<string[]> {
 /** The existing autorepin command, unchanged: `<pull request> [via <branch>]` or `off`. The caller has applied the act rule. */
 export async function autorepin(c: Ctx, args: string, githubId: number | null): Promise<string> {
   const m = /^(\S+)(?:\s+via\s+(\S+))?$/i.exec(args.trim());
-  if (!m) throw new EffectError("autorepin needs a pull request, or off");
+  if (!m) throw new EffectError(t("autorepin needs a pull request, or off."));
   const off = m[1]!.toLowerCase() === "off";
   const prRef = off ? null : parsePrRef(m[1]!);
-  if (!off && !prRef) throw new EffectError(`${m[1]} is not a pull request`);
-  if (githubId === null) throw new EffectError(`${c.by} has no GitHub id on record yet; sign in to the dashboard once`);
+  if (!off && !prRef) throw new EffectError(t("{ref} is not a pull request.", { ref: m[1]! }));
+  if (githubId === null) throw new EffectError(t("AutoCraft has no GitHub id for {login} yet. Sign in to the dashboard once.", { login: c.by }));
   return await step(() => requestRepin(c.db, {
     login: c.by, githubId, role: "", canWrite: true, authorized: true, repo: c.item.repo, number: c.item.number, pr: c.item.kind === "pr",
     ref: prRef, branch: m[2] ? parseBranch(m[2]) : null, at: new Date(c.at),

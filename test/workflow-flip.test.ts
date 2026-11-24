@@ -49,7 +49,7 @@ const counts = async (w: World) => {
 test("a flip starts over: no workflow rows, open Merge? and scope questions withdrawn, the rest kept", async () => {
   const w = await legacyRepo();
   const db = w.db;
-  await assert.rejects(flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true }), FlipRefused, "refused until the planner works workflows");
+  await assert.rejects(flipRepo(db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: false }), FlipRefused, "refused until the planner works workflows");
   const was = await legacyRows(w);
   const dry = await flipRepo(db, "app", { to: "new", by: OPERATOR, apply: false, engineReady: true });
   assert.equal((await counts(w)).openDecisions, 4, "a dry run writes nothing");
