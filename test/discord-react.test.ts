@@ -31,7 +31,7 @@ test("one reaction per newly recorded message", async () => {
   await dispatch("MESSAGE_CREATE", msg("m2", "no items here"));
   await dispatch("MESSAGE_CREATE", msg("m3", "photocraft#1", "c2"));
   await settle();
-  assert.deepEqual(calls, [["c1", "m1", "✅"]]);
+  assert.deepEqual(calls, [["c1", "m1", "🤖"]]);
 
   await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: "off" }));
   await dispatch("MESSAGE_CREATE", msg("m4", "photocraft#2"));

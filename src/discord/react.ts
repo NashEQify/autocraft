@@ -1,11 +1,11 @@
-// Adds a ✅ reaction to a message the bot has just recorded against items, so people see it was picked up.
+// Adds a 🤖 reaction to a message the bot has just recorded against items, so people see it was picked up.
 // The gateway handler stays free of network calls: it hands the message here and this fires the request without waiting.
 import { RestError, type RestClient } from "./rest.ts";
 import type { Db } from "../db/index.ts";
 
 type ReactRest = Pick<RestClient, "addReaction">;
 
-export const REACTION = "✅";
+export const REACTION = "🤖";
 
 /** The operators' switch on the Discord page; on unless switched off. */
 export const reactOn = async (db: Db): Promise<boolean> =>
