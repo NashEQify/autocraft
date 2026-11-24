@@ -72,6 +72,8 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
   fasttrack: [{ table: "fast_track" }],
   // Started items of the maintainer workflow: entry, approval, weight, plan, blocker, recommendation. Planner input.
   workflows: [{ table: "item_workflows" }],
+  // What people said to items of the maintainer workflow: an unclear answer lives only here. Lists only; not planner input.
+  "workflow-events": [{ table: "workflow_events" }],
   // An operator released an outside-author item from its hold: the planner plans for it at once.
   outside: [{ table: "outside_released" }, { table: "stage_trips", when: "new.stage = 'outside-surge'" }],
   // The planner's Plan cache; its own output, so the planner does not plan again for it.

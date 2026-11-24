@@ -82,4 +82,4 @@ export type Parsed =
 /** A registered control: a state change a panel needs that is not one of the command words. */
 export type Control = "hold-merge" | "release-merge" | "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";
 
-export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "weighted";
+export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "weighted" | "closed" | "backlog" | "set";

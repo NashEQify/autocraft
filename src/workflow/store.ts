@@ -3,6 +3,7 @@
 // reads and writes. Every write moves updated_at, which is bookkeeping for the live topic `workflows` (src/live.ts): a
 // write that changes nothing else does not wake the planner.
 import type { Selectable } from "kysely";
+import type { RepoWorkflow } from "../core/plan.ts";
 import type { Db } from "../db/index.ts";
 import type { DB } from "../db/types.ts";
 import type { Blocker, Entry, ItemKind, ItemWorkflow, Parsed, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState } from "./types.ts";
@@ -13,7 +14,7 @@ export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"] as 
 export const isLive = (s: WorkflowState): boolean => (LIVE_STATES as readonly string[]).includes(s);
 
 /** Which model a tracked repo runs: `legacy` (the decision pipeline) or `new` (the maintainer workflow). */
-export type RepoWorkflow = "legacy" | "new";
+export type { RepoWorkflow };
 
 type Row = Selectable<DB["main.item_workflows"]>;
 

@@ -140,6 +140,11 @@ const rows: Row[] = [
 
   // ---- next-step text of issues
   { name: "issue that is not a bugfix", facts: { classification: { label: "infra" }, labels: { existing: ["infra"] } }, expect: { state: "classified", next: "Triage by a person" } },
+
+  // ---- a repo on the maintainer workflow
+  { name: "workflow repo: a needs-decision item gets no scope question", facts: { ...needsDecision, repoFacts: { workflow: "new" } }, expect: { state: "classified", actions: [] } },
+  { name: "workflow repo: an open decision is not prepared", facts: { repoFacts: { workflow: "new" }, scope: { recommend: { failures: 0, failedAt: null } } }, expect: { state: "classified", actions: [] } },
+  { name: "workflow repo: a Close answer that ended the workflow is carried out outside the scope", facts: { inScope: false, repoFacts: { workflow: "new" }, endedWorkflow: "closed", answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
 ];
 
 for (const r of rows) {

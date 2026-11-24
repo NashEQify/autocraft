@@ -630,7 +630,7 @@ CREATE TABLE IF NOT EXISTS github_commands (
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
   pr INTEGER NOT NULL,                -- 1: the comment is on a pull request
-  command TEXT NOT NULL,              -- merge-queue | autorepin
+  command TEXT NOT NULL,              -- merge-queue | autorepin | answer (maintainer workflow repos)
   weight INTEGER,                     -- the fast-track weight given, or null for the default
   login TEXT NOT NULL,                -- the commenter, as GitHub sent it
   github_id INTEGER NOT NULL,         -- the commenter's numeric GitHub id
@@ -2294,6 +2294,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
+CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);
 -- The last "link your account" reply to a GitHub commenter with no AutoCraft login; one a week per login. Bookkeeping: no live topic.
 CREATE TABLE IF NOT EXISTS github_link_nudges (
   login TEXT PRIMARY KEY COLLATE NOCASE,
