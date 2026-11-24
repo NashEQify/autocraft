@@ -39,7 +39,8 @@ import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import { tierTaker } from "./takers.ts";
-import { heldForOwner, readStartedCalls, type StartedCalls } from "./started.ts";
+import { dropStartedCache, ENDED_ATTEMPTS, heldForOwner, startedCallsCached, type StartedCalls } from "./started.ts";
+import { LIVE_STATES } from "../workflow/store.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
@@ -614,6 +615,12 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
         // and calls for work it started or approved (`started`, started.ts).
         .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", caller.login)]))
         .$if(!started, (u) => u.where((eb) => eb.or([eb.not(manualExpr(db, eb, eb.val(caller.login))), eb("parent_id", "is not", null), eb("picked_by", "=", caller.login), eb("for_login", "=", caller.login)])))
+        // The work is still the caller's: each item has its live workflow, or is the PR of a current attempt of its issue's.
+        .$if(started, (u) => u.where((eb) => eb.and(refs.map((it) => eb.exists(db.k.selectFrom("main.item_workflows as ow").select(eb.lit(1).as("one"))
+          .where("ow.state", "in", LIVE_STATES).where("ow.repo", "=", it.repo)
+          .where((e) => e.or([ciEqExpr(db, "ow.started_by", e.val(caller.login)), ciEqExpr(db, "ow.approved_by", e.val(caller.login))]))
+          .where((e) => e.or([e("ow.number", "=", it.number), e.and([e("ow.entry", "=", "implement"), e.exists(db.k.selectFrom("main.implementations as oi").select(e.lit(1).as("one"))
+            .where("oi.repo", "=", ref<string>("ow.repo")).where("oi.number", "=", ref<number>("ow.number")).where("oi.pr_number", "=", it.number).where("oi.state", "not in", ENDED_ATTEMPTS))])])))))))
         .where((eb) => eb.exists(db.k.selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(nowMs).toISOString())))
         .returning("id"));
       if (!r) throw new Taken();
@@ -638,7 +645,7 @@ const queueCaches = new WeakMap<Db, QueueCache>();
 type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin" | "boundSlot" | "refusedToken" | "timeoutMs">;
 const parsedCalls = new WeakMap<Db, Map<number, Parsed>>();
 /** Drops the cached queue order: a call was queued or leased by this process. Other processes' changes show in the signature (count and newest id of the queued calls) or within QUEUE_CACHE_MS. */
-export const dropQueueCache = (db: Db): void => void queueCaches.delete(db);
+export const dropQueueCache = (db: Db): void => { queueCaches.delete(db); dropStartedCache(db); };
 /** The signature of the queued calls as queuedCalls reads it from the table: their count and newest id. */
 const queueSig = (n: number, m: number | null): string => `${n}:${m}`;
 /**
@@ -725,7 +732,7 @@ type OrderReads = { q: QueueCache; manual: boolean; skip: Set<string>; items: It
 
 /** What claimOrder reads, all at once: the queued calls, the user's Manual only switch, skipped tasks and item filter, and whose calls are whose (started.ts). */
 const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderReads> => {
-  const [q, manual, skip, items, started] = await Promise.all([queuedCalls(db, nowMs), manualOnly(db, login), userSkips(db, login), itemFilter(db, login), readStartedCalls(db, nowMs)]);
+  const [q, manual, skip, items, started] = await Promise.all([queuedCalls(db, nowMs), manualOnly(db, login), userSkips(db, login), itemFilter(db, login), startedCallsCached(db, nowMs)]);
   return { q, manual, skip, items, started };
 };
 
@@ -780,7 +787,7 @@ async function claimOrderAll(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, r
   mine.sort((a, b) => a.pickedAt! - b.pickedAt! || a.id - b.id);
   if (manual) return [...followUps, ...ownHere, ...startedHere, ...mine];
   // The queue's order leaves out the caller's started calls (above) and other users' while one of theirs can take them.
-  const held = (r: Cand): boolean => startedBy(started, r, login) || heldForOwner(started, { ...r, judging: judges(r.prompt_id) }, login);
+  const held = (r: Cand): boolean => startedBy(started, r, login) || heldForOwner(started, r, login, nowMs);
   return [...followUps, ...ownHere, ...startedHere, ...mine, ...await filterSeq(q.ordered, async (r) => r.forLogin === null && fits(r) && !held(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && await counts(r)) && (!fastLane || fastLaneFits(r)))];
 }
 
@@ -960,7 +967,7 @@ async function claimRow(db: Db, caller: Caller, now: number, requestId?: string)
 
 /** The rest of a full claim try, after its row: the queued calls, the item filter and whose calls are whose, at the same time; nothing here writes. */
 async function tryReadsOf(db: Db, caller: Caller, helperRepos: readonly string[] | undefined, now: number, r: ClaimRow): Promise<TryReads> {
-  const [q, items, started] = await Promise.all([queuedCalls(db, now, r.sig), itemFilterOf(db, caller.login, taskItemsOf(r.user.get(TASK_ITEMS_KEY))), readStartedCalls(db, now)]);
+  const [q, items, started] = await Promise.all([queuedCalls(db, now, r.sig), itemFilterOf(db, caller.login, taskItemsOf(r.user.get(TASK_ITEMS_KEY))), startedCallsCached(db, now)]);
   const { picks, sig: _s, user, orphan: _o, alive: _a, ...rest } = r;
   return { ...rest, repos: claimReposOf(picks, helperRepos), order: { q, manual: manualOf(user.get(MANUAL_ONLY_KEY)), skip: skipsOf(user.get(SKIP_TASKS_KEY)), items, started } };
 }
@@ -1028,11 +1035,16 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     if (x.role !== caller.role) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "this Task Runner credential was removed or its user's role changed", reserve: x.reserve };
     const cooled = x.cooled;
     // A cool-off holds back every call but those for work the user started or approved (started.ts), which a slot or the fast
-    // lane still takes; such a claim is asked again soon, as that work may come at any time.
-    const coolReply = (): ClaimReply | null => (cooled ? { lease: null, retryAfter: own || lane ? Math.ceil((cooled.until - now) / 1000) : Math.min(CLAIM_RETRY_S, Math.ceil((cooled.until - now) / 1000)), reason: cooled.reason, until: cooled.until, reserve: x.reserve } : null);
-    if (cooled && (own || lane)) return coolReply();
+    // lane still takes while one is queued; the claim is then asked again soon instead of at the cool-off's end.
+    const coolStarted = cooled !== null && !own && !lane && [...x.order.q.followUps, ...x.order.q.ordered].some((r) => r.seen_at >= now - CALLER_STALE_MS && startedBy(x.order.started, r, caller.login));
+    const coolReply = (c: NonNullable<typeof cooled>): ClaimReply => {
+      const left = Math.ceil((c.until - now) / 1000);
+      return { lease: null, retryAfter: coolStarted ? Math.min(CLAIM_RETRY_S, left) : left, reason: c.reason, until: c.until, reserve: x.reserve };
+    };
+    if (cooled && !coolStarted) return coolReply(cooled);
     const { accepted, floors } = x;
     tiers = new Set((Object.keys(claim.tiers) as Tier[]).filter((t) => familyOf(claim.tiers[t]!, accepted[t]) !== null && meetsEffort(claim.efforts?.[t], floors[t], claim.harness)));
+    if (!tiers.size && cooled) return coolReply(cooled);
     if (!tiers.size) throw new HttpError(400, `no tier of the claim has an accepted model at the minimum effort; accepted: ${(Object.keys(accepted) as Tier[]).map((t) => `${t} ${accepted[t].join("/")}${floors[t] ? ` at effort ${floors[t]} or higher` : ""}`).join(", ")}`);
     const can = memoWrite(canWrite), others = idleOthers(db, caller.login, now);
     repos = x.repos;
@@ -1063,7 +1075,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       takeFromQueueCache(db, Number(r.id));
       return { lease, reserve: x.reserve };
     }
-    if (cooled) return coolReply();
+    if (cooled) return coolReply(cooled);
     if (limited && lane) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers hold ${slots} interactive calls, your Interactive slots (Connect page, My settings)`, reserve: x.reserve };
     if (limited) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers run ${max} calls, your limit of calls at once (Connect page, My settings)`, reserve: x.reserve };
     return null;

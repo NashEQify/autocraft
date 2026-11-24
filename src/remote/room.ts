@@ -10,7 +10,7 @@
 // approved (started.ts) a helper is room whatever its Manual only, My repos, tasks and items.
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { ownLaneLeasesOfToken, leasedBy, queueSnapshot, roleFits, runnerTakes } from "./calls.ts";
+import { ownLaneLeasesOfToken, leasedBy, queueSnapshot, runnerTakes } from "./calls.ts";
 import { claimClass } from "./claim-class.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { manualExpr } from "./manual-only.ts";
@@ -74,8 +74,8 @@ export type RoomState = {
   ready: Helper[]; active: Helper[]; takers?: { list: Taker[]; canWrite: (login: string, repo: string) => boolean }; left: Map<string, number>;
   /** Every fresh, ready helper, Manual only and without tasks too: room for the work its user started or approved (started.ts). */
   fresh: Helper[];
-  /** Read on first use: whose started work is whose, and the fresh helpers' users' write permissions. */
-  started?: { s: StartedCalls; canWrite: (login: string, repo: string) => boolean };
+  /** Read on first use: whose started work is whose. */
+  started?: StartedCalls;
 };
 
 export async function roomState(db: Db, nowMs: number = Date.now()): Promise<RoomState> {
@@ -127,14 +127,14 @@ export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, 
   // repos, tasks and items, as runners that take only some items; the calls ahead they take are those of their own started work.
   const on = repos ?? (refs ? [...new Set(refs.map((x) => x.repo))] : undefined);
   if (on?.length) {
-    const sw = st.started ??= await (async () => ({ s: await readStartedCalls(db, nowMs), canWrite: await roomCanWrite(db, st.fresh.map((h) => h.login), nowMs) }))();
-    const owners = sw.s.ownersFor({ repos: on, ...(refs && { refs }) });
+    const sw = st.started ??= await readStartedCalls(db, nowMs);
+    const owners = sw.ownersFor({ repos: on, ...(refs && { refs }), ...(step !== undefined && { step }) });
     const counted = new Set(takers.map((x) => x.h.token_id));
     const extra = owners.size ? st.fresh.filter((h) => isActive(h, nowMs) && !counted.has(h.token_id) && owners.has(h.login.toLowerCase())
-      && roleFits(h.role ?? "", { prompt_id: "", repos: on }) && on.every((x) => sw.canWrite(h.login, x))) : [];
+      && sw.canTake(h.login, { prompt_id: "", repos: on })) : [];
     if (extra.length) {
       const logins = new Set(extra.map((h) => h.login.toLowerCase()));
-      const own = (c: { refs?: readonly { repo: string; number: number }[] }): boolean => !!c.refs && [...sw.s.owners(c.refs)].some((o) => logins.has(o));
+      const own = (c: { refs?: readonly { repo: string; number: number }[] }): boolean => !!c.refs && [...sw.owners(c.refs)].some((o) => logins.has(o));
       // With no other helper counted nothing ahead is theirs.
       const [t0, f0] = takers.length ? [takes, filteredTake] : [() => false, () => false];
       takers = [...takers, ...extra.map((h) => ({ h, filtered: true }))];

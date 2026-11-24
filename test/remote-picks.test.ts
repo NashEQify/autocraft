@@ -24,6 +24,7 @@ import { setManualOnly } from "../src/remote/manual-only.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
 import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
+import { STARTED_HOLD_MS } from "../src/remote/started.ts";
 import { addFastTrack } from "../src/fasttrack.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
@@ -397,6 +398,9 @@ describe("picks and Manual only", async () => {
     const wf = await insertWorkflow(db, { repo: "photocraft", number: 6, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
     const call = await q({ items: [{ repo: "photocraft", number: 6 }] });
     assert.equal(await leased("bob"), null, "alice's runner is fresh: bob passes it over");
+    const old = await q({ items: [{ repo: "photocraft", number: 6 }], ageMs: STARTED_HOLD_MS + 60_000 });
+    assert.equal(await leased("bob"), old, "past the hold bob takes it, though alice's runner is fresh");
+    await db.run(db.k.updateTable("remote_calls").set({ state: "done" }).where("id", "=", old));
     await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "=", "alice"));
     await setUserMaxCalls(db, "bob", 1);
     const busy = await q({ ageMs: 60_000 });

@@ -9,7 +9,7 @@
 // in that user's runners.
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { judges, NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
+import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
 import { heldForOwner, readStartedCalls } from "./started.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { acceptedModels, familyOf, inferenceMode, isTier } from "./mode.ts";
@@ -111,14 +111,14 @@ async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => bool
 
 /**
  * The taker rule for work a person started or approved (started.ts): one of their fresh Task Runners takes such a call (or a
- * job on a repo where they have such an item) under the role rules and write permission alone, whatever their Manual only, My
- * repos, My tasks and items. It counts as a runner that takes only some items (`filtered`), as the call waits for it.
+ * job of a step their live workflow runs, on its repo; StartedCalls.ownersFor) under the role rules and write permission alone,
+ * whatever their Manual only, My repos, My tasks and items. It counts as a runner that takes only some items (`filtered`), as
+ * the call waits for it.
  */
 async function ownerTakes(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
   const s = await readStartedCalls(db, nowMs);
   if (!s.runnerLogins.length) return () => false;
-  const canWrite = await roomCanWrite(db, s.runnerLogins, nowMs);
-  return (c) => [...s.ownersFor(c)].some((o) => (c.tier === undefined ? s.tiersOf(o).size > 0 : s.tiersOf(o).has(c.tier)) && roleFits(s.roleOf(o), c) && c.repos.every((x) => canWrite(o, x)));
+  return (c) => [...s.ownersFor(c)].some((o) => s.canTake(o, c));
 }
 
 /**
@@ -224,7 +224,7 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
   const started = await readStartedCalls(db, nowMs);
   for (const c of await queueSnapshot(db, nowMs)) {
     const since = marked.get(c.id);
-    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || heldForOwner(started, { ...c, judging: judges(c.prompt_id) }, null)
+    const own = c.parent_id !== null || c.seen_at < nowMs - CALLER_STALE_MS || heldForOwner(started, c, null, nowMs)
       || await pickCounts(c, nowMs, async (who) => (pickers ??= await pickerLogins(db, nowMs)).has(who));
     if (own || await takes(c)) {
       if (since !== undefined) await set(null, c.id);
