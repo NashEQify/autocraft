@@ -63,6 +63,7 @@ const BLOCKER_LABEL: Record<Blocker, string> = {
   "beyond-agreed": tk("work beyond what was agreed"),
   "large-fix": tk("a large fix"),
   "outside-purpose": tk("a change outside the pull request's purpose"),
+  other: tk("a stop the review or merge step reported"),
 };
 export const blockerLabel = (b: Blocker): string => t(BLOCKER_LABEL[b]);
 
