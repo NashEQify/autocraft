@@ -133,16 +133,20 @@ const PATH_CHAR = String.raw`[\p{L}\p{M}\p{N}_@+.-]`;
 const PATH_WORD = String.raw`${PATH_CHAR}+`;
 const PATH_PART = String.raw`${PATH_WORD}(?: +${PATH_WORD})*`;
 const ROOT_EXTENSION = "ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh";
-const BARE_PATH = String.raw`/?${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}|/?${PATH_WORD}\.(?:${ROOT_EXTENSION})|/?\.[\p{L}_]${PATH_CHAR}*`;
+const NESTED_OR_DOT_PATH = String.raw`/?${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}|/?\.[\p{L}_]${PATH_CHAR}*`;
+// With a checkout, the filesystem can distinguish an unfamiliar extension from a missing file.
+const FILE_EXTENSION = String.raw`[\p{L}][\p{L}\p{M}\p{N}_-]*`;
 const LINE_TOKEN = String.raw`[+-]?\d+(?:\.\d+|[\p{L}\p{M}_][\p{L}\p{M}\p{N}_]*)?`;
 type ClaimLocation = { path: string; line: number };
 export type ClaimLocationCheck = (location: ClaimLocation) => boolean;
 
-function* evidenceLocations(evidence: string, files: readonly string[]): Generator<ClaimLocation, void> {
+function* evidenceLocations(evidence: string, files: readonly string[], withCheckout = false): Generator<ClaimLocation, void> {
   const known = files.filter((path) => evidence.includes(`${path}:`))
     .sort((a, b) => b.length - a.length)
     .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const bare = [...known, BARE_PATH].join("|");
+  const extension = withCheckout ? FILE_EXTENSION : ROOT_EXTENSION;
+  const rootPath = String.raw`/?${PATH_WORD}\.(?:${extension})`;
+  const bare = [...known, NESTED_OR_DOT_PATH, rootPath].join("|");
   const pattern = new RegExp(String.raw`\x60([^\x60\r\n]+):(${LINE_TOKEN})\x60|(?<![\p{L}\p{M}\p{N}_@+./:-])(${bare}):(${LINE_TOKEN})`, "gu");
   for (const m of evidence.matchAll(pattern)) {
     const rawPath = (m[1] ?? m[3])!;
@@ -203,7 +207,7 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
     const proof = /\S/.test(displayProof[CLAIM_EVIDENCE_CHARS] ?? "") ? prefix.replace(/\S+$/, "").trimEnd() : prefix;
     const claim = !keep && (REFERENCE_LEAK.test(text) || drop.has(text)) ? NEUTRAL_CLAIM : text;
     const evidence = !keep && (REFERENCE_LEAK.test(proof) || drop.has(proof)) ? NEUTRAL_EVIDENCE : proof;
-    const locations = evidenceLocations(checkLocation ? fullProof : proof, files);
+    const locations = evidenceLocations(checkLocation ? fullProof : proof, files, !!checkLocation);
     const first = locations.next();
     const supported = !first.done && (checkLocation
       ? checkLocation(first.value) && [...locations].every(checkLocation)

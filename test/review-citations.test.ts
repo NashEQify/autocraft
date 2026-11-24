@@ -19,6 +19,7 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
   writeFileSync(join(checkout, "Makefile"), "one line without a final newline");
   writeFileSync(join(checkout, "actual.test.ts"), "one line");
   writeFileSync(join(checkout, "Dockerfile"), "one line");
+  writeFileSync(join(checkout, "Cargo.lock"), "one line");
   writeFileSync(join(checkout, "long.rs"), "line\n".repeat(12));
   writeFileSync(join(checkout, "a b.ts"), "one line");
   writeFileSync(join(checkout, "new guide.md"), "one line");
@@ -44,6 +45,8 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
     ["main.rs:1 " + "note ".repeat(CLAIM_EVIDENCE_CHARS / 5) + "dir/main.rs:1", true],
     ["main.rs:2 and missing.rs:1", false],
     ["main.rs:1 and missing.test.ts:1", false],
+    ["main.rs:1 and missing-.editorconfig:1", false],
+    ["Cargo.lock:1", true],
     ["actual.test.ts:1, dir/café.ts:1 and dir/Makefile:1", true],
     ["main.rs:1 and dir/café-missing.ts:1", false],
     ["main.rs:1 and dir/NotAFile:1", false],
