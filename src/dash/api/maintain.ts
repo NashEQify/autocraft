@@ -2,13 +2,13 @@
 // (src/workflow/store.ts) of the repos the reader may see, narrowed to the picked project. An item needs an answer when its
 // recommendation is open or its last answer was unclear; it counts for the reader only where they may act on the repo
 // (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
-import type { MaintainHome, MaintainRow, MaintainRunnerLine } from "../../../web/src/api/types.ts";
+import type { MaintainQueueMeta, MaintainHome, MaintainRow, MaintainRunnerLine } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { listHelpers } from "../../remote/helpers.ts";
 import { inferenceMode } from "../../remote/mode.ts";
 import { readyRunners } from "../../remote/queue-view.ts";
 import { stateLine, weightLabel } from "../../workflow/status.ts";
-import { liveWorkflows } from "../../workflow/store.ts";
+import { liveWorkflows, repoWorkflows } from "../../workflow/store.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Req } from "../types.ts";
@@ -79,4 +79,15 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const byMe = (l: string | null) => l !== null && l.toLowerCase() === me;
   const mine = rows.filter((r) => !needs.includes(r) && (byMe(r.startedBy) || byMe(r.approvedBy) || byMe(r.stoppedBy)));
   return { needs, mine, waiting: [], running: [], runner, attention };
+}
+
+/**
+ * What the new Work queue page needs beyond the classic reads: the visible repos on the new workflow (their holds go through
+ * the workflow controls, the others through the classic routes) and who approved each started item for merge.
+ */
+export async function queueMeta(db: Db, req: Req): Promise<MaintainQueueMeta> {
+  const visible = new Set(await visibleRepos(db, req));
+  const newRepos = (await repoWorkflows(db)).filter((r) => r.workflow === "new" && visible.has(r.repo)).map((r) => r.repo);
+  const live = (await liveWorkflows(db)).filter((w) => visible.has(w.repo) && w.approvedBy !== null);
+  return { newRepos, approvedBy: Object.fromEntries(live.map((w) => [`${w.repo}#${w.number}`, w.approvedBy!])) };
 }

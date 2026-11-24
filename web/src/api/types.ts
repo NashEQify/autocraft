@@ -3335,3 +3335,9 @@ export interface MaintainHome {
   runner: MaintainRunnerLine | null;
   attention: HomeProblem[];
 }
+
+/** GET /api/maintain/queue: the repos on the new workflow, and who approved each started item for merge (`repo#number` to login). */
+export interface MaintainQueueMeta {
+  newRepos: RepoName[];
+  approvedBy: Record<string, string>;
+}

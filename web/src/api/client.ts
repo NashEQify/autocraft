@@ -21,6 +21,7 @@ import type {
   DiscordSetup,
   Home,
   MaintainHome,
+  MaintainQueueMeta,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -250,6 +251,8 @@ export interface Api {
   maintain: {
     /** Home: what waits for the reader's answer, what they started, their Task Runner line and problems; the page's project narrows it. */
     home(): Promise<MaintainHome>;
+    /** Work queue: the repos on the new workflow and who approved each started item for merge. */
+    queue(): Promise<MaintainQueueMeta>;
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
@@ -557,7 +560,7 @@ export interface Api {
     stopBatch(id: number): Promise<void>;
   };
   /** A registered workflow control (src/workflow/apply.ts `runControl`): hold or release a merge. The reply is the line every surface shows. */
-  controls: { run(input: { control: "hold-merge" | "release-merge"; item: { repo: RepoName; number: number } }): Promise<{ ok: boolean; line: string }> };
+  controls: { run(input: { control: "hold-merge" | "release-merge"; item: { repo: RepoName; number: number } } | { control: "resume-breaker"; key: string }): Promise<{ ok: boolean; line: string }> };
 }
 
 export const ApiContext = createContext<Api | null>(null);
