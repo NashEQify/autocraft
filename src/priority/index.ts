@@ -11,11 +11,10 @@ import { type Item, refOf } from "../classify/parse.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { reachOfOpenItems } from "./reach.ts";
 import { reachScore, settleImpact, type Impact } from "./score.ts";
-import { itemOf, plannedItems } from "../core/select-items.ts";
-import { mapSeq } from "../async-seq.ts";
+import { itemsOf, plannedItems } from "../core/select-items.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import { excluded } from "../db/kx.ts";
+import { batches, excluded } from "../db/kx.ts";
 
 const JEV_CHUNK = 40;
 const now = () => new Date().toISOString();
@@ -24,20 +23,28 @@ type Due = Item & { hash: string };
 
 /** The items the Plans send to rating: no priority row, or one made at other text. */
 async function dueItems(db: Db): Promise<Due[]> {
-  return await mapSeq((await plannedItems(db, "prioritize")), async (p) => ({ ...await itemOf(db, p.facts.repo, p.facts.number), hash: p.facts.embedHash }));
+  const planned = await plannedItems(db, "prioritize");
+  // itemsOf also reads class_hash, which the model steps do not take.
+  return (await itemsOf(db, planned.map((p) => p.facts))).map(({ classHash: _, ...item }, i) => ({ ...item, hash: planned[i]!.facts.embedHash }));
 }
 
 type Verdict = { jev: { impact: Impact; p: number } | null; haiku: { impact: Impact; reason: string } | null };
 
-async function save(db: Db, item: Due, v: Verdict): Promise<boolean> {
-  const s = settleImpact(v.jev, v.haiku?.impact ?? null);
-  if (!s) return false;
-  const reason = s.model === "haiku" ? v.haiku!.reason : v.jev ? `${v.jev.impact} ${v.jev.p.toFixed(2)}` : "";
-  await db.run(db.k.insertInto("item_priority")
-    .values({ repo: item.repo, number: item.number, text_hash: item.hash, impact: s.impact, jev_impact: v.jev?.impact ?? null, jev_p: v.jev?.p ?? null,
-      haiku_impact: v.haiku?.impact ?? null, score: 0, model: s.model, reason, at: now() })
-    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["text_hash", "impact", "jev_impact", "jev_p", "haiku_impact", "model", "reason", "at"]))));
-  return true;
+/** Stores the settled verdicts of `items` (those without a valid answer are skipped): one statement per BATCH_ROWS rows. Returns the refs saved. */
+async function save(db: Db, items: readonly Due[], verdicts: ReadonlyMap<string, Verdict>): Promise<Set<string>> {
+  const rows = items.flatMap((item) => {
+    const v = verdicts.get(refOf(item))!;
+    const s = settleImpact(v.jev, v.haiku?.impact ?? null);
+    if (!s) return [];
+    const reason = s.model === "haiku" ? v.haiku!.reason : v.jev ? `${v.jev.impact} ${v.jev.p.toFixed(2)}` : "";
+    return [{ ref: refOf(item), row: { repo: item.repo, number: item.number, text_hash: item.hash, impact: s.impact, jev_impact: v.jev?.impact ?? null, jev_p: v.jev?.p ?? null,
+      haiku_impact: v.haiku?.impact ?? null, score: 0, model: s.model, reason, at: now() } }];
+  });
+  for (const chunk of batches(rows)) {
+    await db.run(db.k.insertInto("item_priority").values(chunk.map((r) => r.row))
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["text_hash", "impact", "jev_impact", "jev_p", "haiku_impact", "model", "reason", "at"]))));
+  }
+  return new Set(rows.map((r) => r.ref));
 }
 
 /**
@@ -87,7 +94,8 @@ export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<Pr
       if (t.haiku.has(ref)) res.haiku++;
     }
     res.haikuAlone += t.alone.size;
-    for (const item of chunk) if (await save(db, item, verdicts.get(refOf(item))!)) res.saved++;
+    const saved = await save(db, chunk, verdicts);
+    for (const item of chunk) if (saved.has(refOf(item))) res.saved++;
     else log(`prioritize: no valid answer for ${refOf(item)}`);
   }
   res.rescored = await rescore(db);
