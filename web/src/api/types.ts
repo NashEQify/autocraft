@@ -975,8 +975,8 @@ export interface DiscordSetup {
   channels: DiscordChannel[];
   /** Tracked repos a channel's default can be. */
   repos: string[];
-  /** Public repos of any owner the bot files issues into without tracking them. */
-  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string }[];
+  /** Public repos of any owner the bot offers without tracking them. `mode`: "submit" when the GitHub App covers the repo (Submit for me), else "link" (only the GitHub link). */
+  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string; mode: "submit" | "link" }[];
   /** Every public tracked repo with whether the bot offers it in its repo select; `used` of `max` places are filled (offered repos plus filing-only ones). */
   offer: { repos: { name: string; label: string; offered: boolean }[]; used: number; max: number };
   contact: string;

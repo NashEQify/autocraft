@@ -9,7 +9,7 @@ import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
 import { countOf, linksOf } from "../../discord/store.ts";
-import { addFilingRepo, botRepos, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
+import { addFilingRepo, botRepos, filingReposWithMode, FilingRepoError, offerState, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
 import { reactOn } from "../../discord/react.ts";
 import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
@@ -95,7 +95,7 @@ async function setupOf(db: Db): Promise<DiscordSetup> {
     state: st?.state ?? "off", detail: st?.detail ?? null, at: st?.at ?? null,
     channels: channels.filter((c) => c.watched || !PLACEHOLDER_NAME.test(c.name ?? "")).map((c) => ({ ...c, watched: !!c.watched })),
     repos: await publicRepoNames(db),
-    filingRepos: await filingRepos(db),
+    filingRepos: await filingReposWithMode(db),
     offer: await offerState(db),
     contact: await contactOf(db), reactOn: await reactOn(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
     usage: await usageOf(db),
@@ -137,7 +137,7 @@ export async function putContact(db: Db, req: Req): Promise<DiscordSetup> {
   return await setupOf(db);
 }
 
-/** Adds a filing-only repo (`repo`: owner/name) once GitHub confirms it; the refusal's reason is the error. */
+/** Adds a filing-only repo (`repo`: owner/name) once GitHub confirms it is public with issues on; the refusal's reason is the error. The list shows its mode. */
 export async function addFiling(db: Db, req: Req): Promise<DiscordSetup> {
   operator(req);
   const repo = body(req).repo;

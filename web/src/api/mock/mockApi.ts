@@ -106,8 +106,8 @@ export function createMockApi(): Api {
       used: 6, max: 25,
     },
     filingRepos: [
-      { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString() },
-      { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString() },
+      { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString(), mode: "submit" },
+      { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString(), mode: "link" },
     ],
     contact: "discord-privacy@example.org", reactOn: true, privacyPath: "/privacy",
     usage: {
@@ -363,8 +363,8 @@ export function createMockApi(): Api {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
         const [owner, name] = repo.trim().split("/");
         if (!owner || !name) throw new Error("Give the repo as owner/name.");
-        if (owner === "no-app-here") throw new Error(`The GitHub App is not installed on ${owner}.`);
-        discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso() }];
+        if (owner === "private-org") throw new Error(`${owner}/${name} is not public.`);
+        discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso(), mode: owner === "example-studio" ? "submit" : "link" }];
         changed();
         return wait(structuredClone(discord));
       },

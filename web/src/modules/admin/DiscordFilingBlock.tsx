@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { LinkSimpleIcon, RobotIcon } from "@phosphor-icons/react";
 import type { DiscordSetup } from "../../api/types";
+import { Badge } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
 import { Input } from "../../ui/atoms/Input";
@@ -9,7 +11,7 @@ import { ConfirmButton } from "../../ui/molecules/ConfirmButton";
 import { Block } from "../../ui/molecules/Block";
 import { useWrite } from "../../lib/hooks";
 
-/** Public repos of other owners the bot files into without tracking them: the list, remove, and an owner/name field to add one. */
+/** Public repos of other owners the bot offers without tracking them, each with how it files there now: the list, remove, and an owner/name field to add one. */
 export function DiscordFilingBlock({ repos, onAdd, onRemove }: { repos: DiscordSetup["filingRepos"]; onAdd: (repo: string) => Promise<unknown>; onRemove: (repo: string) => Promise<unknown> }) {
   const [v, setV] = useState("");
   const write = useWrite();
@@ -26,8 +28,12 @@ export function DiscordFilingBlock({ repos, onAdd, onRemove }: { repos: DiscordS
             <li key={slug} className="flex min-h-11 items-center gap-3 border-t border-line px-4 py-1.5 first:border-0">
               <div className="min-w-0 flex-1">
                 <TextLink href={`https://github.com/${slug}`} className="block truncate text-sm">{slug}</TextLink>
-                <div className="truncate text-2xs text-ink/45">{r.addedBy} · <TimeAgo iso={r.addedAt} /></div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-2xs text-ink/45">{r.addedBy} · <TimeAgo iso={r.addedAt} /></span>
+                  <ModeBadge mode={r.mode} className="sm:hidden" />
+                </div>
               </div>
+              <ModeBadge mode={r.mode} className="max-sm:hidden" />
               <ConfirmButton label="Remove" confirmLabel="Confirm remove" loading={write.busy === slug} onConfirm={() => void write.run(slug, () => onRemove(slug))} target={slug} />
             </li>
           );
@@ -42,4 +48,11 @@ export function DiscordFilingBlock({ repos, onAdd, onRemove }: { repos: DiscordS
       </form>
     </Block>
   );
+}
+
+/** How the bot files into the repo now: as the GitHub App, or only through the prefilled GitHub link. On phones it sits on the meta line, so the repo name keeps the row's width. */
+function ModeBadge({ mode, className }: { mode: DiscordSetup["filingRepos"][number]["mode"]; className?: string }) {
+  return mode === "submit"
+    ? <Badge tone="ok" icon={<RobotIcon aria-hidden size={12} />} className={className}>Submit for me</Badge>
+    : <Badge icon={<LinkSimpleIcon aria-hidden size={12} />} className={className}>Link only</Badge>;
 }

@@ -15,6 +15,8 @@ import type { BotRequest, FileResult } from "../src/discord/file-issue.ts";
 import { signV4 } from "../src/discord/attachments.ts";
 import { installPanel } from "../src/discord/panel.ts";
 import { installIssueNew, type IssueAsk } from "../src/discord/issue-new.ts";
+import { addFilingRepo, COVERAGE_TTL_MS, coverageReader, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
+import { AppNotInstalledError } from "../src/github/install-token.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } from "../src/discord/rest.ts";
 import { Search } from "../src/discord/search.ts";
@@ -337,6 +339,40 @@ describe("search and filing flow", () => {
     assert.ok(bodies[0]!.includes(`![shot.png](https://files.example.test/${key})`));
     assert.doesNotMatch(bodies[0]!, /notes/);
     assert.match(rest.edits[0]!.content!, /^Filed as photocraft#9\nnotes\.png was left out: it is not a PNG, JPEG, GIF or WebP image\.$/);
+  });
+
+  test("a filing-only repo the app does not cover is added link-only; its draft offers Submit for me once the app covers it", async () => {
+    let installed = false, clock = 0;
+    const minted: string[] = [];
+    const mint = async (owner: string, repo: string) => { minted.push(repo); if (!installed) throw new AppNotInstalledError(owner); return "ghs_install"; };
+    const read: ReadRepo = async (owner, name) => ({ owner, name, private: false, hasIssues: true, archived: false });
+    assert.equal((await addFilingRepo(db, "op", "example-studio/sketchpad", { read, mint })).mode, "link");
+    const ix3 = new Interactions(rest, (l) => assert.fail(l));
+    installIssueNew(ix3, { db, keys, search, log: (l) => assert.fail(l), ask, store: null, junk: async () => "ok", botRefusal: async () => null, covers: coverageReader(mint, () => clock) });
+    const draft = async (user: string): Promise<EditBody> => {
+      await send(2, user, { name: "autocraft", type: 1, options: [{ name: "report", type: 1 }] }, "c1", ix3);
+      await send(5, user, { custom_id: modalId(), components: [
+        { type: 18, component: { type: 3, custom_id: "app", values: ["sketchpad"] } },
+        { type: 18, component: { type: 4, custom_id: "description", value: "brush strokes lag on large canvases" } },
+      ] }, "c1", ix3);
+      await send(3, user, { custom_id: rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id! }, "c1", ix3);
+      await send(5, user, { custom_id: modalId(), components: [{ type: 1, components: [{ type: 4, custom_id: "steps", value: "Draw" }] }] }, "c1", ix3);
+      return rest.edits[0]!;
+    };
+    draftReply = JSON.stringify({ title: "Brush lags", kind: "bug", body: "Strokes lag on large canvases." });
+    const linkOnly = await draft("u50");
+    assert.ok(!rows(linkOnly).some((x) => x.label === "Submit for me"));
+    assert.ok(rows(linkOnly).some((x) => x.url?.startsWith("https://github.com/example-studio/sketchpad/issues/new")));
+    assert.match(linkOnly.content!, /cannot file issues in this repo yet/);
+    installed = true;
+    const reads = minted.length;
+    assert.ok(!rows(await draft("u51")).some((x) => x.label === "Submit for me"), "within the cache time the earlier reading holds");
+    assert.equal(minted.length, reads, "and GitHub is not asked again");
+    clock += COVERAGE_TTL_MS;
+    const covered = await draft("u52");
+    assert.ok(rows(covered).some((x) => x.label === "Submit for me"));
+    assert.doesNotMatch(covered.content!, /cannot file/);
+    await removeFilingRepo(db, "op", "sketchpad");
   });
 });
 
