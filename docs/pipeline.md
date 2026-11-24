@@ -738,11 +738,11 @@ Limits count items handled per stage per day (from 00:00 UTC), including by fail
 | Step | Default limit (new database) | Step | Default limit (new database) |
 |---|---|---|---|
 | Embed | none | Implement | none |
-| Duplicates | 2000 | Fix-up | 20 |
+| Duplicates | none | Fix-up | 20 |
 | Compare duplicate groups | 200 | CI fix | none |
-| Classify | 2000 | CI fix reruns | 30 |
+| Classify | none | CI fix reruns | 30 |
 | Referee | 500 | Fix red main | 20 |
-| Priority | 3000 | Verify | 30 |
+| Priority | none | Verify | 30 |
 | Decide | 100 | Merge | 10 |
 | Conversations | 30 | Pre-merge review | none |
 | Maintainers' conversations | none | Approve CI runs | 30 |

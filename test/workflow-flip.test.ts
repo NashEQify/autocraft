@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import { mergeDecisionId } from "../src/core/rules.ts";
 import { getDecision } from "../src/decisions.ts";
 import { questionDecisionId } from "../src/implement/questions.ts";
+import { setStatusApproval, statusApprovalOf } from "../src/prstatus/approval.ts";
 import { FlipRefused, flipRepo } from "../src/workflow/flip.ts";
 import { insertWorkflow, liveWorkflows, repoWorkflow } from "../src/workflow/store.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
@@ -65,13 +66,25 @@ test("a flip starts over: no workflow rows, open Merge? and scope questions with
   assert.equal((await getDecision(db, questionDecisionId("app", 9, 1, 1)))?.answer, null);
 });
 
-test("a second flip changes nothing", async () => {
+test("a flip turns the PR status comment on; a second flip changes nothing unless the switch was turned off", async () => {
   const w = await legacyRepo();
+  assert.equal(await statusApprovalOf(w.db, "app"), null);
+  const dry = await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: false, engineReady: true });
+  assert.ok(dry.statusOn && await statusApprovalOf(w.db, "app") === null, "a dry run reports the switch and leaves it");
   await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
+  assert.equal((await statusApprovalOf(w.db, "app"))?.by, OPERATOR);
   const before = await counts(w);
   const again = await flipRepo(w.db, "app", { to: "new", by: OPERATOR, apply: true, engineReady: true });
   assert.equal(again.applied, false);
   assert.deepEqual(await counts(w), before);
+  // A repo whose switch is off (flipped before the switch came with the workflow) gets it on a re-flip.
+  await setStatusApproval(w.db, OPERATOR, "app", false);
+  const fixed = await flipRepo(w.db, "app", { to: "new", by: "maint", apply: true, engineReady: true });
+  assert.ok(fixed.applied && fixed.statusOn);
+  assert.equal((await statusApprovalOf(w.db, "app"))?.by, "maint");
+  assert.equal(await repoWorkflow(w.db, "app"), "new");
+  await flipRepo(w.db, "app", { to: "legacy", by: OPERATOR, apply: true });
+  assert.notEqual(await statusApprovalOf(w.db, "app"), null, "a rollback leaves the switch as it is");
 });
 
 test("a flip back to legacy stops the workflows and leaves the legacy rows working", async () => {

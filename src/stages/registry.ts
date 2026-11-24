@@ -78,7 +78,7 @@ export const STAGES: StageDef[] = [
   {
     id: "dupes", title: "Duplicates", order: 2, runStage: 3, docSection: "Duplicates", mode: "steps",
     description: "Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group.",
-    steps: [{ name: "dupes", maxMin: 10, label: "Duplicates", limit: 2000 }, { name: "dupes-compare", maxMin: 50, label: "Compare duplicate groups", limit: 200 }],
+    steps: [{ name: "dupes", maxMin: 10, label: "Duplicates", limit: null }, { name: "dupes-compare", maxMin: 50, label: "Compare duplicate groups", limit: 200 }],
     lanes: [{ name: "dupes", steps: ["dupes"], order: 4 }, { name: "dupes-compare", steps: ["dupes-compare"], order: 5 }],
     reads: ["Item vectors", "Duplicate decisions already answered"],
     sets: ["Duplicate pair verdicts", "Duplicate decisions"],
@@ -111,7 +111,7 @@ export const STAGES: StageDef[] = [
   {
     id: "classify", title: "Classify", order: 3, runStage: 2, docSection: "Classify", mode: "steps",
     description: "Gives each open item one type label and two flags (security, needs decision). Jev goes first, Haiku gives a second opinion, and a referee settles disagreements outside the scope labels.",
-    steps: [{ name: "classify-new", maxMin: 20, label: "Classify", limit: null, seeded: 2000 }, { name: "classify-all", maxMin: 120 }, { name: "referee", maxMin: 10, label: "Referee", limit: 500 }, { name: "areas-propose", maxMin: 30 }, { name: "areas-suggest", maxMin: 30 }, { name: "areas-rescan", maxMin: 30 }],
+    steps: [{ name: "classify-new", maxMin: 20, label: "Classify", limit: null }, { name: "classify-all", maxMin: 120 }, { name: "referee", maxMin: 10, label: "Referee", limit: 500 }, { name: "areas-propose", maxMin: 30 }, { name: "areas-suggest", maxMin: 30 }, { name: "areas-rescan", maxMin: 30 }],
     lanes: [{ name: "classify", steps: ["classify-new"], order: 0 }, { name: "referee", steps: ["referee"], order: 18 }],
     reads: ["Item text", "Area list"],
     sets: ["Type label and flags per item", "Area list"],
@@ -143,7 +143,7 @@ export const STAGES: StageDef[] = [
   {
     id: "priority", title: "Priority", order: 4, runStage: 2, docSection: "Priority", mode: "steps",
     description: "Gives each open item a level from P0 to P4, then orders the candidates of later stages by a work rank.",
-    steps: [{ name: "prioritize", maxMin: 30, label: "Priority", limit: null, seeded: 3000 }, { name: "rank", maxMin: 10 }],
+    steps: [{ name: "prioritize", maxMin: 30, label: "Priority", limit: null }, { name: "rank", maxMin: 10 }],
     lanes: [{ name: "priority", steps: ["prioritize"], order: 1 }, { name: "rank", steps: ["rank"], order: 2 }],
     reads: ["Item text", "Type, size and security flag"],
     sets: ["Priority level", "Work rank"],

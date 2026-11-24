@@ -596,7 +596,7 @@ CREATE TABLE IF NOT EXISTS stage_limits (
   updated_by TEXT, updated_at TEXT
 );
 INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES
-  ('classify-new', 2000), ('embed', NULL), ('decide', 100), ('checks', NULL),
+  ('embed', NULL), ('decide', 100), ('checks', NULL),
   ('labels-apply', NULL), ('merge', 10), ('act', 20), ('fixup', 20), ('verify', 30), ('opus-review', 40);
 
 -- One row per `autocraft-server sync` run, kept for two days, for the Pipeline page.
@@ -1370,7 +1370,6 @@ CREATE TABLE IF NOT EXISTS item_priority (
   PRIMARY KEY (repo, number)
 );
 CREATE INDEX IF NOT EXISTS item_priority_score ON item_priority(score);
-INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('prioritize', 3000);
 CREATE INDEX IF NOT EXISTS verifications_finished ON verifications(finished_at);
 
 -- Duplicate candidates (Duplicates stage). a < b. A pair is checked once per pair of text hashes
