@@ -1528,15 +1528,16 @@ export interface QueueRow {
   head: string;
   size: "S" | "M" | "L";
   label: TypeLabel | null;
-  verdict: "take" | "take-fix";
+  /** Null for a PR a maintainer put straight into the merge queue, which has no review. */
+  verdict: "take" | "take-fix" | null;
   reason: string;
   fixes: number;
   /** CI at the reviewed head: success | failure | pending | none, or unknown before checks were fetched for it. */
   ci: "success" | "failure" | "pending" | "none" | "unknown";
   mergeable: Mergeable;
   state: QueueState;
-  /** How it may merge: by the rule, by the operator's answer, or not yet. */
-  path: "rule" | "operator" | null;
+  /** How it may merge: by the rule, by the operator's answer, on the approval of the maintainer who queued it, or not yet. */
+  path: "rule" | "operator" | "maintainer" | null;
   /** Why the merge-without-asking rule doesn't cover it. */
   outsideRule: string[];
   decisionId: string | null;

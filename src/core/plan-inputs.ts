@@ -40,6 +40,9 @@ export type PlanInput = {
   pg?: Partial<Record<"refs" | "when" | "updateWhen" | "full" | "fullUpdate", string>>;
 };
 
+/** Live states of item_workflows (src/workflow/store.ts LIVE_STATES). */
+const WF_LIVE = "('running', 'waiting', 'blocked', 'recommending')";
+
 /** The PR number at the end of a pull request URL (`fastScoreSql` and `pilotSqlFor` link a fix attempt to its PR this way), else NULL. */
 const prOfUrl = (url: string): string => `CASE WHEN instr(${url}, '/pull/') > 0 THEN CAST(substr(${url}, instr(${url}, '/pull/') + 6) AS INTEGER) END`;
 
@@ -243,6 +246,14 @@ export const PLAN_INPUTS: PlanInput[] = [
     table: "pr_checks", class: "cross", why: "Checks of one PR; a new row or one whose overall state moves to or from none can flip its repo's no-CI fact (reposWithNoCi).",
     refs: "SELECT r.repo AS repo, r.number AS number",
     full: "1", fullUpdate: "(COALESCE(old.overall, 'none') = 'none') IS NOT (COALESCE(new.overall, 'none') = 'none')",
+  },
+  {
+    // Commands move a workflow at human pace; its recommendation, plan parts and blocker are not planner facts.
+    table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry and approval, the PR of an issue's implement workflow, and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
+    columns: ["repo", "number", "entry", "state", "approved_by", "started_by", "started_at"],
+    refs: "SELECT r.repo AS repo, r.number AS number UNION SELECT wi.repo, wi.pr_number FROM implementations wi WHERE wi.repo = r.repo AND wi.number = r.number AND wi.pr_number IS NOT NULL",
+    full: `r.state IN ${WF_LIVE}`,
+    fullUpdate: `(old.state IN ${WF_LIVE}) IS NOT (new.state IN ${WF_LIVE})`,
   },
   { table: "fast_track", class: "cross", why: "Fast track moves an item's scope and score, its fix PR's, and through scope its duplicate sets and integration PRs.", full: "1" },
   { table: "outside_holds", class: "cross", why: "An outside-author hold moves an item's scope, and through it duplicate sets, fix PRs and integration PRs.", full: "1" },

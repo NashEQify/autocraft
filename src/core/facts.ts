@@ -26,6 +26,7 @@ import { mergeHolds } from "../merge/holds.ts";
 import { reposWithNoCi } from "../merge/no-ci.ts";
 import { effectiveCi } from "../optional-checks.ts";
 import { inPilot, pilotExpr, pipelineRepos } from "../pilot.ts";
+import { loadWorkflowFacts } from "../workflow/facts.ts";
 import { holdMap } from "../outside.ts";
 import { attemptsIn, parseFixes } from "../fixup/candidates.ts";
 import { operatorTries, operatorTriesLeft, operatorWork, queuedOperatorFix } from "../preapproval/state.ts";
@@ -178,6 +179,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const tripped = await activeTrips(db);
   const brokeAt = await brokeHeads(db, opts.repo);
   const implPrs = await implementationPrs(db, opts.repo);
+  const wfs = await loadWorkflowFacts(db, opts.repo);
   // The per-PR rows below are independent reads: they run together (on Postgres, over the pool).
   const { ourFixupHead, ourSameDiffMerge, pushedHere, pushedOffAt, carries, fixupsOf, fixupAt, lintFixup, lintOperator, lintCifix, carryRows, conflictRowsOf, lintConflict, cifixOf, merges, waiting, verifRows, otherOpen, openQuestion, unsureAt, reviewRows } = await allOf({
     // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
@@ -250,7 +252,8 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const taskEnded = async (id: number | null): Promise<boolean> => { const t = id != null ? await getTask(db, id) : null; return !t || TERMINAL.includes(t.state); };
   const authorWrites = await authorWritesOf(db, now);
   const postSource = await postSourcesOf(db, rows.filter((r) => r.r_mode === CARRIED && r.r_head).map((r) => `${r.repo}#${r.number}`));
-  const queued = rows.filter((r) => r.in_pilot && r.not_integration && (r.r_verdict === "take" || r.r_verdict === "take-fix") && r.author);
+  // In a repo on the maintainer workflow the tier also decides, before any review, whether a PR is on the auto path.
+  const queued = rows.filter((r) => r.in_pilot && r.not_integration && (r.r_verdict === "take" || r.r_verdict === "take-fix" || wfs.model(r.repo) === "new") && r.author);
   const tiers = await tiersOf(db, queued.map((r) => ({ login: r.author!, id: r.author_id })));
 
   const repoMemo = new Map<string, { f: PrFacts["repoFacts"]; pub: boolean; longLived: LongLived; defaultBranch: string | null }>();
@@ -267,7 +270,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       m = {
         f: { mergeApproved: !!await mergeApprovalOf(db, repo), pushApproved: await pushApprovalOf(db, repo) !== null, commentApproved: await commentApprovalOf(db, repo) !== null, ciApproved: await ciApprovalOf(db, repo) !== null,
           noCi: t.noCi.has(repo), mainRed: mainRed.has(repo), fixIssueApproved: await fixIssueApprovalOf(db, repo) !== null,
-          implementOn: await featureOn(db, "implement", repo) },
+          implementOn: await featureOn(db, "implement", repo), workflow: wfs.model(repo) },
         pub: row?.visibility === "public",
         longLived: t.longLived(repo),
         defaultBranch: row?.default_branch ?? null,
@@ -335,6 +338,11 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     return { waiting, reread: !!w.reread, crossRepo: !!w.cross_repo, approvable: runs.filter((x) => x.event === "pull_request" && (failed[x.id] ?? 0) < MAX_FAILURES).length, blocked };
   };
 
+  // The pipeline's own Fix PRs count as whitelisted at a head the pipeline itself pushed (others may push to the branch); an operator's deny still wins.
+  const tierOf = async (r: { repo: string; number: number; author: string | null; author_id: number | null }, head: string | null): Promise<PrFacts["tier"]> => {
+    const t = (r.author ? tiers.get(tierKey({ login: r.author, id: r.author_id })) : undefined) ?? "not";
+    return t === "not" && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(`${r.repo}#${r.number}`) && !!head && await ownHead(r.repo, r.number, head) ? "whitelisted" : t;
+  };
   const holdOf = await reviewHolds(db, now, refs);
   const outsideHolds = await holdMap(db);
   const out: PrFacts[] = [];
@@ -365,6 +373,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     };
     base.inFlight = r.state === "OPEN" && !integration && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref);
     base.implementation = implPrs.get(ref) ?? null;
+    if (rf.f.workflow === "new") { base.workflow = wfs.ofPr(r.repo, r.number, base.implementation?.issue ?? null); base.endedWorkflow = wfs.ended(r.repo, r.number); }
     if (integration) {
       base.runs = runsOf(await batchTip(r.repo, r.number), rf.f.ciApproved);
       out.push(base);
@@ -384,6 +393,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     base.label = labelWithScopeAnswer(s.label ?? null, base.scopeAnswer);
     base.needsDecisionFlag = s.flags.includes("needs decision") || (unsettled.has(ref) && !scope.has(ref));
     base.labelUnsure = s.status === "settled" && !!s.referee && !s.referee.sure && refereeClosed(s.referee);
+    if (rf.f.workflow === "new") base.tier = await tierOf(r, head);
     const pm = mergedByPipeline.get(ref);
     if (pm) base.postmerge = { mergedAt: pm.merged_at, head: pm.head, since, review: pmReviews.get(ref) ?? null };
     // Checks describe the PR when they were fetched for the reviewed head (or, without a review, the current one).
@@ -486,10 +496,8 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
         base.carriedFrom = from.map((x) => ({ number: x.number, author: x.author, tier: (x.author ? t.get(tierKey({ login: x.author, id: x.id })) : undefined) ?? "not" }));
       }
     }
-    base.tier = (r.author ? tiers.get(tierKey({ login: r.author, id: r.author_id })) : undefined) ?? "not";
-    // The pipeline's own Fix PRs count as whitelisted at a head the pipeline itself pushed (others may push to the branch); an operator's deny still wins.
+    base.tier = await tierOf(r, head);
     const ownHere = !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref) && !!head && await ownHead(r.repo, r.number, head);
-    if (base.tier === "not" && ownHere) base.tier = "whitelisted";
 
     const last = merges.get(`${ref}@${r.r_head}`)?.[0];
     // An operator's Retry after a refusal asks for another try now, without waiting for CI or the mergeable state to change.
