@@ -17,7 +17,7 @@
 // second agent (a rolling update that starts the new pod before the old one is gone) waits until the holder removes
 // it or stops touching it for LOCK_STALE_MS.
 import { randomUUID, type KeyObject } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -38,9 +38,12 @@ const MAX_BAD_BLOBS = 32;
 /** Longest build deadline (3 h by default) plus 30 minutes. */
 export const DEFAULT_GRACE_MS = 3.5 * 3600_000;
 
-/** The version a key downloads, as far as it got, and which manifest it follows (StagingState). */
-const STAGING = "staging";
-const STAGING_STATE = "staging.json";
+/**
+ * The version a key downloads, as far as it got, and which manifest it follows (StagingState). The `.tmp` names make an
+ * older agent (rolled back to) remove them as leftovers.
+ */
+const STAGING = "staging.tmp";
+const STAGING_STATE = "staging-state.tmp";
 /**
  * `boot` is the node's boot id when the staging dir was made or last checked by hash; null when unknown. Under another
  * boot id the files written before may not have reached the disk, so a resume checks every kept file's sha256.
@@ -67,8 +70,11 @@ export type NodeStatus = {
   /** ms since the epoch, by the node's clock. */
   updated: number;
   fs: { sizeBytes: number; usedBytes: number; usedPct: number };
-  /** Warm bytes on the node: current versions, and retired versions still in their grace period. Both count against the node cap. */
-  warmBytes: { current: number; grace: number };
+  /**
+   * Warm bytes on the node: current versions, retired versions still in their grace period, and unfinished downloads
+   * (files no version shares; absent from older agents). All count against the node cap.
+   */
+  warmBytes: { current: number; grace: number; staging?: number };
   /** The version each key's `current` names. */
   keys: Record<string, KeyStatus>;
   /** Assigned keys that are not held at their newest version, and why. */
@@ -181,8 +187,12 @@ export class SyncAgent {
   private assignError: string | undefined;
   private writing: Promise<void> = Promise.resolve();
   private diskCheckedAt = 0;
+  /** stagedBytes per key. */
+  private readonly staged = new Map<string, number>();
   /** run()'s stop signal: a sync stops at the next file and leaves its staging dir to resume. */
   private signal: AbortSignal | undefined;
+  /** While run() or once() holds the lock: whether it still does (stops them when not). */
+  private holdsLock: (() => boolean) | undefined;
 
   constructor(c: SyncConfig) {
     if (!NODE_NAME.test(c.node)) throw new Error(`warm sync: node name refused: ${c.node.slice(0, 80)}`);
@@ -193,41 +203,72 @@ export class SyncAgent {
     this.pacer = new Pacer(this.c.writeBytesPerSec);
   }
 
-  /** Polls every `pollMs` until `signal` aborts. */
+  /** Polls every `pollMs` until `signal` aborts; waits for the node dir's lock first. */
   async run(outer: AbortSignal, pollMs = 60_000): Promise<void> {
+    await this.locked(outer, true, async (signal) => {
+      // A sync can take longer than the runner's staleness limit, so the status is rewritten from a timer, not between syncs.
+      const beat = setInterval(() => void this.report(true), this.c.statusEveryMs);
+      beat.unref();
+      try {
+        while (!signal.aborted) {
+          try {
+            await this.cycle();
+          } catch (e) {
+            this.c.log(`warm sync: ${(e as Error).stack ?? e}`);
+          }
+          await sleep(pollMs, undefined, { signal }).catch(() => {});
+        }
+      } finally {
+        clearInterval(beat);
+      }
+    });
+  }
+
+  /** One cycle under the node dir's lock; throws when another agent holds it. */
+  async once(outer: AbortSignal = new AbortController().signal): Promise<void> {
+    if (!(await this.locked(outer, false, () => this.cycle()))) throw new Error(`warm sync: another agent holds ${join(this.c.dir, LOCK)}`);
+  }
+
+  /** Runs `body` holding the lock; false when it was not taken (held by another agent and `wait` is false, or `outer` aborted). */
+  private async locked(outer: AbortSignal, wait: boolean, body: (signal: AbortSignal) => Promise<void>): Promise<boolean> {
     const ac = new AbortController();
     if (outer.aborted) ac.abort();
     outer.addEventListener("abort", () => ac.abort(), { once: true });
-    const signal = ac.signal;
-    this.signal = signal;
-    const release = await this.lock(signal, () => ac.abort());
-    if (!release) return;
-    // A sync can take longer than the runner's staleness limit, so the status is rewritten from a timer, not between syncs.
-    const beat = setInterval(() => void this.report(true), this.c.statusEveryMs);
-    beat.unref();
+    const lk = await this.lock(ac.signal, wait, () => ac.abort());
+    if (!lk) return false;
+    this.signal = ac.signal;
+    this.holdsLock = () => {
+      if (lk.held()) return true;
+      ac.abort();
+      return false;
+    };
     try {
-      while (!signal.aborted) {
-        try {
-          await this.cycle();
-        } catch (e) {
-          this.c.log(`warm sync: ${(e as Error).stack ?? e}`);
-        }
-        await sleep(pollMs, undefined, { signal }).catch(() => {});
-      }
+      await body(ac.signal);
     } finally {
-      clearInterval(beat);
-      release();
+      lk.release();
+      this.holdsLock = undefined;
+      this.signal = undefined;
     }
+    return true;
   }
 
-  /** Takes `<dir>/.agent-lock` (see the top of this file); null when `signal` aborts first. `lost` runs if another agent takes it over. */
-  private async lock(signal: AbortSignal, lost: () => void): Promise<(() => void) | null> {
+  /** Throws when the agent must stop before its next change to the node dir: the stop signal, or the lock is no longer its own. */
+  private guard(): void {
+    this.holdsLock?.();
+    this.signal?.throwIfAborted();
+  }
+
+  /**
+   * Takes `<dir>/.agent-lock` (see the top of this file); null when `signal` aborts first, or at once when another agent
+   * holds it and `wait` is false. `lost` runs when the heartbeat finds the lock is no longer this agent's.
+   */
+  private async lock(signal: AbortSignal, wait: boolean, lost: () => void): Promise<{ held: () => boolean; release: () => void } | null> {
     const { dir, log } = this.c;
     mkdirSync(dir, { recursive: true });
     const path = join(dir, LOCK), me = `${hostname()} ${process.pid} ${randomUUID()}`;
-    const holder = () => {
+    const read = (p: string) => {
       try {
-        return readFileSync(path, "utf8").trim();
+        return readFileSync(p, "utf8").trim();
       } catch {
         return "";
       }
@@ -241,19 +282,36 @@ export class SyncAgent {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       }
       const st = lstatSync(path, { throwIfNoEntry: false });
-      const h = holder().slice(0, 200);
+      const h = read(path);
       if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-        log(`warm sync: taking over ${path} from ${h || "an agent"}, untouched for ${Math.round((Date.now() - st.mtimeMs) / 1000)} s`);
-        rmSync(path, { force: true });
+        // Moved aside with one rename, so of two agents taking over only one gets it; the one that moved a lock that
+        // turns out to be another's (taken over in between) puts it back.
+        const aside = `${path}.${randomUUID()}.stale`;
+        try {
+          renameSync(path, aside);
+        } catch {
+          continue;
+        }
+        const ast = lstatSync(aside, { throwIfNoEntry: false });
+        if (read(aside) === h && ast && Date.now() - ast.mtimeMs > LOCK_STALE_MS) {
+          log(`warm sync: taking over ${path} from ${h.slice(0, 200) || "an agent"}, untouched for ${Math.round((Date.now() - ast.mtimeMs) / 1000)} s`);
+        } else {
+          try {
+            linkSync(aside, path);
+          } catch { /* a third agent made one: the agent it was taken from stops at its next check */ }
+        }
+        rmSync(aside, { force: true });
         continue;
       }
-      if (h !== waitingFor) log(`warm sync: waiting for the agent holding ${path} (${h || "unknown"}) to stop`);
+      if (!wait) return null;
+      if (h !== waitingFor) log(`warm sync: waiting for the agent holding ${path} (${h.slice(0, 200) || "unknown"}) to stop`);
       waitingFor = h;
       await sleep(5000, undefined, { signal }).catch(() => {});
     }
     if (signal.aborted) return null;
+    const held = () => read(path) === me;
     const beat = setInterval(() => {
-      if (holder() !== me) {
+      if (!held()) {
         log(`warm sync: another agent took over ${path}; stopping`);
         clearInterval(beat);
         return lost();
@@ -264,9 +322,12 @@ export class SyncAgent {
       } catch { /* checked again at the next beat */ }
     }, LOCK_BEAT_MS);
     beat.unref();
-    return () => {
-      clearInterval(beat);
-      if (holder() === me) rmSync(path, { force: true });
+    return {
+      held,
+      release: () => {
+        clearInterval(beat);
+        if (held()) rmSync(path, { force: true });
+      },
     };
   }
 
@@ -420,10 +481,12 @@ export class SyncAgent {
   private removeLeftovers(): void {
     for (const k of this.keyDirs()) {
       for (const n of readdirSync(join(this.c.dir, k))) {
-        if (n.endsWith(".tmp")) removeTree(join(this.c.dir, k, n));
+        if (n.endsWith(".tmp") && n !== STAGING && n !== STAGING_STATE) removeTree(join(this.c.dir, k, n));
       }
     }
-    for (const n of readdirSync(this.c.dir)) if (n.endsWith(".floor.tmp")) rmSync(join(this.c.dir, n), { force: true });
+    for (const n of readdirSync(this.c.dir)) {
+      if (n.endsWith(".floor.tmp") || (n.startsWith(`${LOCK}.`) && n.endsWith(".stale"))) rmSync(join(this.c.dir, n), { force: true });
+    }
   }
 
   /** Marks a version as no longer current: its dir mtime starts the grace period. */
@@ -484,20 +547,24 @@ export class SyncAgent {
     }
     // Retired versions stay on disk for the grace period, so they count: the new version waits until they expire.
     // The held version of this key moves into grace after the swap, so it is not counted twice.
+    // Unfinished downloads of other keys count with what they hold; this key's is part of `l.bytes`.
     const wb = this.warmBytes();
-    const others = wb.current - (h ? this.metaOf(join(kd, h.gen))?.bytes ?? 0 : 0);
+    const others = wb.current - (h ? this.metaOf(join(kd, h.gen))?.bytes ?? 0 : 0) + wb.staging - this.stagedBytes(key);
     if (others + wb.grace + l.bytes > maxBytes) {
       const why = wb.grace > 0 ? "waiting for retired versions to expire" : "over the node cap";
-      return `${why}: ${gb(l.bytes)} GiB more on top of ${gb(others)} GiB current (other keys) and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
+      return `${why}: ${gb(l.bytes)} GiB more on top of ${gb(others)} GiB current or downloading (other keys) and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
     }
     const fs = this.fsUse();
-    if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
+    if (fs.usedPct >= this.c.maxFsPct) {
+      this.dropStaging(key, `the node disk is ${fs.usedPct} % full`);
+      return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
+    }
     // The version's whole size is the bound: files that turn out to be hard links from the held version cost nothing.
     // What its staging dir already holds is on the disk already.
     const d = this.c.diskUse(dir);
     const pctAfter = (more: number) => Math.round(((d.usedBytes + more) / Math.max(1, d.usedBytes + d.availBytes)) * 1000) / 10;
     let after = pctAfter(l.bytes);
-    if (after >= this.c.maxFsPct) after = pctAfter(Math.max(0, l.bytes - this.stagingBytes(key, l.sha256)));
+    if (after >= this.c.maxFsPct && this.readStaging(key)?.sha256 === l.sha256) after = pctAfter(Math.max(0, l.bytes - this.stagedBytes(key)));
     if (after >= this.c.maxFsPct) return `not enough disk: ${gb(l.bytes)} GiB would take the node to ${after} % (limit ${this.c.maxFsPct} %)`;
     const f = this.failed.get(key);
     if (f && f.sha256 === l.sha256 && this.c.now() - f.at < this.c.retryMs) return f.why;
@@ -510,6 +577,7 @@ export class SyncAgent {
       const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       progress = this.startProgress(key, l, manifest.header.bytes, manifest.header.files, t0);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
+      this.guard();
       const hash = this.prepareStaging(key, l, manifest, raw);
       const roots = stagingRoots(staging);
       const s = await applyManifest(manifest, roots, this.c.store.blobs(), {
@@ -517,7 +585,8 @@ export class SyncAgent {
         pace: async (n) => {
           await this.pacer.take(n, this.signal);
           progress!.written += n;
-          full = this.diskFull();
+          // Sticky: the other downloads running at once must not clear it before the catch sees it.
+          full ??= this.diskFull();
           if (full) throw new Error(full);
         },
       });
@@ -534,8 +603,10 @@ export class SyncAgent {
       // A name that is free on disk: a version of the same commit may still be in its grace period.
       let gen = base;
       for (let i = 2; existsSync(join(kd, gen)) || gen === h?.gen; i++) gen = `${base}-${i}`;
+      this.guard();
       renameSync(staging, join(kd, gen));
       rmSync(join(kd, STAGING_STATE), { force: true });
+      this.guard();
       this.swap(key, gen, h);
       this.failed.delete(key);
       this.badBlobs.delete(key);
@@ -560,6 +631,8 @@ export class SyncAgent {
       this.failed.set(key, { sha256: l.sha256, at: this.c.now(), why });
       log(`warm sync: ${key}: ${why}`);
       return why;
+    } finally {
+      this.staged.delete(key);
     }
   }
 
@@ -576,8 +649,8 @@ export class SyncAgent {
 
   private writeStaging(key: string, st: StagingState): void {
     const f = join(this.c.dir, key, STAGING_STATE);
-    writeFileSync(`${f}.tmp`, `${JSON.stringify(st)}\n`, { mode: 0o644 });
-    renameSync(`${f}.tmp`, f);
+    writeFileSync(`${f}.next.tmp`, `${JSON.stringify(st)}\n`, { mode: 0o644 });
+    renameSync(`${f}.next.tmp`, f);
   }
 
   /**
@@ -616,12 +689,18 @@ export class SyncAgent {
     const had = existsSync(join(kd, STAGING));
     removeTree(join(kd, STAGING));
     rmSync(join(kd, STAGING_STATE), { force: true });
+    this.staged.delete(key);
     if (had) this.c.log(`warm sync: ${key}: removed the unfinished download: ${why}`);
   }
 
-  /** Bytes of the staging dir's files that no other version shares, when it follows `sha256`. */
-  private stagingBytes(key: string, sha256: string): number {
-    if (this.readStaging(key)?.sha256 !== sha256) return 0;
+  /**
+   * Bytes of a key's staging dir that no version shares (files with one link). Walking a large tree takes a while, so
+   * the count is kept until the key's staging dir changes: a sync of the key ends or the dir is removed. The key that
+   * is syncing shows the count from before its sync.
+   */
+  private stagedBytes(key: string): number {
+    const known = this.staged.get(key);
+    if (known !== undefined) return known;
     let n = 0;
     try {
       for (const e of readdirSync(join(this.c.dir, key, STAGING), { recursive: true, withFileTypes: true })) {
@@ -629,9 +708,11 @@ export class SyncAgent {
         const st = lstatSync(join(e.parentPath, e.name));
         if (st.nlink === 1) n += st.blocks * 512;
       }
-    } catch { /* counts what it saw */ }
+    } catch { /* none, or counts what it saw */ }
+    this.staged.set(key, n);
     return n;
   }
+
 
   /**
    * While a version downloads: `pending[key]` carries the progress (rewritten to the status ConfigMap every
@@ -682,12 +763,13 @@ export class SyncAgent {
     }
   }
 
-  /** Bytes of the versions `current` names, and of retired versions whose grace period has not ended. */
-  private warmBytes(): { current: number; grace: number } {
+  /** Bytes of the versions `current` names, of retired versions whose grace period has not ended, and of unfinished downloads. */
+  private warmBytes(): { current: number; grace: number; staging: number } {
     const now = this.c.now();
-    let current = 0, grace = 0;
+    let current = 0, grace = 0, staging = 0;
     for (const k of this.keyDirs()) {
       const kd = join(this.c.dir, k);
+      staging += this.stagedBytes(k);
       const cur = this.held(k)?.gen;
       for (const n of readdirSync(kd)) {
         if (!GEN.test(n)) continue;
@@ -696,7 +778,7 @@ export class SyncAgent {
         else if (now - lstatSync(join(kd, n)).mtimeMs < this.c.graceMs) grace += bytes;
       }
     }
-    return { current, grace };
+    return { current, grace, staging };
   }
 
   /** The current version as hard-link source; none when its manifest cannot be read (everything is fetched then). */

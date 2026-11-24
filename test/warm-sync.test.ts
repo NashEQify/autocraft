@@ -387,8 +387,11 @@ test("warm sync: a stopped download continues where it stopped, and a newer mani
   let before = blobGets();
   await stopAfter(3);
   const firstRun = blobGets() - before;
-  assert.ok(!existsSync(join(dir, "deckcraft", "current")) && existsSync(join(dir, "deckcraft", "staging")));
+  const staging = join(dir, "deckcraft", "staging.tmp");
+  assert.ok(!existsSync(join(dir, "deckcraft", "current")) && existsSync(staging));
   assert.ok(!existsSync(join(dir, ".agent-lock")), "a stopped agent releases the node dir");
+  // A file a killed transfer left half written (mode 0600, mtime now) is fetched again, not trusted.
+  writeFileSync(join(staging, "target", "debug", "f5"), "f5 ".repeat(40), { mode: 0o600 });
   before = blobGets();
   await agent().cycle();
   assert.equal(blobGets() - before, 6 - firstRun, "the restarted agent fetches only the files the first one did not finish");
@@ -409,5 +412,5 @@ test("warm sync: a stopped download continues where it stopped, and a newer mani
   assert.equal(blobGets() - before, 2, "g0 (changed) and g2 (never fetched) come from the store; g1 is kept");
   assert.equal(current("g0"), "G0 ".repeat(100));
   assert.equal(current("g1"), "g1 ".repeat(100));
-  assert.ok(!existsSync(join(dir, "deckcraft", "staging")) && !existsSync(join(dir, "deckcraft", "staging.json")));
+  assert.ok(!existsSync(staging) && !existsSync(join(dir, "deckcraft", "staging-state.tmp")));
 });
