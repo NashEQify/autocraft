@@ -34,11 +34,17 @@ import { homeModule } from "../modules/home";
 import { hubModule } from "../modules/hub";
 import { maintainHomeModule } from "../modules/maintain/home";
 import { helpModule } from "../modules/help";
+import { referenceModule } from "../modules/reference";
 
 export const classicModules: FeatureModule[] = [homeModule, hubModule, nowModule, flowModule, needsModule, nextModule, agentsModule, envsModule, workspacesModule, ratesModule, itemModule, progressModule, itemsModule, activityModule, contributorsModule, classifiersModule, costModule, downloadsModule, reposModule, accessModule, githubAppModule, discordModule, auditModule, aboutModule, connectModule, pipelineModule, promptsModule, similarModule, accountsModule, inferenceModule, mainCiModule, nightlyModule, stuckModule, batchModule, securityModule];
 
-/** The new dashboard: its own Home; the classic views serve the pages the new dashboard has not replaced yet. */
-export const v2Modules: FeatureModule[] = [maintainHomeModule, helpModule, ...classicModules.filter((m) => m !== homeModule)];
+/** The classic module without the routes the new dashboard replaces. */
+const without = (m: FeatureModule, paths: string[]): FeatureModule => ({ ...m, routes: m.routes.filter((r) => !paths.includes(r.path)) });
+/** The new dashboard: its own Home and reference pages; the classic views serve the pages it has not replaced yet. */
+export const v2Modules: FeatureModule[] = [
+  maintainHomeModule, helpModule, referenceModule,
+  ...classicModules.filter((m) => m !== homeModule && m !== promptsModule).map((m) => (m === envsModule ? without(m, ["envs/:id?"]) : m === reposModule ? without(m, ["repos", "repos/:name"]) : m)),
+];
 
 /** Every module of either dashboard, for preloading code. */
 export const allModules: FeatureModule[] = [...new Set([...classicModules, ...v2Modules])];

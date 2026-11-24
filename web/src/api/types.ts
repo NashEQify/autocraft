@@ -3328,6 +3328,21 @@ export interface MaintainRunnerLine {
  * repos with GitHub write; viewers: none). Viewers get `waiting` (every waiting item) and `running`; others get `mine` (items
  * they started, approved or stopped). `runner` is null for viewers and when model calls run on the server's own accounts.
  */
+/** One tracked repo on the Repos page: its counts, whether automatic work is on, and the breakers that paused a step. */
+export interface MaintainRepo {
+  name: RepoName;
+  /** `new` repos change through the workflow controls, `legacy` repos through the classic switches. */
+  workflow: "new" | "legacy";
+  automatic: boolean;
+  /** The reader runs the repo: an operator, or a maintainer with write access. */
+  canRun: boolean;
+  open: number;
+  started: number;
+  waiting: number;
+  mergedWeek: number;
+  trips: { key: string; text: string; since: string; canResume: boolean }[];
+}
+
 export interface MaintainHome {
   needs: MaintainRow[];
   mine: MaintainRow[];

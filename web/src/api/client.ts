@@ -20,7 +20,7 @@ import type {
   DiscordFilingAdded,
   DiscordSetup,
   Home,
-  MaintainHome,
+  MaintainHome, MaintainRepo,
   OpenDecisionCounts,
   ItemPageData,
   ItemStatusFilter,
@@ -250,6 +250,10 @@ export interface Api {
   maintain: {
     /** Home: what waits for the reader's answer, what they started, their Task Runner line and problems; the page's project narrows it. */
     home(): Promise<MaintainHome>;
+    /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
+    repos(): Promise<MaintainRepo[]>;
+    /** A registered workflow control (resume a breaker, switch Automatic); answers with the line every surface shows. */
+    control(input: { control: "resume-breaker"; key: string } | { control: "set-automatic"; repo: RepoName; on: boolean }): Promise<{ ok: boolean; line: string }>;
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;

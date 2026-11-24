@@ -30,6 +30,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["items-status:", withSlot("items", "stages", "flow", "classify", "decisions", "plans", "pr-builds", "verify")],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers", "accounts"]],
+  ["maintain-repos", ["workflows", "items", "repos", "limits", "settings", "access"]],
   ["maintain-home", ["workflows", "items", "remote-helpers", "access", "settings", "decisions", "plans", "jobs", "limits", "accounts", "security", "repos"]],
   ["home", withSlot("decisions", "decision-snooze", "plans", "jobs", "limits", "accounts", "settings", "queue", "items", "mainci", "github", "usage", "security")],
   // One opened event row: its detail reads what the timeline does; the run, task and decision behind it read one table each.

@@ -474,6 +474,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/mcp/tokens/revoke", mcp.revoke),
     // The new dashboard (ui_v2).
     scoped(get("/api/maintain/home", maintain.home)),
+    get("/api/maintain/repos", maintain.repos),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),
