@@ -131,7 +131,13 @@ export const CLAIM_EVIDENCE_CHARS = 600;
  * A claim's evidence names code as `path:line`. The path is repo-relative with a directory or has a known source extension, and
  * does not follow a scheme or a `/` ("v2.0:1" and URLs do not count). Groups: path, line.
  */
-const EVIDENCE_PATH = String.raw`(?:[\w.-]+/)+[\w.-]+\.\w+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh)`;
+const PATH_WORD = String.raw`[\w.-]+`;
+const PATH_PART = String.raw`${PATH_WORD}(?: ${PATH_WORD})*`;
+const ROOT_EXTENSION = "ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|h|cpp|cs|rb|php|sql|json|toml|ya?ml|md|css|html|sh";
+// A slash before the first space distinguishes a bare path from introductory prose.
+// A code span can name a complete path with spaces anywhere.
+const EVIDENCE_PATH = String.raw`${PATH_WORD}/(?:${PATH_PART}/)*${PATH_PART}\.\w+|[\w-]+\.(?:${ROOT_EXTENSION})`;
+const QUOTED_EVIDENCE_PATH = String.raw`(?:${PATH_PART}/)+${PATH_PART}\.\w+|${PATH_PART}\.(?:${ROOT_EXTENSION})`;
 type ClaimLocation = { path: string; line: number };
 export type ClaimLocationCheck = (location: ClaimLocation) => boolean;
 
@@ -139,9 +145,11 @@ function* evidenceLocations(evidence: string, files: readonly string[]): Generat
   const known = files.filter((path) => evidence.includes(`${path}:`))
     .sort((a, b) => b.length - a.length)
     .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const pattern = new RegExp(String.raw`(?<![\w./:-])(${[...known, EVIDENCE_PATH].join("|")}):(\d+)`, "g");
+  const bare = [...known, EVIDENCE_PATH].join("|");
+  const quoted = [...known, QUOTED_EVIDENCE_PATH].join("|");
+  const pattern = new RegExp(String.raw`\x60(${quoted}):(\d+)\x60|(?<![\w./:-])(${bare}):(\d+)`, "g");
   for (const m of evidence.matchAll(pattern)) {
-    yield { path: m[1]!, line: Number(m[2]) };
+    yield { path: (m[1] ?? m[3])!, line: Number(m[2] ?? m[4]) };
   }
 }
 
@@ -186,10 +194,11 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
     const o = x as Record<string, unknown> | null;
     const text = o && typeof o === "object" && typeof o.claim === "string" ? squashText(stripSandboxPath(o.claim)).slice(0, CLAIM_CHARS) : "";
     if (!o || !text || (o.status !== "verified" && o.status !== "contradicted" && o.status !== "unverified")) { out.rejected++; return; }
-    const proof = typeof o.evidence === "string" ? squashText(stripSandboxPath(o.evidence)).slice(0, CLAIM_EVIDENCE_CHARS) : "";
+    const fullProof = typeof o.evidence === "string" ? squashText(stripSandboxPath(o.evidence)) : "";
+    const proof = fullProof.slice(0, CLAIM_EVIDENCE_CHARS);
     const claim = !keep && (REFERENCE_LEAK.test(text) || drop.has(text)) ? NEUTRAL_CLAIM : text;
     const evidence = !keep && (REFERENCE_LEAK.test(proof) || drop.has(proof)) ? NEUTRAL_EVIDENCE : proof;
-    const locations = evidenceLocations(proof, files);
+    const locations = evidenceLocations(checkLocation ? fullProof : proof, files);
     const first = locations.next();
     const supported = !first.done && (!checkLocation || (checkLocation(first.value) && [...locations].every(checkLocation)));
     const status: ClaimStatus = !supported && (o.status === "verified" || checkLocation) ? "unverified" : o.status;

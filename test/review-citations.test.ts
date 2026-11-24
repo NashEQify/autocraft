@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POSTMERGE_OPUS, PREMERGE_OPUS, REVIEW_OPUS } from "../src/agents/steps.ts";
-import type { OpusPr } from "../src/review/opus-parse.ts";
+import { CLAIM_EVIDENCE_CHARS, type OpusPr } from "../src/review/opus-parse.ts";
 import { connectDb } from "../src/db/open.ts";
 import { postmergeOf } from "../src/dash/api/postmerge.ts";
 import { fileFinding } from "../src/postmerge/file.ts";
@@ -18,14 +18,23 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
   writeFileSync(join(checkout, "main.rs"), "first line\r\nsecond line\r\n");
   writeFileSync(join(checkout, "Makefile"), "one line without a final newline");
   writeFileSync(join(checkout, "new guide.md"), "one line");
+  mkdirSync(join(checkout, "dir"));
+  writeFileSync(join(checkout, "dir/main.rs"), "one line");
+  writeFileSync(join(checkout, "dir/other guide.md"), "one line");
   const input: OpusPr = {
     ref: "app#1", title: "Updates a check", body: "The check runs on startup.", author_association: null,
-    size: "S", lines_changed: 2, ci: "success", mergeable: null, files: ["main.rs", "Makefile", "new guide.md"],
+    size: "S", lines_changed: 2, ci: "success", mergeable: null, files: ["main.rs", "Makefile", "new guide.md", "dir/main.rs"],
     tests_omitted: [], lockfiles_omitted: [], mode: "full", earlier_opus: null, diff: "",
   };
   const context = { dir: undefined, semantic: undefined, checkout };
   for (const [evidence, resolves] of [
     ["/repo/main.rs:2, Makefile:1 and new guide.md:1", true],
+    ["See dir/main.rs:1 for the check", true],
+    ["See `dir/other guide.md:1` for the check", true],
+    ["src/missing dir/main.rs:1", false],
+    ["`missing dir/main.rs:1` and main.rs:1", false],
+    ["main.rs:1 " + "note ".repeat(CLAIM_EVIDENCE_CHARS / 5) + "missing.rs:1", false],
+    ["main.rs:1 " + "note ".repeat(CLAIM_EVIDENCE_CHARS / 5) + "dir/main.rs:1", true],
     ["main.rs:2 and missing.rs:1", false],
     ["main.rs:3", false],
     ["main.rs:0", false],
@@ -41,6 +50,7 @@ test("Review and Pre-merge verify claim citations in the reviewed checkout", asy
     assert.equal(premerge?.unsure, !resolves, evidence);
     for (const result of [review, premerge]) {
       assert.equal(result?.claims[0]?.status, resolves ? "verified" : "unverified", evidence);
+      assert.ok(result!.claims[0]!.evidence.length <= CLAIM_EVIDENCE_CHARS);
     }
   }
 
