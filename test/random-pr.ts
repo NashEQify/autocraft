@@ -332,7 +332,7 @@ export function factsOf(w: PrRows): PrFacts {
     if (defects) f.premergeFixUsed = premergeFixUsedIn(w.patches.fixups);
   }
   if (f.mergeable === "CONFLICTING") {
-    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
+    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable, gone: qh === head && !f.pushedOff }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
     const until = bucket === "capped" ? NOW + 12 * 3600_000 : bucket === "ask-retry" ? conflictAskRetryAtOf(w.patches.conflicts, qh, NOW) : undefined;
     f.conflict = { bucket, base: "main", baseOk: w.baseOk, ...(until !== undefined ? { until } : {}) };
   }
