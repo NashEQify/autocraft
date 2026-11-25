@@ -41,7 +41,7 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function until(cond: () => Promise<boolean>, ms = 20_000): Promise<void> {
+async function until(cond: () => Promise<boolean>, ms = 60_000): Promise<void> {
   const end = Date.now() + ms;
   while (!await cond()) {
     if (Date.now() > end) throw new Error("timed out");

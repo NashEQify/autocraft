@@ -15,8 +15,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { loadPg, setDbRole, setTestDbRedirect } from "../src/db/open.ts";
-import { migratePg, pgStamp } from "../src/db/pg-triggers.ts";
+import { setDbRole, setTestDbRedirect } from "../src/db/role.ts";
 
 const SERVER = process.env.AUTOCRAFT_TEST_PG_URL || undefined;
 
@@ -33,7 +32,7 @@ const urlOf = (name: string): string => {
 };
 
 async function withClient<T>(url: string, fn: (c: import("pg").Client) => Promise<T>): Promise<T> {
-  const pg = await loadPg();
+  const pg = (await import("pg")).default;
   const c = new pg.Client({ connectionString: url, application_name: "autocraft-test-suite" });
   await c.connect();
   try {
@@ -48,6 +47,9 @@ let template: Promise<string> | undefined;
 /** The migrated template database's name, built under a lock by the first process that needs it. */
 function templateDb(): Promise<string> {
   return (template ??= (async () => {
+    // Loaded with the first database: this module is in every process of the run, and the schema modules read environment
+    // variables on import that a test file sets first, and take a second to load in a process that opens no database.
+    const { migratePg, pgStamp } = await import("../src/db/pg-triggers.ts");
     const name = `t_tmpl_${pgStamp()}`;
     await withClient(SERVER!, async (c) => {
       await c.query(`SELECT pg_advisory_lock(${TEMPLATE_LOCK})`);

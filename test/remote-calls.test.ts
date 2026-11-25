@@ -143,9 +143,11 @@ describe("user-local remote calls", async () => {
     let erin: Caller = { tokenId: tokens[0]!, login: "erin", role: "maintainer" };
     const mine = async () => (await claimCall(db, erin, claim(), canWrite)).lease;
     const lose = async (id: number, now: number) => {
-      // The helper heartbeat after its claim, then went quiet.
-      await db.run(db.k.updateTable("remote_calls").set({ leased_at: now - 4 * 60000, heartbeat_at: now - 3 * 60000 }).where("id", "=", id));
-      await expireLeases(db, now);
+      // The helper heartbeat after its claim, then went quiet. One transaction: the caller's own poll expires a lost lease at the real time.
+      await db.write(async () => {
+        await db.run(db.k.updateTable("remote_calls").set({ leased_at: now - 4 * 60000, heartbeat_at: now - 3 * 60000 }).where("id", "=", id));
+        await expireLeases(db, now);
+      });
     };
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const t0 = Date.now();

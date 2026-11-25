@@ -11,6 +11,7 @@ import type { Db, DbRole } from "./index.ts";
 import { migratePg, newerPgSchema, pgStamp, storedPgStamp } from "./pg-triggers.ts";
 import { pgConnectionString, postgresEngine } from "./postgres.ts";
 import { queryDb } from "./query-db.ts";
+import { dbRole, setDbRole, testRedirect } from "./role.ts";
 import { bindSql } from "./sql.ts";
 import { sqliteEngine } from "./sqlite.ts";
 
@@ -71,23 +72,7 @@ export function dbLockName(target: string = dbTarget()): string {
   return `pg-${createHash("sha256").update(`${u.hostname}:${u.port || "5432"}${u.pathname}`).digest("hex").slice(0, 12)}`;
 }
 
-let role: DbRole = "cli";
-
-let testRedirect: ((sqliteTarget: string) => Promise<string>) | undefined;
-
-/**
- * Test hook: `connectDb` on a SQLite target opens the Postgres URL `map(target)` gives instead. test/pg-suite.ts installs
- * it to run the SQLite tests on Postgres; refused unless AUTOCRAFT_TEST_PG_URL is set.
- */
-export function setTestDbRedirect(map: (sqliteTarget: string) => Promise<string>): void {
-  if (!process.env.AUTOCRAFT_TEST_PG_URL) throw new Error("setTestDbRedirect is for tests on Postgres: AUTOCRAFT_TEST_PG_URL is not set");
-  testRedirect = map;
-}
-
-/** Sets the role of this process's handles (pool size on Postgres). Called by long-running commands before they open one. */
-export function setDbRole(r: DbRole): void {
-  role = r;
-}
+export { setDbRole };
 
 export interface ConnectOptions {
   /** How long a write waits for the write lock before failing with a lock timeout. */
@@ -112,10 +97,11 @@ export interface ConnectOptions {
  * `migratePg()`).
  */
 export async function connectDb(target: string = dbTarget(), opts: ConnectOptions = {}): Promise<Db> {
-  if (testRedirect && !isPgUrl(target)) target = await testRedirect(target);
+  const redirect = testRedirect();
+  if (redirect && !isPgUrl(target)) target = await redirect(target);
   if (!isPgUrl(target)) return dbFor(connect(target, opts));
   const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
-  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs, idleInTransactionMs: opts.idleInTransactionMs, rowWrites: opts.rowWrites }, ctx));
+  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? dbRole(), busyTimeoutMs: opts.busyTimeoutMs, idleInTransactionMs: opts.idleInTransactionMs, rowWrites: opts.rowWrites }, ctx));
   if (opts.migrate === false) return db;
   try {
     // A current database costs two reads on the pool; only a stale one opens a connection of its own for the migration, and
