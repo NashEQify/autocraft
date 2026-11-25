@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS items (
   embed_hash TEXT,                    -- hash of the embedded text, set at sync (src/itemhash.ts)
   class_hash TEXT,                    -- the classifier's input hash under class_scheme
   class_scheme TEXT,
+  jev_failed_hash TEXT,               -- class_hash at which a classify.jev request gave no valid verdict while Jev was up
   PRIMARY KEY (repo, number)
 );
 CREATE INDEX IF NOT EXISTS items_state ON items(repo, kind, state);
@@ -1370,6 +1371,17 @@ CREATE TABLE IF NOT EXISTS item_priority (
   PRIMARY KEY (repo, number)
 );
 CREATE INDEX IF NOT EXISTS item_priority_score ON item_priority(score);
+-- An unsure Jev answer of a Jev step with a Haiku fallback whose Haiku tier did not answer (src/agents/step.ts runTiered):
+-- the next pass reuses it while the Jev request (input_hash: sha256 of its body) is unchanged, instead of asking Jev again.
+-- answer: the step's parsed value as JSON. Not a result: the step stores nothing until the fallback answers.
+CREATE TABLE IF NOT EXISTS jev_unsure (
+  prompt_id TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  input_hash TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (prompt_id, ref)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS verifications_finished ON verifications(finished_at);
 
 -- Duplicate candidates (Duplicates stage). a < b. A pair is checked once per pair of text hashes

@@ -152,7 +152,7 @@ const JEV: JevPrompt = {
   id: "classify.jev",
   stage: "Classify",
   runner: "jev",
-  purpose: "First sort: the type label with a probability per label, and a yes-probability for each flag, one item per call.",
+  purpose: "First sort: the type label with a probability per label, and a yes-probability for each flag, one item per call. The same request also asks priority.jev's impact question when the item's priority is due, and areas.jev's area question when an issue's area is due, so an item takes one Jev request.",
   models: ["jev-latest"],
   placeholders: { item: `The item as one JSON string (the request's state) with ${ITEM_FIELDS}.` },
   request: {
@@ -169,7 +169,7 @@ const JEV: JevPrompt = {
     },
   },
   output: `{"answers": {"type": {"choice", "confidence", "probabilities": {label: p}}, "security": {"noul": p}, "needs_decision": {"noul": p}}, "usage": {"input_tokens", "output_tokens"}}`,
-  validation: "The answer is kept only when type.choice is one of the six labels and both noul answers are numbers. Each flag is a yes from its own noul (security 0.9, needs_decision 0.8), a no below 0.3, and unsure in between; when Jev is unsure, Haiku's answer decides. The probabilities are stored with the verdict. A call without a valid answer is made once more; after that the item is logged and stays unclassified.",
+  validation: "The answer is kept only when type.choice is one of the six labels and both noul answers are numbers. Each flag is a yes from its own noul (security 0.9, needs_decision 0.8), a no below 0.3, and unsure in between; when Jev is unsure, Haiku's answer decides. The probabilities are stored with the verdict. A call without a valid answer is made once more; after that the item is logged and stays unclassified. Impact and area answers in the same reply are read and settled as priority.jev and areas.jev read theirs; one that is not valid leaves its question to its own step. The reply's tokens are split over the three steps' usage rows in proportion to the length of the request each step would have sent alone.",
   limits: { perCall: 1, attempts: 2, timeoutSeconds: 600 },
 };
 
@@ -770,7 +770,7 @@ const PRIORITY_JEV: JevPrompt = {
   id: "priority.jev",
   stage: "Priority",
   runner: "jev",
-  purpose: "Priority level of an open issue or pull request (P0 to P4, P4 = backlog) with a probability per level, one item per call.",
+  purpose: "Priority level of an open issue or pull request (P0 to P4, P4 = backlog) with a probability per level, one item per call. In a classify job the question goes in the item's classify.jev request when both are due, and the answer is settled and stored as here.",
   models: ["jev-latest"],
   placeholders: { item: `The item as one JSON string (the request's state) with ${ITEM_FIELDS}.` },
   request: {
@@ -1092,7 +1092,7 @@ const AREAS_JEV: JevPrompt = {
   id: "areas.jev",
   stage: "Classify",
   runner: "jev",
-  purpose: "Names the area of the app an item belongs to, among the repo's area list plus \"none of these\" (the list's names and descriptions fill the question's criteria), one item per call. Asked only for repos that have an area list.",
+  purpose: "Names the area of the app an item belongs to, among the repo's area list plus \"none of these\" (the list's names and descriptions fill the question's criteria), one item per call. Asked only for repos that have an area list. In a classify job an issue's question goes in its classify.jev request when both are due (a pull request's state adds its paths, so it is asked on its own).",
   models: ["jev-latest"],
   placeholders: { item: `The item as one JSON string (the request's state) with ${AREA_ITEM_FIELDS}.` },
   request: {
@@ -1624,13 +1624,33 @@ export function withoutRepoDir<T>(input: T): T {
 /** An item for the area prompts: the classifier's view plus, for pull requests, the changed paths. */
 export const areaItemInput = (i: AreaItem): Record<string, unknown> => ({ ...itemInput(i), ...(i.kind === "pr" && i.paths && { paths: i.paths.slice(0, AREA_PATHS_MAX) }) });
 
-/** The request body for areas.jev: the registered request with the repo's list as the question's criteria. */
-export function renderAreaJev(item: AreaItem, areas: Area[]): string {
-  const req = JEV_PROMPTS["areas.jev"].request;
+/** The area question of areas.jev with the repo's list as its criteria. */
+function areaQuestion(areas: Area[]): JevQuestion {
   const criteria: Record<string, string> = {};
   for (const a of areas) criteria[a.name] = a.description;
   criteria[NONE_OF_THESE] = "No area of the list fits the item well.";
-  return JSON.stringify({ ...req, state: JSON.stringify(areaItemInput(item)), questions: { area: { ...req.questions.area!, criteria } } });
+  return { ...JEV_PROMPTS["areas.jev"].request.questions.area!, criteria };
+}
+
+/** The request body for areas.jev: the registered request with the repo's list as the question's criteria. */
+export function renderAreaJev(item: AreaItem, areas: Area[]): string {
+  const req = JEV_PROMPTS["areas.jev"].request;
+  return JSON.stringify({ ...req, state: JSON.stringify(areaItemInput(item)), questions: { area: areaQuestion(areas) } });
+}
+
+/** The other per-item questions a classify.jev request carries: priority.jev's impact, and areas.jev's area against the repo's list. */
+export type ClassifyExtras = { impact?: boolean; areas?: Area[] };
+
+/**
+ * The request body of classify.jev, with the questions of priority.jev and areas.jev added when they are due for the same item:
+ * Jev answers independent questions over one state in one request. The state is classify's (itemInput); an area question rides
+ * along only where areaItemInput gives the same state, which is every issue (a pull request's area state adds its paths).
+ */
+export function renderClassifyJev(item: Item, extras: ClassifyExtras = {}): string {
+  const req = JEV_PROMPTS["classify.jev"].request;
+  if (extras.areas && item.kind !== "issue") throw new Error("an area question rides along only on an issue, whose area state is the classify state");
+  const questions = { ...req.questions, ...(extras.impact && JEV_PROMPTS["priority.jev"].request.questions), ...(extras.areas && { area: areaQuestion(extras.areas) }) };
+  return JSON.stringify({ ...req, state: JSON.stringify(itemInput(item)), questions });
 }
 
 const itemValues = (items: Item[]) => ({ items: untrustedJson(items.map(itemInput)) });

@@ -94,6 +94,9 @@ const WAITS: Partial<Record<ItemState, string>> = {
   "waiting-haiku": "Haiku's second opinion", "scope-open": "a scope answer", "scope-due": "the scope question to be asked",
 };
 
+/** The item has no priority row at its current text hash; the prioritize step asks it unless a classify request does. */
+export const priorityDue = (f: ItemFacts): boolean => f.inScope && !f.integration && f.priorityHash !== f.embedHash;
+
 export function decideItem(f: ItemFacts): ItemPlan {
   const state = itemState(f);
   const c = f.classification;
@@ -110,8 +113,10 @@ export function decideItem(f: ItemFacts): ItemPlan {
   const backoff = !!c.referee?.failedAt && Date.parse(c.referee.failedAt) > f.now - RECOMMEND_RETRY_MS;
   // Not while Jev or Haiku is due again: the referee would judge the verdicts they are about to replace.
   if (f.run && live && !f.draft && state === "referee-due" && !backoff && !jevDue && !haikuDue) actions.push(act("referee", null, { source: c.referee ? "opus" : "sonnet" }));
-  // prioritize: no priority row at the current text hash.
-  if (live && f.priorityHash !== f.embedHash) actions.push(act("prioritize", null));
+  // prioritize: no priority row at the current text hash. Not while Jev's classify call is due: that request asks the impact
+  // question too and settles the priority (src/runner/classify.ts), so the two steps never ask Jev the same item at once.
+  // The hold ends once a classify request failed for the item's current input, so an item Jev cannot classify still gets a priority.
+  if (priorityDue(f) && !(f.run && live && jevDue && !c.jevFailed)) actions.push(act("prioritize", null));
   // embed: every open item, with no scope test.
   if (f.embeddedHash !== f.embedHash) actions.push(act("embed", null));
   // dupes: items to scan, pairs to check, groups to ask.
