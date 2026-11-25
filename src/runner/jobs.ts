@@ -69,12 +69,12 @@ async function stepOf(name: unknown): Promise<StepDef> {
   return step;
 }
 
-/** Validated params for a step, or a 400. */
-export async function checkRequest(db: Db, stepName: unknown, rawParams: unknown): Promise<{ step: StepDef; params: JobParams }> {
+/** Validated params for a step, or a 400. `tracked`: the tracked repos' names, when the caller has read them. */
+export async function checkRequest(db: Db, stepName: unknown, rawParams: unknown, tracked?: readonly string[]): Promise<{ step: StepDef; params: JobParams }> {
   const step = await stepOf(stepName);
   let params: JobParams;
   try {
-    params = validateParams(step, rawParams, await trackedNames(db));
+    params = validateParams(step, rawParams, [...(tracked ?? await trackedNames(db))]);
   } catch (e) {
     if (e instanceof ParamError) throw new JobError(400, e.message);
     throw e;
@@ -90,8 +90,15 @@ export async function checkRequest(db: Db, stepName: unknown, rawParams: unknown
  * Queues a job. The same step with the same params already waiting is refused.
  * `settle` runs after the request is checked and before the insert: it may change the params (a recomputed limit) or return null to refuse.
  */
-export async function enqueue(db: Db, stepName: unknown, rawParams: unknown, by: string, settle?: (step: StepDef, params: Record<string, unknown>) => Promise<Record<string, unknown> | null>): Promise<Job> {
-  const checked = await checkRequest(db, stepName, rawParams);
+export async function enqueue(db: Db, stepName: unknown, rawParams: unknown, by: string, settle?: Settle): Promise<Job> {
+  return await getJob(db, (await queueJob(db, stepName, rawParams, by, settle)).id);
+}
+
+type Settle = (step: StepDef, params: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+
+/** enqueue for a caller that needs the id and the settled params alone, and may have read the tracked repos' names. */
+export async function queueJob(db: Db, stepName: unknown, rawParams: unknown, by: string, settle?: Settle, tracked?: readonly string[]): Promise<{ id: number; params: Record<string, unknown> }> {
+  const checked = await checkRequest(db, stepName, rawParams, tracked);
   const { step } = checked;
   const params = settle ? await settle(step, checked.params) : checked.params;
   if (!params) throw new JobError(409, `the daily limit of ${step.name} leaves too little for a job`);
@@ -99,7 +106,7 @@ export async function enqueue(db: Db, stepName: unknown, rawParams: unknown, by:
   const { queued } = await enqueueJobs(db, [{ step: step.name, params, repo, by }]);
   const id = queued.get(0);
   if (id === undefined) throw new JobError(409, `${step.name} with these settings is already queued`);
-  return await getJob(db, id);
+  return { id, params };
 }
 
 /** A queued job is cancelled at once; a running one is marked and the runner stops it. */

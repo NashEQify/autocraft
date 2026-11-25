@@ -23,6 +23,7 @@ import { PROTOCOL_VERSION, type Claim, type TaskBundle } from "../src/remote/pro
 import { queueView } from "../src/remote/queue-view.ts";
 import { runSync, type Querier } from "../src/mirror.ts";
 import { JobLogCopy } from "../src/runner/job-log.ts";
+import { applyProposals } from "../src/runner/autopilot.ts";
 import { Runner } from "../src/runner/runner.ts";
 import { runJev, setRunner } from "../src/classify/run.ts";
 import { withConfig } from "../src/data/control/index.ts";
@@ -59,7 +60,7 @@ async function seed(db: Db): Promise<{ callers: Caller[]; calls: number[]; runni
   await q.run(q.k.deleteFrom("repos"));
   await insertAll(db, "repos", repos.map((name) => ({ name, visibility: "public", synced_at: iso(5), high_water: iso(10) })));
   await insertAll(db, "tracked_repos", repos.map((name) => ({ name, pipeline: 1 })));
-  await insertAll(db, "settings", [{ key: "pipeline_enabled", value: "1" }]);
+  await insertAll(db, "settings", [{ key: "pipeline_enabled", value: "1" }, { key: "step_parallel", value: "none" }]);
   const items: Record<string, unknown>[] = [], commits: Record<string, unknown>[] = [], comments: Record<string, unknown>[] = [];
   for (let i = 0; i < PRS; i++) {
     items.push({ repo: repoOf(i), number: 1000 + i, kind: "pr", state: "OPEN", title: `PR ${i}`, body: "Body ".repeat(60), author: `dev${i % 17}`, author_id: 500 + (i % 17), created_at: iso(600 + i), updated_at: iso(30 + i), labels: "[]", head_oid: `h${i}`, base_ref: "main", ci_state: "SUCCESS", mergeable: "MERGEABLE" });
@@ -146,6 +147,13 @@ try {
   Object.assign(runner, { reconcileTick: () => {}, workerUpdateTick: () => {} });
   (runner as unknown as { start: () => Promise<null> }).start = async () => null;
   await unit("runner tick", () => runner.tick(), { warm: 3 });
+
+  const dequeue = async (): Promise<void> => { const q = queryDb(seedDb); await q.run(q.k.deleteFrom("jobs").where("step", "=", "opus-review").where("state", "=", "queued")); };
+  await unit("queueing 5 of the planner's proposals", async () => {
+    const proposals = [12, 13, 14, 15, 16].map((i) => ({ lane: "opus-review", step: "opus-review", params: { repo: repoOf(i), limit: 5 } }));
+    const ids = await applyProposals(db, proposals as never, { log: (l) => void (showSql && console.log(l)) });
+    if (ids.length !== 5) throw new Error(`${ids.length} jobs queued`);
+  }, { before: dequeue, runs: 3 });
 
   // ---- calls ----
   let n = 0;

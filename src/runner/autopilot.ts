@@ -46,7 +46,7 @@ import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts
 import { waitsForHaiku } from "../priority/index.ts";
 import { classifyRun } from "../data/triage/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
-import { DEADLINE_ERROR, enqueue, JobError, now } from "./jobs.ts";
+import { DEADLINE_ERROR, JobError, now, queueJob } from "./jobs.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { loadSteps, type Params, type StepDef } from "./steps.ts";
@@ -295,9 +295,9 @@ async function loadReads(db: Db, ms: number): Promise<Reads> {
 /** The pass's reads, or a fresh load for a caller outside a pass. */
 const readsOf = async (db: Db, ms: number = Date.now()): Promise<Reads> => passOf(db)?.reads ?? await loadReads(db, ms);
 
-async function withPassReads<T>(db: Db, ms: number, fn: () => Promise<T>): Promise<T> {
+async function withPassReads<T>(db: Db, ms: number, fn: () => Promise<T>, read?: Reads): Promise<T> {
   if (passReads) return await fn();
-  passReads = { db, reads: await loadReads(db, ms) };
+  passReads = { db, reads: read ?? await loadReads(db, ms) };
   try { return await fn(); } finally { passReads = null; }
 }
 
@@ -1218,32 +1218,34 @@ export async function applyProposals(db: Db, proposals: Proposal[], opts: PlanOp
   const asActive = (step: string, params: Params, state: string): Active => ({ id: 0, step, state, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null });
   const steps = await loadSteps();
   const untaken = await untakenTest(db, steps);
+  // The jobs as the pass begins (`reserved` adds what it queues): the detection ran a moment ago, and a job of the same step and repo may
+  // have been queued since. One queued during the pass is caught when the jobs are queued (the same params) or claimed.
+  const [reads, cap, tracked] = proposals.length ? await db.together(() => Promise.all([loadReads(db, Date.now()), stepParallel(db), trackedNames(db)])) : [null, Infinity, []];
+  const active: Active[] = (reads?.inputs.live ?? []).map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
   // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
-  const fps: LaneStatePut[] = [];
-  await db.write(async () => {
-    if (opts.wakeAt) await saveLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT, value: new Date(opts.wakeAt).toISOString() }]);
-    else await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
-    if (opts.status) await saveLaneState(db, [{ kind: "mark", step: MARK_STATUS, value: JSON.stringify(opts.status) }]);
-  });
+  const puts: LaneStatePut[] = [
+    ...(opts.wakeAt ? [{ kind: "mark" as const, step: MARK_WAKE_AT, value: new Date(opts.wakeAt).toISOString() }] : []),
+    ...(opts.status ? [{ kind: "mark" as const, step: MARK_STATUS, value: JSON.stringify(opts.status) }] : []),
+  ];
   for (const p of proposals) {
     const slot = `${p.lane}\0${typeof p.params.repo === "string" ? p.params.repo : ""}`;
     if (done.has(slot)) continue;
     try {
-      // The detection ran a moment ago: a job of the same step and repo may have been queued since.
-      if (await jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken })) continue;
-      if (p.gate && await jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken })) continue;
+      if (await jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken, active, cap })) continue;
+      if (p.gate && await jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken, active, cap })) continue;
       // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
-      const job = await enqueue(db, p.step, p.params, AUTOPILOT_USER, async (step, params) => {
+      const job = await queueJob(db, p.step, p.params, AUTOPILOT_USER, async (step, params) => {
         if (typeof params.limit !== "number") return params;
-        // The reads are fresh for each proposal: the jobs queued before it count.
-        const lim = await withPassReads(db, Date.now(), async () => await jobLimit(db, step, Date.now(), params.limit as number, untaken));
+        const lim = await withPassReads(db, Date.now(), async () => await jobLimit(db, step, Date.now(), params.limit as number, untaken), reads!);
         return lim ? { ...params, ...lim } : null;
-      });
+      }, tracked);
       queued.push(job.id);
+      // The jobs queued before a proposal count toward its limit.
+      reads!.inputs.live.push({ ...asActive(p.step, job.params as Params, "queued"), id: job.id, state: "queued", number: typeof p.params.number === "number" ? p.params.number : null, params: JSON.stringify(job.params), items: null, requested_by: AUTOPILOT_USER, resumes: 0, cancel_requested_at: null, started_at: null, pid: null });
       reserved.push(asActive(p.step, p.params, "queued"));
       if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
       done.add(slot);
-      if (p.fp !== undefined) fps.push({ kind: "fp", step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : "", value: p.fp, job_id: job.id });
+      if (p.fp !== undefined) puts.push({ kind: "fp", step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : "", value: p.fp, job_id: job.id });
       const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
       await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
       log(`autopilot: job ${job.id}: ${p.step} ${JSON.stringify(job.params)}`);
@@ -1254,7 +1256,10 @@ export async function applyProposals(db: Db, proposals: Proposal[], opts: PlanOp
       } else log(`autopilot: ${p.step}: not queued: ${e.message}`);
     }
   }
-  await saveLaneState(db, fps);
+  await db.write(async () => {
+    if (!opts.wakeAt) await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
+    await saveLaneState(db, puts);
+  });
   return queued;
 }
 
