@@ -260,7 +260,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
  */
 async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promise<void> {
   const a = (await loadImplementFacts(c.db, [{ repo: c.item.repo, number: c.item.number }])).byIssue.get(`${c.item.repo}#${c.item.number}`);
-  const open = a?.attempt.id === q.implementation && (a.attempt.state === "stuck" || (a.question?.round === q.round && a.answer === null));
+  const open = a?.attempt.id === q.implementation && a.question?.round === q.round && a.answer === null;
   if (!open) throw new fx.EffectError(t("The question this recommendation answers is no longer open."));
   await recordAnswers(c.db, [{ id: q.implementation, question: q.round, by: c.by, via: c.via, option }], c.at);
 }

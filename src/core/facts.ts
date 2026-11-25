@@ -3,7 +3,7 @@
 import { listQuietPrs } from "../data/security/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
-import { loadAssignments, withConfig, config } from "../data/control/index.ts";
+import { withConfig, config } from "../data/control/index.ts";
 import { loadReviewFacts } from "../data/review/index.ts";
 import { fullPass, repoPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
@@ -91,13 +91,21 @@ export function workflowGate(w: ItemWorkflow | undefined, fixupAsked: boolean): 
   };
 }
 
+/** An item's assignment from its last successful assign and its mirrored `assignees` (JSON). Without a recorded account, the audit's own assignee stands for it. */
+export function assignmentIn(pipelineLogin: string | null, assigned: { assignee: string | null } | undefined, assignees: string | null): AssignFacts {
+  return {
+    login: pipelineLogin ?? assigned?.assignee ?? null, assignees: parseList(assignees).filter((x): x is string => typeof x === "string"),
+    ours: assigned !== undefined && (pipelineLogin === null || assigned.assignee === pipelineLogin),
+  };
+}
+
 /** The work score of a live workflow (higher first), as `workflow.fragments.weightScoreExpr` orders: weight, then the older workflow. */
-const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
+export const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
 
 /** Our own integration PR of a batch. */
 function integrationOf(d: PrPassData, ref: string): boolean {
   const m = d.mirror.get(ref);
-  return d.merge.batchPrs.has(ref) && !!m?.item.author && d.ownLogins.has(m.item.author);
+  return d.merge.batchPrs.has(ref) && !!m?.item.author && d.ownLogins.has(m.item.author.toLowerCase());
 }
 
 /** The pass universe: open PRs, merged PRs with a take review or merged by us, PRs of a live implementation attempt. */
@@ -111,7 +119,7 @@ function inUniverse(d: PrPassData, ref: string, state: string): boolean {
 }
 
 /** PRs the pipeline opened itself: quiet security PRs and default-branch fix PRs, when a pipeline account is set. */
-const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string | null): Set<string> => (login ? new Set([...quiet, ...mainFix]) : new Set());
+export const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string | null): Set<string> => (login ? new Set([...quiet, ...mainFix]) : new Set());
 
 /** Facts of every open PR (and merged PRs with a take or take-fix review, merged by us, or of a live implementation) of the keys given. One load for all PRs. */
 export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
@@ -205,7 +213,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const defaultBranch = repoRow?.default_branch ?? null;
   const optional = cfg.repo(repo).optionalChecks;
   const ciOf = (overall: string | null | undefined): string => effectiveCiWith(optional, overall ?? "none", ch?.checks ?? null);
-  const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author);
+  const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const fresh = !!ch?.fetched_at && (!i.updated_at || ch.fetched_at > i.updated_at);
   // An integration PR's head is the batch tip, where the run approvals are recorded.
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
@@ -222,12 +230,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const operator = d.workflow.operator.get(ref);
   const ownHeads = (h: string): string[] => pushChainOf(patch.pushes, h).filter((x) => d.ownCommits.has(`${repo}@${x}`));
   const ownHead = (h: string): boolean => ownHeads(h).length > 0;
-  const assigned = d.assignments.get(ref);
-  const pipelineLogin = d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null;
-  const assignment: AssignFacts = {
-    login: pipelineLogin ?? assigned?.assignee ?? null, assignees: parseList(i.assignees).filter((x): x is string => typeof x === "string"),
-    ours: assigned !== undefined && (pipelineLogin === null || assigned.assignee === pipelineLogin),
-  };
+  const assignment = assignmentIn(d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null, d.assignments.get(ref), i.assignees);
   const trips: Record<string, string> = {};
   for (const [stage, t] of d.control.trips) if (t.active) trips[stage] = t.reason;
   const outsideHold = d.outsideHolds.get(ref);
@@ -436,16 +439,5 @@ export async function ownFixPrs(db: Db, repo?: string, _slug?: string | null): P
   const [own, quiet, mainFix, login] = await db.together(() => Promise.all([
     loadOwnLogins(db), listQuietPrs(db, { repo: repo }), loadMainFixPrs(db, repo ? [repo] : undefined), withConfig(db, async () => config(db).pipelineLogin),
   ]));
-  return { login, prs: ownPrSet(mainFix, quiet, login), quiet, isOwn: async (_r, author) => !!author && own.has(author) };
-}
-
-/** The pipeline account and the last successful assign of every item; the returned function gives an item's assignment facts from its mirrored `assignees` (JSON). */
-export async function assignmentsOf(db: Db, repo?: string): Promise<(ref: string, assignees: string | null) => AssignFacts> {
-  const [last, login] = await db.together(() => Promise.all([loadAssignments(db, repo ? { repo } : {}), withConfig(db, async () => config(db).pipelineLogin)]));
-  return (ref, assignees) => {
-    const list = parseList(assignees).filter((x): x is string => typeof x === "string");
-    const by = last.get(ref);
-    // Without a recorded account, the audit's own assignee stands for it.
-    return { login: login ?? by?.assignee ?? null, assignees: list, ours: by !== undefined && (login === null || by.assignee === login) };
-  };
+  return { login, prs: ownPrSet(mainFix, quiet, login), quiet, isOwn: async (_r, author) => !!author && own.has(author.toLowerCase()) };
 }
