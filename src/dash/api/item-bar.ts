@@ -123,7 +123,7 @@ function evidenceOf(c: Ctx, f: ItemPageFacts, mergedAt: string | null, mergedByU
     if (v.state === "passed" || v.state === "ci-enough") live.push({ stage: "verify", state: "done", at, jobId: null, label: "Verify", reason: null });
     else if (v.state === "failed" || v.state === "error") live.push({ stage: "verify", state: "failed", at, jobId: null, label: "Verify", reason: reasonOf(v.summary) });
   }
-  const answered = f.trace.workflowEvents.filter((e) => e.kind === "answered" || e.kind === "archived").map((e) => e.at).sort().pop();
+  const answered = f.trace.workflowEvents.filter((e) => e.kind === "answered" || (e.kind === "archived" && e.login !== "pipeline")).map((e) => e.at).sort().pop();
   if (answered) live.push({ stage: "decide", state: "done", at: answered, jobId: null, label: "Decision", reason: null });
   if (mergedAt && mergedByUs) live.push({ stage: "merge", state: "done", at: mergedAt, jobId: null, label: "Merge", reason: null });
   return live;

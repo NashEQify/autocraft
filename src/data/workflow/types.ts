@@ -34,6 +34,8 @@ export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[];
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
 export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string };
 export type StoredEvent = WorkflowEvent & { id: number; at: string };
+/** A stored event of the maintainer workflow itself. */
+export type SaidEvent = StoredEvent & { kind: WorkflowEventKind };
 export type QueuePosition = { position: number; of: number; weight: number; startedBy: string };
 export type StartedWork = {
   live: { repo: string; number: number; entry: Entry; state: WorkflowState; startedBy: string; approvedBy: string | null }[];

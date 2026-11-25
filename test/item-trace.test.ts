@@ -105,6 +105,8 @@ test("a viewer gets no staff-only post-merge fields and only the GitHub writes o
   const answers = async (role: "viewer" | "maintainer") => ((await trace(db, { ...as(role), query: new URLSearchParams({ kinds: "decision" }) })) as ItemTrace).events.map((e) => e.summary);
   assert.deepEqual(await answers("maintainer"), ["Merging when CI is green."]);
   assert.deepEqual(await answers("viewer"), ["Answered"], "a viewer sees that it was answered, not the text");
+  await db.run(db.k.insertInto("workflow_events").values({ repo: "photocraft", number: 7, login: "admin", via: "cli", kind: "archived", line: "Merge? Answer: Take it.", at: "2026-01-02T00:00:00Z" }));
+  assert.deepEqual(await answers("maintainer"), ["Merge? Answer: Take it.", "Merging when CI is green."], "an archived answer shows at its own time");
   const f = (await trace(db, { ...as("viewer"), query: new URLSearchParams({ kinds: "review" }) })) as ItemTrace;
   assert.equal(f.events[0]!.head, "c".repeat(40));
 });

@@ -9,11 +9,11 @@ import { loadItems, loadShown } from "../mirror/index.ts";
 import { loadFixPrFindings } from "../security/index.ts";
 import { loadDuplicatesOf } from "../triage/index.ts";
 import { loadEvents, loadLegs, loadWorkflowHistory } from "../workflow/index.ts";
-import type { ItemWorkflow, Preapproval, StoredEvent } from "../workflow/types.ts";
+import type { ItemWorkflow, Preapproval, SaidEvent } from "../workflow/types.ts";
 import type { HoldStatus, Scope, TripRow } from "./types.ts";
 
 export type MaintainItemFacts = {
-  kind: "issue" | "pr"; history: ItemWorkflow[]; events: StoredEvent[]; leg: Preapproval | null; quiet: boolean;
+  kind: "issue" | "pr"; history: ItemWorkflow[]; events: SaidEvent[]; leg: Preapproval | null; quiet: boolean;
   findings: { number: number; title: string; severity: string; state: string }[];
   duplicates: { other: number; canonical: boolean; shown: ItemShown | null }[];
   hold: HoldStatus; trips: TripRow[];

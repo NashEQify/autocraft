@@ -2293,7 +2293,7 @@ CREATE TABLE IF NOT EXISTS item_workflows (
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);
 -- What people did to an item's workflow, with the parsed command (never the raw text): started, approved, answered,
--- ambiguous, blocked, stopped, weighted; and, archived, the answers and actions of the decision system before it. workflow_id is
+-- ambiguous, blocked, stopped, weighted; and, archived, people's answers, the questions left open and the actions of the decision system before it. workflow_id is
 -- null for an ambiguous answer on an item with no workflow and for an archived row.
 CREATE TABLE IF NOT EXISTS workflow_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2309,7 +2309,11 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
 CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);
--- An archived row (src/db/switch-over.ts) names the decision or action it records in parsed: {"kind": "archived", "legacy": "decision:<id>"}.
+-- The readers of what happened last leave the archived rows out: they are written later than what they record.
+CREATE INDEX IF NOT EXISTS workflow_events_live ON workflow_events(repo, number, id) WHERE kind <> 'archived';
+CREATE INDEX IF NOT EXISTS workflow_events_live_at ON workflow_events(at) WHERE kind <> 'archived';
+CREATE INDEX IF NOT EXISTS workflow_events_workflow ON workflow_events(workflow_id) WHERE workflow_id IS NOT NULL;
+-- An archived row (src/db/switch-over.ts) names the answer, open question or action it records in parsed: {"kind": "archived", "legacy": "decision:<id>"}.
 CREATE UNIQUE INDEX IF NOT EXISTS workflow_events_archived ON workflow_events(repo, number, parsed) WHERE kind = 'archived';
 -- The last "link your account" reply to a GitHub commenter with no AutoCraft login; one a week per login. Bookkeeping: no live topic.
 CREATE TABLE IF NOT EXISTS github_link_nudges (

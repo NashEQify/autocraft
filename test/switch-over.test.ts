@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
-import { loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
+import { loadActivityRound } from "../src/data/views/activity.ts";
+import { countEventsSince, loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
 
 const COPIED = "2026-11-20T00:00:00.000Z", BEFORE = "2026-11-19T00:00:00.000Z", AFTER = "2026-11-20T01:00:00.000Z", NOW = "2026-11-20T02:00:00.000Z";
 
@@ -31,6 +32,10 @@ async function legacy(): Promise<Db> {
 
   await decision(db, "answered", { number: 2, answer: "take", answered_by: "alice", answered_at: AFTER });
   await decision(db, "open", { number: 2 });
+  await decision(db, "open~2", { number: 2, question: "Question open?" });
+  await decision(db, "withdrawn", { number: 2, answer: "withdrawn", answered_by: "pipeline", answered_at: AFTER });
+  await decision(db, "superseded", { number: 2, answer: "superseded", answered_by: "dupes", answered_at: AFTER });
+  await decision(db, "closed", { number: 2, answer: "take", answered_by: "pipeline", answered_at: AFTER });
   await decision(db, "batch", { items: JSON.stringify([{ repo: "demo", number: 2 }, { repo: "demo", number: 7 }]), exceptions: JSON.stringify([{ repo: "demo", number: 7, answer: "other" }]), answer: "take", answered_by: "bob", answered_at: AFTER });
   await decision(db, "no-item", { kind: "other", answer: "take", answered_by: "alice", answered_at: AFTER });
   await decision(db, "parked", { kind: "scope", number: 6, answer: "backlog", answered_by: "carol", answered_at: AFTER });
@@ -98,8 +103,8 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
   const r = (await switchOver(db, { now: NOW, perDay: {} }))!;
 
   const ref = (number: number) => ({ repo: "demo", number });
-  const events = await loadEvents(db, [ref(2), ref(7)]);
-  const archived = (n: number) => events.get(`demo#${n}`)!.filter((e) => e.kind as string === "archived").map((e) => [e.login, e.at, e.line]);
+  const events = await loadEvents(db, [ref(2), ref(7)], { archived: true });
+  const archived = (n: number) => events.get(`demo#${n}`)!.filter((e) => e.kind === "archived").map((e) => [e.login, e.at, e.line]);
   assert.deepEqual(archived(2).sort(), [
     ["alice", AFTER, "Comment and close: done https://example.test/c"],
     ["alice", AFTER, "Question answered? Answer: Take it."],
@@ -109,6 +114,11 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
   assert.deepEqual(archived(7), [["bob", AFTER, "Question batch? Answer: other."]]);
   assert.equal((await rows(db, "SELECT target FROM main.audit WHERE action = 'decision-archived'"))[0]!.target, "decision:no-item");
   assert.equal((await loadLastEventKinds(db, [ref(2)])).get("demo#2"), "started", "an archived row is never an item's latest event");
+  const live = [...(await loadEvents(db, [ref(2), ref(7)])).values()].flat();
+  assert.deepEqual([...new Set(live.map((e) => e.kind))].sort(), ["ambiguous", "started"]);
+  assert.equal(await countEventsSince(db, { login: "alice", via: "cli", since: BEFORE }), 0, "an archived answer is no command of the person's");
+  const feed = await loadActivityRound(db, { staff: true, operator: true, hidden: [], own: new Set(), repos: ["demo"] }, { kinds: new Set(["decision"]), only: false, repo: null, limit: 100, before: null, writeActions: null });
+  assert.deepEqual([...new Set(feed.bySource.flatMap((s) => s.rows.map((x) => x.kind)))].sort(), ["answered", "started"], "the feed shows no archived line");
 
   const wf = await rows(db, "SELECT number, kind, entry, weight, state, started_by, base_head FROM main.item_workflows WHERE id < 1000 OR id > 1003 ORDER BY number");
   assert.deepEqual(wf.map((w) => ({ ...w })), [
@@ -147,7 +157,7 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
   assert.equal((await rows(db, "SELECT first_number FROM main.agent_runs WHERE id = 900"))[0]!.first_number, 7);
   assert.equal((await rows(db, "SELECT id FROM main.dupe_groups"))[0]!.id, "demo:dupegroup:1");
   assert.equal((await rows(db, "SELECT workflow_id FROM main.discord_alert_msgs"))[0]!.workflow_id, 1002);
-  assert.equal((await rows(db, "SELECT count(*) AS n FROM main.decisions"))[0]!.n, 6, "the old tables keep their rows for a rollback");
+  assert.equal((await rows(db, "SELECT count(*) AS n FROM main.decisions"))[0]!.n, 10, "the old tables keep their rows for a rollback");
   await db.close();
 });
 

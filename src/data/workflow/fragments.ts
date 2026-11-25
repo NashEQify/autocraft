@@ -1,5 +1,5 @@
 // Predicates other modules embed in their statements (src/data/** only).
-import type { AliasableExpression, SqlBool } from "kysely";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource } from "../keys.ts";
@@ -10,6 +10,12 @@ import * as intake from "../intake/fragments.ts";
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 /** Live states of `item_workflows`, spelled out so the SQL needs no import of the store. */
 export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
+
+/**
+ * `kind` (a column of workflow_events) is not `archived`: what happened in the maintainer workflow, without the history of the decision system before it,
+ * whose rows are written later than what they record. Written as the partial indexes of workflow_events write it.
+ */
+export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => eb(kind, "<>", kx.literal("archived"));
 
 /** The item has a live workflow, or is the PR of a live implement workflow. */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {

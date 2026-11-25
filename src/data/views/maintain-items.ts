@@ -14,7 +14,7 @@ import * as planner from "../planner/index.ts";
 import { quietPrExpr } from "../security/fragments.ts";
 import { hasNoArea, inAreas, isDuplicateClose, rankJoin, settledJoin } from "../triage/fragments.ts";
 import * as triage from "../triage/index.ts";
-import { LIVE_STATES } from "../workflow/fragments.ts";
+import { LIVE_STATES, notArchived } from "../workflow/fragments.ts";
 import * as workflow from "../workflow/index.ts";
 import type { ItemBase, ItemRowFacts, ItemsFilter, Scope } from "./types.ts";
 import { hiddenRepos } from "../control/fragments.ts";
@@ -64,9 +64,9 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
     .leftJoin("main.item_workflows as w", (j: any) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number").on("w.state", "in", LIVE_STATES)
       .on("w.id", "=", (eb: kx.AnyEb) => eb.selectFrom("main.item_workflows as lw").select((e) => e.fn.max<number>("lw.id").as("m"))
         .whereRef("lw.repo", "=", "i.repo").whereRef("lw.number", "=", "i.number").where("lw.state", "in", LIVE_STATES)))
-    .leftJoin("main.workflow_events as ev", (j: any) => j.onRef("ev.repo", "=", "i.repo").onRef("ev.number", "=", "i.number")
+    .leftJoin("main.workflow_events as ev", (j: any) => j.onRef("ev.repo", "=", "i.repo").onRef("ev.number", "=", "i.number").on((eb: kx.AnyEb) => notArchived(eb, "ev.kind"))
       .on("ev.id", "=", (eb: kx.AnyEb) => eb.selectFrom("main.workflow_events as le").select((e) => e.fn.max<number>("le.id").as("m"))
-        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number").where("le.kind", "<>", "archived")));
+        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number").where((w) => notArchived(w, "le.kind"))));
   const cols = (b: ReturnType<typeof base>) => b.select((eb: kx.Eb) => [
     "i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.updated_at", "i.merged_at", "i.closed_at", eb.ref("r.score").as("score"),
     "p.state as plan_state", "p.item_state as plan_item_state", phaseOf(db, eb).as("phase"),

@@ -308,7 +308,7 @@ const strip = ({ detail: _d, ...e }: Ev): TraceEvent => e;
 
 // ---- events from the view's rows -------------------------------------------------------------------------------------------------
 
-const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question answered", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
+const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
 /** A workflow event (an answer, a start, a stop), of kind "decision". */
 export const workflowEvent = (e: { id: number; login: string; kind: string; line?: string | null; at: string }, staff: boolean): Ev => ({
   id: `workflow:${e.id}`, kind: "decision", at: e.at, head: null, actor: e.kind === "archived" ? step("decide") : person(e.login),

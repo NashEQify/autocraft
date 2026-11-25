@@ -8,6 +8,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb, type QueryDb } from "../../db/query-db.ts";
 import { privateStepExpr } from "../build/fragments.ts";
 import { runVisible } from "../inference/fragments.ts";
+import { notArchived } from "../workflow/fragments.ts";
 import type { Scope, TraceKind } from "./types.ts";
 
 export type ActivityScope = Pick<Scope, "staff" | "operator" | "hidden" | "own"> & { repos: string[] };
@@ -24,6 +25,8 @@ const T = "t";
 type Def = {
   id: SourceId; kinds: TraceKind[]; table: string; time: string;
   q: (db: QueryDb, c: Ctx) => SelectQueryBuilder<any, any, any>;
+  /** The rows of the table the source reads, for the feed and its stamp. */
+  rows?: Cond;
   repoCol?: string | null; tie?: () => kx.Ex; one?: (r: any) => string;
   /** With Only AutoCraft: null skips the source (its events are people's), a condition narrows it to AutoCraft's rows, EVERY means every row is AutoCraft's. */
   only?: (c: Ctx) => Cond | null;
@@ -72,8 +75,8 @@ export const SOURCES: Def[] = [
   { id: "postmerge", kinds: ["review"], table: "postmerge_reviews", time: "at", q: (db) => db.k.selectFrom("postmerge_reviews").select(["repo", "number", "merge_sha", "at", "model", "findings", "error"]) },
   { id: "verify", kinds: ["review"], table: "verifications", time: "created_at", q: (db) => db.k.selectFrom("verifications").select(["repo", "number", "head_sha", "kind", "state", "reason", "summary", "note", "created_at", "head_task_id"]) },
   // The answers, starts and stops of the item's workflow.
-  { id: "workflow", kinds: ["decision"], table: "workflow_events", time: "at", only: () => null,
-    q: (db) => db.k.selectFrom("workflow_events").select(["repo", "number", "id", "login", "kind", "line", "at"]).where("kind", "in", ["answered", "started", "stopped", "archived"]) },
+  { id: "workflow", kinds: ["decision"], table: "workflow_events", time: "at", only: () => null, rows: (eb) => notArchived(eb, "kind"),
+    q: (db) => db.k.selectFrom("workflow_events").select(["repo", "number", "id", "login", "kind", "line", "at"]).where("kind", "in", ["answered", "started", "stopped"]) },
   { id: "fixup", kinds: ["step"], table: "fixups", time: "created_at", q: (db) => db.k.selectFrom("fixups").select(["repo", "number", kx.rowid("fixups").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]) },
   { id: "cifix", kinds: ["step"], table: "ci_fixes", time: "created_at", q: (db) => db.k.selectFrom("ci_fixes").select(["repo", "number", kx.rowid("ci_fixes").as("rowid"), "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "created_at"]) },
   { id: "conflict", kinds: ["step"], table: "conflict_merges", time: "created_at", q: (db) => db.k.selectFrom("conflict_merges").select(["repo", "number", kx.rowid("conflict_merges").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]) },
@@ -110,6 +113,7 @@ async function newest(c: Ctx, s: Def): Promise<{ source: SourceId; rows: Activit
   // Only visible (tracked, readable) repos are read. The function around the column keeps the planner on the time index instead of a repo index plus a sort.
   // No `repoCol`: the repo is not a column (audit targets), so `of` filters it.
   const raw = await c.db.all(s.q(c.db, c).select((eb: kx.Eb) => eb.ref(s.time).as(T)).where(s.time, "is not", null)
+    .$if(!!s.rows, (q: any) => q.where(s.rows!))
     .$if(!!own, (q: any) => q.where(own!))
     .$if(before !== null, (q: any) => q.where(s.time, "<=", before))
     .$if(!!(repoCol && c.repo), (q: any) => q.where(repoCol!, "=", c.repo!))
@@ -135,7 +139,7 @@ export async function loadActivityRound(db: Db, scope: ActivityScope, q: Activit
 export async function loadActivityStamp(db: Db, key: ActivityStampKey): Promise<unknown[]> {
   const { k } = queryDb(db);
   const probes = [
-    ...sourcesOf(key.kinds).map((s) => k.selectFrom(s.table as "items").select((eb) => eb.fn.max<string | null>(kx.ref(s.time.replace(/^\w+\./, ""))).as("m"))),
+    ...sourcesOf(key.kinds).map((s) => k.selectFrom(s.table as "items").select((eb) => eb.fn.max<string | null>(kx.ref(s.time.replace(/^\w+\./, ""))).as("m")).$if(!!s.rows, (q: any) => q.where(s.rows!))),
     k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running"),
     k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("state", "in", ["queued", "running"]),
     k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["queued", "claimed", "running"]),

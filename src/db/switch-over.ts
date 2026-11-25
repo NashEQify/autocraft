@@ -1,5 +1,5 @@
-// The switch to the maintainer workflow, once: what older processes wrote after the state copy is carried over, the answered
-// and open questions and the results of the decision system become `archived` workflow events, every tracked repo runs the
+// The switch to the maintainer workflow, once: what older processes wrote after the state copy is carried over, people's answers,
+// the open questions and the results of the decision system become `archived` workflow events, every tracked repo runs the
 // maintainer workflow, and each open fast-track row and each pre-approved merge in progress becomes a started workflow.
 //
 // When. The runner runs it after it won its lease and before it starts work (src/runner/index.ts), on both engines. By then
@@ -37,6 +37,7 @@ export const SWITCH_KEY = "workflow_switch";
 const ACTOR = "pipeline";
 const LIVE = ["running", "waiting", "blocked", "recommending"];
 const WITHDRAWN = "withdrawn";
+const PIPELINE_ANSWERS = [WITHDRAWN, "superseded"];
 const BACKLOG = "backlog";
 const PAGE = 500;
 const DAY_MS = 86_400_000;
@@ -343,14 +344,15 @@ function labelOf(d: Row, answer: string): string {
 }
 
 /**
- * Archives every answered decision and, with `open`, every unanswered one as withdrawn: one event per item it names, or an
- * audit row for a decision that names none. Paged by id, a transaction per page.
+ * Archives every decision a person answered, at the time of the answer, and, with `open`, every unanswered one as withdrawn:
+ * one event per item it names (open questions with the same text on one item make one), or an audit row for a decision that
+ * names none. What the pipeline withdrew or replaced by itself is left out. Paged by id, a transaction per page.
  */
 export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">, now: string, open: boolean): Promise<void> {
   const listed = new Set((await all(db, q(db).selectFrom("main.audit").select("target").where("action", "=", "decision-archived"))).map((x) => x.target as string));
   for (let last = ""; ;) {
     const page = await all(db, q(db).selectFrom("main.decisions").select(["id", "kind", "repo", "number", "items", "question", "options", "exceptions", "answer", "answered_by", "answered_at", "asked_at"])
-      .where("id", ">", last).orderBy("id").limit(PAGE));
+      .where("id", ">", last).where((eb: any) => eb.or([...(open ? [eb("answer", "is", null)] : []), answeredByPerson(eb)])).orderBy("id").limit(PAGE));
     if (!page.length) return;
     last = page.at(-1)!.id as string;
     const answered: Archived[] = [];
@@ -358,15 +360,15 @@ export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">
     const audits: Row[] = [];
     for (const d of page) {
       const done = d.answer !== null;
-      if (!done && !open) continue;
       const items = itemsOf(d);
       const line = (answer: string | null): string => (answer === null ? `${oneLine(d.question)} Withdrawn at the switch to the maintainer workflow.`
-        : answer === WITHDRAWN ? `${oneLine(d.question)} Withdrawn.` : `${oneLine(d.question)} Answer: ${oneLine(labelOf(d, answer))}.`);
-      const login = (done ? d.answered_by as string | null : null) ?? ACTOR;
+        : `${oneLine(d.question)} Answer: ${oneLine(labelOf(d, answer))}.`);
+      const login = (d.answered_by as string | null) ?? ACTOR;
       const at = (done ? (d.answered_at ?? d.asked_at) as string : now);
-      const legacy = `decision:${d.id}${done ? "" : ":open"}`;
+      const id = `decision:${d.id}${done ? "" : ":open"}`;
+      const legacy = done ? id : `open:${oneLine(d.question)}`;
       for (const i of items) (done ? answered : withdrawn).push({ repo: i.repo, number: i.number, login, legacy, line: line(done ? i.answer ?? d.answer as string : null), at });
-      if (!items.length && !listed.has(legacy)) audits.push({ at, login, action: "decision-archived", target: legacy, details: JSON.stringify({ repo: d.repo, kind: d.kind, line: line(d.answer as string | null) }) });
+      if (!items.length && !listed.has(id)) audits.push({ at, login, action: "decision-archived", target: id, details: JSON.stringify({ repo: d.repo, kind: d.kind, line: line(d.answer as string | null) }) });
     }
     await db.write(async () => {
       r.archived.answered += await addArchived(db, answered);
@@ -376,6 +378,9 @@ export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">
     r.archived.withoutItem += audits.length;
   }
 }
+
+/** A person's answer (an early one names nobody): not one the pipeline gave to close a question that no longer applied. */
+const answeredByPerson = (eb: any): any => eb.and([eb("answer", "is not", null), eb("answer", "not in", PIPELINE_ANSWERS), eb(eb.fn.coalesce("answered_by", eb.val("")), "<>", ACTOR)]);
 
 const ACTION_WORDS: Record<string, string> = { "comment-close": "Comment and close" };
 
