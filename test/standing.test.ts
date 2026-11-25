@@ -17,7 +17,7 @@ async function fresh(): Promise<World> {
   await w.db.run(w.db.k.insertInto("access").values({ login: MAINT, role: "maintainer" }));
   await w.db.run(w.db.k.insertInto("settings").values({ key: "github_identity", value: "app" }));
   const ids = await startWorkflows(w.db, [
-    { repo: "app", number: 1, kind: "pr", entry: "review", weight: 5, startedBy: MAINT, startedVia: "github", baseHead: "sha1", approvedBy: MAINT, approvedAt: T0, approvedVia: "github", at: T0 },
+    { repo: "app", number: 1, kind: "pr", entry: "review", weight: 5, startedBy: MAINT, startedVia: "github", baseHead: "sha1", approvedBy: MAINT, approvedVia: "github", at: T0 },
     { repo: "app", number: 2, kind: "issue", entry: "implement", weight: 5, startedBy: MAINT, startedVia: "github", baseHead: null, at: T0 },
   ]);
   await addLegs(w.db, [{ repo: "app", number: 1, by: MAINT, workflowId: ids.get("app#1")!, head: "sha1", state: "review" }]);

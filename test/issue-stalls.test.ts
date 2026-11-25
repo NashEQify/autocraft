@@ -8,7 +8,7 @@ import { connectDb } from "../src/db/open.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 
-const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", standing: "yes", featureOn: true, liveInRepo: 0,
+const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", standing: "yes" as const, featureOn: true, liveInRepo: 0,
   row: { state, attempt: 1, textChanged: o.textChanged ?? false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false } });
 
 test("a stuck or ended implementation waits on a person", () => {
