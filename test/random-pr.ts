@@ -7,7 +7,7 @@ import { pushAllowed } from "../src/core/gates.ts";
 import { workflowGate } from "../src/core/may.ts";
 import type { EndedWorkflow, PrFacts } from "../src/core/plan.ts";
 import { FIXUP_MAX_ATTEMPTS, sizeOf } from "../src/core/rules.ts";
-import { ENDED_STATES, type ImplementationState } from "../src/implement/types.ts";
+import type { ImplementationState } from "../src/implement/types.ts";
 import type { Blocker, ItemWorkflow } from "../src/workflow/types.ts";
 import { NOW } from "./world.ts";
 
@@ -54,7 +54,7 @@ export type PrRows = {
   /** Without a live workflow: how the latest ended, and whether that was the PR's own or its issue's. */
   ended: EndedWorkflow | null; endedOwn: boolean;
   legs: Leg[]; request: { from: string; by: string; id: number } | null; mergeHeld: boolean; mergeWaits: boolean;
-  implementation: { state: ImplementationState; revised: boolean } | null;
+  implementation: { state: ImplementationState; revised: boolean; /** Whether the person its workflow runs for may act on the repo. */ standing?: "yes" | "no" | "unknown" } | null;
   review: { head: string; verdict: "take" | "take-fix" | "hold" | "close"; sure: boolean; fixes: number; stale: boolean; capped: boolean; mode: "full" | "skipped"; blockedBy: "open" | "asked" | "settled" | null } | null;
   gate: "failed" | "failing" | "requested" | "cap" | "interval" | null; carried: boolean; posted: boolean;
   checks: { head: string; overall: "success" | "failure" | "pending" | "none"; approvedRuns: boolean };
@@ -173,7 +173,7 @@ export function randomPrRows(x: Rnd): PrRows {
     tier: x.pick(["whitelisted", "whitelisted", "allow", "not", "deny"] as const), lines: x.pick([20, 20, 120, 900]), label: x.pick(["bugfix", "bugfix", "bugfix", "infra", "performance", null]), labelUnsure: x.bool(0.05), needsDecision: x.bool(0.05),
     duplicates: !workflow && x.bool(0.1), ruledOut: x.bool(0.05), integration: !workflow && x.bool(0.02), quiet: x.bool(0.03),
     workflow, ended, endedOwn: ended !== null && !(impl && x.bool(0.7)), legs, request, mergeHeld: x.bool(0.05), mergeWaits: x.bool(0.06),
-    implementation: impl ? { state: x.pick(["pr-opened", "pr-opened", "pr-opened", "revising", "stuck", "closed", "cancelled"] as const), revised: x.bool(0.3) } : null,
+    implementation: impl ? { state: x.pick(["pr-opened", "pr-opened", "pr-opened", "revising", "stuck", "closed", "cancelled"] as const), revised: x.bool(0.3), standing: x.pick(["yes", "yes", "yes", "no", "unknown"] as const) } : null,
     review, gate: x.pick([null, null, null, null, null, null, "failed", "failing", "requested", "cap", "interval"] as const), carried: x.bool(0.3), posted: x.bool(0.7),
     checks, mergeable, unknownStuck: x.bool(0.3), pushable: ours || x.bool(0.7), runs: x.bool(0.1) ? { waiting: 1 + x.int(2), approvable: x.int(2) } : null, brokeByUs: lastBy !== "author" && x.bool(0.3),
     attempt: x.bool(0.85) ? null : {
@@ -260,7 +260,7 @@ export function factsOf(w: PrRows): PrFacts {
       ended: w.ended, pushes: moves, ownHead, fixupBy: w.request?.from === head ? w.request.by : null,
     },
     inFlight: open && !w.integration && w.mainFix,
-    implementation: w.implementation ? { issue: 5, state: w.implementation.state, revisedHeads: w.implementation.revised ? [head] : [], queuedBy: live?.kind === "issue" ? "mira" : null } : null,
+    implementation: w.implementation ? { issue: 5, state: w.implementation.state, revisedHeads: w.implementation.revised ? [head] : [], queuedBy: live?.kind === "issue" ? "mira" : null, standing: live?.kind === "issue" ? w.implementation.standing ?? "yes" : "no" } : null,
     workflow: live ? { entry: live.entry, approved: live.approvedBy !== null, startedBy: "mira", startedAt: at("09:00"), own: live.kind === "pr" } : null,
     endedWorkflow: w.ended,
   };
@@ -343,5 +343,3 @@ export function factsOf(w: PrRows): PrFacts {
   return f;
 }
 
-/** Whether the attempt of the PR's implementation goes on. */
-export const liveAttempt = (w: PrRows): boolean => !!w.implementation && !ENDED_STATES.has(w.implementation.state);

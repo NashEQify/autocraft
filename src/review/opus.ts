@@ -32,7 +32,8 @@ import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
 import { loadPrWorkflows } from "../data/workflow/index.ts";
-import type { ItemWorkflow } from "../workflow/types.ts";
+import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
+import { droppedTitles, keptFixes } from "../workflow/work.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
@@ -111,16 +112,18 @@ const earlierOf = (o: ReviewRow): EarlierOpus => ({ head: o.head, verdict: o.ver
 
 /**
  * The fixes of the PR's latest earlier reviewed head, when that review was a take-fix whose fixes were never pushed
- * and never posted as a comment (a conflict merge of ours or an author push made a new head first).
+ * and never posted as a comment (a conflict merge of ours or an author push made a new head first). `plan`: its workflow's; a part a person
+ * dropped from it is left out.
  */
-export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }, rows?: Map<string, ReviewRow[]>): Promise<UnappliedFix[]> {
+export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }, rows?: Map<string, ReviewRow[]>, plan: readonly PlanPart[] = []): Promise<UnappliedFix[]> {
   // A hold in between (an author push the reviewer could not judge) does not make the older take-fix's fixes moot.
   const [first, second] = earlierRows(rows ?? await loadReviewRows(db, [{ repo: c.repo, number: c.number }]), c);
   const e = first && first.verdict === "hold" ? second : first;
   if (!e || e.verdict !== "take-fix") return [];
   const facts = (await loadPatchFacts(db, [{ repo: c.repo, number: c.number }])).get(refOf(c));
   if (facts?.fixups.some((f) => f.fromHead === e.head && (f.state === "pushed" || f.state === "asked"))) return [];
-  return (e.fixes as { file: string; change: string }[]).filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string").map((f) => ({ head: e.head, file: f.file, change: f.change }));
+  const asked = (e.fixes as { file: string; change: string; title?: string }[]).filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string");
+  return keptFixes(asked, droppedTitles(plan)).map((f) => ({ head: e.head, file: f.file, change: f.change }));
 }
 
 /** The base branch the review's diff was computed against; the mirrored base when the cached diff does not say. */
@@ -209,7 +212,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   } catch (e) {
     return { kind: "no-threads", error: String((e as Error).message ?? e) };
   }
-  const unapplied = await unappliedFixes(db, c, rows);
+  const unapplied = await unappliedFixes(db, c, rows, workflows.get(ref)?.plan);
   // Our own commits since the earlier reviewed head, for the reviewer to check against what was asked of them.
   const ours = earlier ? (await ourCommitsSince(db, repo, c.number, earlier.head, c.head_oid)).commits.map(({ from: _from, ...x }) => x) : [];
   const input: OpusPr = {

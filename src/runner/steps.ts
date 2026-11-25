@@ -128,7 +128,7 @@ async function checkCommentApproved(db: Db, p: Params): Promise<string | null> {
 /** The `implement` buckets this build carries out. */
 const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build", "revise"]);
 
-/** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
+/** An implementation needs the repo's Implement switch and someone its live workflow acts for who settles on the repo. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
   const { implementRefusal } = await import("../implement/gate.ts");
   const bucket = String(p.bucket ?? "plan");
@@ -448,7 +448,7 @@ export const STEPS: StepDef[] = [
     name: "implement",
     priority: 1,
     title: "Implement issues",
-    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue.",
+    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue",
     stage: runStage("implement"),
     requires: "operator",
     models: ["opus"],
@@ -463,6 +463,7 @@ export const STEPS: StepDef[] = [
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo), number = Number(ctx.params.number);
+      if (ctx.params.mode !== "dry") await (await import("../implement/gate.ts")).moveTurns(ctx.db, repo, number);
       // The item page and the Now feed find the job by its item: its outcome, or its failure, is the job item.
       const { jobItem } = await import("./job-items.ts");
       try {

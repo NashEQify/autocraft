@@ -1,7 +1,6 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, labels, implementation.
 // Built for a whole pass or a slice of it from the module loads of core/pass-load.ts. Reads only: a text hash sync has not written
 // yet is computed here.
-import { HOLD_MAX, permKey, standing } from "../data/access/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
@@ -10,7 +9,7 @@ import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
-import { assignmentIn, ownPrSet, refreshTimes, weightScore, type FactsOf } from "./facts.ts";
+import { assignmentIn, ownPrSet, queuerIn, refreshTimes, weightScore, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
@@ -53,9 +52,9 @@ function verdictsOf(d: ItemPassData, ref: string) {
 const storedClassHash = (i: { class_hash: string | null; class_scheme: string | null }): string | null => (i.class_scheme === SCHEME_ID ? i.class_hash : null);
 
 /** Who queued the issue for implementation: who started its live implement workflow. */
-function queuedOf(d: ItemPassData, ref: string): { by: string; at: string } | null {
+function queuedOf(d: ItemPassData, ref: string): { actors: string[]; at: string } | null {
   const w = d.workflow.live.get(ref);
-  return w?.entry === "implement" ? { by: w.startedBy, at: w.startedAt } : null;
+  return w?.entry === "implement" ? { actors: d.workflow.actors.get(w.id) ?? [], at: w.startedAt } : null;
 }
 
 /**
@@ -78,7 +77,7 @@ function rowsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<strin
 
 /**
  * What the second wave reads: the text of items with an implementation attempt, a missing text hash or a classifier hash to recompute,
- * the attempts' PRs, the comments after open questions, and who queued the issues.
+ * the attempts' PRs, the comments after open questions, and who the queued issues are implemented for.
  */
 function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<string> }): ItemPassNeeds {
   const out: ItemPassNeeds = { texts: [], prs: [], asked: [], logins: [] };
@@ -89,7 +88,7 @@ function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<stri
     if (a && a.attempt.prNumber !== null) out.prs.push({ repo: i.repo, number: a.attempt.prNumber });
     if (a?.attempt.state === "asked") out.asked.push({ ref: { repo: i.repo, number: i.number }, since: askedSince(a) });
     const q = i.kind === "issue" ? queuedOf(d, ref) : null;
-    if (q) out.logins.push({ login: q.by, repo: i.repo });
+    if (q) for (const login of q.actors) out.logins.push({ login, repo: i.repo });
   }
   return out;
 }
@@ -164,10 +163,9 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const a = r.kind === "issue" ? d.implement.byIssue.get(ref) : undefined;
     const q = r.kind === "issue" ? queuedOf(d, ref) : null;
     const attemptPr = a && a.attempt.prNumber !== null ? d.prs.get(`${r.repo}#${a.attempt.prNumber}`) : undefined;
-    const act = q ? d.act.get(permKey(q.by, r.repo)) : undefined;
+    const queuer = queuerIn(q?.actors, r.repo, { act: d.act, identity: cfg.githubIdentity, now, soon: (at) => refresh.soon(ref, at) });
     const live = d.implement.liveByRepo.get(r.repo);
-    // A confirmed write permission stops counting with the clock alone.
-    const refreshAt = refresh.at(ref, act?.perm ? Date.parse(act.perm.checkedAt) + HOLD_MAX : undefined);
+    const refreshAt = refresh.at(ref);
     return {
       repo: r.repo, number: r.number, kind: r.kind as ItemFacts["kind"], open: true, assignment: assignmentIn(pipelineLogin, d.assignments.get(ref), r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}),
       pipelineOn, tripped: tripsOfRepo(tripped, r.repo),
@@ -189,7 +187,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       close: closeOf(d, ref),
       openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null,
       implement: {
-        queuedBy: q?.by ?? null, standing: q ? standing(act, cfg.githubIdentity, now) : "no", ...(cfg.githubIdentity !== "app" ? { boxIdentity: true } : {}), featureOn: cfg.repo(r.repo).buildFeature("implement"),
+        ...queuer, featureOn: cfg.repo(r.repo).buildFeature("implement"),
         row: a ? {
           state: a.attempt.state, attempt: a.attempt.attempt,
           textChanged: textHash(text?.title ?? "", text?.body ?? "") !== a.attempt.textHash,

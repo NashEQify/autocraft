@@ -1,7 +1,7 @@
 // The decision table for open PRs, review to merge: facts overrides in, state, path and due actions out.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NOT_STARTED_WAIT, decidePr } from "../src/core/decide.ts";
+import { MAINTAINER_ANSWER_WAIT, NOT_STARTED_WAIT, decidePr } from "../src/core/decide.ts";
 import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../src/core/rules.ts";
 import { QUEUE_STATES, type Plan, type PrFacts } from "../src/core/plan.ts";
 import { NOW, REVIEW_AT, prFacts } from "./world.ts";
@@ -361,4 +361,12 @@ test("every plan state is one of the declared states", () => {
   const all = new Set<string>([...QUEUE_STATES, "out-of-scope", "integration", "pushed", "backlog", "draft", "opus-hold", "opus-close", "review-stale", "not-reviewed", "not-started", "closed"]);
   for (const row of rows) assert.ok(all.has(decidePr(prFacts(row.facts)).state), row.name);
   assert.equal(REVIEW_AT.length > 0, true);
+});
+
+test("a started PR nobody approved waits for a green main while main is red too; what its review asks for is a person's at once", () => {
+  const started = { workflow: { entry: "review", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } } as const;
+  const red = { ...started, ...CI_FAIL, cifix: cifix(), repoFacts: { mainRed: true } };
+  const wait = (o: Over) => { const p = decidePr(prFacts(o)); return [p.wait, p.waitKind]; };
+  assert.deepEqual(wait(red), ["a green main", "system"]);
+  for (const o of [{ ...red, repoFacts: { mainRed: false } }, { ...red, ...TAKE_FIX, fixup: fixup() }, { ...red, mainFix: true }]) assert.deepEqual(wait(o), [MAINTAINER_ANSWER_WAIT, "person"], JSON.stringify(o));
 });

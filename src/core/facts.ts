@@ -1,7 +1,7 @@
 // Facts: everything the review-to-merge rules read about open PRs, built for a whole pass or a slice of it from the module loads of
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
-import { HOLD_MAX, loadOwnLogins } from "../data/access/index.ts";
+import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
@@ -28,6 +28,7 @@ import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_S
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
+import { keptFixes, settlerOf, verdictKept } from "../workflow/work.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
@@ -67,6 +68,18 @@ export function refreshTimes(now: number): { soon: (ref: string, at: number | un
     soon: (ref, t) => { if (later(t) && !(times.get(ref)! <= t)) times.set(ref, t); },
     at: (ref, ...more) => [times.get(ref), ...more].filter(later).reduce<number | undefined>((m, t) => (m === undefined || t < m ? t : m), undefined),
   };
+}
+
+/** Who an implementation runs for (settlerOf), from the pass's access rows; a confirmed write permission stops counting with the clock alone, told to `soon`. */
+export function queuerIn(
+  actors: readonly string[] | undefined, repo: string, o: { act: Map<PermKey, ActFacts>; identity: ActIdentity; now: number; soon: (at: number | undefined) => void },
+): { queuedBy: string | null; standing: "yes" | "no" | "unknown"; boxIdentity?: boolean } {
+  const s = settlerOf(actors ?? [], (login) => {
+    const a = o.act.get(permKey(login, repo));
+    if (a?.perm) o.soon(Date.parse(a.perm.checkedAt) + HOLD_MAX);
+    return standing(a, o.identity, o.now);
+  });
+  return { queuedBy: s?.by ?? null, standing: s?.standing ?? "no", ...(o.identity !== "app" ? { boxIdentity: true } : {}) };
 }
 
 /** The PR's current head: checks fetched after the mirror's last update win over the mirror. */
@@ -165,7 +178,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
   return () => withConfig(db, async () => {
     const cfg = config(db);
     const ctx: Ctx = {
-      now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs,
+      now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, identity: cfg.githubIdentity,
       holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])) }, now),
     };
     const out: PrFacts[] = [];
@@ -190,7 +203,7 @@ export async function loadPrFact(db: Db, repo: string, number: number, opts: Omi
 export type { PrTier };
 
 type Ctx = {
-  now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; ownPrs: Set<string>; holdOf: HoldCheck;
+  now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; ownPrs: Set<string>; holdOf: HoldCheck; identity: ActIdentity;
 };
 
 function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"] {
@@ -262,7 +275,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);
-  base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads, queuedBy: d.workflow.ofPr.get(ref)?.startedBy ?? null } : null;
+  base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads,
+    ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, { act: d.act, identity: c.identity, now, soon: (at) => refresh.soon(ref, at) }) } : null;
   base.workflow = wfFact;
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
@@ -336,14 +350,15 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   // A hold or close review that the leg went on past is one the person answered after (src/preapproval accepted): it counts as a take.
   const wentOn = !mx && (latest!.verdict === "hold" || latest!.verdict === "close") && !!wfRow
     && !!operator?.legs.some((l) => (l.state === "ci" || l.state === "queued") && l.head === qh && l.workflow_id === wfRow.id && l.updated_at > latest!.at);
-  const verdict = wentOn ? "take" : latest?.verdict;
+  const fixes = latest ? keptFixes(latest.fixes, wfFact?.dropped) : [];
+  const verdict = wentOn ? "take" : latest && verdictKept(latest.verdict, latest.fixes, wfFact?.dropped);
 
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(patch.pushes, qh) : [qh];
   if (!mx) {
     const unsure = take && (!latest!.sure || chain.some((h) => d.review.unsureHeads.has(`${ref}@${h}`)));
     base.review = {
-      head: qh, at: qAt, verdict: verdict!, unsure, mode: latest!.mode, reason: latest!.reason ?? "", fixes: latest!.fixes.length,
+      head: qh, at: qAt, verdict: verdict!, unsure, mode: latest!.mode, reason: latest!.reason ?? "", fixes: fixes.length,
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
     // A stale review does not carry: it has not read the discussion as it is now.
@@ -420,7 +435,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   }
-  if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(latest!.fixes)).length, attempts: attemptsIn(patch.fixups), ...fixupAtHead(patch.fixups, qh, now) };
+  if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(fixes)).length, attempts: attemptsIn(patch.fixups), ...fixupAtHead(patch.fixups, qh, now) };
   for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source === "review" || l.source === "premerge") base.lint.push({ ...l, source: l.source });
   if (base.lint.length) base.inFlight = true;
   if (base.ci === "failure" || base.brokeByUs || base.gateRed) {

@@ -21,11 +21,20 @@ export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => 
 const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 
 /**
- * The attempt `i` is one the implement workflow `w` of its issue works on: the current one, or one that ended in it. An attempt that ended
- * before the workflow started belongs to an earlier one, and its PR (reopened, say) is no work of this one.
+ * The attempt `i` is one the implement workflow `w` of its issue works on (src/workflow/work.ts candidatePr): the current one, one made in it,
+ * or the issue's latest when it ended in it. An attempt that ended before the workflow started belongs to an earlier one, and so does one whose
+ * end was recorded late and that the workflow has an attempt of its own for: its PR (reopened, say) is no work of this one.
  */
-export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> =>
-  eb.or([eb(`${i}.state`, "not in", ENDED_ATTEMPTS), eb(`${i}.updated_at`, ">=", eb.ref(`${w}.started_at`))]);
+export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> => {
+  const started = kx.ref<string>(`${w}.started_at`);
+  const newer = kx.schemaEb(eb).selectFrom("main.implementations as ni").select(one(eb))
+    .where("ni.repo", "=", kx.ref<string>(`${i}.repo`)).where("ni.number", "=", kx.ref<number>(`${i}.number`)).where("ni.id", ">", kx.ref<number>(`${i}.id`));
+  return eb.or([
+    eb(`${i}.state`, "not in", ENDED_ATTEMPTS),
+    eb(`${i}.created_at`, ">=", started),
+    eb.and([eb(`${i}.updated_at`, ">=", started), eb.not(eb.exists(newer))]),
+  ]);
+};
 
 /** A live workflow approved for merge (an approver, or a merge entry) handed the PR over to the merge queue at `head`: its leg is queued there. */
 export const handedOverAt = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.Ex): AliasableExpression<SqlBool> =>

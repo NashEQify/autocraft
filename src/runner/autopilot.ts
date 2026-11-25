@@ -357,15 +357,34 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
 /** The issue an implement job works on, its bucket and the planned item's work score. */
 type ImplementJob = { number: number; bucket: string; score: number | null };
 
+/** implementWork of a planner pass's Plans, made on first use and kept with them. */
+const passImplementWork = new WeakMap<PlanSet, Promise<Map<string, ImplementJob>>>();
+
 /**
  * Per repo, the queued issue its next implement job works on. The revisions of our implementation PRs (planned on the PR,
- * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score).
+ * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score). With several, the first
+ * whose job may run now (implementRefusal): one that may not keeps no other work of the repo back.
  */
 async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
-  const repos = new Set(tracked), out = new Map<string, ImplementJob>();
-  const add = (repo: string, j: ImplementJob) => { if (repos.has(repo) && !out.has(repo)) out.set(repo, j); };
-  for (const p of allowed(await planned(db, "implement", { plans }))) add(p.facts.repo, { number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
-  for (const p of allowed(await plannedItems(db, "implement", { plans }))) add(p.facts.repo, { number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  let work = passImplementWork.get(plans);
+  if (!work) {
+    passImplementWork.set(plans, (work = findImplementWork(db, tracked, plans)));
+    void work.catch(() => passImplementWork.delete(plans));
+  }
+  return await work;
+}
+
+async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
+  const found = new Map<string, ImplementJob[]>(tracked.map((repo) => [repo, []]));
+  for (const p of allowed(await planned(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
+  for (const p of allowed(await plannedItems(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  const { implementRefusal } = await import("../implement/gate.ts");
+  const out = new Map<string, ImplementJob>();
+  await Promise.all([...found].map(async ([repo, jobs]) => {
+    const refused = jobs.length > 1 ? await Promise.all(jobs.map((j) => implementRefusal(db, repo, j.number))) : [];
+    const next = jobs.find((_, i) => (refused[i] ?? null) === null) ?? jobs[0];
+    if (next) out.set(repo, next);
+  }));
   return out;
 }
 

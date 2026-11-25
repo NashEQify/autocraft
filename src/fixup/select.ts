@@ -4,13 +4,14 @@ import { pushAllowed } from "../core/gates.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
-import { type FixCandidate, type FixSelection, parseFixes } from "./candidates.ts";
+import { type Fix, type FixCandidate, type FixSelection, parseFixes } from "./candidates.ts";
 import { loadPatchFacts, loadStoredPatches, type PatchFacts, type StoredPatch } from "../data/changes/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewsAt } from "../data/review/index.ts";
 import { triesIn, type ConflictCandidate, type ConflictRow } from "./conflict-state.ts";
 import { queuedOperatorFix } from "../preapproval/state.ts";
 import type { Db } from "../db/index.ts";
+import { keptFixes } from "../workflow/work.ts";
 
 type Planned = Awaited<ReturnType<typeof planned>>;
 type FixReads = {
@@ -57,6 +58,9 @@ function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Prom
 /** Why the PR's conflict is resolved, for the models: its review's reason, or the approval that stands in for one. */
 const wantedFor = (f: PrFacts): string => f.review?.reason ?? "a maintainer approved the merge; it has no review";
 
+/** A review's fixes that nobody dropped from the PR's workflow. */
+const reviewFixes = (f: PrFacts, stored: string | null | undefined): Fix[] => keptFixes(parseFixes(stored ?? null), f.workflow?.dropped);
+
 /** `allow`: only the planned actions it accepts. */
 export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, allow: (p: Planned[number]) => boolean = () => true): Promise<FixSelection> {
   const opts = { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
@@ -87,7 +91,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       fix.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: 1, model: row?.model ?? null, source: "premerge" });
     } else {
       const r = reads.reviews.get(`${repo}#${f.number}@${head}`);
-      const c: FixCandidate = { repo, number: f.number, head, reason: f.review!.reason, fixes: parseFixes(r?.fixes ?? null), attempt: f.fixup!.attempts + 1, model: r?.model ?? null };
+      const c: FixCandidate = { repo, number: f.number, head, reason: f.review!.reason, fixes: reviewFixes(f, r?.fixes), attempt: f.fixup!.attempts + 1, model: r?.model ?? null };
       if (bucket === "ask") out.ask.push(c);
       else if (bucket === "cannot-push") out.cannotPush.push(c);
       else if (bucket === "fix") fix.push(c);
@@ -113,7 +117,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
         out.lint.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: w.attempt, model: pm?.model ?? null, source: "premerge", lint });
       } else {
         const r = reads.reviews.get(`${repo}#${f.number}@${head}`);
-        if (f.review) out.lint.push({ repo, number: f.number, head, reason: f.review.reason, fixes: parseFixes(r?.fixes ?? null), attempt: w.attempt, model: r?.model ?? null, lint });
+        if (f.review) out.lint.push({ repo, number: f.number, head, reason: f.review.reason, fixes: reviewFixes(f, r?.fixes), attempt: w.attempt, model: r?.model ?? null, lint });
       }
     }
   }

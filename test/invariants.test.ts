@@ -12,7 +12,7 @@ import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
 import type { Db } from "../src/db/index.ts";
 import { LANE_KINDS, LANES, type PlanCtx } from "../src/runner/autopilot.ts";
-import { factsOf, greenRows, headOf, liveAttempt, prng, randomPrRows, reached, reviewed, rnd, startedAs, type PrRows, type Rnd } from "./random-pr.ts";
+import { factsOf, greenRows, headOf, prng, randomPrRows, reached, reviewed, rnd, startedAs, type PrRows, type Rnd } from "./random-pr.ts";
 import { itemFacts } from "./world.ts";
 
 const CASES = Number(process.env.INVARIANT_CASES ?? 4000);
@@ -94,6 +94,7 @@ function safety({ w, f, p }: Case): Violation[] {
       need("blocked-push", w.workflow?.state !== "blocked", `${label(a)} while the workflow is blocked`);
       need("unaccepted-push", !w.workflow || w.workflow.kind === "issue" || a.params?.source === "operator" || !w.workflow.approvedBy || reached(w, w.workflow.baseHead, headOf(w)), `${label(a)} on commits the workflow did not accept`);
     }
+    if (a.kind === "implement" && f.ghState === "OPEN") need("revise-standing", w.workflow?.kind === "issue" && f.implementation?.standing === "yes", "a revision nobody who may act commanded");
     if (a.kind === "review") need("blocked-review", w.workflow?.state !== "blocked", "review while the workflow is blocked");
   }
   // The verdict of every merge, planned or not: the gates let exactly the covered ones through.
@@ -213,8 +214,6 @@ const refusedFor = (c: Case, why: RegExp): boolean => {
   const refusals = c.p.actions.filter(isWork).map((a) => gates(c.f, wantOf(a), "pipeline"));
   return refusals.every((r) => r !== null) && refusals.some((r) => why.test(r!));
 };
-/** The PR of an attempt that goes on, while nobody's implement workflow works on its issue. */
-const queuerless = (c: Case): boolean => liveAttempt(c.w) && c.w.workflow?.kind !== "issue";
 
 /** A failure of a rule that stands: the cases it covers and why. `example` still fails, so an entry does not outlive its reason. */
 type Exception = { id: string; rules: string[]; why: string; covers: (c: Case) => boolean; example: PrRows };
@@ -251,11 +250,6 @@ const EXCEPTIONS: Exception[] = [
   {
     id: "opus-close", rules: ["dead-end"], why: "A review that says close plans no wait: the workflow asks for a started PR, and an unstarted one waits for someone to pick it up.",
     covers: ({ p }) => p.state === "opus-close", example: greenRows({ workflow: null, legs: [], review: reviewed("close") }),
-  },
-  {
-    id: "implementation-without-workflow", rules: ["person-approval", "dead-end"],
-    why: "Once its issue's workflow ended, an implementation PR started by itself still leaves its fixes to the session: gated by the repo's approval of implementations, and refused at the job because nobody queued the issue.",
-    covers: queuerless, example: greenRows({ ours: true, implementation: { state: "pr-opened", revised: false }, approvals: { merge: true, push: true, comment: true, ci: true, fixissue: false }, review: reviewed("take-fix"), legs: [] }),
   },
 ];
 

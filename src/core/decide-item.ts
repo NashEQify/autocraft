@@ -3,18 +3,15 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { decidePr, implementOffWait, notStarted } from "./decide.ts";
+import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, standingWait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
 
-export { implementOffWait };
+export { BOX_IDENTITY_WAIT, implementOffWait };
 /** The wait of a queued issue whose latest attempt ended without a merged PR and whose text has not changed since. */
 export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again";
-
-/** The wait of started work while GitHub writes go out as the box account: nobody's started work counts then (data/access standing). */
-export const BOX_IDENTITY_WAIT = "an operator to switch AutoCraft to its GitHub App: started work runs as the person who started it only through the app";
 
 /**
  * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no live implement
@@ -28,9 +25,9 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   if (f.kind !== "issue" || !f.open || !f.inScope || f.held || im.queuedBy === null) return null;
   const state = row?.state as ImplementationState | undefined;
   const ended = !row || ENDED_STATES.has(state!);
-  if (im.standing === "unknown" && im.boxIdentity) return { wait: BOX_IDENTITY_WAIT, waitKind: "person" };
-  if (im.standing === "unknown") return { wait: `GitHub's answer on ${im.queuedBy}'s access to ${f.repo}`, waitKind: "system" };
-  if (im.standing === "no") return ended ? null : { wait: `a person who settles on ${f.repo} to queue it again`, waitKind: "person" };
+  if (im.standing === "no" && ended) return null;
+  const held = standingWait(im, f.repo);
+  if (held) return { wait: held.text, waitKind: held.kind };
   const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "system" as const });
   if (ended) {
     if (f.openPr !== null) return null;
