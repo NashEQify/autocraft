@@ -25,6 +25,7 @@ export type ItemFull = Omit<ItemRowAll, "jev_failed_hash">;
 export type ItemOf<P extends ItemPreset> = P extends "ref" ? ItemRef : P extends "card" ? ItemCard : P extends "pr" ? ItemPr : P extends "text" ? ItemText : ItemFull;
 
 export type OpenItemsArgs = { repos?: string[]; kind?: ItemKind; tracked?: boolean };
+export type RepoItemsArgs = { repos: string[]; kind?: ItemKind };
 
 export type ItemFilter = {
   repos?: string[]; kind?: ItemKind; states?: ItemState[]; numbers?: number[]; author?: string; labelsAny?: string[];
@@ -144,3 +145,6 @@ export type DownloadAsset = {
 /** Stars of a repo: the last sample before the range start, the first sample, and the last sample before `to`. */
 export type StarReadings = { atStart: number | null; first: number | null; atEnd: number | null };
 export type DownloadsView = { apps: { repo: string; name: string; stars: number }[]; assets: DownloadAsset[]; stars: Map<string, StarReadings> };
+/** What the image index compares to know the mirror changed. */
+export type ImageSignature = { items: number; itemUpdated: string | null; comments: number };
+export type ImageSource = { repo: string; body: string };
