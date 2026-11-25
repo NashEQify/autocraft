@@ -20,7 +20,7 @@ import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
 import { conflictPath, decidePr, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
-import { approvedHead, chainsOwn, neededReview, type RecordedPush } from "../core/evidence.ts";
+import { approvedHead, chainsOwn, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
@@ -96,12 +96,14 @@ function failures(pass: Pass, ref: string, since: string): { step: string; count
  * latest pushed fix-up of the PR's review findings (the review's own, or one a person asked for) after `since`, with the files the plan of the
  * review it fixed names (that review is at the head it started from).
  */
-function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, since: string, agreed: string): { fix: BlockerFacts["fix"]; plannedFiles: string[] } {
+function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, since: string, agreed: string): { fix: BlockerFacts["fix"]; plannedFiles: string[] } {
   const r = pass.fixes.get(ref);
+  const all = pass.moves.get(ref) ?? [], through = pushesSince(all, head, agreed);
   // A fix-up is as old as its patch, its push may come later.
-  const pushedAt = r && ((pass.moves.get(ref) ?? []).find((p) => p.to === r.toHead)?.at ?? r.createdAt);
+  const pushedAt = r && (all.find((p) => p.to === r.toHead)?.at ?? r.createdAt);
   const latest = pushedAt && pushedAt > since ? r : null;
-  const pushes = (pass.moves.get(ref) ?? []).filter((p) => p.at > agreed);
+  // One the mirror does not show yet counts once git reported it done; one that never landed does not.
+  const pushes = all.filter((p) => p.at > agreed && (p.landed || through.includes(p)));
   if (!pushes.length && !latest) return { fix: null, plannedFiles: [] };
   // The latest fix-up without its recorded size counts its stored patch.
   const unsized = latest && pushedAt! > agreed && !pushes.some((p) => p.to === latest.toHead && p.lines !== null);
@@ -430,7 +432,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   }
   const approved = w.approvedBy !== null;
   const fresh = review && readAt(pass, ref, review) > since ? review : null;
-  const fixed = pushedWork(pass, w, ref, since, agreed);
+  const fixed = pushedWork(pass, w, ref, head, since, agreed);
   const f = pass.facts.get(ref);
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts, w.entry === "merge"), conflict);

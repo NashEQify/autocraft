@@ -8,7 +8,7 @@ import type { KeySource, Ref } from "../data/keys.ts";
 import { loadActFacts, loadOwnLogins, type ActFacts, type PermKey } from "../data/access/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type TaskStates } from "../data/changes/index.ts";
-import { loadAssignments, loadAuditMax, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
+import { loadAssignments, loadAuditMax, loadControl, loadMadePushes, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
@@ -181,17 +181,17 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   const logins = [...o.base.own];
   const keyRepos = reposOf(keys);
   const dupeRepo = o.repo ?? (keyRepos?.length === 1 ? keyRepos[0] : undefined);
-  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, mergeEntryReviews] =
+  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins, made, mergeEntryReviews] =
     await Promise.all([
       loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
       loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), o.dupes?.() ?? loadDupeState(db, dupeRepo ? { repo: dupeRepo } : {}), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
       loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
       loadReviewFacts(db, keys, { now: o.now, own: logins }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
       loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
-      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys), loadMergeEntryReviews(db, keys),
+      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys), loadMadePushes(db, keys), loadMergeEntryReviews(db, keys),
     ]);
-  const own = new Map<RefKey, RecordedPush[]>([...new Set([...patches.keys(), ...pushes.keys(), ...repins.keys()])]
-    .map((key) => [key, ownPushes(patches.get(key)?.pushes ?? [], pushes.get(key)?.moves ?? [], repins.get(key) ?? [])]));
+  const own = new Map<RefKey, RecordedPush[]>([...new Set([...made.keys(), ...patches.keys(), ...pushes.keys(), ...repins.keys()])]
+    .map((key) => [key, ownPushes(made.get(key) ?? [], patches.get(key)?.pushes ?? [], pushes.get(key)?.moves ?? [], repins.get(key) ?? [])]));
   const data: PrPassData = {
     now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, mergeEntryReviews, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,

@@ -6,7 +6,7 @@ import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
-import { operatorFixEnded } from "../changes/fragments.ts";
+import { FINAL_BUT_DROPPED, operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
 import { goOnAt, LIVE_STATES } from "./fragments.ts";
@@ -280,15 +280,16 @@ export async function endFixupRequests(db: Db, rows: { id: number; reason: strin
 /**
  * Queued requests with no final fix-up row of their own, ordered by repo, number, head and id. `refs` narrows to those PRs; without it the
  * requests of tracked repos. A request counts only while its maker may still act on the repo; `anyMaker` returns the ones whose maker may not
- * (the caller ends them).
+ * (the caller ends them). `raced`: instead, the ones without a leg whose try at their head was dropped (another push came first).
  */
-export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo: string; number: number }[]; nowMs?: number; anyMaker?: true }): Promise<FixupRequest[]> {
+export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo: string; number: number }[]; nowMs?: number; anyMaker?: true; raced?: true }): Promise<FixupRequest[]> {
   if (f.refs?.length === 0) return [];
   const q = queryDb(db);
   const k = q.k as any;
   const after = new Date((f.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const rows = await q.all(k.selectFrom("main.operator_fixups as o").selectAll("o").where("o.state", "=", "queued")
-    .where((eb: any) => eb.not(operatorFixEnded(eb, "o")))
+    .$if(!f.raced, (b: any) => b.where((eb: any) => eb.not(operatorFixEnded(eb, "o"))))
+    .$if(!!f.raced, (b: any) => b.where("o.preapproval_id", "is", null).where((eb: any) => operatorFixEnded(eb, "o", ["superseded"])).where((eb: any) => eb.not(operatorFixEnded(eb, "o", FINAL_BUT_DROPPED))))
     .$if(!f.anyMaker, (b: any) => b.where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after)))
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "o", f.refs!.map((r) => [r.repo, r.number] as const))))
     .$if(!f.refs, (b: any) => b.where((eb: any) => trackedRepo(eb, "o.repo")))

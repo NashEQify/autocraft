@@ -94,13 +94,17 @@ test("each blocker stops an approved item and keeps its approval", async () => {
 test("a large fix is every push of ours since the approval together; a base merge has no size of its own", async () => {
   for (const [extra, stops] of [["cifix", true], ["merge", false]] as const) {
     const w = await approvedReview();
+    const made = (action: string, from_oid: string, to_oid: string, lines: number, at: string, landed_at: string | null = at) =>
+      w.db.run(w.db.k.insertInto("main.own_pushes").values({ repo: "app", number: 1, action, from_oid, to_oid, lines, at, landed_at }));
     const push = async (action: string, from: string, to: string, lines: number) => {
-      await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: later(), stage: "fixup", action, repo: "app", number: 1, from_oid: from, to_oid: to, before_res: "unknown", lines }));
+      await made(action, from, to, lines, later());
       await w.synced(1, to);
       await advanceWorkflows(w.db);
     };
     // Before the approval: what the person saw.
-    await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: "2020-01-01T00:00:00Z", stage: "fixup", action: "fixup-push", repo: "app", number: 1, from_oid: "sha0", to_oid: "sha1", before_res: "unknown", lines: 900 }));
+    await made("fixup-push", "sha0", "sha1", 900, "2020-01-01T00:00:00Z");
+    // Recorded, and never landed.
+    await made("fixup-push", "sha1", "lost", 900, later(), null);
     await push("fixup-push", "sha1", "sha1b", 250);
     assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
     await (extra === "cifix" ? push("cifix-push", "sha1b", "sha1c", 250) : push("conflict-push", "sha1b", "sha1c", 0));
@@ -445,7 +449,8 @@ const leg2 = async (w: World) => (await w.rows("SELECT state, head, from_head FR
 const planned2 = async (w: World) => (await w.prPlan(2)).actions.map((a) => a.kind);
 /** A CI fix of ours that lands now. */
 const pushNow = async (w: World, from: string, to: string, lines = 10) => {
-  await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "cifix", action: "cifix-push", repo: "app", number: 2, from_oid: from, to_oid: to, before_res: "unknown", lines }));
+  const at = new Date().toISOString();
+  await w.db.run(w.db.k.insertInto("main.own_pushes").values({ repo: "app", number: 2, action: "cifix-push", from_oid: from, to_oid: to, lines, at, landed_at: at }));
   await w.synced(2, to);
   await pause();
 };

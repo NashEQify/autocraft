@@ -245,7 +245,7 @@ export function factsOf(w: PrRows): PrFacts {
   const outEdge = w.pushedOff ? [{ from: head, to: "next" }] : [];
   // Revisions of our implementation are recorded with the push outcomes, autorepins with their requests, the other pushes by their patch rows.
   const made = (by: CommitBy) => w.commits.flatMap((c, i) => (i > 0 && c.by === by ? [{ from: w.commits[i - 1]!.sha, to: c.sha, at: c.at ?? at("08:00") }] : []));
-  const ours = ownPushes(w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push", lines: null })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50"), lines: null }))], made("repin"));
+  const ours = ownPushes([], w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push" })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50") }))], made("repin"));
   const moves = ours.map(({ from, to }) => ({ from, to }));
   const needed = open && live?.entry === "merge" ? neededReview({ entry: "merge", startedAt: at("09:00"), since: at("09:00"), reviewAskedAt: null }, ours, head, w.review ? [{ head: w.review.head, at: at("10:00") }] : []) : null;
   const owed = needed !== null;
@@ -333,7 +333,7 @@ export function factsOf(w: PrRows): PrFacts {
     if (defects) f.premergeFixUsed = premergeFixUsedIn(w.patches.fixups);
   }
   if (f.mergeable === "CONFLICTING") {
-    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
+    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable, gone: qh === head && !f.pushedOff }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
     const until = bucket === "capped" ? NOW + 12 * 3600_000 : bucket === "ask-retry" ? conflictAskRetryAtOf(w.patches.conflicts, qh, NOW) : undefined;
     f.conflict = { bucket, base: "main", baseOk: w.baseOk, ...(until !== undefined ? { until } : {}) };
   }
