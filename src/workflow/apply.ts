@@ -20,6 +20,7 @@ import { ownerOf, slugOf } from "../owners.ts";
 import { claimLevels } from "../remote/level.ts";
 import { actRefusal, type ActRefusal } from "../settlers.ts";
 import * as fx from "./effects.ts";
+import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
 import { confirmLine, listText, replyLine, stepsFor, utcClock, type Clock } from "./status.ts";
 import { WEIGHT_NORMAL, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
@@ -235,7 +236,6 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await implementationPr(db, live)] : [])].filter((x) => x !== null);
   let preapproval: number | null = null;
-  if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
   if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
@@ -250,6 +250,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   return {
     failed: [],
     commit: async () => {
+      if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
       if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: live.id }]);
@@ -264,8 +265,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
  */
 async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promise<void> {
   const a = (await loadImplementFacts(c.db, [{ repo: c.item.repo, number: c.item.number }])).byIssue.get(`${c.item.repo}#${c.item.number}`);
-  const open = a?.attempt.id === q.implementation && a.question?.round === q.round && a.answer === null;
-  if (!open) throw new fx.EffectError(t("The question this recommendation answers is no longer open."));
+  if (!isOpenQuestion(a, q)) throw new fx.EffectError(t("The question this recommendation answers is no longer open."));
   await recordAnswers(c.db, [{ id: q.implementation, question: q.round, by: c.by, via: c.via, option }], c.at);
 }
 

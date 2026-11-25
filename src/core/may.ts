@@ -1,5 +1,5 @@
 import type { StepApproval } from "../data/control/types.ts";
-import type { ActionState, WorkflowAction } from "../data/workflow/types.ts";
+import type { ActionState, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 
 export type WorkflowGate = {
@@ -13,6 +13,24 @@ export type WorkflowGate = {
   baseHead: string | null;
   fixupAsked: boolean;
 };
+
+/**
+ * What `mayMerge` and `mayPush` read of a live workflow row; null without a live one. `legHead`: the head its active merge leg is at.
+ * An issue's workflow has no head of its own to accept (its base_head only says which implementation head its files were shown at),
+ * so its implementation PR may merge at the head its leg accepted: a push that is not ours cancels the leg, and a new one starts at
+ * the head a person answered or approved.
+ */
+export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legHead?: string | null } = {}): WorkflowGate | null {
+  if (!w) return null;
+  return {
+    live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
+    blocker: w.blocker, baseHead: w.kind === "issue" ? o.legHead ?? null : w.baseHead, fixupAsked: o.fixupAsked ?? false,
+  };
+}
+
+/** The head the workflow's active merge leg is at, of the PR's active legs (newest last). */
+export const legHeadOf = (legs: readonly Pick<Preapproval, "workflow_id" | "head">[] | undefined, w: Pick<ItemWorkflow, "id"> | null | undefined): string | null =>
+  (w ? legs?.findLast((l) => l.workflow_id === w.id)?.head : null) ?? null;
 
 export type MayResult = { ok: true; as: "person" | "repo"; by: string } | { ok: false; why: string };
 

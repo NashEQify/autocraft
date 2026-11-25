@@ -3,7 +3,8 @@
 //
 // The rules the spec fixes: a yes needs an open recommendation; `merge` puts a pull request nobody started into the merge queue
 // and approves the merge of a started item; a yes to a recommendation that ends in a merge records the approval; parts named by
-// words must match exactly one planned part; a weight alone needs a started item.
+// words must match exactly one planned part; a weight alone needs a started item. While an implementation's question is open, its
+// options are the parts, and a reply that is only an option's number or words answers it.
 import { describe } from "./parse.ts";
 import { sameQuestion, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
@@ -92,9 +93,15 @@ export function partsMatching(plan: readonly PlanPart[], words: string): PlanPar
 }
 
 export function resolve(parsed: Parsed, state: ItemState): Resolved {
-  if (parsed.kind === "ambiguous") return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest } };
   const wf = state.workflow;
   const live = isLive(wf);
+  if (parsed.kind === "ambiguous") {
+    if (live && !parsed.understood) {
+      const option = optionNamed(wf, parsed.rest);
+      if (option) return pick(wf, option, {});
+    }
+    return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest } };
+  }
   if (parsed.kind === "yes") {
     const understood = "yes";
     if (!live || !wf.rec) return { kind: "ambiguous", understood, ambiguity: { why: "nothing-to-answer" } };
@@ -173,14 +180,13 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const approved = !!wf.approvedBy;
   // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
   // left, else the one option left.
-  const options = rec?.question ? wf.plan.filter((p) => p.option !== undefined && sameQuestion(p.question, rec.question)) : [];
+  const options = optionsOf(wf);
   if (rec?.question && options.length && (fix.length || drop.length) && !entry) {
     const left = options.filter((p) => p.state === "planned" && !drop.includes(p.n));
     if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
     const chosen = fix.length ? options.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
     if (!chosen?.option) return ambiguous({ why: "pick-one", parts: left.map((p) => p.n) });
-    const approve = merge && !approved;
-    return run({ pick: { question: rec.question, option: chosen.option, label: chosen.title }, drop, approve, merges: merge || approved, weight, answers: true, how: approve ? "approved" : "answered" });
+    return pick(wf, chosen, { drop, merge, weight });
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
   if (rec && drop.length && !fix.length && !entry) {
@@ -205,6 +211,40 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   return run({
     again, fix: fixes, drop, approve, merges: merge || approved, weight, answers: !!rec,
     how: approve ? "approved" : rec ? "answered" : null,
+  });
+}
+
+/** The options of the open implementation question, as the plan's parts; none when the recommendation stands for no question. */
+const optionsOf = (wf: ItemWorkflow): PlanPart[] =>
+  (wf.rec?.question ? wf.plan.filter((p) => p.option !== undefined && sameQuestion(p.question, wf.rec!.question)) : []);
+
+/** Words that reverse or postpone an answer: a reply holding one names no option. */
+const HEDGE = new Set(["no", "not", "never", "don", "dont", "wait", "hold", "later", "unless", "but", "if", "instead", "or"]);
+
+/**
+ * The option of the open question a reply names on its own ("2", "option 2", "go with per document"): by its number, or by words that
+ * are all words of exactly one option's title. Null when there is no open question, or the reply says anything else.
+ */
+function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
+  const options = optionsOf(wf);
+  const text = reply.toLowerCase().replace(/[.!]+$/, "").replace(/^(?:(?:go with|take|use|option|part|number|answer)\s+)+/, "").trim();
+  const number = /^#?(\d+)$/.exec(text);
+  if (number) return options.find((p) => p.n === Number(number[1])) ?? null;
+  const wordsOf = (s: string) => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const said = wordsOf(text);
+  if (said.some((x) => HEDGE.has(x))) return null;
+  const words = said.filter((x) => !FILLER.has(x));
+  if (!words.length) return null;
+  const hits = options.filter((p) => p.state === "planned" && words.every((x) => wordsOf(p.title).includes(x)));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/** Answers the open question with `chosen`; `merge` also approves the merge when nobody has. */
+function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: boolean; weight?: number | null }): Resolved {
+  const approve = !!o.merge && !wf.approvedBy;
+  return run({
+    pick: { question: wf.rec!.question!, option: chosen.option!, label: chosen.title }, drop: o.drop ?? [], approve, merges: !!o.merge || !!wf.approvedBy, weight: o.weight ?? null,
+    answers: true, how: approve ? "approved" : "answered",
   });
 }
 

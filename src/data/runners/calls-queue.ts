@@ -156,7 +156,7 @@ const splitRef = (r: string): { repo: string; number: number } => ({ repo: r.sli
 export async function withdrawItemCalls(db: Db, refStr: string, reason: string): Promise<number> {
   const it = splitRef(refStr);
   const items = (eb: Eb) => schemaEb(eb).selectFrom("main.remote_call_items as ci").where("ci.call_id", "=", ref<number>("remote_calls.id"));
-  return (await withdrawWhere(db, reason, Date.now(), (eb) => eb.and([eb("repo", "=", it.repo), eb("state", "=", "queued"),
+  return (await withdrawWhere(db, reason, Date.now(), (eb) => eb.and([eb("state", "=", "queued"),
     eb.exists(items(eb).select(eb.lit(1).as("one")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number)),
     eb(items(eb).select((e) => e.fn.countAll<number>().as("n")), "=", 1)]))).length;
 }

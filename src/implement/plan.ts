@@ -9,11 +9,12 @@ import { guardItem } from "../core/guard.ts";
 import { byOfJob } from "../core/gates.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { textHash } from "../core/open-prs.ts";
+import { loadActFacts, permKey, stillCounts } from "../data/access/index.ts";
 import { loadGuidanceTurns } from "../data/conversations/index.ts";
 import { startAttempts } from "../data/implement/index.ts";
 import { loadComments, loadItems } from "../data/mirror/index.ts";
 import { ghComment } from "../github/write.ts";
-import { ownLoginTest } from "../github/identity.ts";
+import { githubIdentity, ownLoginTest } from "../github/identity.ts";
 import { ITEM_SERVER, itemTools } from "../itemtools/index.ts";
 import { claudeParts, CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { referenceDir } from "../reference.ts";
@@ -21,7 +22,6 @@ import { defaultSemanticDeps, referenceProblems, type PublicText } from "../refe
 import { REFERENCE_SERVER, promptTier } from "../remote/bundle.ts";
 import { fixTurnMessage, mergeFixFields } from "../replylint.ts";
 import { isBotLogin } from "../review/bots.ts";
-import { settleMemo, settlesNow } from "../settlers.ts";
 import { endWorkspace } from "../build/workspaces.ts";
 import type { StepContext } from "../runner/steps.ts";
 import { queuerOf } from "./gate.ts";
@@ -180,11 +180,13 @@ export async function planInput(db: Db, o: { repo: string; number: number; sha: 
   let labels: string[] = [];
   try { labels = (JSON.parse(it.labels ?? "[]") as unknown[]).map(String); } catch { /* none */ }
   const issue: PlanIssue = { number: o.number, title: it.title ?? "", body: cut(it.body, PLAN_BODY_CHARS), author: it.author, labels, comments };
-  const memo = settleMemo();
+  const said = turns.get(ref) ?? [];
+  const maintainers = [...new Set(said.flatMap((t) => (t.kind === "maintainer" && t.login ? [t.login] : [])))];
+  const [act, identity] = maintainers.length ? await Promise.all([loadActFacts(db, maintainers.map((login) => ({ login, repo: o.repo }))), githubIdentity(db)]) : [null, "box" as const];
   const guidance: PlanGuidance[] = [];
-  for (const t of turns.get(ref) ?? []) {
-    // A maintainer's message counts while they settle on the repo (write access where the app acts for them).
-    if (t.kind === "maintainer" && !await settlesNow(db, t.login, [o.repo], memo)) continue;
+  for (const t of said) {
+    // A maintainer's message counts while they act on the repo (write access where the app acts for them).
+    if (t.kind === "maintainer" && !stillCounts(act?.get(permKey(t.login, o.repo)), identity)) continue;
     guidance.push({ from: t.kind as PlanGuidance["from"], login: t.login, at: t.at, text: cut(t.body, PLAN_GUIDANCE_CHARS) });
   }
   if (o.rounds !== null) {

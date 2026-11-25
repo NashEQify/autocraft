@@ -51,6 +51,15 @@ export async function loadLegs(db: Db, keys: KeySource, o: { activeOnly?: boolea
   return out;
 }
 
+/** Active legs of the workflows, on whatever PR they are (an issue's are on its implementation PRs), oldest first. */
+export async function listWorkflowLegs(db: Db, workflowIds: number[]): Promise<Preapproval[]> {
+  if (workflowIds.length === 0) return [];
+  const q = queryDb(db);
+  const k = q.k as any;
+  const rows = await q.all(k.selectFrom("main.preapprovals as p").selectAll("p").where("p.state", "in", ACTIVE_LEGS).where(kx.inList(db, "p.workflow_id", workflowIds, "bigint")).orderBy("p.id")) as Preapproval[];
+  return rows.map(legOf);
+}
+
 /**
  * Active legs of tracked repos joined to their workflow and `goOnAt`, plus the queued requests of those legs; two statements in one wave. A leg
  * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); a leg with no live workflow reads `"ended"`.

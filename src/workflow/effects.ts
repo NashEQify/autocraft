@@ -4,10 +4,10 @@
 // writes the workflow row; nothing here touches item_workflows.
 import { endWorkspace } from "../build/workspaces.ts";
 import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
-import { loadImplementFacts, cancelUnopened } from "../data/implement/index.ts";
+import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { withdrawItemCalls } from "../data/runners/index.ts";
-import { endFixupRequests, holdMerges, loadFixupRequests, loadHolds, loadLegs, releaseMerges } from "../data/workflow/index.ts";
+import { endFixupRequests, holdMerges, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegs, releaseMerges } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
@@ -173,11 +173,8 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   }
   // The workflow's merge legs on other items: an issue's implementation PRs.
   if (c.workflowId !== undefined && item.kind === "issue") {
-    const facts = await loadImplementFacts(db, one);
-    const prs = [...new Set((facts.byIssue.get(ref(item))?.prAttempts ?? []).map((a) => a.prNumber))].map((number) => ({ repo: item.repo, number }));
-    const legs = prs.length ? await loadLegs(db, prs, { activeOnly: true }) : new Map();
-    for (const p of [...legs.values()].flat().filter((l) => l.workflow_id === c.workflowId)) {
-      await attempt(() => cancelPreapproval(db, by, item.repo, p.number, c.exec, c.via));
+    for (const p of await listWorkflowLegs(db, [c.workflowId])) {
+      await attempt(() => cancelPreapproval(db, by, p.repo, p.number, c.exec, c.via));
     }
   }
   await withdrawItemCalls(db, ref(item), why);

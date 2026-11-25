@@ -1,12 +1,11 @@
 // Merge approval. A repo's `merge` step approval lets the pipeline merge PRs nobody approved one by one (the automatic
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
-// approval of its own PR. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
+// approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
 import { loadOwnCommits, loadStepApprovals, loadTrackedRepos, repoStepApproval, SETTINGS, setStepApproval, setting } from "../data/control/index.ts";
 import type { StepApproval } from "../data/control/types.ts";
 import { loadPushEdges } from "../data/changes/index.ts";
-import { listWorkflows, loadLiveRepos } from "../data/workflow/index.ts";
-import type { ItemWorkflow } from "../data/workflow/types.ts";
-import { mayMerge, type MayResult, type WorkflowGate } from "../core/may.ts";
+import { loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
+import { legHeadOf, mayMerge, workflowGate, type MayResult } from "../core/may.ts";
 import type { Db } from "../db/index.ts";
 
 export type MergeApproval = StepApproval;
@@ -20,29 +19,27 @@ export async function setMergeApproval(db: Db, by: string, repo: string, approve
   return await setStepApproval(db, [{ repo, step: "merge", on: approved }], by) > 0;
 }
 
-const gateOf = (w: ItemWorkflow): WorkflowGate => ({
-  // The stored entry is `fixup`; the rule spells it `fix-up`.
-  live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
-  blocker: w.blocker, baseHead: w.baseHead, fixupAsked: false,
-});
-
-/** Whether each PR of the repo may merge at the given head: the repo's approval, the PR's live workflow and the heads we pushed, in one load. */
+/**
+ * Whether each PR of the repo may merge at the given head: the repo's approval, the live workflow that works on it (its own, or its
+ * issue's), that workflow's merge leg and the heads we pushed, in one load.
+ */
 export async function mergeVerdicts(db: Db, repo: string, items: { number: number; head: string }[]): Promise<Map<number, MayResult>> {
   const out = new Map<number, MayResult>();
   if (!items.length) return out;
   const refs = items.map((i) => ({ repo, number: i.number }));
-  const [approvals, workflows, edges, own] = await db.together(() => Promise.all([
+  const [approvals, workflows, legs, edges, own] = await db.together(() => Promise.all([
     loadStepApprovals(db, [repo], ["merge"]),
-    listWorkflows(db, { refs, live: true }),
+    loadPrWorkflows(db, refs),
+    loadLegs(db, refs, { activeOnly: true }),
     loadPushEdges(db, refs),
     loadOwnCommits(db, items.map((i) => ({ repo, sha: i.head }))),
   ]));
   const repoApproval = approvals.get(repo)?.merge ?? null;
-  const gates = new Map(workflows.map((w) => [w.number, gateOf(w)]));
   for (const i of items) {
     const ownHeads = new Set((edges.get(`${repo}#${i.number}`) ?? []).map((e) => e.to));
     if (own.has(`${repo}@${i.head}`)) ownHeads.add(i.head);
-    out.set(i.number, mayMerge({ repoApproval, workflow: gates.get(i.number) ?? null, head: i.head, ownHeads }));
+    const w = workflows.get(`${repo}#${i.number}`);
+    out.set(i.number, mayMerge({ repoApproval, workflow: workflowGate(w, { legHead: legHeadOf(legs.get(`${repo}#${i.number}`), w) }), head: i.head, ownHeads }));
   }
   return out;
 }

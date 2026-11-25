@@ -180,3 +180,9 @@ export function decideAct(facts: ActFacts, write: "yes" | "no" | "unknown" | "ca
   if (identity !== "app") return { ok: false, why: "box-identity" };
   return { ok: true, role: facts.role, basis: write === "yes" ? "live" : "cached" };
 }
+
+/** Work a person started, or a message they wrote, still counts: an operator's, or a maintainer's whom the act rule lets act with a write permission read within PERM_READ_TTL. */
+export function stillCounts(facts: ActFacts | undefined, identity: ActIdentity, now: number = Date.now()): boolean {
+  if (!facts) return false;
+  return facts.role === "operator" || decideAct(facts, freshWrite(facts.perm, PERM_READ_TTL, now) ? "cached" : "unknown", identity).ok;
+}

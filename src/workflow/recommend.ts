@@ -72,7 +72,7 @@ export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[])
 
 /**
  * What an item stopped at a blocker comes back with. A yes resumes the plan with the merge still approved:
- * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix, a stuck implementation's Try again);
+ * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix; a stuck implementation comes back through question.ts);
  * - findings of the pre-merge review (`params.premerge`: their plan parts) are fixed first, never merged as they are;
  * - a major finding or a change outside the purpose takes the review's own recommendation when it gave one;
  * - for the rest, what the blocker was about is accepted as it is.
@@ -89,8 +89,6 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
   switch (found.blocker) {
     case "author-commits": return go(t("Review the new commits, then merge."));
     case "failed-twice": {
-      const answer = p.answer as Recommendation["answer"] | undefined;
-      if (answer) return go(t("Start the implementation again, then merge."), { answer });
       if (p.step === "fix-up") {
         const fix = planned(plan);
         return fix.length ? { text: t("Try the fix-up of {parts} again, then merge.", { parts: listText(fix) }), parts: { fix, drop }, merges: true } : go(t("Try the fix-up again, then merge."), { again: "fixup" });
