@@ -243,7 +243,7 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string): stri
       if (understood && a.rest) return t("I understood “{understood}” but not “{rest}”. Nothing runs until the instruction is clear.", { understood, rest: a.rest });
       if (a.rest) {
         const one = singleCommand(a.rest);
-        if (one) return t("I read this as `{command}`. Reply `{reply}` to run it.", { command: one, reply: mention ? `@${mention} yes` : "yes" });
+        if (one) return t("I read this as `{command}`. Reply `{reply}` to run it.", { command: one, reply: mention ? `@${mention} ${one}` : one });
         return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: COMMANDS.filter((c) => !c.answer || c.word === "drop").map((c) => c.usage).join(", ") });
       }
       if (understood) return t("I understood “{understood}” but not which items. Nothing runs until the instruction is clear.", { understood });

@@ -40,7 +40,7 @@ describe("workflow commands", () => {
     for (const text of ["don't merge it", "merge it but not yet", "wait", "no", "merge it later", "merge if CI is green", "hold the merge", "merge it please soon"]) assert.equal(words(text), "ambiguous", text);
     const reply = (text: string, mention?: string) => { const r = resolve(parse(text), pr()); return r.kind === "ambiguous" ? replyLine(r, undefined, mention) : ""; };
     assert.match(reply("merge it but soon", "autocraft-bot"), /couldn't read/);
-    assert.match(reply("let's review sometime", "autocraft-bot"), /I read this as `review`\. Reply `@autocraft-bot yes`/);
+    assert.match(reply("let's review sometime", "autocraft-bot"), /I read this as `review`\. Reply `@autocraft-bot review`/);
     assert.match(reply("don't merge it"), /couldn't read.*Commands: review/);
   });
 
