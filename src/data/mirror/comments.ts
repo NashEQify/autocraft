@@ -100,9 +100,9 @@ export async function loadAuthoredIn(db: Db, repo: string, logins: string[], ass
   const q = queryDb(db);
   const lower = [...new Set(logins.map((l) => l.toLowerCase()))];
   const rows = await q.all(q.k.selectFrom("items").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
-    .where((eb) => kx.inList(db, "author_association", associations))
+    .where(() => kx.inList(db, "author_association", associations))
     .union(q.k.selectFrom("comments").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
-      .where((eb) => kx.inList(db, "author_association", associations))), { label: "mirror.loadAuthoredIn" });
+      .where(() => kx.inList(db, "author_association", associations))), { label: "mirror.loadAuthoredIn" });
   return new Set(rows.map((r) => r.login));
 }
 
