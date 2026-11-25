@@ -17,7 +17,7 @@ import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import { ASKING_STATES, type Parsed } from "../../workflow/types.ts";
+import { ASKING_STATES, RULE_STARTER, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 
@@ -61,7 +61,8 @@ const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFac
 };
 
 /**
- * Who a workflow acts for, the newest first: whoever last answered or resumed it, approved its merge or started it. Their command is the authority of
+ * Who a workflow acts for, the newest first: whoever last answered or resumed it, approved its merge or started it, never the automatic
+ * merge rule. Their command is the authority of
  * its work, an implementation and its PR's revisions among it (src/workflow/work.ts settlerOf picks the one who may act).
  */
 export function workflowActors(w: Pick<ItemWorkflow, "startedBy" | "startedAt" | "approvedBy" | "approvedAt">, answer: { login: string; at: string } | null | undefined): string[] {
@@ -71,7 +72,7 @@ export function workflowActors(w: Pick<ItemWorkflow, "startedBy" | "startedAt" |
     { login: w.startedBy, at: w.startedAt },
   ].sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : 0));
   const seen = new Set<string>();
-  return said.flatMap(({ login }) => { const key = login.toLowerCase(); return seen.has(key) ? [] : (seen.add(key), [login]); });
+  return said.flatMap(({ login }) => { const key = login.toLowerCase(); return login === RULE_STARTER || seen.has(key) ? [] : (seen.add(key), [login]); });
 }
 
 /** Case-insensitive `col IN logins` with a statement text that does not depend on the list. */

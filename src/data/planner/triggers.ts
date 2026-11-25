@@ -1,6 +1,10 @@
 // The live topics this module's tables feed (src/db/live.ts).
 import { registerTriggerSource } from "../../db/live.ts";
 
+/** The candidate states of src/workflow/auto-stop.ts, on a plan whose reasons hold none of the rule's eligibility reasons (core/decide.ts queueEntry) nor a workflow's. */
+const AUTO_STOP = "new.kind = 'pr' AND new.state IN ('needs-decision', 'opus-hold', 'opus-close', 'verify-failed', 'verify-error')"
+  + ["\"size %", "\"label %", "\"no settled label\"", "\"author not on the whitelist\"", "\"author unknown\"", "\"not approved for merge\""].map((r) => ` AND new.reasons NOT LIKE '%${r}%'`).join("");
+
 registerTriggerSource("stages",
   { table: "stages" },
   { table: "item_stage" },
@@ -10,6 +14,13 @@ registerTriggerSource("stages",
 registerTriggerSource("plans",
   { table: "item_plans" },
   { table: "liveness_items" },
+);
+
+// A stored PR plan that enters a state the automatic merge rule stops in for a person, or changes its reasons there, with no reason
+// that keeps it off the rule: the workflow pass starts its question at once (src/workflow/auto-stop.ts). Not a planner input.
+registerTriggerSource("auto-stops",
+  { table: "item_plans", ops: ["INSERT"], when: `${AUTO_STOP}` },
+  { table: "item_plans", ops: ["UPDATE"], when: `${AUTO_STOP} AND (old.state IS NOT new.state OR old.reasons IS NOT new.reasons)` },
 );
 
 // What decides an item's next pipeline step and its place in line (src/rank/position.ts). Narrower than the page topics:

@@ -695,7 +695,7 @@ export type Wake = (at: number) => void;
  * markers are the ones it read before and whose wake time (`Wake`) has not come would move nothing.
  */
 export function preapprovalInputs(seqs: Record<string, number>): string {
-  return [...INPUT_TOPICS, "access"].map((t) => seqs[t] ?? 0).join(",");
+  return [...INPUT_TOPICS, "access", "auto-stops"].map((t) => seqs[t] ?? 0).join(",");
 }
 
 /**

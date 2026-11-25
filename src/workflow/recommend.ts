@@ -6,6 +6,7 @@
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
 import { byHand, type ConflictPath } from "../core/decide.ts";
+import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../core/rules.ts";
 import { asSentence } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
@@ -165,3 +166,23 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
 
 const afterStop = (reason: string, go: (text: string) => Recommendation): Recommendation =>
   go(reason ? t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }) : t("Go on with the merge."));
+
+/** The merge rule's reasons (core/decide.ts queueEntry) as a person reads them; a reason of its own wording is shown as it is. */
+const RULE_REASONS: readonly (readonly [(r: string) => boolean, () => string])[] = [
+  [(r) => r === UNSURE_REASON, () => t("the review is unsure")],
+  [(r) => r === PREMERGE_DEFECT_REASON, () => t("the pre-merge review found a defect")],
+  [(r) => r === PREMERGE_UNSURE_REASON, () => t("the pre-merge review could not verify a claim of the description")],
+  [(r) => r === PREMERGE_FAILED_REASON, () => t("the pre-merge review failed")],
+  [(r) => r.startsWith("conflicts with "), () => t("it goes against an earlier statement of the owners")],
+  [(r) => r.startsWith("verification failed") || r.startsWith("verification errored"), () => t("verification failed")],
+  [(r) => r.startsWith("the screenshots show"), () => t("the screenshots show a regression")],
+];
+/** Reasons a sentence names at most. */
+const RULE_REASONS_SHOWN = 3;
+
+/** The recommendation of a PR the automatic merge rule took up and stopped: the sentence first says why the rule does not merge it. */
+export function ruleStopped(rec: Recommendation, reasons: readonly string[]): Recommendation {
+  const why = [...new Set(reasons.map((r) => RULE_REASONS.find(([is]) => is(r))?.[1]() ?? r))].slice(0, RULE_REASONS_SHOWN);
+  if (!why.length) return rec;
+  return { ...rec, text: t("The automatic merge rule stops here: {why}. {text}", { why: listText(why), text: rec.text }) };
+}
