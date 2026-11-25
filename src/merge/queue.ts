@@ -1,5 +1,5 @@
 // The merge queue as a view of Plans: every PR with a take or take-fix review at its current head commit, with the fields the
-// dashboard, the flow counts and the merge executors show. Nothing here decides: state, path, reasons and notes come from
+// dashboard and the merge executors show. Nothing here decides: state, path, reasons and notes come from
 // decidePr (src/core/decide.ts); the rest is read from the facts. Reads only local tables; no GitHub calls.
 import { decidePr, mergeEntry, queueEntry } from "../core/decide.ts";
 import { loadPass, loadPrFacts } from "../core/facts.ts";
@@ -15,7 +15,7 @@ import type { Db } from "../db/index.ts";
 export { QUEUE_STATES, type QueueState };
 export {
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, VERIFY_OK, verifyOk, VERIFY_UNAVAILABLE, verifyAllows, ciAllows,
-  MERGE_OPTIONS, mergeDecisionId, holdDecisionId, HEAD_FACT, OPEN_GROUP_SQL, PIPELINE_LOGIN_KEY,
+  mergeDecisionId, PIPELINE_LOGIN_KEY,
 } from "../core/rules.ts";
 export { NO_CI_SAMPLE, repoHasNoCi } from "./no-ci.ts";
 export { headWasUnsure, ownFixPrs } from "../core/facts.ts";
@@ -32,16 +32,12 @@ export type QueueEntry = {
   path: MergePath;
   /** Why the rule doesn't cover it; empty when it does. */
   outsideRule: string[];
-  /** Always null: Merge? questions are retired (the field goes with the web code). */
-  decisionId: string | null;
   /** Actions runs at the reviewed head that wait for a maintainer's approval (see ci-approval.ts); 0 when none or unknown. */
   runsWaiting: number;
   /** Why the pipeline does not approve them: the repo's CI approval is off, approving failed twice, or they are not runs it approves (not a fork's pull_request); null when it will. */
   runsBlocked: "off" | "failed" | "unsupported" | null;
   /** The repo has no CI at all (not just no checks on this PR yet). */
   noCi: boolean;
-  /** Always null: Merge? answers are retired (the field goes with the web code). */
-  answer: string | null;
   refusedReason: string | null;
   reviewedAt: string;
   /** An operator holds the PR's merge (src/merge/controls.ts): it is reviewed and fixed as usual but does not merge, alone or in a batch. */
@@ -95,8 +91,7 @@ function entryOf(f: PrFacts, plan: ReturnType<typeof decidePr>, title: string, p
     repo: f.repo, number: f.number, title, author: f.author, tier: f.tier, head, size: f.size, label: f.label,
     verdict: r ? r.verdict as "take" | "take-fix" : null, reason: r?.reason ?? "", fixes: r?.fixes ?? 0, ci: f.ci, mergeable: f.mergeable,
     state: plan.state as QueueState, eligible: plan.eligible, path: plan.path, outsideRule: plan.reasons,
-    decisionId: null,
-    runsWaiting: f.runs?.waiting ?? 0, runsBlocked: f.runs?.blocked ?? null, noCi: x.noCi, answer: null, refusedReason: x.refusedReason,
+    runsWaiting: f.runs?.waiting ?? 0, runsBlocked: f.runs?.blocked ?? null, noCi: x.noCi, refusedReason: x.refusedReason,
     reviewedAt: r?.at ?? f.workflow?.startedAt ?? "", held: f.mergeHeld, note: plan.note, blockedLive: plan.state === "changes-requested" && !!f.changesRequested?.live,
     verify: f.verification, ...(plan.conflictNote !== null ? { conflictNote: plan.conflictNote } : {}), ...(f.mainFix ? { mainFix: true } : {}), premerge,
   };

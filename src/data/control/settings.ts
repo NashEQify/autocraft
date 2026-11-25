@@ -9,7 +9,7 @@ import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "./audit.ts";
 import { loadStepApprovals } from "./approvals.ts";
 import { loadStageLimits } from "./limits.ts";
-import { PilotError, loadTrackedRepos } from "./repos.ts";
+import { loadTrackedRepos } from "./repos.ts";
 import { loadTrips } from "./trips.ts";
 import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType } from "./types.ts";
 
@@ -65,7 +65,6 @@ export const SETTINGS = {
   /** The name people type to address the app (no `@`); null when unset or not a valid login. */
   githubMentionName: reg<string | null>("github_mention_name", "text", null, { owner: "github" }, (r) => { const v = r?.trim(); return v && v.length <= 39 && MENTION.test(v) ? v : null; }),
   appSlugs: reg<string[]>("app_slugs", "json", [], { owner: "github" }, (r) => strings(jsonOf(r))),
-  pilotItems: reg<string[]>("pilot_items", "json", [], { owner: "control" }, (r) => strings(jsonOf(r))),
 
   whitelistMinMerged: reg("whitelist_min_merged", "int", 5, { owner: "intake" }, (r) => Number(r ?? 5)),
   whitelistMinMergeRate: reg("whitelist_min_merge_rate", "float", 0.6, { owner: "intake" }, (r) => Number(r ?? 0.6)),
@@ -114,7 +113,7 @@ export const REPO_SETTINGS = {
 export const REGISTRY: readonly Reg<unknown>[] = [...Object.values(SETTINGS), ...Object.values(REPO_SETTINGS)];
 
 /** Keys the code still reads or writes in `settings` that the registry does not carry. They end with the build: state keys move to their module's tables (conventions 4.3), retired keys are deleted. */
-export const RETIRED_SETTINGS = ["usage_pause", "inference", "judgement_model", "maintainer_writes", "flow_summary_marks", "outside_admitted_backfill", "fixissue_not_rust"] as const;
+export const RETIRED_SETTINGS = ["usage_pause", "inference", "judgement_model", "maintainer_writes", "pilot_items", "flow_summary_marks", "outside_admitted_backfill", "fixissue_not_rust"] as const;
 export const STATE_SETTINGS = [
   "limit_reset_at", "merge_approved", "push_approved", "comment_approved", "fixissue_approved", "labels_approved", "mainfix_approved", "prstatus_approved", "ci_approved",
   "warm_report", "warm_bytes", "warm_gc_at", "warm_trimmed_publish", "warm_rebuild", "worker_update_pending", "worker_update_failures", "worker_update_attempts", "org_high_water", "full_sync_cursor", "classify_run",
@@ -365,36 +364,7 @@ export async function listSettings(db: Db, f?: { scope?: "instance" | "repo"; sh
   return rows.filter((r) => (!f?.scope || r.def?.scope === f.scope) && (!f?.shown || (r.def !== null && r.def.shown !== false)));
 }
 
-// ---- pilot list and test repos ------------------------------------------------------------------------------------------
-
-const PILOT_KEY = "pilot_items";
-const PILOT_REF = /^([A-Za-z0-9._-]+)(?:#([1-9][0-9]*))?$/;
-
-/** Parses refs (repo#number) separated by whitespace or commas; throws on a malformed one, a whole-repo entry or an untracked repo. */
-export async function parsePilotRefs(db: Db, input: unknown): Promise<string[]> {
-  const parts = Array.isArray(input) ? input : typeof input === "string" ? input.split(/[\s,]+/).filter(Boolean) : null;
-  if (!parts || parts.some((p) => typeof p !== "string")) throw new PilotError("items must be a list of repo#number");
-  const tracked = new Set((await loadTrackedRepos(db)).keys());
-  const out: string[] = [];
-  for (const p of parts as string[]) {
-    const m = PILOT_REF.exec(p);
-    if (!m) throw new PilotError(`not a repo#number: ${p}`);
-    if (!m[2]) throw new PilotError(`${p} is a whole repo; switch it on or off with the Pipeline toggle on the Repos page`);
-    if (!tracked.has(m[1]!)) throw new PilotError(`${m[1]} is not tracked`);
-    if (!out.includes(p)) out.push(p);
-  }
-  if (out.length > 200) throw new PilotError("at most 200 items");
-  return out;
-}
-
-/** Saves the pilot list (`pilot_items`) and audits; an empty list clears the pilot. One write transaction. */
-export async function setPilot(db: Db, by: string, input: unknown): Promise<string[]> {
-  return await db.write(async () => {
-    const refs = await parsePilotRefs(db, input);
-    await saveSettings(db, [{ key: PILOT_KEY, value: refs.length ? JSON.stringify(refs) : null }], by, { action: refs.length ? "pilot-set" : "pilot-clear", target: PILOT_KEY, details: { items: refs } });
-    return refs;
-  });
-}
+// ---- test repos ---------------------------------------------------------------------------------------------------------
 
 /** The `test_repo:<repo>` flag. */
 export async function isTestRepo(db: Db, repo: string): Promise<boolean> {

@@ -99,13 +99,13 @@ test("a viewer gets no staff-only post-merge fields and only the GitHub writes o
   assert.deepEqual(v.map((e) => [e.summary, e.actor.name]), [["Posted review", "AutoCraft"]]);
   assert.equal((await writesOf("maintainer")).length, 2, "a maintainer also sees the dashboard answer, not the operator-only access change");
   assert.equal((await writesOf("operator")).length, 3);
-  await db.run(db.k.insertInto("decisions").values({ id: "b1", kind: "merge", repo: null, number: null, items: JSON.stringify([{ repo: "photocraft", number: 7 }]), question: "Merge the batch?", options: "[]", asked_at: "2026-01-03T00:00:00Z" }));
-  assert.deepEqual(((await trace(db, req(7, { kinds: "decision" }))) as ItemTrace).events.map((e) => e.summary), ["Asked: Merge the batch?"], "a batch decision is found through decision_items");
-  await db.run(db.k.insertInto("decisions").values({ id: "b2", kind: "merge", repo: null, number: null, items: JSON.stringify([{ repo: "photocraft", number: 7 }, { repo: "pdfcraft", number: 1 }]), question: "Hidden batch?", options: "[]", asked_at: "2026-01-04T00:00:00Z" }));
-  const viewer = { ...req(7, { kinds: "decision" }), user: { login: "u", role: "viewer" as const, canWrite: async () => true, canRead: async (r: string) => r !== "pdfcraft" } };
-  await db.run(db.k.insertInto("repos").values({ name: "pdfcraft", visibility: "private" }).onConflict((oc) => oc.column("name").doUpdateSet({ visibility: "private" })));
-  assert.deepEqual(((await trace(db, viewer)) as ItemTrace).events.map((e) => e.summary), ["Asked: Merge the batch?"], "a batch touching a repo hidden from the viewer is left out");
-  assert.equal(((await trace(db, req(7, { kinds: "decision" }))) as ItemTrace).events.length, 2, "an operator sees both");
+  await db.run(db.k.insertInto("workflow_events").values([
+    { repo: "photocraft", number: 7, login: "admin", via: "dashboard", kind: "answered", line: "Merging when CI is green.", at: "2026-01-03T00:00:00Z" },
+    { repo: "pdfcraft", number: 7, login: "admin", via: "dashboard", kind: "answered", line: "another item", at: "2026-01-04T00:00:00Z" },
+  ]));
+  const answers = async (role: "viewer" | "maintainer") => ((await trace(db, { ...as(role), query: new URLSearchParams({ kinds: "decision" }) })) as ItemTrace).events.map((e) => e.summary);
+  assert.deepEqual(await answers("maintainer"), ["Merging when CI is green."]);
+  assert.deepEqual(await answers("viewer"), ["Answered"], "a viewer sees that it was answered, not the text");
   const f = (await trace(db, { ...as("viewer"), query: new URLSearchParams({ kinds: "review" }) })) as ItemTrace;
   assert.equal(f.events[0]!.head, "c".repeat(40));
 });

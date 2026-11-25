@@ -5,7 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
-import { PERM_READ_TTL } from "../access/permissions.ts";
+import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
@@ -62,7 +62,8 @@ export async function listWorkflowLegs(db: Db, workflowIds: number[]): Promise<P
 
 /**
  * Active legs of tracked repos joined to their workflow and `goOnAt`, plus the queued requests of those legs; two statements in one wave. A leg
- * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); a leg with no live workflow reads `"ended"`.
+ * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); with none it reads `"unlinked"`: its
+ * start writes the workflow row after it. A leg of a workflow that is no longer live reads `"ended"`.
  */
 export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise<LegPass> {
   const pass: LegPass = { rows: [], context: new Map(), requests: [] };
@@ -92,7 +93,7 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
     const p = legOf(rest as Preapproval);
     pass.rows.push(p);
     const live = wf_id !== null && wf_state !== null && LIVE_STATES.includes(wf_state);
-    if (!live) { pass.context.set(p.id, "ended"); continue; }
+    if (!live) { pass.context.set(p.id, p.workflow_id === null ? "unlinked" : "ended"); continue; }
     const context: LegContext = { workflowId: num(wf_id), entry: wf_entry!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, approvedBy: wf_approved_by };
     pass.context.set(p.id, context);
   }
@@ -258,7 +259,7 @@ export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo:
   if (f.refs?.length === 0) return [];
   const q = queryDb(db);
   const k = q.k as any;
-  const after = new Date((f.nowMs ?? Date.now()) - PERM_READ_TTL).toISOString();
+  const after = new Date((f.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const rows = await q.all(k.selectFrom("main.operator_fixups as o").selectAll("o").where("o.state", "=", "queued")
     .where((eb: any) => eb.not(operatorFixEnded(eb, "o.id")))
     .$if(!f.anyMaker, (b: any) => b.where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after)))

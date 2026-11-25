@@ -2,7 +2,7 @@
 import type { QueueBatch, QueueRow, QueueState, TypeLabel } from "../types";
 import { AUTHORS, NOW, REPOS, rng, titleFor } from "./fixtures";
 
-const STATES: QueueState[] = ["ready", "decision-answered-merge", "refused", "waiting-ci", "waiting-premerge", "ci-failed", "conflict", "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "declined", "merged", "held-duplicate", "held-backlog", "batch-checking", "in-batch", "batch-failed", "changes-requested"];
+const STATES: QueueState[] = ["ready", "decision-answered-merge", "refused", "waiting-ci", "waiting-premerge", "ci-failed", "conflict", "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "merged", "held-backlog", "batch-checking", "in-batch", "batch-failed", "changes-requested"];
 const REASONS = [
   "Fixes the off-by-one in the page range and adds a test.",
   "Small, correct guard against an empty selection.",

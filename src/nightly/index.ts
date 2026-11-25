@@ -128,7 +128,7 @@ export function defaultDeps(): NightlyDeps {
       try { return readFileSync(path, "utf8"); } catch { return null; }
     },
     openIssue: async (db, o) => {
-      const g = await guardRepo(db, o.repo, "comment", o.by, undefined, typeof o.by === "object" ? o.by.operator : undefined);
+      const g = await guardRepo(db, o.repo, "comment", o.by, typeof o.by === "object" ? o.by.operator : undefined);
       if ("refused" in g) throw new IssueError(g.refused, true);
       return createIssue({ db, login: ACTOR }, g, exec, { repo: o.repo, target: `${o.repo}:nightly`, title: o.title, body: o.body }, { by: "operator", model: "haiku" });
     },

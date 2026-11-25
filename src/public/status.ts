@@ -37,7 +37,7 @@ export type PublicStatus = {
 // Held and refused states are deliberately folded into "In review": the reason is not public.
 const FIXING = ["needs-fix-up"];
 const WAITING = ["waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "waiting-main-ci"];
-const NEVER_REVIEWED = ["not-reviewed", "label-not-reviewed", "out-of-scope", "scope", "draft", "not-started"];
+const NEVER_REVIEWED = ["not-reviewed", "out-of-scope", "draft", "not-started"];
 
 /** True for a repo that is tracked and public. */
 export const isPublicRepo = async (db: Db, repo: string): Promise<boolean> => (await loadPublicRepoNames(db)).includes(repo);

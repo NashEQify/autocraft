@@ -62,7 +62,7 @@ test("a take-fix PR with a conflict give-up, an ended CI fix and a held merge ar
 });
 
 test("an issue is unassigned when its implementation waits on a person, kept while it runs, and never assigned by the planner", async () => {
-  const queued = (state: string) => ({ queuedBy: "op", settles: true, featureOn: true, liveInRepo: 0,
+  const queued = (state: string) => ({ queuedBy: "op", standing: "yes" as const, featureOn: true, liveInRepo: 0,
     row: { state, attempt: 1, textChanged: false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false } });
   assert.equal(unassigns(decideItem(itemFacts({ assignment: ours, implement: queued("stuck") }))), true);
   assert.equal(unassigns(decideItem(itemFacts({ assignment: ours, implement: queued("implementing") }))), false);

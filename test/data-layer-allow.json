@@ -1,5 +1,3 @@
 [
-  "src/build/tasks.ts",
-  "src/dash/api/related.ts",
   "src/itemtools/server/tools.ts"
 ]

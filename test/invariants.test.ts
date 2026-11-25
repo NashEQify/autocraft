@@ -37,8 +37,9 @@ function randomPr(x: Rnd): PrFacts {
     ghState: x.pick(["OPEN", "OPEN", "OPEN", "MERGED", "CLOSED"] as const),
     head, draft: x.bool(0.1), tier: x.pick(["whitelisted", "whitelisted", "not", "allow", "deny"] as const),
     size: x.pick(["S", "S", "M", "L"] as const), label: x.pick(["bugfix", "bugfix", "infra", "performance", "plugin candidate", null]),
-    needsDecisionFlag: x.bool(0.1), scopeAnswer: x.pick([null, null, null, "take", "small-extra", "close"]),
-    inScope: x.bool(0.9), integration: x.bool(0.05), batchPr: x.bool(0.05), heldBacklog: x.bool(0.05), heldDuplicate: x.bool(0.05), mergeHeld: x.bool(0.1),
+    needsDecisionFlag: x.bool(0.1),
+    workflow: x.pick([null, { entry: "review", approved: true }, { entry: "review", approved: true }, { entry: "review", approved: false }, { entry: "fixup", approved: true }, { entry: "merge", approved: true }].map((w) => w && { ...w, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true })) as PrFacts["workflow"],
+    inScope: x.bool(0.9), integration: x.bool(0.05), batchPr: x.bool(0.05), heldBacklog: x.bool(0.05), mergeHeld: x.bool(0.1),
     authorIsPipeline: x.bool(0.1), pipelineOn: x.bool(0.9),
     repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1), implementOn: x.bool(0.8) },
     ci: x.pick(["success", "success", "success", "failure", "pending", "none", "unknown"]),
@@ -52,17 +53,13 @@ function randomPr(x: Rnd): PrFacts {
       mode: x.pick(["full", "full", "skipped"]), stale: x.bool(0.1), staleActionable: x.bool(0.1), fixes: x.int(3),
     },
     verification: x.bool(0.1) ? null : { state: x.pick(["passed", "passed", "ci-enough", "failed", "error", "running", "planned", "stale", "unavailable"]) },
-    decision: {
-      asked: x.bool(0.3), openQuestion: x.bool(0.15), answer: x.pick([null, null, null, "merge", "merge", "hold", "close"]),
-      mergeAnswerAfterReview: x.bool(0.6), inOpenGroup: x.bool(0.05), execWaiting: x.bool(0.05), hold: { asked: x.bool(0.3), open: x.bool(0.1), answer: x.pick([null, null, "wait", "close"]), otherOpen: x.bool(0.1) },
-    },
+    handOver: x.pick([null, null, { afterReview: true }, { afterReview: false }]), mergeWaiting: x.bool(0.05),
     premerge: x.bool(0.15) ? null : {
       tries: x.int(4), hasFindings: x.bool(0.85), unsure: false, defects: x.pick([0, 0, 0, 1, 2]), defectsAllFixable: x.bool(0.7), fixesSafe: x.bool(0.7), minor: x.int(2), error: null,
     },
     lastMerge: x.pick([null, null, null, { outcome: "refused", reason: "ci pending", ci: "pending", mergeable: "MERGEABLE" }, { outcome: "merged", reason: null, ci: null, mergeable: null }]),
     conflict: x.bool(0.3) ? { bucket: x.pick(["merge", "ask", "held"]), base: "main", baseOk: x.bool(0.9) } : null,
     fixup: x.bool(0.5) ? { fixes: x.int(3), attempts: x.int(3), recorded: x.bool(0.3) ? [x.pick(["asked", "pushed", "cannot-push", "too-large"])] : [] } : null,
-    carry: x.bool(0.1) ? [{ attempts: x.int(3) }] : [],
     cifix: x.bool(0.3) ? {
       states: x.bool(0.2) ? [x.pick(["pushed", "failed", "capped"])] : [], tries: x.int(3), rerunAt: null, infraRuns: x.bool(0.2) ? [1] : null,
       formattingTask: null, formatterEnded: false, totalPushes: x.int(3), totalTries: x.int(5), checksAt: null,
@@ -77,23 +74,19 @@ function randomPr(x: Rnd): PrFacts {
 function randomItem(x: Rnd): ItemFacts {
   return itemFacts({
     kind: x.pick(["pr", "issue"] as const), open: x.bool(0.9), draft: x.bool(0.1), inScope: x.bool(0.7), integration: x.bool(0.05),
-    held: x.pick([null, null, null, "backlog", "duplicate"] as const), pipelineOn: x.bool(0.85), run: x.pick(["run1", "run1", null]),
+    held: x.pick([null, null, null, "backlog"] as const), pipelineOn: x.bool(0.85), run: x.pick(["run1", "run1", null]),
     repoFacts: { labelsApproved: x.bool(0.8), commentApproved: x.bool(0.8), fixIssueApproved: x.bool(0.8) },
     classification: {
       status: x.pick(["settled", "settled", "waiting", "disagree", "unclassified"] as const), label: x.pick(["bugfix", "bugfix", "plugin candidate", null]),
       flags: x.pick([[], [], ["needs decision"], ["security"]]), jevLabel: x.pick(["bugfix", "small extra", "plugin candidate"]), haikuLabel: x.pick([null, "bugfix", "small extra"]),
     },
     embeddedHash: x.pick(["e1", "e1", null]), priorityHash: x.pick(["e1", "e1", null]), scannedHash: x.pick(["e1", "e1", null]),
-    pairsToCheck: x.int(2), inGroupToAsk: x.bool(0.1), dupeAnswers: x.bool(0.1) ? ["d1"] : [],
-    scope: { open: x.bool(0.1), covered: x.bool(0.2), answer: null, recommend: x.bool(0.1) ? { failures: x.int(3), failedAt: null } : null },
-    labels: { existing: x.pick([["bugfix"], []]), pluginAnswer: x.bool(0.1), labeledNote: null },
+    pairsToCheck: x.int(2),
+    labels: { existing: x.pick([["bugfix"], []]), labeledNote: null },
     close: x.bool(0.2) ? { id: 1, by: "m", weight: 5, at: "2026-11-04T08:00:00.000Z" } : null,
-    fix: {
-      attempt: x.bool(0.3) ? { state: x.pick(["retry", "testing", "passed", "skipped", "failed"]), textChanged: x.bool(), headDone: x.bool(), baseDone: x.bool() } : null,
-      publicRepo: x.bool(0.9), notRust: x.bool(0.1), openPr: x.bool(0.1) ? { number: 7, closes: x.bool(0.5) } : null, impact: x.pick(["P0", "P2", "P4"]), scopeDecision: null,
-    },
+    openPr: x.bool(0.1) ? { number: 7, closes: x.bool(0.5) } : null,
     implement: {
-      queuedBy: x.pick([null, "maint"]), settles: x.bool(0.8), featureOn: x.bool(0.7), liveInRepo: x.int(3),
+      queuedBy: x.pick([null, "maint"]), standing: x.pick(["yes", "yes", "yes", "no", "unknown"] as const), featureOn: x.bool(0.7), liveInRepo: x.int(3),
       row: x.bool(0.4) ? {
         state: x.pick(["planning", "asked", "planned", "implementing", "pr-opened", "revising", "stuck", "failed", "merged"]), attempt: 1 + x.int(2),
         textChanged: x.bool(0.3), newCommentAfterQuestion: x.bool(0.3), decisionAnswered: x.bool(0.3), requeuedAfterEnd: x.bool(0.2), asked: x.pick(["author", "maintainer", null] as const), prOpen: x.bool(),
@@ -109,18 +102,14 @@ const label = (a: Action) => a.kind + (a.params?.bucket ? `:${String(a.params.bu
 function checkPr(f: PrFacts): void {
   const p = decidePr(f);
   const merges = has(p, "merge");
-  const answer = f.decision.answer;
-  const declined = answer !== null && answer !== "merge";
 
-  // 1. An unsure head merges only on an operator's Merge answer given after the latest review.
-  if (f.review?.unsure && merges.length) assert.ok(answer === "merge" && f.decision.mergeAnswerAfterReview, "merge on an unsure head without a later Merge answer");
-  // 2. After a Hold or Close answer nothing merges and no pre-merge fix-up runs.
-  if (declined) {
-    assert.equal(merges.length, 0, "merge after a Hold/Close answer");
-    assert.deepEqual(p.actions.filter((a) => ["fixup", "conflict", "cifix"].includes(a.kind)).map(label), [], "push action after a Hold/Close answer");
-  }
+  const mergeEntry = f.workflow?.entry === "merge";
+  // 1. An unsure head merges only on a hand-over after the latest review.
+  if (f.review?.unsure && !mergeEntry && merges.length) assert.ok(f.handOver?.afterReview, "merge on an unsure head without a later hand-over");
+  // 2. Nothing merges that nobody handed over, off the merge rule; an unapproved workflow merges nothing by itself.
+  if (f.workflow && !f.workflow.approved && merges.length) assert.ok(f.handOver, "merge of an unapproved item");
   if (merges.length) {
-    assert.ok(f.review && (f.review.verdict === "take" || f.review.verdict === "take-fix"), "merge without a take review");
+    if (!mergeEntry) assert.ok(f.review && (f.review.verdict === "take" || f.review.verdict === "take-fix"), "merge without a take review");
     // 3. A merge by rule has a clean pre-merge review.
     if (p.path === "rule") {
       assert.ok(f.premerge && f.premerge.hasFindings && f.premerge.defects === 0, "rule merge without a clean pre-merge review");
@@ -133,8 +122,8 @@ function checkPr(f: PrFacts): void {
     assert.equal(f.changesRequested, null, "merge while changes are requested");
     assert.equal(f.mergeable, "MERGEABLE", "merge while not mergeable");
     assert.equal(f.ghState, "OPEN", "merge of a PR not open");
-    assert.equal(f.heldBacklog || f.heldDuplicate, false, "merge of a held PR");
-    assert.equal(f.review!.head, f.head, "merge at a head other than the reviewed head");
+    assert.equal(f.heldBacklog, false, "merge of a held PR");
+    if (!mergeEntry) assert.equal(f.review!.head, f.head, "merge at a head other than the reviewed head");
     // 9. A batch member is merged by its batch, not alone.
     assert.equal(f.batch, null, "single merge of a batch member");
     assert.ok(f.ci === "success" || (p.path === "operator" && f.ci === "none" && f.repoFacts.noCi), "merge with CI not green");
@@ -166,7 +155,7 @@ function checkItem(f: ItemFacts): void {
   // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending
   // an attempt whose PR merged or closed is bookkeeping and needs no switch.
   const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
-  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
+  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.standing === "yes" && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
 }
 
 test("safety invariants hold on random facts", () => {

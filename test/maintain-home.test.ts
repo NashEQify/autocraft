@@ -34,3 +34,22 @@ test("needs an answer counts only repos where the reader may act", async () => {
   assert.deepEqual(refs(viewer.needs), []);
   assert.deepEqual(refs(viewer.waiting), ["app#1", "app#3", "lib#2"]);
 });
+
+test("a close that was not made is a problem for those who act on the repo, until someone takes the item up again", async () => {
+  const db = await connectDb(":memory:");
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T, pipeline: 1 }));
+  for (const number of [1, 2]) await db.run(db.k.insertInto("items").values({ repo: "app", number, kind: "issue", state: "OPEN", title: `t${number}`, created_at: T }));
+  const wf = { repo: "app", kind: "issue" as const, entry: "review" as const, startedBy: "m2", startedAt: T, startedVia: "github" as const };
+  const close = async (number: number, state: string) => {
+    const workflow_id = await insertWorkflow(db, { ...wf, number, state: "closed" });
+    await db.run(db.k.insertInto("workflow_actions").values({ workflow_id, repo: "app", number, kind: "close", by: "m2", state, reason: "GitHub refused", created_at: T, updated_at: T }));
+  };
+  await close(1, "failed");
+  await close(2, "done");
+  const listed = async (role: string, writable: string[]) => (await home(db, as(role, writable))).attention.filter((p) => p.kind === "gave-up").map((p) => [p.title, p.detail]);
+  assert.deepEqual(await listed("maintainer", ["app"]), [["app#1: not closed", "GitHub refused"]]);
+  assert.deepEqual(await listed("maintainer", []), []);
+  await insertWorkflow(db, { ...wf, number: 1, state: "running" });
+  assert.deepEqual(await listed("maintainer", ["app"]), []);
+});

@@ -8,7 +8,7 @@ import { readAppSecrets } from "./github/install-token.ts";
 import { AppReadError, readEnv } from "./github/read.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
-import { addTrackedRepo, loadTrackedRepos, PilotError, removeTrackedRepo, setPipelineFlags } from "./data/control/index.ts";
+import { addTrackedRepo, loadTrackedRepos, PipelineFlagError, removeTrackedRepo, setPipelineFlags, setTestRepo } from "./data/control/index.ts";
 import { loadFilingReposNamed } from "./data/discord/index.ts";
 import { countItemsByRepo, ensureRepo, loadRepos, purgeRepoMirror, resetRepoSync } from "./data/mirror/index.ts";
 export { SHADOWED_TABLES } from "./db/scoped.ts";
@@ -154,8 +154,20 @@ const sub: Record<string, (args: string[]) => Promise<void | Promise<void>>> = {
       const on = a[1] === "on";
       console.log((await setPipelineFlags(await openDb(), [{ repo: name, on }], "cli")).changed.length ? `${name}: pipeline ${a[1]}` : `${name}: pipeline was already ${a[1]}`);
     } catch (e) {
-      if (!(e instanceof PilotError)) throw e;
+      if (!(e instanceof PipelineFlagError)) throw e;
       console.error(e.message);
+      process.exit(1);
+    }
+  },
+  "test-repo": async (a) => {
+    const usage = "test-repo <name> on|off";
+    const name = need(a, usage);
+    if (a[1] !== "on" && a[1] !== "off") { need([], usage); return; }
+    try {
+      await setTestRepo(await openDb(), name, a[1] === "on", "cli");
+      console.log(`${name}: ${a[1] === "on" ? "a test repo" : "not a test repo"}`);
+    } catch (e) {
+      console.error((e as Error).message);
       process.exit(1);
     }
   },
@@ -190,7 +202,7 @@ export const commands = {
     },
   },
   repos: {
-    summary: "tracked repos: list | track <name> | untrack <name> | pipeline <name> on|off | purge <name>",
+    summary: "tracked repos: list | track <name> | untrack <name> | pipeline <name> on|off | test-repo <name> on|off | purge <name>",
     run: async (args: string[]) => {
       const f = args[0] ? sub[args[0]] : undefined;
       if (!f) {

@@ -7,7 +7,6 @@ src/discord/gateway.ts :: Gateway.#connectOnce.<anonymous>.onMessage :: this.#id
 src/embed/model.ts :: localEmbedder.embed :: runner.catch(() => { runner = null; });
 src/github/identity.ts :: botUserId :: p.catch(() => botIds.delete(k));
 src/github/pipeline-account.ts :: pipelineAccount :: p.catch(() => { if (cached === p) cached = undefined; });
-src/preapproval/permissions.ts :: refreshSettlers :: read(db, login, repo).then( (r) => (r.kind === "error" ? fail(r.why) : r.kind === "unavailable" ? fa
 src/remote/calls.ts :: claimCall :: reply.catch(() => { if (claimReplies.get(key)?.reply === reply) claimReplies.delete(key); });
 src/runner/runner.ts :: Runner.workerUpdateTick :: checkPendingUpdate(this.db, undefined, this.o.log) .catch((e) => this.o.log(`worker update: ${(e as
 src/worker/logsink.ts :: LogSink.write :: this.flush();

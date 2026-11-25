@@ -4,9 +4,9 @@
 // on their own.
 import { createHash } from "node:crypto";
 import { guardRepo } from "../core/guard.ts";
-import { githubIdentity } from "../github/identity.ts";
 import { readLive } from "../act/live.ts";
-import { lostAccess } from "../act/still.ts";
+import { stillActs } from "../act/still.ts";
+import type { RefreshDeps } from "../preapproval/permissions.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { addAudit, loadActBlocked } from "../data/control/index.ts";
 import { addHeld, failCards, loadActRoom, loadCards, loadQueue, markCard, sweepRunningCards as sweepCards, type CardRow } from "../data/conversations/index.ts";
@@ -38,6 +38,8 @@ export const RUNNING_STALE_MS = 10 * 60_000;
 /** `canWrite` is the presser's live write access to a repo; the shell has none to check. */
 export type ActDeps = StoreDeps & {
   querier?: Querier;
+  /** Stands in for the GitHub App's read of the presser's write permission. */
+  permission?: RefreshDeps["permission"];
   /** Runs `gh` for an issue the card opens and for what a command starts. */
   exec?: Exec;
   canWrite?: (repo: string) => Promise<boolean>;
@@ -61,7 +63,7 @@ async function need(db: Db, id: number): Promise<CardRow> {
   return c;
 }
 
-const RETIRED = "this card answers a question of the retired decision system; ask Opus again";
+const RETIRED = "this card was made for a question that no longer exists; ask Opus again";
 
 function paramsOf(c: CardRow): CardParams {
   const p = readParams(c.kind, c.params);
@@ -223,7 +225,7 @@ async function action(ctx: Ctx, a: OtherAction): Promise<Outcome> {
 
 /** The Act approval of `repo` for the presser's write. Room under the daily limit was taken before it (doCard). */
 async function actGrant(db: Db, repo: string, by: string, need: "comment" | "labels" = "comment") {
-  const g = await guardRepo(db, repo, need, { operator: by }, undefined, by);
+  const g = await guardRepo(db, repo, need, { operator: by }, by);
   if ("refused" in g) throw new Error(g.refused);
   return g;
 }
@@ -264,16 +266,10 @@ export async function liveWrite(q: Querier, repo: string, login: string): Promis
   }
 }
 
-/** A press from the queue is carried out as its presser if they still may: their role and write access are read again now. */
+/** A press from the queue is carried out as its presser if they still may: their role and write access are read again now; one GitHub could not answer for waits. */
 async function presserStill(db: Db, by: string, repos: string[], deps: ActDeps): Promise<void> {
-  if (await lostAccess(db, by, repos, { now: nowOf(deps).getTime() })) throw new ConversationError(409, `${by} no longer has write access`);
-  if (await githubIdentity(db) === "app") return;
-  const q = deps.querier ?? new Client(1000);
-  for (const r of repos) {
-    const live = await liveWrite(q, r, by);
-    if (live === "no") throw new ConversationError(409, `${by} no longer has write access to ${slugOf(r)}`);
-    if (live === "transient") throw new ConversationError(503, "GitHub could not be reached to check the presser's access");
-  }
+  const may = await stillActs(db, by, repos, { permission: deps.permission });
+  if (!may.ok) throw may.standing === "no" ? new ConversationError(409, `${by} no longer has write access`) : new ConversationError(503, "GitHub could not be reached to check the presser's access");
 }
 
 /**
@@ -302,7 +298,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   const needW = cardWriteCount(params);
   if (draining && needW > 0) await presserStill(db, by, cardRepos(c.repo, params), deps);
   for (const repo of cardRepos(c.repo, params).filter((r) => r !== c.repo)) {
-    const g = await guardRepo(db, repo, "comment", { operator: by }, undefined, by);
+    const g = await guardRepo(db, repo, "comment", { operator: by }, by);
     if ("refused" in g) throw new ConversationError(409, g.refused);
   }
   let claimed: "busy" | "lost" | { queued: boolean };
@@ -314,7 +310,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
       if (wait && draining) return "busy" as const;
       if (!wait) return await markCard(db, id, [draining ? "queued" : "proposed"], { state: "running", acted_by: by, acted_at: at }) ? { queued: false } : "lost" as const;
       // Refusals a press that has to wait would only meet at the drain are given now.
-      const g = await guardRepo(db, c.repo, params.kind === "label" ? "labels" : "comment", { operator: by }, undefined, by);
+      const g = await guardRepo(db, c.repo, params.kind === "label" ? "labels" : "comment", { operator: by }, by);
       if ("refused" in g) throw new Error(g.refused);
       const block = (await loadActBlocked(db, [c.repo])).get(c.repo);
       if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);

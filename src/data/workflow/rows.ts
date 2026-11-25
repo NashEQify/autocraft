@@ -5,7 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
-import { PERM_READ_TTL } from "../access/permissions.ts";
+import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { LIVE_STATES } from "./fragments.ts";
@@ -61,14 +61,14 @@ const loginIn = (db: Db, eb: kx.AnyEb, col: string, logins: string[], alias: str
 /**
  * The planner pass's set loader: live workflows with their implementation PR, latest ended state per item, merge holds, queued requests and
  * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`, a
- * permission read within `PERM_READ_TTL` of `nowMs`) and while no final fix-up row of it exists.
+ * write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
  */
 export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: number } = {}): Promise<WorkflowPassFacts> {
   const out: WorkflowPassFacts = { live: new Map(), ofPr: new Map(), ended: new Map(), holds: new Set(), operator: new Map() };
   if (isEmpty(keys)) return out;
   const q = queryDb(db);
   const k = q.k as any;
-  const after = new Date((o.nowMs ?? Date.now()) - PERM_READ_TTL).toISOString();
+  const after = new Date((o.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const keyed = (alias: string, a: string, b: string) => (eb: any) => eb.exists(k.selectFrom(resolveKeys(db, keys, alias)).select(one(eb)).whereRef(`${alias}.repo`, "=", a).whereRef(`${alias}.number`, "=", b));
 
   const impl = k.selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where("pr_number", "is not", null).distinct().as("i");

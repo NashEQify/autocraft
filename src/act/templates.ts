@@ -58,32 +58,6 @@ export function duplicateComment(o: { repo: string; original: string; closed: bo
   return `Duplicate of ${refText(o.repo, o.original)}${o.closed ? ", which is closed" : ""}.`;
 }
 
-
-/** The comment on a member closed in a duplicate group: the kept item, and for a PR the parts carried over. Carried points are model-written from untrusted text, so they are cleaned like a reason. */
-export function dupeGroupCloseComment(o: { kept: number; carry: string[] }): string {
-  const c = cleanReason(o.carry.slice(0, 2).join("; "));
-  return `Closing as a duplicate of #${o.kept}.${c ? `\nParts to carry over to #${o.kept}: ${c}` : ""}`;
-}
-
-export const DETAILS_MAX_BULLETS = 6;
-
-/** The comment on the kept issue listing what the closed reports add: one bullet per point, each crediting its source, the first point of every report before any second one. Null when no report adds anything. */
-export function dupeGroupDetailsComment(adds: { number: number; points: string[] }[]): string | null {
-  const bullets: string[] = [];
-  for (let round = 0; bullets.length < DETAILS_MAX_BULLETS; round++) {
-    let any = false;
-    for (const a of adds) {
-      const p = a.points[round];
-      if (p === undefined) continue;
-      any = true;
-      const t = cleanReason(p);
-      if (t && bullets.length < DETAILS_MAX_BULLETS) bullets.push(`- #${a.number}: ${t}`);
-    }
-    if (!any) break;
-  }
-  return bullets.length ? `Details from the closed duplicates:\n${bullets.join("\n")}` : null;
-}
-
 export const COMMENT_TEMPLATES: CommentTemplate[] = [
   {
     id: "act.close", stage: "Act",

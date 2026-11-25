@@ -82,8 +82,6 @@ export type MergeSummary = {
   states: Record<string, number>;
   /** PRs tried (or, in a dry run, that would be). */
   attempted: string[]; merged: string[]; refused: { ref: string; reason: string }[];
-  /** Always empty: Merge? questions are retired (the field goes with the web code). */
-  asked: string[];
 };
 
 export async function spawnRun(cmd: string, args: string[], env?: Record<string, string>, replaceEnv = false): Promise<CommandResult> {
@@ -164,7 +162,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   const runId = `merge-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   if (!(await mergeScope(db)).any.has(repo)) {
     log(`merge ${repo}: not in the pipeline scope; nothing done`);
-    return { runId, repo, dryRun, states: {}, attempted: [], merged: [], refused: [], asked: [] };
+    return { runId, repo, dryRun, states: {}, attempted: [], merged: [], refused: [] };
   }
   const d = deps ?? defaultDeps();
   // A PR in changes-requested is read live again each run: the mirror alone can block wrongly (the association is relative to the viewer) and a blocked PR never reaches the merge-time read.
@@ -184,7 +182,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   // A merge that waits for its approver's sign-in or access stays put.
   picks = picks.filter((e) => !mergeWaits(waits.get(refOf(e)), live.get(refOf(e)), e.head));
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
-  const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [], asked: [] };
+  const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
 
   if (dryRun) {

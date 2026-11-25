@@ -43,7 +43,7 @@ export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now
 /**
  * Open PRs of `repo` whose Plan holds a `post-review` action: an Opus review (with public text unless it edits an earlier post) at
  * their current head that no review of ours describes yet. The Plan leaves out PRs by the pipeline's own account, batch PRs,
- * held duplicates and items outside the pilot.
+ * items outside the pipeline's scope.
  */
 export async function postCandidates(db: Db, repo: string): Promise<PostCandidate[]> {
   // A review is edited only by the lane that posted it: a NULL `posted_as` is a row from before it was recorded, written by the box account.

@@ -29,7 +29,7 @@ import { LARGE_FIX_KEY, OUTSIDE_PURPOSE_KEY, largeFixLines, outsidePurposeMin } 
 const STAGES: { n: number; name: string; automatic?: boolean }[] = [
   { n: 1, name: "Mirror", automatic: true },
   { n: 2, name: "Classify" },
-  { n: 3, name: "Decide" },
+  { n: 3, name: "Duplicates and conversations" },
   { n: 4, name: "Label" },
   { n: 5, name: "Review" },
   { n: 6, name: "Integrate" },

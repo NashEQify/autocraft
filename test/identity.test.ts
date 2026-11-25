@@ -17,7 +17,7 @@ import * as kx from "../src/db/kx.ts";
 const grant = (as: string): GuardedItem => ({ scope: "item", action: { kind: "act" }, repo: "app", number: 7, as }) as unknown as GuardedItem;
 const q: Querier = { query: async () => ({}) } as unknown as Querier;
 
-test("only a close or merge runs as the person of the grant; any other write is the app's", () => {
+test("a merge or close goes out as the person of its grant, any other write as the app", () => {
   assert.equal(identityFor(grant("user:example-user"), "close"), "user:example-user");
   assert.equal(identityFor(grant("user:example-user"), "merge"), "user:example-user");
   assert.equal(identityFor(grant("user:example-user")), "app");

@@ -1,7 +1,7 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, labels, implementation.
 // Built for a whole pass or a slice of it from the module loads of core/pass-load.ts. Reads only: a text hash sync has not written
 // yet is computed here.
-import { permKey, stillCounts } from "../data/access/index.ts";
+import { HOLD_MAX, permKey, standing } from "../data/access/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
@@ -39,9 +39,6 @@ export type ItemLoadOptions = {
 const json = <T>(s: string | null, d: T): T => { try { return s ? (JSON.parse(s) as T) : d; } catch { return d; } };
 const flagsOf = (s: string | null): string[] => { const f = json<unknown>(s, []); return Array.isArray(f) ? f.filter((x): x is string => typeof x === "string") : []; };
 const asRef = (key: string): Ref => { const i = key.lastIndexOf("#"); return { repo: key.slice(0, i), number: Number(key.slice(i + 1)) }; };
-
-/** The retired scope, duplicate and close questions: no item has one. */
-const NO_SCOPE: ItemFacts["scope"] = { open: false, answer: null, covered: false, recommend: null };
 
 /** The run's verdicts of one item that count: a Haiku row without a Jev row only when Haiku classified alone (it carries the item's input hash). */
 function verdictsOf(d: ItemPassData, ref: string) {
@@ -128,7 +125,6 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
 
   return rows.map(([ref, r]): ItemFacts => {
     const t = d.triage.facts.get(ref)!;
-    const refreshAt = refresh.at(ref);
     const text = d.texts.get(ref);
     const { j, h, s } = verdictsOf(d, ref);
     let referee: Referee | null = null;
@@ -160,15 +156,18 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const outsideHold = d.outsideHolds.get(ref);
     const a = r.kind === "issue" ? d.implement.byIssue.get(ref) : undefined;
     const q = r.kind === "issue" ? queuedOf(d, ref) : null;
+    const act = q ? d.act.get(permKey(q.by, r.repo)) : undefined;
     const live = d.implement.liveByRepo.get(r.repo);
+    // A confirmed write permission stops counting with the clock alone.
+    const refreshAt = refresh.at(ref, act?.perm ? Date.parse(act.perm.checkedAt) + HOLD_MAX : undefined);
     return {
       repo: r.repo, number: r.number, kind: r.kind as ItemFacts["kind"], open: true, assignment: assignmentIn(pipelineLogin, d.assignments.get(ref), r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}),
       pipelineOn, tripped: tripsOfRepo(tripped, r.repo),
       inFlight: (r.kind === "issue" && LIVE_STATES.has(a?.attempt.state ?? "failed")) || (r.kind === "pr" && ownPrs.has(ref) && isOwn(r.author)), draft: !!r.is_draft,
       inScope: d.inScope.has(ref), ...(outsideHold ? { outsideHold } : {}), integration: d.batchPrs.has(ref) && isOwn(r.author),
       held: !work && d.workflow.ended.get(ref) === "backlog" ? "backlog" : null,
-      fast: false, score: weightScore(work) ?? t.score,
-      repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment, fixIssueApproved: !!approvals.fixissue, workflow: "new" },
+      score: weightScore(work) ?? t.score,
+      repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment, fixIssueApproved: !!approvals.fixissue },
       workflow: wf, endedWorkflow: wf ? null : d.workflow.ended.get(ref) ?? null,
       run,
       classification: {
@@ -177,16 +176,12 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
         jevFailed: classHash !== null && t.jevFailedHash === classHash,
       },
       embedHash, embeddedHash: t.embeddedHash, priorityHash: t.priority?.hash ?? null, scannedHash: t.scannedHash,
-      pairsToCheck: t.pairsToCheck, inGroupToAsk: false, inCompareSet: t.compare ?? false, dupeAnswers: [],
-      scope: NO_SCOPE,
-      labels: { quietFix: d.quiet.has(ref), existing: json<unknown[]>(r.labels, []).map(String), pluginAnswer: false, labeledNote: d.stages.get(ref)?.labeledNote ?? null },
+      pairsToCheck: t.pairsToCheck, inCompareSet: t.compare ?? false,
+      labels: { quietFix: d.quiet.has(ref), existing: json<unknown[]>(r.labels, []).map(String), labeledNote: d.stages.get(ref)?.labeledNote ?? null },
       close: closeOf(d, ref),
-      fix: {
-        attempt: null, publicRepo: d.repos.get(r.repo)?.visibility === "public", notRust: false,
-        openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null, impact: t.priority?.impact ?? null, scopeDecision: null,
-      },
+      openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null,
       implement: {
-        queuedBy: q?.by ?? null, settles: q !== null && stillCounts(d.act.get(permKey(q.by, r.repo)), cfg.githubIdentity, now), featureOn: cfg.repo(r.repo).buildFeature("implement"),
+        queuedBy: q?.by ?? null, standing: q ? standing(act, cfg.githubIdentity, now) : "no", featureOn: cfg.repo(r.repo).buildFeature("implement"),
         row: a ? {
           state: a.attempt.state, attempt: a.attempt.attempt,
           textChanged: textHash(text?.title ?? "", text?.body ?? "") !== a.attempt.textHash,

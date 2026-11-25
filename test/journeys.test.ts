@@ -16,9 +16,16 @@ import { setFeature } from "../src/build/features.ts";
 import { runAct } from "../src/act/index.ts";
 import { runBatches } from "../src/merge/batch.ts";
 import { runMerge } from "../src/merge/index.ts";
-import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
+import { prepareOpusInput, saveOpus, type OpusDeps } from "../src/review/opus.ts";
 import { runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
-import { CHECK, T1, tmpdir, world, type World } from "./world-db.ts";
+import type { LaneDeps } from "../src/github/user-lane.ts";
+import { advancePreapprovals } from "../src/preapproval/index.ts";
+import { advanceWorkflows } from "../src/workflow/advance.ts";
+import { liveWorkflow } from "../src/workflow/store.ts";
+import { runCommand } from "../src/workflow/apply.ts";
+import { parse } from "../src/workflow/parse.ts";
+import { CHECK, OPERATOR, T1, tmpdir, world, type World } from "./world-db.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { excluded } from "../src/db/kx.ts";
 import * as kx from "../src/db/kx.ts";
 
@@ -76,6 +83,48 @@ describe("PR journeys", () => {
     assert.equal(w.gh.writesOf("merge").length, 0);
   });
 
+  test("an unsure review of a started PR comes back with a recommendation; answered with merge, it is reviewed again and merged as the person who answered", async () => {
+    const w = await (await (await (await (await (await fresh()).acting("mira")).pr(1)).workflow(1, { by: "mira", approved: false })).review(1, { sure: false })).verified(1);
+    await w.premerge(1, "clean");
+    const lane: LaneDeps = { vault: { userToken: async (login) => ({ ok: true, access: login === "mira" ? "user-token" : "other" }) }, permission: async () => "write" };
+    const tokens: (string | undefined)[] = [];
+    const deps = w.gh.mergeDeps();
+    const run: typeof deps.run = async (cmd, args, env) => { tokens.push(env?.GH_TOKEN); return await deps.run(cmd, args, env); };
+    const merge = () => runMerge(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, { ...deps, run, lane });
+    await advanceWorkflows(w.db);
+    assert.equal((await liveWorkflow(w.db, "app", 1))?.state, "recommending");
+    assert.deepEqual((await merge()).merged, []);
+    assert.deepEqual(w.gh.writes, []);
+
+    const answer = await runCommand(w.db, { login: "mira", canWrite: async () => true }, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
+    assert.equal(answer.items[0]!.outcome, "run", answer.lines.join());
+    const advance = async () => { for (let i = 0; i < 3; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+    await advance();
+    assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind), ["review"]);
+    assert.deepEqual((await merge()).merged, []);
+    // The review is unsure again: the approval carries it on.
+    await saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: "sha1" }, {
+      mode: "full", base: null, model: "m",
+      review: { ref: "app#1", verdict: "take", sure: false, reason: "r", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] },
+    });
+    await w.premerge(1, "clean");
+    await advance();
+    assert.deepEqual((await merge()).merged, ["app#1"]);
+    assert.deepEqual(w.gh.writesOf("merge").map((x) => [x.number, x.head]), [[1, "sha1"]]);
+    assert.deepEqual(tokens, ["user-token"], "the merge ran with the token of the person who answered");
+  });
+
+  test("a PR a person stopped is not merged by the rule", async () => {
+    const w = await (await (await (await (await (await fresh()).acting()).pr(1)).review(1)).verified(1)).premerge(1, "clean");
+    assert.equal((await w.prPlan(1)).state, "ready");
+    await w.workflow(1, { approved: false });
+    const r = await runCommand(w.db, { login: OPERATOR, canWrite: async () => true }, "dashboard", { parsed: parse("stop"), items: [{ repo: "app", number: 1 }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join());
+    const m = await runMerge(w.db, { repo: "app", dryRun: false }, quiet, w.gh.mergeDeps());
+    assert.deepEqual(m.merged, []);
+    assert.deepEqual(w.gh.writes, []);
+  });
+
   test("with the pipeline switched off the pipeline's own run writes nothing", async () => {
     const w = await (await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pipeline(false);
     const m = await runMerge(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, w.gh.mergeDeps());
@@ -104,7 +153,7 @@ describe("PR journeys", () => {
     assert.deepEqual((await merged(w)).map((r) => [r.number, r.head_oid, r.outcome]), [[1, "sha1", "merged"], [2, "sha2", "merged"]]);
   });
 
-  test("the batch PR's runs are approved at the batch tip when its members are fast-tracked in a repo whose pipeline is off", async () => {
+  test("the batch PR's runs are approved at the batch tip when people started its members in a repo whose pipeline is off", async () => {
     const w = await (await (await (await (await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2)).review(2)).verified(2)).premerge(2, "clean");
     await runBatches(w.db, { repo: "app" }, quiet, w.gh.batchDeps());
     const tip = (await w.db.get(w.db.k.selectFrom("merge_batches").select("commit_sha as c").where("pr_number", "=", 900)))!.c;
@@ -116,13 +165,14 @@ describe("PR journeys", () => {
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     assert.equal((await plan()).state, "out-of-scope");
-    for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("fast_track").values({ repo: "app", number: n, added_by: "op", added_at: "2026-01-02T00:00:00Z" }));
+    for (const n of [1, 2]) await w.workflow(n);
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
   });
 
   test("a take-fix patch is linted before the push: clippy findings go back to the model, the clean patch is pushed with the format changes folded in", async () => {
     const git = gitWorld(1);
     const w = await (await (await fresh()).pr(1, { head: git.head })).review(1, { verdict: "take-fix" });
+    await reportingTaskRunner(w.db);
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket, a.head]), [["fixup", "fix", git.head]]);
     const edit = (to: string) => `diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-fn a() {}\n-fn main() { a(); }\n${to}`;
     const asked: { previous?: { findings: string[] } }[] = [];
@@ -178,6 +228,7 @@ describe("lint findings resume the patch session", () => {
   const second = async (minutes: number) => {
     const git = gitWorld(1);
     const w = await (await (await fresh()).pr(1, { head: git.head })).review(1, { verdict: "take-fix" });
+    await reportingTaskRunner(w.db);
     const deps = git.deps(w);
     let clock = Date.parse(T1);
     deps.now = () => new Date(clock);
@@ -270,6 +321,7 @@ describe("patch model build tool", () => {
   test("the model checks its patch with clippy, fixes the finding and re-checks; the harness's lint then passes on the first round", async () => {
     const git = gitWorld(1);
     const w = await (await (await fresh()).pr(1, { head: git.head })).review(1, { verdict: "take-fix" });
+    await reportingTaskRunner(w.db);
     const dirty = git.patch.replace("+fn b() {}\n", "+fn b() { return; }\n");
     assert.notEqual(dirty, git.patch);
     const deps = git.deps(w);
@@ -320,6 +372,7 @@ describe("CI fix journey", () => {
   test("a PR whose CI fails gets a fix pushed to its branch for the reviewed head", async () => {
     const git = gitWorld(1, "fn a() {}\nfn main() { b(); }\n");
     const w = await (await (await fresh()).pr(1, { head: git.head, ci: "failure" })).review(1);
+    await reportingTaskRunner(w.db);
     assert.equal((await w.prPlan(1)).state, "ci-failed");
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket, a.head]), [["cifix", "work", git.head]]);
 
