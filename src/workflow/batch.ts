@@ -8,8 +8,9 @@ import { exec as defaultExec } from "../fixup/git.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import { activeBatch, batchOf, ControlError, endStoppedBatch } from "../merge/controls.ts";
+import { activeBatch, batchOf, ControlError, endStoppedBatch, removeFromBatch } from "../merge/controls.ts";
 import { ownerOf } from "../owners.ts";
+import { inActiveBatch } from "../preapproval/index.ts";
 import { runCommand, type Actor, type ItemOutcome } from "./apply.ts";
 import { endLeg } from "./effects.ts";
 import type { Parsed, Surface } from "./types.ts";
@@ -17,24 +18,37 @@ import type { Parsed, Surface } from "./types.ts";
 const refOf = (repo: string, number: number): string => `${repo}#${number}`;
 const command = (word: "hold" | "resume"): Parsed => ({ kind: "commands", items: [], parts: [{ word }] });
 
-/** Holds (or resumes) one item; a refusal is thrown. */
-export async function holdItem(db: Db, actor: Actor, via: Surface, word: "hold" | "resume", repo: string, number: number, run?: Exec): Promise<ItemOutcome> {
+const isHeld = (o: ItemOutcome): boolean => o.outcome === "run" || o.refusal === "already-held";
+
+/** Sends the word to one item; a refusal is thrown, but for the ones `passes` takes. */
+async function sendTo(db: Db, actor: Actor, via: Surface, word: "hold" | "resume", repo: string, number: number, run: Exec | undefined, passes: (o: ItemOutcome) => boolean): Promise<ItemOutcome> {
   const r = await runCommand(db, actor, via, { parsed: command(word), items: [{ repo, number }], ...(run ? { exec: run } : {}) });
   const o = r.items[0];
-  if (o?.outcome !== "run") throw new ControlError(r.lines.join(" "));
+  if (!o || !passes(o)) throw new ControlError(r.lines.join(" "));
   return o;
 }
 
-/** Holds the PR, which ends its batch: the others go back to the queue and the next merge run builds a batch without it. */
+/** Holds (or resumes) one item; a refusal is thrown. */
+export const holdItem = (db: Db, actor: Actor, via: Surface, word: "hold" | "resume", repo: string, number: number, run?: Exec): Promise<ItemOutcome> =>
+  sendTo(db, actor, via, word, repo, number, run, (o) => o.outcome === "run");
+
+/**
+ * Holds the PR, which ends its batch: the others go back to the queue and the next merge run builds a batch without it. Throws when the batch
+ * could not be ended; sent again, it ends the batch of a PR that is held already.
+ */
 export async function holdBatched(db: Db, actor: Actor, via: Surface, repo: string, number: number, run?: Exec): Promise<{ batch: string; line: string }> {
   const b = await batchOf(db, repo, number);
-  const o = await holdItem(db, actor, via, "hold", repo, number, run);
+  const o = await sendTo(db, actor, via, "hold", repo, number, run, isHeld);
+  if (await inActiveBatch(db, repo, number)) {
+    if (o.outcome === "run") throw new ControlError(o.line, 502);
+    await removeFromBatch(db, actor.login ?? "", repo, number, run);
+  }
   return { batch: b.branch, line: o.line };
 }
 
 /**
  * Stops the batch: holds its open PRs, so the next merge run does not rebuild it, closes its integration PR, then ends their merge legs.
- * They are resumed one by one.
+ * They are resumed one by one. Sent again after the close failed, it ends the batch of PRs that are held already.
  */
 export async function stopBatch(db: Db, actor: Actor, via: Surface, id: number, run: Exec = defaultExec): Promise<{ batch: string; prs: number[]; held: number[]; closed: number | null }> {
   const b = await activeBatch(db, id);
@@ -45,7 +59,7 @@ export async function stopBatch(db: Db, actor: Actor, via: Surface, id: number, 
   let held: number[] = [];
   if (open.length) {
     const r = await runCommand(db, actor, via, { parsed: command("hold"), items: open.map((number) => ({ repo: b.repo, number })), exec: run, keepBatch: true });
-    held = r.items.filter((o) => o.outcome === "run").map((o) => o.number);
+    held = r.items.filter(isHeld).map((o) => o.number);
     if (!held.length) throw new ControlError(r.lines.join(" "));
   }
   const { closed } = await endStoppedBatch(db, by, b, prs, run);

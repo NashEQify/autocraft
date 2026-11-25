@@ -220,6 +220,13 @@ const parsedOf = (r: Row): Parsed | null => {
   }
 };
 
+/**
+ * The command as the two texts are compared: one queued by a release that calls a hold `stop`, or that does not note a yes beside the commands,
+ * is the same command. A release before this one that reads a queued `hold` settles it unanswered; it is sent again.
+ */
+const commandKey = (p: Parsed): string =>
+  JSON.stringify(p.kind === "commands" ? { items: p.items, parts: p.parts.map((x) => ((x.word as string) === "stop" ? { ...x, word: "hold" } : x)) } : p);
+
 /** Words that start, run or approve work: carried out only at the head the comment was written at. */
 const HEAD_WORDS = new Set(["review", "fix-up", "implement", "merge", "fix", "drop"]);
 /** An answer on a PR that may run work there is pinned to the PR's head when it was written; stop, close, backlog, weight and autorepin are not. */
@@ -277,7 +284,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   const names = await commentNames(db, slug);
   const mentionName = names[0];
   const again = c.kind === "ok" && c.authorId === Number(r.github_id) ? parseComment(c.body, names, { repo: r.repo }) : null;
-  if (!again || JSON.stringify(again) !== r.parsed) {
+  if (!again || commandKey(again) !== commandKey(parsed)) {
     await settle(db, d, r, "ignored", c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command", clock());
     return "settled";
   }
@@ -303,7 +310,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   const allowed = !await actRefusal(db, actor, r.repo);
   const reply = !await quietFor(db, d, r);
   const ref = refOf(r);
-  const items = parsed.kind !== "ambiguous" ? parsed.items ?? [] : [];
+  const items = again.kind !== "ambiguous" ? again.items ?? [] : [];
   if (items.length === 1 && !isOwnItem(items[0]!, r.repo, r.number)) {
     await settle(db, d, r, "refused", t("On GitHub a command acts on the item it is written on. Send it there, or from the dashboard, Discord or your agent."), now, { reply, allowed });
     return "settled";
@@ -313,7 +320,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     return "settled";
   }
   try {
-    const own: Parsed = parsed.kind === "ambiguous" || items.length !== 1 ? parsed : { ...parsed, items: [] };
+    const own: Parsed = again.kind === "ambiguous" || items.length !== 1 ? again : { ...again, items: [] };
     const res = await runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString(), asked: () => r.created_at });
     const o = res.items[0];
     await settle(db, d, r, o?.outcome === "run" ? "done" : "refused", o?.line ?? (res.lines.join(" ") || NOT_RUN), now, { reply, allowed });

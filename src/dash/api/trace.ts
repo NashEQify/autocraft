@@ -308,10 +308,10 @@ const strip = ({ detail: _d, ...e }: Ev): TraceEvent => e;
 
 // ---- events from the view's rows -------------------------------------------------------------------------------------------------
 
-const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
+const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Held", resumed: "Resumed", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
 /** The row of an earlier system an archived event stands for (src/db/switch-over.ts): a question, or an action taken for one. */
 const legacyOf = (parsed: unknown): string => { const l = (parsed as { legacy?: unknown } | null | undefined)?.legacy; return typeof l === "string" ? l : ""; };
-/** A workflow event (an answer, a start, a stop), of kind "decision". An archived one is the person's who answered, a question nobody answered the pipeline's. */
+/** A workflow event (an answer, a start, a hold), of kind "decision". An archived one is the person's who answered, a question nobody answered the pipeline's. */
 export const workflowEvent = (e: { id: number; login: string; kind: string; parsed?: unknown; line?: string | null; at: string }, r: Pick<Reader, "staff" | "hidden">): Ev => {
   const archived = e.kind === "archived", act = archived && legacyOf(e.parsed).startsWith("action:");
   const line = blankIfHidden(e.line ?? "", r.hidden);

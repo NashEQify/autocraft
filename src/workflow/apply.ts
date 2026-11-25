@@ -28,7 +28,7 @@ import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
 import { premergeParts } from "./premerge.ts";
 import { atBlocker } from "./recommend.ts";
-import { isLive, premergeStopped, resolve, type Run } from "./resolve.ts";
+import { isLive, premergeStopped, resolve, type Refusal, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { asksForApprover, heldWork, openRecommendation, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
@@ -58,7 +58,7 @@ export type CommandInput = {
   mention?: string;
 };
 
-export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string } };
+export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string }; /** Why a clear command is not possible on the item. */ refusal?: Refusal["why"] };
 export type CommandResult = { items: ItemOutcome[]; lines: string[] };
 
 /** The actions that close an item as the person, and their states before they end. */
@@ -272,16 +272,19 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const why = t("The question changed after you read it. A new question follows. {question}", { question: recommendationLine(wf!.rec) ?? "" });
     return { ...out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why })), wf!.id), question: { workflowId: wf!.id, recAt: wf!.recAt! } };
   }
-  const read0 = r.kind === "run" && r.run.resume && input.parsed.kind === "yes" ? input.asked?.({ ref: key, workflow: held! }) : null;
-  if (read0 && held!.stoppedAt && Date.parse(held!.stoppedAt) > Date.parse(read0)) {
-    return out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: t("{login} held it after you read it. Reply resume to go on.", { login: held!.stoppedBy ?? "" }) })), held!.id);
+  // Work asked for before the hold does not start again what the hold ended, however late it runs.
+  const before = held?.stoppedAt && r.kind === "run" && (r.run.resume || r.run.start || r.run.approve) ? input.asked?.({ ref: key, workflow: held }) : null;
+  if (before && Date.parse(held!.stoppedAt!) > Date.parse(before)) {
+    const why = input.parsed.kind === "yes" ? t("{login} held it after you read it. Reply resume to go on.", { login: held!.stoppedBy ?? "" })
+      : t("{login} held it after you wrote. Send it again, or reply resume to go on.", { login: held!.stoppedBy ?? "" });
+    return out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why })), held!.id);
   }
   if (r.kind === "refused" && r.refusal.why === "premerge-defects") {
     const now = await askToFix(db, wf!, on);
     const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: [replyLine(r, input.clock, input.mention), premergeStopped(now)?.length ? t("Fix them first?") : null, recommendationLine(now.rec)].filter((x) => x !== null).join(" ") });
     return { ...out("refused", reply(line), now.id), ...(now.recAt ? { question: { workflowId: now.id, recAt: now.recAt } } : {}) };
   }
-  if (r.kind === "refused") return out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null);
+  if (r.kind === "refused") return { ...out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null), refusal: r.refusal.why };
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
@@ -496,21 +499,23 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 
 /**
  * Goes on with the held workflow as it was, as the person: its steps, or its open question again. An approved one merges as them, and they
- * accept no commits by it: the advance pass asks about the author's. An item nobody started has nothing to go back to, so its row goes. An
- * issue without an implementation PR, whose attempt the hold ended, starts again with the plan and the approval it had.
+ * accept no commits by it: the advance pass asks about the author's, and the approval keeps its time, which says up to when the code was accepted.
+ * An item nobody started has nothing to go back to, so its row goes. An issue that never had an implementation PR, whose attempt the hold ended,
+ * starts again with the plan and the approval it had; one whose PR merged or closed meanwhile ends with the advance pass.
  */
 async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
   const { db, by, via, at } = c;
   const work = heldWork(held);
   const ref = refText(held.repo, held.number);
   const approved = held.approvedBy !== null && via !== "cli" ? { approvedBy: by, approvedVia: via } : { approvedBy: held.approvedBy, approvedVia: held.approvedVia };
-  const pr = held.kind === "issue" ? await implementationPr(db, held) : c.item;
+  const linked = held.kind === "issue" ? (await loadLinks(db, { workflowIds: [held.id] }, { ended: true }))[0]?.pr ?? held.prNumber : null;
+  const pr = held.kind === "issue" ? await openPr(db, held.repo, linked) : c.item;
   const asHeld = async (): Promise<void> => {
     const [now] = await listWorkflows(db, { ids: [held.id], states: ["stopped"] });
     if (!now || !sameWorkflow(now, held) || (await listWorkflows(db, { live: true, refs: [held] })).length) throw new Moved();
   };
   if (work.unstarted) return { failed: [], commit: async () => { await asHeld(); await dropWorkflows(db, [held.id]); return null; } };
-  if (held.kind === "issue" && held.entry === "implement" && !pr) {
+  if (held.kind === "issue" && held.entry === "implement" && linked === null) {
     return {
       failed: [],
       commit: async () => {
@@ -524,6 +529,8 @@ async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
       },
     };
   }
+  // A merge of theirs that waited for their sign-in or access is tried again; one that came back as a question waits for its answer.
+  const waiting = work.rec ? [] : await waitingMerges(db, held, by);
   const fixes = await fx.askFixes({ ...c, ...(pr ? { item: pr } : {}), workflowId: held.id }, work.fixes ?? [], approved.approvedBy !== null && !work.rec);
   return {
     failed: [],
@@ -533,9 +540,10 @@ async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
         id: held.id, at,
         patch: {
           state: work.rec ? (work.blocker ? "blocked" : "recommending") : "running", rec: work.rec ?? null, blocker: work.blocker ?? null, blockerParams: work.params ?? null,
-          stoppedBy: null, stoppedAt: null, ...(approved.approvedBy ? { ...approved, approvedAt: at } : {}), ...(r.weight !== null ? { weight: r.weight } : {}),
+          stoppedBy: null, stoppedAt: null, ...(approved.approvedBy ? approved : {}), ...(r.weight !== null ? { weight: r.weight } : {}),
         },
       }]);
+      if (waiting.length) await retryActions(db, { ids: waiting.map((a) => a.id) });
       await fixes(held.id);
       return held.id;
     },

@@ -83,9 +83,9 @@ export const SOURCES: Def[] = [
   { id: "premerge", kinds: ["review"], table: "premerge_reviews", time: "at", q: (db) => db.k.selectFrom("premerge_reviews").select(["repo", "number", "head_oid", "at", "model", "findings", "error", "searched"]) },
   { id: "postmerge", kinds: ["review"], table: "postmerge_reviews", time: "at", q: (db) => db.k.selectFrom("postmerge_reviews").select(["repo", "number", "merge_sha", "at", "model", "findings", "error"]) },
   { id: "verify", kinds: ["review"], table: "verifications", time: "created_at", q: (db) => db.k.selectFrom("verifications").select(["repo", "number", "head_sha", "kind", "state", "reason", "summary", "note", "created_at", "head_task_id"]) },
-  // The answers, starts and stops of the item's workflow.
+  // The answers, starts, holds and resumes of the item's workflow.
   { id: "workflow", kinds: ["decision"], table: "workflow_events", time: "at", only: () => null, rows: (eb) => notArchived(eb, "kind"),
-    q: (db) => db.k.selectFrom("workflow_events").select(["repo", "number", "id", "login", "kind", "line", "at"]).where("kind", "in", ["answered", "started", "stopped"]) },
+    q: (db) => db.k.selectFrom("workflow_events").select(["repo", "number", "id", "login", "kind", "line", "at"]).where("kind", "in", ["answered", "started", "stopped", "resumed"]) },
   { id: "fixup", kinds: ["step"], table: "fixups", time: "created_at", q: (db) => db.k.selectFrom("fixups").select(["repo", "number", kx.rowid("fixups").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]) },
   { id: "cifix", kinds: ["step"], table: "ci_fixes", time: "created_at", q: (db) => db.k.selectFrom("ci_fixes").select(["repo", "number", kx.rowid("ci_fixes").as("rowid"), "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "created_at"]) },
   { id: "conflict", kinds: ["step"], table: "conflict_merges", time: "created_at", q: (db) => db.k.selectFrom("conflict_merges").select(["repo", "number", kx.rowid("conflict_merges").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]) },

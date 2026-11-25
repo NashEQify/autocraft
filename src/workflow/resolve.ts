@@ -165,6 +165,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (entry && entry !== "implement" && state.kind === "issue") return refused({ why: "not-issue-step", word: entry });
 
   if (!live) {
+    // The yes would go on with what was held, the start would drop it.
+    if (state.held && parsed.yes && (entry || merge)) return ambiguous({ why: "conflict", words: ["yes", ...parts.map((p) => p.word)] });
     if (named.length) return ambiguous({ why: "no-plan" });
     if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
     if (merge) {

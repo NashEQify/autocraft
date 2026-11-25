@@ -37,11 +37,32 @@ describe("workflow commands", () => {
       ["LGTM, merge", "merge"], ["sounds good, merge it now", "merge"], ["fix-up and merge it", "fix-up,merge"], ["drop 2 and merge the rest", "drop 2,merge"],
       ["thanks, merge", "merge"], ["@autocraft-bot merge the PR", "merge"], ["go ahead", "yes"],
     ] as const) assert.equal(words(text), want, text);
-    for (const text of ["don't merge it", "merge it but not yet", "no", "merge it later", "merge if CI is green", "hold the merge", "merge it please soon"]) assert.equal(words(text), "ambiguous", text);
+    for (const text of ["don't merge it", "merge it but not yet", "no", "merge it later", "merge if CI is green", "yes?", "go ahead?", "merge it please soon"]) assert.equal(words(text), "ambiguous", text);
     const reply = (text: string, mention?: string) => { const r = resolve(parse(text), pr()); return r.kind === "ambiguous" ? replyLine(r, undefined, mention) : ""; };
     assert.match(reply("merge it but soon", "autocraft-bot"), /couldn't read/);
-    assert.match(reply("let's review sometime", "autocraft-bot"), /I read this as `review`\. Reply `@autocraft-bot yes`/);
+    assert.match(reply("let's review sometime", "autocraft-bot"), /I read this as `review`\. Reply `@autocraft-bot review`/);
     assert.match(reply("don't merge it"), /couldn't read.*Commands: review/);
+  });
+
+  test("a message that only says to hold is a hold; one that asks for something else or sets a condition is not", () => {
+    for (const text of ["no, stop", "hold for now", "let's wait", "wait wait", "hold the merge", "stop. I will look"]) assert.deepEqual(parse(text), { kind: "commands", items: [], parts: [{ word: "hold" }] }, text);
+    for (const text of ["don't stop", "stop. merge", "hold if CI fails", "hold. until Friday", "wait?", "hold, merge"]) assert.notEqual(run(text, pr()).kind, "run", text);
+  });
+
+  test("a yes beside a start word on a held item runs nothing: one goes on with the plan, the other drops it", () => {
+    const held = { kind: "pr" as const, workflow: null, held: started({ state: "stopped", approvedBy: "mira" }) };
+    for (const text of ["yes, merge", "yes and review", "go ahead and merge"]) {
+      const r = run(text, held);
+      assert.ok(r.kind === "ambiguous" && r.ambiguity.why === "conflict", text);
+    }
+    const alone = ["yes", "merge"].map((text) => run(text, held));
+    assert.deepEqual(alone.map((r) => r.kind === "run" && [r.run.resume, r.run.start]), [["steps", null], [null, "merge"]]);
+  });
+
+  test("a comment that goes on with a condition is ambiguous; thanks and reasons don't matter, and a hold stands", () => {
+    const kind = (body: string) => parseComment(body.replace("@", `@${SLUG} `), SLUG)?.kind;
+    for (const body of ["@yes\n\nbut wait for CI", "@merge\nafter CI is green", "@merge\n\nThanks! Only when the tests pass.", "@merge\n\nPlease don't merge it before Friday"]) assert.equal(kind(body), "ambiguous", body);
+    for (const body of ["@merge\n\nThanks, great work!", "@yes\nIt crashed when a file was empty. This does not.", "@merge\n\nFine.\n\nBut that is another issue.", "@hold\n\nuntil the release is out"]) assert.equal(kind(body), body.startsWith("@yes") ? "yes" : "commands", body);
   });
 
   test("combined commands and a weight word anywhere", () => {

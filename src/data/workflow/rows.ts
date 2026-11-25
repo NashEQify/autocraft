@@ -1,5 +1,6 @@
 // `item_workflows` and `workflow_events` (M10 workflow-a).
 // reads: implement.implementations and mirror.items (through the link fragments), mirror.items (through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
+import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
@@ -291,18 +292,21 @@ export async function loadAnswers(db: Db, workflowIds: number[], o: { resumes?: 
   return out;
 }
 
-/** Up to when a person has seen each workflow's item and chose to go on with it, and when they last said so; its start without an event. */
+/** Up to when a person has seen each workflow's item and chose to go on with it, and when they last said so (its start without an event); when someone last resumed it. */
 export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, GoneOn>> {
   const out = new Map<number, GoneOn>();
   if (workflows.length === 0) return out;
   const q = queryDb(db);
-  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => [eb.fn.max(seenAt(eb, "e")).as("seen"), eb.fn.max("e.at").as("said")])
-    .where((eb: any) => isGoOn(eb, "e")).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; seen: string | null; said: string | null }[];
+  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => {
+      const of = (is: Expression<SqlBool>, col: unknown) => eb.fn.max(eb.case().when(is).then(col).end());
+      return [of(isGoOn(eb, "e"), seenAt(eb, "e")).as("seen"), of(isGoOn(eb, "e"), eb.ref("e.at")).as("said"), of(eb("e.kind", "=", "resumed"), eb.ref("e.at")).as("resumed")];
+    })
+    .where((eb: any) => eb.or([isGoOn(eb, "e"), eb("e.kind", "=", "resumed")])).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; seen: string | null; said: string | null; resumed: string | null }[];
   const latest = new Map(rows.map((r) => [Number(r.workflow_id), r]));
   for (const w of workflows) {
     const r = latest.get(w.id);
     const from = (at: string | null | undefined): string => (at != null && at > w.startedAt ? at : w.startedAt);
-    out.set(w.id, { since: from(r?.seen), said: from(r?.said) });
+    out.set(w.id, { since: from(r?.seen), said: from(r?.said), resumed: r?.resumed ?? null });
   }
   return out;
 }
@@ -517,19 +521,24 @@ export async function loadActingPairs(db: Db): Promise<{ login: string; repo: st
 
 /**
  * How each workflow's path ended after the approval made at `approvedAt`: `stopped` when the approval was withdrawn or replaced (another or no
- * `approved_at`) or the workflow was stopped or went to the backlog, `closed`, `merged` for a finished workflow (`done`), null while the approval
- * stands on a live workflow. A workflow row that is gone reads `stopped`.
+ * `approved_at`) or the workflow went to the backlog, or was held and other work on its item took its place, `closed`, `merged` for a finished
+ * workflow (`done`), null while the approval stands: on a live workflow, or on a held one, which a resume goes on with. A workflow row that is gone
+ * reads `stopped`.
  */
 export async function loadPathEnds(db: Db, rows: { workflowId: number; approvedAt: string }[]): Promise<Map<number, "merged" | "closed" | "stopped" | null>> {
   const out = new Map<number, "merged" | "closed" | "stopped" | null>();
   if (rows.length === 0) return out;
   const q = queryDb(db);
-  const got = await q.all(q.k.selectFrom("main.item_workflows").select(["id", "state", "approved_at"]).where(kx.inList(db, "id", rows.map((r) => r.workflowId), "bigint")));
+  const k = q.k as any;
+  const newer = (eb: any) => eb.exists(k.selectFrom("main.item_workflows as n").select(one(eb)).whereRef("n.repo", "=", "w.repo").whereRef("n.id", ">", "w.id")
+    .where((x: any) => x.or([x("n.number", "=", x.ref("w.number")), x("n.number", "=", x.ref("w.pr_number"))])));
+  const got = await q.all(k.selectFrom("main.item_workflows as w").select((eb: any) => ["w.id as id", "w.state as state", "w.approved_at as approved_at", eb.case().when(newer(eb)).then(1).else(0).end().as("replaced")])
+    .where(kx.inList(db, "w.id", rows.map((r) => r.workflowId), "bigint"))) as { id: number; state: string; approved_at: string | null; replaced: unknown }[];
   const byId = new Map(got.map((r) => [Number(r.id), r]));
   for (const r of rows) {
     const w = byId.get(r.workflowId);
     if (!w || w.approved_at !== r.approvedAt) out.set(r.workflowId, "stopped");
-    else out.set(r.workflowId, w.state === "done" ? "merged" : w.state === "closed" ? "closed" : w.state === "stopped" || w.state === "backlog" ? "stopped" : null);
+    else out.set(r.workflowId, w.state === "done" ? "merged" : w.state === "closed" ? "closed" : w.state === "backlog" || (w.state === "stopped" && flag(w.replaced)) ? "stopped" : null);
   }
   return out;
 }

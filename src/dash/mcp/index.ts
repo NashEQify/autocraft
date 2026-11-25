@@ -153,7 +153,7 @@ export const TOOLS = [
   },
   {
     name: "list_merge_queue",
-    description: "The merge queue as on the dashboard's Queue page (Merge tab): each PR with its state, how it came in and who added it, its weight, whether its merge is held, and why it does not merge yet; the next merges in order with what each waits for; the integration batches in flight; and pre-approved merges still before their review.",
+    description: "The merge queue as on the dashboard's Queue page (Merge tab): each PR with its state, how it came in and who added it, its weight, and why it does not merge yet; the next merges in order with what each waits for; the integration batches in flight; and pre-approved merges still before their review.",
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
@@ -172,13 +172,13 @@ const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 export const WORKFLOW_READ_TOOLS = [
   {
     name: "get_item",
-    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and stopped it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
+    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and holds it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
     inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
     annotations: { readOnlyHint: true },
   },
   {
     name: "my_items",
-    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or stopped, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
+    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or held, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true },
   },

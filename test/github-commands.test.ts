@@ -388,6 +388,27 @@ describe("comment-time checks", () => {
     assert.match(gh.posted[0]!.body, /changed after the command was written/);
   });
 
+  test("a hold queued as `stop` by an earlier release holds; a merge written before the hold that runs after it starts nothing", async () => {
+    const w = await (await fresh()).pr(1);
+    const gh = ghFake();
+    const at = (s: number) => new Date(Date.now() - s * 1000);
+    await deliver(w, payload({ body: `@${SLUG} merge`, created: at(40) }));
+    let failing = true;
+    const pr = async (q: unknown, repo: string, n: number) => { if (failing) throw new Error("no check suite yet"); return await unchanged(w)(q, repo, n); };
+    await drained(w, { exec: gh.exec, pr });
+    await deliver(w, payload({ body: `@${SLUG} stop`, comment: 5001, created: at(20) }));
+    await w.db.run(w.db.k.updateTable("github_commands").set({ parsed: JSON.stringify({ kind: "commands", items: [], parts: [{ word: "stop" }] }) }).where("comment_id", "=", 5001));
+    await drained(w, { exec: gh.exec, pr });
+    assert.deepEqual((await rows(w)).map((r) => r.state), ["queued", "done"]);
+    assert.match(gh.posted[0]!.body, /On hold/);
+    failing = false;
+    await w.db.run(w.db.k.updateTable("github_commands").set({ tried_at: null }).where("comment_id", "=", 5000));
+    await drained(w, { exec: gh.exec, pr });
+    assert.equal((await rows(w))[0]!.state, "refused");
+    assert.match(gh.posted[1]!.body, /held it after you wrote/);
+    assert.equal(await started(w, 1), null);
+  });
+
   test("a yes to a question that was asked anew after the comment is refused; one written after it runs", async () => {
     const w = await (await fresh()).pr(1);
     const head = String((await w.rows("SELECT head_oid FROM items WHERE number = 1"))[0]!.head_oid);

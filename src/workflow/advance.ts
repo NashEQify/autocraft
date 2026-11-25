@@ -143,11 +143,12 @@ const FIX_STOPS: readonly StopCode[] = ["fix-cannot-run", "fix-failed", "fix-too
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
 
 /** The merge leg of the workflow that ended after `since` (and none active), with its reason. One a hold ended says nothing once someone resumed the item. */
-function endedLeg(pass: Pass, w: ItemWorkflow, since: string): EndedLeg | null {
+function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | null): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
-  if (HOLD_ENDS.includes(codeOf({ reason: r.reason ?? "", code: r.reason_code as StopCode | null })) && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
-  return { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
+  const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
+  if (HOLD_ENDS.includes(codeOf(ended)) && resumed !== null && r.updated_at <= resumed) return null;
+  return ended;
 }
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -440,7 +441,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     w = { ...w, ...on };
   }
   if (!head) return settle(base);
-  const { since, said } = pass.goOn.get(w.id) ?? { since: w.startedAt, said: w.startedAt };
+  const { since, said, resumed } = pass.goOn.get(w.id) ?? { since: w.startedAt, said: w.startedAt, resumed: null };
   const agreed = agreedAt({ approvedAt: w.approvedAt, since, said });
   const patch: WorkflowPatch = { ...base };
 
@@ -498,7 +499,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // A question that went leaves the workflow running, as the facts do not say yet.
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
-  const ended = approved ? endedLeg(pass, w, since) : null;
+  const ended = approved ? endedLeg(pass, w, since, resumed) : null;
   // A leg that stopped at the review's fixes would stop there again.
   const skips = (x: Found): Recommendation | null =>
     (ended && x.params.reason === ended.reason && FIX_STOPS.includes(codeOf(ended)) && f?.head === head ? withoutFixes(f, { approved, review: view, parts: plan, conflict }) : null);

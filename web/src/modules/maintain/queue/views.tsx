@@ -172,7 +172,7 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
 }
 
 function HeldItems({ project, meta }: { project: string | null; meta: MaintainQueueMeta }) {
-  const rows = meta.held.filter((r) => !project || r.repo === project);
+  const rows = (meta.held ?? []).filter((r) => !project || r.repo === project);
   if (!rows.length) return null;
   return (
     <Part title={t("Held")} count={rows.length} empty="">
