@@ -14,7 +14,7 @@ import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
 import type { Db } from "../src/db/index.ts";
 import { LANE_KINDS, LANES, type PlanCtx } from "../src/runner/autopilot.ts";
-import { factsOf, greenRows, headOf, prng, randomPrRows, reached, reviewed, rnd, startedAs, type PrRows, type Rnd } from "./random-pr.ts";
+import { factsOf, greenRows, headOf, prng, randomPrRows, reached, reviewed, rnd, type PrRows, type Rnd } from "./random-pr.ts";
 import { randomItem } from "./random-item.ts";
 
 const CASES = Number(process.env.INVARIANT_CASES ?? 4000);
@@ -217,10 +217,6 @@ const refusedFor = (c: Case, why: RegExp): boolean => {
 /** A failure of a rule that stands: the cases it covers and why. `example` still fails, so an entry does not outlive its reason. */
 type Exception = { id: string; rules: string[]; why: string; covers: (c: Case) => boolean; example: PrRows };
 const EXCEPTIONS: Exception[] = [
-  {
-    id: "asked-wait", rules: ["false-wait"], why: "An item stopped at a blocker keeps a plan that names its next step (the pre-merge review, the hand-over), not the question.",
-    covers: ({ w }) => w.workflow?.state === "blocked", example: greenRows({ workflow: startedAs("merge", { state: "blocked", blocker: "other" }), legs: [], review: null }),
-  },
   {
     id: "pipeline-off", rules: ["dead-end"], why: "The plan shows what would run with the pipeline on.",
     covers: (c) => refusedFor(c, /^The pipeline is off$/), example: greenRows({ pipelineOn: false }),
