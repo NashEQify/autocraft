@@ -13,7 +13,7 @@ import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
 import { isLockTimeout } from "./db/errors.ts";
-import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
+import { NO_CI_SAMPLE, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
 import { MENTION_KEY, SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
 import { SIM_THRESHOLD } from "./dupes/scan.ts";
@@ -715,9 +715,11 @@ function ciFirst(db: DatabaseSync): void {
         reason = 'Upstream CI runs the full gate; the merge waits for it to be green.', summary = 'Upstream CI runs the full gate; the merge waits for it to be green.', finished_at = ?
         WHERE repo = ? AND number = ? AND head_sha = ?`);
       const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'verify-ci-enough', ?, 'verify', ?)");
+      // The latest checks of one repo, newest first: repoHasNoCi's reading (src/merge/no-ci.ts).
+      const latestChecks = db.prepare("SELECT overall FROM main.pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT ?");
       for (const v of db.prepare("SELECT repo, number, head_sha, head_task_id, base_task_id FROM main.verifications WHERE kind = 'tests' AND state IN ('planned', 'running')").all() as
         { repo: string; number: number; head_sha: string; head_task_id: number | null; base_task_id: number | null }[]) {
-        if (noCiFrom(db.prepare(NO_CI_SQL).all(v.repo, NO_CI_SAMPLE) as { overall: string | null }[])) continue;
+        if (noCiFrom(latestChecks.all(v.repo, NO_CI_SAMPLE) as { overall: string | null }[])) continue;
         for (const t of [v.head_task_id, v.base_task_id]) if (t !== null) cancel.run(at, at, t);
         settle.run(at, v.repo, v.number, v.head_sha);
         stage.run(v.repo, v.number, at, `ci-enough at ${v.head_sha.slice(0, 7)}: upstream CI is the check`);

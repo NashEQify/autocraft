@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { loadActivityByLogins, loadComments, loadCommentStats, loadFormalReviews, searchComments } from "../../src/data/mirror/index.ts";
+import { loadActivityByLogins, loadAuthoredIn, loadCommentHeads, loadComments, loadCommentStats, loadFormalReviews, loadNewerComments, loadSpokenComments, newerKey, searchComments } from "../../src/data/mirror/index.ts";
 import type { Db } from "../../src/db/index.ts";
 import { both, bothFlat, comment, seedItems } from "./mirror-fixture.ts";
 
@@ -39,6 +39,25 @@ both("loadCommentStats counts, sizes and lists the authors of each item's commen
   assert.equal(counted.get("app#1")!.n, 2);
   assert.equal(counted.has("app#2"), false);
   return [all.get("app#1")!.n, counted.get("app#1")!.n];
+});
+
+both("spoken comments leave out bots, named logins and empty text; heads, newer ones and edges follow the creation order", async (db) => {
+  await seedItems(db, "app", [1, 2]);
+  await put(db, [
+    comment("app", 1, "c1", { created_at: "2026-01-01T00:00:00Z", author: "Ann", author_association: "MEMBER" }), comment("app", 1, "c2", { created_at: "2026-01-04T00:00:00Z", author: "bot[bot]" }),
+    comment("app", 1, "c3", { created_at: "2026-01-03T00:00:00Z", author: "own-app" }), comment("app", 1, "c4", { created_at: "2026-01-03T00:00:00Z", author: "bob" }),
+    comment("app", 1, "c5", { created_at: "2026-01-05T00:00:00Z", body: "  " }), comment("app", 1, "c0", { created_at: null, author: null }),
+  ]);
+  const not = ["own-app"];
+  const heads = await loadCommentHeads(db, refs(2), { not });
+  assert.deepEqual([...heads], [["app#1", { n: 3, last: "c4" }]]);
+  const edge = async (order: "first" | "last") => (await loadSpokenComments(db, { repo: "app", number: 1 }, { order, limit: 2, not })).map((c) => c.id);
+  assert.deepEqual([await edge("first"), await edge("last")], [["c0", "c1"], ["c4", "c1"]]);
+  const asked = ["c1", "c4", "gone", null].map((after) => ({ repo: "app", number: 1, after }));
+  const newer = await loadNewerComments(db, asked, { not });
+  assert.deepEqual(asked.map((a) => newer.get(newerKey(a))?.map((c) => c.id).sort() ?? null), [["c4"], [], null, ["c0", "c1", "c4"]]);
+  assert.deepEqual([...await loadAuthoredIn(db, "app", ["ann", "bob"], ["MEMBER"])], ["ann"]);
+  return [...heads];
 });
 
 both("loadFormalReviews keeps formal reviews with an author on open PRs, in row order", async (db) => {

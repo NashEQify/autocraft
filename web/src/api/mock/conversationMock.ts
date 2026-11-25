@@ -7,7 +7,7 @@ const at = (min: number) => new Date(NOW - min * MIN).toISOString();
 const REF = "designcraft#1484";
 
 const card = (c: Partial<ConversationCard> & Pick<ConversationCard, "id" | "kind" | "title" | "state">): ConversationCard => ({ label: LABELS[c.kind], headline: c.title, steps: [], canSettle: true, digest: `d${c.id}`, ...c } as ConversationCard);
-const LABELS: Record<ConversationCard["kind"], string> = { resolution: "Do it", comment: "Post comment", answer: "Answer", label: "Add label", backlog: "Move to Backlog", resolve: "Close decision", duplicate: "Close as duplicate", close: "Close issue" };
+const LABELS: Record<ConversationCard["kind"], string> = { command: "Run command", resolution: "Do it", comment: "Post comment", answer: "Answer", label: "Add label", backlog: "Move to Backlog", resolve: "Close decision", duplicate: "Close as duplicate", close: "Close issue" };
 
 const issueBody = "designcraft#1484 commits the Hungarian dictionary and hyphenation patterns. craft-i18n ships the same data as the `hu` pack.\n\nSwitch the spellchecker to load the pack through craft-proof and remove the committed files.";
 

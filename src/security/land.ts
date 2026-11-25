@@ -243,8 +243,7 @@ async function draftAdvisory(db: Db, row: FindingRow, w: Writer, g: Parameters<t
   if (!claimed) return { ghsa: null, result: { code: 1, stdout: "", stderr: "the advisory is being created" } };
   const text = `${advisoryText(row)}${row.fix_pr ? `\n### Fix\n\nFixed in ${slugOf(row.repo)}#${row.fix_pr}.\n` : ""}`;
   const a = await ghAdvisoryCreate(w, g, d.exec, { repo: row.repo, key, summary: row.title, description: text, severity: row.severity, range: await advisoryRange(db, row, d) });
-  // NEEDS security.setAdvisoryId: accept null to release the claim when the draft failed (today the claim stays until it is ten minutes old).
-  if (a.ghsa) await sec.setAdvisoryId(db, sec.findingKey(row.repo, row.number), a.ghsa);
+  await sec.setAdvisoryId(db, sec.findingKey(row.repo, row.number), a.ghsa ?? null);
   return a;
 }
 
@@ -299,18 +298,6 @@ export async function fixOnMain(git: Git, fixCommit: string, head: string): Prom
   return !!own && (await patchIds(git, head, 300)).has(own);
 }
 
-/** The finding rows `pollLanding` watches: quiet-route findings landing with a pull request, and findings waiting for an admin with a commit. */
-type Watched = Pick<sec.FindingBoardRow, "repo" | "number" | "fix_commit" | "fork" | "fix_pr">;
-// NEEDS security.loadLandingWatch: the two sets in one statement without the listing of every finding; the narrow load below reads them all to find the repos with watched findings.
-async function loadLandingWatch(db: Db): Promise<{ quiet: (Watched & { fix_pr: number })[]; waiting: (Watched & { fix_commit: string })[] }> {
-  const repos = [...new Set((await sec.loadFindingsForLinking(db)).filter((f) => f.state === "landing" || f.state === "awaiting-admin").map((f) => f.repo))];
-  const board = await sec.loadFindingBoard(db, { repos });
-  return {
-    quiet: board.filter((f): f is typeof f & { fix_pr: number } => f.state === "landing" && f.fix_pr !== null && f.fork === null),
-    waiting: board.filter((f): f is typeof f & { fix_commit: string } => f.state === "awaiting-admin" && f.fix_commit !== null),
-  };
-}
-
 type PrFacts = { item: Pick<ItemOf<"pr">, "state" | "is_draft" | "mergeable" | "ci_state"> | undefined; last: { outcome: string; reason: string | null } | undefined };
 
 /** Why a quiet pull request is still open, from its mirror row and its last merge attempt. */
@@ -350,7 +337,7 @@ export async function stallReason(db: Db, repo: string, number: number): Promise
  * `advisory`. External wait: it reads GitHub state and never sleeps on a timer. Returns the number of findings moved.
  */
 export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "log">): Promise<number> {
-  const { quiet, waiting } = await loadLandingWatch(db);
+  const { quiet, waiting } = await sec.loadLandingWatch(db);
   let moved = 0;
   const facts = await loadPrFacts(db, quiet.map((f) => ({ repo: f.repo, number: f.fix_pr })));
   const stateOf = (f: (typeof quiet)[number]) => facts.get(`${f.repo}#${f.fix_pr}`)?.item?.state;

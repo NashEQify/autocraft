@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { bulkWrites, changeCursor, changesSince, pruneChanges, type ChangeCursor } from "../src/core/plan-changes.ts";
-import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
+import { PLAN_INPUTS } from "../src/trigger-sources.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { inReadSnapshot, planPass } from "../src/core/plan-engine.ts";

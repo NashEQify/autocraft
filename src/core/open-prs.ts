@@ -38,8 +38,13 @@ export async function issuesWithOpenPr(db: Db, repo: string): Promise<Map<number
 
 /** issuesWithOpenPr() for every repo, from one reading of the open PRs. */
 export async function issuesWithOpenPrAll(db: Db): Promise<(repo: string) => Map<number, OpenPr>> {
+  return openPrsByRepo(await loadOpenPrLinks(db));
+}
+
+/** issuesWithOpenPrAll over loaded open-PR rows (mirror.loadOpenPrLinks). */
+export function openPrsByRepo(rows: readonly OpenPrRow[]): (repo: string) => Map<number, OpenPr> {
   const by = new Map<string, OpenPrRow[]>();
-  for (const p of await loadOpenPrLinks(db)) (by.get(p.repo) ?? by.set(p.repo, []).get(p.repo)!).push(p);
+  for (const p of rows) (by.get(p.repo) ?? by.set(p.repo, []).get(p.repo)!).push(p);
   return (repo) => openPrMap(by.get(repo) ?? []);
 }
 

@@ -152,10 +152,7 @@ export function refreshShared(db: Db, box: TokenBox, provider: Provider, login: 
     };
     if (!held()) return await settle();
     if (mine.kind === "session") {
-      // NEEDS access.endSessionIf: delete the session only while its token_enc is still `mine.enc`, in one statement (this read-then-delete can end a session a sign-in has just replaced).
-      const now = await access.loadSessionSealed(db, mine.idHash);
-      const ended = now?.sealed === mine.enc;
-      if (ended) await access.endSession(db, mine.idHash);
+      const ended = !!mine.enc && await access.endSessionIf(db, mine.idHash, mine.enc as Sealed);
       return ended ? { ok: false, transient: false, why: "refresh-failed" } : await settle();
     }
     if (!live) return { ok: false, transient: false, why: "refresh-failed" };

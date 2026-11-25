@@ -4,7 +4,7 @@ import type { DiscordAccount, DiscordFilingAdded, DiscordLinkCode, DiscordInfo, 
 import { envVar } from "../../env.ts";
 import { listLinks as loadLinks } from "../../data/access/index.ts";
 import { setting, settings, writeSetting } from "../../data/control/index.ts";
-import { loadDiscordSetup, markWatched, offeredRepos, setDefaultRepo } from "../../data/discord/index.ts";
+import { loadDiscordSetup, loadMentionCounts, loadMentionsOfItems, markWatched, offeredRepos, setDefaultRepo } from "../../data/discord/index.ts";
 import { loadPromptSpend } from "../../data/inference/index.ts";
 import { loadReleaseAppNames } from "../../data/mirror/index.ts";
 import { readsUseApp } from "../../data/access/index.ts";
@@ -13,10 +13,9 @@ import { isPublicRepo, publicRepoNames } from "../../public/status.ts";
 import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
-import { countOf, linksOf, trackedRepos } from "../../discord/store.ts";
+import { mentionLinks, trackedRepos } from "../../discord/store.ts";
 import { addFilingRepo, FilingRepoError, modesOf, offerOf, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
 import { DEFAULT_REACT_EMOJI, setReactEmoji, validReactEmoji } from "../../discord/react.ts";
-import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, unlinkLogin, unlinkRow } from "../../discord/links.ts";
 import type { Req } from "../types.ts";
 import type { Db } from "../../db/index.ts";
@@ -45,9 +44,10 @@ export const contactOf = async (db: Db): Promise<string> =>
 /** Count for everyone who sees the item; message links only with the key. */
 export async function discordOf(db: Db, repo: string, n: number): Promise<DiscordInfo> {
   const keys = discordKeys();
-  // NEEDS views: the item page loads these rows once for all four fields; each call below reads the item's mention rows again.
-  const [count, links, signals, signalLinkList] = await db.together(() => Promise.all([countOf(db, repo, n), linksOf(db, keys, repo, n), signalCountOf(db, repo, n), signalLinks(db, keys, repo, n)]));
-  return { count, links, signals, signalLinks: signalLinkList };
+  const key = `${repo}#${n}`;
+  const [counts, mentions] = await db.together(() => Promise.all([loadMentionCounts(db, [key]), keys ? loadMentionsOfItems(db, [key]) : Promise.resolve(null)]));
+  const c = counts.get(key), rows = mentions?.get(key) ?? [];
+  return { count: c?.count ?? 0, links: mentionLinks(keys, rows), signals: c?.signals ?? 0, signalLinks: mentionLinks(keys, rows.filter((r) => r.signal)) };
 }
 
 const operator = (req: Req): void => {

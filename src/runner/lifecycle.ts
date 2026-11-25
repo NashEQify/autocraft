@@ -3,14 +3,13 @@
 // file is written after it commits.
 import { appendFileSync } from "node:fs";
 import type { Db } from "../db/index.ts";
-import { clearLeases, loadJobs, loadRunning, markCancelQueued, markCancelRequested, markEnded, markResumed, releaseLeases } from "../data/jobs/index.ts";
+import { clearLeases, loadJobs, loadRunning, markCancelQueued, markCancelRequested, markEnded, markResumed, releaseLeases, RUNNER_STOPPED } from "../data/jobs/index.ts";
 import { failRunning } from "../data/inference/index.ts";
 import { clearJobReplies, withdrawJobCalls } from "../data/runners/index.ts";
 import { MAX_RESUMES } from "./resuming.ts";
 
 /** Error text of jobs a runner stop or restart ended without resuming them (resumeJob); the autopilot does not count them as failures. */
-// NEEDS jobs.RUNNER_STOPPED: exported from src/data/jobs/index.ts (it is only in fragments.ts, which feature code may not import); keep both texts equal.
-export const RUNNER_STOPPED = "The runner stopped while this job ran; start it again if needed.";
+export { RUNNER_STOPPED } from "../data/jobs/index.ts";
 /** Error of a job the runner stopped for running past its step's deadline; set when the stop is asked, so the job can finish its current item. */
 export const DEADLINE_ERROR = /^stopped: (ran past|no progress for) /;
 export const now = (): string => new Date().toISOString();

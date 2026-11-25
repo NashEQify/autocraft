@@ -29,7 +29,7 @@ import { AppError, call, GITHUB_API } from "./app.ts";
 import { appSlug } from "./identity.ts";
 import { commentNames } from "./slugs.ts";
 import { installationToken } from "./install-token.ts";
-import { ghComment, WritePacedError } from "./write.ts";
+import { ghComment, WritePacedError, type Writer } from "./write.ts";
 import { envVar } from "../env.ts";
 import { t } from "../i18n/index.ts";
 import { runCommand, type Actor } from "../workflow/apply.ts";
@@ -97,6 +97,8 @@ export type CommandDeps = {
   pr?: (q: Querier, repo: string, number: number, since: string) => Promise<PrNow | null>;
   /** The app's slug the comment is parsed again with (default: the app's). */
   slug?: string | null;
+  /** Replaces the installation-token minter of the app identity (tests). */
+  mint?: Writer["mint"];
   now?: () => Date;
   log?: (l: string) => void;
   limit?: number;
@@ -357,7 +359,7 @@ async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "fa
     reply = "failed";
   } else {
     try {
-      const out = await ghComment({ db, login: stranger ? AUDIT_LOGIN : r.login }, g, deps.exec ?? defaultExec, "github-command-reply", { repo: r.repo, number: r.number, pr: r.pr === 1 }, { by: "fixed-operator" }, answerText(r), { comment: Number(r.comment_id), command: r.command });
+      const out = await ghComment({ db, login: stranger ? AUDIT_LOGIN : r.login, mint: deps.mint }, g, deps.exec ?? defaultExec, "github-command-reply", { repo: r.repo, number: r.number, pr: r.pr === 1 }, { by: "fixed-operator" }, answerText(r), { comment: Number(r.comment_id), command: r.command });
       reply = out.code === 0 ? "posted" : "failed";
       if (out.code !== 0) deps.log?.(`github command ${refOf(r)}: the answer failed: ${oneLine(out.stderr || out.stdout)}`);
     } catch (e) {

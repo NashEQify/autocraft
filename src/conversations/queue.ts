@@ -3,38 +3,25 @@
 // queued cards in order (item priority level, then the time of the press) once room returns, which is 00:00 UTC or an operator's
 // raise of the limit. Waiting for room is the registered "Daily limit" wait (src/stages/registry.ts); no timer runs.
 // Card writes and Act's closes share one count (src/conversations/usage.ts), held to the Act limit.
-import { holdsIssues, type CardParams } from "./cards.ts";
+import { readParams, type CardParams } from "./cards.ts";
 import { loadActRoom, loadQueue, type ActRoom } from "../data/conversations/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** What a queued card needs to run later as the press would have run: the presser's choices at the time. */
-export type QueueArgs = { skip?: number[]; note?: string; noteStaysOut?: boolean; role?: string };
-
-const WRITE_STEPS_ONE = new Set(["comment", "label", "close", "unlabel", "reopen", "open_issue", "transfer", "assign", "request_reviewers"]);
+export type QueueArgs = { note?: string; noteStaysOut?: boolean; role?: string };
 
 /**
- * The GitHub writes a card makes when pressed: one per write step, two for a close that comes with a comment and for a duplicate close. Review and
- * fix-up steps start pipeline work and write nothing here; an issue the card holds until the merge is counted when it is filed (src/conversations/held.ts).
+ * The GitHub writes a card makes when pressed: one for a comment or a label. A command writes nothing here: it runs through the
+ * workflow, whose steps and person actions keep their own counts; an issue a merging command holds is counted when it is filed
+ * (src/conversations/held.ts).
  */
-export function cardWriteCount(params: CardParams, text: string | null): number {
-  switch (params.kind) {
-    case "comment": case "label": return 1;
-    case "close": return text ? 2 : 1;
-    case "duplicate": return 2;
-    case "resolution": {
-      const held = holdsIssues(params);
-      return params.steps.reduce((n, s) => n + (s.kind === "duplicate" ? 2 : s.kind === "open_issue" && held ? 0 : WRITE_STEPS_ONE.has(s.kind) ? 1 : 0), 0);
-    }
-    default: return 0;
-  }
+export function cardWriteCount(params: CardParams | null): number {
+  return params?.kind === "comment" || params?.kind === "label" ? 1 : 0;
 }
 
-/** Writes the queued card still makes: the card's writes minus the steps the presser removed. */
-export function needOf(c: { params: string; text: string | null; queue_args?: string | null }): number {
-  const params = JSON.parse(c.params) as CardParams;
-  const args = JSON.parse(c.queue_args ?? "{}") as QueueArgs;
-  const left = params.kind === "resolution" && args.skip?.length ? { ...params, steps: params.steps.filter((_, k) => !args.skip!.includes(k)) } : params;
-  return cardWriteCount(left, c.text);
+/** Writes the queued card still makes. */
+export function needOf(c: { kind: string; params: string }): number {
+  return cardWriteCount(readParams(c.kind, c.params));
 }
 
 /**
@@ -74,9 +61,8 @@ export const queuePlace = async (db: Db, cardId: number): Promise<number | null>
 /** The shown reason of a queued press. The place is read when shown, never stored. */
 export const queueReason = (place: number | null): string => (place === null ? "daily GitHub write limit" : `daily GitHub write limit, #${place} in line`);
 
-/** Whether any card other than `except` waits in the queue. */
-export const queuedAhead = async (db: Db, except?: number): Promise<boolean> =>
-  (await queuedCards(db)).some((r) => r.id !== except);
+/** Whether any card other than `except` waits in the loaded queue. */
+export const queuedAhead = (queue: { rows: { id: number }[] }, except?: number): boolean => queue.rows.some((r) => r.id !== except);
 
 /** The first queued card and what it needs, for the planner: it proposes the drain only when the head fits. */
 export async function queueHead(db: Db): Promise<{ repo: string; fits: boolean } | null> {

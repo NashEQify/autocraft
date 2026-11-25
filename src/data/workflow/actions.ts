@@ -76,12 +76,14 @@ export async function saveActions(db: Db, rows: { id: number; state: ActionState
   });
 }
 
-/** Actions per item (oldest first), for items, workflows, or the rows waiting for one login's token or permission. With no filter, every action. */
-export async function loadActions(db: Db, f: { refs?: { repo: string; number: number }[]; workflowIds?: number[]; waitingFor?: string }): Promise<Map<RefKey, WorkflowAction[]>> {
+/** Actions per item (oldest first), for items, workflows, kinds, states, or the rows waiting for one login's token or permission. With no filter, every action. */
+export async function loadActions(db: Db, f: { refs?: { repo: string; number: number }[]; workflowIds?: number[]; waitingFor?: string; kinds?: readonly ActionKind[]; states?: readonly ActionState[] }): Promise<Map<RefKey, WorkflowAction[]>> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.workflow_actions as a").select(kx.cols(T, "a"))
     .$if(!!f.refs, (b) => b.where(kx.refIn(db, "a", f.refs!.map((r): [string, number] => [r.repo, r.number]))))
     .$if(!!f.workflowIds, (b) => b.where(kx.inList(db, "a.workflow_id", f.workflowIds!, "bigint")))
+    .$if(!!f.kinds, (b) => b.where(kx.inList(db, "a.kind", [...f.kinds!])))
+    .$if(!!f.states, (b) => b.where(kx.inList(db, "a.state", [...f.states!])))
     .$if(f.waitingFor !== undefined, (b) => b.where("a.state", "in", WAITING).where((eb) => kx.ciEq(db, "a.by", eb.val(f.waitingFor!))))
     .orderBy("a.id"));
   const out = new Map<RefKey, WorkflowAction[]>();

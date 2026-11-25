@@ -8,7 +8,6 @@ import {
   loadTaskStates, loadTasks, loadWorkerTask, pruneTaskBatch, QueueFullError, reapStaleTasks, releaseClaims, startTasks, StatusError, TaskAccessError, touchTasks, loseTasks,
   LOG_TAIL_BYTES, LOST_AFTER_MS, loadTaskSummary, MAX_CHUNK_BYTES, PRIVATE_STEPS,
 } from "../data/build/index.ts";
-import { privateStepExpr as privateStep } from "../data/build/fragments.ts";
 import type { ClaimInputs, ClaimPick, NewTask, TaskRecord, TaskState, Warm } from "../data/build/index.ts";
 import type { Config } from "../data/control/index.ts";
 import { warmKeyOfRepo } from "../data/build/warm-key.ts";
@@ -20,8 +19,6 @@ import { slugOf } from "../owners.ts";
 import { settingsConfig } from "./scope.ts";
 import { autocraftVersion, warmMinInterval, WARM_PRODUCER_REV } from "./warm-queue.ts";
 import type { Db } from "../db/index.ts";
-import type { Expression, SqlBool } from "kysely";
-import type { Eb, Ex } from "../db/kx.ts";
 
 export {
   ARTIFACT_KEEP_MS, CONFIDENTIAL_WAIT, KEEP_MS, LOG_TAIL_BYTES, LOST_AFTER_MS, MAX_ATTEMPTS, MAX_CHUNK_BYTES, MAX_LOG_BYTES, MAX_QUEUED, PRIVATE_STEPS, TERMINAL, WARM_STEP,
@@ -354,7 +351,7 @@ export async function privateClockStart(db: Db, queuedAt: string): Promise<numbe
 }
 
 /** `step IN (PRIVATE_STEPS)` as an expression on the step in `col`; `eb.not(...)` for NOT IN. */
-export const privateStepExpr = (eb: Eb, col: Ex = "step"): Expression<SqlBool> => privateStep(eb, col);
+export { privateStepExpr } from "../data/build/index.ts";
 
 /** Newest first, keyset-paged by id. `hidden` repos are left out, and the security fix's tasks unless `staff`. */
 export async function listTasks(db: Db, f: TaskFilter, hidden: string[] = [], staff = true): Promise<TaskPage> {

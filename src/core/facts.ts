@@ -3,9 +3,9 @@
 import { listQuietPrs } from "../data/security/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
-import { loadAssignments, withConfig, config } from "../data/control/index.ts";
-import { loadReviewFacts } from "../data/review/index.ts";
-import { fullPass } from "../data/planner/index.ts";
+import { withConfig, config } from "../data/control/index.ts";
+import { loadUnsureHeads } from "../data/review/index.ts";
+import { fullPass, repoPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo } from "../fixup/pushable.ts";
@@ -30,7 +30,7 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import type { WorkflowGate } from "./may.ts";
+import { mergeWaits, type WorkflowGate } from "./may.ts";
 import { loadPrPass, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
@@ -91,13 +91,21 @@ export function workflowGate(w: ItemWorkflow | undefined, fixupAsked: boolean): 
   };
 }
 
+/** An item's assignment from its last successful assign and its mirrored `assignees` (JSON). Without a recorded account, the audit's own assignee stands for it. */
+export function assignmentIn(pipelineLogin: string | null, assigned: { assignee: string | null } | undefined, assignees: string | null): AssignFacts {
+  return {
+    login: pipelineLogin ?? assigned?.assignee ?? null, assignees: parseList(assignees).filter((x): x is string => typeof x === "string"),
+    ours: assigned !== undefined && (pipelineLogin === null || assigned.assignee === pipelineLogin),
+  };
+}
+
 /** The work score of a live workflow (higher first), as `workflow.fragments.weightScoreExpr` orders: weight, then the older workflow. */
-const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
+export const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
 
 /** Our own integration PR of a batch. */
 function integrationOf(d: PrPassData, ref: string): boolean {
   const m = d.mirror.get(ref);
-  return d.merge.batchPrs.has(ref) && !!m?.item.author && d.ownLogins.has(m.item.author);
+  return d.merge.batchPrs.has(ref) && !!m?.item.author && d.ownLogins.has(m.item.author.toLowerCase());
 }
 
 /** The pass universe: open PRs, merged PRs with a take review or merged by us, PRs of a live implementation attempt. */
@@ -111,14 +119,13 @@ function inUniverse(d: PrPassData, ref: string, state: string): boolean {
 }
 
 /** PRs the pipeline opened itself: quiet security PRs and default-branch fix PRs, when a pipeline account is set. */
-const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string | null): Set<string> => (login ? new Set([...quiet, ...mainFix]) : new Set());
+export const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string | null): Set<string> => (login ? new Set([...quiet, ...mainFix]) : new Set());
 
 /** Facts of every open PR (and merged PRs with a take or take-fix review, merged by us, or of a live implementation) of the keys given. One load for all PRs. */
 export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? [...opts.refs] : undefined;
-  // NEEDS planner.repoPass: the pass universe of one repo; a repo-only load reads the full pass and keeps that repo's PRs.
-  const keys: KeySource = opts.keys ?? (refs ? refs.map(asRef) : fullPass());
+  const keys: KeySource = opts.keys ?? (refs ? refs.map(asRef) : opts.repo ? repoPass(opts.repo) : fullPass());
   const mergeEntryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;
@@ -206,7 +213,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const defaultBranch = repoRow?.default_branch ?? null;
   const optional = cfg.repo(repo).optionalChecks;
   const ciOf = (overall: string | null | undefined): string => effectiveCiWith(optional, overall ?? "none", ch?.checks ?? null);
-  const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author);
+  const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const fresh = !!ch?.fetched_at && (!i.updated_at || ch.fetched_at > i.updated_at);
   // An integration PR's head is the batch tip, where the run approvals are recorded.
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
@@ -223,12 +230,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const operator = d.workflow.operator.get(ref);
   const ownHeads = (h: string): string[] => pushChainOf(patch.pushes, h).filter((x) => d.ownCommits.has(`${repo}@${x}`));
   const ownHead = (h: string): boolean => ownHeads(h).length > 0;
-  const assigned = d.assignments.get(ref);
-  const pipelineLogin = d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null;
-  const assignment: AssignFacts = {
-    login: pipelineLogin ?? assigned?.assignee ?? null, assignees: parseList(i.assignees).filter((x): x is string => typeof x === "string"),
-    ours: assigned !== undefined && (pipelineLogin === null || assigned.assignee === pipelineLogin),
-  };
+  const assignment = assignmentIn(d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null, d.assignments.get(ref), i.assignees);
   const trips: Record<string, string> = {};
   for (const [stage, t] of d.control.trips) if (t.active) trips[stage] = t.reason;
   const outsideHold = d.outsideHolds.get(ref);
@@ -256,8 +258,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.workflow = wfFact;
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
-    // NEEDS merge.loadMergeFacts: the batch tip's run approvals only while every member has a final take review at its batched head.
-    base.runs = runsOf(batchRow ? d.merge.runs.get(`${ref}@${batchRow.commitSha}`) : undefined, rf.ciApproved);
+    // The batch tip's run approvals count only while the batch is open and every member keeps its take review at its batched head.
+    const tipRuns = batchRow?.state === "open" && batchRow.membersReviewed ? d.merge.runs.get(`${ref}@${batchRow.commitSha}`) : undefined;
+    base.runs = runsOf(tipRuns, rf.ciApproved);
     return base;
   }
   if (!inScope) {
@@ -308,6 +311,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const mx = mxh !== null;
   const qh = mxh ?? latest!.head;
   const qAt = mx ? wfFact!.startedAt : latest!.at;
+  // The merge queue's operator path: the approved workflow's leg handed the PR over at this head (moveLegs sets `updated_at`).
+  const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
+  if (handed) base.decision = { ...NO_DECISION, asked: true, answer: "merge", mergeAnswerAfterReview: handed.updated_at > qAt };
+  if (mergeWaits(d.mergeActions.get(ref), wfRow, qh)) base.decision = { ...base.decision, execWaiting: true };
   const verdict = latest?.verdict;
 
   const take = mx || verdict === "take" || verdict === "take-fix";
@@ -426,8 +433,7 @@ function statementConflicts(d: PrPassData, stored: unknown[]): PrFacts["statemen
 
 /** True when any stored Opus review at the head (the current row or an overwritten one in the history) was a take or take-fix with sure = 0. */
 export async function headWasUnsure(db: Db, repo: string, number: number, head: string): Promise<boolean> {
-  // NEEDS review.loadUnsureHeads(keys): the unsure heads alone; loadReviewFacts reads the rest of the review facts in the same wave.
-  return (await loadReviewFacts(db, [{ repo, number }], { now: Date.now() })).unsureHeads.has(`${repo}#${number}@${head}`);
+  return (await loadUnsureHeads(db, [{ repo, number }])).has(`${repo}#${number}@${head}`);
 }
 
 export { tierKey, tiersOf, type AuthorRef };
@@ -437,16 +443,5 @@ export async function ownFixPrs(db: Db, repo?: string, _slug?: string | null): P
   const [own, quiet, mainFix, login] = await db.together(() => Promise.all([
     loadOwnLogins(db), listQuietPrs(db, { repo: repo }), loadMainFixPrs(db, repo ? [repo] : undefined), withConfig(db, async () => config(db).pipelineLogin),
   ]));
-  return { login, prs: ownPrSet(mainFix, quiet, login), quiet, isOwn: async (_r, author) => !!author && own.has(author) };
-}
-
-/** The pipeline account and the last successful assign of every item; the returned function gives an item's assignment facts from its mirrored `assignees` (JSON). */
-export async function assignmentsOf(db: Db, repo?: string): Promise<(ref: string, assignees: string | null) => AssignFacts> {
-  const [last, login] = await db.together(() => Promise.all([loadAssignments(db, repo ? { repo } : {}), withConfig(db, async () => config(db).pipelineLogin)]));
-  return (ref, assignees) => {
-    const list = parseList(assignees).filter((x): x is string => typeof x === "string");
-    const by = last.get(ref);
-    // Without a recorded account, the audit's own assignee stands for it.
-    return { login: login ?? by?.assignee ?? null, assignees: list, ours: by !== undefined && (login === null || by.assignee === login) };
-  };
+  return { login, prs: ownPrSet(mainFix, quiet, login), quiet, isOwn: async (_r, author) => !!author && own.has(author.toLowerCase()) };
 }

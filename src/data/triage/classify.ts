@@ -201,6 +201,16 @@ export async function loadLatestVerdicts(db: Db, keys: KeySource): Promise<Map<R
   return out;
 }
 
+/** Every classification row of the repo's items (only run `run` when given), newest first per item. 1 statement. */
+export async function loadLabelVerdicts(db: Db, repo: string, run?: string): Promise<Map<RefKey, ClsRow[]>> {
+  const out = new Map<RefKey, ClsRow[]>();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.classifications as c").select(FULL).where("c.repo", "=", repo)
+    .$if(run !== undefined, (b) => b.where("c.run_id", "=", run!)).orderBy("c.at", "desc").orderBy(kx.rowid("main.classifications", "c"), "desc"), { label: "triage.loadLabelVerdicts" });
+  for (const r of rows) push(out, refKey(r.repo, r.number), r as ClsRow);
+  return out;
+}
+
 /** Verdict count. */
 export async function countVerdicts(db: Db, f: { run: string; classifier?: string; since?: string }): Promise<number> {
   const q = queryDb(db);

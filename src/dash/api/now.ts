@@ -229,7 +229,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
       .$if(!!before, (q) => q.where((eb) => eb(eb.fn.coalesce("r.ended_at", "r.started_at"), "<", before!))).orderBy("at", "desc").limit(SCAN)),
     db.all(db.k.selectFrom("build_tasks").select((eb) => ["id", "step", "repo", "number", "state", eb.fn.coalesce("ended_at", "queued_at").as("at"), "summary"])
       .where("state", "in", ["failed", "lost"]).where("job_id", "is", null)
-      .$if(!staff, (q) => q.where((eb) => eb.not(privateStepExpr(eb))))
+      .$if(!staff, (q) => q.where((eb) => eb.not(privateStepExpr(eb, "step"))))
       .$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden)))
       .$if(!!before, (q) => q.where((eb) => eb(eb.fn.coalesce("ended_at", "queued_at"), "<", before!))).orderBy("at", "desc").limit(SCAN)),
   ]);

@@ -1,12 +1,11 @@
-// Card presses at the daily GitHub write limit: they queue instead of failing, hold their decision's lock, drain in order through the Act
+// Card presses at the daily GitHub write limit: they queue instead of failing, drain in order through the Act
 // step against the one shared count, are carried out only for a presser who may still settle, and stop being retried after three failures.
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { runAct } from "../src/act/index.ts";
-import { disputeCard, keepCard, queuedCards } from "../src/conversations/queue.ts";
+import { queuedCards } from "../src/conversations/queue.ts";
 import { actUsedToday } from "../src/conversations/usage.ts";
 import { doCard, liveWrite } from "../src/conversations/act.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
 import { applyAnswer, undo } from "../src/dash/api/decisions.ts";
 import { ask, getDecision } from "../src/decisions.ts";
 import type { Req } from "../src/dash/types.ts";
@@ -41,14 +40,7 @@ const rank = async (w: World, n: number, level: number) =>
   await w.db.run(w.db.k.insertInto("item_rank").values({ repo: "app", number: n, score: level * 10000, breakdown: "{}", computed_at: T1 })
     .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["score", "breakdown", "computed_at"]))));
 const commentCard = async (w: World, n: number) =>
-  Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "comment", params: JSON.stringify({ kind: "comment", text: "Hello." }), text: "Hello.", description: "comment" }).returning("id")))!.id);
-/** A card that comments and answers the item's open scope question, so it locks that decision. */
-const settleCard = async (w: World, n: number) => {
-  const id = `app#${n}:scope`;
-  await ask(w.db, [{ id, kind: "scope", repo: "app", number: n, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
-  const params = { kind: "resolution", steps: [{ kind: "comment" }], settle: { kind: "answer", decision: id, option: "take", stamp: await decisionStamp(w.db, (await getDecision(w.db, id))!) } };
-  return { decision: id, card: Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "resolution", params: JSON.stringify(params), text: "Hello.", description: "comment and answer" }).returning("id")))!.id) };
-};
+  Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "comment", params: JSON.stringify({ kind: "comment" }), text: "Hello.", description: "comment" }).returning("id")))!.id);
 const state = async (w: World, id: number) => (await w.db.get(w.db.k.selectFrom("conversation_cards").select(["state", "error"]).where("id", "=", id)))!;
 const run = (w: World, d: ReturnType<typeof deps>, params: { limit?: number; onHandled?: (n: number) => void } = {}) => runAct(w.db, { repo: "app", dryRun: false, ...params }, () => {}, d);
 const askClose = async (w: World, n: number) => {
@@ -92,7 +84,7 @@ describe("card presses at the daily limit", () => {
     assert.deepEqual([(await state(w, e)).state, (await state(w, f)).state], ["done", "queued"]);
   });
 
-  test("a press that cannot wait is refused with the reason, and a queued press holds only its own decision", async () => {
+  test("a press that cannot wait is refused with the reason, and a presser who lost access fails cleanly at the drain", async () => {
     current = await (await (await (await world()).repo()).issue(1)).issue(2);
     const w = current;
     const d = deps(w);
@@ -102,41 +94,16 @@ describe("card presses at the daily limit", () => {
     await w.pipeline(true);
     await assert.rejects(doCard(w.db, await commentCard(w, 1), "op", d as never), /the daily limit of Act is 0/);
     await limit(w, 1);
-    const used = await commentCard(w, 2);
-    assert.equal((await doCard(w.db, used, "op", d as never)).card.state, "done");
-    const s = await settleCard(w, 1);
-    assert.equal((await doCard(w.db, s.card, "op", d as never)).card.state, "queued");
-    const dec = (await getDecision(w.db, s.decision))!;
-    await assert.rejects(async () => await applyAnswer(w.db, dec, "op2", { answer: "close" }, "dashboard"), /waits for the daily GitHub write limit/);
-    // The other decision of the item set is free.
-    await ask(w.db, [{ id: "app#2:scope", kind: "scope", repo: "app", number: 2, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
-    await applyAnswer(w.db, (await getDecision(w.db, "app#2:scope"))!, "op2", { answer: "close" }, "dashboard");
-  });
-
-  test("a dispute skips the queued press until it is kept; a presser who lost access fails cleanly and frees the decision", async () => {
-    current = await (await (await (await (await world()).repo()).issue(1)).issue(2)).issue(3);
-    const w = current;
     await w.db.run(w.db.k.insertInto("access").values({ login: "op2", role: "operator" }));
-    const posted: string[] = [];
-    const d = deps(w, { posted });
-    await limit(w, 1);
-    await doCard(w.db, await commentCard(w, 3), "op", d as never);
-    const a = await settleCard(w, 1), b = await commentCard(w, 2);
-    await doCard(w.db, a.card, "op2", d as never);
-    await doCard(w.db, b, "op", d as never);
-    assert.equal(await disputeCard(w.db, a.card, "op2", "wrong", T1), false, "not by the presser");
-    assert.equal(await disputeCard(w.db, a.card, "op", "wrong item", T1), true);
+    await doCard(w.db, await commentCard(w, 2), "op", d as never);
+    const a = await commentCard(w, 1), b = await commentCard(w, 2);
+    assert.equal((await doCard(w.db, a, "op2", d as never)).card.state, "queued");
+    assert.equal((await doCard(w.db, b, "op", d as never)).card.state, "queued");
+    await w.db.run(w.db.k.deleteFrom("access").where("login", "=", "op2"));
     await limit(w, 10);
     await run(w, d);
-    assert.deepEqual([(await state(w, a.card)).state, (await state(w, b)).state], ["queued", "done"], "the disputed press is skipped, the next one runs");
-    // Kept, but its presser is no longer an operator.
-    await keepCard(w.db, a.card);
-    await w.db.run(w.db.k.deleteFrom("access").where("login", "=", "op2"));
-    await run(w, d);
-    assert.equal((await state(w, a.card)).state, "failed");
-    assert.match((await state(w, a.card)).error ?? "", /op2 no longer has write access/);
-    assert.equal((await getDecision(w.db, a.decision))!.exec_state, null, "the decision is free again");
-    await applyAnswer(w.db, (await getDecision(w.db, a.decision))!, "op", { answer: "close" }, "dashboard");
+    assert.deepEqual([(await state(w, a)).state, (await state(w, b)).state], ["failed", "done"]);
+    assert.match((await state(w, a)).error ?? "", /op2 no longer has write access/);
   });
 });
 
@@ -174,16 +141,15 @@ describe("blocked repos, GitHub errors and permission reads", () => {
     const d = deps(w);
     await limit(w, 1);
     await doCard(w.db, await commentCard(w, 2), "op", d as never);
-    const a = await settleCard(w, 1);
-    assert.equal((await doCard(w.db, a.card, "op", d as never)).card.state, "queued");
+    const a = await commentCard(w, 1);
+    assert.equal((await doCard(w.db, a, "op", d as never)).card.state, "queued");
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     await limit(w, 10);
     // The blocked press holds no place: a new press runs at once instead of queueing behind it.
     assert.equal((await doCard(w.db, await commentCard(w, 2), "op", d as never)).card.state, "done");
     await run(w, d);
-    assert.equal((await state(w, a.card)).state, "failed");
-    assert.match((await state(w, a.card)).error ?? "", /Act cannot run for app now: the pipeline is off for app/);
-    assert.equal((await getDecision(w.db, a.decision))!.exec_state, null, "its decision is free again");
+    assert.equal((await state(w, a)).state, "failed");
+    assert.match((await state(w, a)).error ?? "", /Act cannot run for app now: the pipeline is off for app/);
   });
 
   test("a GitHub server error stops the run without counting a try", async () => {

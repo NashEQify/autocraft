@@ -4,7 +4,7 @@ import { isTypeLabel, sameLabel } from "./set.ts";
 import { listItems } from "../data/mirror/index.ts";
 import { loadOwnIntegration } from "../data/merge/index.ts";
 import { listQuietPrs } from "../data/security/index.ts";
-import { loadLatestVerdicts, loadVerdicts } from "../data/triage/index.ts";
+import { loadLabelVerdicts } from "../data/triage/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** The type label of a plugin candidate. */
@@ -18,12 +18,11 @@ export type PlanRow = {
 export type PlanCounts = { toAdd: number; already: number; unsettled: number; conflicts: number };
 
 export async function planLabels(db: Db, repo: string, runId?: string): Promise<PlanRow[]> {
-  const [listed, own, quiet] = await db.together(() => Promise.all([listItems(db, { repos: [repo], states: ["OPEN"], inScope: true }, "card"), loadOwnIntegration(db, [repo]), listQuietPrs(db, { repo })]));
+  const [listed, own, quiet, cls] = await db.together(() => Promise.all([
+    listItems(db, { repos: [repo], states: ["OPEN"], inScope: true }, "card"), loadOwnIntegration(db, [repo]), listQuietPrs(db, { repo }), loadLabelVerdicts(db, repo, runId),
+  ]));
   const items = listed.filter((i) => !own.has(`${repo}#${i.number}`));
-  const keys = items.map((i) => ({ repo, number: i.number }));
-  // NEEDS triage.loadLabelVerdicts: a repo's rows, newest first, in one statement; this reads the latest row per classifier when no run is named.
-  const cls = runId ? await loadVerdicts(db, keys, runId) : await loadLatestVerdicts(db, keys);
-  const byItem = (n: number): ClsRow[] => (cls.get(`${repo}#${n}`) ?? []).slice().sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const byItem = (n: number): ClsRow[] => cls.get(`${repo}#${n}`) ?? [];
 
   return items.map((it) => {
     let existing: string[] = [];

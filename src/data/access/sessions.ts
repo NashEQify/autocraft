@@ -84,6 +84,12 @@ export async function endSession(db: Db, idHash: string): Promise<void> {
   await q.run(q.k.deleteFrom("sessions").where("id_hash", "=", idHash));
 }
 
+/** Deletes one session only while it still holds `sealed` (a sign-in may have replaced it); true when it was deleted. One statement. */
+export async function endSessionIf(db: Db, idHash: string, sealed: Sealed): Promise<boolean> {
+  const q = queryDb(db);
+  return Number((await q.run(q.k.deleteFrom("sessions").where("id_hash", "=", idHash).where("token_enc", "=", sealed))).changes) > 0;
+}
+
 /** Admin revoke: delete returning. */
 export async function endSessionById(db: Db, rowid: number): Promise<{ idHash: string; login: string; createdAt: string; sealed: Sealed | null } | null> {
   const q = queryDb(db);

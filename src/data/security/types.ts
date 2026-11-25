@@ -13,6 +13,8 @@ export type FindingKey = string;
 
 export const ACTIVE_STATES: ScanState[] = ["modeling", "scanning", "verifying"];
 export const INTERNAL_FINDING_STATES = ["unverified", "disproved", "duplicate"] as const;
+/** Every state a finding row can hold: the listed ones and the scan's own. */
+export type StoredFindingState = FindingState | (typeof INTERNAL_FINDING_STATES)[number];
 export const UNCHECKED_RESULT = "Not verified: the scan ended before this finding was checked.";
 export const TRANSITIONS: Record<"dismiss" | "backlog" | "reopen", { from: FindingState[]; to: FindingState }> = {
   dismiss: { from: ["new", "backlog", "ready", "awaiting-admin"], to: "dismissed" },
@@ -29,6 +31,9 @@ export type CallRow = Selectable<DB["security_calls"]>;
 export type FindingRow = Selectable<DB["security_findings"]>;
 export type FindingBriefRow = Omit<FindingRow, "fix_patch" | "fix_files" | "verification" | "refs" | "reach" | "impact" | "fix_summary">;
 export type FindingBoardRow = FindingBriefRow & { building_round: number | null; last_attempt_rounds: number };
+/** A finding the landing poll watches. */
+export type WatchedFinding = { repo: string; number: number; fix_commit: string | null; fork: string | null; fix_pr: number | null };
+export type LandingWatch = { quiet: (WatchedFinding & { fix_pr: number })[]; waiting: (WatchedFinding & { fix_commit: string })[] };
 export type RoundRow = Selectable<DB["security_fix_rounds"]>;
 export type LogRound = Selectable<DB["security_fix_log"]>;
 export type ScanTestRow = Selectable<DB["security_scan_tests"]>;
@@ -45,7 +50,7 @@ export type FindingPatch = Partial<{
   fix_patch: string | null; fix_title: string | null; fix_summary: string | null; fix_branch: string | null; fix_files: string | null; fix_ref: string | null;
   env_wait_at: string | null; reason: string | null; decided_by: string | null; verification: string | null; severity: string;
 }> & { bumpFixAttempts?: true; restoreFixAttempts?: number };
-export type FindingMove = { repo: string; number: number; from: FindingState[]; to: FindingState; set?: FindingPatch; by?: string };
+export type FindingMove = { repo: string; number: number; from: StoredFindingState[]; to: StoredFindingState; set?: FindingPatch; by?: string };
 
 export type NewArea = { idx: number; name: string; paths: string; entry_points: string; risk: number; why: string | null };
 export type NewScanCall = { scanId: number; kind: string; areaIdx?: number | null; finding?: number | null; resumed?: boolean };

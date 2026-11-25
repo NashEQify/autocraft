@@ -42,7 +42,9 @@ export type PollRow = {
   consumedAt: number | null; usage: string | null; turns: number | null; sessionId: string | null;
 };
 /** `parentLive`: for a queued follow-up, the helper that ran its parent holds a lease that heartbeats. */
-export type CallPoll = { call: PollRow | null; liveness: { alive: boolean; since: number }; lost: boolean; gone: boolean; parentLive: boolean };
+/** The waits' fields of a queued call; `repos` are the repos of its items and its own repo, as in QueuedCall. */
+export type QueuedWait = { parentId: number | null; queuedMs: number; queuedSince: number | null; since: number; promptId: string; tier: Tier; repos: string[] };
+export type CallPoll = { call: PollRow | null; liveness: { alive: boolean; since: number }; lost: boolean; gone: boolean; parentLive: boolean; queued: QueuedWait | null };
 
 export type UserSettings = {
   reserve: Reserve; repos: string[]; maxCalls: number | null; interactiveSlots: number | null; manualOnly: boolean;
@@ -74,6 +76,8 @@ export type HelperInfo = {
   tokenId: number; label: string | null; readiness: Readiness | null; until: string | null; reason: string | null; fresh: boolean; lastSeen: string | null;
   harness: string | null; models: Partial<Record<Tier, string>>; reserve: Reserve | null; usage: unknown; slots: number | null; machine: Machine | null;
   helperVersion: string | null; createdAt: string; expiresAt: string; canAgent: boolean; canAnswer: boolean; cooledUntil: string | null; cooledReason: string | null;
+  /** Calls running now and the last error, as the helper last reported them. */
+  busy: number | null; lastError: { text: string; at: string } | null;
 };
 
 export type ClaimCaller = { tokenId: number; login: string; role: Role; claimId?: string };

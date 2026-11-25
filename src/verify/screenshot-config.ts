@@ -1,7 +1,7 @@
 // Per-repo setup for before/after UI screenshots. Operators write it (JSON, validated here on every write and
 // read); the planning model only picks command names and argument values, so every command line a task runs comes
 // from this config and from validated arguments, never from model text.
-import { loadScreenshotConfigs, removeScreenshotConfig, saveScreenshotConfig, type ScreenshotConfig as StoredConfig, type ScreenshotConfigInput } from "../data/merge/index.ts";
+import { loadScreenshotConfigs, removeScreenshotConfig, saveScreenshotConfig, type ScreenshotConfig as StoredConfig } from "../data/merge/index.ts";
 import type { ParamSpec } from "./types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -241,8 +241,7 @@ export async function listConfigs(db: Db): Promise<ScreenshotConfig[]> {
 export async function putConfig(db: Db, by: string, repo: string, raw: unknown): Promise<ScreenshotConfig> {
   const p = parseScreenshotConfig(raw);
   if ("error" in p) throw new ScreenshotConfigError(p.error);
-  // NEEDS merge types: CommandSpec.line and .capture are typed string; the validated body has an object and a boolean.
-  const saved = await saveScreenshotConfig(db, by, repo, p.value as unknown as ScreenshotConfigInput);
+  const saved = await saveScreenshotConfig(db, by, repo, p.value);
   return { ...p.value, repo, updatedBy: saved.updatedBy, updatedAt: saved.updatedAt };
 }
 

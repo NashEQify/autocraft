@@ -10,7 +10,7 @@ import { pilotExpr, pilotExprFor, pilotSql, pilotSqlFor } from "../src/pilot.ts"
 import { backlogHeldExpr, backlogHeldSql } from "../src/dupes/held.ts";
 import { openSubjectExpr, openSubjectSql, prepareStateExpr, prepareStateSql } from "../src/decide/prepared.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
-import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
+import { quietPrExpr } from "../src/data/security/fragments.ts";
 import { testDatabase, type TestDatabase } from "./test-db.ts";
 
 const NOW = new Date();
@@ -164,7 +164,6 @@ const cases = (): Case[] => [
   onItems("pilotSql", pilotSql(db, "i"), (eb) => pilotExpr(db, eb, "i")),
   onItems("pilotSql without a pilot list", pilotSql(db, "i"), (eb) => pilotExpr(db, eb, "i"), noPilot),
   onItems("pilotSqlFor", pilotSqlFor(db, "i.repo", "i.number"), (eb) => pilotExprFor(db, eb, "i.repo", "i.number")),
-  onItems("quietSqlFor", quietSqlFor("i.repo", "i.number"), (eb) => quietExprFor(db, eb, "i.repo", "i.number")),
   onItems("backlogHeldSql", backlogHeldSql(db, "i"), (eb) => backlogHeldExpr(db, eb, "i")),
   {
     name: "fastScoreSql",
@@ -204,6 +203,11 @@ test("each fragment twin gives the rows of its SQL text", async () => {
     }
   }
   assert.deepEqual(failed, []);
+});
+
+test("quietPrExpr keeps the PRs of a landing finding and of a remembered quiet PR whose finding is not published", async () => {
+  const rows = await db.all(db.k.selectFrom("items as i").select(["i.repo", "i.number"]).where((eb) => quietPrExpr(eb, "i.repo", "i.number")).orderBy("i.repo").orderBy("i.number"));
+  assert.deepEqual(rows.map((r) => `${r.repo}#${r.number}`), ["app#11", "app#15"]);
 });
 
 test("prepareStateSql's columns are filled for an open decision with discussion, review, prepares and stale choices", async () => {

@@ -7,10 +7,11 @@
 // Nothing is written to GitHub; a stuck attempt still becomes a blocker of its workflow.
 import type { Db } from "../db/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
-import { loadImplementationView, loadPlanReplyOfCall } from "../data/implement/index.ts";
+import { loadPlanReplyOfCall } from "../data/implement/index.ts";
 import { loadRun } from "../data/inference/index.ts";
 import { loadJobState } from "../data/jobs/index.ts";
-import { loadCallReply } from "../data/runners/index.ts";
+import { loadCalls, loadCallReply } from "../data/runners/index.ts";
+import { loadSessions } from "../data/build/index.ts";
 import { openDb } from "../db/open.ts";
 import { unpackText } from "../agents/runs.ts";
 import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
@@ -95,12 +96,11 @@ async function planOnly(db: Db, ref: Ref, dry: boolean): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
-  // The plan call the job ended on: a dry run names it in its summary, a stored plan is the attempt's newest plan round.
-  // NEEDS build.loadSessions: a { jobId } source, to find the job's newest implement.plan call as the session rows record it.
-  const summary = (await loadJobState(db, id))?.summary ?? "";
-  const named = dry ? /plan call (\d+)/.exec(summary)?.[1] : undefined;
-  const call = named !== undefined ? Number(named) : (await loadImplementationView(db, `${ref.repo}#${ref.number}`))?.rounds.filter((r) => r.kind === "plan" && r.callId !== null).at(-1)?.callId;
-  if (call != null) await show(db, ref, call);
+  // The plan call the job ended on: its newest implement.plan call for the issue.
+  const ids = ((await loadSessions(db, { jobId: id })).get(id) ?? []).flatMap((s) => (s.kind === "implement" && s.remote_call_id !== null ? [Number(s.remote_call_id)] : []));
+  const calls = await loadCalls(db, ids);
+  const call = Math.max(-1, ...[...calls.values()].filter((c) => c.promptId === PLAN_PROMPT_ID).map((c) => c.id));
+  if (call >= 0) await show(db, ref, call);
 }
 
 /** Runs the build units of the current attempt in this process until it is ready for its PR, stuck or no longer moving. */

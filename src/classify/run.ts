@@ -19,7 +19,7 @@ import { CHECK_SERVER } from "../checktool/bridge.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { CHECK_MAX_WALL_MS } from "../core/rules.ts";
 import { agentsDefinition, MCP_PATH } from "../sandbox/agents.ts";
-import { levelBand } from "../rank/level.ts";
+import { callLevel } from "../remote/level.ts";
 import { tierOfModel } from "../remote/mode.ts";
 import { awaitCall, enqueueCall, REFUSED_PREFIX, type Outcome } from "../remote/calls.ts";
 import { bundleMounts, checkoutCommit, REFERENCE_SERVER } from "../remote/bundle.ts";
@@ -483,7 +483,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
     const mounts = at ? await bundleMounts(db, at, items, shared, docs) : [];
     const timeoutSeconds = p.limits.timeoutSeconds + (checkTool ? CHECK_MAX_WALL_MS / 1000 : 0);
     const tier = tierOfModel(model);
-    const level = await levelBand(db, items[0]?.repo, items[0]?.number);
+    const level = await callLevel(db, items[0]);
 
     /** One remote turn: the first message, or with `after` a follow-up on the session of that call. The reference folder is named after its repo (referenceDir). */
     const turn = async (stdin: string, after: number | null, lean = false, first = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {

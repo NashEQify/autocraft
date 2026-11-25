@@ -20,6 +20,9 @@ import "./data/discord/triggers.ts";
 import "./data/security/triggers.ts";
 import "./data/runners/triggers.ts";
 import { registerPlanInputs } from "./db/plan-triggers.ts";
-import { PLAN_INPUTS } from "./core/plan-inputs.ts";
+import { planInputsWith } from "./db/plan-inputs.ts";
+import { PERM_READ_TTL } from "./data/access/index.ts";
 
+/** The planner's inputs, as the change log's triggers are made from them. */
+export const PLAN_INPUTS = planInputsWith({ permReadTtlMs: PERM_READ_TTL });
 registerPlanInputs(PLAN_INPUTS);

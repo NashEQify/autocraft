@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeChoices } from "../src/decide/choices.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
+import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { doChoice } from "../src/dash/api/conversations.ts";
 import { SCOPE_OPTIONS } from "../src/decide/decision.ts";
 import { ask, getDecision } from "../src/decisions.ts";

@@ -11,6 +11,7 @@ import { decideItem } from "./decide-item.ts";
 import { gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
 import { loadItemFact } from "./issue-facts.ts";
 import type { ActionKind, PrFacts } from "./plan.ts";
+import type { MayResult } from "./may.ts";
 import { identityOfDecision, type Identity } from "../github/identity.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
@@ -146,9 +147,14 @@ export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals
   };
 }
 
-/** Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch. */
-export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string): Promise<GuardedRepo | Refused> {
-  const why = gateRepo(await repoApprovals(db, repo), need, by, repo);
+/**
+ * Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch.
+ * `members`: the merge rule's verdicts (src/core/may.ts) of the PRs a batch write carries; a "merge" write passes without the repo's
+ * merge approval when every one of them passes, so a batch of PRs people approved one by one needs no repo switch.
+ */
+export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string, o: { members?: readonly MayResult[] } = {}): Promise<GuardedRepo | Refused> {
+  const approved = need === "merge" && !!o.members?.length && o.members.every((m) => m.ok);
+  const why = gateRepo(await repoApprovals(db, repo), approved ? null : need, by, repo);
   // `login`: the operator pressing the button right now (a conversation card), who acts as themselves with no answered decision yet.
   return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : await identityOfDecision(db, decisionId) } as unknown as GuardedRepo);
 }

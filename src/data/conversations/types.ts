@@ -35,7 +35,7 @@ export type CardPatch = Partial<Pick<CardRow, "state" | "result" | "result_url" 
 export type QueuedCard = CardRow & { place: number };
 export type Queue = { rows: QueuedCard[]; blocked: Set<string> };
 /** The pure rule `used + reserve + need <= limit` is feature code: it derives the reserve from `running` with the card write counts. */
-export type RunningCard = { id: number; params: string; text: string | null; queue_args: string | null; written: number };
+export type RunningCard = { id: number; kind: string; params: string; text: string | null; queue_args: string | null; written: number };
 export type ActRoom = { limit: number | null; used: number; running: RunningCard[] };
 
 export type NewHeld = { card_id: number; workflow_id: number | null; approved_at: string | null; repo: string; number: number; issue_repo: string; title: string; body: string; by: string; at: string };

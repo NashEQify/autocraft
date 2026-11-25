@@ -19,8 +19,8 @@ export async function addSession(db: Db, row: NewSession): Promise<number> {
 }
 
 /**
- * Sessions by ids, workspace ids or remote call id, oldest first within a key. The key is the session id for `ids`, the workspace id
- * for `workspaceIds`, and the call id for `remoteCallId`. 1 statement.
+ * Sessions by ids, workspace ids, remote call id or job id, oldest first within a key. The key is the session id for `ids`, the workspace id
+ * for `workspaceIds`, the call id for `remoteCallId` and the job id for `jobId`. 1 statement.
  */
 export async function loadSessions(db: Db, src: SessionSource): Promise<Map<number, SessionRow[]>> {
   const out = new Map<number, SessionRow[]>();
@@ -29,10 +29,24 @@ export async function loadSessions(db: Db, src: SessionSource): Promise<Map<numb
   let b = q.k.selectFrom("main.workspace_sessions").selectAll().orderBy("id");
   if ("ids" in src) b = b.where(kx.inList(db, "id", src.ids, "bigint"));
   else if ("workspaceIds" in src) b = b.where(kx.inList(db, "workspace_id", src.workspaceIds, "bigint"));
-  else b = b.where("remote_call_id", "=", src.remoteCallId);
+  else if ("remoteCallId" in src) b = b.where("remote_call_id", "=", src.remoteCallId);
+  else b = b.where("job_id", "=", src.jobId);
   for (const r of await q.all(b)) {
-    const key = "ids" in src ? Number(r.id) : "workspaceIds" in src ? Number(r.workspace_id) : src.remoteCallId;
+    const key = "ids" in src ? Number(r.id) : "workspaceIds" in src ? Number(r.workspace_id) : "remoteCallId" in src ? src.remoteCallId : src.jobId;
     (out.get(key) ?? out.set(key, []).get(key)!).push(r as SessionRow);
+  }
+  return out;
+}
+
+/** The item and bound call of each workspace's sessions, oldest first, without prompts (lists read these). 1 statement. */
+export async function loadSessionCalls(db: Db, workspaceIds: number[]): Promise<Map<number, { item: number | null; remoteCallId: number | null }[]>> {
+  const out = new Map<number, { item: number | null; remoteCallId: number | null }[]>();
+  if (!workspaceIds.length) return out;
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.workspace_sessions").select(["workspace_id", "item", "remote_call_id"]).where(kx.inList(db, "workspace_id", workspaceIds, "bigint")).orderBy("id"));
+  for (const r of rows) {
+    const id = Number(r.workspace_id);
+    (out.get(id) ?? out.set(id, []).get(id)!).push({ item: r.item === null ? null : Number(r.item), remoteCallId: r.remote_call_id === null ? null : Number(r.remote_call_id) });
   }
   return out;
 }

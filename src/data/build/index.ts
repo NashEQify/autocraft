@@ -11,3 +11,4 @@ export * from "./types.ts";
 export * from "./workspace-calls.ts";
 export * from "./workspace-views.ts";
 export * from "./workspaces.ts";
+export { privateStepExpr } from "./fragments.ts";

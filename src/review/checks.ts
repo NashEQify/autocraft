@@ -3,10 +3,9 @@ import { ownerOf } from "../owners.ts";
 import type { Querier } from "../mirror.ts";
 import { overallAt, type Suite } from "../merge/ci-approval.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 import { resolvePushes } from "../data/control/index.ts";
 import { noteMergeable, recordRuns } from "../data/merge/index.ts";
-import { listItems, loadChecks, saveChecks as saveCheckRows } from "../data/mirror/index.ts";
+import { listItems, loadChecks, saveChecks as saveCheckRows, SAVE_CHECKS_ROWS } from "../data/mirror/index.ts";
 import { loadReviewsAt } from "../data/review/index.ts";
 
 /** PRs per query: 100 check contexts each keeps a query well under GitHub's node limit. */
@@ -143,7 +142,7 @@ export async function refreshChecks(db: Db, client: Querier, repo: string, numbe
     }
     unsaved.push(...rows);
     all.push(...rows);
-    if (unsaved.length >= kx.BATCH_ROWS) { await saveChecks(db, unsaved); unsaved = []; }
+    if (unsaved.length >= SAVE_CHECKS_ROWS) { await saveChecks(db, unsaved); unsaved = []; }
   }
   if (unsaved.length) await saveChecks(db, unsaved);
   log(`checks: ${repo}: ${all.length} PRs (${(["success", "failure", "pending", "none"] as const).map((o) => `${all.filter((r) => r.overall === o).length} ${o}`).join(", ")})`);

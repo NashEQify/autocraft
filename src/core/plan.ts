@@ -245,13 +245,13 @@ export type PrFacts = {
     asked: boolean;
     /** An unanswered Merge? question exists at any head. */
     openQuestion: boolean;
-    /** The operator answer at the reviewed head that counts (not yet applied, not Backlog). */
+    /** "merge" once an approved workflow's leg handed the PR to the merge queue at the reviewed head; else null. */
     answer: string | null;
-    /** The operator's Merge answer was given after the review's `at`. */
+    /** The hand-over came after the review's `at`. */
     mergeAnswerAfterReview: boolean;
     /** Member of an open duplicate group (asked after the group is answered). */
     inOpenGroup: boolean;
-    /** The answered decision waits for its person's sign-in or access, or is disputed: the merge step leaves it out, so none is proposed. */
+    /** The merge, made as the person who approved it, waits for their sign-in or access: the merge step leaves it out, so none is proposed. */
     execWaiting: boolean;
     /** The Hold question of a review that says hold, at the reviewed head: asked at all, still unanswered, and the answer given. */
     hold: { asked: boolean; open: boolean; answer: string | null; /** Another open question of the item (scope, Merge?, Close?) is asked first. */ otherOpen: boolean };
@@ -358,7 +358,7 @@ export type ItemState = (typeof ITEM_STATES)[number];
 export type ItemFacts = {
   repo: string; number: number;
   kind: "pr" | "issue";
-  /** Open on GitHub as mirrored. A closed item is in the facts only while an answered close of it is not applied (the Act step records it as already closed); nothing else is planned for it. */
+  /** Open on GitHub as mirrored; the loader reads open items only. */
   open: boolean;
   /** Time of the decision, ms. */
   now: number;
@@ -469,9 +469,9 @@ export type ItemFacts = {
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
   implement: {
-    /** Who queued the issue for implementation: the `added_by` of its fast_track row (in a repo on the maintainer workflow, who started its live implement workflow); null when it has none. */
+    /** Who queued the issue for implementation: who started its live implement workflow; null when it has none. */
     queuedBy: string | null;
-    /** queuedBy settles decisions on the repo now (an operator, or a maintainer with write access under src/settlers.ts). */
+    /** queuedBy still counts on the repo: an operator, or a maintainer the act rule lets act with a fresh cached write permission (data/access decideAct). */
     settles: boolean;
     /** The repo's `implement` build feature is on (src/build/features.ts). */
     featureOn: boolean;
@@ -484,9 +484,9 @@ export type ItemFacts = {
       textChanged: boolean;
       /** An `asked` attempt: a comment by a person (no bot, not ours) came after its newest question. */
       newCommentAfterQuestion: boolean;
-      /** An `asked` attempt's decision was answered after its newest question, or a `stuck` attempt's after it got stuck. */
+      /** An answer round follows the newest question of an `asked` attempt, or the blocker question of a `stuck` one. */
       decisionAnswered: boolean;
-      /** An ended attempt, and the issue was queued again after it ended (its fast_track row is newer). */
+      /** An ended attempt, and the issue was queued again after it ended (its live implement workflow is newer). */
       requeuedAfterEnd: boolean;
       /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (a decision); null in other states. */
       asked: "author" | "maintainer" | null;

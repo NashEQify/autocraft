@@ -149,6 +149,26 @@ export async function loadTaskCards(db: Db, jobIds: IdSource, scope: ViewScope):
   return out;
 }
 
+/**
+ * Tasks as live-board cards with the step their newest log chunk is on, oldest first: `states` lists tasks without a job in those states
+ * (private steps and hidden repos filtered by `scope`), `ids` the listed tasks (private steps filtered). 2 statements in one wave.
+ */
+export async function loadStandaloneTasks(db: Db, src: { states: TaskState[] } | { ids: number[] }, scope: ViewScope): Promise<TaskCard[]> {
+  if ("ids" in src && !src.ids.length) return [];
+  const q = queryDb(db);
+  const mine = (eb: kx.Eb) => eb.and("ids" in src
+    ? [kx.inList(db, "t.id", src.ids, "bigint"), ...visible(db, eb, { staff: scope.staff, hiddenRepos: [] }, "t.repo", "t.step")]
+    : [eb("t.state", "in", src.states), eb("t.job_id", "is", null), ...visible(db, eb, scope, "t.repo", "t.step")]);
+  const [rows, steps] = await db.together(async () => await Promise.all([
+    q.all(q.k.selectFrom("build_tasks as t").select(["t.id", "t.job_id", "t.step", "t.repo", "t.number", "t.state", "t.queued_at", "t.started_at", "t.ended_at", "t.results", "t.summary"]).where(mine).orderBy("t.id"), { label: "build.loadStandaloneTasks" }),
+    lastLogSteps(db, q.k.selectFrom("build_tasks as t").select("t.id").where(mine)),
+  ]));
+  return rows.map((r) => ({
+    id: r.id, jobId: r.job_id, step: r.step, state: r.state as TaskState, repo: r.repo, number: r.number, queuedAt: r.queued_at, startedAt: r.started_at, endedAt: r.ended_at,
+    results: parseJson<TaskResult[]>(r.results, []), summary: r.summary, logStep: steps.get(r.id) ?? null,
+  }));
+}
+
 /** The newest `samples` durations in ms of done tasks per `repo|step`, newest first (a window function). 1 statement. */
 export async function loadTaskDurations(db: Db, pairs: { repo: string; step: string }[], samples: number): Promise<Map<string, number[]>> {
   if (pairs.length === 0) return new Map();

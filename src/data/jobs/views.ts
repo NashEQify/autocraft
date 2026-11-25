@@ -203,18 +203,19 @@ export async function loadStepRuns(db: Db, o: { requestedBy: string; sinceDays: 
 
 /**
  * Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has
- * beaten: failed stop rows of the last 5000 ids, the last done id per step and the acknowledgements, in one wave.
+ * beaten: failed stop rows of the last 5000 ids and the last done id per step in one wave, then the acknowledgements of the stopped steps
+ * (only when there are any).
  */
 export async function loadDeadlineStops(db: Db): Promise<DeadlineStop[]> {
   const q = queryDb(db);
   const stopped = () => q.k.selectFrom("jobs").select(["step", "id", "error", "ended_at"])
     .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STOP_WINDOW)).where("state", "=", "failed")
     .where((eb) => eb.or([kx.like(db, "error", eb.val("stopped: ran past %")), kx.like(db, "error", eb.val("stopped: no progress for %"))]));
-  const [rows, done, acked] = await db.together(() => Promise.all([
+  const [rows, done] = await db.together(() => Promise.all([
     q.all(stopped().orderBy("id", "desc")),
     q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>("id").as("m")]).where("state", "=", "done").where("step", "in", (eb) => eb.selectFrom(stopped().as("s")).select("s.step")).groupBy("step")),
-    loadAuditMax(db, "deadline-ack"),
   ]));
+  const acked = await loadAuditMax(db, "deadline-ack", [...new Set(rows.map((r) => `step:${r.step}`))]);
   const lastDone = new Map(done.map((r) => [r.step, Number(r.m)]));
   const out: DeadlineStop[] = [];
   for (const step of new Set(rows.map((r) => r.step))) {

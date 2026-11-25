@@ -8,7 +8,7 @@ export type PatchKind = "fixup" | "cifix" | "conflict";
 export type FixupSource = "review" | "premerge" | "operator";
 export type FixupState = string;
 export type ConflictState = string;
-export type CheckKind = "fixup" | "fix";
+export type CheckKind = "fixup" | "fixissue";
 export type MainFixVerdict = "code" | "infra" | "flaky";
 
 export type Rowbase = { id: number; repo: string; number: number; createdAt: string };
@@ -52,7 +52,7 @@ export type PatchCheckRow = {
 };
 export type PatchCheckInput = { kind: CheckKind; repo: string; number: number; subject: string; patch: string; round: number; model: string; check: { verdict: "approve" | "reject"; reasons: string; problems: string[] }; at: string };
 
-export type ModelCheckStep = "fixup" | "cifix" | "fixissue";
+export type ModelCheckStep = "fixup" | "cifix" | "fixissue" | "fix-check";
 export type ModelCheckCommand = "fmt" | "clippy" | "check" | "test";
 /** `fixissue` stays a step value for existing rows; nothing writes it. */
 export type ModelCheckRow = {

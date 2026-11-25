@@ -6,7 +6,6 @@ import { afterEach, test } from "node:test";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { setStepApproval } from "../src/data/control/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
-import { mergeDecisionId } from "../src/core/rules.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
@@ -21,9 +20,10 @@ import { setFeature } from "../src/build/features.ts";
 import { textHash } from "../src/core/open-prs.ts";
 import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
-import { getDecision, optionsOf } from "../src/decisions.ts";
+import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
+import { openQuestion } from "../src/implement/questions.ts";
+import { recordAnswers, startAttempt } from "../src/data/implement/index.ts";
 import { recordPlan } from "../src/implement/plan.ts";
-import { currentImplementation, setImplementationState, startImplementation } from "../src/implement/store.ts";
 import type { PlanReply } from "../src/implement/types.ts";
 
 let current: World | undefined;
@@ -127,8 +127,9 @@ test("an approved review entry with minor findings is fixed, reviewed again and 
   await advanceWorkflows(db);
   for (let i = 0; i < 3; i++) await advancePreapprovals(db);
   assert.equal(await legState(w), "queued");
-  const d = (await db.get(db.k.selectFrom("main.decisions").select(["answer", "answered_by"]).where("id", "=", mergeDecisionId("app", 1, "sha2"))))!;
-  assert.deepEqual([d.answer, d.answered_by], ["merge", MAINT], "the merge is made as the approver");
+  const leg = (await db.get(db.k.selectFrom("main.preapprovals").select(["by", "workflow_id"]).where("number", "=", 1).orderBy("id", "desc").limit(1)))!;
+  assert.equal(leg.by, MAINT, "the merge is made as the approver");
+  assert.equal((await liveWorkflow(db, "app", 1))!.approvedBy, MAINT);
   await w.verified(1);
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "merge"), "the merge queue merges it once verified");
 
@@ -234,11 +235,11 @@ async function implementIssue(): Promise<World> {
   const r = await runCommand(db, actor, "dashboard", { parsed: parse("implement"), items: [{ repo: "app", number: 7 }] });
   assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
   const it = (await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", "app").where("number", "=", 7)))!;
-  await startImplementation(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: textHash(it.title ?? "", it.body ?? "") });
+  await startAttempt(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: textHash(it.title ?? "", it.body ?? "") });
   return w;
 }
 
-test("an implement question comes back as one recommendation, and a yes answers it so the implementation plans again", async () => {
+test("an implement question is recorded with its options, and an answer makes the implementation plan again", async () => {
   const w = await implementIssue();
   const db = w.db;
   const asks: PlanReply = {
@@ -246,19 +247,19 @@ test("an implement question comes back as one recommendation, and a yes answers 
     questions: [{ audience: "maintainer", text: "Remember the folder globally or per document?", options: [{ label: "Globally", hint: "One folder." }, { label: "Per document", hint: "Stored with the file." }], recommended: "Per document" }],
     workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
   };
-  await recordPlan(db, (await currentImplementation(db, "app", 7))!, { callId: null, reply: asks }, { commentsApproved: true, postComment: async () => null, log: () => {} });
-  await advanceWorkflows(db);
-  const wf = (await liveWorkflow(db, "app", 7))!;
-  assert.equal(wf.state, "recommending");
-  assert.deepEqual(wf.plan.map((p) => p.title), ["Globally", "Per document"]);
-  assert.equal(wf.rec?.text, asks.workflow!.recommendation);
+  await recordPlan(db, (await currentAttempt(db, "app", 7))!.impl, { callId: null, reply: asks }, { commentsApproved: true, postComment: async () => null, log: () => {} });
+  const attempt = (await currentAttempt(db, "app", 7))!;
+  assert.equal(attempt.impl.state, "asked");
+  const asked = openQuestion(attempt.rounds);
+  const options = (asked.question!.result as { options: { key: string; label: string }[]; recommended: string }).options;
+  assert.deepEqual(options.map((o) => o.label), ["Globally", "Per document"]);
+  assert.equal(asked.answer, null);
 
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 7 }] });
-  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
-  assert.match(r.lines[0]!, /Per document/);
-  const d = (await getDecision(db, (await currentImplementation(db, "app", 7))!.decisionId!))!;
-  assert.equal(optionsOf(d).find((o) => o.key === d.answer)?.label, "Per document");
-  assert.equal(d.answered_by, MAINT);
+  const chosen = options.find((o) => o.label === "Per document")!;
+  assert.equal(await recordAnswers(db, [{ id: attempt.impl.id, question: asked.question!.id, by: MAINT, via: "dashboard", option: chosen.key }]), 1);
+  const { answer } = openQuestion((await currentAttempt(db, "app", 7))!.rounds);
+  assert.equal(answer?.option, chosen.key);
+  assert.equal(answer?.by, MAINT);
   assert.deepEqual(implementStep((await loadItemFact(db, "app", 7))!), { bucket: "plan" });
   assert.equal((await liveWorkflow(db, "app", 7))!.state, "running");
 });
@@ -267,8 +268,8 @@ test("an answer on an implement issue queues a fix-up of the named part on its i
   const w = await implementIssue();
   const db = w.db;
   await w.pr(8, { author: "craft-bot" });
-  const im = (await currentImplementation(db, "app", 7))!;
-  await setImplementationState(db, im.id, "pr-opened", { branch: "fix-8", prNumber: 8, prUrl: "https://example.invalid/8" });
+  const im = (await currentAttempt(db, "app", 7))!.impl;
+  await writeStep(db, im, { to: "pr-opened", patch: { branch: "fix-8", prNumber: 8, prUrl: "https://example.invalid/8" } });
   await db.run(db.k.insertInto("main.opus_reviews").values({
     repo: "app", number: 8, head_oid: "sha8", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "take-fix", sure: 1, reason: "r",
     fixes: JSON.stringify([{ file: "src/export.rs", change: "store the folder on the document", title: "folder per document" }]),

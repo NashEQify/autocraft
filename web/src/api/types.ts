@@ -2196,8 +2196,8 @@ export interface ConversationCard {
   id: number;
   /** Digest of the card's text and steps: a press sends it back, so it runs only the card as shown. */
   digest: string;
-  /** "resolution" for cards Opus proposes from now on; the other kinds are single actions on older turns. */
-  kind: "resolution" | "comment" | "answer" | "label" | "backlog" | "duplicate" | "resolve" | "close";
+  /** "command", "comment" or "label"; the other kinds are cards of the retired decision system on older turns. */
+  kind: "command" | "resolution" | "comment" | "answer" | "label" | "backlog" | "duplicate" | "resolve" | "close";
   title: string;
   /** The viewer may press, edit and dismiss this card (same rule as `Decision.canSettle`, over every repo the card writes to). */
   canSettle: boolean;
