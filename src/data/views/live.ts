@@ -69,29 +69,29 @@ async function loadCards(db: Db, o: { states?: string[]; ids?: number[]; staff: 
 }
 
 /**
- * Wave 1: the job board, runs without a job, open batches, standalone tasks, step durations (every step, not only the running ones) and, for staff,
- * the worker runs and runner board. Wave 2: calls and tasks of the board's jobs and of the batches. Wave 3: the earlier durations behind the
+ * Wave 1: the job board, runs without a job, open batches, standalone tasks, and, for staff,
+ * the worker runs and runner board. Wave 2: calls and tasks of the board's jobs and of the batches, and the durations of the running jobs' steps. Wave 3: the earlier durations behind the
  * estimates of what runs now and the shown fields of every first item.
  */
-export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: boolean }, o: LiveOptions & { steps: string[] }): Promise<LiveView> {
+export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: boolean }, o: LiveOptions): Promise<LiveView> {
   const vis = { hidden: scope.hidden, staff: scope.staff };
   const taskScope = { hiddenRepos: scope.hidden, staff: scope.staff };
   const since = new Date(o.nowMs - o.workerWindowMs).toISOString();
-  const [board, looseRuns, batches, standalone, stepDurations, workerRuns, runnerBoard] = await db.together(() => Promise.all([
+  const [board, looseRuns, batches, standalone, workerRuns, runnerBoard] = await db.together(() => Promise.all([
     loadLiveBoard(db, { quietSteps: o.quietSteps, recentMs: o.recentMs, queuedMax: o.queuedMax, recentMax: o.recentMax, hidden: scope.hidden }),
     loadLooseRuns(db, vis),
     listActiveBatches(db, { hidden: scope.hidden }),
     loadCards(db, { states: ["queued", "claimed", "running"], staff: scope.staff, hidden: scope.hidden }),
-    loadStepDurations(db, o.steps),
     scope.staff ? loadWorkerRuns(db, vis, since, o.workerCallsMax) : null,
     scope.staff ? loadRunnerBoard(db, o.nowMs, o.workerWindowMs) : null,
   ]));
   const jobIds = [...board.running, ...board.queued, ...board.recent].map((j) => j.id);
   const taskIds = batches.flatMap((b) => (b.task_id === null ? [] : [b.task_id]));
-  const [jobRuns, jobTasks, batchCards] = await db.together(() => Promise.all([
+  const [jobRuns, jobTasks, batchCards, stepDurations] = await db.together(() => Promise.all([
     loadJobRuns(db, jobIds, vis),
     loadTaskCards(db, jobIds, taskScope),
     loadCards(db, { ids: taskIds, staff: scope.staff, hidden: scope.hidden }),
+    loadStepDurations(db, [...new Set(board.running.map((j) => j.step))]),
   ]));
   const batchTasks = new Map(batchCards.map((t) => [t.id, t]));
 

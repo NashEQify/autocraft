@@ -10,7 +10,6 @@ import type { RunRow } from "../../data/inference/index.ts";
 import type { TaskCard } from "../../data/build/index.ts";
 import type { RunnerRow } from "../../data/runners/index.ts";
 import { loadLiveView, type LiveView } from "../../data/views/live.ts";
-import { loadSteps } from "../../runner/steps.ts";
 import type { Req } from "../types.ts";
 import { QUIET_STEPS } from "./now.ts";
 import { canSeeInternals } from "./staff.ts";
@@ -52,8 +51,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const nowMs = Date.now();
   // Housekeeping steps show only when they fail; left out before any limit, so they never take a slot.
   const quiet = [...QUIET_STEPS];
-  const steps = [...(await loadSteps()).keys()].filter((s) => !QUIET_STEPS.has(s));
-  const v = await loadLiveView(db, { hidden, staff }, { nowMs, quietSteps: quiet, recentMs: RECENT_MS, recentMax: RECENT_MAX, queuedMax: QUEUED_MAX, workerWindowMs: WORKER_WINDOW_MS, workerCallsMax: WORKER_CALLS_MAX, steps });
+  const v = await loadLiveView(db, { hidden, staff }, { nowMs, quietSteps: quiet, recentMs: RECENT_MS, recentMax: RECENT_MAX, queuedMax: QUEUED_MAX, workerWindowMs: WORKER_WINDOW_MS, workerCallsMax: WORKER_CALLS_MAX });
   const item = (repo: string, number: number): ItemRef & ItemShown => ({ repo, number, ...(v.shown.get(`${repo}#${number}`) ?? NONE_SHOWN) });
 
   // Estimates, read once per key.
