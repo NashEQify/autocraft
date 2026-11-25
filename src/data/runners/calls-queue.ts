@@ -1,25 +1,196 @@
 // Enqueue and withdraw calls (package runners-a).
+import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import { queryDb } from "../../db/query-db.ts";
+import { batches, inList, schemaEb, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
+import { resumingJobs } from "../jobs/fragments.ts";
+import { loadJobs } from "../jobs/index.ts";
+import { adoptableCall } from "./fragments.ts";
+import { finishCalls } from "./calls-unlease.ts";
+import { dropQueueCache, bundleHash, judges, queuedMsAfter } from "./calls-shared.ts";
+import { loadAuthors } from "./cross.ts";
 import type { NewCall } from "./types.ts";
 
+/** Calls this process queued or adopted: a resumed run adopts each earlier call once. */
+const adopted = new Set<number>();
+/** One adoption at a time, so two equal calls of one job made side by side do not adopt the same earlier call. */
+let adopting: Promise<unknown> = Promise.resolve();
+
+const refKey = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
+const parentOf = (c: NewCall) => (eb: Eb) => (c.parentId === undefined ? eb("parent_id", "is", null) : eb("parent_id", "=", c.parentId));
+
 /**
- * Queues calls: one read wave (resumed run, parent rows, adoption candidates, item authors), then one write with a multi-row insert of
- * `remote_calls` and `remote_call_items`. A resumed job adopts an equal earlier call instead of inserting.
+ * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, bundle and parent that is still open or answered and
+ * unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt, items and parent asked something else: the
+ * resumed run will not adopt them, so they are withdrawn and free their Task Runner. At most 4 statements per call.
  */
-export async function enqueueCalls(db: Db, calls: NewCall[], now?: number): Promise<number[]> { throw new Error("not built: runners.enqueueCalls"); }
+function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, now: number): Promise<number | null> {
+  const q = queryDb(db);
+  const turn = adopting.then(async (): Promise<number | null> => {
+    const taken = [...adopted];
+    const earlier = await q.get(q.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
+      .where("prompt_version", "=", c.promptVersion).where("bundle_hash", "=", hash).where(parentOf(c)).where((eb) => adoptableCall(eb))
+      .$if(taken.length > 0, (b) => b.where(inList(db, "id", taken, "bigint", true))).orderBy("id").limit(1));
+    if (earlier) {
+      const id = Number(earlier.id);
+      adopted.add(id);
+      // Fresh again for claims: its caller is back. A queued call's wait starts again: the time it waited before the stop counts toward its wait limits, the restart's does not.
+      await q.run(q.k.updateTable("main.remote_calls").set((eb) => {
+        const w = schemaEb(eb) as any;
+        return {
+          queued_ms: w("queued_ms", "+", w.case().when(w.and([w("state", "=", "queued"), w("queued_since", "is not", null)])).then(w.fn("max", [w.lit(0), w(w.fn("min", [w.ref("seen_at"), w.val(now)]), "-", w.ref("queued_since"))])).else(w.lit(0)).end()),
+          queued_since: w.case().when(w("state", "=", "queued")).then(now).else(w.ref("queued_since")).end(), seen_at: now,
+        } as any;
+      }).where("id", "=", id));
+      dropQueueCache(db);
+      return id;
+    }
+    const stale = await q.all(q.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
+      .where("items", "=", JSON.stringify(c.items)).where(parentOf(c)).where("state", "=", "queued").$if(taken.length > 0, (b) => b.where(inList(db, "id", taken, "bigint", true))));
+    if (stale.length) await withdrawCalls(db, stale.map((r) => ({ id: Number(r.id), reason: "the resumed job asked again with other input" })), { states: ["queued"], now });
+    return null;
+  });
+  adopting = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
+ * Queues calls: one read wave (the jobs, parent rows, item authors), then one write with a multi-row insert of `remote_calls` and `remote_call_items`.
+ * A resumed job adopts an equal earlier call instead of inserting. Returns the call ids in the order given.
+ */
+export async function enqueueCalls(db: Db, calls: NewCall[], now: number = Date.now()): Promise<number[]> {
+  if (!calls.length) return [];
+  const q = queryDb(db);
+  const jobIds = [...new Set(calls.flatMap((c) => (c.job.jobId === null ? [] : [c.job.jobId])))];
+  const parentIds = [...new Set(calls.flatMap((c) => (c.parentId === undefined ? [] : [c.parentId])))];
+  const judged = new Map(calls.filter((c) => judges(c.promptId)).flatMap((c) => c.items).map((i) => [refKey(i), i]));
+  const [jobs, parents, authors] = await db.together(async () => await Promise.all([
+    jobIds.length ? loadJobs(db, jobIds) : Promise.resolve(new Map<number, { resumes: number; started_at: string | null }>()),
+    parentIds.length ? q.all(q.k.selectFrom("main.remote_calls").select(["id", "user_login", "for_login", "bound_slot"]).where(inList(db, "id", parentIds, "bigint"))) : Promise.resolve([]),
+    judged.size ? loadAuthors(db, [...judged.values()]) : Promise.resolve(new Map<string, string[]>()),
+  ]));
+  const parentRow = new Map(parents.map((r) => [Number(r.id), r]));
+  const ids: (number | null)[] = [];
+  const fresh: { c: NewCall; at: number }[] = [];
+  for (const c of calls) {
+    const job = c.job.jobId === null ? undefined : jobs.get(c.job.jobId);
+    const hash = bundleHash(c.bundle);
+    const adoptedId = job && Number(job.resumes) > 0 && job.started_at ? await adoptEarlier(db, c.job.jobId!, Date.parse(job.started_at), c, hash, now) : null;
+    ids.push(adoptedId);
+    if (adoptedId === null) fresh.push({ c, at: ids.length - 1 });
+  }
+  if (fresh.length) {
+    await db.write(async () => {
+      const rows = fresh.map(({ c }) => {
+        const parent = c.parentId === undefined ? undefined : parentRow.get(c.parentId);
+        const forLogin = c.forLogin ?? parent?.for_login ?? null;
+        const boundSlot = forLogin !== null && (c.forLogin !== undefined ? c.boundSlot === true : Number(parent?.bound_slot) === 1);
+        const names = judges(c.promptId) ? [...new Set(c.items.flatMap((i) => authors.get(refKey(i)) ?? []))] : [];
+        return {
+          job_id: c.job.jobId, step: c.job.step, stage: c.job.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
+          bundle: JSON.stringify(c.bundle), bundle_hash: bundleHash(c.bundle), state: "queued" as const, items: JSON.stringify(c.items), repo: c.job.repo, class: c.job.cls, level: c.level,
+          since: now, seen_at: now, queued_since: now, max_attempts: Math.max(1, c.maxAttempts), timeout_ms: c.bundle.timeoutSeconds * 1000, parent_id: c.parentId ?? null,
+          sticky_login: parent?.user_login ?? null, reference_repo: c.referenceRepo ?? null, authors: JSON.stringify(names), for_login: forLogin, bound_slot: boundSlot ? 1 : 0,
+        };
+      });
+      const inserted: number[] = [];
+      for (const b of batches(rows)) for (const r of await q.all(q.k.insertInto("main.remote_calls").values(b).returning("id"))) inserted.push(Number(r.id));
+      const items = fresh.flatMap(({ c }, i) => c.items.map((it, pos) => ({ call_id: inserted[i]!, pos, repo: it.repo, number: it.number })));
+      for (const b of batches(items)) await q.run(q.k.insertInto("main.remote_call_items").values(b));
+      fresh.forEach(({ c, at }, i) => { ids[at] = inserted[i]!; if (c.job.jobId !== null) adopted.add(inserted[i]!); });
+    });
+    dropQueueCache(db);
+  }
+  return ids as number[];
+}
+
 /** One-call wrapper over `enqueueCalls`. */
-export async function enqueueCall(db: Db, call: NewCall, now?: number): Promise<number> { throw new Error("not built: runners.enqueueCall"); }
+export async function enqueueCall(db: Db, call: NewCall, now?: number): Promise<number> {
+  return (await enqueueCalls(db, [call], now))[0]!;
+}
+
+/** Ends the calls `where` selects as failed with `reason` and finishes their runs, in one transaction. Returns the ids ended. */
+async function withdrawWhere(db: Db, reason: string, now: number, where: (eb: Eb) => Expression<SqlBool>): Promise<number[]> {
+  const q = queryDb(db);
+  const ended = await db.write(async () => {
+    const rows = await q.all(q.k.updateTable("main.remote_calls").set((eb) => ({ state: "failed", error: reason, ended_at: now, queued_ms: queuedMsAfter(db, eb, now), queued_since: null }) as any)
+      .where((eb) => where(eb)).returning(["id", "run_id"]));
+    await finishCalls(db, rows.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reason, summary: "withdrawn" })));
+    return rows;
+  });
+  if (ended.length) dropQueueCache(db);
+  return ended.map((r) => Number(r.id));
+}
+
 /** Withdraws calls in the given states with a per-row reason and finishes their runs in the same transaction. Returns the ids withdrawn. */
-export async function withdrawCalls(db: Db, rows: { id: number; reason: string }[], opts?: { states?: string[]; now?: number }): Promise<number[]> { throw new Error("not built: runners.withdrawCalls"); }
+export async function withdrawCalls(db: Db, rows: { id: number; reason: string }[], opts: { states?: string[]; now?: number } = {}): Promise<number[]> {
+  if (!rows.length) return [];
+  const now = opts.now ?? Date.now(), states = opts.states ?? ["queued", "leased"];
+  const q = queryDb(db);
+  const reasons = new Map(rows.map((r) => [r.id, r.reason]));
+  const ended = await db.write(async () => {
+    const out: { id: number; run_id: number | null }[] = [];
+    for (const chunk of batches(rows.map((r) => ({ id: r.id, reason: r.reason })))) {
+      const v = valuesTable(db, chunk, { id: "bigint", reason: "text" }, "v");
+      const got = await q.all((q.k.updateTable("main.remote_calls") as any).from(v)
+        .set((eb: Eb) => ({ state: "failed", error: eb.ref("v.reason"), ended_at: now, queued_ms: queuedMsAfter(db, eb, now), queued_since: null }))
+        .where((eb: Eb) => eb.and([eb("remote_calls.id", "=", eb.ref("v.id")), eb("remote_calls.state", "in", states)])).returning(["remote_calls.id as id", "remote_calls.run_id as run_id"]));
+      out.push(...got.map((r: any) => ({ id: Number(r.id), run_id: r.run_id as number | null })));
+    }
+    await finishCalls(db, out.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reasons.get(r.id)!, summary: "withdrawn" })));
+    return out;
+  });
+  if (ended.length) dropQueueCache(db);
+  return ended.map((r) => r.id);
+}
+
 /** Withdraws the open calls of a job, or of every job except resuming ones, and finishes their runs. */
-export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): Promise<number> { throw new Error("not built: runners.withdrawJobCalls"); }
+export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): Promise<number> {
+  return (await withdrawWhere(db, reason, Date.now(), (eb) => eb.and([eb("state", "in", ["queued", "leased"]),
+    jobId === undefined ? eb("job_id", "is not", null) : eb("job_id", "=", jobId), eb("job_id", "not in", resumingJobs(db))]))).length;
+}
+
+const splitRef = (r: string): { repo: string; number: number } => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) });
+
 /** Withdraws the open queued calls whose only item is `ref`. */
-export async function withdrawItemCalls(db: Db, ref: string, reason: string): Promise<number> { throw new Error("not built: runners.withdrawItemCalls"); }
+export async function withdrawItemCalls(db: Db, refStr: string, reason: string): Promise<number> {
+  const it = splitRef(refStr);
+  const items = (eb: Eb) => schemaEb(eb).selectFrom("main.remote_call_items as ci").where("ci.call_id", "=", ref<number>("remote_calls.id"));
+  return (await withdrawWhere(db, reason, Date.now(), (eb) => eb.and([eb("repo", "=", it.repo), eb("state", "=", "queued"),
+    eb.exists(items(eb).select(eb.lit(1).as("one")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number)),
+    eb(items(eb).select((e) => e.fn.countAll<number>().as("n")), "=", 1)]))).length;
+}
+
 /** Withdraws queued or leased `conversation.turn` calls bound to `forLogin` that name `ref`. */
-export async function withdrawTurnCalls(db: Db, a: { ref: string; forLogin: string; reason: string }): Promise<number> { throw new Error("not built: runners.withdrawTurnCalls"); }
-/** Sets the claim level of the queued calls of each item. */
-export async function setCallLevels(db: Db, rows: { ref: string; level: number }[]): Promise<number> { throw new Error("not built: runners.setCallLevels"); }
+export async function withdrawTurnCalls(db: Db, a: { ref: string; forLogin: string; reason: string }): Promise<number> {
+  const it = splitRef(a.ref);
+  return (await withdrawWhere(db, a.reason, Date.now(), (eb) => eb.and([eb("prompt_id", "=", "conversation.turn"), eb("repo", "=", it.repo), eb("state", "in", ["queued", "leased"]),
+    ciEq(db, "for_login", eb.val(a.forLogin)),
+    eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ci").select(eb.lit(1).as("one")).where("ci.call_id", "=", ref<number>("remote_calls.id")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number))]))).length;
+}
+
+/** Sets the claim level of the queued calls of each item (the highest level named when a call has several items). */
+export async function setCallLevels(db: Db, rows: { ref: string; level: number }[]): Promise<number> {
+  if (!rows.length) return 0;
+  const q = queryDb(db);
+  const v = valuesTable(db, rows.map((r) => ({ ...splitRef(r.ref), level: r.level })), { repo: "text", number: "bigint", level: "bigint" }, "v");
+  const named = (eb: Eb) => schemaEb(eb).selectFrom("main.remote_call_items as ci").innerJoin(v, (j) => j.onRef("v.repo", "=", "ci.repo").onRef("v.number", "=", "ci.number")).where("ci.call_id", "=", ref<number>("remote_calls.id"));
+  const r = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({ level: named(eb).select((e: any) => e.fn.max("v.level").as("l")) }) as any)
+    .where("state", "=", "queued").where((eb) => eb.exists(named(eb).select(eb.lit(1).as("one")))));
+  if (Number(r.changes) > 0) dropQueueCache(db);
+  return Number(r.changes);
+}
+
 /** Stamps `seen_at` on the calls a process awaits. */
-export async function markCallersSeen(db: Db, ids: number[], now: number): Promise<void> { throw new Error("not built: runners.markCallersSeen"); }
+export async function markCallersSeen(db: Db, ids: number[], now: number): Promise<void> {
+  if (!ids.length) return;
+  const q = queryDb(db);
+  await q.run(q.k.updateTable("main.remote_calls").set({ seen_at: now }).where(inList(db, "id", ids, "bigint")));
+}
+
 /** Clears `reply` on the done calls of the jobs. */
-export async function clearJobReplies(db: Db, jobIds: number[]): Promise<number> { throw new Error("not built: runners.clearJobReplies"); }
+export async function clearJobReplies(db: Db, jobIds: number[]): Promise<number> {
+  if (!jobIds.length) return 0;
+  const q = queryDb(db);
+  return Number((await q.run(q.k.updateTable("main.remote_calls").set({ reply: null }).where(inList(db, "job_id", jobIds, "bigint")).where("state", "=", "done").where("reply", "is not", null))).changes);
+}

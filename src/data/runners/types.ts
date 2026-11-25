@@ -3,6 +3,7 @@ import type { HelperStatus, Machine, Readiness, Reserve, TaskBundle, Tier } from
 
 export type { HelperStatus, Machine, Readiness, Reserve, TaskBundle, Tier };
 import type { RefKey } from "../mirror/types.ts";
+import type { ToolRow } from "../inference/types.ts";
 
 export type Ref = RefKey;
 export type LowerLogin = string;
@@ -12,6 +13,8 @@ export type CallState = "queued" | "leased" | "done" | "failed";
 export type NewCall = {
   promptId: string; promptVersion: string; tier: Tier; effort: string; askedModel: string; bundle: Omit<TaskBundle, "callId">;
   items: ItemRef[]; level: number; maxAttempts: number;
+  /** Where the call belongs: the job and step it runs in (`stepOf`) and its queue class and repo (`callQueue`), decided by the caller. */
+  job: { jobId: number | null; step: string; stage: number; cls: number; repo: string | null };
   /** A follow-up turn on the session of this call. */
   parentId?: number;
   referenceRepo?: string;
@@ -29,13 +32,17 @@ export type QueuedCall = {
   timeoutMs: number; refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null;
   forLogin: string | null; boundSlot: boolean; refusedToken: number | null; pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   askedModel: string; queuedMs: number; queuedSince: number | null; error: string | null; level: number; jobId: number | null; since: number;
+  /** Queue class and the call's repo: the inputs of the pure queue order. */
+  cls: number; repo: string | null;
 };
+/** `calls` holds the follow-ups first (oldest first), then the other calls oldest first; the pure `sortQueue` of feature code puts them in claim order. */
 export type QueueSnapshot = { signature: string; calls: QueuedCall[]; running: { repoN: Map<string, number>; stepN: Map<string, number> } };
 export type PollRow = {
   id: number; state: CallState; reply: string | null; error: string | null; runId: number | null; leasedAt: number | null; attempt: number;
   consumedAt: number | null; usage: string | null; turns: number | null; sessionId: string | null;
 };
-export type CallPoll = { call: PollRow | null; liveness: { alive: boolean; since: number }; lost: boolean; gone: boolean };
+/** `parentLive`: for a queued follow-up, the helper that ran its parent holds a lease that heartbeats. */
+export type CallPoll = { call: PollRow | null; liveness: { alive: boolean; since: number }; lost: boolean; gone: boolean; parentLive: boolean };
 
 export type UserSettings = {
   reserve: Reserve; repos: string[]; maxCalls: number | null; interactiveSlots: number | null; manualOnly: boolean;
@@ -58,7 +65,11 @@ export type RunnerSnapshot = {
   at: number; runners: RunnerRow[]; settings: Map<LowerLogin, UserSettings>; cooled: Map<LowerLogin, { until: string; reason: string }>;
   denied: ReadonlySet<string>; leasedByLogin: Map<LowerLogin, { leased: number; interactive: number }>; started: StartedWork;
 };
-export type LiveLease = { id: number; jobId: number | null; runId: number | null; login: string; promptId: string; items: ItemRef[]; repo: string | null; root: string | null };
+export type LiveLease = {
+  id: number; jobId: number | null; runId: number | null; login: string; promptId: string; items: ItemRef[]; repo: string | null; root: string | null;
+  secretHash: string; tokenId: number | null; tier: Tier; model: string | null; askedModel: string; step: string; attempt: number; maxAttempts: number;
+  leasedAt: number | null; parentId: number | null; forLogin: string | null; refusals: number;
+};
 export type HelperInfo = {
   tokenId: number; label: string | null; readiness: Readiness | null; until: string | null; reason: string | null; fresh: boolean; lastSeen: string | null;
   harness: string | null; models: Partial<Record<Tier, string>>; reserve: Reserve | null; usage: unknown; slots: number | null; machine: Machine | null;
@@ -67,24 +78,38 @@ export type HelperInfo = {
 
 export type ClaimCaller = { tokenId: number; login: string; role: Role; claimId?: string };
 export type ClaimFacts = {
-  role: Role | null; idle: boolean; cooled: { until: string; reason: string } | null; settings: UserSettings; leased: number; interactive: number;
+  role: Role | null; idle: boolean; cooled: { until: number; reason: string } | null; settings: UserSettings; leased: number; interactive: number;
   signature: string; orphan: { id: number; runId: number | null; leaseSecretHash: string | null } | null; liveness: { alive: boolean; since: number };
   lost: number[]; gone: number[];
 };
 export type LeaseSource = {
   bundle: string; baseStdin: string | null; jobId: number | null; step: string; stage: number; promptId: string; promptVersion: string; askedModel: string; items: ItemRef[];
 };
+/** What a lease records of the claim. */
+export type LeaseClaim = { harness: string; harnessVersion: string; root?: string | null; requestId?: string | null; ownLane?: boolean };
 export type LeaseRequest = {
-  id: number; caller: ClaimCaller; claim: unknown; model: string; caps: { perLogin: number | null; interactive: number | null }; started: StartedWork;
-  clearIdle: boolean; bundle: string; live: () => boolean;
+  id: number; caller: ClaimCaller; claim: LeaseClaim; model: string; now: number;
+  /** Leases the login may hold outside the own lane (null: no limit), and its interactive-lane leases. A lane lease counts toward no limit but its own. */
+  caps: { perLogin: number | null; interactive: number | null };
+  /** The call is for work the caller started or approved: checked in the lease statement; else the Manual only rules apply. */
+  started: boolean;
+  clearIdle: boolean; source: LeaseSource;
+  /** The run's stored prompt (`packPrompt` of the harness-worded bundle). */
+  prompt: string | Uint8Array;
+  /** A bundle whose text was rewritten for this lease (a workspace session's resume note) and the text it was rewritten from. */
+  rewrite: { bundle: string; baseStdin: string } | null;
+  /** Asked inside the lease transaction before anything is written: false when no one waits for the reply any more. */
+  live: () => boolean;
 };
 export type Lease = { id: number; secret: string; runId: number | null; bundle: string; attempt: number };
 export type ExpiryResult = { requeued: number[]; failed: number[]; withdrawn: number[]; beaten: string[] };
+/** A validated reply, its path root already taken off the text and the tool rows; `usage` is the stored usage object. */
 export type ParsedSubmit = {
-  reply: string; model: string | null; usage: unknown; turns: number | null; sessionId: string | null; tools: unknown[]; durationMs: number; refused?: boolean;
+  reply: string; model: string; usage: unknown; turns: number | null; sessionId: string | null; tools: Omit<ToolRow, "runId">[]; durationMs: number;
 };
-export type SubmitResult = { ok: boolean; state: CallState; requeued?: boolean; error?: string };
-export type RefusalRetry = { tier: Tier; model: string } | null;
+export type SubmitResult = { accepted: boolean };
+/** Where a call the model's safety filter declined runs once more: on another runner (`token` is the one that declined) or on a lower tier; null: nowhere. */
+export type RefusalRetry = { token: number } | { tier: Tier; model: string } | null;
 
 export type PickContext = {
   call: QueuedCall | null; runners: RunnerRow[]; livePicks: number; cooled: { until: string; reason: string } | null; pickerLogins: string[]; cap: number; max: number;
