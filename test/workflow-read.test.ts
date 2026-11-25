@@ -26,6 +26,8 @@ test("a message the parser cannot read runs the command a model reads in it only
   assert.equal(noJev.outcome, "ambiguous", "Haiku's own confidence only proposes");
   const hedged = await send(w, "take a look at this one later", reads("review", 0.95, 0.95));
   assert.equal(hedged.outcome, "ambiguous");
+  const carved = await send(w, "yes except merge", reads("yes", 0.99, 0.99));
+  assert.equal(carved.outcome, "ambiguous", "an exception is never run from a reading");
   assert.equal(await liveWorkflow(w.db, "app", 1), null);
 
   const clear = await send(w, text, reads("review", 0.5, 0.95));

@@ -37,8 +37,8 @@ export const READ_OWN_MAX = 100;
 export const READ_TAKE_WAIT_MS = 8_000;
 /** The step the calls are recorded under; their texts are deleted when they end. */
 const READ_STEP = "command-read";
-/** Words that put a command off to a later time, beside the parser's own condition words (CONDITION). */
-const LATER = /(?<![\w-])(?:if|after|when|until|once|before|later|tomorrow)(?![\w-])/i;
+/** Words that put a command off to a later time or carve something out of it, beside the parser's own condition words (CONDITION). */
+const LATER = /(?<![\w-])(?:if|after|when|until|once|before|later|tomorrow|except|without|minus|other than|apart from|instead of)(?![\w-])/i;
 /**
  * A text that negates, hedges, asks or sets a condition: the parser's guard (GUARD), the words an unclear reply never reads back as a
  * command (MEANING_WORDS), its condition words (CONDITION) and LATER. Such a text never runs a reading, unless it is a hold.
