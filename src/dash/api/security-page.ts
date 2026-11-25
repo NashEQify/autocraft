@@ -5,13 +5,13 @@ import { OPERATOR_ACTIONS } from "./security.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { ChoiceCore, Decision, DecisionChoices, FindingAction, FindingSeverity, FindingState, FindingView } from "../../../web/src/api/types.ts";
 import { FIX_ROUNDS } from "../../security/rules.ts";
-import { findingRow, INTERNAL_FINDING_STATES, reconcileFindings, toFinding, type FindingRow as StoredFinding } from "../../security/store.ts";
+import { findingDetail, reconcile, type FindingRow as StoredFinding } from "../../security/store.ts";
+import { loadFindingBoard, type FindingBoardRow, type LiveRound, type LogRound } from "../../data/security/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
-import * as kx from "../../db/kx.ts";
 
 export type ItemPhase = "Triage" | "Waiting for a person" | "Review" | "Fixing" | "Verifying" | "In queue" | "Merged" | "Closed" | "Held" | "Out of scope";
 export interface ItemStatus { phase: ItemPhase; waiting: string | null; next: string | null; since: string }
@@ -77,14 +77,6 @@ const CORE: Record<FindingAction, { label: string; autocraft: string; writes: Ch
   publish: { label: "Publish", autocraft: "publishes the advisory", writes: [] },
 };
 
-type LogRound = { attempt: number; round: number; state: string; failure: string | null; created_at: string; ended_at: string };
-type LiveRound = { round: number; state: string; failure: string | null; created_at: string };
-
-const logRounds = async (db: Db, repo: string, n: number): Promise<LogRound[]> =>
-  await db.all(db.k.selectFrom("security_fix_log").select(["attempt", "round", "state", "failure", "created_at", "ended_at"]).where("repo", "=", repo).where("number", "=", n).orderBy("attempt").orderBy("round"));
-const liveRounds = async (db: Db, repo: string, n: number): Promise<LiveRound[]> =>
-  await db.all(db.k.selectFrom("security_fix_rounds").select(["round", "state", "failure", "created_at"]).where("repo", "=", repo).where("number", "=", n).orderBy("round"));
-
 /** Rounds the last attempt ran, from the log; null when the log has none. */
 function lastAttemptRounds(log: LogRound[]): number | null {
   if (!log.length) return null;
@@ -92,26 +84,26 @@ function lastAttemptRounds(log: LogRound[]): number | null {
   return log.filter((r) => r.attempt === last).length;
 }
 
-function rowOf(r: StoredFinding, log: LogRound[], live: LiveRound[]): FindingRow {
-  const building = live.find((l) => l.state === "building");
-  const rounds = r.state === "fixing" ? (building?.round ?? null) : lastAttemptRounds(log.filter((l) => l.attempt === r.fix_attempts));
+type Listed = Pick<StoredFinding, "repo" | "number" | "title" | "severity" | "state" | "urgent" | "area" | "note" | "fix_attempts" | "last_failure" | "updated_at">;
+
+function rowOf(r: Listed, rounds: number | null): FindingRow {
   return {
     repo: r.repo, number: r.number, title: r.title, severity: r.severity, state: r.state, urgent: r.urgent === 1, area: r.area,
     status: findingStatus(r.state, r.note, r.fix_attempts, r.last_failure, r.updated_at, rounds), attempts: r.fix_attempts, updatedAt: r.updated_at,
   };
 }
 
+/** The rounds a finding's status line names: the round now building, else the rounds of its last attempt. */
+const roundsOf = (r: Pick<StoredFinding, "state" | "fix_attempts">, log: LogRound[], live: Pick<LiveRound, "round" | "state">[]): number | null =>
+  r.state === "fixing" ? (live.find((l) => l.state === "building")?.round ?? null) : lastAttemptRounds(log.filter((l) => l.attempt === r.fix_attempts));
+
 /** Findings of the repos the reader can see, grouped by what they wait for; most severe first. */
 export async function securityFindings(db: Db, req: Req): Promise<SecurityList> {
   needStaff(req);
   const repos = await visibleRepos(db, req);
-  const rows: FindingRow[] = [];
-  for (const repo of repos) {
-    await reconcileFindings(db, repo);
-    const stored = await db.all(db.k.selectFrom("security_findings").select(kx.cols("security_findings")).$narrowType<{ severity: FindingSeverity; state: FindingState }>()
-      .where("repo", "=", repo).where("state", "not in", INTERNAL_FINDING_STATES));
-    for (const r of stored) rows.push(rowOf(r, await logRounds(db, r.repo, r.number), await liveRounds(db, r.repo, r.number)));
-  }
+  if (repos.length) await reconcile(db);
+  const board: FindingBoardRow[] = await loadFindingBoard(db, { repos });
+  const rows = board.map((r) => rowOf(r as Listed, r.state === "fixing" ? r.building_round : r.last_attempt_rounds || null));
   const byRank = (a: FindingRow, b: FindingRow) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.repo.localeCompare(b.repo) || a.number - b.number;
   return { groups: GROUPS.map((group) => ({ group, rows: rows.filter((r) => GROUP[r.state] === group).sort(byRank) })).filter((g) => g.rows.length) };
 }
@@ -160,14 +152,12 @@ export async function findingPage(db: Db, req: Req): Promise<FindingPageData> {
   needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
-  await reconcileFindings(db, repo);
+  await reconcile(db, repo);
   const n = Number(req.params.n);
-  const stored = Number.isInteger(n) ? await findingRow(db, repo, n) : undefined;
-  if (!stored) throw new HttpError(404, NOT_FOUND);
-  const finding = await toFinding(db, stored);
-  const log = await logRounds(db, repo, n);
-  const live = await liveRounds(db, repo, n);
-  const row = rowOf(stored, log, live);
+  const detail = Number.isInteger(n) ? await findingDetail(db, repo, n) : undefined;
+  if (!detail) throw new HttpError(404, NOT_FOUND);
+  const { view: finding, row: stored, log, rounds: live } = detail;
+  const row = rowOf(stored, roundsOf(stored, log, live));
   const { decision, choices } = synthesize(finding, stored, row.status, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), await mayRunRepo(req.user, repo), req.user.role === "operator");
   return {
     finding, decision, choices, status: row.status, attempts: stored.fix_attempts, rounds: rounds(finding, log, live), history: history(finding),

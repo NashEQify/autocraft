@@ -123,7 +123,7 @@ function fakeModel(costs = { model: 1, area: 2, verify: 0.5 }, calls: string[] =
   return { ask, checkout: async () => ({ dir: tree, sha: "a".repeat(40) }), cancelled: async () => false, log: () => {} };
 }
 
-const newScan = async (cap: number | null): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo: "photocraft", state: "modeling", cap_usd: cap, started_by: "boss", started_at: "2026-11-05T00:00:00Z" }).returning("id")))!.id;
+const newScan = async (cap: number | null): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo: "photocraft", state: "modeling", cap_usd: cap, started_by: "boss", started_at: new Date().toISOString() }).returning("id")))!.id;
 const scanOf = async (id: number) => (await db.get(db.k.selectFrom("security_scans").select(kx.cols("security_scans")).where("id", "=", id)))!;
 
 describe("security deep scan", () => {
