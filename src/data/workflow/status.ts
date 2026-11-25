@@ -20,13 +20,14 @@ export async function loadStatusComments(db: Db, repos: readonly string[]): Prom
     .orderBy("c.repo").orderBy("c.number")) as StatusRow[];
 }
 
-/** Each started item's latest workflow in the repos, with whether the item is open. */
+/** Each started item's latest workflow in the repos, with whether the item is open; none where the automatic merge rule took the PR back from it. */
 export async function loadLatestWorkflows(db: Db, repos: readonly string[]): Promise<Map<RefKey, { wf: ItemWorkflow; open: boolean }>> {
   if (!repos.length) return new Map();
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.item_workflows as w").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
     .selectAll("w").select("i.state as item_state").where(kx.inList(db, "w.repo", [...repos]))
     .where("w.id", "=", (eb) => kx.schemaEb(eb).selectFrom("main.item_workflows as m").select((e) => e.fn.max("m.id").as("id")).where("m.repo", "=", kx.ref<string>("w.repo")).where("m.number", "=", kx.ref<number>("w.number")))
+    .where("w.state", "<>", "superseded")
     .orderBy("w.id"));
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, { wf: workflowOf(r), open: r.item_state === "OPEN" }]));
 }

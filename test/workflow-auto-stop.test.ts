@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { decidePr } from "../src/core/decide.ts";
 import { loadPrFact } from "../src/core/facts.ts";
+import { loadStatusInputs } from "../src/data/views/prStatus.ts";
 import { mergeMay } from "../src/core/gates.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
@@ -90,10 +91,13 @@ test("an author push before anyone answers gives the PR back to the rule, which 
   await w.pipeline(true);
   await sweep(w);
   assert.deepEqual(await states(w), ["recommending"]);
+  const commented = async () => (await loadStatusInputs(w.db, ["app"])).get("app")!.started.has(1);
+  assert.equal(await commented(), true);
 
   await w.synced(1, "sha1b");
   await advanceWorkflows(w.db);
   assert.deepEqual(await states(w), ["superseded"]);
+  assert.equal(await commented(), false, "its status comment is the rule's again");
   await (await (await w.review(1, { head: "sha1b" })).verified(1)).premerge(1, "clean");
   assert.equal(decidePr((await loadPrFact(w.db, "app", 1))!).path, "rule", "a sure take at the new head merges by the rule");
 

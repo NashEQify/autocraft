@@ -13,6 +13,12 @@ export type Surface = "github" | "discord" | "agent" | "dashboard" | "cli";
  */
 export const RULE_STARTER = "automatic merge rule";
 
+/** The workflow an item is shown with: its newest, unless the automatic merge rule took the PR back from it, when it shows as unstarted. */
+export const shownWorkflow = (history: readonly ItemWorkflow[]): ItemWorkflow | null => {
+  const w = history.at(-1) ?? null;
+  return w?.state === "superseded" ? null : w;
+};
+
 /** The six blockers that bring an approved item back to a person, and `other` for a stop outside them (its reason shown as given). */
 export type Blocker = "major-finding" | "author-commits" | "failed-twice" | "beyond-agreed" | "large-fix" | "outside-purpose" | "other";
 

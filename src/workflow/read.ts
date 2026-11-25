@@ -23,7 +23,7 @@ import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
 import { jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
 import { isLive } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
-import { openRecommendation, type ItemRef, type Parsed, type Surface } from "./types.ts";
+import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
 
 /** The score from which a command read from a message runs without asking. */
 export const READ_RUN_SCORE = 0.9;
@@ -137,7 +137,7 @@ async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boo
     const it = items.get(key as never);
     if (!it) continue;
     const all = history.get(key) ?? [];
-    const wf = all.findLast((w) => isLive(w)) ?? all.at(-1) ?? null;
+    const wf = all.findLast((w) => isLive(w)) ?? shownWorkflow(all);
     const rec = isLive(wf) ? openRecommendation(wf) : null;
     const veiled = quiet.has(key);
     out.push({
