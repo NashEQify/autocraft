@@ -21,7 +21,7 @@ const MAIN = COMMANDS.filter((c) => !c.more);
 const MORE = COMMANDS.filter((c) => c.more);
 const BLOCKERS: Blocker[] = ["major-finding", "author-commits", "failed-twice", "beyond-agreed", "large-fix", "outside-purpose"];
 const ENTRIES: Entry[] = ["review", "fixup", "implement"];
-const ITEM = "photocraft#812";
+const ITEM = "photocraft#803";
 
 const PAGES = [
   { id: "start", title: () => t("Getting started") },
@@ -95,7 +95,7 @@ function Start() {
             {t("GitHub: a comment that starts with the app's name,")} <Code>{`@${mention} ${COMMANDS[1]!.example}`}</Code>
           </li>
           <li>
-            {t("Discord:")} <Code>{`/autocraft do text:${COMMANDS[1]!.example} ${ITEM}`}</Code>
+            {t("Discord:")} <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code>
           </li>
           <li>{t("Your agent: the AutoCraft tools take the same words.")}</li>
           <li>{t("This app: the command box on an item, or Command on Items.")}</li>
@@ -116,10 +116,10 @@ function Surfaces({ c }: { c: CommandDef }) {
       </dd>
       <dt className={dt}>Discord</dt>
       <dd className="min-w-0 break-words">
-        <Code>{`/autocraft do text:${c.example} ${ITEM}`}</Code>
+        <Code>{`/autocraft do text:${c.example}: ${ITEM}`}</Code>
       </dd>
       <dt className={dt}>{t("Agent")}</dt>
-      <dd className="min-w-0 break-words">“{`${c.example} ${ITEM}`}”</dd>
+      <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>
       <dt className={dt}>{t("App")}</dt>
       <dd className="min-w-0 break-words">{t("{word} in the item's command box", { word: c.example })}</dd>
     </dl>
@@ -185,7 +185,7 @@ function Commands() {
       </Part>
       <Part title={t("Several items")}>
         <p>
-          {t("Write them inline on Discord and in an agent:")} <Code>merge photocraft#803 photocraft#19</Code>. {t("In every surface, a list after a colon works too:")} <Code>merge, urgent: photocraft#803 #19</Code>. {t("A bare number takes the repo before it. Each item gets its own answer line.")}
+          {t("On Discord, in an agent and in this app, write them inline:")} <Code>merge photocraft#803 photocraft#19</Code>, {t("or as a list after a colon:")} <Code>merge, urgent: photocraft#803 #19</Code>. {t("A bare number takes the repo before it. Each item gets its own answer line. A GitHub comment acts only on the item it is written on.")}
         </p>
       </Part>
       <Part title={t("More commands")}>
@@ -353,7 +353,7 @@ function Roles() {
   const rows: [string, string[]][] = [
     [t("Viewer"), [t("Reads items, Work queue, Stats, Prompts, Environments, Repos and Scans, without security findings."), t("Sends no commands.")]],
     [t("Maintainer (write access on the repo)"), [t("Starts, answers, approves the merge, holds, resumes and closes any item in that repo."), t("Turns the repo's automatic handling on or off, resumes paused steps and releases outside authors' items."), t("Starts security scans with a spend cap and sees their findings."), t("Connects a Task Runner.")]],
-    [t("Operator"), [t("Everything a maintainer can, on every repo."), t("Admin: users and access, accounts, inference, GitHub App, Discord, limits, health, sweeps, audit log.")]],
+    [t("Operator"), [t("Everything a maintainer can, on every repo where they have write access."), t("Admin: users and access, accounts, inference, GitHub App, Discord, limits, health, sweeps, audit log.")]],
     [t("Outside contributor"), [t("Sees the status of their own issues and pull requests.")]],
   ];
   return (
