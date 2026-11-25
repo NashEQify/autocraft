@@ -1,6 +1,6 @@
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
-import type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState } from "../../workflow/types.ts";
+import type { Blocker, Entry, ItemKind, ItemWorkflow, Parsed, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState } from "../../workflow/types.ts";
 import type { RefKey } from "../mirror/types.ts";
 
 export type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState, RefKey };
@@ -24,12 +24,13 @@ export type WorkflowPassFacts = {
 
 export type NewWorkflow = {
   repo: string; number: number; kind: ItemKind; entry: Entry; weight: number; startedBy: string; startedVia: Surface; baseHead?: string | null;
-  approvedBy?: string | null; approvedVia?: Surface | null; plan?: PlanPart[]; at?: string;
+  approvedBy?: string | null; approvedVia?: Surface | null; plan?: PlanPart[]; step?: string | null; at?: string;
 };
 /** The fields of `ItemWorkflow` except identity. */
 export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "updatedAt">>;
 export type WorkflowFilter = { live?: boolean; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
-export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; text?: string | null; data?: Record<string, unknown> | null; at?: string };
+/** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
+export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string };
 export type StoredEvent = WorkflowEvent & { id: number; at: string };
 export type QueuePosition = { position: number; of: number; weight: number; startedBy: string };
 export type StartedWork = {
@@ -42,7 +43,8 @@ export type LegState = "fixup" | "review" | "ci" | "queued" | "merged" | "cancel
 export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { state: LegState };
 export type LegRow = Preapproval;
 export type LegContext = { workflowId: number; entry: Entry; since: string; approvedBy: string | null };
-export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended"> };
+/** `requests`: the queued requests of the active legs. */
+export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
 export type LegMoved = LegMove & { repo: string; number: number };
 export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };
