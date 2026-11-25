@@ -10,7 +10,7 @@ import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type Task
 import { loadAssignments, loadAuditMax, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
-import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
+import { loadHolds as loadOutsideHolds, recomputeHolds, type HoldInfo } from "../data/intake/index.ts";
 import { loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
 import {
   listItems, loadDiffFacts, loadFormalReviews, loadGates, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
@@ -21,6 +21,7 @@ import { loadRanks, type RankRow } from "../data/triage/index.ts";
 import { listWorkflows, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { mergeDecisionId } from "./rules.ts";
+import { whitelistVerdict } from "../whitelist.ts";
 
 type RefKey = `${string}#${number}` | string;
 
@@ -130,4 +131,12 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
     if (ids.length) data.statements = await loadStatements(db, ids);
     return data;
   });
+}
+
+/**
+ * Recomputes the outside-author holds before the pass loads its facts, so the facts read the new holds; commits on its own, never in
+ * the facts wave. The whitelist standing of a held author comes from the pure policy of src/whitelist.ts.
+ */
+export async function recomputeOutsideHolds(db: Db, now: number): Promise<Awaited<ReturnType<typeof recomputeHolds>>> {
+  return await recomputeHolds(db, { now, whitelist: whitelistVerdict });
 }
