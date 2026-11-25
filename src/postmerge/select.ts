@@ -3,6 +3,7 @@ import { loadQuiet } from "../data/security/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import { listItems } from "../data/mirror/index.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { listPostmergeReviewed, loadFilings, loadFollowupFixPrs, loadFollowups, loadPendingDefects, loadPostmerge, loadRecentFiled } from "../data/review/index.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
@@ -22,8 +23,8 @@ export type MergedPr = { repo: string; number: number; head_oid: string; merged_
 export const MAX_RETRIES = 3;
 
 /** PRs whose Plan holds a `postmerge` action: a pipeline merge that needs a review (src/core/evidence.ts landedWhy) landed since the `postmerge_since` setting and no usable review is stored (a `retry:` error counts as missing an hour after it failed; the third is stored as held). Oldest merge first. */
-export async function selectPostmerge(db: Db, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet): Promise<MergedPr[]> {
-  const rows = await planned(db, "postmerge", { repo, now, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) });
+export async function selectPostmerge(db: Db, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet, by: By = CLI_BY): Promise<MergedPr[]> {
+  const rows = await planned(db, "postmerge", { repo, now, by, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) });
   return [...(await mergedPrs(db, repo, rows.map((p) => p.facts.number))).values()]
     .sort((a, b) => (a.merged_at < b.merged_at ? -1 : a.merged_at > b.merged_at ? 1 : 0) || a.number - b.number);
 }

@@ -5,12 +5,11 @@
 //   autocraft-server review-post --repo R [--limit N] [--apply]
 //
 // Without --apply it is a dry run: it reads the local tables only and lists what would be posted.
-import { commentApprovalOf } from "../act/approval.ts";
 import { type Note, editReview, postReview, type Writer } from "../github/write.ts";
 import { guard } from "../core/guard.ts";
 import { auditIdentity, githubIdentity } from "../github/identity.ts";
 import { ownerOf } from "../owners.ts";
-import { planned } from "../core/select.ts";
+import { planned, runnable } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
 import { CLI_BY, mergeAllowed, pushAllowed, type By } from "../core/gates.ts";
 import { Client, GithubError, type Querier } from "../mirror.ts";
@@ -45,12 +44,15 @@ export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now
  * their current head that no review of ours describes yet. The Plan leaves out PRs by the pipeline's own account, batch PRs,
  * items outside the pipeline's scope.
  */
-export async function postCandidates(db: Db, repo: string): Promise<PostCandidate[]> {
+export const postCandidates = async (db: Db, repo: string, by: By = CLI_BY): Promise<PostCandidate[]> => (await postsDue(db, repo, by)).due;
+
+/** postCandidates, and why the other reviews to post are held back (null: none is). */
+async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandidate[]; held: string | null }> {
   // A review is edited only by the lane that posted it: a NULL `posted_as` is a row from before it was recorded, written by the box account.
   const lane = (as: string | null | undefined): "legacy" | "app" => (as && as !== "legacy" ? "app" : "legacy");
   const nowLane = await githubIdentity(db) === "app" ? "app" : "legacy";
   const out: PostCandidate[] = [];
-  const rows = await planned(db, "post-review", { repo });
+  const { may: rows, held } = runnable(await planned(db, "post-review", { repo, refused: true }), by);
   const refs = rows.map((p) => ({ repo, number: p.facts.number }));
   const [posts, source] = await Promise.all([loadPosts(db, refs), postSourcesOf(db, refs.map((r) => `${r.repo}#${r.number}`))]);
   for (const { facts: f, plan, action } of rows) {
@@ -70,7 +72,7 @@ export async function postCandidates(db: Db, repo: string): Promise<PostCandidat
       }),
     });
   }
-  return out;
+  return { due: out, held };
 }
 
 /** Whether an edit failed because the review no longer exists or the token may not edit it. */
@@ -86,12 +88,12 @@ export async function runReviewPost(db: Db, params: PostParams, log: (line: stri
   const dryRun = params.dryRun ?? true;
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const s: PostSummary = { repo, dryRun, candidates: 0, posted: [], edited: [], skipped: [], failed: [], note: null };
-  if (!await commentApprovalOf(db, repo)) {
-    s.note = `commenting in ${repo} is not approved`;
-    log(`review-post ${repo}: ${s.note}; nothing done`);
-    return s;
+  const { due, held } = await postsDue(db, repo, params.by ?? CLI_BY);
+  if (held) {
+    s.note = held;
+    log(`review-post ${repo}: ${held}`);
   }
-  let todo = await postCandidates(db, repo);
+  let todo = due;
   s.candidates = todo.length;
   if (params.limit !== undefined) todo = todo.slice(0, params.limit);
   if (dryRun) {

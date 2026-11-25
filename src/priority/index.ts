@@ -12,6 +12,7 @@ import { fillEmbedHashes } from "../itemhash.ts";
 import { savePriorities, rescoreReach, type PriorityRow } from "../data/triage/index.ts";
 import { settleImpact, type Impact } from "./score.ts";
 import { loadUnsure } from "../data/inference/index.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { itemsOf, plannedItems, type PlannedItem } from "../core/select-items.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -22,8 +23,8 @@ const now = () => new Date().toISOString();
 export type Due = Item & { hash: string };
 
 /** The items the Plans send to rating: no priority row, or one made at other text. */
-async function dueItems(db: Db): Promise<Due[]> {
-  const planned = await plannedItems(db, "prioritize");
+async function dueItems(db: Db, by: By): Promise<Due[]> {
+  const planned = await plannedItems(db, "prioritize", { by });
   // itemsOf also reads class_hash, which the model steps do not take.
   return (await itemsOf(db, planned.map((p) => p.facts))).map(({ classHash: _, ...item }, i) => ({ ...item, hash: planned[i]!.facts.embedHash }));
 }
@@ -63,7 +64,7 @@ async function save(db: Db, items: readonly Due[], verdicts: ReadonlyMap<string,
   return new Set(await savePriorities(db, rows));
 }
 
-export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => Promise<boolean>; log?: (line: string) => void };
+export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => Promise<boolean>; log?: (line: string) => void; /** Who asked; a command-line run is an operator's. */ by?: By };
 export type PrioritizeResult = { due: number; sent: number; jev: number; haiku: number; saved: number; rescored: number; haikuAlone: number };
 
 /** Rates one chunk: Jev (skipped for the items in `given`, answered in another request), Haiku where it is unsure, then saves. */
@@ -88,7 +89,7 @@ async function rateChunk(db: Db, all: Due[], res: PrioritizeResult, log: (line: 
 export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<PrioritizeResult> {
   const log = opts.log ?? (() => {});
   await fillEmbedHashes(db);
-  const all = await dueItems(db);
+  const all = await dueItems(db, opts.by ?? CLI_BY);
   const due = all.length;
   const todo = (await takersFirst(db, all, (x) => [x.repo], (x) => [x], "priority.haiku")).slice(0, opts.limit);
   log(`prioritize: ${due} items due, taking ${todo.length}`);

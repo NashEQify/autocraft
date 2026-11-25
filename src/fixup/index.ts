@@ -185,8 +185,8 @@ class Recorder {
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
-  async dropUnlisted(repo: string, listed: FixCandidate[]): Promise<void> {
-    await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed.map((c) => c.lint!.rowid)));
+  async dropUnlisted(repo: string, listed: number[]): Promise<void> {
+    await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed));
   }
 
   /** A fixups row and a stages row: `hold` for the two states that need a person, else the PR's `take` stage with a note. */
@@ -220,7 +220,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const runId = `fixup-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   const gw: Writer = { db, login: ACTOR };
   const summary: FixupSummary = { runId, repo, dryRun, pushed: [], asked: [], failed: [], held: [] };
-  const sel = await selectFixups(db, repo);
+  const sel = await selectFixups(db, repo, undefined, undefined, params.by);
   const asks = await takersCut(db, sel.ask, params.limit, repo, (c) => c.number);
   // Stored patches whose lint task ended come first: they hold a model patch that is already paid for.
   const wanted = [...sel.lint, ...sel.fix];
@@ -245,7 +245,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const titles = new Map([...await loadItems(db, [...sel.lint, ...sel.fix].map(refPair), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
   const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   const rec = new Recorder(db, at);
-  await rec.dropUnlisted(repo, sel.lint);
+  await rec.dropUnlisted(repo, sel.listed);
 
   // Not approved for comments: no GitHub write, recorded once per head.
   for (const c of sel.cannotPush) {

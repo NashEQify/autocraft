@@ -86,7 +86,7 @@ export type StepDef = {
   run: (ctx: StepContext) => Promise<string>;
 };
 
-/** Labelling writes to GitHub only for repos in the pipeline scope that an operator approved on the Repos page. */
+/** Creating a repo's labels, a repo-level write, is for repos in the pipeline scope that an operator approved for labelling on the Repos page. */
 async function checkApproved(db: Db, p: Params): Promise<string | null> {
   const { approvalOf } = await import("../labels/approval.ts");
   const { scopeRepos } = await import("./scope.ts");
@@ -101,12 +101,6 @@ export function modelsOf(step: StepDef | undefined, params: Params): string[] {
 
 /** Models that run on a Task Runner (everything but Jev). */
 export const usesClaude = (models: string[]): boolean => models.some((m) => m !== "jev");
-
-/** Approving workflow runs of outside contributors' PRs is opt-in per repo. */
-async function checkCiApproved(db: Db, p: Params): Promise<string | null> {
-  const { ciApprovalOf } = await import("../merge/ci-approval.ts");
-  return await ciApprovalOf(db, String(p.repo)) ? null : `approving CI runs in ${p.repo} is not approved`;
-}
 
 /** The nightly checks run only for repos whose build feature is switched on. */
 async function checkNightlyOn(db: Db, p: Params): Promise<string | null> {
@@ -230,18 +224,16 @@ export const STEPS: StepDef[] = [
   {
     name: "labels-apply",
     title: "Apply labels on GitHub",
-    description: "Puts the settled type label and flags of the current classification run onto the open items of one repo on GitHub. Refused unless the operator has approved labelling for that repo.",
+    description: "Puts the settled type label and flags of the current classification run onto the open items of one repo on GitHub, in a repo approved for labelling.",
     stage: runStage("labels-apply"),
     requires: "operator",
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 5000, default: 500, help: "items to label in this job" },
     ],
-    check: checkApproved,
+    // No repo check: whether an item's labels may be written is its action's own permission.
     run: async (ctx) => {
       const repo = String(ctx.params.repo);
-      const refused = await checkApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const { classifyRun } = await import("../data/triage/index.ts");
       const runId = await classifyRun(ctx.db);
       if (!runId) throw new Error("there is no classification run yet");
@@ -253,7 +245,7 @@ export const STEPS: StepDef[] = [
       const limit = Number(ctx.params.limit);
       const stopAt = Date.parse(ctx.job.startedAt) + (stepDeadlineMin("labels-apply", limit) - 5) * 60_000;
       const r = await applyLabels(ctx.db, new Client(500), repo, { runId, limit, stopAt: Number.isNaN(stopAt) ? undefined : stopAt, apply: true, login: ctx.job.requestedBy, by: byOfJob(ctx.job.requestedBy), log: ctx.log, onLabeled: ctx.handled });
-      return `${repo}: labelled ${r.labeled} of ${r.planned} items in ${r.batches} batches, ${r.failed.length} failed${r.stopped ? "; stopped before the time limit, the rest go in the next job" : ""}${r.paced ? "; paused for the GitHub write budget, the rest go in the next job" : ""}`;
+      return `${repo}: labelled ${r.labeled} of ${r.planned} items in ${r.batches} batches, ${r.failed.length} failed${r.stopped ? "; stopped before the time limit, the rest go in the next job" : ""}${r.paced ? "; paused for the GitHub write budget, the rest go in the next job" : ""}${r.held ? `; ${r.held}` : ""}`;
     },
   },
   {
@@ -374,7 +366,7 @@ export const STEPS: StepDef[] = [
     ],
     run: async (ctx) => {
       const { runVerify } = await import("../verify/index.ts");
-      const r = await runVerify(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, stopping: ctx.stopping }, ctx.log);
+      const r = await runVerify(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       const k = Object.entries(r.kinds).map(([x, n]) => `${n} ${x}`).join(", ");
       return `${r.repo}: planned ${r.handled} of ${r.candidates} candidates${k ? ` (${k})` : ""}; ${r.errors} errors, ${r.tasks.length} tasks queued`;
@@ -423,7 +415,7 @@ export const STEPS: StepDef[] = [
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 30000, default: 1000, help: "items sent to Jev in this job" }],
     run: async (ctx) => {
       const { runPrioritize } = await import("../priority/index.ts");
-      const r = await runPrioritize(ctx.db, { limit: Number(ctx.params.limit), onSent: ctx.handled, cancelled: ctx.cancelled, log: ctx.log });
+      const r = await runPrioritize(ctx.db, { limit: Number(ctx.params.limit), onSent: ctx.handled, cancelled: ctx.cancelled, log: ctx.log, by: byOfJob(ctx.job.requestedBy) });
       return r.due ? `rated ${r.saved} of ${r.sent} items (${r.jev} by Jev, ${r.haiku} by Haiku), ${r.due - r.sent > 0 ? r.due - r.sent : 0} left; ${r.rescored} reach values changed` : `nothing new to rate; ${r.rescored} reach values changed`;
     },
   },
@@ -438,7 +430,7 @@ export const STEPS: StepDef[] = [
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 5000, default: 2000, help: "pairs to check in this job" }],
     run: async (ctx) => {
       const { runDupes } = await import("../dupes/index.ts");
-      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
+      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
       ctx.acted(r.scanned + r.pairsAdded);
       return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}`;
@@ -643,7 +635,7 @@ export const STEPS: StepDef[] = [
       const run = await classifyRun(ctx.db);
       if (!run) throw new Error("There is no classification run yet; start a classification pass first.");
       const { takersFirst } = await import("../agents/call.ts");
-      const due = (await takersFirst(ctx.db, await plannedItems(ctx.db, "referee", { run }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, Number(ctx.params.limit));
+      const due = (await takersFirst(ctx.db, await plannedItems(ctx.db, "referee", { run, by: byOfJob(ctx.job.requestedBy) }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, Number(ctx.params.limit));
       if (!due.length) return `Nothing to referee in run ${run}.`;
       const asked = async (source: string) => await mapSeq(due.filter((p) => p.action.params?.source === source), async (p) => await itemOf(ctx.db, p.facts.repo, p.facts.number));
       const sonnet = await asked("sonnet"), opus = await asked("opus");
@@ -670,7 +662,7 @@ export const STEPS: StepDef[] = [
     ],
     run: async (ctx) => {
       const { runOpusReview } = await import("../review/opus.ts");
-      const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
+      const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
       return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.off.length} off the automatic path, ${r.missing.length} without an answer`;
@@ -686,7 +678,7 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runCarry } = await import("../review/carry-step.ts");
       const repo = String(ctx.params.repo);
-      return `${repo}: carried ${await runCarry(ctx.db, repo, ctx.log)} reviews`;
+      return `${repo}: carried ${await runCarry(ctx.db, repo, ctx.log, byOfJob(ctx.job.requestedBy))} reviews`;
     },
   },
   {
@@ -699,13 +691,10 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 20, help: "reviews to post in this job" },
     ],
-    check: checkCommentApproved,
     run: async (ctx) => {
       const { runReviewPost } = await import("../review/post.ts");
-      const refused = await checkCommentApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runReviewPost(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      return `${r.repo}: ${r.posted.length} posted, ${r.edited.length} edited, ${r.skipped.length} skipped, ${r.failed.length} failed`;
+      return `${r.repo}: ${r.posted.length} posted, ${r.edited.length} edited, ${r.skipped.length} skipped, ${r.failed.length} failed${r.note ? `; ${r.note}` : ""}`;
     },
   },
   {
@@ -722,7 +711,7 @@ export const STEPS: StepDef[] = [
     ],
     run: async (ctx) => {
       const { runPremerge } = await import("../premerge/review.ts");
-      const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
+      const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
     },
@@ -740,7 +729,7 @@ export const STEPS: StepDef[] = [
     ],
     run: async (ctx) => {
       const { runPostmerge } = await import("../postmerge/review.ts");
-      const r = await runPostmerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
+      const r = await runPostmerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer`;
     },
@@ -919,13 +908,10 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 30, help: "pull requests to approve runs for in this job" },
     ],
-    check: checkCiApproved,
     run: async (ctx) => {
       const { approveRuns } = await import("../merge/ci-approval.ts");
       const { ghExec } = await import("../merge/safe-merge.ts");
       const { exec } = await import("../fixup/git.ts");
-      const refused = await checkCiApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo);
       const r = await approveRuns(ctx.db, repo, { gh: ghExec, exec, limit: Number(ctx.params.limit), log: ctx.log, by: byOfJob(ctx.job.requestedBy) });
       ctx.handled(r.approved.length + r.failed.length);
@@ -967,11 +953,8 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 30, help: "pull requests to rerun in this job" },
     ],
-    check: checkCiApproved,
     run: async (ctx) => {
       const { runRerun } = await import("../cifix/index.ts");
-      const refused = await checkCiApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runRerun(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       return `${r.repo}: reran ${r.reran.length} PRs, ${r.skipped.length} skipped`;
     },

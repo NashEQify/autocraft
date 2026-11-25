@@ -1,7 +1,7 @@
 // Merging a few clean ready PRs one at a time instead of through an integration batch. Only the way a PR that
 // may merge already does changes here: the merge rule, its approval, Verify and the final review still decide whether.
 import { cachedDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
-import { mayMergeNow, type By } from "../core/gates.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { runMerge, type MergeDeps, type MergeSummary } from "./index.ts";
 import { planned } from "../core/select.ts";
 import { SETTINGS, saveSettings, setting } from "../data/control/index.ts";
@@ -40,10 +40,9 @@ export function pathsOfDiff(text: string): string[] | null {
  * limit, a diff that cannot be read, or two PRs changing one file. A workspace manifest or lockfile is a file
  * like any other here, so two PRs that both change one overlap. The diffs are the ones the reviews cached.
  */
-export async function planSingles(db: Db, repo: string, fetchDiff: DiffFetcher = ghDiff): Promise<Set<number> | null> {
+export async function planSingles(db: Db, repo: string, fetchDiff: DiffFetcher = ghDiff, by: By = CLI_BY): Promise<Set<number> | null> {
   const max = await singleMergeMax(db);
-  // A PR aimed at a non-default branch merges singly on its own path and takes no part in this count or the file overlap.
-  const ready = (await planned(db, "merge", { repo })).filter((p) => !p.facts.baseOffDefault && mayMergeNow(p.facts));
+  const ready = await planned(db, "merge", { repo, by });
   if (max === 0 || !ready.length || ready.length > max) return null;
   const seen = new Set<string>();
   for (const { facts, action } of ready) {
@@ -68,9 +67,9 @@ export async function runSingles(
   db: Db, params: { repo: string; limit?: number; onMerged?: (n: number) => void; by?: By },
   log: (line: string) => void = console.log, deps?: MergeDeps, fetchDiff?: DiffFetcher,
 ): Promise<MergeSummary | null> {
-  // Whether each PR may merge is the plan's (mayMerge), checked again before each merge.
+  // Whether each PR may merge is the plan's, checked again before each merge.
   if ((await loadBatchRun(db, params.repo)).active.length) return null;
-  const plan = await planSingles(db, params.repo, fetchDiff);
+  const plan = await planSingles(db, params.repo, fetchDiff, params.by);
   if (!plan) return null;
   log(`merge ${params.repo}: ${plan.size} PRs ready, none sharing a file; merging them one at a time`);
   return runMerge(db, { repo: params.repo, limit: params.limit, dryRun: false, only: (e) => plan.has(e.number), stopOnRefusal: true, onMerged: params.onMerged, by: params.by }, log, deps);

@@ -4,6 +4,8 @@
 import type { Embedder } from "./model.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { itemText } from "./text.ts";
+import { mayRun } from "../core/authority.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { plannedItems } from "../core/select-items.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { embedStatements, statementsDue } from "../memory/statements.ts";
@@ -30,10 +32,10 @@ const todosOf = async (db: Db, rows: readonly { repo: string; number: number; ha
  * Closed items have no Plan; the ones with a missing or stale vector are added so that duplicate scans still find them.
  * Reads only; the item rows' missing hashes are filled by embedItems.
  */
-export async function pending(db: Db, modelId: string, all = false, plans?: PlanSet): Promise<Todo[]> {
+export async function pending(db: Db, modelId: string, all = false, plans?: PlanSet, by: By = CLI_BY): Promise<Todo[]> {
   // The first query runs on covering indexes; only the rows that differ are read in full.
   const diff = await listEmbedDiff(db, modelId, all);
-  const planned = all ? [] : (await plannedItems(db, "embed", { model: modelId, run: null, ...(plans ? { plans } : {}) })).map((p) => ({ repo: p.facts.repo, number: p.facts.number, hash: p.facts.embedHash }));
+  const planned = all ? [] : (await plannedItems(db, "embed", { model: modelId, run: null, by, ...(plans ? { plans } : {}) })).map((p) => ({ repo: p.facts.repo, number: p.facts.number, hash: p.facts.embedHash }));
   // A row without a hash waits for fillEmbedHashes (embedItems runs it first).
   const hashed = [...planned, ...diff].filter((r): r is { repo: string; number: number; hash: string } => r.hash !== null);
   return (await todosOf(db, hashed)).sort((a, b) => a.text.length - b.text.length);
@@ -41,7 +43,7 @@ export async function pending(db: Db, modelId: string, all = false, plans?: Plan
 
 /** Whether the embed step has work: open items the Plans send here, or closed ones with a missing or stale vector. */
 export async function embedDue(db: Db, modelId: string, plans?: PlanSet): Promise<boolean> {
-  if (plans ? plans.items.some((p) => p.plan.actions.some((a) => a.kind === "embed")) : (await plannedItems(db, "embed", { model: modelId, run: null })).length) return true;
+  if (plans ? plans.items.some((p) => p.plan.actions.some((a) => a.kind === "embed" && mayRun({ facts: p.facts, action: a }, "pipeline").ok)) : (await plannedItems(db, "embed", { model: modelId, run: null })).length) return true;
   // Owner statements (src/memory/) are embedded by the same step.
   if (await statementsDue(db, modelId)) return true;
   return await hasEmbedDiff(db, modelId);

@@ -82,7 +82,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
     assert.ok(kinds.includes(unreviewed ? "premerge" : c.name === "clean base merge" ? "carry" : "review"), `${label}: ${kinds.join()}`);
     assert.ok(!kinds.includes("merge"), label);
     const may = (await mergeVerdicts(w.db, "app", [{ number: c.n, head: `sha${c.n}b` }])).get(c.n)!;
-    assert.ok(!may.ok && /hand it over/.test(may.why), `${label}: ${JSON.stringify(may)}`);
+    assert.ok(!may.ok && may.why.code === "not-handed-over", `${label}: ${JSON.stringify(may)}`);
   }
 
   // Reviewed, green and clean at the new head, every one is handed over and may merge as the approver.
@@ -94,7 +94,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
   const verdicts = await mergeVerdicts(w.db, "app", all.map((c) => ({ number: c.n, head: `sha${c.n}b` })));
   for (const c of all) {
     assert.equal((await legOf(w, c.n)).state, "queued", `${c.name}, ${c.state}, ${c.entry}`);
-    assert.deepEqual(verdicts.get(c.n), { ok: true, as: "person", by: OPERATOR }, `${c.name}, ${c.state}, ${c.entry}`);
+    assert.deepEqual(verdicts.get(c.n), { ok: true, as: `user:${OPERATOR}`, by: { kind: "person", login: OPERATOR } }, `${c.name}, ${c.state}, ${c.entry}`);
   }
 });
 
