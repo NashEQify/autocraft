@@ -10,7 +10,9 @@ import { handleMcp } from "../src/dash/mcp/index.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Req, Role } from "../src/dash/types.ts";
-import { claimCall, dropQueueCache, enqueueCall, leasedBy, leaseTurnover, withdrawCall, type Caller } from "../src/remote/calls.ts";
+import { claimCall, enqueueCall, leasedBy, leaseTurnover, withdrawCall, type Caller } from "../src/remote/calls.ts";
+// NEEDS runners.index: dropQueueCache as a test seam for rows a test writes directly; until then the 2 s caches may hold.
+const dropQueueCache = (_db: unknown): void => undefined;
 import { defaultSemanticDeps } from "../src/reference-lint.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
@@ -427,9 +429,9 @@ describe("picks and Manual only", async () => {
     await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("login", "=", "alice"));
     const now = Date.now(), st = await roomState(db, now), takes = takerTest(db, now);
     const started = [{ repo: "photocraft", number: 7 }], auto = [{ repo: "photocraft", number: 8 }];
-    assert.ok(await roomOf(db, st, 0, now, ["photocraft"], "opus-review", started) > 0, "room for her started item");
-    assert.equal(await roomOf(db, st, 0, now, ["photocraft"], "opus-review", auto), 0, "no room for an automatic item");
-    assert.ok(await roomOf(db, st, 0, now, ["photocraft"], "opus-review") > 0, "a job on the repo of her started item has room");
+    assert.ok(await roomOf(st, 0, ["photocraft"], "opus-review", started) > 0, "room for her started item");
+    assert.equal(await roomOf(st, 0, ["photocraft"], "opus-review", auto), 0, "no room for an automatic item");
+    assert.ok(await roomOf(st, 0, ["photocraft"], "opus-review") > 0, "a job on the repo of her started item has room");
     assert.ok(await takes({ prompt_id: "", repos: ["photocraft"], step: "opus-review", refs: started }), "a taker for her started item");
     assert.equal(await takes({ prompt_id: "", repos: ["photocraft"], step: "opus-review", refs: auto }), false, "none for an automatic item");
     await setUserRepos(db, "alice", []);

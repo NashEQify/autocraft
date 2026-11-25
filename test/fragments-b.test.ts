@@ -11,7 +11,8 @@ import { hiddenExpr as statusHiddenExpr, hiddenSql as statusHiddenSql } from "..
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
-import { MANUAL_ONLY_KEY, manualExpr, manualSql } from "../src/remote/manual-only.ts";
+import { MANUAL_ONLY_KEY } from "../src/remote/manual-only.ts";
+import { manualOnlyExpr } from "../src/data/runners/fragments.ts";
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
@@ -193,8 +194,8 @@ function cases(db: Db): Case[] {
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),
       built: (d) => d.k.selectFrom("build_tasks").select("step as k").where((eb) => (not ? eb.not(privateStepExpr(eb)) : privateStepExpr(eb))).orderBy("step") });
   }
-  out.push({ name: "manualSql", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE ${manualSql("t.login")} ORDER BY t.login`], expect: ["alice"],
-    built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualExpr(d, eb, "t.login")).orderBy("t.login") });
+  out.push({ name: "manualOnlyExpr", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE EXISTS (SELECT 1 FROM main.user_settings mo WHERE mo.login = t.login AND mo.key = '${MANUAL_ONLY_KEY}' AND mo.value = '1') ORDER BY t.login`], expect: ["alice"],
+    built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualOnlyExpr(eb as never, "t.login")).orderBy("t.login") });
   out.push({ name: "KEPT_RUNS", text: [`SELECT id AS k FROM agent_runs WHERE id NOT IN (${KEPT_RUNS}) ORDER BY id`], expect: ["2", "3"],
     built: (d) => d.k.selectFrom("agent_runs").select("id as k").where("id", "not in", keptRunsExpr(d)).orderBy("id") });
   out.push({ name: "RESUMING_JOBS", text: [`SELECT id AS k FROM main.jobs WHERE id IN (${RESUMING_JOBS}) ORDER BY id`], expect: ["1"],
