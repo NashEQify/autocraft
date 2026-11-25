@@ -1,16 +1,15 @@
 // The merge queue for the dashboard: read-only, anyone signed in, limited to the repos the requester may see; viewers get
 // the queue rows without the review's reason, verification text and the plan's quoted reasons (src/dash/api/reader.ts).
 import type { BatchList, BatchState, Mergeable, QueueBatch, QueueList, QueueRow, QueueState, Tier, TypeLabel } from "../../../web/src/api/types.ts";
-import { cachedQueue, countMergedPlans, countStates, type CachedEntry } from "../../core/plan-read.ts";
+import { countMergedQueue, countStates, loadMergeQueue, type CachedEntry } from "../../data/views/merge-queue.ts";
+import { listActiveBatches, listBatchPage, type BatchListRow } from "../../data/merge/index.ts";
 import { QUEUE_STATES } from "../../core/plan.ts";
-import { pageBatches, type BatchRow } from "../../merge/batch-store.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { flowMembers } from "./flow.ts";
 import { queueTextFor, readerOf, type Reader } from "./reader.ts";
-import { isHiddenRepo } from "../../hidden-sql.ts";
+import { isHiddenRepo } from "../../data/control/index.ts";
 import type { Db } from "../../db/index.ts";
-import * as kx from "../../db/kx.ts";
 
 const TIER: Record<string, Tier> = { whitelisted: "whitelisted", not: "not", allow: "override-allow", deny: "override-deny" };
 const MERGEABLE: Record<string, Mergeable> = { MERGEABLE: "clean", CONFLICTING: "conflicts" };
@@ -38,9 +37,7 @@ function parseCursor(s: string | null): { repo: string; number: number } | undef
 // The queue rows come from the Plan cache (src/core/plan-read.ts): open PRs are read whole (counts and the state filter need all of
 // them) and cut into pages by (repo, number); merged PRs are read a page at a time and only when state=merged.
 /** PRs (repo#number@head) in an integration batch in flight: without a state filter they are listed under their batch, not in the PR list. */
-const inFlight = async (db: Db): Promise<Set<string>> => new Set((await db.all(db.k.selectFrom("main.merge_batch_prs as p").innerJoin("main.merge_batches as b", "b.id", "p.batch_id")
-  .select((eb) => eb(eb(eb(eb(eb.ref("b.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "p.number")), "||", eb.val("@")), "||", eb.ref("p.head_oid")).as("k"))
-  .where("b.state", "in", ["checking", "open"]))).map((r) => r.k));
+const inFlight = async (db: Db): Promise<Set<string>> => new Set((await listActiveBatches(db, {})).flatMap((b) => b.members.map((m) => `${b.repo}#${m.number}@${m.head_oid}`)));
 
 export async function queue(db: Db, req: Req): Promise<QueueList> {
   const repo = req.query.get("repo") || undefined;
@@ -56,7 +53,7 @@ export async function queue(db: Db, req: Req): Promise<QueueList> {
   if (flowKey) {
     const refs = /^merge\.[a-z-]+$/.test(flowKey) ? await flowMembers(db, flowKey) : null;
     if (!refs) throw new HttpError(400, "flow must name a Merge queue branch");
-    const entries = await cachedQueue(db, { repo, merged: "all", hidden, refs });
+    const entries = await loadMergeQueue(db, { repo, merged: "all", hidden, refs });
     const from = after ? entries.findIndex((e) => e.repo > after.repo || (e.repo === after.repo && e.number > after.number)) : 0;
     const rest = from < 0 ? [] : entries.slice(from);
     const rows = rest.slice(0, limit);
@@ -65,8 +62,8 @@ export async function queue(db: Db, req: Req): Promise<QueueList> {
       next: rest.length > limit ? cursorOf(rows[rows.length - 1]!) : null,
     };
   }
-  const open = await cachedQueue(db, { repo, merged: "exclude", hidden });
-  const merged = await countMergedPlans(db, repo, hidden);
+  const open = await loadMergeQueue(db, { repo, merged: "exclude", hidden });
+  const merged = await countMergedQueue(db, repo, hidden);
   // An open PR that we merged and the mirror has not seen merged yet counts as merged.
   const counts = countStates(open);
   counts.merged += merged;
@@ -74,7 +71,7 @@ export async function queue(db: Db, req: Req): Promise<QueueList> {
   let more: boolean;
   let match: CachedEntry[] | undefined;
   if (state === "merged") {
-    page = await cachedQueue(db, { repo, merged: "only", after, limit: limit + 1, hidden });
+    page = await loadMergeQueue(db, { repo, merged: "only", after, limit: limit + 1, hidden });
     more = page.length > limit;
     page = page.slice(0, limit);
   } else {
@@ -99,18 +96,18 @@ export async function queueBatches(db: Db, req: Req): Promise<BatchList> {
   const reader = await readerOf(db, req);
   const hidden = reader.hidden;
   if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
-  const { batches, total, more } = await pageBatches(db, { repo, hidden, before: after, limit });
-  const refs = batches.flatMap((b) => b.prs.map((p) => `${b.repo}#${p.number}`));
-  const rows = new Map(refs.length ? (await cachedQueue(db, { merged: "all", refs, hidden })).map((e) => [`${e.repo}#${e.number}`, toRow(e, reader)]) : []);
-  const out = batches.map((b) => toBatch(b, reader, b.prs.flatMap((p) => rows.get(`${b.repo}#${p.number}`) ?? [])));
+  const { batches, total, more } = await listBatchPage(db, { repo, hidden, before: after, limit });
+  const refs = batches.flatMap((b) => b.members.map((p) => `${b.repo}#${p.number}`));
+  const rows = new Map(refs.length ? (await loadMergeQueue(db, { merged: "all", refs, hidden })).map((e) => [`${e.repo}#${e.number}`, toRow(e, reader)]) : []);
+  const out = batches.map((b) => toBatch(b, reader, b.members.flatMap((p) => rows.get(`${b.repo}#${p.number}`) ?? [])));
   return { batches: out, total, next: more ? String(out[out.length - 1]!.id) : null };
 }
 
 /** A batch row with its member PRs as queue rows. */
 /** `summary` can hold raw push, PR and gh errors, so only staff get it. */
-export function toBatch(b: BatchRow & { prs: unknown[]; areas: string[] }, reader: Reader, prs: QueueRow[]): QueueBatch {
+export function toBatch(b: BatchListRow, reader: Reader, prs: QueueRow[]): QueueBatch {
   return {
-    id: b.id, repo: b.repo, branch: b.branch, fork: b.fork, state: b.state as BatchState, baseSha: b.base_sha, size: b.prs.length, areas: b.areas, prs,
+    id: b.id, repo: b.repo, branch: b.branch, fork: b.fork, state: b.state as BatchState, baseSha: b.base_sha, size: b.members.length, areas: b.areas, prs,
     prNumber: b.pr_number, prUrl: b.pr_url, summary: reader.staff ? b.summary : null, createdAt: b.created_at, updatedAt: b.updated_at,
   };
 }

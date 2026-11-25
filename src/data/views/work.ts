@@ -31,3 +31,16 @@ export async function loadWorkList(db: Db, f: WorkFilter): Promise<{ rows: WorkL
     })),
   };
 }
+
+/** Every open ranked item of every repo in work-score order, without paging: the Queue page filters and counts them. 1 statement. */
+export async function loadRankedOpen(db: Db): Promise<WorkListRow[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.items as i").innerJoin("main.item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+    .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select(["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
+    .where("i.state", "=", "OPEN").orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number"), { label: "views.loadRankedOpen" });
+  return rows.map((r) => ({
+    repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", score: r.score, breakdown: JSON.parse(r.breakdown) as RankBreakdown,
+    next: r.next, label: r.label, itemState: r.item_state,
+  }));
+}
