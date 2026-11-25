@@ -63,7 +63,8 @@ export type CommandProgress = { commentId: number; triedAt?: string; retryInc?: 
 export type StatusRow = Selectable<DB["pr_status_comments"]>;
 
 export type RepinState = string;
-export type RepinKey = { repo: string; number: number; refRepo: string; refNumber: number; login: string };
+/** The request a row was read with: its pair, asker, and (to refuse a newer command by the same asker) the request time. */
+export type RepinKey = { repo: string; number: number; refRepo: string; refNumber: number; login: string; requestedAt?: string };
 export type RepinRow = Selectable<DB["autorepins"]>;
 export type RepinRequest = { repo: string; number: number; refRepo: string; refNumber: number; refBranch: string | null; login: string; githubId: number; off?: boolean; at?: string };
 export type RepinPatch = Partial<Pick<RepinRow, "state" | "sha" | "head" | "task_id" | "tries" | "tried_at" | "to_head" | "result" | "done_at" | "notice">>;
