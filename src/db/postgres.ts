@@ -317,19 +317,26 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     exclusiveLock: async (name: string, waitMs: number) => {
       // A connection of its own, outside the pool (a job's pool has one connection), closed with the lock: closing the
       // session releases it, and so does the server when this process dies (SERVER_KEEPALIVE).
-      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, connectionTimeoutMillis: 10_000 });
-      c.on("error", () => undefined);
-      const end = async () => void await c.end().catch(() => undefined);
+      const wait = Math.max(1, Math.floor(waitMs));
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, connectionTimeoutMillis: 10_000, query_timeout: wait + 5_000 });
+      let held = false;
+      c.on("error", () => (held = false));
+      c.on("end", () => (held = false));
+      const end = async (): Promise<void> => {
+        held = false;
+        await c.end().catch(() => undefined);
+      };
       try {
         await c.connect();
-        await setSession((text) => c.query(text), SERVER_KEEPALIVE, "the lock connection", (l) => console.warn(l));
-        await c.query(`SET lock_timeout = ${Math.max(1, Math.floor(waitMs))}`);
+        await setSession((text) => c.query(text), SERVER_KEEPALIVE, "the lock connection", (l) => console.warn(l), 10_000);
+        await c.query(`SET lock_timeout = ${wait}`);
         await c.query(`SELECT pg_advisory_lock(${EXCLUSIVE_LOCKS}, hashtext($1))`, [name]);
+        held = true;
       } catch (e) {
         await end();
         throw e;
       }
-      return end;
+      return { release: end, held: () => held };
     },
     exec: async (op: Op, text: string, args: Args, tx: Tx | undefined) => {
       const { text: q, values } = bindParams(parse(text), args, (i) => `$${i + 1}`);

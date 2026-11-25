@@ -11,7 +11,7 @@ import { readSecrets } from "../dash/server/config.ts";
 import { openAppKeys } from "./app-keys.ts";
 import { GitHubProvider, RevokeRefused, type Provider, type Tokens } from "../dash/server/provider.ts";
 import { readUserTokens, revocationAad } from "../dash/server/user-tokens.ts";
-import { refreshShared, usableAccess } from "../dash/server/token-refresh.ts";
+import { lockOf, readCopies, refreshShared, sessionMayHeal, usableAccess, type Copy } from "../dash/server/token-refresh.ts";
 import { githubIdentity } from "./identity.ts";
 import type { Db } from "../db/index.ts";
 
@@ -55,8 +55,9 @@ export class Vault {
     if (!row?.tokens) return { ok: false, needsSignIn: true, why: "no-token" };
     if (row.status === "ok" && usableAccess(row.tokens, rejected)) return { ok: true, access: row.tokens.access };
     // Under the app identity the sessions hold tokens of the same app, so they share refreshes with the row and may heal it.
+    // A refresh-failed row goes to refreshShared (and its lock) only when a session holds a token set that could heal it.
     const heal = await githubIdentity(this.#db) === "app";
-    if (row.status !== "ok" && (!heal || !await this.#db.get(this.#db.k.selectFrom("sessions").select("id_hash").where("login", "=", login).where("token_enc", "is not", null)))) {
+    if (row.status !== "ok" && (!heal || !await sessionMayHeal(this.#db, this.#box, login, row.tokens))) {
       return { ok: false, needsSignIn: true, why: "refresh-failed" };
     }
     const r = await refreshShared(this.#db, this.#box, this.#provider, login, { kind: "user" }, { rejected, heal });
@@ -108,32 +109,45 @@ export class Vault {
       t = plain ? (JSON.parse(plain) as Tokens) : null;
     } catch { /* unreadable */ }
     if (!t) return true;
+    const tokens = t;
     const revoke = (access: string): Promise<void> => (r.kind === "token" ? this.#provider.revoke(access) : this.#provider.revokeGrant(access));
-    // The login's user_tokens row written by the same sign-in holds this very token set and dies with it.
-    const own = r.kind === "token" ? await readUserTokens(this.#db, this.#box, r.login) : null;
-    const sameSignIn = !!own?.tokens && (own.tokens.access === t.access || (!!t.refresh && own.tokens.refresh === t.refresh));
-    const refreshed = async (): Promise<string | null> => {
-      if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) return null;
-      const next = await this.#provider.refresh(t.refresh);
-      return "refused" in next ? null : next.access;
-    };
-    let ok = false;
-    const expired = t.expiresAt !== null && t.expiresAt - EXPIRY_MARGIN <= Date.now();
-    if (!expired) {
-      try {
-        await revoke(t.access);
-        ok = true;
-      } catch (e) {
-        if (!(e instanceof RevokeRefused) || (e.status !== 404 && e.status !== 422)) throw e;
+    // Under the login's lock, so a refresh here never races refreshShared over the same single-use refresh token.
+    return await this.#db.exclusive(lockOf(r.login), async (held) => {
+      const copies = await this.#db.fresh(() => readCopies(this.#db, this.#box, r.login));
+      // The login's user_tokens row written by the same sign-in holds this very token set and dies with it.
+      const own = r.kind === "token" ? copies.find((c) => c.kind === "user") : undefined;
+      const sameSignIn = !!own?.tokens && (own.tokens.access === tokens.access || (!!tokens.refresh && own.tokens.refresh === tokens.refresh));
+      // Any other live copy still holding the refresh token would be left with a used one if it were refreshed here. The
+      // revoked session itself (its aad) is ending and does not count.
+      const ending = (c: Copy): boolean => (sameSignIn && c === own) || (c.kind === "session" && c.idHash === r.aad);
+      const holders = !tokens.refresh ? [] : copies.filter((c) => !ending(c) && c.tokens?.refresh === tokens.refresh
+        && (c.kind === "session" || c.status === "ok")).map((c) => c.tokens!);
+      let ok = false;
+      const expired = tokens.expiresAt !== null && tokens.expiresAt - EXPIRY_MARGIN <= Date.now();
+      if (!expired) {
+        try {
+          await revoke(tokens.access);
+          ok = true;
+        } catch (e) {
+          if (!(e instanceof RevokeRefused) || (e.status !== 404 && e.status !== 422)) throw e;
+        }
       }
-    }
-    if (!ok) {
-      const access = await refreshed();
-      if (!access) return false;
-      await revoke(access);
-    }
-    if (sameSignIn) await this.#db.run(this.#db.k.deleteFrom("user_tokens").where("login", "=", r.login));
-    return true;
+      if (!ok && holders.length) {
+        const other = holders.find((h) => h.access !== tokens.access && usableAccess(h));
+        if (!other) {
+          console.error(`revocation for ${r.login}: the token set is still in use and is not refreshed for the revoke; the revocation is dropped`);
+          return true;
+        }
+        await revoke(other.access);
+      } else if (!ok) {
+        if (!held() || !tokens.refresh || (tokens.refreshExpiresAt !== null && tokens.refreshExpiresAt <= Date.now())) return false;
+        const next = await this.#provider.refresh(tokens.refresh);
+        if ("refused" in next) return false;
+        await revoke(next.access);
+      }
+      if (sameSignIn && own?.kind === "user") await this.#db.run(this.#db.k.deleteFrom("user_tokens").where("login", "=", r.login).where("version", "=", own.version));
+      return true;
+    });
   }
 }
 

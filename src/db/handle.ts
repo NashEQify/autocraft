@@ -46,10 +46,11 @@ export interface Engine {
   /** A new listener on a connection of its own; absent where the backend has no notifications (SQLite). */
   listener?(): Listener;
   /**
-   * Takes the lock `name` across processes, waiting at most `waitMs`, and returns its release. It holds no writer lock and
-   * no pooled connection. Absent where one process owns the database (SQLite): the in-process queue of Db.exclusive is enough.
+   * Takes the lock `name` across processes, waiting at most `waitMs`. It holds no writer lock and no pooled connection.
+   * `held()` turns false when the lock's connection fails. Absent on SQLite, where Db.exclusive excludes only the holders
+   * in this process.
    */
-  exclusiveLock?(name: string, waitMs: number): Promise<() => Promise<void>>;
+  exclusiveLock?(name: string, waitMs: number): Promise<{ release: () => Promise<void>; held: () => boolean }>;
   close(): Promise<void>;
 }
 
@@ -206,20 +207,21 @@ export class Handle implements Db {
 
   #exclusive = new Map<string, Promise<void>>();
 
-  async exclusive<T>(name: string, fn: () => Promise<T>, waitMs = 30_000): Promise<T> {
+  async exclusive<T>(name: string, fn: (held: () => boolean) => Promise<T>, waitMs = 30_000): Promise<T> {
     if (this.#current()) throw new Error(`db.exclusive("${name}") inside a transaction`);
-    // One holder per name in this process, then one across processes; a session-level lock would let this process in twice.
+    // One holder per name in this process, then (Postgres) one across processes: a session-level lock alone would let this
+    // process in twice. SQLite has no cross-process step, so a runner sharing the file is not excluded.
     const prev = this.#exclusive.get(name) ?? Promise.resolve();
     let done!: () => void;
     const tail = prev.then(() => new Promise<void>((r) => (done = r)));
     this.#exclusive.set(name, tail);
     try {
       await prev;
-      const release = await this.#engine.exclusiveLock?.(name, waitMs);
+      const lock = await this.#engine.exclusiveLock?.(name, waitMs);
       try {
-        return await fn();
+        return await fn(lock?.held ?? (() => true));
       } finally {
-        await release?.();
+        await lock?.release();
       }
     } finally {
       // `done` is set once `prev` settled, which it has by now unless the wait above threw (it never rejects).
