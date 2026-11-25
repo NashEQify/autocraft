@@ -50,6 +50,8 @@ const rows: Row[] = [
 
   // ---- unsure heads and operator answers
   { name: "unsure head does not merge by rule", facts: { review: { unsure: true } }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: [UNSURE_REASON] } },
+  { name: "an operator Merge answer waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, decision: { ...answered("merge"), execWaiting: true } }, expect: { state: "decision-answered-merge", path: "operator", actions: [] } },
+  { name: "the same Merge answer merges once the sign-in arrived", facts: { ...SIZE_L, decision: { ...answered("merge"), execWaiting: false } }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
   { name: "unsure head, Merge answer given before the review, does not merge", facts: { review: { unsure: true }, decision: answered("merge", false) }, expect: { state: "needs-decision", path: null, actions: [] } },
   { name: "unsure head, Merge answer after the review, merges as operator", facts: { review: { unsure: true }, decision: answered("merge", true) }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
   { name: "unsure head, Hold answer is declined and does not merge", facts: { review: { unsure: true }, decision: answered("hold") }, expect: { state: "declined", actions: [] } },

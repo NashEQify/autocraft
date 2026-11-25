@@ -299,7 +299,10 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     .where((eb) => inList(db, keyOf(eb, "x", "head_oid"), mxKeys)))).map((x) => [x.k, x]) : []);
   // The answer of the merge and hold decisions at each reviewed head, by id (null: not answered yet); the loop looks up no others.
   const decisionIds = rows.flatMap((r) => { const h = mergeEntryHead(r) ?? (r.r_head && r.r_verdict && r.r_at ? r.r_head : null); return h ? [mergeDecisionId(r.repo, r.number, h), holdDecisionId(r.repo, r.number, h)] : []; });
-  const decisionAnswers = new Map((await db.all(db.k.selectFrom("decisions").select(["id", "answer"]).where(inList(db, "id", decisionIds)))).map((d) => [d.id, d.answer]));
+  const decisionRows = await db.all(db.k.selectFrom("decisions").select(["id", "answer", "exec_state"]).where(inList(db, "id", decisionIds)));
+  const decisionAnswers = new Map(decisionRows.map((d) => [d.id, d.answer]));
+  // Answered, but its person has no sign-in or access yet, or it is disputed: the same states the merge step leaves out (src/github/user-lane.ts isWaiting).
+  const execWaiting = new Set(decisionRows.filter((d) => d.exec_state === "waiting-token" || d.exec_state === "waiting-permission" || d.exec_state === "disputed").map((d) => d.id));
   const holdQuestionOf = (ref: string, id: string): PrFacts["decision"]["hold"] => {
     const asked = decisionAnswers.has(id), answer = decisionAnswers.get(id) ?? null;
     return { asked, open: asked && answer === null, answer, otherOpen: otherOpen.has(ref) };
@@ -376,7 +379,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       review: null, post: { postable: false, posted: null },
       checksHere: false, checksOpen: false, ci: "unknown", mergeable: r.i_mergeable ?? "UNKNOWN", unknown: null, runs: null,
       lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
-      decision: { asked: false, openQuestion: false, answer: null, mergeAnswerAfterReview: false, inOpenGroup: grouped.has(ref), hold: { asked: false, open: false, answer: null, otherOpen: otherOpen.has(ref) } },
+      decision: { asked: false, openQuestion: false, answer: null, mergeAnswerAfterReview: false, inOpenGroup: grouped.has(ref), execWaiting: false, hold: { asked: false, open: false, answer: null, otherOpen: otherOpen.has(ref) } },
       premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: activeBatched.has(ref), fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     };
     base.inFlight = r.state === "OPEN" && !integration && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref);
@@ -533,6 +536,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     base.decision = {
       asked: decisionAnswers.has(id), openQuestion: r.state === "OPEN" && openQuestion.has(ref), answer: given,
       mergeAnswerAfterReview: given === "merge" && answeredAfter(id, qAt), inOpenGroup: grouped.has(ref),
+      execWaiting: execWaiting.has(id),
       hold: base.decision.hold,
     };
     if (r.state !== "OPEN") { out.push(base); continue; }

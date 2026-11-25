@@ -4,6 +4,7 @@
 import type { Db } from "../db/index.ts";
 import { t, tk } from "../i18n/index.ts";
 import { PREMERGE_MAX_TRIES, premergeAt } from "../premerge/store.ts";
+import { mergeDecisionId } from "../core/rules.ts";
 import { inferenceMode } from "../remote/mode.ts";
 import { takerTest, waitingOn, type RunnerHold } from "../remote/takers.ts";
 import type { ItemWorkflow } from "./types.ts";
@@ -15,6 +16,10 @@ import type { ItemWorkflow } from "./types.ts";
 export async function legWait(db: Db, wf: Pick<ItemWorkflow, "id" | "repo" | "state">, nowMs: number = Date.now()): Promise<string | null> {
   if (wf.state !== "running" && wf.state !== "waiting") return null;
   const p = await db.get(db.k.selectFrom("main.preapprovals").select(["number", "head"]).where("workflow_id", "=", wf.id).where("state", "=", "ci").orderBy("id", "desc").limit(1));
+  if (p?.head) {
+    const d = await db.get(db.k.selectFrom("main.decisions").select(["exec_state", "answered_by"]).where("id", "=", mergeDecisionId(wf.repo, p.number, p.head)));
+    if (d?.exec_state === "waiting-token" && d.answered_by) return t("Waiting for {login} to sign in to AutoCraft, so the merge runs as them", { login: d.answered_by });
+  }
   if (!p?.head || await inferenceMode(db) !== "user-local") return null;
   const pm = await premergeAt(db, wf.repo, p.number, p.head);
   if (pm && (pm.findings !== null || pm.tries >= PREMERGE_MAX_TRIES)) return null;
