@@ -184,13 +184,27 @@ export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => 
       const scope = await scopeRepos(db);
       const run = await latestRun(db);
       const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
+      wakeAtRefresh(pass.plans, wake);
       return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
     });
   }
   const scope = await scopeRepos(db);
   const run = await latestRun(db);
-  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: await loadPlanSet(db, { run }), wake, notes: {}, scope };
+  const plans = await loadPlanSet(db, { run });
+  wakeAtRefresh(plans, wake);
+  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
 };
+
+/**
+ * The earliest refreshAt of the pass's facts (a timed hold, backoff, permission-read lifetime or cache lifetime ends): the
+ * Plans can change then with no logged write, and steps outside the planner take their items from the stored Plans.
+ */
+function wakeAtRefresh(plans: Pick<PlanSet, "prs" | "items">, wake: number[]): void {
+  let at = Infinity;
+  for (const { facts } of plans.prs) if (facts.refreshAt !== undefined && facts.refreshAt < at) at = facts.refreshAt;
+  for (const { facts } of plans.items) if (facts.refreshAt !== undefined && facts.refreshAt < at) at = facts.refreshAt;
+  if (at !== Infinity) wake.push(at);
+}
 
 /** The lane's candidates, detected once per planner pass (ctx.detected). */
 const detectOf = (db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "detect">): Promise<Candidate[]> => {
