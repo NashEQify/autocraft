@@ -106,6 +106,25 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.equal(c.full, true);
   seq = c.cursor;
 
+  // A PR's text edit as sync writes it (the row, then its references): the issues the old and the new text name, no full pass.
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 60, kind: "pr", state: "OPEN", title: "t", body: "Fixes #61", text_refs: "[[61],[61]]", closing_issues: "[62]", created_at: T }));
+  seq = (await since(seq)).cursor;
+  await db.write(async () => {
+    await db.run(db.k.updateTable("items").set({ body: "See #63" }).where("number", "=", 60));
+    await db.run(db.k.updateTable("items").set({ text_refs: "[[],[63]]" }).where("number", "=", 60));
+  });
+  c = await since(seq);
+  assert.equal(c.full, false);
+  assert.deepEqual(c.refs.filter((r) => ["app#60", "app#61", "app#62", "app#63"].includes(r)), ["app#60", "app#61", "app#62", "app#63"]);
+  seq = c.cursor;
+  // Without stored references the issues the old text named are unknown.
+  await db.run(db.k.updateTable("items").set({ text_refs: null }).where("number", "=", 60));
+  seq = (await since(seq)).cursor;
+  await db.run(db.k.updateTable("items").set({ body: "Fixes #64" }).where("number", "=", 60));
+  c = await since(seq);
+  assert.equal(c.full, true);
+  seq = c.cursor;
+
   // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
   assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);

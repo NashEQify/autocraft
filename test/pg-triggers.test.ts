@@ -158,7 +158,7 @@ test("counters move once per transaction, at commit, and not for a rolled-back s
     const seqs = async () => {
       const s = await readSeqs(db);
       const gen = (await db.get(db.k.selectFrom("plan_full").select("seq")))!.seq;
-      const n = (await db.get(db.k.selectFrom("plan_full_causes").select("n").where("source", "=", "plan_items_full_i")))?.n ?? 0;
+      const n = (await db.get(db.k.selectFrom("plan_full_causes").select("n").where("source", "like", "plan_items%full_i")))?.n ?? 0;
       return { items: s.items!, fasttrack: s.fasttrack!, gen, n };
     };
     const before = await seqs();
