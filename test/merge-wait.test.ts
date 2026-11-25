@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { setStepApproval } from "../src/data/control/index.ts";
+import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { loadActions } from "../src/data/workflow/index.ts";
 import { planned } from "../src/core/select.ts";
 import { retryWaiting, type LaneDeps } from "../src/github/user-lane.ts";
@@ -21,16 +22,35 @@ const quiet = () => {};
 const APPROVER = "mira";
 const actor: Actor = { login: APPROVER, canWrite: async () => true };
 
-test("an approved merge whose approver has no sign-in waits, is neither planned nor tried again, and merges once they signed in", async () => {
+/** PR 1 started with "review and merge"; or issue 7 started with "implement and merge", whose implementation opened PR 1. Returns the started item. */
+async function startWork(w: World, kind: "pr" | "issue"): Promise<number> {
+  const { db } = w;
+  const run = async (text: string, number: number) => {
+    const r = await runCommand(db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+  };
+  if (kind === "pr") {
+    await w.pr(1, { label: "feature" });
+    await run("review and merge", 1);
+    return 1;
+  }
+  await w.issue(7);
+  await run("implement and merge", 7);
+  const im = await startAttempt(db, { repo: "app", number: 7, queuedBy: APPROVER, textHash: "h" });
+  await w.pr(1, { label: "feature", author: "craft-bot" });
+  await recordSteps(db, [{ id: im.id, to: "pr-opened", patch: { branch: "fix-1", prNumber: 1, prUrl: "https://example.invalid/1" } }]);
+  await advanceWorkflows(db);
+  return 7;
+}
+
+for (const kind of ["pr", "issue"] as const) test(`an approved merge of ${kind === "pr" ? "a PR" : "an issue's implementation PR"} whose approver has no sign-in waits, is neither planned nor tried again, and merges once they signed in`, async () => {
   const w = current = await (await world()).repo();
   const db = w.db;
   await setStepApproval(db, [{ repo: "app", step: "merge", on: true }], APPROVER);
   await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
   await db.run(db.k.insertInto("main.access").values({ login: APPROVER, role: "operator" }));
   await db.run(db.k.insertInto("main.repo_permissions").values({ login: APPROVER, repo: "app", permission: "write", checked_at: new Date().toISOString() }));
-  await w.pr(1, { label: "feature" });
-  const started = await runCommand(db, actor, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 1 }] });
-  assert.equal(started.items[0]!.outcome, "run", started.lines.join("\n"));
+  const item = await startWork(w, kind);
   await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 1, head_oid: "sha1", run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r" }));
   await w.verified(1);
   for (let i = 0; i < 2; i++) await advancePreapprovals(db);
@@ -51,7 +71,8 @@ test("an approved merge whose approver has no sign-in waits, is neither planned 
   assert.deepEqual(w.gh.writesOf("merge"), []);
   const row = await action();
   assert.deepEqual([row?.state, row?.by, row?.head], ["waiting-token", APPROVER, "sha1"]);
-  assert.match(await legWait(db, (await liveWorkflow(db, "app", 1))!) ?? "", /mira to sign in/);
+  assert.match(await legWait(db, (await liveWorkflow(db, "app", item))!) ?? "", /mira to sign in/);
+  assert.equal(row?.workflow_id, (await liveWorkflow(db, "app", item))!.id);
   assert.equal(await mergesPlanned(), 0);
   const before = asked;
   await merge();

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { adoptLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadMergeApprovals, recordEvents, startWorkflows } from "../../src/data/workflow/index.ts";
+import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadMergeApprovals, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number, o: Record<string, unknown> = {}) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT, ...o });
@@ -42,6 +42,23 @@ both("loadLegs: oldest first, active only, latest only; loadLegPass reads each l
   assert.equal((ctx(1) as { workflowId: number }).workflowId, ids.get("o/a#1"));
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 1)!.id, workflowId: ids.get("o/a#1")! }]), 1);
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 2)!.id, workflowId: 999 }]), 0, "a linked leg is not adopted again");
+});
+
+both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue's implement workflow; listWorkflowLegs finds an issue's legs", async ({ db }) => {
+  const q = queryDb(db);
+  const k = q.k as any;
+  const ids = await seed(db, 4);
+  const issues = await startWorkflows(db, [90, 91].map((n) => wf("o/a", n, { kind: "issue", entry: "implement" })));
+  const [byLeg, byAttempt] = [issues.get("o/a#90")!, issues.get("o/a#91")!];
+  const impl = (number: number, pr: number, attempt: number, state: string) => ({ repo: "o/a", number, queued_by: "ann", state, attempt, text_hash: "h", pr_number: pr, created_at: AT, updated_at: AT });
+  await q.run(k.insertInto("main.implementations").values([impl(91, 2, 1, "closed"), impl(91, 4, 2, "pr-opened")]));
+  // PR 3 and 4 have no live workflow of their own; PR 3's leg is the first issue's, PR 4 was opened for the second.
+  await saveWorkflows(db, [3, 4].map((n) => ({ id: ids.get(`o/a#${n}`)!, patch: { state: "stopped" as const } })));
+  await q.run(k.updateTable("main.preapprovals").set({ workflow_id: byLeg }).where("number", "=", 3));
+  const refs = [1, 2, 3, 4, 5].map((number) => ({ repo: "o/a", number }));
+  assert.deepEqual([...await loadPrWorkflows(db, refs)].map(([key, w]) => [key, w.id]).sort(),
+    [["o/a#1", ids.get("o/a#1")], ["o/a#2", ids.get("o/a#2")], ["o/a#3", byLeg], ["o/a#4", byAttempt]]);
+  assert.deepEqual((await listWorkflowLegs(db, [byLeg])).map((l) => l.number), [3]);
 });
 
 both("loadMergeApprovals needs an approved (or merge-entry) live workflow, an open PR and a queued leg", async ({ db }) => {

@@ -96,8 +96,10 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const wf = state.workflow;
   const live = isLive(wf);
   if (parsed.kind === "ambiguous") {
-    const picked = live && !parsed.understood ? optionNamed(wf, parsed.rest) : null;
-    if (picked) return pick(wf, picked, {});
+    if (live && !parsed.understood) {
+      const option = optionNamed(wf, parsed.rest);
+      if (option) return pick(wf, option, {});
+    }
     return { kind: "ambiguous", understood: parsed.understood, ambiguity: { why: "unreadable", rest: parsed.rest } };
   }
   if (parsed.kind === "yes") {
