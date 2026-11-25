@@ -77,7 +77,7 @@ both("unchecked pairs need matching hashes, scope and an open item; verdicts rem
   const verdict = (p: ReturnType<typeof pair>, verdict: string, canonical: number | null) => ({ ...p, jev_p: 0.95, haiku: null, verdict, canonical, checked_at: T0 });
   assert.equal(await savePairVerdicts(db, [verdict(pair(3), "duplicate", 5), verdict(pair(1), "distinct", null)]), 2);
   assert.equal(await savePairVerdicts(db, [verdict({ ...pair(3), a_hash: "other" }, "distinct", null)]), 0, "a verdict for other hashes touches nothing");
-  const stored = await q.get(k.selectFrom("duplicate_pairs").select(["verdict", "canonical", "jev_p"]).where("a", "=", 5));
+  const stored = (await q.get(k.selectFrom("duplicate_pairs").select(["verdict", "canonical", "jev_p"]).where("a", "=", 5))) as { verdict: string; canonical: number; jev_p: number };
   assert.deepEqual([stored.verdict, stored.canonical, stored.jev_p], ["duplicate", 5, 0.95]);
   assert.deepEqual(await loadUncheckedPairs(db), []);
 });
