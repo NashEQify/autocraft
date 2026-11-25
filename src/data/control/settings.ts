@@ -214,7 +214,7 @@ const snapshotOf = async (db: Db, ...keys: string[]): Promise<Map<string, string
     const own: NonNullable<typeof had> = { read: read(), writes: s.writes };
     s.tx.set(tx, own);
     // A read that failed is made again by the next caller.
-    own.read.then((m) => { own.map = m; }, () => { if (s.tx.get(tx) === own) s.tx.delete(tx); });
+    void own.read.then((m) => { own.map = m; }, () => { if (s.tx.get(tx) === own) s.tx.delete(tx); });
     return await own.read;
   }
   while (s.dirty || s.reread) {
