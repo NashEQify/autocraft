@@ -1,7 +1,7 @@
 // Converts the resolution cards Opus proposed before the choices format into decision_choices drafts, without a model call.
 // `cardsToDrafts` is the pure mapping (also used for settling cards in a conversation turn); `convertOpenDecisions` applies it to the open decisions.
-import type { CardParams, Step } from "../conversations/cards.ts";
-import { decisionStamp, openDecision } from "../conversations/cards.ts";
+import type { CardParams, Step } from "./choices-parse.ts";
+import { decisionStamp, openDecision } from "./choices-parse.ts";
 import type { DecisionRow } from "../decisions.ts";
 import { applyDrafts, coresFor, MAX_ADDED_CORES, withIds, writeChoices } from "./choices.ts";
 import { coreKey, type ChoicesBlockExtra, type ChoicesRow, type CoreKey, type StoredDraft } from "./choices-types.ts";

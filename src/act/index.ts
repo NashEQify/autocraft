@@ -301,7 +301,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   if (!dryRun) {
     await fillEmbedHashes(db); await applyDuplicateAnswers(db, at()); await sweepStaleAnswers(db, at());
     const { drainQueuedCards } = await import("../conversations/act.ts");
-    const drained = await drainQueuedCards(db, { now: deps?.now, querier: deps?.querier, lane: deps?.lane }, params.limit === undefined ? {} : { writes: params.limit });
+    const drained = await drainQueuedCards(db, { now: deps?.now, querier: deps?.querier }, params.limit === undefined ? {} : { writes: params.limit });
     cardWrites = drained.writes;
     summary.cards = drained.ran;
     if (drained.ran) log(`act: ${drained.ran} queued card press${drained.ran === 1 ? "" : "es"} carried out`);

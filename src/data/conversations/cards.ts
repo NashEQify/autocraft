@@ -57,7 +57,7 @@ export async function loadActRoom(db: Db, now: Date): Promise<ActRoom> {
     control.loadActUsage(db, reset && reset > day ? reset : day),
     running.length ? control.countCardWrites(db, running.map((r) => ({ id: r.id, since: r.acted_at ?? undefined }))) : Promise.resolve(new Map<number, number>()),
   ]));
-  return { limit, used, running: running.map((r): RunningCard => ({ id: r.id, params: r.params, text: r.text, queue_args: r.queue_args, written: written.get(r.id) ?? 0 })) };
+  return { limit, used, running: running.map((r): RunningCard => ({ id: r.id, kind: r.kind, params: r.params, text: r.text, queue_args: r.queue_args, written: written.get(r.id) ?? 0 })) };
 }
 
 /** Compare-and-set on `state IN from`; true when the card moved. Keys of `set` that are undefined are left alone. */

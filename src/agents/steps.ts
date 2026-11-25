@@ -13,8 +13,7 @@ import { parseRefereeReply, type Referee } from "../classify/parse.ts";
 import { lintOpusReply, parseOpusReply, publicTexts as opusTexts, rawReason, type OpusPr, type OpusReview } from "../review/opus-parse.ts";
 import { lintPremerge, parsePremerge, premergeTexts, type PremergeReview } from "../premerge/parse.ts";
 import { lintReply, parseFindings, publicTexts as postmergeTexts, type Finding, type PostmergePr } from "../postmerge/parse.ts";
-import { commentTexts } from "../conversations/cards.ts";
-import { choicesTexts, parseTurn, type TurnReply as ConversationReply } from "../decide/choices-parse.ts";
+import { commentTexts, parseReply, type Parsed as ConversationReply } from "../conversations/cards.ts";
 import type { ConversationInput } from "../conversations/types.ts";
 import { parseCompareReply, parsePlanReply, parseScreenshotReply, type CompareParsed, type Parsed as PlanReply, type ScreenshotParsed } from "../verify/plan.ts";
 import type { ScreenshotConfigBody } from "../verify/screenshot-config.ts";
@@ -219,8 +218,8 @@ export type ConversationCtx = ReferenceCtx & { db: Db; repo: string; n: number }
 export const CONVERSATION: ClaudeStep<ConversationInput, ConversationReply, ConversationCtx> = {
   provider: "claude", id: "conversation.turn",
   toPrompt: (x) => [x], size: () => 1,
-  lint: { fields: ["cards[].text", "cards[].steps[].body", "cards[].steps[].title", "cores[].reason", "cores[].extras[].text", "cores[].extras[].title", "cores[].extras[].body", "add[].extras[].text", "add[].extras[].title", "add[].extras[].body", "ask.text"], make: (_x, c) => async (text, stage) => (await parseTurn(c.db, c.repo, c.n, text) ? referenceProblems([...commentTexts(text), ...choicesTexts(text)], c.dir, c.semantic, { stage }) : null) },
-  parse: async (text, _x, ctx, c) => { const r = await parseTurn(c.db, c.repo, c.n, text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+  lint: { fields: ["cards[].text", "cards[].steps[].body", "cards[].steps[].title"], make: (_x, c) => async (text, stage) => (await parseReply(c.db, c.repo, c.n, text) ? referenceProblems(commentTexts(text), c.dir, c.semantic, { stage }) : null) },
+  parse: async (text, _x, ctx, c) => { const r = await parseReply(c.db, c.repo, c.n, text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
 };
 
 /** The plan reply as parsed, valid or not: an invalid plan is asked for again (the last reading stands after the last attempt). */

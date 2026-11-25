@@ -61,6 +61,9 @@ export type CommentOut = Omit<CommentRow, "body"> & { body?: string | null };
 export type CommentFilter = { kinds?: string[]; counted?: boolean; after?: string; authors?: string[]; excludeBots?: boolean; order: "rowid" | "created"; body?: boolean };
 /** `authors`: the distinct logins, in no set order. `length`: total body length. */
 export type CommentStats = { n: number; newest: string | null; length: number; hasUrls: boolean; authors: string[] };
+/** `n`: how many spoken comments the item has; `last`: the id of the newest. */
+export type CommentHead = { n: number; last: string | null };
+export type SpokenComment = { id: string; author: string | null; body: string };
 export type ReviewFact = { id: string; author: string; association: string | null; state: string; at: string | null };
 
 export type GateRow = Selectable<DB["review_gates"]>;

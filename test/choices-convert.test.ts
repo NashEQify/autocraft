@@ -8,7 +8,7 @@ import { SCRATCH } from "./scratch.ts";
 import { currentChoices } from "../src/decide/choices.ts";
 import { convertOpenDecisions } from "../src/decide/choices-convert.ts";
 import { ask, getDecision } from "../src/decisions.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
+import { decisionStamp } from "../src/decide/choices-parse.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 

@@ -1,6 +1,7 @@
 // Decisions for people. The pipeline asks them with the CLI; only a signed-in
 // person on the dashboard answers them. The one command that sets answers is
 // the operator's bulk Backlog (`decisions backlog`), which only holds items.
+import { loadCards } from "./data/conversations/index.ts";
 import { settledBy, settledByExpr } from "./settlers.ts";
 import { lockLiveExpr } from "./answers/hold.ts";
 import { readFileSync } from "node:fs";
@@ -325,25 +326,20 @@ export async function retryAsSession(db: Db, id: string, login: string): Promise
   throw new Error(`decision ${id} is not waiting or failed`);
 }
 
-/** The repos a card writes to: its item's, and a resolution's transfer and new-issue targets. */
-function cardRepos(c: { repo: string; params: string }): string[] {
-  const p = JSON.parse(c.params) as { kind: string; steps?: { kind: string; to?: string; repo?: string }[] };
-  return [c.repo, ...(p.kind === "resolution" ? (p.steps ?? []).flatMap((x) => (x.kind === "transfer" && x.to ? [x.to] : x.kind === "open_issue" && x.repo ? [x.repo] : [])) : [])];
-}
-
 /** Runs a proposed card as `login` the way the dashboard's button does; test repos only, operator logins only. */
 export async function cardAsSession(db: Db, id: number, login: string, opts: { note?: string; skip?: number[] } = {}): Promise<{ state: string; result: string | null; error: string | null }> {
-  const c = await db.get(db.k.selectFrom("main.conversation_cards").select(["id", "repo", "number", "params", "state"]).where("id", "=", id));
+  if (opts.skip?.length) throw new Error("a card does one thing: it has no steps to skip");
+  const c = (await loadCards(db, [id])).get(id);
   if (!c) throw new Error(`no card ${id}`);
-  const outside = await filterSeq([...new Set(cardRepos(c))], async (r) => !await isTestRepo(db, r));
+  const { cardRepos, readParams } = await import("./conversations/cards.ts");
+  const outside = await filterSeq(cardRepos(c.repo, readParams(c.kind, c.params)), async (r) => !await isTestRepo(db, r));
   if (outside.length) throw new Error(`refused: ${outside.join(", ")} is not marked as a test repo (decisions test-repo REPO on)`);
   if (!(await operators(db)).has(login)) throw new Error(`refused: ${login} is not an operator`);
   const { doCard } = await import("./conversations/act.ts");
-  const { card, ran } = await doCard(db, id, login, opts);
+  const { card, ran } = await doCard(db, id, login, { note: opts.note, via: "cli" });
   if (!ran) throw new Error(`card ${id} is ${card.state}, not proposed`);
   await audit(db, login, "card", `${c.repo}#${c.number}`, { card: id, source: "cli", via: "session" });
-  const after = await db.get(db.k.selectFrom("main.conversation_cards").select(["state", "result", "error"]).where("id", "=", id));
-  return after!;
+  return { state: card.state, result: card.result, error: card.error };
 }
 
 async function cardsCmd(args: string[]): Promise<void> {

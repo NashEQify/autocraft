@@ -6,7 +6,7 @@ import { queryDb } from "../../db/query-db.ts";
 import { parseSearch } from "../../db/search.ts";
 import type { KeySource } from "../keys.ts";
 import { joinKeys, keyChunks, refKey, qualified, type AnyQ } from "./shared.ts";
-import type { CommentFilter, CommentHit, CommentOut, CommentStats, RefKey, ReviewFact, SnippetMarks } from "./types.ts";
+import type { CommentFilter, CommentHead, CommentHit, CommentOut, CommentStats, RefKey, ReviewFact, SnippetMarks, SpokenComment } from "./types.ts";
 
 type Filter = Omit<CommentFilter, "order" | "body">;
 
@@ -92,6 +92,73 @@ export async function loadActivityByLogins(db: Db, repo: string, logins: string[
     .union(q.k.selectFrom("comments").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))), { label: "mirror.loadActivityByLogins" });
   const found = new Set(rows.map((r) => r.login));
   return new Set(logins.filter((l) => found.has(l.toLowerCase())));
+}
+
+/** Logins (lower case) with an item or a comment in the repo written under one of `associations` (GitHub's author association); the match ignores case. */
+export async function loadAuthoredIn(db: Db, repo: string, logins: string[], associations: string[]): Promise<Set<string>> {
+  if (!logins.length || !associations.length) return new Set();
+  const q = queryDb(db);
+  const lower = [...new Set(logins.map((l) => l.toLowerCase()))];
+  const rows = await q.all(q.k.selectFrom("items").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
+    .where((eb) => kx.inList(db, "author_association", associations))
+    .union(q.k.selectFrom("comments").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
+      .where((eb) => kx.inList(db, "author_association", associations))), { label: "mirror.loadAuthoredIn" });
+  return new Set(rows.map((r) => r.login));
+}
+
+/** Comments with text by people and review bots: not empty, no `[bot]` login, none of `not` (logins as stored). */
+const spoken = (db: Db, eb: kx.AnyEb, a: string, not: readonly string[]): Expression<SqlBool> => eb.and([
+  eb(eb.fn.coalesce(eb.fn("trim", [`${a}.body`]), eb.val("")), "<>", ""),
+  eb.not(kx.like(db, eb.fn.coalesce(`${a}.author`, eb.val("")), eb.val("%[bot]"))),
+  ...(not.length ? [eb.not(kx.inList(db, eb.fn.coalesce(`${a}.author`, eb.val("")), [...not]))] : []),
+]);
+
+/** Count and id of the newest (by `created_at`, then id) spoken comment per item; `not`: logins whose comments do not count. Items with none have no entry. */
+export async function loadCommentHeads(db: Db, keys: KeySource, o: { not?: readonly string[] } = {}): Promise<Map<RefKey, CommentHead>> {
+  const q = queryDb(db);
+  const out = new Map<RefKey, CommentHead>();
+  const parts = await Promise.all(keyChunks(keys).map((k) => q.all((q.k as any).selectFrom(
+    (joinKeys(db, q.k.selectFrom("comments as c"), k, "c") as AnyQ)
+      .select((eb: kx.AnyEb) => ["c.repo", "c.number", "c.id",
+        eb.fn.countAll().over((w: any) => w.partitionBy(["c.repo", "c.number"])).as("n"),
+        eb.fn.agg("row_number").over((w: any) => w.partitionBy(["c.repo", "c.number"])
+          .orderBy(eb.case().when("c.created_at", "is", null).then(1).else(0).end()).orderBy("c.created_at", "desc").orderBy("c.id", "desc")).as("rn")] as never)
+      .where((eb: kx.AnyEb) => spoken(db, eb, "c", o.not ?? [])).as("w"))
+    .select(["w.repo", "w.number", "w.id", "w.n"]).where("w.rn", "=", 1), { label: "mirror.loadCommentHeads" })));
+  for (const rows of parts) for (const r of rows as unknown as { repo: string; number: number; id: string; n: number }[]) out.set(refKey(r.repo, r.number), { n: Number(r.n), last: r.id });
+  return out;
+}
+
+/** The oldest (`first`, oldest first) or newest (`last`, newest first) `limit` spoken comments of one item, with their text. */
+export async function loadSpokenComments(db: Db, ref: { repo: string; number: number }, o: { order: "first" | "last"; limit: number; not?: readonly string[] }): Promise<SpokenComment[]> {
+  const q = queryDb(db);
+  const rows = await q.all((q.k.selectFrom("comments as c") as AnyQ).select(["c.id", "c.author", "c.body"] as never).where("c.repo", "=", ref.repo).where("c.number", "=", ref.number)
+    .where((eb: kx.AnyEb) => spoken(db, eb, "c", o.not ?? []))
+    .orderBy("c.created_at", (x: any) => (o.order === "first" ? x.asc().nullsFirst() : x.desc().nullsLast())).orderBy("c.id", o.order === "first" ? "asc" : "desc").limit(o.limit), { label: "mirror.loadSpokenComments" });
+  return rows as unknown as SpokenComment[];
+}
+
+/** The key of one entry of `loadNewerComments`. */
+export const newerKey = (r: { repo: string; number: number; after: string | null }): string => `${r.repo}#${r.number}@${r.after ?? ""}`;
+
+/** Per entry, the spoken comments after the comment `after` (by `created_at`, then id; null: all), oldest first; null when that comment is gone. One statement. */
+export async function loadNewerComments(db: Db, entries: { repo: string; number: number; after: string | null }[], o: { not?: readonly string[] } = {}): Promise<Map<string, SpokenComment[] | null>> {
+  const out = new Map<string, SpokenComment[] | null>();
+  const unique = [...new Map(entries.map((e) => [newerKey(e), e])).values()];
+  if (!unique.length) return out;
+  const q = queryDb(db);
+  const v = kx.valuesTable(db, unique.map((e) => ({ k: newerKey(e), repo: e.repo, number: e.number, after: e.after })), { k: "text", repo: "text", number: "bigint", after: "text" }, "v");
+  const rows = await q.all((q.k as any).selectFrom(v)
+    .leftJoin("comments as m", (j: any) => j.onRef("m.repo", "=", "v.repo").onRef("m.number", "=", "v.number").onRef("m.id", "=", "v.after"))
+    .leftJoin("comments as c", (j: any) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number").on((eb: kx.AnyEb) => eb.and([spoken(db, eb, "c", o.not ?? []), eb.or([
+      eb("v.after", "is", null), eb("c.created_at", ">", eb.ref("m.created_at")), eb.and([eb("c.created_at", "=", eb.ref("m.created_at")), eb("c.id", ">", eb.ref("m.id"))])])])))
+    .select(["v.k", "v.after", "m.id as mark", "c.id", "c.author", "c.body"]).orderBy("c.created_at").orderBy("c.id"), { label: "mirror.loadNewerComments" });
+  for (const e of unique) out.set(newerKey(e), []);
+  for (const r of rows as unknown as { k: string; after: string | null; mark: string | null; id: string | null; author: string | null; body: string }[]) {
+    if (r.after !== null && r.mark === null) out.set(r.k, null);
+    else if (r.id !== null) out.get(r.k)?.push({ id: r.id, author: r.author, body: r.body });
+  }
+  return out;
 }
 
 const MARKS: SnippetMarks = { open: "\u0002", close: "\u0003", words: 24 };

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
+import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { writeChoices } from "../src/decide/choices.ts";
 import { ask, getDecision } from "../src/decisions.ts";
 import { DecisionAlerts, coreId, installAlertCommands, type DmRest } from "../src/discord/alerts.ts";
