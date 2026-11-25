@@ -2249,6 +2249,7 @@ export interface UserTokens {
   version: Generated<number>;
   updated_at: string;
   status: Generated<string>;
+  refresh_error: string | null;
 }
 
 export interface Verifications {
@@ -2944,7 +2945,7 @@ export const COLUMNS = {
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
   user_settings: ["login", "key", "value", "updated_at"],
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
-  user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status"],
+  user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
