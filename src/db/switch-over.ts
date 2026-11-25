@@ -407,8 +407,8 @@ async function endAskedLegs(db: Db, r: SwitchReport, now: string): Promise<void>
       .where("e.kind", "in", ["started", "answered"]).whereRef("e.at", ">", "p.updated_at")))));
   for (const s of stopped) {
     const plan = (parse(s.plan) ?? []) as PlanPart[];
-    const review = parse(s.workflow) as ReviewWorkflow | null;
-    const view: ReviewView | null = s.verdict === null ? null : { verdict: s.verdict, sure: Number(s.sure) === 1, rec: review?.recommendation ?? null };
+    const given = (parse(s.workflow) as ReviewWorkflow | null)?.recommendation ?? null;
+    const view: ReviewView | null = s.verdict === null ? null : { verdict: s.verdict, sure: Number(s.sure) === 1, rec: Array.isArray(given?.fix) ? given : null };
     const rec = view?.rec ? afterSteps(view, plan) : atBlocker({ blocker: "other", params: s.reason ? { reason: s.reason } : {} }, view, plan);
     await run(db, q(db).updateTable("main.item_workflows").set({ state: "recommending", rec: JSON.stringify(rec), rec_at: now, rec_head: s.head, updated_at: now }).where("id", "=", s.id));
     r.recommending.push(key(s as { repo: string; number: number }));
