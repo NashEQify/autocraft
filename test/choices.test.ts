@@ -7,7 +7,7 @@ import { describe, test } from "node:test";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
-import { decisionStamp, validateCard } from "../src/conversations/cards.ts";
+import { decisionStamp, validateCard } from "../src/decide/choices-parse.ts";
 import { doCard } from "../src/conversations/act.ts";
 import { applyDrafts, autocraftLine, compose, coresFor, currentChoices, mergeChoices, writeChoices } from "../src/decide/choices.ts";
 import { coreKey, parseCoreKey } from "../src/decide/choices-types.ts";

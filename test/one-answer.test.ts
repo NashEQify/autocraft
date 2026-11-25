@@ -8,7 +8,7 @@ import { SCRATCH } from "./scratch.ts";
 import { clearDispute, openDispute } from "../src/answers/hold.ts";
 import { revertAnswer } from "../src/preapproval/index.ts";
 import { sweepStaleAnswers } from "../src/answers/sweep.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
+import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { doCard } from "../src/conversations/act.ts";
 import { actionable, ask, getDecision } from "../src/decisions.ts";
 import { applyAnswer, canUndo, keepAnswer, retry, undo } from "../src/dash/api/decisions.ts";

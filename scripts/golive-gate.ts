@@ -11,7 +11,7 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { clearDispute, openDispute } from "../src/answers/hold.ts";
 import { writeEffect } from "../src/act/index.ts";
 import { doCard } from "../src/conversations/act.ts";
-import { decisionStamp } from "../src/conversations/cards.ts";
+import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { ConversationError } from "../src/conversations/store.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";

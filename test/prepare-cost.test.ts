@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { prepareIds } from "../src/decide/prepare.ts";
 import { preparedEarlier, preparing } from "../src/decide/prepared.ts";
 import { ask, getDecision } from "../src/decisions.ts";
-import { dependsOnCode } from "../src/conversations/cards.ts";
+import { dependsOnCode } from "../src/decide/choices-parse.ts";
 import { world } from "./world-db.ts";
 import * as kx from "../src/db/kx.ts";
 
