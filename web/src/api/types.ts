@@ -145,6 +145,8 @@ export interface Item extends ItemRef {
   fixups: ItemFixup[];
   /** PRs the pipeline merged: the post-merge review; null or absent when there is none. */
   postmerge?: ItemPostmerge | null;
+  /** AutoCraft merged it as a person approved it, so there is no post-merge review to come. */
+  mergedAsApproved?: boolean;
   /** PRs: the pre-merge review of every reviewed head, newest first; absent in mocks without one. */
   premerge?: ItemPremerge[];
   /** Opus checks of the patches we wrote for this item (Fix-up, Fix), oldest first. */
@@ -2332,7 +2334,8 @@ export interface ItemBarStep {
   /** Registry stage id. */
   stage: string;
   title: string;
-  state: "done" | "current" | "failed" | "next";
+  /** `not-needed`: the post-merge review of a PR that merged as a person approved it. */
+  state: "done" | "current" | "failed" | "next" | "not-needed";
   /** The current stage has a job running (animated); otherwise it is waiting. */
   running: boolean;
   /** When a done or failed stage ended. */

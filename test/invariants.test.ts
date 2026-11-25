@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decideItem } from "../src/core/decide-item.ts";
-import { decidePr } from "../src/core/decide.ts";
+import { decidePr, premergeFix } from "../src/core/decide.ts";
 import { gates, mergeMay, type Want } from "../src/core/gates.ts";
 import { isWork } from "../src/core/assignment.ts";
 import type { Action, ItemFacts, Plan, PrFacts } from "../src/core/plan.ts";
@@ -64,6 +64,7 @@ function safety({ w, f, p }: Case): Violation[] {
     if (a.kind !== "postmerge" && a.kind !== "unassign") need("head", a.head === p.head || (a.kind === "implement" && f.ghState !== "OPEN"), `${label(a)} at a head other than the plan's`);
     if (a.kind === "fixup" && a.params?.bucket === "fix") need("pushable", f.pushable, `${label(a)} on a branch that cannot be pushed to`);
     if (!f.pipelineOn) need("pipeline-off", !runs(a), `${label(a)} passes the gates with the pipeline off`);
+    if (pushes(f, a)) need("changes-requested-push", !f.changesRequested || a.params?.source === "operator", `${label(a)} while a maintainer requests changes`);
     if (pushes(f, a) && runs(a)) {
       const why = pushUncovered(w, a);
       need("push-approved", why === null, `${label(a)}: ${why}`);
@@ -96,14 +97,14 @@ function safety({ w, f, p }: Case): Violation[] {
       need("ci", f.ci === "success", "rule merge with CI not green");
       need("verified", ["passed", "ci-enough"].includes(f.verification?.state ?? ""), "rule merge with verification not ok");
     } else need("path", p.path === "operator", `merge on the path ${p.path}`);
-    need("held", !f.mergeHeld, "merge while held");
+    need("base", !f.baseOffDefault, "merge into another branch than the default");
     need("changes-requested", f.changesRequested === null, "merge while changes are requested");
     need("mergeable", f.mergeable === "MERGEABLE" && f.ghState === "OPEN" && !f.draft, "merge of a PR not open, a draft or not mergeable");
     need("backlog", !f.heldBacklog, "merge of a PR in the backlog");
     // A hold or close review at the head is merged past only by a person who answered after it.
     if (w.review && !mergeEntry && w.review.head === f.head && (w.review.verdict === "hold" || w.review.verdict === "close")) need("answered-past", w.legs.some((l) => l.head === f.head && l.updatedAt > "2026-11-04T10:00:00.000Z"), "merge past a hold or close review nobody answered after");
     need("batch", f.batch === null, "single merge of a batch member");
-    need("ci", f.ci === "success" || (p.path === "operator" && f.ci === "none" && f.repoFacts.noCi), "merge with CI not green");
+    need("ci", f.ci === "success", "merge with CI not green");
   }
   // A person's approval stands whatever the repo's step approvals are: the plan and its gates are the same with all of them on and off.
   if (w.workflow) {
@@ -111,6 +112,10 @@ function safety({ w, f, p }: Case): Violation[] {
     const view = (v: PrRows): string => { const g = factsOf(v), q = decidePr(g); return JSON.stringify({ ...q, actions: q.actions.map((a) => [label(a), gates(g, wantOf(a), "pipeline") === null]) }); };
     const on = view(all(true)), off = view(all(false));
     need("person-approval", on === off, `with the repo's approvals ${on}\n  without them ${off}`);
+  }
+  // The leg of an approved PR waits while the defects' fix-up can be made: the plan makes it, or says what comes first.
+  if (f.operator?.premerge && premergeFix(f) === "fix" && f.ci === "success" && f.mergeable === "MERGEABLE" && !f.pushedOff) {
+    need("premerge-fix", p.wait !== null || has(p, "fixup").length || f.operator.fix || f.draft || !f.review || f.review.stale, "a pre-merge fix-up that can be made is not planned");
   }
   // A refused merge of a started PR is never all there is: something says what it waits for.
   if (w.workflow) for (const a of merges) if (runs(a) === false && f.pipelineOn && !f.tripped?.merge) {
@@ -147,7 +152,7 @@ const OWN_WAITS: Record<string, (c: Case) => boolean> = {
   "the pre-merge review": ({ w, f }) => (!!f.premerge && !f.premerge.hasFindings) || underWay(w),
   verification: ({ f }) => ["planned", "running"].includes(f.verification?.state ?? ""),
   "the approved merge to be handed over to its approver": ({ w }) => underWay(w) || w.legs.length > 0,
-  "its pre-approved merge": ({ w }) => w.legs.length > 0 || w.request !== null,
+  "its pre-approved merge": ({ w }) => underWay(w) || w.legs.length > 0 || w.request !== null,
   "the review's fixes to be applied": ({ f }) => f.lint.length > 0 || f.implementation?.state === "revising",
   "the formatter or lint run of the CI fix": ({ f }) => (f.cifix?.formattingTask != null && !f.cifix.formatterEnded) || f.lint.some((l) => l.step === "cifix" && !l.ended),
   "the lint run of the conflict resolution": ({ f }) => f.lint.some((l) => l.step === "conflict" && !l.ended),

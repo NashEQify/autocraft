@@ -232,8 +232,6 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["conflict_merges", "own_diff", "TEXT"],
   // With own_diff = changed: the PR's changed and dropped hunks, as diff text, for a delta review.
   ["conflict_merges", "own_delta", "TEXT"],
-  // How many of the pull request's lines the push changed; NULL when unknown.
-  ["push_outcomes", "lines", "INTEGER"],
   ["main_fixes", "pr_number", "INTEGER"],
   ["main_fixes", "pr_url", "TEXT"],
   // A model patch waiting for its lint task (state linting): the patch, the files (JSON), the task, the round and `pending` | `requeued`.
@@ -343,6 +341,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "workflow", "TEXT"],
   // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
   ["item_workflows", "step", "TEXT"],
+  // The PR an implement workflow works on, written by linkWorkflows (src/data/workflow/link.ts).
+  ["item_workflows", "pr_number", "INTEGER"],
   // How often a workflow row was written, and the PR head a person accepted (src/core/evidence.ts acceptedHeads).
   ["item_workflows", "version", "INTEGER NOT NULL DEFAULT 0"],
   ["item_workflows", "accepted_head", "TEXT"],
@@ -447,6 +447,8 @@ const STATE_INDEXES = [
   "CREATE INDEX IF NOT EXISTS main.agent_runs_first ON agent_runs(first_repo, started_at)",
   // The implementation a PR belongs to.
   "CREATE INDEX IF NOT EXISTS main.implementations_pr ON implementations(repo, pr_number) WHERE pr_number IS NOT NULL",
+  // The implement workflows linked to a PR.
+  "CREATE INDEX IF NOT EXISTS main.item_workflows_pr ON item_workflows(repo, pr_number) WHERE pr_number IS NOT NULL",
   // One active pre-approved merge leg per PR: a second one is refused by the insert. Built after oneActiveLeg (src/db/state-copy.ts).
   `CREATE UNIQUE INDEX IF NOT EXISTS main.${ACTIVE_LEG_INDEX} ON preapprovals(repo, number) WHERE state IN (${ACTIVE_LEG_STATES.map((s) => `'${s}'`).join(", ")})`,
 ];

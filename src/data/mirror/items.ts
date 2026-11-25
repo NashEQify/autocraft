@@ -89,21 +89,6 @@ export async function loadPrMirror(db: Db, keys: KeySource): Promise<Map<RefKey,
   return out;
 }
 
-/** Open PRs whose head is another open PR's base, keyed "repo headRef headRepoLower"; lowest number first. */
-export async function loadStackedHeads(db: Db, repos: string[]): Promise<Map<string, number[]>> {
-  const out = new Map<string, number[]>();
-  if (!repos.length) return out;
-  const q = queryDb(db);
-  // The base list is one uncorrelated subquery, which SQLite builds once; a correlated EXISTS rescans the repo's open PRs for every row.
-  const rows = await q.all(q.k.selectFrom("items as i")
-    .select((eb) => [eb(eb(eb(eb(eb.ref("i.repo"), "||", eb.val(" ")), "||", eb.ref("i.head_ref")), "||", eb.val(" ")), "||", eb.fn<string>("lower", [eb.ref("i.head_repo")])).as("k"), "i.number"])
-    .where("i.kind", "=", "pr").where("i.state", "=", "OPEN").where("i.head_ref", "is not", null).where("i.head_repo", "is not", null).where(kx.inList(db, "i.repo", repos))
-    .where((eb) => eb(eb.refTuple("i.repo", "i.head_ref"), "in", eb.selectFrom("items as b").select(["b.repo", "b.base_ref"]).where("b.kind", "=", "pr").where("b.state", "=", "OPEN").where("b.base_ref", "is not", null).$asTuple("repo", "base_ref")))
-    .orderBy("i.number"), { label: "mirror.loadStackedHeads" });
-  for (const r of rows) (out.get(r.k) ?? out.set(r.k, []).get(r.k)!).push(r.number);
-  return out;
-}
-
 const NO_REFS = JSON.stringify([[], []]);
 
 /** Open PRs that can hold an issue, with author, closing issues and text refs; title and body only where `text_refs` is null. Ordered by repo, then number descending. */

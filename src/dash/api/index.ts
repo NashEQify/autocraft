@@ -56,7 +56,7 @@ import { activity } from "./activity.ts";
 import { downloads } from "./downloads.ts";
 import { itemPage } from "./item-page.ts";
 import { trace as itemTrace, traceDetail as itemTraceDetail } from "./trace.ts";
-import { postmergeOf } from "./postmerge.ts";
+import { mergedAsApproved, postmergeOf } from "./postmerge.ts";
 import * as nightly from "./nightly.ts";
 import { canSeeInternals } from "./staff.ts";
 import * as operator from "./operator.ts";
@@ -143,7 +143,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   const pr = it.kind === "pr";
   const key = [{ repo, number: n }];
   // The parts read independently, so they run together.
-  const [c, stageLog, commentRows, quiet, files, checkRows, tracked, related, classifications, area, discordOf, settled, priority, checks, record, timeline, verification, postmerge, releases, slots, preapproval, hidden] = await db.together(() => Promise.all([
+  const [c, stageLog, commentRows, quiet, files, checkRows, tracked, related, classifications, area, discordOf, settled, priority, checks, record, timeline, verification, postmerge, asApproved, releases, slots, preapproval, hidden] = await db.together(() => Promise.all([
     it.author ? contributors(db, { login: it.author }).then((cs) => cs.find((x) => x.login === it.author)) : undefined,
     loadStageLog(db, [ref]),
     loadComments(db, key, { order: "created", body: true }),
@@ -157,6 +157,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     pr ? loadPatchTimeline(db, key, { internals }) : new Map(),
     pr ? loadLatestVerification(db, key) : new Map(),
     pr ? postmergeOf(db, repo, n, internals) : null,
+    pr ? mergedAsApproved(db, repo, n) : false,
     releasesOf(db, repo, n),
     visibleRepos(db, req).then((v) => queueSlots(db, v)),
     pr ? preapprovalOf(db, repo, n) : null,
@@ -197,7 +198,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
       ({ kind, subject, patchHash, round, verdict, reasons: internals ? reasons : "", problems: internals ? problems : [], model, createdAt })),
     reviews,
     premerge,
-    postmerge,
+    postmerge, ...(asApproved && { mergedAsApproved: true }),
     releases,
     queue: slots.get(`${repo}#${n}`) ?? null,
     // The operator's instructions are shown to those who see the internals only.

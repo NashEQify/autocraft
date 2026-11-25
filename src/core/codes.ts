@@ -12,7 +12,7 @@ export type RefusalCode =
 export type WaitCode = RefusalCode
   | "answer" | "not-started" | "ci" | "mergeable-unknown" | "mergeable-stuck" | "premerge" | "verification" | "verification-failed"
   | "ci-approval" | "ci-approval-failed" | "main-red" | "batch" | "batch-failed" | "changes-requested" | "merge-refused" | "refusal-retry"
-  | "sign-in" | "hand-over" | "leg" | "base-off-default" | "review-hold" | "review-failed" | "review-cap"
+  | "sign-in" | "hand-over" | "leg" | "base-off-default" | "no-ci" | "review-hold" | "review-failed" | "review-cap"
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
   | "ci-contributor" | "ci-running" | "ci-fix-failed" | "ci-own-breakage" | "ci-nothing-to-fix" | "ask-unsent" | "ask-failed" | "lint"
   | "revision" | "revision-failed" | "implement-question" | "implement-stuck" | "implement-off" | "implement-ended" | "implement-room"
@@ -86,6 +86,8 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "a person: the CI fix comment failed": "ask-failed",
   "a person: the comment to the contributor failed": "ask-failed",
   "a person: the ask comment failed": "ask-failed",
+  "a person: its base is not the default branch, and AutoCraft merges only into that": "base-off-default",
+  "a person: the repo has no CI, and AutoCraft merges only on green CI": "no-ci",
   "a person: CI is red at the head and has nothing for the implementation session to fix": "revision-failed",
   "a person: the implementation session ended without the review's fixes": "revision-failed",
   "the pull request to be marked ready for review": "draft",

@@ -246,10 +246,10 @@ export const STAGES: StageDef[] = [
   },
   {
     id: "postmerge", title: "Post-merge review", order: 13, runStage: 8, docSection: "Post-merge review", mode: "steps",
-    description: "Opus reviews each PR the pipeline merged a second time, reading what landed with the pipeline's own commits and reviews of the PR, and lists defects and minor findings. Each defect that no open item covers becomes one follow-up issue in repos approved for commenting, except on a security fix whose advisory is not published yet (its findings are only shown); minor findings are only shown.",
+    description: "Opus reviews what landed with a merge nobody approved, or whose code the pipeline changed after the approval, reading it with the pipeline's own commits and reviews of the PR, and lists defects and minor findings; a PR that merged as a person approved it gets no such review. Each defect that no open item covers becomes one follow-up issue in repos approved for commenting, except on a security fix whose advisory is not published yet (its findings are only shown); minor findings are only shown.",
     steps: [{ name: "postmerge", maxMin: 30, label: "Post-merge review", limit: null }, { name: "postmerge-file", maxMin: 10, label: "File follow-up issues", limit: 20 }],
     lanes: [{ name: "postmerge", steps: ["postmerge"], order: 22 }, { name: "postmerge-file", steps: ["postmerge-file"], order: 23 }],
-    models: [{ model: "opus", use: "Reviews each merged PR", remark: "Reads the merge commit and lists findings; the reply is linted like the Review stage's" }],
+    models: [{ model: "opus", use: "Reviews merged PRs", remark: "Reads the merge commit and lists findings; the reply is linted like the Review stage's" }],
     promptIds: ["postmerge.opus"], promptStage: "Post-merge review",
     waits: [
       { name: "Failed post-merge review", why: "The model gave no valid reply twice", howLong: "1 hour, three tries in all", showsAs: "Post-merge review on the item page: no review yet", kind: "backoff" },

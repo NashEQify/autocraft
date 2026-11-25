@@ -1,23 +1,20 @@
-// reads: workflow.item_workflows, implement.implementations, access.mcp_tokens, access.access
+// reads: workflow.item_workflows (and through workflow.worksOnPr implement.implementations and mirror.items), access.mcp_tokens, access.access
 // The conditions that must hold at the instant of the lease, under the login's lock, so they cannot be loaded beforehand.
 import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { ciEq, indexedBy, literal, ref, schemaEb, type Eb, type Ex } from "../../db/kx.ts";
 import { setRunProgress } from "../inference/index.ts";
-import { LIVE_STATES } from "../workflow/fragments.ts";
+import { LIVE_STATES, worksOnPr } from "../workflow/fragments.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
 import { MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
 import type { LiveLease, Tier } from "./types.ts";
 import { expireLeases } from "./calls-expiry.ts";
 import { unlease } from "./calls-unlease.ts";
 
-/** The attempts of an implementation that are not current. */
-const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
-
 /**
  * The started-work condition inside the lease update: every item of the call (`remote_call_items`) has a live workflow started or
- * approved by `login`, or is the PR of a current attempt of one.
+ * approved by `login`, or is the PR that one works on.
  */
 export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
@@ -25,8 +22,7 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
   const owns = (e: any, item: string) => e.exists(schemaEb(e).selectFrom("main.item_workflows as ow").select(one)
     .where("ow.state", "in", LIVE_STATES).where("ow.repo", "=", ref<string>(`${item}.repo`))
     .where((x: any) => x.or([ciEq(db, "ow.started_by", x.val(login)), ciEq(db, "ow.approved_by", x.val(login))]))
-    .where((x: any) => x.or([x("ow.number", "=", ref<number>(`${item}.number`)), x.and([x("ow.entry", "=", "implement"), x.exists(schemaEb(x).selectFrom("main.implementations as oi").select(one)
-      .where("oi.repo", "=", ref<string>("ow.repo")).where("oi.number", "=", ref<number>("ow.number")).where("oi.pr_number", "=", ref<number>(`${item}.number`)).where("oi.state", "not in", ENDED_ATTEMPTS))])])));
+    .where((x: any) => x.or([x("ow.number", "=", ref<number>(`${item}.number`)), worksOnPr(x, "ow", `${item}.number`)])));
   return w.not(w.exists(schemaEb(w).selectFrom("main.remote_call_items as ci").select(one).where("ci.call_id", "=", ref<number>(callIdRef)).where((e: any) => e.not(owns(e, "ci")))));
 }
 

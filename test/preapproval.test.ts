@@ -14,6 +14,7 @@ import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { legBlocker } from "../src/workflow/blockers.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { expectFlat } from "./helpers/query-count.ts";
+import { premergeFix } from "../src/core/decide.ts";
 import { CHECK, OPERATOR, T0, world, type World } from "./world-db.ts";
 import { addOwnCommits } from "../src/data/control/index.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
@@ -182,6 +183,28 @@ describe("pre-approved merge", () => {
     assert.deepEqual(await codes(w, 11), ["premerge-defect"]);
   });
 
+  test("the defects of an approved PR outside the rule go to the one pre-merge fix-up", async () => {
+    const w = await (await (await fresh()).pr(19, { label: "performance" })).review(19, { verdict: "take-fix" });
+    await w.workflow(19);
+    await inCi(w, 19);
+    await (await w.premerge(19, "defect")).verified(19);
+    assert.ok((await kindsOf(w, 19)).includes("fixup:premerge"), (await kindsOf(w, 19)).join());
+    // While the fix-up's push is under way it is made once, and the PR waits for it.
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 19, from_head: "sha19b", to_head: "sha19c", state: "pushing", attempt: 1, created_at: T0, source: "premerge" }));
+    const p = (await w.plan()).prs.find((x) => x.facts.number === 19)!;
+    assert.deepEqual([p.plan.state, p.plan.waitKind, premergeFix(p.facts)], ["needs-fix-up", "system", "running"]);
+  });
+
+  test("an approved PR in a repo without CI stops", async () => {
+    const w = await (await take(await fresh(), 56)).review(56, { verdict: "take-fix" });
+    await inCi(w, 56);
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "none" }));
+    await settle(w);
+    const p = (await preapprovalOf(w.db, "app", 56))!;
+    assert.equal(p.state, "failed");
+    assert.match(p.reason!, /no CI/);
+  });
+
   test("cancelling after the hand-over takes the PR out of the merge queue, also out of a batch", async () => {
     const w = await (await take(await (await take(await fresh(), 6)).review(6, { verdict: "take-fix" }), 18)).review(18, { verdict: "take-fix" });
     for (const n of [6, 18]) {
@@ -253,7 +276,7 @@ describe("pre-approved merge", () => {
     assert.deepEqual([p.state, p.head], ["review", "sha50c"]);
   });
 
-  test("a queued PR leaves the queue for a failed verification, and not for a transient refusal, a hold, a batch or a running merge", async () => {
+  test("a queued PR leaves the queue for a failed verification, and not for a transient refusal, a batch or a running merge", async () => {
     const w = await (await take(await fresh(), 51)).review(51, { verdict: "take-fix" });
     await inCi(w, 51);
     await (await w.premerge(51, "clean")).verified(51);
@@ -264,9 +287,6 @@ describe("pre-approved merge", () => {
     assert.ok((await kindsOf(w, 51)).some((k) => k.startsWith("merge")), "a transient refusal is tried again");
 
     await w.db.run(w.db.k.updateTable("verifications").set({ state: "failed", finished_at: new Date(Date.now() + 1000).toISOString() }).where("number", "=", 51));
-    await w.db.run(w.db.k.insertInto("merge_holds").values({ repo: "app", number: 51, held_by: OPERATOR, held_at: T0 }));
-    assert.equal(await state(), "queued", "held");
-    await w.db.run(w.db.k.deleteFrom("merge_holds"));
     await w.db.run(w.db.k.insertInto("merge_batches").values({ id: 5, repo: "app", branch: "integration-app-1", state: "open", base_sha: "b", commit_sha: "t", created_at: T0, updated_at: T0 }));
     await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 5, number: 51, head_oid: "sha51b", position: 1 }));
     assert.equal(await state(), "queued", "in a batch");

@@ -1,7 +1,8 @@
 // reads: (none; composes loaders)
 // The item page's data and its stamp. Wave 1: the trace's sources (with the item's files, checks and read time), the tracked repo, the
 // merge legs, the workflow history, the jobs of the item, the screenshot runs, the conversation thread, the held follow-ups and the
-// implementation attempt, the queue positions and the build. Wave 2: what the first wave's keys name (the held issues' audit rows, the implementation's calls, workspaces and PR, the screenshot images' names).
+// implementation attempt, the queue positions and the build. Wave 2: what the first wave's keys name (the held issues' audit rows, the implementation's calls, workspaces and PR, the screenshot images' names) and, of a PR the pipeline merged, whether it merged as approved.
+import type { LandedWhy } from "../../core/plan.ts";
 import type { Db } from "../../db/index.ts";
 import { loadHeldIssueAudits, loadTrackedRepos, loadWriteLog } from "../control/index.ts";
 import type { TrackedRepo, WriteLogRow } from "../control/types.ts";
@@ -19,6 +20,7 @@ import type { ItemShown } from "../mirror/types.ts";
 import { loadLegs, loadWorkflowHistory } from "../workflow/index.ts";
 import type { ItemWorkflow, Preapproval } from "../workflow/types.ts";
 import { completeImplementation, type ImplementationFacts } from "./item-implementation.ts";
+import { loadLandedWhy } from "./landed.ts";
 import { loadItemTrace, loadItemTraceStamp, type ItemTraceRows, type TraceScope, type WriteActions } from "./trace.ts";
 
 /** Failed jobs older than this do not show on the item. */
@@ -30,6 +32,8 @@ export type ItemPageFacts = {
   prBuild: PrBuildView | null; screenshots: ScreenshotRun[]; screenshotArtifacts: Map<number, ArtifactRow[]>;
   thread: Thread | null; held: HeldRow[]; heldAudits: Map<number, { issue: { number: number; url: string } | null }>;
   implementation: ImplementationFacts | null; implementationPr: ItemShown | null;
+  /** The pipeline merged it: why what landed is reviewed (null: it merged as a person approved it). Null when it did not. */
+  landed: { why: LandedWhy | null } | null;
 };
 
 /** `staff` reads the conversation thread, as the page's story shows it to them only. */
@@ -47,13 +51,16 @@ export async function loadItemPage(db: Db, scope: TraceScope, ref: { repo: strin
   const newestShot = shots[shots.length - 1];
   const heldRows = held.get(key) ?? [];
   const shotTasks = [...new Set([newestShot?.baseTaskId, newestShot?.headTaskId].filter((x): x is number => typeof x === "number"))];
-  const [heldAudits, artifacts, implementation, implementationPr] = await db.together(() => Promise.all([
+  const [heldAudits, artifacts, implementation, implementationPr, landed] = await db.together(() => Promise.all([
     loadHeldIssueAudits(db, heldRows.filter((h) => h.state === "filing").map((h) => ({ id: h.id, since: h.updated_at }))),
     loadArtifacts(db, shotTasks, { contentType: "image/png" }),
     view ? completeImplementation(db, ref, view, trace.detail.comments) : Promise.resolve(null),
     view?.impl.prNumber != null ? loadShown(db, [{ repo: ref.repo, number: view.impl.prNumber }]) : Promise.resolve(new Map<string, ItemShown>()),
+    trace.merges.some((m) => m.outcome === "merged") ? loadLandedWhy(db, refs) : Promise.resolve(new Map<string, LandedWhy | null>()),
   ]));
+  const why = landed.get(key);
   return {
+    landed: why === undefined ? null : { why },
     trace, writeLog: writeLog.get(key) ?? [], tracked: tracked.get(ref.repo) ?? null, legs: legs.get(key) ?? [], workflow: workflow.get(key) ?? [], failedJobs: failedJobs.get(key) ?? [], activeJobs: activeJobs.get(key) ?? [], positions: jobs.positions,
     prBuild: trace.detail.item?.kind === "pr" ? builds.get(key) ?? null : null, screenshots: shots, screenshotArtifacts: artifacts, thread: thread.get(key) ?? null, held: heldRows, heldAudits, implementation,
     implementationPr: view?.impl.prNumber != null ? implementationPr.get(`${ref.repo}#${view.impl.prNumber}`) ?? null : null,

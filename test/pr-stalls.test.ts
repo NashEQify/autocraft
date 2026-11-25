@@ -12,15 +12,15 @@ test("red CI that holds the review with no take review at the head asks the cont
   const f = { review: { verdict: "hold", head: "h0" }, ci: "failure", cifix: cifix(), reviewHold: { kind: "ci", wait: "CI on the latest commit to pass", red: true } } as const;
   assert.deepEqual(kinds(f), ["cifix:ask"]);
   const asked = decidePr(prFacts({ ...f, cifix: cifix({ states: ["asked"] }) }));
-  assert.equal(asked.waitKind, "contributor");
+  assert.deepEqual([asked.waitKind, asked.waitCode], ["contributor", "ci-contributor"]);
   const skipped = decidePr(prFacts({ ...f, cifix: cifix({ states: ["skipped"], skipReason: "nothing to fix" }) }));
-  assert.equal(skipped.waitKind, "person");
+  assert.deepEqual([skipped.waitKind, skipped.waitCode], ["person", "ci-nothing-to-fix"]);
 });
 
 test("a CI fix whose comment failed, or did not reach GitHub after the last retry, waits on a person", () => {
   for (const c of [cifix({ states: ["comment-failed"] }), cifix({ states: ["comment-unsent", "comment-unsent", "comment-unsent"], unsent: "final" })]) {
     const p = decidePr(prFacts({ ci: "failure", cifix: c }));
-    assert.deepEqual([p.actions.filter((a) => a.kind !== "unassign"), p.wait, p.waitKind], [[], "a person: the CI fix comment failed", "person"]);
+    assert.deepEqual([p.actions.filter((a) => a.kind !== "unassign"), p.wait, p.waitKind, p.waitCode], [[], "a person: the CI fix comment failed", "person", "ask-failed"]);
   }
 });
 
@@ -44,9 +44,11 @@ test("a mergeable state still unknown after GitHub was asked to compute it block
   const reading = decidePr(prFacts({ mergeable: "UNKNOWN", unknown: { since, reads: 3, rereads: 0, stuck: false } }));
   assert.equal(reading.state, "waiting-ci");
   assert.match(reading.wait ?? "", /3 checks reads/);
+  assert.equal(reading.waitCode, "mergeable-unknown");
   const stuck = decidePr(prFacts({ mergeable: "UNKNOWN", unknown: { since, reads: 6, rereads: 1, stuck: true } }));
   assert.equal(stuck.state, "needs-decision");
   assert.ok(stuck.reasons.some((r) => r.includes("unknown")));
+  assert.equal(stuck.waitCode, "mergeable-stuck");
 });
 
 test("a merge refused for a reason other than CI or mergeable blocks the merge; a state refusal waits for the change", () => {
@@ -55,7 +57,27 @@ test("a merge refused for a reason other than CI or mergeable blocks the merge; 
   assert.equal(other.state, "needs-decision");
   assert.ok(other.reasons.some((r) => r.includes("protected file")));
   const state = decidePr(prFacts(refused("not ready at merge time: CI pending, mergeable unknown")));
-  assert.equal(state.state, "refused");
+  assert.deepEqual([state.state, state.waitCode, state.waitKind], ["refused", "refusal-retry", "system"]);
+});
+
+test("a batch the PR failed alone in waits on a person until the PR is handed over anew", async () => {
+  const { world } = await import("./world-db.ts");
+  const w = await (await (await (await (await world()).repo()).pr(1)).review(1)).verified(1);
+  try {
+    await w.workflow(1);
+    await w.premerge(1, "clean");
+    await w.handedOver(1);
+    const at = (await w.rows("SELECT head, updated_at FROM preapprovals WHERE number = 1"))[0] as { head: string; updated_at: string };
+    const failed = async (minutes: number) => {
+      const t = new Date(Date.parse(at.updated_at) + minutes * 60_000).toISOString();
+      const b = (await w.db.get(w.db.k.insertInto("main.merge_batches").values({ repo: "app", branch: "b", state: "failed", base_sha: "m", commit_sha: "c", summary: "CI failed", created_at: t, updated_at: t }).returning("id")))!;
+      await w.db.run(w.db.k.insertInto("main.merge_batch_prs").values({ batch_id: b.id, number: 1, head_oid: at.head, position: 0 }));
+      const p = await w.prPlan(1);
+      return [p.state === "batch-failed", p.actions.some((a) => a.kind === "merge"), p.waitCode];
+    };
+    assert.deepEqual(await failed(-5), [false, true, null]);
+    assert.deepEqual(await failed(5), [true, false, "batch-failed"]);
+  } finally { w.close(); }
 });
 
 test("from database rows: red CI at a new head with an earlier non-take review asks the contributor once", async () => {

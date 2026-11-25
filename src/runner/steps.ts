@@ -730,7 +730,7 @@ export const STEPS: StepDef[] = [
   {
     name: "postmerge",
     title: "Review merged pull requests",
-    description: "Opus reads, one pull request per call, what each pipeline merge landed in one repo, with our own commits and reviews of the PR, and lists defects and minor findings. Reads GitHub; writes only to the local database.",
+    description: "Opus reads, one pull request per call, what the merges of one repo that need a post-merge review landed, with our own commits and reviews of the PR, and lists defects and minor findings. Reads GitHub; writes only to the local database.",
     stage: runStage("postmerge"),
     requires: "operator",
     models: ["opus"],

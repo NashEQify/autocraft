@@ -40,6 +40,9 @@ export type StoredPatch =
 
 export type LintingRow = { kind: PatchKind; id: number; repo: string; number: number; head: string; lintTask: number | null; unsentSibling: number };
 
+/** A fix-up or CI fix whose push was about to be made when its row was written. */
+export type PushingRow = { kind: "fixup" | "cifix"; id: number; repo: string; number: number; head: string; toHead: string; files: string[]; stored: boolean };
+
 export type MainFixRow = {
   repo: string; headSha: string; check: string; verdict: MainFixVerdict; state: string; reason: string | null; runId: number | null;
   runUrl: string | null; excerpt: string | null; issueNumber: number | null; prNumber: number | null; prUrl: string | null; patch: string | null;

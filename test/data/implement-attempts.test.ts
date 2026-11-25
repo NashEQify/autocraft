@@ -6,7 +6,7 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  loadImplementFacts, loadImplementStamps, loadImplementationRepos, loadImplementationView, loadPlanReplyOfCall, loadStuckStreaks, listLivePrs,
+  loadImplementFacts, loadImplementStamps, loadImplementationRepos, loadImplementationView, loadPlanReplyOfCall, loadStuckStreaks,
   recordAnswers, recordSteps, restartAttempt, retryRevision, startAttempt, startAttempts,
 } from "../../src/data/implement/index.ts";
 
@@ -169,7 +169,6 @@ both("stamps, repos, live PRs, plan replies and stuck streaks read what the writ
   assert.equal(await loadPlanReplyOfCall(db, 11), JSON.stringify("a longer reply text"));
   assert.equal(await loadPlanReplyOfCall(db, 99), null);
   assert.deepEqual([...(await loadImplementationRepos(db, [a!.id, b!.id])).entries()].sort(), [[a!.id, "app"], [b!.id, "other"]].sort());
-  assert.deepEqual(await listLivePrs(db), [{ repo: "app", number: 1, prNumber: 5 }]);
   // Streaks: newest first, after the repo's since, with a PR or stuck/failed.
   await recordSteps(db, [{ id: b!.id, to: "failed" }], T1);
   const streaks = await loadStuckStreaks(db, new Map([["app", T0], ["other", ""]]), 3);

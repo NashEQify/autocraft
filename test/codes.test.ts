@@ -33,14 +33,19 @@ const NAMED: [string, WaitCode][] = [
   ["2 implementations already running in app", "implement-room"],
 ];
 
+/** Texts that stand for more than one wait. */
+const SAME_WORDS: Record<string, WaitCode[]> = {
+  "approval of CI runs": ["ci-approval-failed", "repo-approval"], "its batch": ["batch-failed"], "a maintainer's answer": ["ci-nothing-to-fix", "implement-question"],
+};
+
 test("a wait has a code exactly when the plan waits, and no text of decide or decide-item is without one of its own", () => {
   const seed = process.env.INVARIANT_SEED ? Number(process.env.INVARIANT_SEED) : (Date.now() & 0x7fffffff);
   const x: Rnd = rnd(prng(seed));
-  const at = { seed, texts: new Set<string>() };
+  const at = { seed, texts: new Map<string, Set<WaitCode>>() };
   const check = (p: { wait: string | null; waitCode?: WaitCode | null }, what: () => unknown): void => {
     assert.equal(p.waitCode === null, p.wait === null);
     if (p.wait === null) return;
-    at.texts.add(p.wait);
+    at.texts.set(p.wait, (at.texts.get(p.wait) ?? new Set()).add(p.waitCode!));
     assert.notEqual(p.waitCode, "other", `INVARIANT_SEED=${seed}: no code for the wait "${p.wait}"\n${JSON.stringify(what())}`);
   };
   for (let i = 0; i < CASES; i++) {
@@ -50,6 +55,8 @@ test("a wait has a code exactly when the plan waits, and no text of decide or de
     check(decideItem(item), () => item);
   }
   assert.ok(at.texts.size > 30, `only ${at.texts.size} different waits came up`);
+  // One text is one wait, except where a person and the system wait in the same words.
+  for (const [text, codes] of at.texts) for (const code of codes) assert.ok(code === waitCodeOf(text) || SAME_WORDS[text]?.includes(code), `INVARIANT_SEED=${seed}: "${text}" as ${code}`);
   for (const [text, code] of NAMED) assert.equal(waitCodeOf(text), code, text);
   // Started items whose wait is left to the person who set it, or to GitHub, are asked nothing.
   assert.deepEqual((["answer", "merge-refused", "hold", "repo-approval", "changes-requested", "sign-in"] as const).map((c) => needsQuestion(c, "person")), [true, true, false, false, false, false]);

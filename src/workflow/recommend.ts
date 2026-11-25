@@ -6,6 +6,7 @@
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
 import { byHand, type ConflictPath } from "../core/decide.ts";
+import { asSentence } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
@@ -144,6 +145,10 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       if (fix.length) return { text: fixText(fix, true), parts: { fix, drop }, merges: true };
       return found.blocker === "outside-purpose" ? go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) })) : go(t("Merge it as it is."));
     }
-    case "other": return go(p.reason ? t("Go on with the merge after this stop: {reason}.", { reason: String(p.reason) }) : t("Go on with the merge."));
+    case "other": {
+      const reason = String(p.reason ?? "");
+      if (!reason) return go(t("Go on with the merge."));
+      return go(t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }));
+    }
   }
 }

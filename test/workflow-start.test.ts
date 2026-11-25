@@ -447,7 +447,7 @@ test("a revision runs for whoever last answered, approved or started the issue's
   const plan = await w.prPlan(8);
   assert.deepEqual([plan.waitKind, plan.wait?.includes(MAINT)], ["person", true], plan.wait ?? "");
   const issue = implementStep((await loadItemFact(w.db, "app", 7))!);
-  assert.ok(issue && "wait" in issue && issue.wait.includes(MAINT), JSON.stringify(issue));
+  assert.ok(issue && "wait" in issue && issue.wait.text.includes(MAINT), JSON.stringify(issue));
   assert.deepEqual(await implementJobs(w), [[9, "plan"]]);
 
   // The plans may be older than the access they were made on: the job that may not run is passed over.
