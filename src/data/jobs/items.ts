@@ -71,11 +71,11 @@ export async function loadItemJobTrail(db: Db, refs: Ref[], o: { states?: string
   for (const part of kx.chunks(refs)) {
     const rows = await q.all(q.k.selectFrom("job_items as ji").innerJoin("jobs as j", "j.id", "ji.job_id")
       .innerJoin(kx.refPairs(db, part.map((r): [string, number] => [r.repo, r.number]), "rp"), (jn) => jn.onRef("rp.repo", "=", "ji.repo").onRef("rp.number", "=", "ji.number"))
-      .select(["ji.repo", "ji.number", "j.id as job_id", "j.step", "j.state", "ji.outcome", "ji.at", "j.ended_at", "j.error"]).$narrowType<{ state: JobState }>()
+      .select(["ji.id", "ji.repo", "ji.number", "j.id as job_id", "j.step", "j.state", "ji.outcome", "ji.at", "j.ended_at", "j.error"]).$narrowType<{ state: JobState }>()
       .$if(!!o.states, (b) => b.where("j.state", "in", o.states!)).orderBy("ji.id"));
     for (const r of rows) {
       const key: RefKey = `${r.repo}#${Number(r.number)}`;
-      const row: ItemJobRow = { job_id: r.job_id, step: r.step, state: r.state, outcome: r.outcome, at: r.at, ended_at: r.ended_at, error: r.error };
+      const row: ItemJobRow = { id: Number(r.id), job_id: r.job_id, step: r.step, state: r.state, outcome: r.outcome, at: r.at, ended_at: r.ended_at, error: r.error };
       const l = out.get(key);
       if (l) l.push(row); else out.set(key, [row]);
     }

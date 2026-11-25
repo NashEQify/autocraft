@@ -157,6 +157,15 @@ export async function listWorkflows(db: Db, f: WorkflowFilter = {}): Promise<Ite
   return rows.map(workflowOf);
 }
 
+/** The items with an open recommendation, per repo of `repos`. One statement; a repo without one is absent. */
+export async function countWaiting(db: Db, repos: string[]): Promise<Map<string, number>> {
+  if (repos.length === 0) return new Map();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.item_workflows as w").select((eb) => ["w.repo", eb.fn.countAll<number>().as("n")])
+    .where("w.state", "=", "recommending").where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
+  return new Map(rows.map((r) => [r.repo, Number(r.n)]));
+}
+
 /**
  * The live workflow that works on each PR: its own, else the one its active merge leg belongs to, else the implement workflow of the
  * issue an attempt opened it for. One statement.

@@ -130,6 +130,7 @@ export function createHttpApi(): Api {
       items: (q) => get(`/api/maintain/items${qs({ ...q, filters: undefined, filter: q.filters?.join(","), areas: undefined, area: q.areas?.join(","), refs: q.refs?.join(",") })}`),
       command: (text) => post("/api/commands", { text }),
       repos: () => get("/api/maintain/repos"),
+      waiting: () => get("/api/maintain/waiting"),
       control: (input) => post("/api/controls", input),
     },
     maintainItem: {

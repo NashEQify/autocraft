@@ -283,6 +283,21 @@ describe("access changes", () => {
   });
 });
 
+describe("a queued token revocation", () => {
+  test("is swept at the next request, also one without a dashboard session", async () => {
+    const queued = async () => (await db.get(db.k.selectFrom("user_token_revocations").select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
+    // The first request of a process sweeps whatever it is.
+    await fetch(`${base}/auth/signed-out`);
+    await sleep(200);
+    for (const path of ["/api/remote/claim", "/mcp"]) {
+      await db.run(db.k.insertInto("user_token_revocations").values({ login: "gone", token_enc: "unreadable", queued_at: new Date().toISOString() }));
+      await fetch(`${base}${path}`, { method: "POST", body: "{}" });
+      for (let i = 0; i < 40 && await queued(); i++) await sleep(50);
+      assert.equal(await queued(), 0, path);
+    }
+  });
+});
+
 describe("roles", () => {
 });
 

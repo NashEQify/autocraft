@@ -60,7 +60,7 @@ function HoldButton({ m, held }: { m: Pick<NextMerge, "repo" | "number">; held: 
   if (!canRun(useUser(), m.repo)) return null;
   const control = held ? "release-merge" : "hold-merge";
   const go = async () => {
-    const r = await api.controls.run({ control, item: { repo: m.repo, number: m.number } });
+    const r = await api.controls.run({ control, repo: m.repo, number: m.number });
     if (!r.ok) throw new Error(r.line);
   };
   return (

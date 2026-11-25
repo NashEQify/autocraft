@@ -30,6 +30,10 @@ export type HistoryRow = {
   rowid: number; head: string; at: string; model: string | null; mode: string | null; verdict: string; sure: boolean; reason: string;
   summary: string | null; risks: string[]; fixes: ReviewFinding[]; claims: string | null; blocked_by: RefKey[]; trigger: string | null; job_id: number | null;
 };
+/** A stored history row of any review, one that gave no verdict included. */
+export type StoredHistory = Omit<HistoryRow, "verdict"> & { verdict: string | null };
+/** An `opus_reviews` row of any review, one that gave no verdict included, with its claims. */
+export type StoredReview = Omit<ReviewRow, "verdict"> & { verdict: Verdict | null; claims: string | null };
 export type ReviewPost = { repo: string; number: number; review_id: string; head: string; posted_at: string; edited_at: string | null; opus_at: string | null; posted_as: string | null };
 /** The `review_state` row. */
 export type ReviewMarks = { staleAt: string | null; rerunDay: string | null; rerunCount: number; failHead: string | null; failCount: number; failAt: string | null };
@@ -56,7 +60,7 @@ export type ReviewFacts = {
   discussion: Map<RefKey, DiscussionStat>;
   blockerLatest: Map<RefKey, { verdict: Verdict; blocked_by: RefKey[] }>;
 };
-export type ReviewRecord = { latest: ReviewRow | null; history: HistoryRow[]; premerge: PremergeRow[]; postmerge: PostmergeRow | null; followups: Followup[]; post: ReviewPost | null };
+export type ReviewRecord = { latest: ReviewRow | null; /** One per reviewed head, newest first. */ reviews: StoredReview[]; history: StoredHistory[]; premerge: PremergeRow[]; postmerge: PostmergeRow | null; followups: Followup[]; post: ReviewPost | null };
 export type ReviewSignature = { history: { n: number; newest: string | null }; reviews: { n: number; newest: string | null }; premerge: { n: number; newest: string | null; tries: number }; postmerge: { n: number; newest: string | null }; followups: string };
 /** The stored columns of one feed row of `dash/api/activity.ts`; JSON columns stay text for the page to parse. */
 export type ReviewEventRow =

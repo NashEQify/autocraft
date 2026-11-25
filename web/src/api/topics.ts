@@ -15,7 +15,7 @@ const withSlot = (...topics: Topic[]): Topic[] => [...new Set<Topic>([...topics,
 /** Everything an item page shows about a pull request. */
 const ITEM: Topic[] = withSlot("discord", "items", "stages", "classify", "ranks", "workflows", "reviews", "verify", "fixes", "postmerge", "actions", "checks", "preapprovals", "pr-builds", "build-features");
 
-const TRACE: Topic[] = withSlot("items", "stages", "workflows", "workflow-events", "reviews", "verify", "fixes", "postmerge", "actions", "plans", "tasks", "conversations", "queue", "access", "checks", "trace", "preapprovals", "pr-builds", "build-features");
+const TRACE: Topic[] = withSlot("items", "stages", "workflows", "workflow-events", "reviews", "verify", "fixes", "postmerge", "actions", "plans", "tasks", "conversations", "queue", "access", "checks", "trace", "preapprovals", "pr-builds", "build-features", "github");
 
 const RULES: [prefix: string, topics: Topic[]][] = [
   ["health", ["jobs", "envs", "sync", "settings", "repos", "mainci", "limits", "access", "plans", "actions"]],
@@ -25,16 +25,19 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   // The trace reads most tables behind an item page plus model calls, jobs and GitHub detail. The `trace` topic leaves out a running call's progress lines; the page also asks the server `since` its last stamp.
   ["item-trace:", TRACE],
   // The item page is the trace plus the header (labels, Discord, holds) and the GitHub side; it also asks `since` its last stamp.
-  ["item-page:", [...new Set<Topic>([...TRACE, "discord", "github", "ranks"])]],
+  ["item-page:", [...new Set<Topic>([...TRACE, "discord", "ranks"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
+  ["maintain-waiting", ["workflows", "repos"]],
   ["maintain-queue", ["workflows", "items", "repos"]],
   // The item page: the workflow row and its events, signals, findings, holds and breakers.
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
   ["maintain-repos", ["workflows", "items", "repos", "limits", "settings", "access"]],
   ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
+  // The list of the pull requests AutoCraft merged.
+  ["maintain-items:merged:", ["queue", "items", "access", "repos"]],
   ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "outside", "access", "security", "repos"]],
-  ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos"]],
+  ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
   // One opened event row: its detail reads what the timeline does; the run and the task behind it read one table each.
   ["item-trace-detail:", TRACE],
   ["item-trace-run:", ["agents"]],
@@ -46,7 +49,8 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["downloads", ["downloads", "items"]],
   ["cost:", ["usage", "agents"]],
   ["rates-", ["usage", "agents"]],
-  ["conversation:", ["conversations"]],
+  // A card's refusal follows the item's recommendation.
+  ["conversation:", ["conversations", "workflows"]],
   // A scan page also shows each running call's progress line, which arrives through `agents`.
   ["security:scan:", ["security", "agents"]],
   ["security", ["security"]],

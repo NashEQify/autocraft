@@ -36,7 +36,7 @@ const MAP: Record<string, (r: ActivityRow, c: Ctx) => (Ev | null)[]> = {
   run: (r, c) => [runEvent({ ...(r as never as Parameters<typeof runEvent>[0]), label: null }, c.staff)],
   check: (r) => [checkEvent(r as never)], task: (r) => [taskEvent(r as never)], push: (r) => [pushEvent(r as never)], patchcheck: (r) => [patchCheckEvent(r as never)],
   opus: (r) => [opusEvent(r as never, `opus:${r.rowid}`)], premerge: (r) => [premergeEvent(r as never)], postmerge: (r, c) => [postmergeEvent(r as never, c.staff)], verify: (r) => [verifyEvent(r as never)],
-  workflow: (r, c) => [workflowEvent(r as never, c.staff)],
+  workflow: (r, c) => [workflowEvent(r as never, c)],
   fixup: (r) => [fixupEvent(r as never)], cifix: (r) => [ciFixEvent(r as never)], conflict: (r) => [conflictEvent(r as never)], merge: (r) => [mergeEvent(r as never)],
   turn: (r) => [turnEvent(r as never)], write: (r, c) => [writeEvent(r as never, c.staff)],
 };

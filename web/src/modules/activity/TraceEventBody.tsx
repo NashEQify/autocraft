@@ -54,7 +54,7 @@ export type EventItem = Pick<Item, "repo" | "number" | "kind"> & { comments?: It
 
 export function TraceEventBody({ event: e, item }: { event: TraceEvent; item: EventItem }) {
   const { repo, number } = item;
-  const needsDetail = !(e.kind === "model-call" && e.ref.runId !== undefined) && !(e.kind === "github" && e.ref.commentId);
+  const needsDetail = !(e.kind === "model-call" && e.ref.runId !== undefined) && e.kind !== "github";
   const detail = useQuery(`item-trace-detail:${repo}#${number}:${e.id}`, (a) => a.itemTraceDetail(repo, number, e.id), { enabled: needsDetail });
   const run = useQuery(`item-trace-run:${e.ref.runId}`, (a) => a.agents.get(e.ref.runId!), { enabled: e.kind === "model-call" && e.ref.runId !== undefined, pollMs: (d) => (d && !d.endedAt ? 3000 : false) });
   const task = useQuery(`item-trace-task:${e.ref.taskId}`, (a) => a.tasks.get(e.ref.taskId!), { enabled: e.ref.taskId !== undefined && e.kind !== "model-call" });

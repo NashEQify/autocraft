@@ -194,7 +194,7 @@ export async function loadDueRefs(db: Db, kind: ActionKind, side: "item" | "pr",
 }
 
 type HistoryDbRow = { id: number; repo: string; number: number; head: string | null; old_state: string | null; new_state: string; old_wait: string | null; wait: string | null; reasons: string; at: string };
-const historyOf = (r: HistoryDbRow): PlanHistoryRow => ({ head: r.head, oldState: r.old_state, newState: r.new_state, oldWait: r.old_wait, wait: r.wait, reasons: JSON.parse(r.reasons) as string[], at: r.at });
+const historyOf = (r: HistoryDbRow): PlanHistoryRow => ({ id: Number(r.id), head: r.head, oldState: r.old_state, newState: r.new_state, oldWait: r.old_wait, wait: r.wait, reasons: JSON.parse(r.reasons) as string[], at: r.at });
 const HISTORY_COLS = ["h.id", "h.repo", "h.number", "h.head", "h.old_state", "h.new_state", "h.old_wait", "h.wait", "h.reasons", "h.at"] as const;
 
 /** Plan history per ref, newest first (by id); with `limit`, the newest `limit` rows of each ref. 1 statement. */
@@ -226,7 +226,7 @@ export async function listPlanHistory(db: Db, opts: { afterId?: number; since?: 
     .$if(asc, (b) => b.where("h.id", ">", opts.afterId!))
     .$if(!!opts.since, (b) => b.where("h.at", ">=", opts.since!))
     .orderBy("h.id", asc ? "asc" : "desc").limit(Math.floor(opts.limit)));
-  return rows.map((r) => ({ ...historyOf(r), repo: r.repo, number: Number(r.number), id: Number(r.id) }));
+  return rows.map((r) => ({ ...historyOf(r), repo: r.repo, number: Number(r.number) }));
 }
 
 /** Deletes plan history older than `keepMs`. Returns the rows removed. 1 statement. */

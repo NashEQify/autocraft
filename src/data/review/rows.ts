@@ -4,7 +4,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import type { HeadKey, HeadRef, HistoryRow, ReviewFinding, ReviewRow, ReviewWorkflow, RefKey, Verdict } from "./types.ts";
+import type { HeadKey, HeadRef, HistoryRow, ReviewFinding, ReviewRow, ReviewWorkflow, RefKey, StoredReview, Verdict } from "./types.ts";
 
 export const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
 export const headRef = (repo: string, number: number, head: string): HeadRef => `${repo}#${number}@${head}`;
@@ -31,14 +31,28 @@ export function reviewSelect(db: Db, eb: kx.AnyEb, alias: string) {
   ] as any[];
 }
 
+/** A row with no `sure` counts as sure. */
+const sureOf = (v: unknown): boolean => v === null || v === undefined || Number(v) !== 0;
+
 export function parseReview(r: any): ReviewRow {
   return {
     repo: r.repo, number: Number(r.number), head: r.head_oid, at: r.at, run_id: r.run_id ?? null, model: r.model ?? null, mode: r.mode, base_head: r.base_head ?? null, base_ref: r.base_ref ?? null,
-    verdict: r.verdict as Verdict, sure: r.sure === null || r.sure === undefined ? true : Number(r.sure) !== 0, reason: r.reason ?? "",
+    verdict: r.verdict as Verdict, sure: sureOf(r.sure), reason: r.reason ?? "",
     fixes: listOf<ReviewFinding>(r.fixes), risks: listOf<string>(r.risks), conflicts: listOf<{ id: number; reason: string }>(r.conflicts),
     blocked_by: refsOf(r.blocked_by), seen_at: r.seen_at ?? null, disc_hash: r.disc_hash ?? null, public_summary: r.public_summary ?? null,
     workflow: objectOf<ReviewWorkflow>(r.workflow),
   };
+}
+
+/** Every stored review of the PRs of `keys`, newest first within a PR. One statement. */
+export async function storedReviews(db: Db, keys: KeySource): Promise<Map<RefKey, StoredReview[]>> {
+  const out = new Map<RefKey, StoredReview[]>();
+  if (noKeys(keys)) return out;
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.opus_reviews as o").innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "o.repo").onRef("kk.number", "=", "o.number"))
+    .select((eb) => [...reviewSelect(db, eb, "o"), "o.claims"] as any).orderBy("o.at", "desc").orderBy(kx.rowid("main.opus_reviews", "o"), "desc") as any) as any[];
+  for (const r of rows) pushTo(out, refKey(r.repo, r.number), { ...parseReview(r), verdict: (r.verdict ?? null) as Verdict | null, claims: r.claims ?? null });
+  return out;
 }
 
 /** Rows with a verdict, one per (PR, head), newest first within a PR, for the PRs of `keys`; `rn` is the position (1 is the latest). */
@@ -64,7 +78,7 @@ export const headTuples = (heads: HeadKey[]) => heads.map((h) => [h.repo, h.numb
 
 export function parseHistory(r: any): HistoryRow {
   return {
-    rowid: Number(r.rowid), head: r.head_oid, at: r.at, model: r.model ?? null, mode: r.mode ?? null, verdict: r.verdict, sure: Number(r.sure) === 1, reason: r.reason ?? "",
+    rowid: Number(r.rowid), head: r.head_oid, at: r.at, model: r.model ?? null, mode: r.mode ?? null, verdict: r.verdict, sure: sureOf(r.sure), reason: r.reason ?? "",
     summary: r.summary ?? null, risks: listOf<string>(r.risks), fixes: listOf<ReviewFinding>(r.fixes), claims: r.claims ?? null, blocked_by: refsOf(r.blocked_by), trigger: r.trigger ?? null, job_id: r.job_id === null || r.job_id === undefined ? null : Number(r.job_id),
   };
 }

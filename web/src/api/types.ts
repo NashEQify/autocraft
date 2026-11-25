@@ -2711,7 +2711,8 @@ export interface MaintainStats {
  * (open, nothing planned) and `done` (merged or closed).
  */
 export type MaintainItemGroup = "needs" | "started" | "automatic" | "rest" | "backlog" | "done";
-export type MaintainItemsShow = "open" | "backlog" | "closed";
+/** `merged`: the pull requests AutoCraft merged (its merge step or a merged batch), newest merge first. */
+export type MaintainItemsShow = "open" | "backlog" | "closed" | "merged";
 /** `security` and `stuck` are for operators and maintainers. */
 export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates";
 
@@ -2742,6 +2743,8 @@ export interface MaintainItemRow {
   /** The reader may send commands on its repo. */
   may: boolean;
   updatedAt: string;
+  /** When and how AutoCraft merged it: by the merge rule, on a person's approval, or with an integration batch. In the `merged` list only. */
+  merged?: { at: string; how: "rule" | "approval" | "batch" };
 }
 
 export interface MaintainItemsQuery {

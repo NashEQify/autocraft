@@ -72,6 +72,8 @@ const TOOL_BODY_LIMIT = 2 * 1024 * 1024;
 const WORKSPACE_BODY_LIMIT = 12 * 1024 * 1024;
 const toolBodyLimit = (server: string): number => (server === WORKSPACE_SERVER ? WORKSPACE_BODY_LIMIT : TOOL_BODY_LIMIT);
 const HELPER_FILE = new URL("../../../worker/autocraft.mjs", import.meta.url);
+/** The routes answered without a dashboard session (a trailing slash: every path below it). */
+const SESSIONLESS = ["/auth/", "/mcp", "/api/remote/", `${ROUTES.mcp}/`, WEBHOOK_PATH];
 const PUBLIC_FILES = new Set(["/artcraft-mark.svg", "/artcraft-mark.png"]);
 const FILE_TYPES: Record<string, string> = {
   css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", svg: "image/svg+xml",
@@ -628,6 +630,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       const url = new URL(req.url ?? "/", "http://dashboard.invalid");
       const cookies = parseCookies(req.headers.cookie);
+      if (SESSIONLESS.some((p) => url.pathname === p || (p.endsWith("/") && url.pathname.startsWith(p)))) void sweepRevoked().catch(() => {});
       if (url.pathname.startsWith("/auth/")) {
         const { r, cookies: set } = await auth(req, url, nonce, cookies);
         return send(res, nonce, r, set);

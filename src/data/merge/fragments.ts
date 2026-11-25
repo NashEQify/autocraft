@@ -12,6 +12,12 @@ export function mergedByUs(eb: Eb, repoCol: string, numberCol: string): Expressi
   return w.exists(w.selectFrom("merges as mg").select(w.lit(1).as("one")).where("mg.repo", "=", eb.ref(repoCol)).where("mg.number", "=", eb.ref(numberCol)).where("mg.outcome", "=", "merged"));
 }
 
+/** The pipeline merged the item on a person's approval, not by the merge rule. */
+export function mergedOnApproval(eb: Eb, repoCol: string, numberCol: string): Expression<SqlBool> {
+  const w = schemaEb(eb);
+  return w.exists(w.selectFrom("merges as mg").select(w.lit(1).as("one")).where("mg.repo", "=", eb.ref(repoCol)).where("mg.number", "=", eb.ref(numberCol)).where("mg.outcome", "=", "merged").where("mg.path", "<>", "rule"));
+}
+
 /** When the pipeline first merged the item. */
 export function mergedAt(eb: Eb, repoCol: string, numberCol: string): Expression<string | null> {
   const w = schemaEb(eb);

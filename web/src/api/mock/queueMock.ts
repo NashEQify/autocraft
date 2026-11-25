@@ -87,8 +87,8 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
       async run(input) {
         need();
         if (input.control === "resume-breaker") return { ok: true, line: `Resumed ${input.key}` };
-        const { control, item } = input;
-        const k = key(item);
+        const { control } = input;
+        const k = key(input);
         if (control === "hold-merge") held.add(k);
         else held.delete(k);
         changed();
