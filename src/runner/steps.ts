@@ -89,8 +89,8 @@ export type StepDef = {
 /** Creating a repo's labels, a repo-level write, is for repos in the pipeline scope that an operator approved for labelling on the Repos page. */
 async function checkApproved(db: Db, p: Params): Promise<string | null> {
   const { approvalOf } = await import("../labels/approval.ts");
-  const { scopeRepos } = await import("./scope.ts");
-  if (!(await scopeRepos(db)).has(String(p.repo))) return `${p.repo} is not in the pipeline scope`;
+  const { inRepoScope } = await import("./scope.ts");
+  if (!await inRepoScope(db, String(p.repo), "work")) return `${p.repo} is not in the pipeline scope`;
   return await approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
 }
 

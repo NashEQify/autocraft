@@ -8,10 +8,11 @@ import { guardItem } from "../src/core/guard.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { plannedItems } from "../src/core/select-items.ts";
 import * as kx from "../src/db/kx.ts";
+import { loadActBlocked } from "../src/data/control/index.ts";
 import { loadActions, queueActions, startWorkflows } from "../src/data/workflow/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { authFailure, retryWaiting, type LaneDeps } from "../src/github/user-lane.ts";
-import { LANES, planCtx } from "../src/runner/autopilot.ts";
+import { detectAutopilot, LANES, planCtx } from "../src/runner/autopilot.ts";
 import { checkRequest } from "../src/runner/jobs.ts";
 import { scopeRepos } from "../src/runner/scope.ts";
 import { runCommand } from "../src/workflow/apply.ts";
@@ -259,7 +260,9 @@ test("a close is planned for an item outside the pipeline's scope, and by the bo
     await queueActions(w.db, [{ workflowId: id, repo: "app", number: 5, kind: "close", by, head: null, at: T0 }]);
   };
   await start(MIRA);
-  assert.ok((await scopeRepos(w.db)).has("app"));
+  // The close is the act step's alone: no other step works the repo.
+  assert.deepEqual([[...await scopeRepos(w.db)], [...await scopeRepos(w.db, { for: "cards" })], (await loadActBlocked(w.db, ["app"])).get("app")], [[], ["app"], null]);
+  assert.deepEqual((await detectAutopilot(w.db)).proposals.filter((p) => p.params.repo === "app").map((p) => p.step), ["act"]);
   const box = w.gh.actDeps();
   const g = { deps: { ...box, querier: { ...box.querier, query: async (q: string, v?: object) => (q.includes("issueOrPullRequest") ? await readItem(w, q, v as Record<string, unknown>) : await box.querier.query(q, v ?? {})) } } as never };
   await run(w, g);
