@@ -2724,3 +2724,173 @@ CREATE TRIGGER IF NOT EXISTS classifications_settled_d AFTER DELETE ON classific
   INSERT INTO item_settled_dirty (run_id, repo, number) VALUES (OLD.run_id, OLD.repo, OLD.number)
     ON CONFLICT (run_id, repo, number) DO UPDATE SET n = n + 1;
 END;
+
+-- State that code writes for its own use, one table per owning module (src/data/<module>). The values once lived in settings
+-- rows; src/db/state-copy.ts copies those rows here once and leaves them in place for older processes.
+
+-- Sync bookkeeping (mirror): one row.
+CREATE TABLE IF NOT EXISTS sync_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  org_high_water TEXT,                -- start of the last org-wide incremental sync that finished without failures
+  full_sync_cursor TEXT,              -- `<scope>|<name>`: where a resumable full sync carries on
+  search_catchup_at TEXT,
+  repos_refreshed_at TEXT,
+  main_ci_polled_at TEXT,
+  releases_polled_at TEXT,
+  releases_offset INTEGER,            -- where the next release poll starts in the repo list
+  rate_remaining INTEGER,             -- GitHub GraphQL points left after the last sync, and when they reset
+  rate_reset_at TEXT,
+  points_last_run INTEGER,            -- GraphQL points the last incremental sync and the last full sync spent
+  full_points_last_run INTEGER,
+  author_ids_backfilled_at TEXT,
+  author_ids_error TEXT,              -- `<time> <message>` of the last failed account-id pass
+  app_install_sweep_at TEXT
+);
+
+-- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.
+CREATE TABLE IF NOT EXISTS repo_step_approvals (
+  repo TEXT NOT NULL,
+  step TEXT NOT NULL,                 -- merge | push | comment | fixissue | labels | mainfix | prstatus | ci
+  by TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (repo, step)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS audit_action_at ON audit(action, at);
+
+-- Lane bookkeeping (jobs): fingerprints of a lane's inputs at its last job (fp, per step and repo), daily-limit resets
+-- (reset, per step), round-robin cursors (cursor: review, verify) and planner marks (mark: planned_at, seqs_seen, wake_at,
+-- status, heartbeat, security_poll_at). value is the fingerprint, time, cursor or mark; job_id the job an fp row belongs to.
+CREATE TABLE IF NOT EXISTS lane_state (
+  kind TEXT NOT NULL,
+  step TEXT NOT NULL,
+  repo TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL,
+  job_id INTEGER,
+  at TEXT NOT NULL,
+  PRIMARY KEY (kind, step, repo)
+) WITHOUT ROWID;
+-- Database statements, round trips and time per process scope (runner-tick, claim, dashboard, planner-pass) and UTC minute
+-- (`YYYY-MM-DDTHH:MM`), added up by each process's flush.
+CREATE TABLE IF NOT EXISTS db_stats (
+  scope TEXT NOT NULL,
+  minute TEXT NOT NULL,
+  statements INTEGER NOT NULL DEFAULT 0,
+  round_trips INTEGER NOT NULL DEFAULT 0,
+  ms INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, minute)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS db_stats_minute ON db_stats(minute);
+
+-- Classify state (triage): kind jev_failed is the class_hash at which an item's Jev request gave no valid verdict; kind
+-- current_run (repo '', number 0) is the classify run the pipeline reads.
+CREATE TABLE IF NOT EXISTS classify_state (
+  kind TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  value TEXT,
+  at TEXT,
+  PRIMARY KEY (kind, repo, number)
+) WITHOUT ROWID;
+-- A duplicate set that changed on GitHub since the sync (triage): the set's hash and when it was dropped, so it is not tried
+-- again for a while.
+CREATE TABLE IF NOT EXISTS dupe_drops (
+  repo TEXT NOT NULL,
+  key TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (repo, key)
+) WITHOUT ROWID;
+
+-- What a person told AutoCraft to do on GitHub (workflow): a close, comment-close or merge made as that person.
+-- state: pending | waiting-token | waiting-permission | done | failed | stopped | skipped. head is the head the person saw:
+-- a push after the command stops a close or merge.
+CREATE TABLE IF NOT EXISTS workflow_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id INTEGER NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  kind TEXT NOT NULL,                 -- close | comment-close | merge
+  by TEXT NOT NULL,
+  head TEXT,
+  state TEXT NOT NULL,
+  reason TEXT,
+  comment_url TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  done_at TEXT,
+  UNIQUE (workflow_id, kind, repo, number)
+);
+CREATE INDEX IF NOT EXISTS workflow_actions_state ON workflow_actions(state, created_at);
+CREATE INDEX IF NOT EXISTS workflow_actions_item ON workflow_actions(repo, number);
+
+-- Review marks per PR (review): when an operator marked the reviews stale, today's count of discussion re-reviews, and the
+-- failed review calls at one head.
+CREATE TABLE IF NOT EXISTS review_state (
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  stale_at TEXT,
+  rerun_day TEXT,                     -- UTC day (YYYY-MM-DD) rerun_count counts
+  rerun_count INTEGER NOT NULL DEFAULT 0,
+  fail_head TEXT,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  fail_at TEXT,
+  PRIMARY KEY (repo, number)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS opus_reviews_item_at ON opus_reviews(repo, number, at);
+CREATE INDEX IF NOT EXISTS opus_review_history_item_at ON opus_review_history(repo, number, at);
+
+-- PRs whose mergeable state GitHub keeps reporting as unknown (merge): checks reads in a row that showed it, REST rereads,
+-- and whether it is stuck.
+CREATE TABLE IF NOT EXISTS merge_state (
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  head TEXT NOT NULL,
+  since TEXT NOT NULL,
+  reads INTEGER NOT NULL DEFAULT 0,
+  rereads INTEGER NOT NULL DEFAULT 0,
+  stuck INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (repo, number)
+) WITHOUT ROWID;
+-- The most PRs a repo's next integration batch takes (merge): grows after a passing batch, halves after a failed one.
+CREATE TABLE IF NOT EXISTS merge_repo_state (
+  repo TEXT PRIMARY KEY,
+  batch_size INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS merge_batches_pr ON merge_batches(repo, pr_number);
+CREATE INDEX IF NOT EXISTS pr_builds_created ON pr_builds(repo, created_at);
+
+-- The liveness check's last run (planner): one row.
+CREATE TABLE IF NOT EXISTS liveness_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  checked_at TEXT,
+  open INTEGER                        -- open items the check found
+);
+
+CREATE INDEX IF NOT EXISTS agent_runs_step_model ON agent_runs(step, model, id);
+
+-- The items of a Task Runner call (runners), in the order of remote_calls.items, written with the call.
+CREATE TABLE IF NOT EXISTS remote_call_items (
+  call_id INTEGER NOT NULL,
+  pos INTEGER NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  PRIMARY KEY (call_id, pos)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS remote_call_items_item ON remote_call_items(repo, number);
+
+-- Build bookkeeping (build): warm_report, warm_bytes:<key>, warm_gc_at, warm_trimmed_publish, warm_rebuild:<repo>,
+-- worker_update_pending, worker_update_failures and the runner endpoint (leader:runner:endpoint), with their settings values.
+CREATE TABLE IF NOT EXISTS build_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+
+-- Lookups of the patches AutoCraft writes (changes).
+CREATE INDEX IF NOT EXISTS fixups_linting ON fixups(state) WHERE state = 'linting';
+CREATE INDEX IF NOT EXISTS fixups_to_head ON fixups(to_head) WHERE state = 'pushed';
+CREATE INDEX IF NOT EXISTS ci_fixes_to_head ON ci_fixes(to_head) WHERE to_head IS NOT NULL;
+CREATE INDEX IF NOT EXISTS conflict_merges_to_head ON conflict_merges(to_head) WHERE to_head IS NOT NULL;

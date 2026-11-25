@@ -91,6 +91,8 @@ export interface AgentRuns {
   user_login: string | null;
   harness: string | null;
   reported_model: string | null;
+  first_repo: string | null;
+  first_number: number | null;
 }
 
 export interface AppAllowedOwners {
@@ -237,6 +239,12 @@ export interface BuildSizes {
   memory_source: Generated<string>;
 }
 
+export interface BuildState {
+  key: string;
+  value: string;
+  updated_at: string;
+}
+
 export interface BuildTaskLogs {
   task_id: number;
   seq: number;
@@ -330,6 +338,14 @@ export interface Classifications {
   reason: string | null;
   probs: string | null;
   input_hash: string | null;
+}
+
+export interface ClassifyState {
+  kind: string;
+  repo: string;
+  number: number;
+  value: string | null;
+  at: string | null;
 }
 
 export interface ClaudeAccountStatus {
@@ -453,6 +469,15 @@ export interface Conversations {
   created_by: string;
 }
 
+export interface DbStats {
+  scope: string;
+  minute: string;
+  statements: Generated<number>;
+  round_trips: Generated<number>;
+  ms: Generated<number>;
+  calls: Generated<number>;
+}
+
 export interface DecisionChoices {
   id: string;
   decision_id: string;
@@ -570,6 +595,8 @@ export interface DiscordAlertMsgs {
   sealed: string | null;
   choices_id: string | null;
   sent_at: string;
+  workflow_id: number | null;
+  rec_at: string | null;
 }
 
 export interface DiscordAlerts {
@@ -699,6 +726,13 @@ export interface DupeComparisons {
   sizes: string | null;
 }
 
+export interface DupeDrops {
+  repo: string;
+  key: string;
+  hash: string;
+  at: string;
+}
+
 export interface DupeGroupFails {
   decision_id: string;
   number: number;
@@ -716,6 +750,7 @@ export interface DupeGroupItems {
   base_role: string;
   base_target: number | null;
   head: string | null;
+  group_id: string | null;
 }
 
 export interface DupeGroupPosts {
@@ -739,6 +774,7 @@ export interface DupeGroups {
   repo: string;
   source: string;
   applied_answer: string | null;
+  id: string | null;
 }
 
 export interface DuplicatePairs {
@@ -1209,12 +1245,25 @@ export interface Jobs {
   crash_resumes: Generated<number>;
   lease_skips: number | null;
   lease_skip_keys: string | null;
+  db_statements: number | null;
+  db_round_trips: number | null;
+  db_ms: number | null;
+  effects: number | null;
 }
 
 export interface LaneNext {
   lane: string;
   total: number;
   items: string;
+  at: string;
+}
+
+export interface LaneState {
+  kind: string;
+  step: string;
+  repo: Generated<string>;
+  value: string;
+  job_id: number | null;
   at: string;
 }
 
@@ -1236,6 +1285,12 @@ export interface LivenessItems {
   phase: string;
   since: string;
   checked_at: string;
+}
+
+export interface LivenessState {
+  id: Generated<number>;
+  checked_at: string | null;
+  open: number | null;
 }
 
 export interface MainCi {
@@ -1299,6 +1354,7 @@ export interface MergeBatchPrs {
   number: number;
   head_oid: string;
   position: number;
+  repo: string | null;
 }
 
 export interface MergeBatches {
@@ -1329,6 +1385,22 @@ export interface MergeHolds {
   number: number;
   held_by: string;
   held_at: string;
+}
+
+export interface MergeRepoState {
+  repo: string;
+  batch_size: number;
+  updated_at: string;
+}
+
+export interface MergeState {
+  repo: string;
+  number: number;
+  head: string;
+  since: string;
+  reads: Generated<number>;
+  rereads: Generated<number>;
+  stuck: Generated<number>;
 }
 
 export interface Merges {
@@ -1527,6 +1599,7 @@ export interface OwnerStatements {
   at: string;
   embedding: Uint8Array | null;
   model: string | null;
+  ignored: Generated<number>;
 }
 
 export interface PatchChecks {
@@ -1752,6 +1825,13 @@ export interface ReleaseAssets {
   gone_at: string | null;
 }
 
+export interface RemoteCallItems {
+  call_id: number;
+  pos: number;
+  repo: string;
+  number: number;
+}
+
 export interface RemoteCalls {
   id: Generated<number>;
   job_id: number | null;
@@ -1849,6 +1929,10 @@ export interface RemoteHelpers {
   busy: number | null;
   last_error: string | null;
   helper_version: string | null;
+  idle_claim_at: number | null;
+  idle_tiers: string | null;
+  idle_repos: string | null;
+  machine: string | null;
 }
 
 export interface RemoteLeaseDrops {
@@ -1891,6 +1975,13 @@ export interface RepoPermissions {
   repo: string;
   permission: string;
   checked_at: string;
+}
+
+export interface RepoStepApprovals {
+  repo: string;
+  step: string;
+  by: string;
+  at: string;
 }
 
 export interface ReporterStates {
@@ -1948,6 +2039,17 @@ export interface ReviewPosts {
   edited_at: string | null;
   posted_as: string | null;
   opus_at: string | null;
+}
+
+export interface ReviewState {
+  repo: string;
+  number: number;
+  stale_at: string | null;
+  rerun_day: string | null;
+  rerun_count: Generated<number>;
+  fail_head: string | null;
+  fail_count: Generated<number>;
+  fail_at: string | null;
 }
 
 export interface RunnerLogins {
@@ -2149,6 +2251,8 @@ export interface StageLimits {
   per_day: number | null;
   updated_by: string | null;
   updated_at: string | null;
+  reset_at: string | null;
+  limit_set: Generated<number>;
 }
 
 export interface StageTrips {
@@ -2199,6 +2303,24 @@ export interface SyncRuns {
   mode: string | null;
   items: number | null;
   error: string | null;
+}
+
+export interface SyncState {
+  id: Generated<number>;
+  org_high_water: string | null;
+  full_sync_cursor: string | null;
+  search_catchup_at: string | null;
+  repos_refreshed_at: string | null;
+  main_ci_polled_at: string | null;
+  releases_polled_at: string | null;
+  releases_offset: number | null;
+  rate_remaining: number | null;
+  rate_reset_at: string | null;
+  points_last_run: number | null;
+  full_points_last_run: number | null;
+  author_ids_backfilled_at: string | null;
+  author_ids_error: string | null;
+  app_install_sweep_at: string | null;
 }
 
 export interface TokenUsage {
@@ -2283,6 +2405,23 @@ export interface WorkLeases {
   job_id: number;
   step: string;
   taken_at: string;
+}
+
+export interface WorkflowActions {
+  id: Generated<number>;
+  workflow_id: number;
+  repo: string;
+  number: number;
+  kind: string;
+  by: string;
+  head: string | null;
+  state: string;
+  reason: string | null;
+  comment_url: string | null;
+  attempts: Generated<number>;
+  created_at: string;
+  updated_at: string;
+  done_at: string | null;
 }
 
 export interface WorkflowEvents {
@@ -2392,12 +2531,14 @@ export interface DB {
   build_envs: BuildEnvs;
   build_pod_runs: BuildPodRuns;
   build_sizes: BuildSizes;
+  build_state: BuildState;
   build_task_logs: BuildTaskLogs;
   build_tasks: BuildTasks;
   change_seq: ChangeSeq;
   ci_fixes: CiFixes;
   ci_run_approvals: CiRunApprovals;
   classifications: Classifications;
+  classify_state: ClassifyState;
   claude_account_status: ClaudeAccountStatus;
   claude_account_tokens: ClaudeAccountTokens;
   claude_accounts: ClaudeAccounts;
@@ -2407,6 +2548,7 @@ export interface DB {
   conversation_includes: ConversationIncludes;
   conversation_turns: ConversationTurns;
   conversations: Conversations;
+  db_stats: DbStats;
   decision_choices: DecisionChoices;
   decision_claims: DecisionClaims;
   decision_comments: DecisionComments;
@@ -2431,6 +2573,7 @@ export interface DB {
   download_deltas: DownloadDeltas;
   dupe_carries: DupeCarries;
   dupe_comparisons: DupeComparisons;
+  dupe_drops: DupeDrops;
   dupe_group_fails: DupeGroupFails;
   dupe_group_items: DupeGroupItems;
   dupe_group_posts: DupeGroupPosts;
@@ -2472,14 +2615,18 @@ export interface DB {
   job_log_chunks: JobLogChunks;
   jobs: Jobs;
   lane_next: LaneNext;
+  lane_state: LaneState;
   leader_leases: LeaderLeases;
   liveness_items: LivenessItems;
+  liveness_state: LivenessState;
   main_ci: MainCi;
   main_fixes: MainFixes;
   mcp_tokens: McpTokens;
   merge_batch_prs: MergeBatchPrs;
   merge_batches: MergeBatches;
   merge_holds: MergeHolds;
+  merge_repo_state: MergeRepoState;
+  merge_state: MergeState;
   merges: Merges;
   model_checks: ModelChecks;
   model_waits: ModelWaits;
@@ -2516,6 +2663,7 @@ export interface DB {
   push_outcomes: PushOutcomes;
   release_apps: ReleaseApps;
   release_assets: ReleaseAssets;
+  remote_call_items: RemoteCallItems;
   remote_calls: RemoteCalls;
   remote_checks: RemoteChecks;
   remote_cooloffs: RemoteCooloffs;
@@ -2526,12 +2674,14 @@ export interface DB {
   remote_no_taker: RemoteNoTaker;
   remote_passages: RemotePassages;
   repo_permissions: RepoPermissions;
+  repo_step_approvals: RepoStepApprovals;
   reporter_states: ReporterStates;
   reporter_tokens: ReporterTokens;
   repos: Repos;
   review_blockers: ReviewBlockers;
   review_gates: ReviewGates;
   review_posts: ReviewPosts;
+  review_state: ReviewState;
   runner_logins: RunnerLogins;
   screenshot_config: ScreenshotConfig;
   screenshot_runs: ScreenshotRuns;
@@ -2552,6 +2702,7 @@ export interface DB {
   sync_repo_errors: SyncRepoErrors;
   sync_requests: SyncRequests;
   sync_runs: SyncRuns;
+  sync_state: SyncState;
   token_usage: TokenUsage;
   tracked_repos: TrackedRepos;
   user_settings: UserSettings;
@@ -2560,6 +2711,7 @@ export interface DB {
   verifications: Verifications;
   whitelist_overrides: WhitelistOverrides;
   work_leases: WorkLeases;
+  workflow_actions: WorkflowActions;
   workflow_events: WorkflowEvents;
   workspace_calls: WorkspaceCalls;
   workspace_sessions: WorkspaceSessions;
@@ -2584,12 +2736,14 @@ export interface DB {
   "main.build_envs": BuildEnvs;
   "main.build_pod_runs": BuildPodRuns;
   "main.build_sizes": BuildSizes;
+  "main.build_state": BuildState;
   "main.build_task_logs": BuildTaskLogs;
   "main.build_tasks": BuildTasks;
   "main.change_seq": ChangeSeq;
   "main.ci_fixes": CiFixes;
   "main.ci_run_approvals": CiRunApprovals;
   "main.classifications": Classifications;
+  "main.classify_state": ClassifyState;
   "main.claude_account_status": ClaudeAccountStatus;
   "main.claude_account_tokens": ClaudeAccountTokens;
   "main.claude_accounts": ClaudeAccounts;
@@ -2599,6 +2753,7 @@ export interface DB {
   "main.conversation_includes": ConversationIncludes;
   "main.conversation_turns": ConversationTurns;
   "main.conversations": Conversations;
+  "main.db_stats": DbStats;
   "main.decision_choices": DecisionChoices;
   "main.decision_claims": DecisionClaims;
   "main.decision_comments": DecisionComments;
@@ -2623,6 +2778,7 @@ export interface DB {
   "main.download_deltas": DownloadDeltas;
   "main.dupe_carries": DupeCarries;
   "main.dupe_comparisons": DupeComparisons;
+  "main.dupe_drops": DupeDrops;
   "main.dupe_group_fails": DupeGroupFails;
   "main.dupe_group_items": DupeGroupItems;
   "main.dupe_group_posts": DupeGroupPosts;
@@ -2664,14 +2820,18 @@ export interface DB {
   "main.job_log_chunks": JobLogChunks;
   "main.jobs": Jobs;
   "main.lane_next": LaneNext;
+  "main.lane_state": LaneState;
   "main.leader_leases": LeaderLeases;
   "main.liveness_items": LivenessItems;
+  "main.liveness_state": LivenessState;
   "main.main_ci": MainCi;
   "main.main_fixes": MainFixes;
   "main.mcp_tokens": McpTokens;
   "main.merge_batch_prs": MergeBatchPrs;
   "main.merge_batches": MergeBatches;
   "main.merge_holds": MergeHolds;
+  "main.merge_repo_state": MergeRepoState;
+  "main.merge_state": MergeState;
   "main.merges": Merges;
   "main.model_checks": ModelChecks;
   "main.model_waits": ModelWaits;
@@ -2708,6 +2868,7 @@ export interface DB {
   "main.push_outcomes": PushOutcomes;
   "main.release_apps": ReleaseApps;
   "main.release_assets": ReleaseAssets;
+  "main.remote_call_items": RemoteCallItems;
   "main.remote_calls": RemoteCalls;
   "main.remote_checks": RemoteChecks;
   "main.remote_cooloffs": RemoteCooloffs;
@@ -2718,12 +2879,14 @@ export interface DB {
   "main.remote_no_taker": RemoteNoTaker;
   "main.remote_passages": RemotePassages;
   "main.repo_permissions": RepoPermissions;
+  "main.repo_step_approvals": RepoStepApprovals;
   "main.reporter_states": ReporterStates;
   "main.reporter_tokens": ReporterTokens;
   "main.repos": Repos;
   "main.review_blockers": ReviewBlockers;
   "main.review_gates": ReviewGates;
   "main.review_posts": ReviewPosts;
+  "main.review_state": ReviewState;
   "main.runner_logins": RunnerLogins;
   "main.screenshot_config": ScreenshotConfig;
   "main.screenshot_runs": ScreenshotRuns;
@@ -2744,6 +2907,7 @@ export interface DB {
   "main.sync_repo_errors": SyncRepoErrors;
   "main.sync_requests": SyncRequests;
   "main.sync_runs": SyncRuns;
+  "main.sync_state": SyncState;
   "main.token_usage": TokenUsage;
   "main.tracked_repos": TrackedRepos;
   "main.user_settings": UserSettings;
@@ -2752,6 +2916,7 @@ export interface DB {
   "main.verifications": Verifications;
   "main.whitelist_overrides": WhitelistOverrides;
   "main.work_leases": WorkLeases;
+  "main.workflow_actions": WorkflowActions;
   "main.workflow_events": WorkflowEvents;
   "main.workspace_calls": WorkspaceCalls;
   "main.workspace_sessions": WorkspaceSessions;
@@ -2767,7 +2932,7 @@ export const COLUMNS = {
   agent_run_items: ["run_id", "repo", "number"],
   agent_run_texts: ["run_id", "prompt", "output"],
   agent_run_tools: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"],
-  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model"],
+  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "first_repo", "first_number"],
   app_allowed_owners: ["login", "account_id", "added_by", "added_at"],
   area_lists: ["repo", "version", "areas", "at", "by", "note"],
   area_proposals: ["id", "repo", "kind", "areas", "created_at", "created_by", "state", "decided_by", "decided_at"],
@@ -2780,12 +2945,14 @@ export const COLUMNS = {
   build_envs: ["id", "label", "kind", "enabled", "slots", "confidential", "confidential_since", "confidential_online_at", "key_hash", "capabilities", "reported_slots", "version", "paused_reason", "last_seen_at", "created_at", "updated_by", "updated_at", "settings", "health", "health_at"],
   build_pod_runs: ["task_id", "env_id", "key_hash", "pvc", "stage", "pod", "pod_created_at", "prepared", "results", "failed", "ran", "logged", "create_tries", "failing_since", "retry_at", "started_at", "node", "reserved_cpu_m", "reserved_mem_bytes", "disruptions", "replaces", "log_positions"],
   build_sizes: ["repo", "memory_request_bytes", "memory_limit_bytes", "updated_at", "reason", "warm_target", "memory_source"],
+  build_state: ["key", "value", "updated_at"],
   build_task_logs: ["task_id", "seq", "step", "chunk"],
   build_tasks: ["id", "job_id", "step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "state", "env_id", "attempts", "queued_at", "claimed_at", "started_at", "ended_at", "heartbeat_at", "cancel_requested_at", "results", "summary", "log_bytes", "artifact_bytes", "patch", "warm_key", "warm_role", "sandbox_env", "warm_image", "warm_version", "warm_rev"],
   change_seq: ["topic", "seq", "at"],
   ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
   classifications: ["repo", "number", "classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"],
+  classify_state: ["kind", "repo", "number", "value", "at"],
   claude_account_status: ["account_id", "logged_in", "method", "plan", "login_expires_at", "checked_at"],
   claude_account_tokens: ["account_id", "set_at", "rejected_at"],
   claude_accounts: ["id", "label", "enabled", "max_concurrent", "updated_by", "updated_at"],
@@ -2795,6 +2962,7 @@ export const COLUMNS = {
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
   conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress"],
   conversations: ["repo", "number", "item_block", "item_sig", "created_at", "created_by"],
+  db_stats: ["scope", "minute", "statements", "round_trips", "ms", "calls"],
   decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at", "asked_by"],
   decision_claims: ["decision_id", "login", "since", "at"],
   decision_comments: ["id", "decision_id", "login", "at", "body", "via"],
@@ -2803,7 +2971,7 @@ export const COLUMNS = {
   decision_prepares: ["decision_id", "at", "manual"],
   decisions: ["id", "kind", "repo", "number", "items", "question", "context", "facts", "options", "recommended", "recommended_reason", "recommended_by", "prepared_at", "prepared_head", "prepared_discussion", "prepare_failed_head", "recommend_failures", "recommend_failed_at", "public_text", "asked_at", "asked_by", "docket", "answer", "answer_note", "exceptions", "answered_by", "answered_at", "applied_at", "summary", "summary_by", "summary_at", "adopted_opinion", "snoozed_by", "snoozed_at", "exec_state", "exec_reason", "dispute_by", "dispute_reason", "dispute_at", "answered_role", "prepare_requested_at"],
   diff_facts: ["repo", "number", "head_oid", "reasons", "lines", "pending", "last_read"],
-  discord_alert_msgs: ["decision_id", "user_hash", "sealed", "choices_id", "sent_at"],
+  discord_alert_msgs: ["decision_id", "user_hash", "sealed", "choices_id", "sent_at", "workflow_id", "rec_at"],
   discord_alerts: ["user_hash", "sealed", "created_at"],
   discord_categories: ["category_id", "guild_id", "name", "position"],
   discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id", "panel_message", "viewable"],
@@ -2819,11 +2987,12 @@ export const COLUMNS = {
   download_deltas: ["asset_id", "t", "span", "delta"],
   dupe_carries: ["decision_id", "repo", "number", "state", "attempts", "outcome", "to_head", "from_head", "updated_at"],
   dupe_comparisons: ["repo", "key", "kind", "members", "hash", "kept", "source", "model", "reason", "result", "error", "attempts", "at", "heads", "summary", "why", "sizes"],
+  dupe_drops: ["repo", "key", "hash", "at"],
   dupe_group_fails: ["decision_id", "number", "fails"],
-  dupe_group_items: ["decision_id", "repo", "number", "kind", "role", "target", "detail", "base_role", "base_target", "head"],
+  dupe_group_items: ["decision_id", "repo", "number", "kind", "role", "target", "detail", "base_role", "base_target", "head", "group_id"],
   dupe_group_posts: ["decision_id", "number", "step", "url", "at"],
   dupe_group_texts: ["decision_id", "option", "number", "step", "text"],
-  dupe_groups: ["decision_id", "repo", "source", "applied_answer"],
+  dupe_groups: ["decision_id", "repo", "source", "applied_answer", "id"],
   duplicate_pairs: ["repo", "a", "b", "a_hash", "b_hash", "similarity", "jev_p", "haiku", "verdict", "canonical", "by_operator", "created_at", "checked_at"],
   duplicate_scans: ["repo", "number", "hash", "at"],
   ever_tracked_repos: ["name"],
@@ -2858,16 +3027,20 @@ export const COLUMNS = {
   jev_unsure: ["prompt_id", "ref", "input_hash", "answer", "at"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
   job_log_chunks: ["job_id", "seq", "start", "next_start", "chunk", "at"],
-  jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "crash_resumes", "lease_skips", "lease_skip_keys"],
+  jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "crash_resumes", "lease_skips", "lease_skip_keys", "db_statements", "db_round_trips", "db_ms", "effects"],
   lane_next: ["lane", "total", "items", "at"],
+  lane_state: ["kind", "step", "repo", "value", "job_id", "at"],
   leader_leases: ["role", "holder", "epoch", "expires_ms"],
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],
+  liveness_state: ["id", "checked_at", "open"],
   main_ci: ["repo", "head_sha", "branch", "state", "failing", "checks", "committed_at", "headline", "first_seen_at", "state_changed_at", "updated_at"],
   main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state"],
   mcp_tokens: ["id", "login", "token_hash", "label", "can_answer", "created_at", "last_used_at", "expires_at", "can_run", "idle_claim_at", "idle_tiers", "idle_repos", "kind", "machine", "can_agent"],
-  merge_batch_prs: ["batch_id", "number", "head_oid", "position"],
+  merge_batch_prs: ["batch_id", "number", "head_oid", "position", "repo"],
   merge_batches: ["id", "repo", "branch", "state", "base_sha", "commit_sha", "parent_id", "task_id", "retries", "pr_number", "pr_url", "summary", "created_at", "updated_at", "fork", "merge_sha", "build_state", "build_tries", "ci_reruns", "ci_rerun_at"],
   merge_holds: ["repo", "number", "held_by", "held_at"],
+  merge_repo_state: ["repo", "batch_size", "updated_at"],
+  merge_state: ["repo", "number", "head", "since", "reads", "rereads", "stuck"],
   merges: ["repo", "number", "head_oid", "run_id", "at", "path", "method", "outcome", "reason", "ci", "mergeable"],
   model_checks: ["id", "run_id", "step", "repo", "number", "head", "command", "crate", "test_name", "task_id", "outcome", "started_at", "ended_at"],
   model_waits: ["id", "provider", "class", "job_id", "step", "repo", "since", "seen_at", "eligible", "level"],
@@ -2884,7 +3057,7 @@ export const COLUMNS = {
   outside_holds: ["repo", "number", "author", "kind", "reason"],
   outside_released: ["repo", "number", "by", "at"],
   own_commits: ["repo", "sha", "action", "at"],
-  owner_statements: ["id", "source_kind", "source_id", "repo", "number", "item_title", "author", "text", "at", "embedding", "model"],
+  owner_statements: ["id", "source_kind", "source_id", "repo", "number", "item_title", "author", "text", "at", "embedding", "model", "ignored"],
   patch_checks: ["id", "kind", "repo", "number", "subject", "patch_hash", "round", "verdict", "reasons", "problems", "model", "created_at"],
   plan_bulk: ["id"],
   plan_full: ["id", "seq"],
@@ -2904,22 +3077,25 @@ export const COLUMNS = {
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
+  remote_call_items: ["call_id", "pos", "repo", "number"],
   remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "bound_slot", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin", "refusals", "refused_token"],
   remote_checks: ["id", "call_id", "run_id", "input", "state", "result", "requested_at", "ended_at"],
   remote_cooloffs: ["login", "until", "reason", "failures", "failures_since"],
-  remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version"],
+  remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version", "idle_claim_at", "idle_tiers", "idle_repos", "machine"],
   remote_lease_drops: ["token_id", "at", "login", "call_id"],
   remote_lease_tombstones: ["secret_hash", "call_id", "at"],
   remote_liveness: ["id", "alive_at", "since"],
   remote_no_taker: ["repo", "since"],
   remote_passages: ["id", "call_id", "run_id", "user_login", "repo", "passage_id", "page", "at"],
   repo_permissions: ["login", "repo", "permission", "checked_at"],
+  repo_step_approvals: ["repo", "step", "by", "at"],
   reporter_states: ["state_hash", "reporter", "expires_at", "verifier"],
   reporter_tokens: ["reporter", "github_id", "login", "token_enc", "version", "updated_at", "status"],
   repos: ["name", "owner", "visibility", "default_branch", "open_prs", "open_issues", "synced_at", "high_water", "reconciled_at"],
   review_blockers: ["b_repo", "b_number", "repo", "number", "head_oid"],
   review_gates: ["repo", "number", "blocked", "by_login", "read_at", "failures"],
   review_posts: ["repo", "number", "review_id", "head_oid", "posted_at", "edited_at", "posted_as", "opus_at"],
+  review_state: ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],
   runner_logins: ["id", "user_code", "secret_hash", "label", "machine", "ip", "helper_version", "created_at", "expires_at", "state", "login", "token_id", "want_agent", "want_answer"],
   screenshot_config: ["repo", "package", "example", "driver", "commands", "ui_paths", "size", "updated_by", "updated_at"],
   screenshot_runs: ["repo", "number", "head_sha", "base_sha", "state", "reason", "plan", "head_task_id", "base_task_id", "verdict", "clear", "comparison", "model", "held", "created_at", "finished_at"],
@@ -2933,13 +3109,14 @@ export const COLUMNS = {
   security_scans: ["id", "repo", "commit_sha", "state", "cap_usd", "cost_usd", "estimate_usd", "areas_total", "areas_done", "started_by", "started_at", "ended_at", "error", "job_id", "threat_model"],
   sessions: ["id_hash", "login", "csrf", "token_enc", "created_at", "last_seen", "expires_at", "user_agent"],
   settings: ["key", "value"],
-  stage_limits: ["step", "per_day", "updated_by", "updated_at"],
+  stage_limits: ["step", "per_day", "updated_by", "updated_at", "reset_at", "limit_set"],
   stage_trips: ["stage", "active", "reason", "evidence", "tripped_at", "cleared_at", "cleared_by"],
   stages: ["repo", "number", "stage", "at", "actor", "note", "docket"],
   star_samples: ["repo", "t", "stars"],
   sync_repo_errors: ["repo", "kind", "message", "moved_to", "since", "at"],
   sync_requests: ["repo", "number", "event", "requested_at"],
   sync_runs: ["started_at", "ended_at", "mode", "items", "error"],
+  sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at"],
   token_usage: ["run_id", "agent", "stage", "model", "repo", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"],
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
   user_settings: ["login", "key", "value", "updated_at"],
@@ -2948,6 +3125,7 @@ export const COLUMNS = {
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
+  workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at"],
   workflow_events: ["id", "workflow_id", "repo", "number", "login", "via", "kind", "parsed", "line", "at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],
