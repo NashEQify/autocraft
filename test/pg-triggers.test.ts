@@ -3,12 +3,14 @@
 // pass. The Postgres tests need a server (AUTOCRAFT_TEST_PG_URL; `pnpm test:pg` starts one) and are skipped otherwise.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bulkWrites, changeCursor, changesSince, planTriggers, pruneChanges, type ChangeCursor } from "../src/core/plan-changes.ts";
+import "../src/trigger-sources.ts";
+import { bulkWrites, changeCursor, changesSince, pruneChanges, type ChangeCursor } from "../src/core/plan-changes.ts";
+import { planTriggers } from "../src/db/plan-triggers.ts";
 import { pgExpr } from "../src/core/pg-expr.ts";
 import type { Db } from "../src/db/index.ts";
 import { loadPg } from "../src/db/open.ts";
 import { PG_COLUMNS_SQL, pgColumns } from "../src/db/pg-triggers.ts";
-import { liveTriggers, readSeqs } from "../src/live.ts";
+import { liveTriggers } from "../src/db/live.ts";
 import { needsPg, testDatabase, type TestDatabase } from "./test-db.ts";
 
 const T = "2026-01-01T00:00:00Z";
@@ -54,12 +56,12 @@ const STEPS: [string, (db: Db) => Promise<unknown>][] = [
 
 /** Per step: the topics whose counter moved and what the change log answers. */
 async function observe(db: Db): Promise<string[]> {
-  let seqs = await readSeqs(db);
+  let seqs = await db.seqs();
   let cursor = await changeCursor(db);
   const out: string[] = [];
   for (const [label, run] of STEPS) {
     await run(db);
-    const now = await readSeqs(db);
+    const now = await db.seqs();
     const c = await changesSince(db, cursor);
     const topics = Object.keys(now).filter((t) => now[t] !== seqs[t]).sort();
     out.push(`${label}: topics ${topics.join(" ")}; ${c.full ? "full" : `items ${[...c.refs].sort().join(" ")}`}`);
@@ -158,7 +160,7 @@ test("counters move once per transaction, at commit, and not for a rolled-back s
     // The full-pass cause of a new PR, named after its planner input.
     const source = planTriggers("postgres").flatMap((p) => ("full" in p && p.table === "items" && p.op === "INSERT" ? [p.full] : []))[0]!;
     const seqs = async () => {
-      const s = await readSeqs(db);
+      const s = await db.seqs();
       const gen = (await db.get(db.k.selectFrom("plan_full").select("seq")))!.seq;
       const n = (await db.get(db.k.selectFrom("plan_full_causes").select("n").where("source", "=", source)))?.n ?? 0;
       return { items: s.items!, fasttrack: s.fasttrack!, gen, n };

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { grid, select, series } from "../src/dash/api/nightly.ts";
 import { setFeature } from "../src/build/features.ts";
-import { TOPICS } from "../src/live.ts";
+import { TOPICS } from "../src/db/live.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";

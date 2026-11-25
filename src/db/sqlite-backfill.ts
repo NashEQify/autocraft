@@ -1,7 +1,7 @@
 // SQLite-only migration and maintenance code that runs on the synchronous DatabaseSync inside connect()'s migrations
 // (src/db.ts), or maintains the SQLite change-log triggers. Raw SQL lives here so the rest of src/ uses the query builder.
 import type { DatabaseSync } from "node:sqlite";
-import { markFull, BULK_ROWS } from "../core/plan-changes.ts";
+import { markFull, BULK_ROWS } from "./plan-triggers.ts";
 import { BATCH, FIELD_COLUMNS, SCHEME_ID, classifyHash, embedHash, type Fields } from "../itemhash.ts";
 import { textRefs } from "../core/open-prs.ts";
 import type { Db } from "./index.ts";

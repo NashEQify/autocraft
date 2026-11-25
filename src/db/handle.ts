@@ -633,6 +633,14 @@ export class Handle implements QueryDb {
     return () => void this.#observers.delete(fn);
   }
 
+  async seqs(topics?: readonly string[]): Promise<Record<string, number>> {
+    let q = this.k.selectFrom("change_seq").select(["topic", "seq"]);
+    if (topics) q = q.where("topic", "in", [...topics]);
+    const out: Record<string, number> = {};
+    for (const r of await this.all(q)) out[r.topic] = Number(r.seq);
+    return out;
+  }
+
   async notify(channel: string, payload: string): Promise<void> {
     if (this.dialect !== "postgres") return;
     await this.prepare("SELECT pg_notify(?, ?) AS n").get(channel, payload);

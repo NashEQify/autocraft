@@ -2,7 +2,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fingerprintOf, INPUT_TOPICS, LANES, detectAutopilot, pauseOf, setLimit } from "../src/runner/autopilot.ts";
-import { readSeqs } from "../src/live.ts";
 import { OPERATOR, world } from "./world-db.ts";
 
 test("a step paused until an operator acts sets no wake time", async () => {
@@ -16,10 +15,10 @@ test("a step paused until an operator acts sets no wake time", async () => {
 
 test("a write to flow_summary leaves the planner's input unchanged", async () => {
   const w = await (await (await world()).repo()).issue(1);
-  const fp = async () => await fingerprintOf(w.db, { topics: INPUT_TOPICS }, "prioritize", {}, await readSeqs(w.db));
+  const fp = async () => await fingerprintOf(w.db, { topics: INPUT_TOPICS }, "prioritize", {}, await w.db.seqs());
   const before = await fp();
-  const flow = (await readSeqs(w.db)).flow;
+  const flow = (await w.db.seqs()).flow;
   await w.db.run(w.db.k.insertInto("flow_summary").values({ repo: "app", counts: "{}", counted_at: "now", stale: 0, decisions_sig: "" }));
-  assert.notEqual((await readSeqs(w.db)).flow, flow, "the flow topic moved");
+  assert.notEqual((await w.db.seqs()).flow, flow, "the flow topic moved");
   assert.equal(await fp(), before);
 });

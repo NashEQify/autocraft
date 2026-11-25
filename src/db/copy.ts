@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { planChangesSql } from "../core/plan-changes.ts";
+import { planChangesSql } from "./plan-triggers.ts";
 import type { Db, Param, Row, Value } from "./index.ts";
 import { connect } from "../db.ts";
 import { connectDb, dbFor, isPgUrl, loadPg } from "./open.ts";

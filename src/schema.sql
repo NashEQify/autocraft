@@ -1767,7 +1767,9 @@ CREATE TABLE IF NOT EXISTS held_followups (
   url TEXT,
   reason TEXT,                        -- dropped or failed: why; held: why the last try did not file it
   attempts INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  workflow_id INTEGER,                -- the maintainer workflow the follow-up was held for; NULL on rows held before workflows
+  approved_at TEXT                    -- the workflow's merge approval as it stood when the follow-up was held
 );
 CREATE INDEX IF NOT EXISTS held_followups_item ON held_followups(repo, number);
 CREATE INDEX IF NOT EXISTS held_followups_state ON held_followups(state);
