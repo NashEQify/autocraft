@@ -323,6 +323,7 @@ function Workflows() {
             </span>
           </li>
         </ol>
+        <p className="text-sm">{t("When the automatic path stops for a person, it asks like any other workflow. Whoever answers takes the item over.")}</p>
       </Part>
       {ENTRIES.map((e) => (
         <Part key={e} title={t(ENTRY_LABEL[e])}>

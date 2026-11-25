@@ -4,7 +4,7 @@
 import { t, tk } from "../i18n/index.ts";
 import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
-import { heldWork } from "./types.ts";
+import { heldWork, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend";
@@ -160,7 +160,9 @@ export const recommendationLine = (rec: Recommendation | null): string | null =>
 
 /** Who started, approved, answered and holds the item; `answered` is the latest answer, from the item's events. */
 export function attributionLines(wf: ItemWorkflow, answered?: { by: string; at: string } | null, clock: Clock = utcClock): string[] {
-  const out = wf.state === "stopped" && heldWork(wf).unstarted ? [] : [t("{entry}, started by {login}, {time}", { entry: t(ENTRY_LABEL[wf.entry]), login: wf.startedBy, time: clock(wf.startedAt) })];
+  const entry = t(ENTRY_LABEL[wf.entry]), time = clock(wf.startedAt);
+  const started = wf.startedBy === RULE_STARTER ? t("{entry}, started by the automatic merge rule, {time}", { entry, time }) : t("{entry}, started by {login}, {time}", { entry, login: wf.startedBy, time });
+  const out = wf.state === "stopped" && heldWork(wf).unstarted ? [] : [started];
   if (wf.approvedBy) out.push(t("Approved for merge by {login}, {time}", { login: wf.approvedBy, time: clock(wf.approvedAt ?? "") }));
   if (answered) out.push(t("Answered by {login}, {time}", { login: answered.by, time: clock(answered.at) }));
   if (wf.stoppedBy) out.push(t("Held by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }));

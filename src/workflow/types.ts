@@ -7,6 +7,12 @@ export type Entry = "review" | "fixup" | "implement" | "merge";
 export type WorkflowState = "running" | "waiting" | "blocked" | "recommending" | "done" | "stopped" | "closed" | "backlog";
 export type Surface = "github" | "discord" | "agent" | "dashboard" | "cli";
 
+/**
+ * Who started the workflow of a PR the automatic merge rule took up and then stopped for a person's judgement (auto-stop.ts). No GitHub
+ * login has a space, so it is nobody's. The workflow acts for nobody until someone answers it: that person takes the item over.
+ */
+export const RULE_STARTER = "automatic merge rule";
+
 /** The six blockers that bring an approved item back to a person, and `other` for a stop outside them (its reason shown as given). */
 export type Blocker = "major-finding" | "author-commits" | "failed-twice" | "beyond-agreed" | "large-fix" | "outside-purpose" | "other";
 

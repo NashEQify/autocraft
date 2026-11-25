@@ -8,7 +8,8 @@
 // answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end, a stop at a blocker at once with the end
 // of its merge leg (block.ts). A workflow a person changed meanwhile (held, answered, approved) keeps what they did: the pass's write
-// leaves it out and the next pass looks at it again.
+// leaves it out and the next pass looks at it again. Each pass first starts the workflows of PRs the automatic merge rule stopped for a
+// person's judgement (auto-stop.ts), so they come back the same way.
 import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
@@ -30,6 +31,7 @@ import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
+import { startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
 import { codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
@@ -193,6 +195,13 @@ function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours
 export async function advanceWorkflows(db: Db, log: (line: string) => void = () => {}, wake: (at: number) => void = () => {}, failed: Map<number, FailedCheck> = new Map()): Promise<Moved[]> {
   return await withConfig(db, async () => {
     const at = new Date().toISOString();
+    try {
+      const started = await startAutoStops(db, at);
+      if (started) log(`workflows: ${started} pull requests the automatic merge rule stopped now wait for an answer`);
+    } catch (e) {
+      if (isFenced(e)) throw e;
+      log(`workflows: the automatic merge rule's stops were not started: ${(e as Error).message}`);
+    }
     const live = await listWorkflows(db, { live: true });
     const ids = new Set(live.map((w) => w.id));
     for (const id of failed.keys()) if (!ids.has(id)) failed.delete(id);
