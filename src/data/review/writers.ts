@@ -251,6 +251,17 @@ export async function saveFollowups(db: Db, rows: FollowupRow[]): Promise<void> 
   }
 }
 
+/** Writes the outcome of rows left in `filing`: only over a row still in `filing` that was claimed by `before`. */
+export async function settleFilings(db: Db, rows: FollowupRow[], o: { before: string }): Promise<void> {
+  if (!rows.length) return;
+  const q = queryDb(db);
+  for (const part of kx.batches(rows)) {
+    await q.run(q.k.insertInto("main.postmerge_followups")
+      .values(part.map((r) => ({ repo: r.repo, number: r.number, review_at: r.review_at, finding: r.finding, title: r.title, issue_number: r.issue_number, url: r.url, state: r.state, at: r.at, duplicate_of: r.duplicate_of, attempts: r.attempts, note: r.note })))
+      .onConflict((oc) => followupConflict(oc).doUpdateSet(kx.excluded(FOLLOWUP_SET)).where("main.postmerge_followups.state", "=", "filing").where("main.postmerge_followups.at", "<=", o.before)));
+  }
+}
+
 /** A fresh post is an upsert of every column; an edit updates head, edit time, `opus_at` and `posted_as` only. A later row of one PR in the call wins. */
 export async function saveReviewPosts(db: Db, rows: PostSave[]): Promise<void> {
   if (!rows.length) return;

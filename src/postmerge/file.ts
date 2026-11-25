@@ -3,7 +3,8 @@
 //
 // A row in state `filing` is written before the call. A create that succeeded on GitHub but whose answer was lost leaves
 // that row behind: the issue may exist, so the finding is never filed again by this stage, and the dashboard says the
-// outcome is unknown. Only a refusal from GitHub (no issue can exist) is recorded `failed` and tried again later.
+// outcome is unknown. A refusal from GitHub (no issue can exist) is recorded `failed` and tried again later; a create that
+// sent nothing puts the row back as it was. A row a stopped process left behind is settled from its audit row (stuckFilings).
 import { jobItem } from "../runner/job-items.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo, type GuardedRepo } from "../core/guard.ts";
@@ -14,10 +15,11 @@ import { createIssue, IssueError, type Writer } from "../github/write.ts";
 import { pipelineLogin } from "../review/discussion.ts";
 import { ghFileExists, type FileChecker } from "../review/diff.ts";
 import { issueBody, issueTitle, refusal } from "./template.ts";
-import { claimFollowups, followupKey, saveFollowups } from "../data/review/index.ts";
+import { claimFollowups, followupKey, saveFollowups, settleFilings } from "../data/review/index.ts";
 import { listItems, loadRepos } from "../data/mirror/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
-import { dedupeDefects, pendingDefects, recentFiled, reviewOf, followupsOf, type FollowupState, type PendingDefect } from "./select.ts";
+import { HELD_STUCK_MS } from "../conversations/held.ts";
+import { dedupeDefects, pendingDefects, recentFiled, reviewOf, followupsOf, stuckFilings, type FollowupState, type PendingDefect } from "./select.ts";
 import type { Db } from "../db/index.ts";
 
 export const ACTOR = "postmerge-file";
@@ -29,6 +31,10 @@ export type FileSummary = {
   repo: string; candidates: number; filed: { ref: string; issue: number }[]; limited: number; failed: { ref: string; reason: string }[];
   /** Attempts whose outcome is unknown: the issue may exist on GitHub. */
   unknown: { ref: string; reason: string }[]; skipped: number; note: string | null;
+  /** Rows a stopped process left in `filing`, settled. */
+  settled: number;
+  /** Why the run stopped at a create that sent nothing: a later run tries it again. */
+  later?: string;
 };
 
 export const defaultFileDeps = (): FileDeps => ({ exec, now: () => new Date(), fileExists: ghFileExists });
@@ -50,7 +56,7 @@ async function claim(db: Db, d: Row, at: string, attempts: number): Promise<bool
 
 const oneLine = (e: unknown): string => String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 300);
 
-type Outcome = { kind: "filed"; issue: number } | { kind: "skipped" } | { kind: "failed" | "unknown"; reason: string };
+type Outcome = { kind: "filed"; issue: number } | { kind: "skipped" } | { kind: "failed" | "unknown" | "later"; reason: string };
 
 /**
  * One filing attempt: the stale-file and text checks (a skip, no write to GitHub), the `filing` row, the create, and the
@@ -83,6 +89,14 @@ async function fileDefect(db: Db, deps: FileDeps, w: Writer, g: GuardedRepo, d: 
     made = await createIssue(w, g, deps.exec, { repo, target: ref, title, body }, { by: "model", kind: "issue", model: d.model }, { finding: d.finding, severity: d.f.severity });
   } catch (e) {
     const reason = oneLine(e);
+    // Nothing was sent (also while an earlier try's outcome cannot be read): no try is counted.
+    if (e instanceof IssueError && (e.later || e.unsettled)) {
+      try {
+        if (d.was) await saveFollowups(db, [d.was]);
+        else await setFollowup(db, row, "skipped-limit", at(), { attempts: d.attempts });
+      } catch (x) { log(`  ${ref}: not put back, its audit row settles it: ${oneLine(x)}`); }
+      return { kind: "later", reason };
+    }
     if (!(e instanceof IssueError) || !e.clear) return { kind: "unknown", reason };
     try { await setFollowup(db, row, "failed", at(), { attempts, note: reason }); } catch { return { kind: "unknown", reason }; }
     return { kind: "failed", reason };
@@ -96,15 +110,27 @@ async function fileDefect(db: Db, deps: FileDeps, w: Writer, g: GuardedRepo, d: 
   return { kind: "filed", issue: made.number };
 }
 
+/** Settles the repo's rows left in `filing` from their audit rows: filed with the issue, or back to what may be tried again when nothing was sent. */
+async function settleStuck(db: Db, repo: string, now: Date, log: (line: string) => void): Promise<number> {
+  const { due } = await stuckFilings(db, { repo, now: now.getTime() });
+  await settleFilings(db, due.map(({ row, outcome }) => {
+    if (outcome.state === "filed") return { ...row, state: "filed", issue_number: outcome.number, url: outcome.url, at: now.toISOString() };
+    const attempts = Math.max(0, row.attempts - 1);
+    return { ...row, state: attempts ? "failed" : "skipped-limit", attempts };
+  }), { before: new Date(now.getTime() - HELD_STUCK_MS).toISOString() });
+  for (const { row, outcome } of due) log(`  ${repo}#${row.number}: ${outcome.state === "filed" ? `was filed as issue ${outcome.number}` : "a stopped filing sent nothing"}`);
+  return due.length;
+}
+
 /**
  * Files up to `limit` pending defects of the repo, oldest review first. A defect that repeats an earlier one of the same
  * run (same file, nearby line, similar title) is marked skipped-duplicate. The defects beyond the limit are marked
  * skipped-limit and are filed by a later run. Nothing is filed in a repo without comment approval. After an attempt with
- * an unknown outcome the run stops: the network or GitHub is likely failing.
+ * an unknown outcome, or one that sent nothing, the run stops: the network or GitHub is likely failing.
  */
 export async function runPostmergeFile(db: Db, params: FileParams, log: (line: string) => void = console.log, deps: FileDeps = defaultFileDeps()): Promise<FileSummary> {
   const { repo } = params;
-  const s: FileSummary = { repo, candidates: 0, filed: [], limited: 0, failed: [], unknown: [], skipped: 0, note: null };
+  const s: FileSummary = { repo, candidates: 0, filed: [], limited: 0, failed: [], unknown: [], skipped: 0, note: null, settled: 0 };
   if (!await commentApprovalOf(db, repo)) {
     s.note = `commenting in ${repo} is not approved`;
     log(`postmerge-file ${repo}: ${s.note}; nothing filed`);
@@ -116,6 +142,7 @@ export async function runPostmergeFile(db: Db, params: FileParams, log: (line: s
     log(`postmerge-file ${repo}: ${s.note}; nothing filed`);
     return s;
   }
+  s.settled = await settleStuck(db, repo, deps.now(), log);
   const { keep, dupes } = dedupeDefects(await pendingDefects(db, repo, deps.now().getTime()), await recentFiled(db, repo, deps.now().getTime()));
   for (const { d, of } of dupes) {
     await setFollowup(db, rowOf(d), "skipped-duplicate", deps.now().toISOString(), { duplicateOf: of });
@@ -137,7 +164,11 @@ export async function runPostmergeFile(db: Db, params: FileParams, log: (line: s
     if (o.kind === "filed") s.filed.push({ ref, issue: o.issue });
     else if (o.kind === "skipped") s.skipped++;
     else if (o.kind === "failed") { s.failed.push({ ref, reason: o.reason }); log(`  ${ref}: not filed: ${o.reason}`); }
-    else {
+    else if (o.kind === "later") {
+      s.later = o.reason;
+      log(`  ${ref}: not filed yet: ${o.reason}`);
+      break;
+    } else {
       s.unknown.push({ ref, reason: o.reason });
       log(`  ${ref}: outcome unknown, check GitHub: ${o.reason}`);
       break;
@@ -163,10 +194,11 @@ export async function fileFinding(db: Db, ref: string, index: number, log: (line
   if (!await commentApprovalOf(db, repo)) throw new Error(`commenting in ${repo} is not approved`);
   if ((await loadQuiet(db, [`${repo}#${number}`])).size > 0) throw new Error(`${ref} is a quiet pull request: its fix is not public yet, so no issue is filed about it`);
   if (!(await listItems(db, { repos: [repo], numbers: [number], inScope: true }, "ref")).length) throw new Error(`${ref} is outside the pipeline's scope`);
+  await settleStuck(db, repo, deps.now(), log);
   const have = (await followupsOf(db, repo, number)).find((x) => x.review_at === r.at && x.finding === index);
   if (have?.state === "filed" || have?.state === "filing") throw new Error(`finding ${index} of ${ref} is already ${have.state === "filed" ? `filed as issue ${have.issue_number}` : "being filed with an unknown outcome; check GitHub"}`);
   await audit(db, OPERATOR, "postmerge-file-one", ref, { finding: index });
-  const d: PendingDefect = { repo, number, review_at: r.at, finding: index, f, model: r.model, attempts: have?.attempts ?? 0 };
+  const d: PendingDefect = { repo, number, review_at: r.at, finding: index, f, model: r.model, attempts: have?.attempts ?? 0, was: have ?? null };
   const g = await guardRepo(db, repo, "comment", CLI_BY);
   if ("refused" in g) throw new Error(g.refused);
   const o = await fileDefect(db, deps, { db, login: ACTOR }, g, d, log, () => {});

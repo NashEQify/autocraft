@@ -9,6 +9,7 @@ import { issueMade } from "../src/github/made.ts";
 import { commentOn, createIssue, ghAskComment, ghComment, IssueError, UnsettledError } from "../src/github/write.ts";
 import { Client, Transient } from "../src/mirror.ts";
 import { SCRATCH } from "./scratch.ts";
+import { failsBegin } from "./helpers/fails-begin.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -77,11 +78,22 @@ test("a lost issue is found by its title or body under our own name, reading no 
 test("a create whose audit row could not be finished may have made the issue; one a rate limit refused made none and may be tried again", async () => {
   const g = { scope: "repo", repo: "app", as: "app" } as unknown as GuardedRepo;
   const create = async (exec: Parameters<typeof createIssue>[2], db: Awaited<ReturnType<typeof connectDb>>) =>
-    await createIssue({ db, login: "x" }, g, exec, { repo: "app", target: "app#3", title: "t", body: "b" }, note).then(() => null, (e: IssueError) => ({ clear: e.clear, paced: e.paced }));
+    await createIssue({ db, login: "x" }, g, exec, { repo: "app", target: "app#3", title: "t", body: "b" }, note).then(() => null, (e: IssueError) => ({ clear: e.clear, later: e.later }));
   const gone = await connectDb(join(dir, "gone.db"));
-  assert.deepEqual(await create(async () => { await gone.close(); return { code: 0, stdout: "https://github.com/storytold/app/issues/4\n", stderr: "" }; }, gone), { clear: false, paced: false });
+  assert.deepEqual(await create(async () => { await gone.close(); return { code: 0, stdout: "https://github.com/storytold/app/issues/4\n", stderr: "" }; }, gone), { clear: false, later: false });
   const db = await connectDb(join(dir, "limit.db"));
-  assert.deepEqual(await create(async () => ({ code: 1, stdout: "", stderr: "GraphQL: API rate limit already exceeded for user ID 1." }), db), { clear: true, paced: true });
+  assert.deepEqual(await create(async () => ({ code: 1, stdout: "", stderr: "GraphQL: API rate limit already exceeded for user ID 1." }), db), { clear: true, later: true });
+});
+
+test("a create that failed before its request sent nothing, unless an earlier try may have made the issue", async () => {
+  const g = { scope: "repo", repo: "app", as: "app" } as unknown as GuardedRepo;
+  let creates = 0;
+  const create = async (db: Awaited<ReturnType<typeof connectDb>>, exec: Parameters<typeof createIssue>[2] = async () => { creates++; return { code: 1, stdout: "", stderr: "timeout" }; }) =>
+    await createIssue({ db, login: "x" }, g, exec, { repo: "app", target: "app#3", title: "t", body: "b" }, note).then(() => null, (e: IssueError) => [e.clear, e.later, e.unsent, e.unsettled]);
+  const db = await connectDb(join(dir, "before.db"));
+  assert.deepEqual([await create(failsBegin(db)), creates], [[true, true, true, false], 0]);
+  assert.deepEqual([await create(db), creates], [[false, false, false, false], 1], "this request went out");
+  assert.deepEqual([await create(db, async () => { throw new Error("no network"); }), creates], [[false, false, false, true], 1], "GitHub cannot be read for the lost try");
 });
 
 test("comments that speak of abuse are not a rate limit of GitHub", async () => {
