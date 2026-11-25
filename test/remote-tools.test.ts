@@ -19,7 +19,7 @@ import type { Embedder } from "../src/embed/model.ts";
 import { awaitCall, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, ROUTES, type TaskBundle } from "../src/remote/protocol.ts";
-import { buildReferenceIndex } from "../src/reference-search.ts";
+import { buildReferenceIndex } from "../src/data/external/index.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
 import { SCRATCH } from "./scratch.ts";
 import { writeTestSnapshot } from "./test-db.ts";

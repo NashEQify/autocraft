@@ -108,6 +108,84 @@ export function inList(d: D, e: Ex, values: readonly Param[], type: ElemType = "
   return sql`${x(e)} ${op} (SELECT ${v} FROM json_array_elements_text((${list})::json) AS value)`;
 }
 
+// ---- JSON row sets ----------------------------------------------------------------------------------------------
+
+/** Column names of `valuesTable` and `updateFrom` are written into the statement text, so they must be plain names. */
+const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ident = (name: string): string => {
+  if (!IDENT.test(name)) throw new Error(`not a plain column name: ${name}`);
+  return name;
+};
+
+/**
+ * A subselect as JSON array text of its rows (objects keyed by the select's column names), for a select list: SQLite
+ * `json_group_array(json_object(..))`, Postgres `json_agg`. Rows keep the subselect's `ORDER BY`; no row gives `[]`.
+ * Text, integers and reals only (no booleans, no blobs). Every column needs a name (an alias or a plain reference). Read
+ * the value with `parseJsonRows`. `q` may refer to the enclosing query's tables.
+ */
+export function jsonRows(d: D, q: SelectQueryBuilder<any, any, any>): RawBuilder<string | null> {
+  const pairs = sql.join(selectionNames(q).flatMap((n) => [sql.lit(n), sql.ref(`s.${n}`)]));
+  return pgOf(d)
+    ? sql`(SELECT COALESCE(json_agg(json_build_object(${pairs})), '[]'::json)::text FROM ${q} AS s)`
+    : sql`(SELECT json_group_array(json_object(${pairs})) FROM ${q} AS s)`;
+}
+
+/** The rows of a `jsonRows` value; none for NULL. */
+export function parseJsonRows<T = Record<string, unknown>>(value: string | null | undefined): T[] {
+  return value === null || value === undefined ? [] : (JSON.parse(value) as T[]);
+}
+
+type ValuesRow<C extends Record<string, ElemType>> = { [K in keyof C]: ElemTs<C[K]> | null };
+
+/**
+ * A table expression named `alias` over `rows`, bound as one JSON parameter, with the columns `cols` (name to type; the
+ * type is the Postgres cast, as in `jsonEach`). The statement text is the same for any number of rows. Row values are
+ * text, numbers or null; a missing key is NULL. Generalizes `refPairs` and `tupleIn`.
+ */
+export function valuesTable<C extends Record<string, ElemType>, A extends string>(d: D, rows: readonly Record<string, Param>[], cols: C, alias: A): AliasedRawBuilder<ValuesRow<C>, A> {
+  const list = JSON.stringify(rows);
+  const pg = pgOf(d);
+  const proj = sql.join(Object.entries(cols).map(([name, type]) => {
+    const get = sql.raw(`value ->> ${quote(ident(name))}`);
+    return pg && type !== "text" ? sql`(${get})::${sql.raw(type)} AS ${sql.id(name)}` : sql`${get} AS ${sql.id(name)}`;
+  }));
+  return pg
+    ? sql<ValuesRow<C>>`(SELECT ${proj} FROM json_array_elements((${list})::json) AS value)`.as(alias)
+    : sql<ValuesRow<C>>`(SELECT ${proj} FROM json_each(${list}))`.as(alias);
+}
+
+/** Keys per JSON key list and rows per `updateFrom` statement. */
+export const JSON_CHUNK = 10_000;
+
+/** `rows` in slices of `n` (default 10,000) for JSON key lists; `batches` slices to BATCH_ROWS for multi-row VALUES. */
+export const chunks = <T>(rows: readonly T[], n: number = JSON_CHUNK): T[][] => Array.from({ length: Math.ceil(rows.length / n) }, (_, i) => rows.slice(i * n, (i + 1) * n));
+
+/**
+ * `UPDATE table SET c = v.c FROM (rows) v WHERE table.k = v.k`: one statement sets different values on many rows, in
+ * chunks of 10,000 rows. `keyCols` match rows; `setCols` default to every other column of the first row. Values are text,
+ * numbers or null, stored as the column's own type (Postgres reads the rows with json_populate_recordset against the
+ * table, so a JSON number into a bigint or text into a citext column needs no cast). Returns the rows changed. Call
+ * inside `db.write`.
+ */
+export async function updateFrom(db: Db, table: string, keyCols: readonly string[], rows: readonly Record<string, Param>[], setCols?: readonly string[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const set = setCols ?? Object.keys(rows[0]).filter((c) => !keyCols.includes(c));
+  if (set.length === 0 || keyCols.length === 0) throw new Error("updateFrom needs key columns and columns to set");
+  const k = db.k as any;
+  const names = [...keyCols, ...set].map(ident);
+  let changed = 0;
+  for (const chunk of chunks(rows)) {
+    const v = db.dialect === "postgres"
+      ? sql`json_populate_recordset(NULL::${sql.table(table)}, ${JSON.stringify(chunk)}::json)`.as("v")
+      : valuesTable(db, chunk, Object.fromEntries(names.map((n) => [n, "text" as const])), "v");
+    const q = k.updateTable(table).from(v)
+      .set((eb: ExpressionBuilder<any, any>) => Object.fromEntries(set.map((c) => [c, eb.ref(`v.${c}`)])))
+      .where((eb: ExpressionBuilder<any, any>) => eb.and(keyCols.map((c) => eb(`${table}.${c}`, "=", eb.ref(`v.${c}`)))));
+    changed += (await db.run(q)).changes;
+  }
+  return changed;
+}
+
 // ---- item refs ----------------------------------------------------------------------------------------------------
 
 /** `[repo, number]` pairs from "repo#number" refs (unreadable ones left out) or from pairs as they are. */
