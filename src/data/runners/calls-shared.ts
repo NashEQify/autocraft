@@ -108,9 +108,10 @@ export function dropQueueCache(db: Db): void {
   queueCaches.delete(db);
   for (const h of dropHooks) h(db);
 }
-export const cachedQueue = (db: Db, signature: string, now: number): QueueSnapshot | null => {
+/** The cached queue read within the window; it stands while its signature is still the queue's. */
+export const cachedQueue = (db: Db, now: number): QueueSnapshot | null => {
   const hit = queueCaches.get(db);
-  return hit && hit.snapshot.signature === signature && now >= hit.at && now - hit.at < QUEUE_CACHE_MS ? hit.snapshot : null;
+  return hit && now >= hit.at && now - hit.at < QUEUE_CACHE_MS ? hit.snapshot : null;
 };
 export const storeQueue = (db: Db, snapshot: QueueSnapshot, now: number): void => void queueCaches.set(db, { at: now, snapshot });
 export const queueSignature = (n: number, newest: number | null): string => `${n}:${newest}`;

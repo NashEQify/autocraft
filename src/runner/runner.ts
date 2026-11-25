@@ -14,22 +14,24 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
 import { advancePreapprovals, preapprovalInputs } from "../preapproval/index.ts";
-import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
+import { applyProposals, AUTOPILOT_USER, isEnabled, KEY_ENABLED, loadPlanDue, planDue, type Detected } from "./autopilot.ts";
 import { pruneRuns } from "../agents/runs.ts";
 import { pruneJevUnsure } from "../agents/step.ts";
 import { pruneTasks, reapLost } from "../build/tasks.ts";
+import { loadStaleTasks } from "../data/build/index.ts";
+import { freshConfig } from "../data/control/index.ts";
 import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
 import { drainCommands, pruneCommands } from "../github/commands.ts";
 import { checkPendingUpdate } from "../build/worker-update.ts";
 import { JOB_KEEP_MS, now, pruneJobs } from "./jobs.ts";
 import { endJob, recoverJobs } from "./lifecycle.ts";
-import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
-import { advanceScanTests } from "../security/scantest.ts";
+import { advanceSecurityFixes, autoFixConfirmed, loadSecurityFixWork } from "../security/actions.ts";
+import { advanceScanTests, loadScanTestWork } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
 import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
-import { jobBlock, stepParallel } from "./concurrency.ts";
+import { jobBlock, STEP_PARALLEL_KEY } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
@@ -38,7 +40,7 @@ import { JOB_DEADLINE_ENV, stepDeadlineMin, stepNoProgressMin } from "./deadline
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
-import { CALLER_STALE_MS } from "../remote/room.ts";
+import { CALLER_STALE_MS, roomState } from "../remote/room.ts";
 import { claimJob, failQueued, loadLiveJobs, loadRunnerTick, markDeadlineStops, saveLaneState, setPids, type LogCursor, type QueuedJob, type RunningState } from "../data/jobs/index.ts";
 import { loadSyncState, hasSyncRequests } from "../data/mirror/index.ts";
 import { hasCommandWork } from "../data/workflow/index.ts";
@@ -113,6 +115,8 @@ function numberOfParams(params: string): number | null {
   try { const n = (JSON.parse(params) as { number?: unknown }).number; return typeof n === "number" ? n : null; } catch { return null; }
 }
 
+type TickReads = Awaited<ReturnType<Runner["load"]>>;
+
 export class Runner {
   readonly db: Db;
   readonly running = new Map<number, Running>();
@@ -129,6 +133,8 @@ export class Runner {
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
   private detected: Detected | null = null;
+  /** Jobs were queued at the last look: the next tick reads the model queue's room with the rest. */
+  private jobsWaited = false;
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
   private preapprovalMark: { sig: string; wakeAt: number } | null = null;
   private readonly planThread: OffThread;
@@ -170,10 +176,24 @@ export class Runner {
     });
   }
 
-  /** One pass: heartbeat, cancels, autopilot, new jobs. */
+  /**
+   * One pass: heartbeat, cancels, autopilot, new jobs. Everything it decides on is read in one wave; a part that changed
+   * something (a job's end recorded, proposals applied) makes the parts after it read again. The heartbeat and the jobs' new
+   * log lines are written beside it: it ends once they have landed.
+   */
   async tick(): Promise<void> {
-    const t = now();
-    await saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: t }]);
+    const beside = [saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: now() }])];
+    try {
+      await this.pass(beside);
+    } finally {
+      const ends = await Promise.allSettled(beside);
+      const failed = ends.find((e) => e.status === "rejected");
+      // A pass that failed has its own error on the way.
+      if (failed) this.o.log(`runner: heartbeat or job logs not stored: ${(failed.reason as Error)?.message ?? String(failed.reason)}`);
+    }
+  }
+
+  private async pass(beside: Promise<void>[]): Promise<void> {
     if (this.o.lockFile) {
       try {
         utimesSync(this.o.lockFile, new Date(), new Date());
@@ -181,34 +201,53 @@ export class Runner {
         // removed under us; the next start notices
       }
     }
-    await this.cancels();
-    await this.recordEnds();
+    const read = await this.load();
+    await this.checkRunning(read.jobs.running);
+    beside.push(this.copyRunningLogs());
+    if (await this.recordEnds()) read.stale = true;
     if (this.stopping) return;
     try {
-      await refreshReadIdentity(this.db);
-    } catch (e) {
-      this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`);
-    }
-    try {
-      const lost = await reapLost(this.db);
-      if (lost) this.o.log(`${lost} build tasks lost their worker`);
+      const lost = await reapLost(this.db, read.at, read.staleTasks);
+      if (lost) {
+        read.stale = true;
+        this.o.log(`${lost} build tasks lost their worker`);
+      }
     } catch (e) {
       this.o.log(`build tasks: ${(e as Error).message}`);
     }
-    await this.webhookTick();
+    if (read.webhooks) this.webhookTick(...read.webhooks);
     this.reconcileTick();
     await this.pruneTick();
     this.workerUpdateTick();
-    await this.autopilot();
-    await this.startJobs();
+    await this.autopilot(read);
+    await this.startJobs(read);
+  }
+
+  /** What a tick reads, in one wave. `stale`: a part of the tick wrote since, so what follows it reads again. */
+  private async load() {
+    const db = this.db, at = Date.now();
+    const webhooks = !this.webhooking && at - this.webhookAt >= WEBHOOK_DRAIN_MS;
+    if (webhooks) this.webhookAt = at;
+    const [start, staleTasks, fixes, scanTests, seqs, plan, hooks] = await db.together(() => Promise.all([
+      this.loadStart(at), loadStaleTasks(db, at), loadSecurityFixWork(db), loadScanTestWork(db), db.seqs(), this.planning ? null : loadPlanDue(db, at),
+      // Commands in comments, autorepins whose pull request was merged or closed or whose lockfile task ended (src/repin), webhook re-reads.
+      webhooks ? Promise.all([hasCommandWork(db), anyRepinDue(db), hasSyncRequests(db)]) : null,
+      refreshReadIdentity(db).catch((e: unknown) => this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`)),
+    ]));
+    return { at, ...start, staleTasks, fixes, scanTests, seqs, plan, webhooks: hooks, stale: false };
+  }
+
+  /** What startJobs reads: the jobs, the switch and the cap, and (when jobs waited at the last tick, so some likely wait now) the model queue's room. */
+  private async loadStart(at: number) {
+    const db = this.db;
+    const [jobs, live, cfg, room] = await db.together(() => Promise.all([
+      loadRunnerTick(db, at, CALLER_STALE_MS), loadLiveJobs(db), freshConfig(db, [KEY_ENABLED, STEP_PARALLEL_KEY]), this.jobsWaited ? roomState(db, at) : undefined,
+    ]));
+    return { jobs, live, on: cfg.pipelineEnabled, draining: cfg.pipelineDraining, cap: cfg.stepParallel, room };
   }
 
   /** Reads the items GitHub App webhooks named again from GitHub, off the tick, while no sync run holds its lock. The poll covers any that fail. */
-  private async webhookTick(): Promise<void> {
-    if (this.webhooking || Date.now() - this.webhookAt < WEBHOOK_DRAIN_MS) return;
-    this.webhookAt = Date.now();
-    // Autorepins whose pull request was merged or closed, or whose lockfile task ended (src/repin).
-    const [commands, repinDue, requests] = await this.db.together(() => Promise.all([hasCommandWork(this.db), anyRepinDue(this.db), hasSyncRequests(this.db)]));
+  private webhookTick(commands: boolean, repinDue: boolean, requests: boolean): void {
     const repins = !this.repinning && repinDue;
     if (!commands && !repins && !requests) return;
     this.webhooking = (async () => {
@@ -273,10 +312,11 @@ export class Runner {
    * The planner. Detection reads a lot and runs off the loop, at most one pass at a time; the
    * tick queues what it found, so a slow detection never delays the heartbeat or cancels.
    */
-  private async autopilot(): Promise<void> {
+  private async autopilot(read: TickReads): Promise<void> {
     const found = this.detected;
     this.detected = null;
     if (found) {
+      read.stale = true;
       for (const l of found.logs) this.o.log(l);
       try {
         // Detection read the database a moment ago; the switch may have been turned off since.
@@ -292,19 +332,21 @@ export class Runner {
     }
     // A private fix waits for its build without a job; the next job starts when the build tasks end, for operator-started fixes with the pipeline off too.
     try {
-      const next = await advanceSecurityFixes(this.db, isEnabled(this.db));
+      const next = await (read.stale ? advanceSecurityFixes(this.db, await isEnabled(this.db)) : advanceSecurityFixes(this.db, read.on, read.fixes));
+      if (next) read.stale = true;
       if (next) this.o.log(`security: continued the private fix of ${next} findings after their builds`);
     } catch (e) { this.o.log(`security fixes: ${(e as Error).message}`); }
     // The build task of a scan test is read here (database only); a finding whose test ended can then start its automatic fix.
     try {
-      for (const t of await advanceScanTests(this.db)) {
+      for (const t of await advanceScanTests(this.db, read.stale ? undefined : read.scanTests)) {
+        read.stale = true;
         this.o.log(`security: scan test of ${t.repo} finding ${t.number}: ${t.state}`);
         if (await isEnabled(this.db) && t.state !== "not-shown") await autoFixConfirmed(this.db, t.repo, t.number);
       }
     } catch (e) { this.o.log(`security scan tests: ${(e as Error).message}`); }
     // Pre-approved merges move on rows other steps wrote; they are read here, not on a timer of their own.
-    try { await this.preapprovals(); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
-    if (this.planning || !await planDue(this.db)) return;
+    try { await this.preapprovals(read); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
+    if (this.planning || !await planDue(this.db, read.at, read.stale || !read.plan ? undefined : read.plan)) return;
     this.planning = this.detect(Date.now())
       .then((d) => { this.detected = d; }, (e) => this.o.log(`autopilot: detection failed: ${(e as Error).message}`))
       .finally(() => (this.planning = null));
@@ -315,12 +357,13 @@ export class Runner {
    * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that throws runs
    * again on the next tick.
    */
-  private async preapprovals(): Promise<void> {
+  private async preapprovals(read: TickReads): Promise<void> {
     const t = Date.now();
-    const sig = await preapprovalInputs(this.db);
+    const sig = preapprovalInputs(read.stale ? await this.db.seqs() : read.seqs);
     const m = this.preapprovalMark;
     if (m && m.sig === sig && t < m.wakeAt) return;
     this.preapprovalMark = null;
+    read.stale = true;
     const next = { sig, wakeAt: Infinity };
     // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on.
     try { await advanceWorkflows(this.db, this.o.log); } catch (e) { this.o.log(`workflows: ${(e as Error).message}`); }
@@ -397,9 +440,14 @@ export class Runner {
     }
   }
 
+  /** The cancels and deadlines alone, while the runner stops. */
   private async cancels(): Promise<void> {
     if (this.running.size) await this.checkRunning((await loadRunnerTick(this.db, Date.now(), CALLER_STALE_MS)).running);
-    // The new log lines of every running job, in one write (each job at most every JOB_LOG_FLUSH_MS).
+    await this.copyRunningLogs();
+  }
+
+  /** The new log lines of every running job, in one write (each job at most every JOB_LOG_FLUSH_MS). */
+  private async copyRunningLogs(): Promise<void> {
     await copyLogs(this.db, [...this.running.values()].map((r) => r.logCopy)).catch((e: Error) => this.o.log(`job logs not stored: ${e.message}`));
   }
 
@@ -456,17 +504,17 @@ export class Runner {
    * waits queued. The room is read once per pass, so a start takes one from every room counted so far, and a room first read
    * later in the pass starts with the pass's starts taken off: the Task Runners that serve one repo or task may serve others.
    */
-  private async startJobs(): Promise<void> {
+  private async startJobs(read: TickReads): Promise<void> {
     const steps = await loadSteps();
-    const [tick, live, cap] = await this.db.together(() => Promise.all([loadRunnerTick(this.db, Date.now(), CALLER_STALE_MS), loadLiveJobs(this.db), stepParallel(this.db)]));
+    const { jobs: tick, live, on, draining, cap, room: state } = read.stale ? await this.loadStart(Date.now()) : read;
     const queued = tick.queued.sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
+    this.jobsWaited = queued.length > 0;
     if (!queued.length) return;
     const running = live.filter((j) => j.state === "running");
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
-    const [on, draining] = await Promise.all([isEnabled(this.db), isDraining(this.db)]);
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
     const room = new Map<number, Map<string, number>>();
-    const pass = await queueRoomPass(this.db);
+    const pass = await queueRoomPass(this.db, undefined, state);
     let started = 0;
     const pids: { id: number; pid: number }[] = [];
     const failed: { id: number; error: string }[] = [];
@@ -566,15 +614,19 @@ export class Runner {
     if (r) this.o.log(`job ${id}: ${r.state === "queued" ? "queued to resume after the restart" : r.state}${r.state === "failed" && r.error ? `: ${r.error}` : ""}`);
   }
 
-  private async recordEnds(): Promise<void> {
+  /** True when it recorded one. */
+  private async recordEnds(): Promise<boolean> {
+    let some = false;
     for (const [id, e] of [...this.unrecorded]) {
       try {
         await this.finish(id, e.code, e.signal, e.spawnError);
         this.unrecorded.delete(id);
+        some = true;
       } catch (err) {
         this.o.log(`job ${id}: end still not recorded: ${(err as Error).message}`);
       }
     }
+    return some;
   }
 
   /**

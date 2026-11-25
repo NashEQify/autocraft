@@ -321,17 +321,15 @@ const memoWrite = (canWrite: (repo: string) => Promise<boolean>): ((repo: string
   };
 };
 
-/** A claim's first wave: the claim facts (wave A of the runners module) with the accepted models, in one round trip. */
-async function claimFacts(db: Db, caller: Caller, nowMs: number, requestId?: string): Promise<{ facts: ClaimFacts; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>> }> {
-  const [facts, models] = await db.together(() => Promise.all([runners.loadClaimFacts(db, caller, { now: nowMs, ...(requestId !== undefined && { requestId }) }), setting(db, REMOTE_MODELS_KEY)]));
-  return { facts, ...modelsOf(models) };
+/** What a claim decides on (runners.loadClaim) with the accepted models, in one wave. */
+async function claimReads(db: Db, caller: Caller, nowMs: number, requestId?: string): Promise<{ facts: ClaimFacts; queue: QueueSnapshot; snapshot: RunnerSnapshot; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>> }> {
+  const [claim, models] = await db.together(() => Promise.all([runners.loadClaim(db, caller, { now: nowMs, ...(requestId !== undefined && { requestId }) }), setting(db, REMOTE_MODELS_KEY)]));
+  return { ...claim, ...modelsOf(models) };
 }
 
-/** A claim's second wave: the queue and the runner snapshot, each cached 2 s per process (no round trip on a hit). */
-async function claimWave(db: Db, caller: Caller, facts: ClaimFacts, nowMs: number, accepted: Record<Tier, string[]>): Promise<{ q: ReturnType<typeof orderedOf>; view: RemoteView; queue: QueueSnapshot }> {
-  const { queue, snapshot } = await runners.loadClaimWave(db, caller, facts, nowMs);
-  return { queue, q: orderedOf(queue, nowMs), view: { now: nowMs, snapshot, accepted } };
-}
+/** The queue in order and the view of the runners, of one claim's reads. */
+const claimView = (x: Awaited<ReturnType<typeof claimReads>>, nowMs: number): { q: ReturnType<typeof orderedOf>; view: RemoteView } =>
+  ({ q: orderedOf(x.queue, nowMs), view: { now: nowMs, snapshot: x.snapshot, accepted: x.accepted } });
 
 /** The tiers a claim's models serve: of an accepted family and at the minimum effort. */
 const claimTiers = (claim: Pick<Claim, "tiers" | "efforts" | "harness">, accepted: Record<Tier, string[]>, floors: Partial<Record<Tier, Effort>>): Set<Tier> =>
@@ -340,13 +338,13 @@ const claimTiers = (claim: Pick<Claim, "tiers" | "efforts" | "harness">, accepte
 /** How many queued calls the caller could claim now (same filters and eligibility as claimCall, nothing is leased), for a session's next_task. Follow-ups of a helper's own sessions are not counted. */
 export async function claimableCalls(db: Db, caller: Caller, opts: { tiers?: readonly Tier[]; models?: Partial<Record<Tier, string>> }, canWrite: (repo: string) => Promise<boolean>, nowMs: number = Date.now()): Promise<number> {
   await expireLeases(db, nowMs);
-  const x = await claimFacts(db, caller, nowMs);
+  const x = await claimReads(db, caller, nowMs);
   const set = x.facts.settings;
   if (x.facts.cooled !== null) return 0;
   if (set.maxCalls !== null && x.facts.leased >= set.maxCalls) return 0;
   // A tier counts when the model the helper would use for it is of an accepted family; without a model, when the tier accepts any.
   const tiers = new Set((opts.tiers ?? TIERS).filter((t) => x.accepted[t].length > 0 && (opts.models?.[t] === undefined || familyOf(opts.models[t]!, x.accepted[t]) !== null)));
-  const w = await claimWave(db, caller, x.facts, nowMs, x.accepted);
+  const w = claimView(x, nowMs);
   const can = memoWrite(canWrite), others = idleOthers(w.view, caller.login);
   let n = 0;
   for (const r of claimOrder(w.q, orderReadsOf(w.view, caller.login), caller, tiers, claimReposOf(set.repos, undefined), [], nowMs)) if (await mayTake(caller, r, can, others)) n++;
@@ -423,18 +421,17 @@ async function claimNew(db: Db, caller: Caller, claim: Claim, canWrite: (repo: s
 
 /**
  * The once-per-claim part of a claim: the helper's version, and a lease of a repeated claim the dashboard no longer remembers.
- * Returns a reply when the claim is answered here, else its tries. A full try reads wave A (the claim facts: role, cool-off,
- * settings, lease counts, queue signature) and wave B (the queue and the runner snapshot, cached 2 s), orders the queue in
- * memory, and leases the first eligible call in one short transaction (runners.leaseCall); it gives null when there is
+ * Returns a reply when the claim is answered here, else its tries. A full try reads one wave (claimReads: role, cool-off,
+ * settings, lease counts, and the queue and the runner snapshot where they are not cached), orders the queue in memory, and leases the first eligible call in one short transaction (runners.leaseCall); it gives null when there is
  * nothing to take and no reason to give.
  */
 async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (repo: string) => Promise<boolean>, nowMs: number):
   Promise<{ reply: ClaimReply } | { attempt: ClaimTry; idle: (nowMs: number) => Promise<void>; empty: (nowMs: number, held: boolean) => Promise<EmptyReply>; slots: () => number }> {
   if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
-  // The first try's wave A carries the repeat's orphan lease and the expiry's lost and gone calls. A repeat the dashboard no
+  // The first try's wave carries the repeat's orphan lease and the expiry's lost and gone calls. A repeat the dashboard no
   // longer remembers (it restarted in between): the lease the first claim took cannot be given out again, as only its secret's
   // hash is stored, so it goes back to the queue unused and this claim is answered afresh.
-  let pending: Awaited<ReturnType<typeof claimFacts>> | null = await claimFacts(db, caller, nowMs, claim.requestId);
+  let pending: Awaited<ReturnType<typeof claimReads>> | null = await claimReads(db, caller, nowMs, claim.requestId);
   const { orphan } = pending.facts;
   if (orphan) {
     await runners.returnOrphanLease(db, orphan, nowMs);
@@ -463,7 +460,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       if (!claimOrder(orderedOf(queue, now), orderReadsOf(v, login), caller, tiers, repos, claim.sessions ?? [], now, { fastLane: fast, bound, lane: mode }).length) return null;
     }
     tooLong = 0;
-    const x = (now === nowMs && pending) || await claimFacts(db, caller, now);
+    const x = (now === nowMs && pending) || await claimReads(db, caller, now);
     pending = null;
     const f = x.facts, set = f.settings;
     const slots = lane ? slotsOf(set.interactiveSlots, caller.role) : 0;
@@ -471,7 +468,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     // A held claim outlives the route's credential check: a credential removed, expired or demoted meanwhile ends the hold untaken.
     if (f.role !== caller.role) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "this Task Runner credential was removed or its user's role changed", reserve: set.reserve };
     accepted = x.accepted;
-    const w = await claimWave(db, caller, f, now, x.accepted);
+    const w = claimView(x, now);
     const reads = orderReadsOf(w.view, login);
     const cooled = f.cooled;
     // A cool-off holds back every call but those for work the user started or approved (started.ts), which a slot or the fast

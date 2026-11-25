@@ -187,8 +187,8 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
 const removeFiles = (r: { files: number[] }): void => removeArtifactDirs(r.files);
 
 /** Tasks without a heartbeat for LOST_AFTER_MS: requeued once, then failed; a cancelled one is just cancelled. Returns how many were handled. */
-export async function reapLost(db: Db, nowMs: number = Date.now()): Promise<number> {
-  const r = await reapStaleTasks(db, nowMs);
+export async function reapLost(db: Db, nowMs: number = Date.now(), seen?: number[]): Promise<number> {
+  const r = await reapStaleTasks(db, nowMs, seen);
   removeFiles(r);
   return r.lost;
 }

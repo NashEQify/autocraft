@@ -3,7 +3,7 @@
 // the runner reads the task, so no job waits on a build and the read is database work only. Nothing here changes a finding's
 // state or severity except a note on one whose test passed; only a person decides what that means.
 import { createHash } from "node:crypto";
-import { config, withConfig } from "../data/control/index.ts";
+import { freshConfig, withConfig } from "../data/control/index.ts";
 import { cancelTasks, cloneTasks, loadConfidentialReadyAt, loadTasks, TERMINAL } from "../data/build/index.ts";
 import * as sec from "../data/security/index.ts";
 import { BuildError } from "../build/envs.ts";
@@ -72,16 +72,23 @@ export async function writeAndQueue(db: Db, o: WriteOpts): Promise<boolean> {
   return true;
 }
 
+export type ScanTestWork = { enabled: boolean; rows: sec.BuildingTest[] };
+
+/** The `building` scan tests and whether scan tests are on, in one wave. */
+export async function loadScanTestWork(db: Db): Promise<ScanTestWork> {
+  const [cfg, rows] = await db.together(() => Promise.all([freshConfig(db, ["build_feature:scan-tests"]), sec.listBuildingScanTests(db)]));
+  return { enabled: cfg.scanTestsEnabled, rows };
+}
+
 /**
  * Reads the build task of each `building` scan test: a failure at the test step is `confirmed`, a pass is `not-shown`, a build
  * failure, a timeout or a second environment error is `could-not-build` (a first environment error queues the task again).
  * A task still running after ROUND_BUILD_LIMIT_MS is cancelled. Returns the tests that ended.
  */
-export async function advanceScanTests(db: Db): Promise<{ repo: string; number: number; state: ScanTestState }[]> {
+export async function advanceScanTests(db: Db, work?: ScanTestWork): Promise<{ repo: string; number: number; state: ScanTestState }[]> {
+  const { enabled, rows } = work ?? await loadScanTestWork(db);
+  if (!enabled || !rows.length) return [];
   return await withConfig(db, async () => {
-    if (!config(db).scanTestsEnabled) return [];
-    const rows = await sec.listBuildingScanTests(db);
-    if (!rows.length) return [];
     const [tasks, ready] = await db.together(() => Promise.all([loadTasks(db, rows.map((r) => r.task_id)), loadConfidentialReadyAt(db)]));
     const ended: { repo: string; number: number; state: ScanTestState; detail: string }[] = [];
     const retry: sec.BuildingTest[] = [];

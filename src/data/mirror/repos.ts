@@ -127,10 +127,10 @@ export async function loadSyncPlan(db: Db): Promise<SyncPlan> {
   const q = queryDb(db);
   const [rows, errors, state] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("main.repos").select(kx.cols("repos")).orderBy("name")),
-    q.all(q.k.selectFrom("main.sync_repo_errors").select("repo").where("kind", "in", ["not-found", "forbidden"])),
+    q.all(q.k.selectFrom("main.sync_repo_errors").select(["repo", "kind"])),
     loadSyncState(db),
   ]));
-  return { repos: new Map(rows.map((r) => [r.name, r])), synced: new Set(rows.filter((r) => r.synced_at !== null).map((r) => r.name)), broken: new Set(errors.map((r) => r.repo)), state };
+  return { repos: new Map(rows.map((r) => [r.name, r])), synced: new Set(rows.filter((r) => r.synced_at !== null).map((r) => r.name)), broken: new Set(errors.filter((r) => r.kind === "not-found" || r.kind === "forbidden").map((r) => r.repo)), failing: new Set(errors.map((r) => r.repo)), state };
 }
 
 /** Deletes the repo's comments and items and resets its sync marks; checks, files, commits and activity rows stay. */
