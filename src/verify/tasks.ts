@@ -1,5 +1,8 @@
 // Build tasks for a validated plan, and the warm build of the default branch.
-import { createTask, warmKeyOf, type NewTask } from "../build/tasks.ts";
+import { parsePatch, parsePlan, parseRequires, parseWarm, warmKeyOf } from "../build/tasks.ts";
+import { BuildError } from "../build/envs.ts";
+import { cloneTasks, createTasks, loadEnvs, type NewTask } from "../data/build/index.ts";
+import { currentJobId } from "../agents/call.ts";
 import { rustPlan } from "../worker/rust.ts";
 import { WORKSPACE_TEST_TARGETS } from "../worker/rust-targets.ts";
 import type { TaskStep } from "../worker/types.ts";
@@ -7,7 +10,6 @@ import { featureOn } from "../build/features.ts";
 import type { VerifyPlan } from "./plan.ts";
 import type { ParamSpec, ScreenshotConfigBody } from "./screenshot-config.ts";
 import type { ShotStep } from "./types.ts";
-import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
 const REQUIRES = { os: "linux", toolchains: ["rust-stable"] } as const;
@@ -33,9 +35,33 @@ export function tasksFor(plan: Planned, c: { repo: string; number: number; head:
   ];
 }
 
+const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const SHA_RE = /^[0-9a-f]{40}$/;
+const STEP_RE = /^[a-z][a-z0-9-]{0,39}$/;
+
+/** The task as the table stores it: every field validated, the job filled in from the running job. */
+function validated(t: NewTask): NewTask {
+  if (typeof t.step !== "string" || !STEP_RE.test(t.step)) throw new BuildError(400, "step is not valid");
+  if (typeof t.repo !== "string" || !REPO_RE.test(t.repo)) throw new BuildError(400, "repo is not valid");
+  if (!SHA_RE.test(t.headSha)) throw new BuildError(400, "headSha must be a full lowercase commit id");
+  if (t.baseSha != null && !SHA_RE.test(t.baseSha)) throw new BuildError(400, "baseSha must be a full lowercase commit id");
+  if (t.number != null && (!Number.isInteger(t.number) || t.number < 1)) throw new BuildError(400, "number is not valid");
+  const priority = t.priority ?? 0;
+  if (!Number.isInteger(priority) || priority < -100 || priority > 100) throw new BuildError(400, "priority must be -100 to 100");
+  return {
+    ...t, jobId: t.jobId ?? currentJobId(), priority, requires: parseRequires(t.requires), plan: parsePlan(t.plan),
+    ...(t.patch === undefined ? {} : { patch: parsePatch(t.patch) }), ...(t.warm === undefined ? {} : { warm: parseWarm(t.warm) }),
+  };
+}
+
+/** Validates and queues tasks in one statement pair; returns their ids in order. A refusal queues none. */
+export async function queueNewTasks(db: Db, tasks: NewTask[]): Promise<number[]> {
+  return await createTasks(db, tasks.map(validated));
+}
+
 /** Queues the tasks; returns their ids, head task first. */
 export async function queueTasks(db: Db, plan: Planned, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
-  return await mapSeq(tasksFor(plan, c), async (t) => await createTask(db, t));
+  return await queueNewTasks(db, tasksFor(plan, c));
 }
 
 /**
@@ -44,18 +70,13 @@ export async function queueTasks(db: Db, plan: Planned, c: { repo: string; numbe
  * dirs (src/worker/warm.ts), so none is queued without an enabled worker environment: build pods start from the warm
  * store, which the warm producer fills (src/build/warm-queue.ts).
  */
-export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
-  if (!await db.get(db.k.selectFrom("build_envs").select("id").where("kind", "!=", "kubernetes").where("enabled", "=", 1).limit(1))) return null;
-  const same = await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one"))
-    .where("repo", "=", repo).where("head_sha", "=", mainSha).where("warm_role", "=", "build"));
-  if (same) return null;
-  const since = new Date(nowMs - WARM_EVERY_MS).toISOString();
-  if (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one"))
-    .where("repo", "=", repo).where("warm_role", "=", "build").where("queued_at", ">", since))) return null;
-  return await createTask(db, {
+export async function queueWarmBuild(db: Db, repo: string, mainSha: string): Promise<number | null> {
+  if (!(await loadEnvs(db, { enabled: true })).some((e) => e.kind !== "kubernetes")) return null;
+  // NEEDS build.queueLocalWarmBuild: skip a head that already has a warm build task, and a repo with one queued in the last 24 hours (WARM_EVERY_MS); no loader reads warm-role build tasks.
+  return (await queueNewTasks(db, [{
     step: "verify", repo, headSha: mainSha, baseSha: mainSha, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, priority: WARM_PRIORITY,
     plan: warmBuildPlan(), warm: { key: warmKeyOf(repo), role: "build" },
-  });
+  }]))[0] ?? null;
 }
 
 /** The worker's warm build: the units a whole-workspace plan builds and tests, as the cluster's warm producer builds them. */
@@ -66,13 +87,7 @@ function warmBuildPlan(): TaskStep[] {
 
 /** Queues a new task with the same step, commits, requirements, plan, patch and warm role as task `id`. */
 export async function cloneTask(db: Db, id: number): Promise<number> {
-  const r = await db.get(db.k.selectFrom("build_tasks").select(["step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "patch", "warm_key", "warm_role"])
-    .$narrowType<{ warm_role: "use" | "build" | null }>().where("id", "=", id));
-  if (!r) throw new Error(`no task ${id}`);
-  return await createTask(db, {
-    step: r.step, repo: r.repo, number: r.number, headSha: r.head_sha, baseSha: r.base_sha, requires: JSON.parse(r.requires), priority: r.priority,
-    plan: JSON.parse(r.plan), ...(r.patch === null ? {} : { patch: r.patch }), ...(r.warm_key && r.warm_role ? { warm: { key: r.warm_key, role: r.warm_role } } : {}),
-  });
+  return (await cloneTasks(db, [id])).get(id)!;
 }
 
 const RENDER_TIMEOUT_SEC = 120;
@@ -141,5 +156,5 @@ export function screenshotTasks(script: ShotStep[], config: Pick<ScreenshotConfi
 /** Queues the screenshot tasks; returns their ids, head task first, or [] when the repo's screenshots switch is off. */
 export async function queueScreenshotTasks(db: Db, script: ShotStep[], config: Pick<ScreenshotConfigBody, "package" | "example" | "driver" | "commands">, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
   if (!await featureOn(db, "screenshots", c.repo)) return [];
-  return await mapSeq(screenshotTasks(script, config, c), async (t) => await createTask(db, t));
+  return await queueNewTasks(db, screenshotTasks(script, config, c));
 }
