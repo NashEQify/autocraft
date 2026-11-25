@@ -57,19 +57,19 @@ const tally = (ctx: StepContext): Tally => {
 };
 
 /** True while the job may start another chunk: the first chunk of the job always runs, so every job moves the backlog; after it, until the time slice is used. */
-const sliceGuard = (ctx: StepContext): (() => boolean) => {
+const sliceGuard = (ctx: StepContext): (() => Promise<boolean>) => {
   let first = true;
-  return () => {
-    const ok = first || !ctx.timeUp();
+  return async () => {
+    const ok = first || !await ctx.timeUp();
     first = false;
     return ok;
   };
 };
 
-export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, t: Tally, more: () => boolean): Promise<Set<string>> {
+export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, t: Tally, more: () => Promise<boolean>): Promise<Set<string>> {
   const { db } = ctx;
   const done = new Set<string>();
-  for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db) && more(); i += JEV_CHUNK) {
+  for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db) && await more(); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
     await keepUsage(db, run, chunk.map((x) => `jev-${refOf(x)}`));
     t.sent(chunk.length);
@@ -108,13 +108,13 @@ async function haikuItems(db: Db, run: string, limit: number, plans: ClassifyPla
   return await itemsOf(db, todo.map((p) => p.facts));
 }
 
-async function haikuPass(ctx: StepContext, run: string, todo: Item[], t: Tally, name: string, more: () => boolean): Promise<number> {
+async function haikuPass(ctx: StepContext, run: string, todo: Item[], t: Tally, name: string, more: () => Promise<boolean>): Promise<number> {
   const { db } = ctx;
   const t0 = new Date().toISOString();
   const answered = async () => (await db.get(db.k.selectFrom("classifications").select((eb) => eb.fn.countAll<number>().as("n"))
     .where("classifier", "=", "haiku").where("run_id", "=", run).where("at", ">=", t0)))!.n;
   // A chunk holds one batch for every call the accounts can take at once (at least 4), so the calls fill the free slots.
-  for (let i = 0, size = 0; i < todo.length && !await ctx.cancelled() && more(); i += size) {
+  for (let i = 0, size = 0; i < todo.length && !await ctx.cancelled() && await more(); i += size) {
     size = HAIKU_PER_CALL * Math.max(4, await freeSlots(db));
     const chunk = todo.slice(i, i + size);
     await keepUsage(db, run, Array.from({ length: (await haikuBatches(db, chunk, HAIKU_PER_CALL)).length }, (_, n) => `haiku-${String(n).padStart(2, "0")}`));
@@ -130,7 +130,7 @@ async function haikuPass(ctx: StepContext, run: string, todo: Item[], t: Tally, 
  * Haiku classifies the items alone. Its verdict carries the item's input hash, which keeps the item from being due for Jev
  * until it changes, and replaces a Jev verdict of the item's earlier text. Returns the number of items Haiku answered.
  */
-async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashes: Map<string, string>, t: Tally, more: () => boolean): Promise<number> {
+async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashes: Map<string, string>, t: Tally, more: () => Promise<boolean>): Promise<number> {
   const { db } = ctx;
   const t0 = new Date().toISOString();
   await haikuPass(ctx, run, items, t, "haiku-alone", more);
@@ -187,7 +187,7 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   // Items of repos with an area list that were not asked against its current version; Jev's answers share the job's limit with the type pass.
   // Past the slice the areas wait for a job with time left, since the planner queues classify-new only while Jev has items due;
   // the job that clears the last of them asks them whatever its time.
-  const areas = await ctx.cancelled() || (ctx.timeUp() && left > 0) ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: Math.min(limit, AREAS_PER_CLASSIFY_JOB), usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
+  const areas = await ctx.cancelled() || (left > 0 && await ctx.timeUp()) ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: Math.min(limit, AREAS_PER_CLASSIFY_JOB), usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
   return { areas, jev, due: due.length, haiku, haikuDue: unsure.length, haikuAlone, aloneDue: alone.length, left, asked: t.asked() };
 }
 

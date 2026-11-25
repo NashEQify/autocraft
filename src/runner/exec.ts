@@ -95,7 +95,7 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; s
   }
 
   let lastProgress = 0;
-  // The runner passes the deadline it enforces; the slice is counted from the claim (started_at), like the runner's clock.
+  // The runner passes the deadline it enforces.
   const deadlineMin = Number(process.env[JOB_DEADLINE_ENV]);
   const sliceMs = deadlineMin > 0 ? deadlineMin * 60_000 * SLICE_SHARE : null;
   const ctx: StepContext = {
@@ -119,7 +119,12 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; s
       return !!r.cancel_requested_at || DEADLINE_ERROR.test(r.error ?? "");
     },
     stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await isEnabled(db)),
-    timeUp: () => sliceMs !== null && Date.now() - Date.parse(startedAt) >= sliceMs,
+    // Read from the row on each call: started_at is the runner's claim time, the start its deadline counts from.
+    timeUp: async () => {
+      if (sliceMs === null) return false;
+      const r = await db.get(db.k.selectFrom("jobs").select("started_at").where("id", "=", id));
+      return Date.now() - Date.parse(r?.started_at ?? startedAt) >= sliceMs;
+    },
   };
   setCallContext({ jobId: id, step: step.name, stage: step.stage, class: step.priority ?? 0, ...(typeof params.repo === "string" && { repo: params.repo }), cancelled: ctx.cancelled,
     // Model calls (local and remote) are withdrawn when the pipeline is switched off, not during a drain: running jobs finish with their calls.

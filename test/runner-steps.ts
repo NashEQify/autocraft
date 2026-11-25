@@ -56,7 +56,7 @@ export const steps: StepDef[] = [
     run: async (ctx) => {
       const units = Number(ctx.params.units);
       let done = 0;
-      while (done < units && !ctx.timeUp()) {
+      while (done < units && !await ctx.timeUp()) {
         await sleep(50);
         await ctx.handled(++done);
       }
