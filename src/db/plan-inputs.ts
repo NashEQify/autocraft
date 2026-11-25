@@ -25,15 +25,11 @@ const blockedBy = (repo: string, number: string): string =>
   `SELECT o.repo AS repo, o.number AS number FROM review_blockers rb JOIN opus_reviews o ON o.repo = rb.repo AND o.number = rb.number AND o.head_oid = rb.head_oid
     WHERE rb.b_repo = ${repo} AND rb.b_number = ${number} AND o.verdict = 'hold'`;
 
-/** Members of the duplicate group decision `id`. */
-const groupMembers = (id: string): string => `SELECT gm.repo AS repo, gm.number AS number FROM dupe_group_items gm WHERE gm.decision_id = ${id}`;
-
-/** True when item `a` is in a duplicate edge or group: its state, text and activity move other members' sets, groups and canonical pick (src/dupes/plan.ts). */
+/** True when item `a` is in a duplicate edge: its state, text and activity move other members' sets (src/dupes/plan.ts). */
 // The unary + keeps SQLite off the verdict index: the item's own pairs are a key lookup.
 const inDupeSet = (a: string): string =>
   `(EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.repo = ${a}.repo AND dp.a = ${a}.number AND +dp.verdict = 'duplicate')
-    OR EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.repo = ${a}.repo AND dp.b = ${a}.number AND +dp.verdict = 'duplicate')
-    OR EXISTS (SELECT 1 FROM dupe_group_items dg WHERE dg.repo = ${a}.repo AND dg.number = ${a}.number))`;
+    OR EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.repo = ${a}.repo AND dp.b = ${a}.number AND +dp.verdict = 'duplicate'))`;
 
 const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ");
 
@@ -55,7 +51,7 @@ const PR_REFS = `SELECT r.repo AS repo, j.value AS number FROM json_each(CASE WH
 const pgRefsArray = (x: string): string => `COALESCE(CASE WHEN json_valid(${x}) THEN CASE WHEN json_typeof(${x}::json -> 1) = 'array' THEN ${x}::json -> 1 END END, '[]'::json)`;
 const PR_REFS_PG = `SELECT r.repo AS repo, ac_int(j #>> '{}') AS number FROM json_array_elements(${pgRefsArray("r.text_refs")}) j WHERE json_typeof(j) = 'number'
       UNION SELECT r.repo, ac_int(j #>> '{}') FROM json_array_elements(${pgJsonArray("r.closing_issues")}) j WHERE json_typeof(j) = 'number'`;
-/** Item columns that change duplicate sets, group plans and the canonical pick of the item's group. */
+/** Item columns that change duplicate sets and their stored comparisons. */
 const DUPE_COLUMNS = ["state", "title", "body", "embed_hash", "comments_count", "created_at", "closing_issues"];
 
 /** An item write that forces a full pass; `no` is the dialect's false (the CASE keeps SQLite from probing the dupe tables on every write). */
@@ -106,7 +102,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "fixups", class: "item", why: "Fix-up rows of one PR (fix-up, operator fix-up, lint, push chain)." },
     { table: "item_embeddings", class: "item", why: "One item's embedding hash.", columns: ["repo", "number", "model", "hash"] },
     { table: "item_priority", class: "item", why: "One item's priority row." },
-    { table: "item_rank", class: "item", why: "One item's fast-track score input." },
+    { table: "item_rank", class: "item", why: "One item's rank score." },
     { table: "item_stage", class: "item", why: "One item's stage row." },
     { table: "merge_holds", class: "item", why: "An operator's merge hold on one PR." },
     { table: "merges", class: "item", why: "Merge attempts of one PR." },
@@ -169,16 +165,12 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       refs: "SELECT b.repo AS repo, r.number AS number FROM merge_batches b WHERE b.id = r.batch_id UNION SELECT b.repo, b.pr_number FROM merge_batches b WHERE b.id = r.batch_id",
     },
     {
-      table: "dupe_group_items", class: "cross", why: "A group member's role: every member of the group (held, group to ask, closers) and the group's carry-overs.",
-      refs: `SELECT r.repo AS repo, r.number AS number UNION ${groupMembers("r.decision_id")}`,
-    },
-    { table: "dupe_groups", class: "cross", why: "A group's applied answer: every member (closers).", refs: groupMembers("r.decision_id") },
-    {
-      table: "duplicate_pairs", class: "cross", why: "A pair: both items (pairs to check); a duplicate edge changes the sets and groups of its whole component.",
+      table: "duplicate_pairs", class: "cross", why: "A pair: both items (pairs to check); a duplicate edge changes the sets of its whole component.",
       refs: "SELECT r.repo AS repo, r.a AS number UNION SELECT r.repo, r.b",
       full: "r.verdict = 'duplicate'",
     },
-    { table: "dupe_comparisons", class: "cross", why: "A compared set: the group plans of every member of the set's group, which the row does not name.", full: "1" },
+    { table: "dupe_comparisons", class: "cross", why: "A compared set: every member of the set, which the row does not name.", full: "1" },
+    { table: "dupe_drops", class: "cross", why: "A dropped set: its members are not compared again for a while, and the row does not name them.", full: "1" },
     {
       // Refs, not a full pass: the rows a change can move are this issue's, its PR's and, through the repo's live count, the repo's other queued issues.
       table: "implementations", class: "cross", why: "An implementation attempt: its issue, its PR (which it revises), and the repo's other open issues started for implementation (live implementations per repo bound new attempts).",
@@ -213,9 +205,9 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       full: "1", fullUpdate: "(COALESCE(old.overall, 'none') = 'none') IS NOT (COALESCE(new.overall, 'none') = 'none')",
     },
     {
-      // Commands move a workflow at human pace; its recommendation, plan parts and blocker are not planner facts.
-      table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry and approval, the PR of an issue's implement workflow, and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
-      columns: ["repo", "number", "entry", "state", "approved_by", "started_by", "started_at"],
+      // Commands move a workflow at human pace; its recommendation and plan parts are not planner facts.
+      table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry, weight and what the merge rule reads (approval, base head, blocker), the PR of an issue's implement workflow, and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
+      columns: ["repo", "number", "entry", "state", "weight", "approved_by", "approved_at", "base_head", "blocker", "started_by", "started_at"],
       refs: "SELECT r.repo AS repo, r.number AS number UNION SELECT wi.repo, wi.pr_number FROM implementations wi WHERE wi.repo = r.repo AND wi.number = r.number AND wi.pr_number IS NOT NULL",
       full: `r.state IN ${WF_LIVE}`,
       fullUpdate: `(old.state IN ${WF_LIVE}) IS NOT (new.state IN ${WF_LIVE})`,
@@ -238,6 +230,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "repo_step_approvals", class: "global", why: "Per-repo step approvals (merge, push, comment, implement, labels, main fix, status comment, CI): every item of the repo reads them." },
     { table: "tracked_repos", class: "global", why: "Tracked repos and their pipeline switch (scope of every item)." },
     { table: "repos", class: "global", why: "Visibility and default branch of a repo (every PR there).", columns: ["name", "visibility", "default_branch", "owner"] },
+    { table: "github_app", class: "global", why: "The app's slug: which authors and commenters are us.", columns: ["slug"] },
     { table: "access", class: "global", why: "Operator and maintainer roles: who may answer for a repo, whose comments count." },
     {
       table: "repo_permissions", class: "global", why: "Maintainers' write permission per repo: who may answer there.",
@@ -256,6 +249,8 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "owner_statements", class: "global", why: "Owner statements that stored reviews of any PR name as conflicts." },
 
     // ---- read, but not a fact input ----
+    { table: "review_blockers", class: "none", why: "Kept from opus_reviews by its own triggers; a review's write logs the items it names." },
+    { table: "stage_limits", class: "none", why: "Daily limits of the steps, read with the other control rows; no fact reads them." },
     { table: "change_seq", class: "none", why: "Topic counters: the memo key of the discussion state (src/review/discussion.ts), whose inputs are logged themselves." },
   ];
 }
