@@ -11,6 +11,7 @@ import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
 import { sqliteOnly } from "./test-db.ts";
+import { saveSyncState, loadSyncState } from "../src/data/mirror/index.ts";
 
 async function scratchDb() {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "synchealth-")), "m.db"));
@@ -26,9 +27,7 @@ test("a repo that no longer resolves is skipped and recorded; failures and recov
     { name: "a", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-01T00:00:00Z" },
     { name: "b", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-02T00:00:00Z" },
   ]));
-  await db.run(db.k.insertInto("settings").values([
-    { key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
-  ]));
+  await saveSyncState(db, { org_high_water: "2026-11-02T09:30:00Z", repos_refreshed_at: "2999-01-01T00:00:00Z", search_catchup_at: "2999-01-01T00:00:00Z" });
   const client = {
     spent: 0, remaining: 4000 as number | null,
     repoMovedTo: (owner: string, name: string) => `elsewhere/${name}-${owner.length}`,
@@ -61,7 +60,7 @@ async function recoveryScenarios(): Promise<void> {
   // A new repo whose first read fails with a plain error is retried per repo, not marked synced by a search.
   const db = await scratchDb();
   await db.run(db.k.insertInto("repos").values({ name: "a", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-02T09:00:00Z" }));
-  await db.run(db.k.insertInto("settings").values([{ key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" }]));
+  await saveSyncState(db, { org_high_water: "2026-11-02T09:30:00Z", search_catchup_at: "2999-01-01T00:00:00Z" });
   const client = {
     spent: 0, remaining: 4000 as number | null,
     async query(query: string, v: Record<string, unknown>) {
@@ -76,7 +75,7 @@ async function recoveryScenarios(): Promise<void> {
   };
   const o = { only: [], all: false, full: false, perRepo: false };
   assert.equal((await runSync(db, client, o, new Date("2026-11-02T10:05:00Z"))).mode, "per-repo");
-  await db.run(db.k.insertInto("settings").values({ key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+  await saveSyncState(db, { repos_refreshed_at: "2999-01-01T00:00:00Z" });
   assert.equal((await runSync(db, client, o, new Date("2026-11-02T10:06:00Z"))).mode, "per-repo");
   assert.equal((await db.get(db.k.selectFrom("repos").select("synced_at as t").where("name", "=", "b")))!.t, null);
 
@@ -85,9 +84,7 @@ async function recoveryScenarios(): Promise<void> {
   await db2.run(db2.k.deleteFrom("tracked_repos"));
   await db2.run(db2.k.insertInto("tracked_repos").values({ name: "c", added_by: "t", added_at: "x" }));
   await db2.run(db2.k.insertInto("repos").values({ name: "c", owner: "other", synced_at: "2026-11-02T08:00:00Z", high_water: "2026-11-02T08:00:00Z", reconciled_at: "2026-11-02T09:00:00Z" }));
-  await db2.run(db2.k.insertInto("settings").values([
-    { key: "org_high_water", value: "2026-11-02T10:00:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
-  ]));
+  await saveSyncState(db2, { org_high_water: "2026-11-02T10:00:00Z", repos_refreshed_at: "2999-01-01T00:00:00Z", search_catchup_at: "2999-01-01T00:00:00Z" });
   await db2.run(db2.k.insertInto("sync_repo_errors").values({ repo: "c", kind: "transient", message: "x", moved_to: "", since: "2026-11-02T08:30:00Z", at: "2026-11-02T10:00:00Z" }));
   await reloadRepoOwners(db2);
   const c2 = {
