@@ -2,20 +2,16 @@
 // the hold and batch controls. Reads are for anyone signed in, limited to the repos the
 // requester may see; every write is for operators (the route says so) and audited.
 import { canSeeInternals } from "./staff.ts";
-import type { FastPosition, ItemPrBuild, MergeWait, NextMerge, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRepos, QueueTab, QueueWorkRow, TypeLabel } from "../../../web/src/api/types.ts";
+import type { ItemPrBuild, MergeWait, NextMerge, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRepos, QueueTab, QueueWorkRow, TypeLabel, WeightPlace } from "../../../web/src/api/types.ts";
 import type { CachedEntry } from "../../data/views/merge-queue.ts";
 import { closingOf, loadQueuePage, type QueuePageFacts } from "../../data/views/queue.ts";
 import { loadPrBuildViews, type PrBuildView } from "../../data/merge/index.ts";
-import { loadTrackedRepos } from "../../data/control/index.ts";
-import { loadItems, loadOpenPrLinks } from "../../data/mirror/index.ts";
+import { loadOpenPrLinks } from "../../data/mirror/index.ts";
 import { featureOn } from "../../build/features.ts";
 import { ownerOf } from "../../owners.ts";
-import { HEAD_CHANGED, preapproveMerge } from "../../preapproval/index.ts";
-import { actRefusal } from "../../github/identity.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { ControlError, holdMerge, releaseMerge, removeFromBatch, stopBatch } from "../../merge/controls.ts";
 import { loadBatches } from "../../data/merge/index.ts";
-import { loadHolds } from "../../data/workflow/index.ts";
 import type { Preapproval } from "../../data/workflow/index.ts";
 import { mergeOrder, queueSlots, scoreLookup } from "../../rank/position.ts";
 import { classifyListOf, NOT_PLANNED } from "../../rank/next.ts";
@@ -27,7 +23,6 @@ import { mayRunRepo } from "../repo-access.ts";
 import { readerOf, veiledFor } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import type { Db } from "../../db/index.ts";
-import { implementRefusal } from "../../implement/gate.ts";
 
 export const TABS: QueueTab[] = ["all", "review", "fix", "verify", "merge"];
 const NEXT_LIMIT = 10;
@@ -54,19 +49,19 @@ const WAITS: Record<string, [MergeWait, string, number]> = {
 };
 const HELD: [MergeWait, string, number] = ["held", "Merge held by an operator", 9];
 
-/** What merges next and what each PR waits for, from the queue states (src/merge/queue.ts). Fast-tracked first, held last. */
-export function nextMerges(entries: CachedEntry[], fast: Map<string, FastPosition>, batchOf: Map<string, { id: number; branch: string }>, scores: Map<string, number>): NextMerge[] {
+/** What merges next and what each PR waits for, from the queue states (src/merge/queue.ts). By weight, then by what it waits for; held last. */
+export function nextMerges(entries: CachedEntry[], places: Map<string, WeightPlace>, batchOf: Map<string, { id: number; branch: string }>, scores: Map<string, number>): NextMerge[] {
   const items = entries.flatMap((e) => {
     const w = e.held && e.state in WAITS ? HELD : e.state === "ci-approval" && e.runsBlocked ? WAITS[e.state]!.map((x, k) => (k === 1 ? "CI runs need a person to approve" : x)) as [MergeWait, string, number] : WAITS[e.state];
     return w ? [{ e, w }] : [];
   });
   items.sort((a, b) => {
-    const fa = fast.get(`${a.e.repo}#${a.e.number}`)?.position ?? Infinity, fb = fast.get(`${b.e.repo}#${b.e.number}`)?.position ?? Infinity;
+    const fa = places.get(`${a.e.repo}#${a.e.number}`)?.position ?? Infinity, fb = places.get(`${b.e.repo}#${b.e.number}`)?.position ?? Infinity;
     return (a.w[2] === 9 ? 1 : 0) - (b.w[2] === 9 ? 1 : 0) || fa - fb || a.w[2] - b.w[2]
       || (scores.get(`${b.e.repo}#${b.e.number}`) ?? -1) - (scores.get(`${a.e.repo}#${a.e.number}`) ?? -1) || a.e.repo.localeCompare(b.e.repo) || a.e.number - b.e.number;
   });
   return items.slice(0, NEXT_LIMIT).map(({ e, w }) => ({
-    repo: e.repo, number: e.number, title: e.title, waitsFor: w[0], label: w[1], fast: fast.get(`${e.repo}#${e.number}`) ?? null, batch: batchOf.get(`${e.repo}#${e.number}`) ?? null,
+    repo: e.repo, number: e.number, title: e.title, waitsFor: w[0], label: w[1], batch: batchOf.get(`${e.repo}#${e.number}`) ?? null,
   }));
 }
 
@@ -108,12 +103,10 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const { views, holds: held, ranked, closes: closesOf, positions } = facts;
   const allEntries = facts.entries;
   const scoped = views ? new Set([...views].filter(([, v]) => v.scope).map(([k]) => k)) : null;
-  const fastAll = new Map<string, FastPosition>([...positions].map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
-  const fast = new Map([...fastAll].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))));
+  const places = new Map<string, WeightPlace>([...positions].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))).map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
   // The default view is the pipeline's scope (src/rank/position.ts), the same one the position badges count.
   const inScope = (repo: string, number: number): boolean =>
     reposParam === "all" ? visibleSet.has(repo) : reposParam === "pipeline" ? visibleSet.has(repo) && scoped!.has(`${repo}#${number}`) : repo === reposParam;
-  const fastOf = (repo: string, number: number): FastPosition | null => fast.get(`${repo}#${number}`) ?? null;
 
   // A linked item (`item=repo:number`) comes with the first page: it is cut long enough to include the item.
   const item = req.query.get("item");
@@ -135,7 +128,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     return {
       repo: r.repo, number: r.number, kind: r.kind, title: r.title, score: r.score, level: bd.level, size: bd.size, breakdown: bd,
       label: r.label as TypeLabel | null, next: r.next ?? NOT_PLANNED, nextHref: r.itemState === "referee-due" ? classifyListOf(r.repo) : null,
-      queue: slots.get(`${r.repo}#${r.number}`) ?? null, fast: fastOf(r.repo, r.number), held: held.has(`${r.repo}#${r.number}`),
+      queue: slots.get(`${r.repo}#${r.number}`) ?? null, held: held.has(`${r.repo}#${r.number}`),
     };
   });
 
@@ -143,11 +136,11 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const entries = allEntries.filter((e) => e.state !== "merged" && visibleSet.has(e.repo) && inScope(e.repo, e.number));
   const originOf = queueOriginOf(facts, internals);
   const builds = tab === "merge" ? await prBuildsOf(db, entries, internals) : new Map<string, ItemPrBuild>();
-  const asRow = (e: CachedEntry): QueueMergeRow => ({ ...toRow(e, reader), fast: fastOf(e.repo, e.number), held: e.held, prBuild: builds.get(refText(e)) ?? null, closes: closesOf.get(refText(e)) ?? [], added: originOf(e) });
+  const asRow = (e: CachedEntry): QueueMergeRow => ({ ...toRow(e, reader), place: places.get(refText(e)) ?? null, held: e.held, prBuild: builds.get(refText(e)) ?? null, closes: closesOf.get(refText(e)) ?? [], added: originOf(e) });
   // Tabs come from the stored next step; the text is veiled afterwards, so a quiet pull request stays in its tab.
   const tabOf = new Map(work.map((w) => [w, tabOfNext(w.next)]));
   const veilNext = (w: QueueWorkRow): QueueWorkRow => (veiledFor(reader, w.repo, w.number) ? { ...w, next: "" } : w);
-  const pending = pendingRows(facts, entries, inScope, originOf, fastOf, held, internals);
+  const pending = pendingRows(facts, entries, inScope, originOf, held);
   const count = (t: QueueTab): number => (t === "all" ? work.length : t === "merge" ? entries.length + pending.length : work.filter((w) => tabOf.get(w) === t).length);
   const counts = { all: count("all"), review: count("review"), fix: count("fix"), verify: count("verify"), merge: count("merge") };
 
@@ -172,20 +165,18 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   out.mergeRows = free.slice(offset, offset + sizeFor(free, offset));
   out.total = free.length;
   out.next = offset + out.mergeRows.length < free.length ? offset + out.mergeRows.length : null;
-  out.nextMerges = nextMerges(entries, fast, batchOf, facts.scores);
+  out.nextMerges = nextMerges(entries, places, batchOf, facts.scores);
   out.batches = active.map((b) => toBatch(b, reader, b.members.flatMap((p) => rowOf.get(`${b.repo}#${p.number}`) ?? [])));
   out.pending = pending;
   return out;
 }
 
 /**
- * Open PRs queued with Queue items or pre-approved that are no merge queue row yet: no take review at their head, so they wait for
+ * Open PRs approved for merge that are no merge queue row yet: no take review at their head, so they wait for
  * the fix-up or the review first. `entries` are the queue rows the view shows and `want` is the view's scope, so a PR is in exactly one
  * group. Oldest first.
  */
-function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "reviewedAt">) => QueueOrigin,
-  fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>, staff: boolean): QueuePendingRow[] {
-  void staff;
+function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "reviewedAt">) => QueueOrigin, held: Set<string>): QueuePendingRow[] {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
   const seen = new Set<string>();
   const out: QueuePendingRow[] = [];
@@ -197,15 +188,14 @@ function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: str
     seen.add(k);
     out.push({
       repo: p.repo, number: p.number, kind: "pr", title: it.title ?? "", author: it.author ?? "", size: f.ranks.get(k)?.breakdown.size ?? null, step: p.state,
-      fast: fastOf(p.repo, p.number), held: held.has(k), added: originOf({ repo: p.repo, number: p.number, reviewedAt: "" }),
+      held: held.has(k), added: originOf({ repo: p.repo, number: p.number, reviewedAt: "" }),
     });
   }
   return out;
 }
 
 /**
- * How each PR came into the merge queue, and who put it there: an active pre-approval (added with Queue items, or a pre-approval
- * after a fix-up), else the take review itself. Operator logins are shown to staff only.
+ * How each PR came into the merge queue, and who put it there: an active merge approval (with or without a fix-up), else the take review itself. Operator logins are shown to staff only.
  */
 export function queueOriginOf(f: Pick<QueuePageFacts, "legs" | "carried">, staff: boolean): (e: Pick<CachedEntry, "repo" | "number" | "reviewedAt">) => QueueOrigin {
   const pre = new Map<string, Preapproval>();
@@ -220,19 +210,7 @@ export function queueOriginOf(f: Pick<QueuePageFacts, "legs" | "carried">, staff
   };
 }
 
-// ---- repo list, merge holds, queueing and batch controls --------------------------------
-
-/** Visible repos whose pipeline is on. */
-export async function pipelineRepoNames(db: Db, req: Req): Promise<string[]> {
-  const tracked = await loadTrackedRepos(db);
-  return (await visibleRepos(db, req)).filter((r) => tracked.get(r)?.pipeline === true);
-}
-
-/** PRs whose merge an operator holds, as `repo#number`, in visible repos. */
-export async function heldMergeRefs(db: Db, req: Req): Promise<string[]> {
-  const visible = new Set(await visibleRepos(db, req));
-  return [...(await loadHolds(db)).keys()].filter((k) => visible.has(k.slice(0, k.lastIndexOf("#")))).sort();
-}
+// ---- merge holds and batch controls --------------------------------
 
 /** `https://github.com/<owner>/<repo>/pull/<n>` (or `/issues/<n>`), `<repo>#<n>` or `<owner>/<repo>#<n>`. */
 export function parseItemRef(input: unknown): { repo: string; number: number } {
@@ -269,9 +247,6 @@ async function guarded<T>(f: () => Promise<Promise<T> | T>): Promise<T> {
   }
 }
 
-/** Queuing an issue is the start of its workflow: the row that carries the queuer and the weight is written by the command, so nothing is stored here. */
-export async function queueIssue(_db: Db, _by: string, _repo: string, _number: number, _w: number | null, _via?: string): Promise<void> {}
-
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror), in number order. */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
   return (closingIndex(await loadOpenPrLinks(db, [repo])).get(`${repo}#${issue}`) ?? []);
@@ -287,54 +262,6 @@ function closingIndex(links: Awaited<ReturnType<typeof loadOpenPrLinks>>): Map<s
   }
   for (const l of out.values()) l.sort((a, b) => a - b);
   return out;
-}
-
-/** What Queue items does, as the refusal names it. */
-export const queueWhat = (repo: string): string => `queues items on ${repo}`;
-
-/**
- * "Queue items", one line, for an operator or a maintainer who may act on the repo. A PR is pre-approved at its current head (it merges
- * once the review says take, the pre-merge review is clean and CI is green). An issue is queued for Fix; when exactly one open PR closes
- * it, that PR is queued as above. Several closing PRs are only listed: a person picks one.
- * `pin` (a command in a comment) names the one head each PR may be pre-approved at, or null for a PR that may not be queued: one
- * opened or pushed to after the comment.
- */
-export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number) => string | null): Promise<{ label: string; fast: string[] }> {
-  const r = item(req);
-  await needVisible(db, req, r.repo);
-  // A pre-approved merge is a merge approval given ahead, so it takes the act rule: an AutoCraft login with write access on the repo.
-  if (await actRefusal(db, req.user, r.repo)) throw new HttpError(403, `only an operator, or a maintainer with write access where the app acts for them, ${queueWhat(r.repo)}`);
-  const by = req.user.login;
-  const kind = (await loadItems(db, [r], "ref")).get(refText(r))?.kind;
-  if (kind === "issue") {
-    await queueIssue(db, by, r.repo, r.number, null, via);
-    const prs = await openPrsClosing(db, r.repo, r.number);
-    if (!prs.length) {
-      const waits = await implementRefusal(db, r.repo, r.number);
-      return { label: waits ? `Queued; it is not implemented while ${waits}` : "Queued: AutoCraft plans and implements it", fast: [] };
-    }
-    let rest: string;
-    if (prs.length > 1) rest = `${prs.map((n) => `#${n}`).join(", ")} close it; queue one of them`;
-    else if (pin && pin(prs[0]!) === null) rest = `#${prs[0]} closes it but was opened or pushed to after your comment, so it was not queued; comment on #${prs[0]} to queue it`;
-    else {
-      try {
-        await preapproveMerge(db, { repo: r.repo, number: prs[0]!, by, via, ...(pin ? { head: pin(prs[0]!)! } : {}) });
-        rest = `queued #${prs[0]}, which closes it`;
-      } catch (e) {
-        rest = `#${prs[0]} closes it but was not queued: ${(e as Error).message}`;
-      }
-    }
-    return { label: `Queued the issue; ${rest}`, fast: [] };
-  }
-  let done: { label: string };
-  const head = pin ? pin(r.number) : undefined;
-  if (head === null) throw new HttpError(409, HEAD_CHANGED);
-  try {
-    done = await preapproveMerge(db, { repo: r.repo, number: r.number, by, via, ...(head === undefined ? {} : { head }) });
-  } catch (e) {
-    throw new HttpError(409, (e as Error).message);
-  }
-  return { label: done.label, fast: [] };
 }
 
 export async function mergeHoldPr(db: Db, req: Req, on: boolean): Promise<{ ok: true }> {

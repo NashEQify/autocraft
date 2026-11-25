@@ -146,7 +146,6 @@ describe("api", () => {
     assert.deepEqual(byWords.map((h) => `${h.repo}#${h.number}`).sort(), ["photocraft#1", "photocraft#5"]);
     const p = await boss.get<Progress>("/api/progress");
     assert.equal(p.funnel.open, 5);
-    assert.equal(p.decisionsOpen, 0);
     assert.equal(p.perHour.length, 24);
   });
 

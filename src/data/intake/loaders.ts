@@ -9,7 +9,7 @@ import { loadItems } from "../mirror/index.ts";
 import { limitsOf } from "./limits.ts";
 import { OUTSIDE_SURGE } from "./types.ts";
 import { isOutsideAuthor } from "./pure.ts";
-import type { HeldAuthorRow, HeldRow, HiddenRepos, HoldCounts, HoldInfo, HoldReason, HoldStatus, OutsideAuthorRow, OutsideState, RefKey } from "./types.ts";
+import type { HeldAuthorRow, HiddenRepos, HoldCounts, HoldInfo, HoldReason, HoldStatus, OutsideAuthorRow, OutsideState, RefKey } from "./types.ts";
 
 const empty = (keys: KeySource): boolean => Array.isArray(keys) && keys.length === 0;
 const refKey = (r: { repo: string; number: number }): RefKey => `${r.repo}#${r.number}`;
@@ -44,21 +44,6 @@ export async function loadHoldStatus(db: Db, keys: KeySource): Promise<Map<RefKe
     else if (r.released_by !== null) out.set(key, { author: null, reason: null, releasedBy: r.released_by });
   }
   return out;
-}
-
-/** The items held for one author (without case), oldest first, with their titles. 2 statements in 2 waves (the titles follow the holds). */
-export async function listHeldByAuthor(db: Db, filter: { author: string; hidden: HiddenRepos; limit: number }): Promise<HeldRow[]> {
-  const q = queryDb(db);
-  const k = q.k as any;
-  const ciAuthor = (eb: any) => eb(eb.fn("lower", ["h.author"]), "=", filter.author.toLowerCase());
-  const holds = await q.all(k.selectFrom("main.outside_holds as h").select(["h.repo", "h.number", "h.author", "h.kind", "h.reason"]).where(ciAuthor)
-    .$if(filtered(filter.hidden), (s: any) => s.where(hiddenRepos(db, "h.repo", filter.hidden)))) as { repo: string; number: number; author: string; kind: "pr" | "issue"; reason: HoldReason }[];
-  if (holds.length === 0) return [];
-  const items = await loadItems(db, holds.map((h): Ref => ({ repo: h.repo, number: h.number })), "card");
-  const rows = holds.map((h) => { const i = items.get(refKey(h)); return { ...h, title: i?.title ?? null, created_at: i?.created_at ?? null }; });
-  // Items missing from the mirror first, then oldest.
-  rows.sort((a, b) => (a.created_at === null ? (b.created_at === null ? 0 : -1) : b.created_at === null ? 1 : a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || a.number - b.number);
-  return rows.slice(0, filter.limit);
 }
 
 /** Per author (one spelling, the smallest): count, PRs, oldest item and surge flag, most items first. 2 statements in 2 waves. */

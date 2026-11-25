@@ -20,9 +20,9 @@ export function GithubSide({ d }: { d: ItemPageData }) {
   const counts: Record<GithubTab, number> = { conversation: g.events.length, commits: g.commits.length, checks: g.checks.length, files: g.files.length };
   return (
     <div className="pb-6">
-      <div className="px-4 pt-3 text-xs font-semibold text-ink/55 md:px-6">
+      <div className="flex flex-wrap items-center gap-x-2 px-4 pt-3 text-xs font-semibold text-ink/55 md:px-6">
         <span className="inline-flex items-center gap-1.5"><GithubLogoIcon className="text-[14px]" /> On GitHub</span>
-        {g.syncedAt && <span className="num ml-2 font-normal text-ink/45">updated {clock(g.syncedAt)}</span>}
+        {g.syncedAt && <span className="num font-normal text-ink/45">updated {clock(g.syncedAt)}</span>}
       </div>
       <div role="tablist" className="mt-2 flex gap-1 overflow-x-auto border-b border-line px-4 scrollbar-none md:px-6">
         {tabs.map(([k, l]) => (

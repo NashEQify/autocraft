@@ -1,7 +1,7 @@
 // Fake merge queue: the merge fixtures behind one repo filter, with in-memory holds and batch controls.
 import type { Api } from "../client";
-import type { FastPosition, MergeWait, NextMerge, QueueBatch, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRow, User } from "../types";
-import { PIPELINE_REPOS, queueBatchList, queueList } from "./queueFixtures";
+import type { MergeWait, NextMerge, QueueBatch, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRow, User, WeightPlace } from "../types";
+import { PIPELINE_REPOS, queueBatches, queueRows } from "./queueFixtures";
 
 const WAITS: Record<string, [MergeWait, string, number]> = {
   ready: ["ready", "Ready", 0],
@@ -16,8 +16,8 @@ const WAITS: Record<string, [MergeWait, string, number]> = {
 
 export function createQueueMock(me: User, changed: () => void): Pick<Api, "queuePage" | "queueControl" | "controls"> {
   const wait = <T,>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 40));
-  const allMerge = queueList({ limit: 10000 }).rows;
-  const fixtureBatches = queueBatchList({ limit: 100 }).batches;
+  const allMerge = queueRows();
+  const fixtureBatches = queueBatches();
   const originOf = (r: QueueRow): QueueOrigin => {
     if (r.path === "operator") return { how: "answer", by: r.number % 2 ? "mira-ops" : "jonas-k", at: r.reviewedAt };
     if (r.number % 7 === 0) return { how: "queued", by: "mira-ops", at: r.reviewedAt };
@@ -35,12 +35,12 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
   };
   // Weights of a few started items: heavier ones go first.
   const weighted = allMerge.filter((r) => r.repo === "designcraft").slice(0, 3);
-  const pos = (r: { repo: string; number: number }): FastPosition | null => {
+  const pos = (r: { repo: string; number: number }): WeightPlace | null => {
     const i = weighted.findIndex((w) => key(w) === key(r));
     return i < 0 ? null : { position: i + 1, of: weighted.length, weight: 10 - 2 * i };
   };
   const rank = (r: { repo: string; number: number }) => pos(r)?.position ?? Infinity;
-  const firstFast = <T extends { repo: string; number: number }>(rows: T[]) => [...rows].sort((a, b) => rank(a) - rank(b));
+  const byWeight = <T extends { repo: string; number: number }>(rows: T[]) => [...rows].sort((a, b) => rank(a) - rank(b));
 
   return {
     async queuePage(f) {
@@ -57,30 +57,30 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
       const seen = new Set<string>();
       const entries = base
         .filter((r) => !seen.has(key(r)) && !!seen.add(key(r)))
-        .map((r): QueueMergeRow => ({ ...r, state: inBatch.has(key(r)) ? r.state : r.state === "in-batch" || r.state === "batch-checking" ? "ready" : r.state, fast: pos(r), held: held.has(key(r)), added: originOf(r) }))
+        .map((r): QueueMergeRow => ({ ...r, state: inBatch.has(key(r)) ? r.state : r.state === "in-batch" || r.state === "batch-checking" ? "ready" : r.state, place: pos(r), held: held.has(key(r)), added: originOf(r) }))
         .filter((r) => r.state !== "merged" && inScope(r.repo));
       // Approved for merge, no take review yet.
       const pending: QueuePendingRow[] = [
-        { repo: "designcraft", number: 3311, kind: "pr" as const, title: "Keep the swatch order when importing a palette", author: "contributor", size: "S" as const, step: "fixup" as const, fast: null, held: false, added: { how: "queued" as const, by: "operator", at: new Date(Date.now() - 3600_000).toISOString() } },
-        { repo: "designcraft", number: 3317, kind: "pr" as const, title: "Frame tool: snap to the baseline grid", author: "contributor", size: "M" as const, step: "review" as const, fast: null, held: false, added: { how: "preapproved" as const, by: "operator", at: new Date(Date.now() - 1800_000).toISOString() } },
+        { repo: "designcraft", number: 3311, kind: "pr" as const, title: "Keep the swatch order when importing a palette", author: "contributor", size: "S" as const, step: "fixup" as const, held: false, added: { how: "queued" as const, by: "operator", at: new Date(Date.now() - 3600_000).toISOString() } },
+        { repo: "designcraft", number: 3317, kind: "pr" as const, title: "Frame tool: snap to the baseline grid", author: "contributor", size: "M" as const, step: "review" as const, held: false, added: { how: "preapproved" as const, by: "operator", at: new Date(Date.now() - 1800_000).toISOString() } },
       ].filter((r) => inScope(r.repo));
       const merge = entries.length + pending.length;
       const counts = { all: merge, review: 0, fix: 0, verify: 0, merge };
       const out: QueuePage = { tab, repos, counts, rows: [], mergeRows: [], nextMerges: [], batches: [], total: 0, next: null };
       const offset = f.offset ?? 0, limit = f.limit ?? 100;
-      const free = firstFast(entries.filter((e) => !inBatch.has(key(e))));
+      const free = byWeight(entries.filter((e) => !inBatch.has(key(e))));
       out.mergeRows = free.slice(offset, offset + limit);
       out.total = free.length;
       out.next = offset + out.mergeRows.length < free.length ? offset + out.mergeRows.length : null;
       out.pending = pending;
-      out.batches = batches.map((b) => ({ ...b, prs: b.prs.map((p): QueueMergeRow => ({ ...p, fast: pos(p), held: held.has(key(p)), added: originOf(p) })) }));
+      out.batches = batches.map((b) => ({ ...b, prs: b.prs.map((p): QueueMergeRow => ({ ...p, place: pos(p), held: held.has(key(p)), added: originOf(p) })) }));
       const batchOf = new Map(batches.flatMap((b) => b.prs.map((p) => [key(p), { id: b.id, branch: b.branch }] as const)));
       const items = entries.flatMap((e) => {
         const w: [MergeWait, string, number] | undefined = held.has(key(e)) && e.state in WAITS ? ["held", "Merge held by an operator", 9] : WAITS[e.state];
         return w ? [{ e, w }] : [];
       });
       items.sort((a, b) => (a.w[2] === 9 ? 1 : 0) - (b.w[2] === 9 ? 1 : 0) || rank(a.e) - rank(b.e) || a.w[2] - b.w[2]);
-      out.nextMerges = items.slice(0, 10).map(({ e, w }): NextMerge => ({ repo: e.repo, number: e.number, title: e.title, waitsFor: w[0], label: w[1], fast: pos(e), batch: batchOf.get(key(e)) ?? null }));
+      out.nextMerges = items.slice(0, 10).map(({ e, w }): NextMerge => ({ repo: e.repo, number: e.number, title: e.title, waitsFor: w[0], label: w[1], batch: batchOf.get(key(e)) ?? null }));
       return wait(out);
     },
     controls: {

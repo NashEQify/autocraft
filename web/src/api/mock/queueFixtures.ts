@@ -1,5 +1,5 @@
 // Fake merge queue: a few PRs in every state, over the mock repos.
-import type { BatchFilter, BatchList, QueueBatch, QueueFilter, QueueList, QueueRow, QueueState, TypeLabel } from "../types";
+import type { QueueBatch, QueueRow, QueueState, TypeLabel } from "../types";
 import { AUTHORS, NOW, REPOS, rng, titleFor } from "./fixtures";
 
 const STATES: QueueState[] = ["ready", "decision-answered-merge", "refused", "waiting-ci", "waiting-premerge", "ci-failed", "conflict", "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "declined", "merged", "held-duplicate", "held-backlog", "batch-checking", "in-batch", "batch-failed", "changes-requested"];
@@ -119,19 +119,7 @@ const OPEN_BATCH: QueueBatch = (() => {
 const BATCH_MEMBERS = new Set(OPEN_BATCH.prs.map((r) => r.number));
 BATCHES.unshift(OPEN_BATCH);
 
-export function queueList(f: QueueFilter): QueueList {
-  const all = ROWS.filter((x) => (!f.repo || x.repo === f.repo) && !(x.repo === "designcraft" && BATCH_MEMBERS.has(x.number)));
-  const counts = Object.fromEntries(STATES.map((s) => [s, all.filter((x) => x.state === s).length])) as Record<QueueState, number>;
-  const match = all.filter((x) => (f.state ? x.state === f.state : x.state !== "merged"));
-  const from = f.after ? match.findIndex((x) => `${x.repo}#${x.number}` === f.after) + 1 : 0;
-  const rows = match.slice(from, from + (f.limit ?? 100));
-  const last = rows[rows.length - 1];
-  return { rows, counts, total: match.length, next: last && from + rows.length < match.length ? `${last.repo}#${last.number}` : null };
-}
+/** The open PRs that are in no batch in flight. */
+export const queueRows = (): QueueRow[] => ROWS.filter((x) => x.state !== "merged" && !(x.repo === "designcraft" && BATCH_MEMBERS.has(x.number)));
 
-export function queueBatchList(f: BatchFilter): BatchList {
-  const all = BATCHES.filter((b) => !f.repo || b.repo === f.repo);
-  const from = f.after ? all.findIndex((b) => String(b.id) === f.after) + 1 : 0;
-  const batches = all.slice(from, from + (f.limit ?? 20));
-  return { batches, total: all.length, next: batches.length && from + batches.length < all.length ? String(batches[batches.length - 1]!.id) : null };
-}
+export const queueBatches = (): QueueBatch[] => BATCHES;

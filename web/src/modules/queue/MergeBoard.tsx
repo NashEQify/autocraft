@@ -16,6 +16,7 @@ import { ConfirmButton, ErrorLine, useWrite } from "../admin/parts";
 import { useIsLinked } from "./highlight";
 import { BatchFacts, STATE, StateChip, TIER, Why } from "./mergeParts";
 import { CHECK_COLUMNS, checkCells, Size, SIZE_COLUMN } from "./checks";
+import { PENDING_STEP } from "./pendingStep";
 import { RowMenu } from "./RowMenu";
 import { usePage } from "./usePage";
 
@@ -109,14 +110,6 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
 
 /** The Queued group: PRs approved for merge before their take review. */
 const QUEUED = { id: "queued", label: "Queued", dot: "bg-ink/40" };
-
-const PENDING_STEP: Record<Exclude<QueuePendingRow["step"], "next" | "implement">, string> = {
-  fixup: "Fix-up first",
-  review: "Waiting for review",
-  ci: "Reviewed: take",
-  build: "Waiting for its PR",
-  pr: "PR open",
-};
 
 function PendingRow({ r }: { r: QueuePendingRow }) {
   const linked = useIsLinked(r.repo, r.number);

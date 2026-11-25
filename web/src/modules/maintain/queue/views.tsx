@@ -17,6 +17,7 @@ import { Button } from "../../../ui/atoms/Button";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { Pending } from "../../../ui/atoms/Pending";
 import { ItemRef } from "../../../ui/molecules/ItemRef";
+import { PENDING_STEP } from "../../queue/pendingStep";
 import { BATCH_STATE } from "../../queue/mergeParts";
 import { QueueRow as ModelCallRow } from "../../agents/queue";
 import { WarningIcon } from "@phosphor-icons/react";
@@ -155,7 +156,7 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
             </p>
             <ul className="divide-y divide-line">
               {queued.map((r) => (
-                <Row key={key(r)} item={{ ...r, kind: r.kind, state: "open" as const }} line={lineOf(r, r.implement ? `${r.implement.text}${r.implement.wait ? ` · ${r.implement.wait}` : ""}` : r.next ?? r.step)} action={r.kind === "pr" ? <HoldButton m={r} held={r.held} /> : undefined} />
+                <Row key={key(r)} item={{ ...r, kind: r.kind, state: "open" as const }} line={lineOf(r, r.implement ? `${r.implement.text}${r.implement.wait ? ` · ${r.implement.wait}` : ""}` : r.next ?? (r.step === "next" || r.step === "implement" ? t("In progress") : t(PENDING_STEP[r.step])))} action={r.kind === "pr" ? <HoldButton m={r} held={r.held} /> : undefined} />
               ))}
             </ul>
           </>

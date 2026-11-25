@@ -1,14 +1,9 @@
-// The merge queue for the dashboard: read-only, anyone signed in, limited to the repos the requester may see; viewers get
-// the queue rows without the review's reason, verification text and the plan's quoted reasons (src/dash/api/reader.ts).
-import type { BatchList, BatchState, Mergeable, QueueBatch, QueueList, QueueRow, QueueState, Tier, TypeLabel } from "../../../web/src/api/types.ts";
-import { countMergedQueue, countStates, loadMergeQueue, type CachedEntry } from "../../data/views/merge-queue.ts";
-import { listActiveBatches, listBatchPage, type BatchListRow } from "../../data/merge/index.ts";
-import { QUEUE_STATES } from "../../core/plan.ts";
-import { HttpError } from "../server/util.ts";
-import type { Req } from "../types.ts";
-import { queueTextFor, readerOf, type Reader } from "./reader.ts";
-import { isHiddenRepo } from "../../data/control/index.ts";
-import type { Db } from "../../db/index.ts";
+// Merge queue and batch rows as the dashboard shows them; viewers get the queue rows without the review's reason, verification
+// text and the plan's quoted reasons (src/dash/api/reader.ts).
+import type { BatchState, Mergeable, QueueBatch, QueueRow, QueueState, Tier, TypeLabel } from "../../../web/src/api/types.ts";
+import type { CachedEntry } from "../../data/views/merge-queue.ts";
+import type { BatchListRow } from "../../data/merge/index.ts";
+import { queueTextFor, type Reader } from "./reader.ts";
 
 const TIER: Record<string, Tier> = { whitelisted: "whitelisted", not: "not", allow: "override-allow", deny: "override-deny" };
 const MERGEABLE: Record<string, Mergeable> = { MERGEABLE: "clean", CONFLICTING: "conflicts" };
@@ -23,73 +18,7 @@ export const toRow = (e: CachedEntry, r: Reader): QueueRow => queueTextFor(r, {
   refusedReason: e.refusedReason, note: e.note, reviewedAt: e.reviewedAt, verify: e.verify,
 });
 
-/** `repo#number` cursor of the last row of a page. */
-const cursorOf = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
-function parseCursor(s: string | null): { repo: string; number: number } | undefined {
-  if (!s) return undefined;
-  const k = s.lastIndexOf("#");
-  const number = Number(s.slice(k + 1));
-  if (k < 1 || !Number.isInteger(number)) throw new HttpError(400, "after must be repo#number");
-  return { repo: s.slice(0, k), number };
-}
-
-// The queue rows come from the Plan cache (src/core/plan-read.ts): open PRs are read whole (counts and the state filter need all of
-// them) and cut into pages by (repo, number); merged PRs are read a page at a time and only when state=merged.
-/** PRs (repo#number@head) in an integration batch in flight: without a state filter they are listed under their batch, not in the PR list. */
-const inFlight = async (db: Db): Promise<Set<string>> => new Set((await listActiveBatches(db, {})).flatMap((b) => b.members.map((m) => `${b.repo}#${m.number}@${m.head_oid}`)));
-
-export async function queue(db: Db, req: Req): Promise<QueueList> {
-  const repo = req.query.get("repo") || undefined;
-  const state = req.query.get("state") || undefined;
-  const limit = Math.min(Math.max(Number(req.query.get("limit")) || 100, 1), 500);
-  const after = parseCursor(req.query.get("after"));
-  const reader = await readerOf(db, req);
-  const hidden = reader.hidden;
-  if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
-  if (state && !(QUEUE_STATES as readonly string[]).includes(state)) throw new HttpError(400, `state must be one of ${QUEUE_STATES.join(", ")}`);
-  const open = await loadMergeQueue(db, { repo, merged: "exclude", hidden });
-  const merged = await countMergedQueue(db, repo, hidden);
-  // An open PR that we merged and the mirror has not seen merged yet counts as merged.
-  const counts = countStates(open);
-  counts.merged += merged;
-  let page: CachedEntry[];
-  let more: boolean;
-  let match: CachedEntry[] | undefined;
-  if (state === "merged") {
-    page = await loadMergeQueue(db, { repo, merged: "only", after, limit: limit + 1, hidden });
-    more = page.length > limit;
-    page = page.slice(0, limit);
-  } else {
-    const batched = state ? null : await inFlight(db);
-    match = open.filter((e) => e.state !== "merged" && (state ? e.state === state : !batched!.has(`${e.repo}#${e.number}@${e.head}`)));
-    const from = after ? match.findIndex((e) => e.repo > after.repo || (e.repo === after.repo && e.number > after.number)) : 0;
-    const rest = from < 0 ? [] : match.slice(from);
-    page = rest.slice(0, limit);
-    more = rest.length > limit;
-  }
-  const total = state === "merged" ? counts.merged : state ? counts[state as keyof typeof counts] : match!.length;
-  return { rows: page.map((e) => toRow(e, reader)), counts, total, next: more ? cursorOf(page[page.length - 1]!) : null };
-}
-
-/** One page of integration batches, newest first, each with its member PRs as queue rows. `after` is the id of the last batch of the previous page. */
-export async function queueBatches(db: Db, req: Req): Promise<BatchList> {
-  const repo = req.query.get("repo") || undefined;
-  const limit = Math.min(Math.max(Number(req.query.get("limit")) || 20, 1), 100);
-  const afterRaw = req.query.get("after");
-  const after = afterRaw ? Number(afterRaw) : undefined;
-  if (after !== undefined && !Number.isInteger(after)) throw new HttpError(400, "after must be a batch id");
-  const reader = await readerOf(db, req);
-  const hidden = reader.hidden;
-  if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
-  const { batches, total, more } = await listBatchPage(db, { repo, hidden, before: after, limit });
-  const refs = batches.flatMap((b) => b.members.map((p) => `${b.repo}#${p.number}`));
-  const rows = new Map(refs.length ? (await loadMergeQueue(db, { merged: "all", refs, hidden })).map((e) => [`${e.repo}#${e.number}`, toRow(e, reader)]) : []);
-  const out = batches.map((b) => toBatch(b, reader, b.members.flatMap((p) => rows.get(`${b.repo}#${p.number}`) ?? [])));
-  return { batches: out, total, next: more ? String(out[out.length - 1]!.id) : null };
-}
-
-/** A batch row with its member PRs as queue rows. */
-/** `summary` can hold raw push, PR and gh errors, so only staff get it. */
+/** A batch row with its member PRs as queue rows. `summary` can hold raw push, PR and gh errors, so only staff get it. */
 export function toBatch(b: BatchListRow, reader: Reader, prs: QueueRow[]): QueueBatch {
   return {
     id: b.id, repo: b.repo, branch: b.branch, fork: b.fork, state: b.state as BatchState, baseSha: b.base_sha, size: b.members.length, areas: b.areas, prs,

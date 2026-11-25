@@ -1,5 +1,5 @@
 // Mock content for the redesign: the curated items, their status lines, reviews, results, history and GitHub sides, and findings.
-import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemImplementation, ItemKind, ItemPageData, ItemPageHeader, ItemPhase, ItemStatus, ItemStatusRow, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
+import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemImplementation, ItemKind, ItemPageData, ItemPageHeader, ItemPeek, ItemPhase, ItemStatus, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
 import { withTimeline, type MockPage, type ResultCard } from "./storyMock";
 import { NOW } from "./fixtures";
 
@@ -19,18 +19,18 @@ const HEADER_1484: Partial<ItemPageHeader> = {
 
 type Seed = { repo: string; number: number; kind: "pr" | "issue"; state: "open" | "closed" | "merged"; title: string; author: string; status: ItemStatus; updated: number };
 const seeds: Seed[] = [
-  { repo: "designcraft", number: 1484, kind: "pr", state: "open", title: "Add Hungarian spellchecking and nonstandard hyphenation", author: "rhea-m", updated: 20, status: status("Waiting for a person", 5 * H, "a Merge? answer", "merge or fix-up on the answer") },
+  { repo: "designcraft", number: 1484, kind: "pr", state: "open", title: "Add Hungarian spellchecking and nonstandard hyphenation", author: "rhea-m", updated: 20, status: status("Waiting for a person", 5 * H, "an answer to the recommendation", "what the answer says") },
   { repo: "photocraft", number: 9981, kind: "pr", state: "open", title: "Fix crop handles on rotated layers", author: "dana-k", updated: 38, status: status("In queue", 46, "CI on a1b2c3d", "merge in batch #41") },
   { repo: "wordcraft", number: 2231, kind: "pr", state: "open", title: "Keep the hyperlink run when exporting the last paragraph", author: "linnea-w", updated: 3, status: status("Fixing", 6, "fix-up round 2", "review of the new head, then merge") },
   { repo: "vectorcraft", number: 1388, kind: "pr", state: "open", title: "Snap guides ignore locked layers", author: "kiri-n", updated: 12, status: status("Fixing", 26, "a fix-up", "review of the new head, then merge") },
   { repo: "wordcraft", number: 2214, kind: "issue", state: "open", title: "Export to PDF drops the hyperlink on the last paragraph", author: "linnea-w", updated: 9, status: status("Fixing", 70, "fix-up round 2 on wordcraft#2231", "review of the new head, then merge") },
   { repo: "photocraft", number: 9970, kind: "pr", state: "merged", title: "Curves: keep the endpoint handles inside the plot", author: "hollowbrook", updated: 98, status: status("Merged", 98, null, null) },
-  { repo: "pdfcraft", number: 2210, kind: "pr", state: "open", title: "Add CMYK output profile selection", author: "pixel-wrangler", updated: 1 * D, status: status("Waiting for a person", 1 * D, "a Scope? answer", "review on the answer") },
-  { repo: "photocraft", number: 4127, kind: "pr", state: "open", title: "Add Wave distortion filter with live preview", author: "pixel-wrangler", updated: 3 * H, status: status("Waiting for a person", 71 * H, "a Scope? answer", "review on the answer") },
-  { repo: "gridcraft", number: 977, kind: "pr", state: "open", title: "Range spill: keep neighbouring cells when a formula grows", author: "saltmarsh-ink", updated: 2 * H, status: status("Waiting for a person", 2 * H, "a Merge? answer", "merge or fix-up on the answer") },
+  { repo: "pdfcraft", number: 2210, kind: "pr", state: "open", title: "Add CMYK output profile selection", author: "pixel-wrangler", updated: 1 * D, status: status("Waiting for a person", 1 * D, "a maintainer to start it", null) },
+  { repo: "photocraft", number: 4127, kind: "pr", state: "open", title: "Add Wave distortion filter with live preview", author: "pixel-wrangler", updated: 3 * H, status: status("Waiting for a person", 71 * H, "a maintainer to start it", null) },
+  { repo: "gridcraft", number: 977, kind: "pr", state: "open", title: "Range spill: keep neighbouring cells when a formula grows", author: "saltmarsh-ink", updated: 2 * H, status: status("Waiting for a person", 2 * H, "an answer to the recommendation", "what the answer says") },
   { repo: "vectorcraft", number: 1402, kind: "pr", state: "open", title: "Rename the curvature toggle and add a shortcut", author: "kiri-n", updated: 6, status: status("Verifying", 14, "a build worker", "merge queue if verified") },
-  { repo: "lightcraft", number: 540, kind: "pr", state: "open", title: "Bloom threshold slider is ignored in preview", author: "hollowbrook", updated: 30, status: status("Review", 22, "an Opus review", "classify, then decide") },
-  { repo: "filmcraft", number: 1830, kind: "issue", state: "open", title: "Timeline playhead jumps when zooming with the trackpad", author: "mosswood", updated: 50, status: status("Triage", 50, "classifier verdicts", "priority and decision") },
+  { repo: "lightcraft", number: 540, kind: "pr", state: "open", title: "Bloom threshold slider is ignored in preview", author: "hollowbrook", updated: 30, status: status("Review", 22, "an Opus review", "its verdict") },
+  { repo: "filmcraft", number: 1830, kind: "issue", state: "open", title: "Timeline playhead jumps when zooming with the trackpad", author: "mosswood", updated: 50, status: status("Triage", 50, "classifier verdicts", "priority") },
   { repo: "craft-libs", number: 517, kind: "pr", state: "open", title: "Improve startup time", author: "wren-lat", updated: 4 * H, status: { ...status("Held", 4 * H, "author's daily limit (5 new PRs a day)", "Model work starts when the window frees or an operator releases it"), outside: { reason: "limit", author: "wren-lat", kind: "pr", limit: 5 } } },
   { repo: "effectcraft", number: 301, kind: "pr", state: "open", title: "Glow effect: use linear blending", author: "brushstroke42", updated: 2 * D, status: status("Held", 2 * D, "an operator to release the hold", "review resumes") },
   { repo: "craft-libs", number: 412, kind: "pr", state: "merged", title: "Bump the egui pin", author: "kiri-n", updated: 3 * H, status: status("Merged", 3 * H, null, null) },
@@ -50,7 +50,7 @@ const BARS: Record<string, ItemBar> = {
     steps: [step("classify", "Classify", "done", 5 * H, 0.01, 4301), step("review", "Review", "done", 3 * H, 0.92, 4377), step("fixup", "Fix-up", "current", null, 1.4, 4412, true), ...PR_NEXT],
   },
   "lightcraft#540": {
-    headline: { tone: "queued", text: "Queued for Opus review · #2 in line", next: "classify, then decide", model: null, startedAt: null, jobId: 4415 },
+    headline: { tone: "queued", text: "Queued for Opus review · #2 in line", next: "its verdict", model: null, startedAt: null, jobId: 4415 },
     steps: [step("classify", "Classify", "done", 40, 0.01, 4398), step("review", "Review", "current", null, null, 4415), ...PR_NEXT],
   },
   "vectorcraft#1388": {
@@ -58,15 +58,15 @@ const BARS: Record<string, ItemBar> = {
     steps: [step("classify", "Classify", "done", 4 * H, 0.01, 4290), step("review", "Review", "done", 2 * H, 0.88, 4366), step("fixup", "Fix-up", "failed", 26, 1.84, 4404), ...PR_NEXT],
   },
   "designcraft#1484": {
-    headline: { tone: "waiting", text: "Waiting for a Merge? answer", next: "merge or fix-up on the answer", model: null, startedAt: null, jobId: null },
-    steps: [step("classify", "Classify", "done", 2 * D, 0.01, 4001), step("review", "Review", "done", 5 * H, 1.35, 4350), step("fixup", "Fix-up", "failed", 3 * H, 0.4, 4380), step("decide", "Decide", "current", null, 0.2, null), ...PR_NEXT],
+    headline: { tone: "waiting", text: "Waiting for an answer to the recommendation", next: "what the answer says", model: null, startedAt: null, jobId: null },
+    steps: [step("classify", "Classify", "done", 2 * D, 0.01, 4001), step("review", "Review", "done", 5 * H, 1.35, 4350), step("fixup", "Fix-up", "failed", 3 * H, 0.4, 4380), step("decide", "Recommendation", "current", null, 0.2, null), ...PR_NEXT],
   },
   "craft-libs#517": {
     headline: { tone: "waiting", text: "Waiting: author's daily limit (5 new PRs a day)", next: "Model work starts when the window frees or an operator releases it", model: null, startedAt: null, jobId: null, outside: { reason: "limit", author: "wren-lat", kind: "pr", limit: 5 } },
     steps: [],
   },
   "filmcraft#1830": {
-    headline: { tone: "running", text: "Classify running", next: "priority and decision", model: "Jev", startedAt: at(0.15), jobId: 4418 },
+    headline: { tone: "running", text: "Classify running", next: "priority", model: "Jev", startedAt: at(0.15), jobId: 4418 },
     steps: [step("dupes", "Duplicates", "done", 49, 0, 4416), step("classify", "Classify", "current", null, null, 4418, true)],
   },
   "photocraft#9970": {
@@ -93,8 +93,11 @@ export const findingStatus = (state: string, attempts: number, note: string | nu
   return status("Closed", 3 * D, null, null);
 };
 
-/** Quieter rows from many repos, so the list runs past one page. */
-function fillerRows(): ItemStatusRow[] {
+/** What the hover card of a mock item shows. */
+export type PeekRow = Omit<ItemPeek, "createdAt" | "labels">;
+
+/** Quieter items from many repos. */
+function fillerRows(): PeekRow[] {
   const repos = ["designcraft", "photocraft", "wordcraft", "pdfcraft", "gridcraft", "vectorcraft", "lightcraft", "filmcraft"];
   const titles = ["Tooltip clips at the window edge", "Add a keyboard shortcut for zoom to selection", "Crash when the recent list is empty", "Panel resize handle flickers", "Update the French strings", "Undo skips the last brush stroke", "Rulers show the wrong unit after import", "Typo in the export dialog"];
   const phases: [ItemPhase, string | null, string | null][] = [["Triage", "classification", null], ["Review", "an Opus review", "post the review"], ["Fixing", "fix-up round 1", "verify"], ["Merged", null, null], ["Closed", null, null], ["Out of scope", null, null], ["In queue", "CI", "merge by rule"], ["Verifying", "a build worker", "merge queue"]];
@@ -103,20 +106,16 @@ function fillerRows(): ItemStatusRow[] {
     const kind = i % 3 === 0 ? "issue" : "pr";
     const state = phase === "Merged" ? "merged" : phase === "Closed" || phase === "Out of scope" ? "closed" : "open";
     const m = 8 * H + i * 37;
-    const checks: ItemStatusRow["checks"] = kind === "pr" && (phase === "In queue" || phase === "Verifying")
-      ? { verdict: i % 5 === 0 ? "take-fix" : "take", ci: i % 4 === 0 ? "pending" : "success", mergeable: "clean", size: (["S", "M", "L"] as const)[i % 3]!,
-          verify: phase === "Verifying" ? { state: "running", kind: null, summary: "Build and tests on a worker", note: null } : { state: "passed", kind: null, summary: "Build and 412 tests passed", note: null }, prBuild: null }
-      : null;
-    return { checks, closes: kind === "pr" && i % 2 === 0 ? [3000 + i] : [], repo: repos[i % repos.length]!, number: 3100 + i * 7, kind, state: kind === "issue" && state === "merged" ? "closed" : state, title: titles[(i * 5) % titles.length]!, author: ["mosswood", "kestrel", "dmann", null][i % 4] ?? null, status: status(phase, m, waiting, next), updatedAt: at(m) } as ItemStatusRow;
+    return { closes: kind === "pr" && i % 2 === 0 ? [3000 + i] : [], repo: repos[i % repos.length]!, number: 3100 + i * 7, kind, state: kind === "issue" && state === "merged" ? "closed" : state, title: titles[(i * 5) % titles.length]!, author: ["mosswood", "kestrel", "dmann", null][i % 4] ?? null, status: status(phase, m, waiting, next), updatedAt: at(m) } as PeekRow;
   });
 }
 
-export function statusRows(): ItemStatusRow[] {
+export function peekRows(): PeekRow[] {
   return [...seedRows(), ...fillerRows()];
 }
 
-function seedRows(): ItemStatusRow[] {
-  return seeds.map((s) => ({ repo: s.repo, number: s.number, kind: s.kind, state: s.state, title: s.title, author: s.author ?? null, status: s.status, updatedAt: at(s.updated) }));
+function seedRows(): PeekRow[] {
+  return seeds.map((s) => ({ repo: s.repo, number: s.number, kind: s.kind, state: s.state, title: s.title, author: s.author ?? null, status: s.status, updatedAt: at(s.updated), closes: [] }));
 }
 
 /** A plain header for mock pages: open, nothing queued or held. */
@@ -173,7 +172,7 @@ const HISTORY_1484: HistoryEntry[] = [
   hist("h6", 2 * D, "Review", "Take with fixes, head e6a09b1", "Opus", 0.88, "model", [{ label: "Opus, 31k tokens", kind: "model", costUsd: 0.88 }]),
   hist("h7", 5 * H + 30, "Review", "Take, unsure", "Opus", 0.92, "model", [{ label: "Read crates/spell/src/hu.rs", kind: "tool", costUsd: null }, { label: "Opus, 33k tokens", kind: "model", costUsd: 0.92 }]),
   hist("h8", 5 * H + 20, "Edited review on GitHub", "Review comment updated", null, null, "write", [], "h8"),
-  hist("h9", 5 * H, "Merge? asked", "Prepared options: Merge, Hold, Ask to use the language pack", "Opus", 0.31, "decision", [{ label: "Opus, 12k tokens", kind: "model", costUsd: 0.31 }]),
+  hist("h9", 5 * H, "Recommendation written", "Merge parts 1 and 3, and move the dictionary to a follow-up issue?", "Opus", 0.31, "decision", [{ label: "Opus, 12k tokens", kind: "model", costUsd: 0.31 }]),
 ];
 
 const RESULTS_1484: ResultCard[] = [
@@ -181,7 +180,7 @@ const RESULTS_1484: ResultCard[] = [
   { id: "c2", kind: "classifiers", title: "Classifiers", outcome: "Missing feature, 3 of 3 agree", tone: "neutral", at: at(4 * D + 3 * H), detail: null, earlier: [] },
   { id: "c3", kind: "duplicates", title: "Duplicates and links", outcome: "Related: craft-i18n#88, designcraft#1391", tone: "neutral", at: at(4 * D + 3 * H), detail: null, earlier: [] },
   { id: "c4", kind: "patch-checks", title: "Patch checks", outcome: "Opus approved round 2", tone: "ok", at: at(2 * D + 20), detail: "Round 1 rejected: the test does not cover the ccs case.", earlier: [{ at: at(2 * D + 50), outcome: "Round 1 rejected" }] },
-  { id: "c5", kind: "actions", title: "Actions", outcome: "Comment posted, not closed", tone: "neutral", at: at(5 * H + 10), detail: "Merge? answered by rhea-m: hold for the pack decision.", earlier: [] },
+  { id: "c5", kind: "actions", title: "Actions", outcome: "Comment posted, not closed", tone: "neutral", at: at(5 * H + 10), detail: "rhea-m answered: wait for the language pack.", earlier: [] },
   { id: "c6", kind: "postmerge", title: "Post-merge review", outcome: "1 follow-up opened", tone: "warn", at: at(95), detail: "Earlier merge of the pack loader left a stale cache path.", earlier: [], followups: [{ repo: "designcraft", number: 1490 }, { repo: "craft-i18n", number: 91 }] },
 ];
 

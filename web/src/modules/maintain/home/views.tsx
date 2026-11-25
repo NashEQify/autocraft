@@ -6,6 +6,7 @@ import { t } from "../../../../../src/i18n/index.ts";
 import { useQuery } from "../../../api/client";
 import { usePageProject } from "../../../api/scope";
 import type { HomeProblem, MaintainRow, MaintainRunnerLine } from "../../../api/types";
+import { causeText } from "../../../lib/stuck";
 import { itemPath } from "../../../lib/links";
 import { useUser } from "../../../shell/UserContext";
 import { Badge } from "../../../ui/atoms/Badge";
@@ -156,7 +157,7 @@ function Stuck() {
                 <span className="code">
                   {i.repo}#{i.number}
                 </span>{" "}
-                · {i.cause}
+                · {causeText(i.cause)}
               </div>
             </div>
           </li>

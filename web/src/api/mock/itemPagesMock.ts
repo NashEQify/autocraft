@@ -4,7 +4,7 @@ import type { FindingAction, FindingQuestion, FindingRow, FindingSummary, Findin
 import { findingActions } from "../../lib/security";
 import { setClock } from "../../lib/format";
 import { realData } from "./realStore";
-import { FINDING_HISTORY_11, FIX_ROUNDS_11, FIX_ROUNDS_4, barFromStatus, findingStatus, itemPageFor, mockHeader, statusRows } from "./itemPagesData";
+import { FINDING_HISTORY_11, FIX_ROUNDS_11, FIX_ROUNDS_4, barFromStatus, findingStatus, itemPageFor, mockHeader, peekRows } from "./itemPagesData";
 
 const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 const GROUP: Record<string, SecurityGroup> = {
@@ -56,8 +56,8 @@ export function createItemPagesMock(me: User, base: Pick<Api, "security" | "item
       });
     },
     async itemPeek(repo, number) {
-      const row = [...(real?.rows ?? []), ...statusRows()].find((r) => r.repo === repo && r.number === number);
-      if (row) return wait({ repo, number, kind: row.kind, state: row.state, title: row.title, author: row.author, createdAt: null, updatedAt: row.updatedAt, labels: [], status: row.status, closes: row.closes ?? [] });
+      const row = [...(real?.rows ?? []), ...peekRows()].find((r) => r.repo === repo && r.number === number);
+      if (row) return wait({ repo, number, kind: row.kind, state: row.state, title: row.title, author: row.author, createdAt: null, updatedAt: row.updatedAt, labels: [], status: row.status, closes: row.closes });
       const it = await base.item(repo, number);
       return wait({ repo, number, kind: it.kind, state: it.state, title: it.title, author: it.author, createdAt: it.createdAt, updatedAt: it.updatedAt, labels: it.labels,
         status: { phase: it.state === "merged" ? "Merged" : it.state === "closed" ? "Closed" : "Triage", waiting: null, next: null, since: it.updatedAt }, closes: [] });

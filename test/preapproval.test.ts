@@ -9,7 +9,7 @@ import { scopeToTracked } from "../src/repos.ts";
 import { excluded } from "../src/db/kx.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
-import { queueAdd, queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
+import { queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";

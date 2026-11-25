@@ -132,7 +132,7 @@ function RepoPage({ name }: { name: string }) {
   const act = useRepoActions(q.refetch);
   const r = q.data?.find((x) => x.name === name);
   return (
-    <RefPage title={<span className="code">{name}</span>} back={{ to: "/repos", label: t("Repos") }}>
+    <RefPage title={<span className="code text-xl">{name}</span>} back={{ to: "/repos", label: t("Repos") }}>
       <ErrorLine error={act.error ?? q.error?.message} />
       {!q.data ? (
         <Loading />

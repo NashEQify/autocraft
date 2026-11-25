@@ -3,7 +3,7 @@
 // maintainers also see override notes. The access list and every write here
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
-import { filtered, isHiddenRepo, listAuditPage, PilotError, setPilot, setPipelineFlags, type HiddenRepos } from "../../data/control/index.ts";
+import { filtered, isHiddenRepo, listAuditPage, setPipelineFlags, type HiddenRepos } from "../../data/control/index.ts";
 import { endSessionById, listSessions, loadOverrides } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type {
@@ -580,20 +580,6 @@ export async function auditLog(db: Db, req: Req): Promise<AuditPage> {
   const { total, rows } = await listAuditPage(db, { login: login || undefined, action: action || undefined, limit, offset, ...(operator ? {} : { visible, actions }) });
   const entries: AuditEntry[] = rows.map((r) => ({ at: r.at, login: r.login, action: r.action, target: r.target, details: r.details }));
   return { entries, total, actions };
-}
-
-// Only an operator limits the pipeline to a list of items. An empty list clears the pilot.
-export async function putPilot(db: Db, req: Req) {
-  requireOperator(req, "set the pilot");
-  const items = body(req).items;
-  if (!Array.isArray(items)) throw new HttpError(400, "items must be a list of repo#number");
-  try {
-    await setPilot(db, req.user.login, items);
-  } catch (e) {
-    if (e instanceof PilotError) throw new HttpError(e.status, e.message);
-    throw e;
-  }
-  return pipelineState(db);
 }
 
 // An operator, or a maintainer with write access to the repo, sets the checks whose failure does not stop a merge.

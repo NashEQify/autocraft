@@ -383,7 +383,7 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const prs = page.mergeRows.map((x) => ({
     item: item(x), title: x.title, author: x.author, state: x.state, mergesBy: x.path, verdict: x.verdict, ci: x.ci, mergeable: x.mergeable,
     verify: x.verify?.state ?? null, premergeOrRefusal: x.refusedReason, outsideRule: x.outsideRule, note: x.note, conflict: x.conflictNote ?? null,
-    held: x.held,
+    held: x.held, weight: x.place,
     added: x.added ? { how: x.added.how, by: x.added.by, at: x.added.at } : null, closes: x.closes ?? [], link: link(env, itemPath(x.repo, x.number)),
   }));
   // Pre-approved merges whose PR is no queue row yet (no take review at its head), so an agent sees what it queued. A PR that is a

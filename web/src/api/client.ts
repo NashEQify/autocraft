@@ -54,6 +54,7 @@ import type {
   Rates,
   AuditFilter,
   AuditPage,
+  HeldAuthor,
   OutsideState,
   Contributor,
   ContributorFilter,
@@ -362,6 +363,10 @@ export interface Api {
     resetLimit(step: string): Promise<PipelineState>;
     /** Clears a stage the circuit breaker paused. */
     resumeTrip(stage: string): Promise<PipelineState>;
+    /** Operator only: outside authors with held items. */
+    heldAuthors(): Promise<HeldAuthor[]>;
+    /** Operator only: lets every item now held for the author through. */
+    releaseAuthor(author: string): Promise<{ released: number }>;
     setOutsideLimits(input: Partial<Pick<OutsideState, "prsPerDay" | "issuesPerDay" | "surgePerHour">>): Promise<OutsideState>;
     /** Operator only: clears the warning about jobs of a step the runner stopped for running past their limit. */
     ackDeadline(step: string): Promise<{ ok: true }>;

@@ -46,7 +46,7 @@ export const EVENTS: TraceEvent[] = ([
     body: "Thanks for the work on this. Two questions before I look at the diff:\n\n1. Why are the dictionary files committed instead of loaded from the **language pack**?\n2. Do the nonstandard hyphenation rules differ from the pack's?" },
   { id: "review:gh:r1", kind: "github", at: at(50), head: H1, actor: { type: "person", name: "mosswood" }, summary: "Submitted a review: changes requested", ref: { commentId: "r1" },
     body: "Changes requested.\n\n- `crates/text/src/lang/hu.rs`: the loader duplicates `load_pack`.\n- The data files are about 270,000 lines; they make every clone larger.\n\n```rust\nlet pack = load_pack(\"hu\")?;\n```" },
-  { id: "decision:d9:asked", kind: "decision", at: at(95), head: H1, actor: { type: "step", name: "Ask decisions" }, summary: "Asked: Merge this fix?", ref: { decisionId: "designcraft#1484:merge" } },
+  { id: "workflow:31", kind: "decision", at: at(95), head: H1, actor: { type: "person", name: "mira-ops" }, summary: "Command: review", ref: {} },
   {
     id: "run:901", kind: "model-call", at: at(120), head: H1, actor: { type: "model", name: "opus" }, summary: "Review pull requests: hold", ref: { runId: 901, jobId: 52 },
     call: { promptId: "review.opus", step: "Review pull requests", model: "opus", provider: "claude", via: { login: "kiri-n", harness: "claude", model: "claude-opus-4-5" }, state: "done", inputTokens: 51_000, outputTokens: 3_300, costUsd: 0.97, toolCalls: 11, endedAt: at(118) },
@@ -66,7 +66,6 @@ const ISSUE_EVENTS: TraceEvent[] = [
     call: { model: "haiku", provider: "claude", state: "done", inputTokens: 1_900, outputTokens: 60, costUsd: 0.002, toolCalls: 0, endedAt: at(2 * 1440 - 4) } },
   { id: "run:811", kind: "model-call", at: at(2 * 1440 - 3.5), head: null, actor: { type: "model", name: "jev" }, summary: "Classify items: bugfix", ref: { runId: 811, jobId: 41 },
     call: { model: "jev", provider: "jev", state: "done", inputTokens: 1_800, outputTokens: 40, costUsd: 0, toolCalls: 0, endedAt: at(2 * 1440 - 4) } },
-  { id: "decision:dup:asked", kind: "decision", at: at(2 * 1440 - 20), head: null, actor: { type: "step", name: "Ask decisions" }, summary: "Asked: Is this a duplicate?", ref: {} },
   { id: "comment:i1", kind: "github", at: at(900), head: null, actor: { type: "person", name: "wren-h" }, summary: "Posted a comment, 120 characters", ref: { commentId: "i1" },
     body: "Same seams on a second machine. They only show up on 16-bit files, not on 8-bit ones." },
 ].sort((a, b) => (a.at < b.at ? -1 : 1)) as TraceEvent[];

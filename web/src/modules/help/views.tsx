@@ -395,7 +395,14 @@ function Keyboard() {
 }
 
 export function HelpView({ params }: ViewProps) {
-  const page = params.page;
+  return (
+    <div className="h-full overflow-y-auto">
+      <HelpPage page={params.page} />
+    </div>
+  );
+}
+
+function HelpPage({ page }: { page?: string }) {
   if (page === "start") return <Start />;
   if (page === "commands") return <Commands />;
   if (page === "after") return <After />;

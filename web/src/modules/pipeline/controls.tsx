@@ -180,9 +180,9 @@ export function StageLimits() {
     <Block flush title="Daily limits" aside={`items per day, resets at ${dayResetLocal()}; empty is no limit, 0 pauses the stage`}>
       <ErrorLine error={q.error?.message} className="p-4" />
       {q.data && (
-        <div className="overflow-x-auto">
-          <table className="num w-full min-w-[560px] text-sm">
-            <thead className="bg-ink/[0.03] text-xs text-ink/55">
+        <div className="md:overflow-x-auto">
+          <table className="num w-full text-sm max-md:block md:min-w-[560px]">
+            <thead className="bg-ink/[0.03] text-xs text-ink/55 max-md:hidden">
               <tr>
                 <th className="h-8 px-3 text-left font-medium">Stage</th>
                 <th className="h-8 px-3 text-right font-medium">Used today</th>
@@ -190,15 +190,15 @@ export function StageLimits() {
                 <th className="h-8 px-3 text-left font-medium">Status</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="max-md:block">
               {q.data.limits.map((l) => (
-                <tr key={l.step} className="border-t border-line align-middle">
-                  <td className="px-3 py-1.5">
+                <tr key={l.step} className="border-t border-line align-middle max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-3 max-md:gap-y-1.5 max-md:px-3 max-md:py-2.5 max-md:first:border-t-0">
+                  <td className="md:px-3 md:py-1.5 max-md:min-w-0 max-md:flex-1 max-md:basis-40">
                     {l.title} <span className="code text-xs text-ink/45">{l.step}</span>
                   </td>
-                  <td className="whitespace-nowrap px-3 text-right">{usage(l)}</td>
-                  <td className="px-3 py-1.5">{operator ? <LimitEditor l={l} /> : limitText(l)}</td>
-                  <td className="px-3">
+                  <td className="whitespace-nowrap text-right md:px-3">{usage(l)}</td>
+                  <td className="max-md:basis-full md:px-3 md:py-1.5">{operator ? <LimitEditor l={l} /> : limitText(l)}</td>
+                  <td className="max-md:basis-full md:px-3">
                     <div className="flex flex-wrap items-center gap-2">
                       {/* A trip on every repo is the pause reason; its row below the table says why. */}
                       {l.trips?.some((t) => t.repo === null) ? null : l.pausedReason ? <Badge tone="warn">{l.pausedReason}</Badge> : <span className="text-ink/45">{l.status ?? "ready"}</span>}
@@ -285,7 +285,44 @@ export function OutsideLimits({ className }: { className?: string }) {
           )}
         </form>
         <ErrorLine error={write.error} className="mt-2" />
+        {operator && held && <HeldAuthors />}
       </Block>
+    </div>
+  );
+}
+
+const count = (n: number, one: string) => `${num(n)} ${one}${n === 1 ? "" : "s"}`;
+
+/** The outside authors with held items; an operator lets everything held for one author through at once. */
+function HeldAuthors() {
+  const api = useApi();
+  const { data } = useQuery("outside-held", (a) => a.pipeline.heldAuthors());
+  const write = useWrite();
+  if (!data?.length) return null;
+  return (
+    <div className="mt-4">
+      <h3 className="text-xs text-ink/60">Held items by author</h3>
+      <ul className="mt-1 divide-y divide-line border-y border-line">
+        {data.map((h) => (
+          <li key={h.author} className="flex min-h-[44px] flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
+            <div className="min-w-0 flex-1 basis-52">
+              <span className="break-words text-sm font-medium">{h.author}</span>
+              {h.surge && <Badge tone="warn" className="ml-2">Surge</Badge>}
+              <p className="text-xs text-ink/60">
+                {[h.prs && count(h.prs, "PR"), h.issues && count(h.issues, "issue")].filter(Boolean).join(", ")}
+                {h.oldest && (
+                  <>
+                    {", oldest "}
+                    <TimeAgo iso={h.oldest} />
+                  </>
+                )}
+              </p>
+            </div>
+            <ConfirmButton label="Release all" confirmLabel={`Release ${h.prs + h.issues} for ${h.author}`} loading={write.busy === h.author} onConfirm={() => void write.run(h.author, () => api.pipeline.releaseAuthor(h.author))} />
+          </li>
+        ))}
+      </ul>
+      <ErrorLine error={write.error} className="mt-2" />
     </div>
   );
 }

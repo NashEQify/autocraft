@@ -260,6 +260,8 @@ export function createHttpApi(): Api {
       resetLimit: (step) => post(`/api/pipeline/limits/${encodeURIComponent(step)}/reset`),
       ackDeadline: (step) => post(`/api/pipeline/steps/${encodeURIComponent(step)}/deadline-ack`),
       resumeTrip: (stage) => post(`/api/pipeline/trips/${encodeURIComponent(stage)}/resume`),
+      heldAuthors: () => get("/api/pipeline/outside/held"),
+      releaseAuthor: (author) => post("/api/pipeline/outside/release", { author }),
       setOutsideLimits: (input) => put("/api/pipeline/outside-limits", input),
       setBlockers: (input) => put("/api/pipeline/blocker-thresholds", input),
     },

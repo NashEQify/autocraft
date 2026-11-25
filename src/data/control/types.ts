@@ -47,10 +47,9 @@ export type ControlSnapshot = {
   trips: Map<string, TripRow>;
   limits: Map<string, LimitRow>;
 };
-export type UsagePause = { fiveHour: number; weekly: number };
 export type RepoConfig = { readonly optionalChecks: string[]; readonly prBuildsScope: "all" | "outside"; readonly batchSize: number; readonly testRepo: boolean; buildFeature(feature: string): boolean };
 /** Typed instance properties of the registry (`SETTINGS` in settings.ts) plus the per-repo accessor. */
 export type Config = InstanceConfig & { repo(repo: string): RepoConfig };
 /** The live keys with their defaults applied (`stepParallel` is Infinity for "none"). */
-export type LiveConfig = { pipelineEnabled: boolean; drain: boolean; changedBy: string | null; changedAt: string | null; jevParallel: number; usagePause: UsagePause; stepParallel: number };
+export type LiveConfig = { pipelineEnabled: boolean; drain: boolean; changedBy: string | null; changedAt: string | null; jevParallel: number; stepParallel: number };
 export type StageDefaults = Record<string, number | null>;

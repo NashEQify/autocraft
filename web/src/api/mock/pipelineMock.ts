@@ -3,7 +3,7 @@ import { mayRunMock } from "./adminMock";
 import type { Api } from "../client";
 import type { Job, JobDetail, PipelineOverview, PipelineState, PipelineStep, StageLimit, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
-import { outside, resumeSurge } from "./outsideMock";
+import { heldAuthors, outside, releaseAuthor, resumeSurge } from "./outsideMock";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 const iso = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -59,19 +59,19 @@ const job = (id: number, step: string, state: Job["state"], startMin: number | n
   id, step, params: {}, requestedBy: "ochre-fox", requestedAt: iso((startMin ?? 0) + 1), state,
   startedAt: startMin === null ? null : iso(startMin), endedAt: state === "running" || state === "queued" ? null : iso((startMin ?? 0) - minutes),
   progress: null, summary: null, error: null, cancelRequested: false, usage: null,
-  models: step.startsWith("classify") ? ["jev", "haiku"] : step === "opus-review" ? ["opus"] : step === "decide" ? ["opus"] : [], waiting: null, ...extra,
+  models: step.startsWith("classify") ? ["jev", "haiku"] : step === "opus-review" ? ["opus"] : [], waiting: null, ...extra,
 });
 
 const pr = (repo: string, number: number, title: string) => ({ repo, number, kind: "pr" as const, state: "open" as const, title });
 const JOB_ITEMS: Record<number, JobDetail["items"]> = {
   49: [{ ...pr("designcraft", 65, "Replace the fixed page grid with snap guides"), outcome: "take" }],
   50: ["Fix overset detection for locked frames", "Add snap guides to the ruler", "Crash when ungrouping nested frames", "Export drops the bleed box", "Guides ignore locked layers", "Undo skips the last move", "Text frame loses its style on paste"].map((t, i) => ({
-    ...pr("designcraft", 1484 + i * 3, t), outcome: i % 3 === 2 ? "labelled bugfix, needs-review" : "labelled bugfix", decision: null })),
+    ...pr("designcraft", 1484 + i * 3, t), outcome: i % 3 === 2 ? "labelled bugfix, needs-review" : "labelled bugfix", })),
 };
 
 function seed(): Job[] {
   return [
-    job(49, "merge-ask", "done", 3, 1, { summary: "Asked Merge? on 1 PR" }),
+    job(49, "workflow-advance", "done", 3, 1, { summary: "Wrote 1 recommendation" }),
     job(50, "labels-apply", "done", 6, 1, { params: { repo: "designcraft" }, summary: "designcraft: labelled 7 items" }),
     job(51, "opus-review", "queued", null, 0, { params: { repo: "photocraft", limit: 5 }, waiting: "No Task Runner takes photocraft" }),
     job(48, "classify-new", "queued", null, 0, { params: { limit: 200 }, requestedBy: "pipeline" }),
@@ -104,7 +104,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
   const blockers = { largeFixLines: 400, outsidePurposeMin: 20 };
   const flag = { enabled: !MOCK_DRAIN, draining: MOCK_DRAIN, changedBy: "ochre-fox" as string | null, changedAt: iso(300) as string | null };
   const limits: StageLimit[] = [
-    ["classify-new", "Classify new and changed items", 2000, 412], ["embed", "Embed items", null, 0], ["decide", "Ask decisions", 100, 100],
+    ["classify-new", "Classify new and changed items", 2000, 412], ["embed", "Embed items", null, 0], ["premerge", "Review before merging", 100, 100],
     ["checks", "Refresh CI and merge state", null, 38], ["opus-review", "Review pull requests", 40, 14], ["labels-apply", "Apply labels on GitHub", null, 0], ["merge", "Merge queued pull requests", 10, 2],
     ["verify", "Plan verification of taken pull requests", 40, 12], ["fixup", "Fix up take-fix pull requests", 10, 3], ["act", "Comment and close", 20, 20],
   ].map(([step, title, perDay, usedToday]) => ({
@@ -214,6 +214,16 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
         ackedDeadlines.add(step);
         changed();
         return { ok: true as const };
+      },
+      async heldAuthors() {
+        requireOperator();
+        return wait(heldAuthors(), 30);
+      },
+      async releaseAuthor(author) {
+        requireOperator();
+        const released = releaseAuthor(author);
+        changed();
+        return wait({ released }, 30);
       },
       async setOutsideLimits(input) {
         requireOperator();

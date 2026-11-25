@@ -56,7 +56,7 @@ export function History({ repo, number, kind, said }: { repo: string; number: nu
     return n;
   });
   return (
-    <div className="flex flex-col gap-2 px-4 pb-4">
+    <div className="flex flex-col gap-2 p-4">
       <Segmented
         label={t("History shows")}
         value={all}

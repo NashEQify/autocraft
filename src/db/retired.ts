@@ -26,7 +26,7 @@ const REKEYED: Record<string, { key: string[]; withoutRowid?: boolean }> = {
 };
 
 /** Settings rows: the state that moved to tables, and what nothing reads. */
-const SETTING_KEYS = [...COPIED_SETTINGS.keys, "flow_summary_marks", "pilot_items", "outside_admitted_backfill", "inference", "judgement_model", "maintainer_writes"];
+const SETTING_KEYS = [...COPIED_SETTINGS.keys, "flow_summary_marks", "pilot_items", "outside_admitted_backfill", "usage_pause", "inference", "judgement_model", "maintainer_writes"];
 const SETTING_PREFIXES = [...COPIED_SETTINGS.prefixes, "fixissue_not_rust:"];
 
 /** The retired columns `have` ("table.column") still has, per table. */

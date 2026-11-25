@@ -11,7 +11,6 @@ export type HoldInfo = { reason: HoldReason; author: string; kind: "pr" | "issue
 export type OutsideLimits = { prsPerDay: number; issuesPerDay: number; surgePerHour: number };
 export type OutsideState = OutsideLimits & { heldByLimit: number; heldBySurge: number; authors: number; tripped: { reason: string; since: string } | null };
 export type HoldStatus = { author: string; reason: HoldReason; releasedBy: null } | { author: null; reason: null; releasedBy: string } | null;
-export type HeldRow = Hold & { title: string | null; created_at: string | null };
 export type HeldAuthorRow = { author: string; count: number; prs: number; oldest: string | null; surge: boolean };
 export type HoldCounts = { limit: number; surge: number; authors: number };
 export type OutsideAuthorRow = { author: string | null; author_association: string | null; author_type: string | null };

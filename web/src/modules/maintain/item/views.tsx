@@ -282,7 +282,7 @@ function Signals({ m }: { m: MaintainItem }) {
   if (!m.duplicates.length) return null;
   return (
     <DisclosurePanel title={t("Signals")} summary={m.duplicates.length === 1 ? t("1 duplicate") : t("{n} duplicates", { n: m.duplicates.length })} defaultOpen>
-      <section aria-label={t("Duplicates")} className="flex flex-col gap-1.5 px-4 pb-4">
+      <section aria-label={t("Duplicates")} className="flex flex-col gap-1.5 p-4">
         <h3 className="text-xs font-semibold text-ink/70">{t("Duplicates")}</h3>
         <ul className="flex flex-col gap-2">
           {m.duplicates.map((x) => (
@@ -303,7 +303,7 @@ function Security({ m }: { m: MaintainItem }) {
   if (!m.security.length) return null;
   return (
     <DisclosurePanel title={t("Security")} summary={String(m.security.length)}>
-      <ul className="flex flex-col gap-2 px-4 pb-4 text-sm">
+      <ul className="flex flex-col gap-2 p-4 text-sm">
         {m.security.map((f) => (
           <li key={f.number} className="flex flex-wrap items-baseline gap-x-1.5">
             <Badge tone={SEVERITY_TONE[f.severity]}>{f.severity}</Badge>
@@ -325,7 +325,7 @@ function Conversation({ m }: { m: MaintainItem }) {
   const turns = conv.turns.filter((x) => x.kind !== "system");
   return (
     <DisclosurePanel title={t("Conversation with the model")} summary={conv.pending ? t("The model is replying") : turns.length === 1 ? t("1 message") : t("{n} messages", { n: turns.length })}>
-      <div className="flex flex-col gap-3 px-4 pb-4">
+      <div className="flex flex-col gap-3 p-4">
         {turns.map((x) => (
           <div key={x.id} className={cn("rounded-md border px-3 py-2", x.kind === "opus" ? "border-accent/40 bg-accent/[0.04]" : "border-line bg-panel")}>
             <div className="mb-1 flex flex-wrap items-center gap-x-2 text-xs text-ink/70">
