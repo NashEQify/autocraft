@@ -2,13 +2,12 @@
 // next pipeline step. Read-only, anyone signed in, limited to the repos the requester may see.
 import type { TypeLabel, WorkList, WorkRow } from "../../../web/src/api/types.ts";
 import { classifyListOf, NOT_PLANNED } from "../../rank/next.ts";
-import type { RankBreakdown } from "../../rank/score.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { visibleRepos } from "./visible.ts";
 import { readerOf, veiledFor } from "./reader.ts";
 import type { Db } from "../../db/index.ts";
-import * as kx from "../../db/kx.ts";
+import { loadWorkList } from "../../data/views/work.ts";
 
 export async function work(db: Db, req: Req): Promise<WorkList> {
   const repo = req.query.get("repo") || undefined;
@@ -20,20 +19,15 @@ export async function work(db: Db, req: Req): Promise<WorkList> {
   if (kind && kind !== "pr" && kind !== "issue") throw new HttpError(400, "kind must be pr or issue");
   const repos = repo ? [repo] : visible;
   if (!repos.length) return { rows: [], total: 0, next: null };
-  const filtered = () => db.k.selectFrom("items as i").innerJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
-    .where("i.state", "=", "OPEN").where("i.repo", "in", repos).$if(!!kind, (q) => q.where("i.kind", "=", kind!));
-  const total = (await db.get(filtered().select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
-  const rows = await db.all(filtered().leftJoin("item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-    .select((eb) => ["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
-    .orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number").limit(limit).offset(offset));
+  const { rows, total } = await loadWorkList(db, { repos, kind: kind as "pr" | "issue" | undefined, limit, offset });
   const reader = await readerOf(db, req);
   const out: WorkRow[] = rows.map((r) => {
-    const bd = JSON.parse(r.breakdown) as RankBreakdown;
+    const bd = r.breakdown;
     return {
-      repo: r.repo, number: r.number, kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", score: r.score, level: bd.level, size: bd.size,
+      repo: r.repo, number: r.number, kind: r.kind, title: r.title, score: r.score, level: bd.level, size: bd.size,
       breakdown: bd, label: r.label as TypeLabel | null,
       // A viewer of a quiet pull request gets no next step: it can quote the planner's reasons.
-      next: veiledFor(reader, r.repo, r.number) ? "" : r.next ?? NOT_PLANNED, nextHref: r.item_state === "referee-due" ? classifyListOf(r.repo) : null,
+      next: veiledFor(reader, r.repo, r.number) ? "" : r.next ?? NOT_PLANNED, nextHref: r.itemState === "referee-due" ? classifyListOf(r.repo) : null,
     };
   });
   return { rows: out, total, next: offset + rows.length < total ? offset + rows.length : null };

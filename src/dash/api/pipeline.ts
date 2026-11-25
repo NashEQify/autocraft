@@ -15,14 +15,13 @@ import { mayResumeTrip, resumeStage, TripError } from "../../push-outcomes.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { blankIfHidden, hiddenRepos, visibleRepos } from "./visible.ts";
-import { cols, excluded } from "../../db/kx.ts";
-import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { isHiddenRepo, writeSetting, type HiddenRepos } from "../../data/control/index.ts";
+import { loadPipelineOverview } from "../../data/views/pipeline.ts";
 import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import { SECURITY_PREFIX, SECURITY_STEP } from "../../security/rules.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-import { setting } from "../../settings-read.ts";
 import { LARGE_FIX_KEY, OUTSIDE_PURPOSE_KEY, largeFixLines, outsidePurposeMin } from "../../workflow/settings.ts";
 
 // Stages of docs/pipeline.md. A stage with registered steps shows them; the
@@ -84,56 +83,45 @@ function wireParams(s: StepDef, repos: string[]): StepParam[] {
   });
 }
 
-const lastJob = async (db: Db, step: string, view: (j: Job) => Job, hidden: HiddenRepos): Promise<Job | null> => {
-  const r = await db.get(db.k.selectFrom("jobs").select(cols("jobs")).$narrowType<{ state: JobState }>().where("step", "=", step)
-    .$if(filtered(hidden), (q) => q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])))
-    .orderBy("id", "desc").limit(1));
-  return r ? view((await toJobs(db, [r]))[0]!) : null;
-};
-
-async function stageState(db: Db, steps: string[], syncFailed: boolean | null): Promise<PipelineStage["state"]> {
-  if (steps.length) {
-    const active = await db.get(db.k.selectFrom("jobs").select("state").$narrowType<{ state: JobState }>().where("step", "in", steps).where("state", "in", ["running", "queued"])
-      .orderBy("state", "desc").limit(1)); // "running" sorts after "queued"
-    if (active) return active.state === "running" ? "running" : "queued";
-  }
-  if (syncFailed !== null) return syncFailed ? "failed" : "ok";
-  if (!steps.length) return "idle";
-  const last = await db.get(db.k.selectFrom("jobs").select("state").$narrowType<{ state: JobState }>().where("step", "in", steps).where("state", "in", ["done", "failed"])
-    .orderBy("id", "desc").limit(1));
-  return last?.state === "done" ? "ok" : last?.state === "failed" ? "failed" : "idle";
+/** A running or queued step decides; else a sync result for the automatic stage; else the newest finished job. */
+function stageState(fromJobs: PipelineStage["state"], syncFailed: boolean | null): PipelineStage["state"] {
+  if (fromJobs === "running" || fromJobs === "queued") return fromJobs;
+  return syncFailed !== null ? (syncFailed ? "failed" : "ok") : fromJobs;
 }
 
 export async function overview(db: Db, req: Req): Promise<PipelineOverview> {
   const all = [...(await loadSteps()).values()].filter((s) => s.name !== SECURITY_STEP || canSeeInternals(req));
-  const repos = await visibleRepos(db, req);
-  const hidden = await hiddenRepos(db, req);
-  const steps: PipelineStep[] = await mapSeq(all, async (s) => ({
-    name: s.name, title: s.title, description: s.description, stage: s.stage, requires: s.requires,
-    params: wireParams(s, repos), unavailable: s.available?.() ?? null,
-    lastJob: await lastJob(db, s.name, forViewer(req, hidden), hidden),
-  }));
-  const raw = await db.all(db.k.selectFrom("sync_runs").select(["started_at as startedAt", "ended_at as endedAt", "mode", "items", "error"]).orderBy("started_at", "desc").limit(10));
+  const [repos, hidden] = await Promise.all([visibleRepos(db, req), hiddenRepos(db, req)]);
+  const stageSteps = STAGES.map((st) => ({ n: st.n, steps: all.filter((s) => s.stage === st.n).map((s) => s.name) }));
+  const facts = await loadPipelineOverview(db, { steps: all.map((s) => s.name), stages: stageSteps, hidden, syncRuns: 10, settingKeys: ["org_high_water", HEARTBEAT_KEY] });
+  const lastRows = [...facts.lastJobs.values()];
+  const lastJobs = new Map(lastRows.map((r, i) => [r.id, i]));
+  const jobsOf = await toJobs(db, lastRows);
+  const view = forViewer(req, hidden);
+  const steps: PipelineStep[] = all.map((s) => {
+    const row = facts.lastJobs.get(s.name);
+    return {
+      name: s.name, title: s.title, description: s.description, stage: s.stage, requires: s.requires,
+      params: wireParams(s, repos), unavailable: s.available?.() ?? null,
+      lastJob: row ? view(jobsOf[lastJobs.get(row.id)!]!) : null,
+    };
+  });
+  const raw = facts.syncRuns.map((r) => ({ startedAt: r.started_at, endedAt: r.ended_at, mode: r.mode, items: r.items, error: r.error }));
   const lastSync = raw.find((r) => r.endedAt);
   // A sync error can quote GitHub's answer about any repo: staff read it unless it names a repo hidden from them, viewers read "failed".
   const runs = raw.map((r) => ({ ...r, error: r.error && (canSeeInternals(req) ? blankIfHidden(r.error, hidden) || "failed" : "failed") }));
-  const high = (await setting(db, "org_high_water")) ?? null;
-  const stages: PipelineStage[] = await mapSeq(STAGES, async (st) => {
+  const high = facts.settings.get("org_high_water") ?? null;
+  const stages: PipelineStage[] = STAGES.map((st) => {
     const names = steps.filter((s) => s.stage === st.n).map((s) => s.name);
     const mode = st.automatic ? "automatic" : names.length ? "steps" : "planned";
-    return {
-      n: st.n, name: st.name, mode, steps: names,
-      state: mode === "planned" ? "planned" : await stageState(db, names, st.automatic ? (lastSync ? lastSync.error !== null : high ? false : null) : null),
-    };
+    return { n: st.n, name: st.name, mode, steps: names, state: mode === "planned" ? "planned" : stageState(facts.stageStates.get(st.n) ?? "idle", st.automatic ? (lastSync ? lastSync.error !== null : high ? false : null) : null) };
   });
-  const beat = (await setting(db, HEARTBEAT_KEY)) ?? null;
-  const count = async (state: string) => (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", state)
-    .$if(filtered(hidden), (q) => q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])))))!.n;
+  const beat = facts.settings.get(HEARTBEAT_KEY) ?? null;
   return {
     stages, steps,
     runner: { lastSeen: beat, alive: beat !== null && Date.now() - Date.parse(beat) < RUNNER_ALIVE_MS },
     sync: { lastFinishedAt: lastSync?.endedAt ?? high, runs },
-    counts: { queued: await count("queued"), running: await count("running") },
+    counts: { queued: facts.counts.get("queued") ?? 0, running: facts.counts.get("running") ?? 0 },
   };
 }
 
@@ -242,7 +230,7 @@ export async function putBlockers(db: Db, req: Req) {
     const v = b[field];
     if (v === undefined) continue;
     if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 1_000_000) throw new HttpError(400, `${field} must be a whole number from 1 to 1000000`);
-    await db.run(db.k.insertInto("settings").values({ key, value: String(v) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await writeSetting(db, key, String(v));
   }
   await audit(db, req.user.login, "blocker-thresholds", "pipeline", { was, ...b });
   return pipelineState(db, req);

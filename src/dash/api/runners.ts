@@ -10,9 +10,10 @@ import { revokeToken, setRunnerScopes, type Scopes } from "../mcp/tokens.ts";
 import { HttpError, RateLimiter, share } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { approveLogin, denyLogin, normalizeCode, pendingLogin } from "../../remote/device-login.ts";
-import { listHelpers } from "../../remote/helpers.ts";
+import { loadHelpers, loadRunnerSnapshot } from "../../data/runners/index.ts";
+import { loadRunnerTokenOf } from "../../data/access/index.ts";
 import { inferenceMode } from "../../remote/mode.ts";
-import type { Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
+import type { HelperInfo, Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Lookups of a user code that found no waiting login, per login: guessing codes is slow. */
@@ -60,17 +61,18 @@ async function scopesOf(db: Db, req: Req, b: Record<string, unknown>, hadAnswer 
 }
 
 export async function list(db: Db, req: Req): Promise<RunnersReply> {
-  const helpers = await listHelpers(db, req.user.login);
-  const extra = new Map((await db.all(db.k.selectFrom("mcp_tokens as t").leftJoin("remote_helpers as h", "h.token_id", "t.id")
-    .select(["t.id", "t.machine", "t.created_at", "t.expires_at", "t.can_agent", "t.can_answer", "h.helper_version"])
-    .where("t.login", "=", req.user.login).where("t.kind", "=", "runner")))
-    .map((r) => [Number(r.id), r]));
+  const now = Date.now();
+  const [helpers, snapshot, answering] = await db.together(() => Promise.all([loadHelpers(db, [req.user.login], now), loadRunnerSnapshot(db, now), mayGrantAnswer(db, req)]));
+  const rows = new Map(snapshot.runners.map((r) => [r.tokenId, r]));
   return {
-    runners: helpers.flatMap((h) => {
-      const x = extra.get(h.tokenId);
-      return x ? [{ ...h, machine: x.machine ? JSON.parse(x.machine) as Machine : null, helperVersion: x.helper_version, createdAt: x.created_at, expiresAt: x.expires_at, agent: x.can_agent === 1, answer: x.can_answer === 1 }] : [];
+    runners: (helpers.get(req.user.login.toLowerCase()) ?? []).map(({ canAgent, canAnswer, cooledUntil, cooledReason, ...h }) => {
+      const row = rows.get(h.tokenId);
+      return {
+        ...h, harness: h.harness as HelperInfo["harness"], usage: h.usage as HelperInfo["usage"], ...(cooledUntil ? { readiness: "cooled-off" as const, until: cooledUntil, reason: cooledReason } : {}), agent: canAgent, answer: canAnswer,
+        busy: row?.busy ?? null, lastError: row?.lastError ? JSON.parse(row.lastError) as { text: string; at: string } : null,
+      };
     }),
-    answering: await mayGrantAnswer(db, req),
+    answering,
   };
 }
 
@@ -93,9 +95,9 @@ export async function approve(db: Db, req: Req): Promise<RunnersReply> {
 export async function scopes(db: Db, req: Req): Promise<RunnersReply> {
   const b = body(req);
   if (!Number.isInteger(b.id)) throw new HttpError(400, "id must be a Task Runner id");
-  const had = await db.get(db.k.selectFrom("mcp_tokens").select("can_answer").where("id", "=", b.id as number).where("login", "=", req.user.login).where("kind", "=", "runner"));
+  const had = await loadRunnerTokenOf(db, req.user.login, b.id as number);
   if (!had) throw new HttpError(404, "you have no such Task Runner");
-  const s = await scopesOf(db, req, b, had.can_answer === 1);
+  const s = await scopesOf(db, req, b, had.canAnswer);
   if (!await setRunnerScopes(db, req.user.login, b.id as number, s)) throw new HttpError(404, "you have no such Task Runner");
   await audit(db, req.user.login, "runner-scopes", req.user.login, { id: b.id, ...s });
   return await list(db, req);

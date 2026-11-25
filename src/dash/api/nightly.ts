@@ -4,11 +4,12 @@ import { mayRunRepo } from "../repo-access.ts";
 import type { NightlyBench, NightlyCell, NightlyCheckRow, NightlyGrid, NightlyRepo, NightlySeries } from "../../../web/src/api/types.ts";
 import { featureOn } from "../../build/features.ts";
 import { audit } from "../audit.ts";
-import { BENCH_MIN_HISTORY, BENCH_WINDOW, NIGHTLY_CHECKS, benchSeries, checkOf, recentRuns, selectionOf, setSelection } from "../../nightly/index.ts";
+import { BENCH_MIN_HISTORY, BENCH_WINDOW, NIGHTLY_CHECKS, checkOf } from "../../nightly/index.ts";
+import { loadBenchSeries, loadNightlyGrid, setSelection, type NightlyGridRow } from "../../data/inference/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { visibleRepos } from "./visible.ts";
-import { filterSeq, mapSeq } from "../../async-seq.ts";
+import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 
 const NIGHTS = 14;
@@ -25,10 +26,10 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
 
-async function benchesOf(db: Db, repo: string): Promise<NightlyBench[]> {
-  const names = (await db.all(db.k.selectFrom("nightly_bench").select("bench").distinct().where("repo", "=", repo).orderBy("bench"))).map((r) => r.bench);
-  return await mapSeq(names, async (name) => {
-    const s = await benchSeries(db, repo, name);
+const gridOpts = { nights: NIGHTS, sparkPoints: SPARK_POINTS, window: BENCH_WINDOW };
+
+function benchesOf(g: NightlyGridRow | undefined): NightlyBench[] {
+  return [...(g?.benches ?? [])].map(([name, s]) => {
     const last = s[s.length - 1]!;
     const before = s.slice(-1 - BENCH_WINDOW, -1).map((p) => p.value);
     const base = before.length >= BENCH_MIN_HISTORY ? median(before) : 0;
@@ -36,9 +37,9 @@ async function benchesOf(db: Db, repo: string): Promise<NightlyBench[]> {
   });
 }
 
-async function repoOf(db: Db, repo: string, canSelect: boolean): Promise<NightlyRepo> {
-  const runs = await recentRuns(db, repo, NIGHTS);
-  const sel = await selectionOf(db, repo);
+function repoOf(repo: string, canSelect: boolean, g: NightlyGridRow | undefined, on: boolean): NightlyRepo {
+  const runs = g?.runs ?? [];
+  const sel = g?.selection ?? [];
   const checks = NIGHTLY_CHECKS.map((c): NightlyCheckRow => {
     const s = sel.find((x) => x.checkId === c.id);
     const cells = runs.map((u): NightlyCell | null => {
@@ -47,16 +48,15 @@ async function repoOf(db: Db, repo: string, canSelect: boolean): Promise<Nightly
     });
     return { id: c.id, label: c.label, enabled: s?.enabled ?? false, experimental: !!c.experimental, needs: c.needs ?? null, takes: takesOf(c.id), crates: s?.crates ?? [], targets: s?.targets ?? [], cells };
   });
-  return { repo, canSelect, on: await featureOn(db, "nightly", repo), nights: runs.map((u) => ({ runId: u.id, startedAt: u.startedAt, sha: u.sha })), checks, benches: await benchesOf(db, repo) };
+  return { repo, canSelect, on, nights: runs.map((u) => ({ runId: u.id, startedAt: u.startedAt, sha: u.sha })), checks, benches: benchesOf(g) };
 }
 
-/** Repos with the switch on, any selection row or any run. */
-const shown = async (db: Db, repo: string): Promise<boolean> =>
-  await featureOn(db, "nightly", repo) || !!await db.get(db.k.selectFrom("nightly_selection").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo)
-    .unionAll(db.k.selectFrom("nightly_runs").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo)).limit(1));
-
-export const grid = async (db: Db, req: Req): Promise<NightlyGrid> =>
-  ({ repos: await mapSeq((await filterSeq((await visibleRepos(db, req)), async (r) => await shown(db, r))), async (r) => await repoOf(db, r, await mayRunRepo(req.user, r))) });
+/** Repos with the switch on, any selection row or any run are shown. */
+export const grid = async (db: Db, req: Req): Promise<NightlyGrid> => {
+  const repos = await visibleRepos(db, req);
+  const [data, on, may] = await Promise.all([loadNightlyGrid(db, repos, gridOpts), mapSeq(repos, (r) => featureOn(db, "nightly", r)), mapSeq(repos, (r) => mayRunRepo(req.user, r))]);
+  return { repos: repos.flatMap((r, i) => (on[i] || data.has(r) ? [repoOf(r, may[i]!, data.get(r), on[i]!)] : [])) };
+};
 
 async function visible(db: Db, req: Req, repo: unknown): Promise<string> {
   if (typeof repo !== "string" || !(await visibleRepos(db, req)).includes(repo)) throw new HttpError(404, "no such repo");
@@ -65,7 +65,7 @@ async function visible(db: Db, req: Req, repo: unknown): Promise<string> {
 
 export const series = async (db: Db, req: Req): Promise<NightlySeries> => {
   const repo = await visible(db, req, req.params.repo);
-  const points = await benchSeries(db, repo, req.params.bench ?? "");
+  const points = await loadBenchSeries(db, repo, req.params.bench ?? "");
   if (!points.length) throw new HttpError(404, "no such benchmark");
   return { repo, bench: points[0]!.bench, unit: points[points.length - 1]!.unit, points: points.map(({ sha, at, value }) => ({ sha, at, value })) };
 };
@@ -84,7 +84,7 @@ export const select = async (db: Db, req: Req): Promise<NightlyGrid> => {
   if (typeof b.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
   const crates = names(b.crates, "crates");
   const targets = names(b.targets, "targets");
-  await setSelection(db, repo, b.check, b.enabled, { crates, targets });
+  await setSelection(db, { repo, checkId: b.check, enabled: b.enabled, crates, targets });
   await audit(db, req.user.login, "nightly-select", repo, { check: b.check, enabled: b.enabled, crates: crates ?? null, targets: targets ?? null });
   return grid(db, req);
 };
