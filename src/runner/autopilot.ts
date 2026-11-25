@@ -17,7 +17,8 @@ import { TOPICS } from "../db/live.ts";
 import { pendingConversations } from "../conversations/store.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { loadPlanSet, type PlanSet } from "../core/plan-set.ts";
-import { gates, mergeAllowed, type Want } from "../core/gates.ts";
+import { mayRun, mergePermission } from "../core/authority.ts";
+import type { RefusalCode } from "../core/codes.ts";
 import type { Action, ActionKind } from "../core/plan.ts";
 import { planCacheDiff, writePlanDiff } from "../core/plan-cache.ts";
 import { refreshLiveness } from "../liveness.ts";
@@ -62,7 +63,7 @@ import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
 import { countMainFixes } from "../data/changes/index.ts";
 import { failureDelayMs } from "../core/backoff.ts";
-import { STEP_STAGE, tripKey, tripOf, type TripStage } from "../core/push-outcome.ts";
+import { STEP_STAGE, tripOf } from "../core/push-outcome.ts";
 import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
@@ -235,18 +236,6 @@ async function servable(db: Db, ctx: PlanCtx, kind: ActionKind, step: string, fr
 const cursorOf = async (db: Db, ctx: PlanCtx, name: "review" | "verify"): Promise<string | null> =>
   (ctx.marks ??= new Map([...(await loadLaneState(db, ["cursor"])).values()].map((r) => [r.step, r.value]))).get(name) ?? null;
 
-const wantOf = (a: Action): Want => ({
-  kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}), ...(typeof a.params?.source === "string" ? { source: a.params.source } : {}),
-});
-/** Whether the guard would let the pipeline make the write an action stands for: the global switch, the breaker and the item's own approval rule. */
-const passes = (p: { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }): boolean => gates(p.facts, wantOf(p.action), "pipeline") === null;
-const allowed = <T extends { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }>(ps: T[]): T[] => ps.filter(passes);
-/** The same test for a write whose approval is the repo's alone (no per-item rule): every item of the repo carries the same answer. */
-function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
-  const f = plans.prs.find((p) => p.facts.repo === repo)?.facts ?? plans.items.find((p) => p.facts.repo === repo)?.facts;
-  return !f || gates(f, want, "pipeline") === null;
-}
-
 /**
  * Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries, the
  * item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. `plan-inputs` covers what
@@ -286,8 +275,6 @@ type JobEnd = { id: number; endedAt: string; state: string; items: number | null
 /** Job, limit, breaker and release reads of one planner pass, loaded once. Other connections may start or end jobs meanwhile; applyProposals re-checks blocks and limits with fresh reads. */
 type Reads = {
   inputs: LaneInputs; limits: Map<string, LimitRow>;
-  /** Push-breaker trips active now, by key (`<stage>:<repo>`, or `<stage>` on every repo), with their reasons. */
-  trips: Record<string, string>;
   /** The newest operator release per action (RELEASE_STEPS). */
   released: Map<string, string>;
 };
@@ -304,12 +291,10 @@ const passScope = new AsyncLocalStorage<PassReads>();
 const passOf = (db: Db): PassReads | null => { const p = passScope.getStore(); return p?.db === db ? p : null; };
 
 async function loadReads(db: Db, ms: number): Promise<Reads> {
-  const [inputs, limits, tripRows, released] = await db.together(() => Promise.all([
-    loadLaneInputs(db, ms), loadStageLimits(db, DEFAULT_PER_DAY), loadTrips(db, { active: true }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  const [inputs, limits, released] = await db.together(() => Promise.all([
+    loadLaneInputs(db, ms), loadStageLimits(db, DEFAULT_PER_DAY), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
   ]));
-  const trips: Record<string, string> = {};
-  for (const t of tripRows.values()) if (tripOf(t.stage)) trips[t.stage] = t.reason;
-  return { inputs, limits, trips, released };
+  return { inputs, limits, released };
 }
 
 /** The pass's reads, or a fresh load for a caller outside a pass. */
@@ -374,8 +359,8 @@ async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise
 
 async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
   const found = new Map<string, ImplementJob[]>(tracked.map((repo) => [repo, []]));
-  for (const p of allowed(await planned(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
-  for (const p of allowed(await plannedItems(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  for (const p of await planned(db, "implement", { plans })) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
+  for (const p of await plannedItems(db, "implement", { plans })) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
   const choices = [...found].flatMap(([repo, jobs]) => (jobs.length > 1 ? jobs.map((j) => ({ repo, number: j.number })) : []));
   const refused = choices.length ? await (await import("../implement/gate.ts")).implementRefusals(db, choices) : new Map<string, string | null>();
   const out = new Map<string, ImplementJob>();
@@ -404,10 +389,10 @@ export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<str
   return lanes.map((l) => (tops.has(l.name) ? sorted[k++]! : l));
 }
 
-/** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch; ask: a comment; capped: a note on the item). */
+/** Repos with a CI-fix action of one of the buckets that may run. */
 async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<string[]> {
   const repos = new Set(ctx.tracked);
-  const due = allowed(await planned(db, "cifix", { plans: await plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
+  const due = (await planned(db, "cifix", { plans: await plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
   return flightFirst(await plansOf(db, ctx), [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort());
 }
 
@@ -508,7 +493,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, ctx) => {
       if (!ctx.run) return [];
-      const repos = new Set(allowed(await plannedItems(db, "label", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
+      const repos = new Set((await plannedItems(db, "label", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       // A repo whose GitHub write budget is used up would label nothing (the writes are refused as paced): it waits for the window to move.
       const now = Date.now();
       const waits = await pipelineWriteWaits(db, "labels-apply", ctx.tracked.filter((r) => repos.has(r)), now);
@@ -530,9 +515,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       // The merge queue: PRs with a queue state (merged ones too) whose merge is approved, by a person or by the repo.
-      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && mergeAllowed(p.facts))
+      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && mergePermission(p.facts).ok)
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
-      const due = new Set(allowed(await planned(db, "merge", { plans })).map((p) => p.facts.repo));
+      const due = new Set((await planned(db, "merge", { plans })).map((p) => p.facts.repo));
       const batches = new Set(await batchesDue(db));
       const out: Candidate[] = [];
       // A merge job that advanced a batch runs again at once; one that only watched waits.
@@ -569,7 +554,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => {
       // Repos in the order of their best close: workflow weight, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest command.
       const best = new Map<string, { weight: number; at: string }>();
-      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) {
+      for (const p of await plannedItems(db, "act", { plans: await plansOf(db, ctx) })) {
         const c = p.facts.close, b = best.get(p.facts.repo);
         if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
@@ -604,7 +589,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const repos: string[] = [], failed: unknown[] = [];
       for (const repo of ctx.tracked) {
         try {
-          const sel = await selectFixups(db, repo, ctx.run, plans, passes);
+          const sel = await selectFixups(db, repo, ctx.run, plans, "pipeline");
           if ([sel.fix, sel.lint, sel.conflictMerge, sel.ask, sel.conflictAsk].some((l) => l.length > 0)) repos.push(repo);
         } catch (e) {
           // A repo whose selection fails leaves the lane to the others; a failure of every repo is the lane's own.
@@ -687,7 +672,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "review-post",
     perRepo: true,
     detect: async (db, ctx) => {
-      const due = new Set(allowed(await planned(db, "post-review", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
+      const due = new Set((await planned(db, "post-review", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "review-post", params: { repo } }));
     },
   },
@@ -715,8 +700,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "ci-approve",
     perRepo: true,
     detect: async (db, ctx) => {
-      const plans = await plansOf(db, ctx), due = await ciApproveRepos(db, plans, ctx.run);
-      return ctx.tracked.filter((repo) => due.has(repo) && repoAllows(plans, repo, { kind: "approve-ci" })).sort().map((repo) => ({ step: "ci-approve", params: { repo } }));
+      const due = await ciApproveRepos(db, await plansOf(db, ctx), ctx.run);
+      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "ci-approve", params: { repo } }));
     },
   },
   {
@@ -726,7 +711,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
-      const lint = allowed(await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
+      const lint = (await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
       return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect", "ask", "capped"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
     },
   },
@@ -736,7 +721,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx), repos = new Set(ctx.tracked);
-      const due = [...allowed(await planned(db, "unassign", { plans })), ...allowed(await plannedItems(db, "unassign", { plans }))];
+      const due = [...await planned(db, "unassign", { plans }), ...await plannedItems(db, "unassign", { plans })];
       return [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort().map((repo) => ({ step: "unassign", params: { repo } }));
     },
   },
@@ -776,7 +761,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, ctx) => {
       const repos = new Set(ctx.tracked);
-      const due = new Set((await premergeCandidates(db, { plans: await plansOf(db, ctx), ...(ctx.wake ? { wake: ctx.wake } : {}) })).map((e) => e.repo));
+      const due = new Set((await premergeCandidates(db, { plans: await plansOf(db, ctx), by: "pipeline", ...(ctx.wake ? { wake: ctx.wake } : {}) })).map((e) => e.repo));
       return [...due].filter((repo) => repos.has(repo)).sort().map((repo) => ({ step: "premerge", params: { repo } }));
     },
   },
@@ -890,7 +875,7 @@ export async function jobLimit(db: Db, step: StepDef, ms: number = Date.now(), w
 export async function cliGate(db: Db, step: { name: string }, steps: Map<string, StepDef>, params: Params = {}, ms: number = Date.now()): Promise<string | null> {
   const busy = await jobBlock(db, steps, { step: step.name, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { mutex: true });
   if (busy) return busy;
-  return await pauseReason(db, step.name, ms, { backoff: false, repo: typeof params.repo === "string" ? params.repo : null });
+  return await pauseReason(db, step.name, ms, { backoff: false });
 }
 
 /** The steps an operator release (operator-actions.ts) hands new work to. */
@@ -934,27 +919,12 @@ export async function failureBackoff(db: Db, step: string, ms: number = Date.now
 
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
-const tripReason = (reason: string, wide: boolean): string =>
-  `tripped: ${reason}; ${wide ? "an operator resumes it" : "an operator, or a maintainer with write access to the repo, resumes it"}`;
-
-/** Why the step cannot start because its push stage tripped on every repo, or (with `repo`) a job of it cannot work that repo because it tripped there; null when neither. */
-async function tripOfStep(db: Db, step: string, repo: string | null): Promise<string | null> {
-  const stage = STEP_STAGE[step];
-  if (!stage) return null;
-  const trips = (await readsOf(db)).trips;
-  if (trips[stage] !== undefined) return tripReason(trips[stage], true);
-  const reason = repo ? trips[tripKey(stage as TripStage, repo)] : undefined;
-  return reason === undefined ? null : tripReason(reason, false);
-}
-
 /**
- * Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused.
- * A breaker of the step's push stage tripped on every repo pauses it; with `repo`, a job for that repo, one tripped on that repo pauses it too (the stage goes on for other repos). A step's models are taken at their defaults.
+ * Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a limit change), or null when it is not paused.
+ * A circuit breaker pauses no step: it refuses the actions that push or merge (gates.ts), and the step's asks and bookkeeping run.
  */
-export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean; repo?: string | null } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
+export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
   const l = await limitRow(db, step), used = await usageToday(db, step, ms);
-  const tripped = await tripOfStep(db, step, o.repo ?? null);
-  if (tripped) return { why: tripped, wakeAt: null };
   if (l.perDay === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
   if (l.perDay !== null && used >= l.perDay) return { why: `daily limit of ${l.perDay} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
   const b = o.backoff === false ? null : await failureBackoff(db, step, ms);
@@ -963,7 +933,7 @@ export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: 
 }
 
 /** Why the stage cannot start jobs now, or null. The one place a stage's pause is decided. */
-export const pauseReason = async (db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean; repo?: string | null } = {}): Promise<string | null> => (await pauseOf(db, step, ms, o))?.why ?? null;
+export const pauseReason = async (db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<string | null> => (await pauseOf(db, step, ms, o))?.why ?? null;
 
 // ---- state ---------------------------------------------------------------------
 
@@ -1082,10 +1052,10 @@ const nextUtcMidnight = (ms: number): number => Date.parse(dayStart(ms)) + 86_40
 /**
  * Detection: loads and decides the Plans of every PR and item once, then returns, per lane, the candidates whose
  * step is idle, not backing off, not unchanged since a job that handled nothing, and has limit left. A lane is the
- * items whose Plan holds its action, minus what the guard would refuse (gates()). The only write is the Plan cache
+ * items whose Plan holds its action and where that action may run (mayRun). The only write is the Plan cache
  * (item_plans), so the runner can do it on another connection while it keeps polling; applyProposals() queues the result.
- * The order of the checks on a lane: a step of the lane can start (gate), the lane's items, the guard's gates() per
- * item or repo, the pipeline scope, then gate() per candidate: same-step job, pause and daily limit, failure backoff,
+ * The order of the checks on a lane: a step of the lane can start (gate), the lane's items that may run,
+ * the pipeline scope, then gate() per candidate: same-step job, pause and daily limit, failure backoff,
  * unchanged input, minimum gap.
  */
 export async function detectAutopilot(db: Db, opts: PlanOptions = {}): Promise<Detected> {
@@ -1145,8 +1115,6 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active, cap })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
-    // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row (pausedWhy covers a trip on every repo).
-    if (repo0 !== null && await tripOfStep(db, stepName, repo0)) return null;
     const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params });
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
@@ -1420,8 +1388,10 @@ export type LaneItem = {
   rank: number | null; inFlight: boolean;
   /** The next job of the lane covers this item's repo. */
   next: boolean;
-  /** Why the guard would refuse the item's write, or why no job of the lane will take its repo now (no Task Runner takes it), or null. */
+  /** Why the item's action may not run, or why no job of the lane will take its repo now (no Task Runner takes it), or null. */
   blocked: string | null;
+  /** The code of a refused action, or null. */
+  refusal: RefusalCode | null;
 };
 
 /**
@@ -1449,16 +1419,17 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     const ref = `${f.repo}#${f.number}`;
     if (seen.has(ref)) return;
     seen.add(ref);
-    const refused = gates(f, wantOf(a), "pipeline");
-    const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? await waits(f.repo);
+    const may = mayRun({ facts: f, action: a }, "pipeline"), refused = may.ok || may.why.code === "pipeline-off" ? null : may.why;
+    const outside = !ctx.tracked.includes(f.repo);
+    const blocked = outside ? "outside the pipeline scope" : refused?.text ?? (may.ok ? await waits(f.repo) : null);
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
-      rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
+      rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked, refusal: outside ? null : refused?.code ?? null,
     });
   };
   for (const k of kinds) {
-    for (const p of await planned(db, k, { plans })) await add(p.facts, p.plan.state, p.action);
-    for (const p of await plannedItems(db, k, { plans })) await add(p.facts, p.plan.state, p.action);
+    for (const p of await planned(db, k, { plans, refused: true })) await add(p.facts, p.plan.state, p.action);
+    for (const p of await plannedItems(db, k, { plans, refused: true })) await add(p.facts, p.plan.state, p.action);
   }
   const repos: string[] = [];
   for (const c of await detectOf(db, ctx, lane)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
@@ -1470,7 +1441,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
   return [...first, ...rest].map((i) => ({ ...i, next: picked(i) && !i.blocked }));
 }
 
-const plain = (why: string): string => { const t = why.replace(/^(paused|tripped): /, ""); return t.charAt(0).toUpperCase() + t.slice(1); };
+const plain = (why: string): string => { const t = why.replace(/^paused: /, ""); return t.charAt(0).toUpperCase() + t.slice(1); };
 
 /** The most items of one lane the planner stores. */
 const NEXT_PER_LANE = 500;
@@ -1514,7 +1485,7 @@ export async function actBlockedReason(db: Db, repo: string): Promise<string | n
   return null;
 }
 
-export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "backoff"; why: string | null };
+export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "limit" | "backoff"; why: string | null };
 
 /** Whether a job of each lane can start now, from the same checks the planner's gate() makes; one reading serves them all. */
 export async function laneGates(db: Db, lanes: readonly Pick<Lane, "name" | "steps">[], allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<Map<string, LaneGate>> {
@@ -1530,7 +1501,7 @@ export async function laneGates(db: Db, lanes: readonly Pick<Lane, "name" | "ste
       if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
       const why = await pauseReason(db, s, ms);
       if (!why) return { canRun: true, kind: "ok", why: null };
-      const kind = /^tripped/.test(why) ? "breaker" : /^failed/.test(why) ? "backoff" : "limit";
+      const kind = /^failed/.test(why) ? "backoff" : "limit";
       blocked ??= { canRun: false, kind, why: plain(why) };
     }
     return blocked ?? { canRun: true, kind: "ok", why: null };

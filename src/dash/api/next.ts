@@ -34,15 +34,16 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
   const steps: NextStep[] = [];
   for (const lane of LANES) {
     const kept = stored[lane.name]?.items ?? [];
-    const items: NextItem[] = kept.filter((i) => visible.has(i.repo)).map((i) => ({ ...i, ...shown(i.repo, i.number), why: why(i.repo, i.number, i.action) }));
+    const items: NextItem[] = kept.filter((i) => visible.has(i.repo)).map(({ refusal: _, ...i }) => ({ ...i, ...shown(i.repo, i.number), why: why(i.repo, i.number, i.action) }));
     const total = (stored[lane.name]?.total ?? 0) - (kept.length - items.length);
     const gate = gates.get(lane.name)!;
     const open = items.filter((i) => !i.blocked);
-    // Every item blocked by a repo approval: the step cannot do its work although it could start.
+    // Every item blocked, by a breaker or a missing approval say: the step cannot do its work although it could start.
     const refused = !open.length && items.length ? items[0]!.blocked : null;
+    const tripped = kept.find((i) => visible.has(i.repo))?.refusal === "breaker";
     steps.push({
       lane: lane.name, title: stepDefs.get(lane.steps?.[0] ?? lane.name)?.title ?? lane.name, stage: stageOf.get(lane.name) ?? "", steps: lane.steps ?? [],
-      canRun: gate.canRun && !refused, kind: refused && gate.canRun ? "approval" : gate.kind, why: blankIfHidden(gate.why, hidden) || refused,
+      canRun: gate.canRun && !refused, kind: refused && gate.canRun ? (tripped ? "breaker" : "approval") : gate.kind, why: blankIfHidden(gate.why, hidden) || refused,
       note: blankIfHidden((lane.steps ?? []).map((s) => status[s]).find(Boolean) ?? null, hidden) || null, total, items,
     });
   }

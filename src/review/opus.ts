@@ -10,6 +10,7 @@ import { Client, type Querier } from "../mirror.ts";
 import { checksOf, refreshChecks } from "./checks.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
 import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
+import type { By } from "../core/gates.ts";
 import { notDue, planNow } from "../core/select.ts";
 import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
@@ -44,6 +45,8 @@ export type OpusParams = {
   repo: string; limit?: number; dryRun?: boolean;
   /** Called with the running count of PRs handled. */
   onHandled?: (n: number) => void;
+  /** Who asked; a command-line run is an operator's. */
+  by?: By;
 };
 export type OpusDeps = {
   /** Reads the live head and state of the candidates just before the model calls; absent: the mirror's view stands. */
@@ -232,7 +235,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
 export async function runOpusReview(db: Db, params: OpusParams, log: (line: string) => void = console.log, deps: OpusDeps = defaultOpusDeps()): Promise<OpusSummary> {
   const { repo } = params;
   const runId = `opus-review-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await selectOpusCandidates(db, repo);
+  let cands = await selectOpusCandidates(db, repo, undefined, params.by);
   const uncapped = await staleReviews(db, repo, true);
   const allStale = await staleReviews(db, repo);
   const capped = [...allStale].filter((k) => !uncapped.has(k));

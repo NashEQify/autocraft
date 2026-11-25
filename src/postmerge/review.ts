@@ -14,6 +14,7 @@ import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForCommit, checkoutForPr } from "../sandbox/index.ts";
 import { MAX_MERGED_DIFF_CHARS, type FiledBefore, type Finding, type PostmergeCommit, type PostmergePr } from "./parse.ts";
 import { relatedOpen, reviewHistory } from "./related.ts";
+import type { By } from "../core/gates.ts";
 import { mergedPr, selectPostmerge, type MergedPr } from "./select.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { flatMapSeq } from "../async-seq.ts";
@@ -33,6 +34,8 @@ export type PostmergeParams = {
   /** Review these PRs of the repo whether or not they have a review (the `--again` command). */
   only?: number[];
   onHandled?: (n: number) => void;
+  /** Who asked; a command-line run is an operator's. */
+  by?: By;
 };
 export type PostmergeDeps = {
   fetchMerged: MergedFetcher; model: string; maxChars: number;
@@ -111,7 +114,7 @@ export async function saveReview(db: Db, c: { repo: string; number: number }, r:
 export async function runPostmerge(db: Db, params: PostmergeParams, log: (line: string) => void = console.log, deps: PostmergeDeps = defaultPostmergeDeps(db)): Promise<PostmergeSummary> {
   const { repo } = params;
   const runId = `postmerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands: MergedPr[] = params.only ? await flatMapSeq(params.only, async (n) => { const m = await mergedPr(db, repo, n); return m ? [m] : []; }) : await selectPostmerge(db, repo);
+  let cands: MergedPr[] = params.only ? await flatMapSeq(params.only, async (n) => { const m = await mergedPr(db, repo, n); return m ? [m] : []; }) : await selectPostmerge(db, repo, undefined, undefined, undefined, params.by);
   const s: PostmergeSummary = { runId, repo, candidates: cands.length, reviewed: 0, findings: 0, defects: 0, failed: [] };
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
   if (!cands.length) { log(`postmerge ${repo}: nothing to review`); return s; }

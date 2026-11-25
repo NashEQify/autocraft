@@ -11,9 +11,9 @@ import { DRAFT_REFUSAL } from "./safe-merge.ts";
 import { ACTION_WAITS, mergeWaits } from "../core/may.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CLI_BY, mayMergeNow, type By } from "../core/gates.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
-import { planned } from "../core/select.ts";
+import { planned, runnable } from "../core/select.ts";
 import { claimForWork } from "../github/claim.ts";
 import { pipelineMe } from "../github/pipeline-account.ts";
 import { mergeViaCommand, MERGE_RECORDED_ENV, type Writer } from "../github/write.ts";
@@ -171,8 +171,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   const queue = await buildQueue(db, { repo });
   const open = queue.filter((e) => e.state !== "merged");
   const states = countStates(queue);
-  const planDue = await planned(db, "merge", { repo });
-  const due = planDue.filter((p) => mayMergeNow(p.facts));
+  const { may: due, held } = runnable(await planned(db, "merge", { repo, refused: true }), params.by ?? CLI_BY);
   const mergeDue = new Map(due.map((p) => [p.facts.number, { singleOnly: p.action.params?.singleOnly === true, verifyOverride: p.facts.verifyOverride }]));
   const scores = await loadWorkScores(db, open.map((e) => ({ repo, number: e.number })));
   const score = (e: QueueEntry) => scores.get(refOf(e)) ?? NO_WORKFLOW_SCORE;
@@ -186,7 +185,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
   const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
-  if (due.length < planDue.length) log(`merge ${repo}: ${planDue.length - due.length} that could merge left out: nobody approved them and the repo does not merge on its own`);
+  if (held) log(`merge ${repo}: ${held}`);
 
   if (dryRun) {
     summary.attempted = picks.map(refOf);

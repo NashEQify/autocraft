@@ -14,8 +14,10 @@ export type CifixCandidate = {
   attempt: number;
   /** branch: the branch accepts our push. comment: it does not, and the repo allows comments. */
   route: "branch" | "comment";
-  /** Why our push to the PR is not approved (src/core/may.ts); null when it is. */
-  pushRefused: string | null;
+  /** Our push to the PR is approved (pushPermission). */
+  mayPush: boolean;
+  /** The repo allows comments. */
+  mayComment: boolean;
   /** The one rerun of this head was done; the failure is read again as something to fix. */
   rerun: boolean;
   /** When the rerun was requested (ISO), else null. */
@@ -35,6 +37,8 @@ export type CifixSelection = {
   ask: CifixCandidate[];
   /** Stored patches whose lint task ended (the Plan's `lint` action, step cifix). */
   lint: CifixCandidate[];
+  /** The rowids of every stored patch the Plan lists, also those that may not be delivered now: they are kept. */
+  listed: number[];
   /** Infra failures due their one rerun, with the run ids to rerun. */
   rerun: { c: CifixCandidate; runs: number[] }[];
 };

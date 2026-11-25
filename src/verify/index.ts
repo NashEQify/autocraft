@@ -21,6 +21,7 @@ import { checkoutForPr } from "../sandbox/index.ts";
 import { cachedDiff, codeDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
 import { cachedCrates, ghApi, ghCrates, type CratesFetcher } from "./crates.ts";
 import { NOT_RUST_REASON, type VerifyCandidate } from "./candidates.ts";
+import type { By } from "../core/gates.ts";
 import { selectCandidates, unavailableCandidates } from "./select.ts";
 import { type VerifyPlan } from "./plan.ts";
 import { repoChecksKnown, repoHasNoCi } from "../merge/no-ci.ts";
@@ -71,7 +72,7 @@ export function defaultDeps(): VerifyDeps {
   };
 }
 
-export type VerifyParams = { repo: string; limit?: number; dryRun?: boolean; onHandled?: (n: number) => void; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean> };
+export type VerifyParams = { repo: string; limit?: number; dryRun?: boolean; onHandled?: (n: number) => void; /** Who asked; a command-line run is an operator's. */ by?: By; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean> };
 export type VerifySummary = {
   runId: string; repo: string; candidates: number; handled: number;
   kinds: Record<string, number>; errors: number; tasks: number[]; warm: number | null; skipped: string[];
@@ -116,7 +117,7 @@ const errorRow = (reason: string): Saved => ({ kind: "error", reason, plan: null
 export async function runVerify(db: Db, params: VerifyParams, log: (line: string) => void = console.log, deps: VerifyDeps = defaultDeps()): Promise<VerifySummary> {
   const { repo } = params;
   const runId = `verify-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await selectCandidates(db, repo);
+  let cands = await selectCandidates(db, repo, undefined, params.by);
   const summary: VerifySummary = { runId, repo, candidates: cands.length, handled: 0, kinds: {}, errors: 0, tasks: [], warm: null, skipped: [] };
   if (params.dryRun) {
     log(`verify ${repo}: ${cands.length} candidates; dry run, nothing fetched or asked`);
@@ -129,7 +130,7 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
   }
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
   // Nothing to build for these: recorded at once so the PR goes on to its merge approval.
-  const unavailable = await unavailableCandidates(db, repo);
+  const unavailable = await unavailableCandidates(db, repo, undefined, params.by);
   await saveVerifications(db, unavailable.map((u) => ({ c: u.c, v: unavailableRow(u.reason) })));
   for (const u of unavailable) {
     log(`  ${refOf(u.c)}: verification unavailable: ${u.reason}`);

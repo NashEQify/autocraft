@@ -1,6 +1,7 @@
 // The PRs the fix-up and conflict steps work on: those whose Plan holds a `fixup` or `conflict` action.
 import { planned } from "../core/select.ts";
-import { pushAllowed } from "../core/gates.ts";
+import { mayRun } from "../core/authority.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
@@ -48,7 +49,7 @@ const passFixReads = new WeakMap<PlanSet, Promise<FixReads>>();
 function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Promise<FixReads> {
   let r = passFixReads.get(plans);
   if (!r) {
-    const o = { ...(run !== undefined ? { run } : {}), plans };
+    const o = { ...(run !== undefined ? { run } : {}), plans, refused: true };
     passFixReads.set(plans, (r = (async () => await fixReads(db, await planned(db, "conflict", o), await planned(db, "fixup", o), await planned(db, "lint", { ...o, bucket: "fixup" }), await planned(db, "lint", { ...o, bucket: "conflict" })))()));
     void r.catch(() => { if (passFixReads.get(plans) === r) passFixReads.delete(plans); });
   }
@@ -61,12 +62,12 @@ const wantedFor = (f: PrFacts): string => f.review?.reason ?? "a maintainer appr
 /** A review's fixes that nobody dropped from the PR's workflow. */
 const reviewFixes = (f: PrFacts, stored: string | null | undefined): Fix[] => keptFixes(parseFixes(stored ?? null), f.workflow?.dropped);
 
-/** `allow`: only the planned actions it accepts. */
-export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, allow: (p: Planned[number]) => boolean = () => true): Promise<FixSelection> {
-  const opts = { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
-  const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], conflictMerge: [], conflictAsk: [] };
-  const conflicts = (await planned(db, "conflict", opts)).filter(allow), fixups = (await planned(db, "fixup", opts)).filter(allow);
-  const lintFixups = (await planned(db, "lint", { ...opts, bucket: "fixup" })).filter(allow), lintConflicts = (await planned(db, "lint", { ...opts, bucket: "conflict" })).filter(allow);
+/** The work that may run for `by` (mayRun). */
+export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, by: By = CLI_BY): Promise<FixSelection> {
+  const opts = { repo, by, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
+  const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], listed: [], conflictMerge: [], conflictAsk: [] };
+  const conflicts = await planned(db, "conflict", opts), fixups = await planned(db, "fixup", opts);
+  const lintFixups = await planned(db, "lint", { ...opts, bucket: "fixup", refused: true }), lintConflicts = await planned(db, "lint", { ...opts, bucket: "conflict" });
   // Read once for the repo, or with a planner pass's Plans once for every repo of the pass.
   const reads = plans ? await passReads(db, plans, run) : await fixReads(db, conflicts, fixups, lintFixups, lintConflicts);
   const titleOf = (n: number) => (reads.titles.get(`${repo}#${n}`) ?? "").slice(0, 300);
@@ -84,8 +85,8 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       const o = await queuedOperatorFix(db, repo, f.number, head);
       if (o) fix.push({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: (f.operator?.fix?.attempts ?? 0) + 1, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions } });
     } else if (action.params?.source === "premerge") {
-      // Only a branch we may push to gets a pre-merge round; otherwise the step leaves it alone.
-      if (!f.pushable || !pushAllowed(f, "fixup")) continue;
+      // Only a branch we can push to gets a pre-merge round; otherwise the step leaves it alone.
+      if (!f.pushable) continue;
       const row = await premergeAt(db, repo, f.number, head);
       const defects = findingsOf(row).filter((x) => x.severity === "defect");
       fix.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: 1, model: row?.model ?? null, source: "premerge" });
@@ -100,6 +101,8 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
   // Stored patches (review, pre-merge and operator sources) whose lint task ended.
   const seenLint = new Set<string>();
   for (const { facts: f, action } of lintFixups) {
+    const may = mayRun({ facts: f, action }, by).ok;
+    const list = (c: FixCandidate) => { out.listed.push(c.lint!.rowid); if (may) out.lint.push(c); };
     const head = action.head!, source = String(action.params?.source ?? "review");
     // Several lint actions of one PR (one per stored row) would otherwise list every row of the key again.
     const key = `${f.number} ${head} ${source}`;
@@ -110,14 +113,14 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       const lint = { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, session: w.session, changes: w.changes };
       if (source === "operator") {
         const o = await queuedOperatorFix(db, repo, f.number, head);
-        if (o && w.operatorFix === o.id) out.lint.push({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: w.attempt, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions }, lint });
+        if (o && w.operatorFix === o.id) list({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: w.attempt, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions }, lint });
       } else if (source === "premerge") {
         const pm = await premergeAt(db, repo, f.number, head);
         const defects = findingsOf(pm).filter((x) => x.severity === "defect");
-        out.lint.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: w.attempt, model: pm?.model ?? null, source: "premerge", lint });
+        list({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: w.attempt, model: pm?.model ?? null, source: "premerge", lint });
       } else {
         const r = reads.reviews.get(`${repo}#${f.number}@${head}`);
-        if (f.review) out.lint.push({ repo, number: f.number, head, reason: f.review.reason, fixes: reviewFixes(f, r?.fixes), attempt: w.attempt, model: r?.model ?? null, lint });
+        if (f.review) list({ repo, number: f.number, head, reason: f.review.reason, fixes: reviewFixes(f, r?.fixes), attempt: w.attempt, model: r?.model ?? null, lint });
       }
     }
   }
