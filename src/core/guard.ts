@@ -76,6 +76,7 @@ async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f
   const why = gates(f, a, by);
   if (why) return { refused: `${name}: ${why}` };
   if (a.batch && f.mergeHeld) return { refused: `${name}: merge held by an operator` };
+  if (a.batch && f.draft) return { refused: `${name}: it is a draft` };
   const plan = decidePr(f, loadPass());
   const holds = plan.head === a.head && (plan.actions.some((x) => x.kind === a.kind && x.head === a.head && (a.bucket === undefined || x.params?.bucket === a.bucket) && (a.source === undefined || x.params?.source === a.source))
     // A batch member is in its batch state, not ready; it must still pass what a single merge needs apart from CI and mergeable.

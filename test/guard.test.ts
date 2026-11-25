@@ -76,14 +76,15 @@ test("the global pipeline switch gates the pipeline's writes, not an operator's"
 });
 
 test("gates: each action kind needs its approval", () => {
-  const off = (k: "mergeApproved" | "pushApproved" | "commentApproved" | "ciApproved") => prFacts({ repoFacts: { [k]: false } });
-  assert.match(gates(off("mergeApproved"), { kind: "merge" }, OP) ?? "", /Merges/);
-  assert.match(gates(off("pushApproved"), { kind: "conflict", bucket: "merge" }, OP) ?? "", /Pushes/);
+  const off = (k: "commentApproved" | "ciApproved") => prFacts({ repoFacts: { [k]: false } });
+  const unstarted = (may: { repoMerge?: null; repoPush?: null }) => prFacts({ workflow: null, may });
+  assert.match(gates(unstarted({ repoMerge: null }), { kind: "merge" }, OP) ?? "", /Merges/);
+  assert.match(gates(unstarted({ repoPush: null }), { kind: "conflict", bucket: "merge" }, OP) ?? "", /Pushes/);
   assert.match(gates(off("commentApproved"), { kind: "fixup", bucket: "ask" }, OP) ?? "", /Comments/);
   assert.match(gates(off("commentApproved"), { kind: "post-review" }, OP) ?? "", /Comments/);
   assert.match(gates(off("ciApproved"), { kind: "approve-ci" }, OP) ?? "", /CI run approvals/);
   assert.match(gates(off("ciApproved"), { kind: "cifix", bucket: "rerun" }, OP) ?? "", /CI run approvals/);
-  assert.equal(gates(off("pushApproved"), { kind: "merge" }, OP), null);
+  assert.equal(gates(unstarted({ repoPush: null }), { kind: "merge" }, OP), null);
 });
 
 test("gates: a tripped stage writes nothing, asks and other stages stay open", () => {
@@ -121,17 +122,18 @@ test("a write function refuses a guard that was made for another repo", async ()
   await assert.rejects(closeItem({ db: await fresh([{ n: 1 }]), login: "t" }, G("other"), q, { repo: "app", number: 1, id: "N1", pr: false }), /guard covers other/);
 });
 
-test("a batch member passes the batch guard only with a passed verification, also while GitHub's mergeable state is still unknown", async () => {
+test("a batch member passes the batch guard only with a passed verification and not as a draft, also while GitHub's mergeable state is still unknown", async () => {
   const batch = async (verification: string): Promise<Db> => {
     const db = (await (await (await (await (await (await (await world()).repo(["comment"])).pr(1)).review(1)).verified(1, verification)).premerge(1, "clean")).pipeline(false)).db;
     await db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at) VALUES (1, 'app', 'integration-app-1', 'open', 'base', 'tip', 900, ?, ?)").run(T, T);
     await db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (1, 1, 'sha1', 0)").run();
     return db;
   };
-  const batchLive: Live = async (_r, n) => (n === 900 ? { ...open, head: "tip" } : { ...open, mergeable: "UNKNOWN" });
-  const run = (db: Db) => guardBatchMerge(db, { repo: "app", number: 900, head: "tip" }, [{ number: 1, head: "sha1" }], OP, batchLive);
+  const batchLive = (draft: boolean): Live => async (_r, n) => (n === 900 ? { ...open, head: "tip" } : { ...open, mergeable: "UNKNOWN", draft });
+  const run = (db: Db, draft = false) => guardBatchMerge(db, { repo: "app", number: 900, head: "tip" }, [{ number: 1, head: "sha1" }], OP, batchLive(draft));
   assert.ok(ok(await run(await batch("passed"))), why(await run(await batch("passed"))));
   assert.ok(!ok(await run(await batch("failed"))));
+  assert.match(why(await run(await batch("passed"), true)), /it is a draft/);
 });
 
 test("a fix-up grant is for the Plan action's source", async () => {

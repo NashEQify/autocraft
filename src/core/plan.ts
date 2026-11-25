@@ -187,7 +187,7 @@ export type PrFacts = {
   /** The score of its live workflow (weight, then age), else the rank score; null when unranked. Lanes order by it, highest first, then by number. */
   score: number | null;
   repoFacts: {
-    mergeApproved: boolean; pushApproved: boolean; commentApproved: boolean; ciApproved: boolean;
+    commentApproved: boolean; ciApproved: boolean;
     /** The repo has no CI at all. */
     noCi: boolean;
     /** The default branch's CI is red. */
@@ -300,10 +300,10 @@ export type PrFacts = {
   gateFailureNote: string | null;
   /**
    * What the merge and push approval checks (src/core/may.ts) read: the repo's merge and push approvals, the live workflow's
-   * approval inputs, how the latest workflow ended when none is live, and our recorded pushes to the PR. Absent on facts built by
-   * hand: the repo approvals in `repoFacts` stand alone.
+   * approval inputs, how the latest workflow ended when none is live, and our recorded pushes to the PR. The only place the facts
+   * hold the repo's merge and push approvals, so no rule can read them past a person's approval.
    */
-  may?: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ended: EndedWorkflow | null; pushes: { from: string; to: string }[]; /** The head is a commit we pushed to a branch of our own, or our later pushes on top of one. */ ownHead: boolean; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };
+  may: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ended: EndedWorkflow | null; pushes: { from: string; to: string }[]; /** The head is a commit we pushed to a branch of our own, or our later pushes on top of one. */ ownHead: boolean; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };
   /** For a PR outside the pipeline's scope (no other review facts are loaded): what its stored rows say, enough for the Work page to name the step it waits on. */
   outside?: { review: string | null; verify: string | null; ci: string | null };
 };

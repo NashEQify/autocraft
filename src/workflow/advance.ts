@@ -137,7 +137,7 @@ function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours
   const f = pass.facts.get(ref);
   const bases = [w.baseHead, ...(pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).flatMap((l) => [l.from_head, l.head])];
   if (bases.some((b) => b !== null && ownChain(pass, ref, b, head))) return "ours";
-  if (!f?.may) return "unread";
+  if (!f) return "unread";
   return f.head !== head ? "later" : f.may.ownHead ? "ours" : "theirs";
 }
 

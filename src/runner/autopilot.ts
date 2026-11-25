@@ -387,7 +387,7 @@ export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<str
   return lanes.map((l) => (tops.has(l.name) ? sorted[k++]! : l));
 }
 
-/** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch). */
+/** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch; ask: a comment; capped: a note on the item). */
 async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<string[]> {
   const repos = new Set(ctx.tracked);
   const due = allowed(await planned(db, "cifix", { plans: await plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
@@ -710,7 +710,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
       const lint = allowed(await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
-      return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
+      return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect", "ask", "capped"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
     },
   },
   {

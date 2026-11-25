@@ -73,30 +73,27 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;
   if (commandedBy(f, a) !== null) return null;
-  const may = "may" in f && f.may && (need === "merge" || need === "push") ? (need === "merge" ? mergeMay(f as PrFacts) : pushMay(f as PrFacts, a)) : null;
-  if (may) return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
-  const r = f.repoFacts as Partial<Record<"mergeApproved" | "pushApproved" | "commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
-  const ok = { merge: r.mergeApproved, push: r.pushApproved, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
+  if ("may" in f && (need === "merge" || need === "push")) {
+    const may = need === "merge" ? mergeMay(f) : pushMay(f, a);
+    return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
+  }
+  const r = f.repoFacts as Partial<Record<"commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
+  // An item (no PR facts) has no merge and no push of its own.
+  const ok = { merge: undefined, push: undefined, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
   return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
 }
 
-const mergeInputs = (f: PrFacts): MergeInputs | null =>
-  f.may ? { repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, duplicates: f.duplicates?.of.map((n) => `${f.repo}#${n}`), head: f.head ?? "", pushes: f.may.pushes } : null;
+const mergeInputs = (f: PrFacts): MergeInputs =>
+  ({ repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, duplicates: f.duplicates?.of.map((n) => `${f.repo}#${n}`), head: f.head ?? "", pushes: f.may.pushes });
 
-/** Whether the PR may be merged at its head (src/core/may.ts); null on facts built without the approval inputs. */
-export function mergeMay(f: PrFacts): MayResult | null {
-  const m = mergeInputs(f);
-  return m && mayMerge(m);
-}
+/** Whether the PR may be merged at its head (src/core/may.ts). */
+export const mergeMay = (f: PrFacts): MayResult => mayMerge(mergeInputs(f));
 
-/** `mergeMay` as a yes or no; the repo's merge approval on facts without its inputs. */
-export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f)?.ok ?? f.repoFacts.mergeApproved;
+/** `mergeMay` as a yes or no. */
+export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f).ok;
 
-/** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts); the repo's merge approval on facts without its inputs. */
-export function mergeAllowed(f: PrFacts): boolean {
-  const m = mergeInputs(f);
-  return m ? mergeApproved(m).ok : f.repoFacts.mergeApproved;
-}
+/** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts). */
+export const mergeAllowed = (f: PrFacts): boolean => mergeApproved(mergeInputs(f)).ok;
 
 type PushKind = "fixup" | "cifix" | "conflict";
 
@@ -107,21 +104,18 @@ function pushKind(a: Want): PushKind {
   return "fixup";
 }
 
-/** Whether a push of `kind` is approved (src/core/may.ts); null on facts built without the approval inputs. `operatorFix`: a person's fix-up request. */
-function pushMayOf(f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult | null {
-  if (!f.may) return null;
-  return mayPush({ kind, repoApproval: f.may.repoPush, workflow: f.may.workflow, operatorFix, ...(operatorFix && f.may.fixupBy ? { by: f.may.fixupBy } : {}) });
-}
-const pushMay = (f: PrFacts, a: Want): MayResult | null => pushMayOf(f, pushKind(a), a.source === "operator");
+/** Whether a push of `kind` is approved (src/core/may.ts). `operatorFix`: a person's fix-up request. */
+const pushMayOf = (f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult =>
+  mayPush({ kind, repoApproval: f.may.repoPush, workflow: f.may.workflow, operatorFix, ...(operatorFix && f.may.fixupBy ? { by: f.may.fixupBy } : {}) });
+const pushMay = (f: PrFacts, a: Want): MayResult => pushMayOf(f, pushKind(a), a.source === "operator");
 
 /** Why a push of `kind` is not approved; null when it is. */
 export function pushRefusal(f: PrFacts, kind: PushKind, operatorFix = false): string | null {
   const m = pushMayOf(f, kind, operatorFix);
-  if (m) return m.ok ? null : m.why;
-  return f.repoFacts.pushApproved ? null : "Pushing is not approved for the repo.";
+  return m.ok ? null : m.why;
 }
 
-/** The push approval as a yes or no: `mayPush` where the facts carry its inputs, else the repo's push approval. */
+/** The push approval as a yes or no. */
 export const pushAllowed = (f: PrFacts, kind: PushKind, operatorFix = false): boolean => pushRefusal(f, kind, operatorFix) === null;
 
 /** Writes from the command line are an operator's. */
