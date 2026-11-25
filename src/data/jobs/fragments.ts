@@ -3,6 +3,7 @@ import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
+import { registerKeySource } from "../keys.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 const ENDED = ["done", "failed", "cancelled"];
@@ -43,3 +44,11 @@ export const earlierRunCall = (db: Db, eb: kx.AnyEb): AliasableExpression<SqlBoo
 /** Sum of `items` of jobs of `step` started at or after `sinceRef`, as a scalar (0 when none). */
 export const itemsSumSince = (eb: kx.AnyEb, step: string, sinceRef: kx.Ex): Expression<number> =>
   kx.schemaEb(eb).selectFrom("main.jobs as js").select((e) => e.fn.coalesce(e.fn.sum<number>("js.items"), e.lit(0)).as("n")).where("js.step", "=", step).where("js.started_at", ">=", kx.exprOf(eb, sinceRef)) as unknown as Expression<number>;
+
+/** Error text of jobs a runner stop or restart ended without resuming them; the planner does not count them as failures. */
+export const RUNNER_STOPPED = "The runner stopped while this job ran; start it again if needed.";
+
+/** The items one job handled: `{ jobId }`, for `mirror.loadShown` in the same statement as the job's items. */
+registerKeySource<{ jobId: number }>("jobs.itemsOfJob", (db, a) => queryDb(db).k.selectFrom("job_items").select(["repo", "number"]).where("job_id", "=", a.jobId));
+/** The items of several jobs. */
+registerKeySource<{ jobIds: number[] }>("jobs.itemsOfJobs", (db, a) => queryDb(db).k.selectFrom("job_items").select(["repo", "number"]).where(kx.inList(db, "job_id", a.jobIds, "bigint")));

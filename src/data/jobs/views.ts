@@ -1,84 +1,267 @@
 // Read models for dashboards, health and rates (M07 jobs).
 import type { Db } from "../../db/index.ts";
-import type { Ref } from "../keys.ts";
-import type { ActiveJob, DeadlineStop, FailedJob, HiddenRepos, ItemsByBucket, JobDetail, JobRow, JobState, JobStamp, LiveBoard, RefKey, StageState, StepRun } from "./types.ts";
+import { queryDb } from "../../db/query-db.ts";
+import * as kx from "../../db/kx.ts";
+import { namedKeys, type Ref } from "../keys.ts";
+import { loadAuditMax } from "../control/audit.ts";
+import { loadShown } from "../mirror/items.ts";
+import { RUNNER_STOPPED } from "./fragments.ts";
+import { loadJobItems } from "./items.ts";
+import { loadLogTail } from "./logs.ts";
+import { hasFilter, numberOf, repoVisible } from "./sql.ts";
+import type { ActiveJob, DeadlineStop, FailedJob, HiddenRepos, ItemsByBucket, JobDetail, JobItemRow, JobRow, JobState, JobStamp, LiveBoard, RefKey, StageState, StepRun } from "./types.ts";
 
-/** Row, items and log tail in one wave; item states come from `mirror.loadShown` in the same wave. */
+/** Bytes of a job log the detail page shows. */
+export const LOG_TAIL_BYTES = 48 * 1024;
+/** Finished runs per step the duration estimates read. */
+const DURATION_SAMPLES = 60;
+/** How many of the newest jobs the deadline stops look at. */
+const STOP_WINDOW = 5000;
+
+const isHidden = (h: HiddenRepos, repo: string): boolean => (h.visible ? !h.visible.includes(repo) : h.includes(repo));
+const jobCols = () => kx.cols("jobs");
+const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
+const pairsOf = (refs: Ref[]): [string, number][] => refs.map((r): [string, number] => [r.repo, r.number]);
+
+/** Row, items and log tail in one wave; item states come from `mirror.loadShown` in the same wave. A job of a hidden repo is not found. */
 export async function loadJobDetail(db: Db, id: number, o: { hidden?: HiddenRepos; logs: boolean }): Promise<JobDetail | null> {
-  throw new Error("not built: jobs.loadJobDetail");
+  const q = queryDb(db);
+  const [row, items, logTail, shown] = await db.together(() => Promise.all([
+    q.get(q.k.selectFrom("jobs").select(jobCols()).$narrowType<{ state: JobState }>().where("id", "=", id)),
+    q.all(q.k.selectFrom("job_items").select(["id", "job_id", "repo", "number", "outcome", "at"]).where("job_id", "=", id)
+      .$if(hasFilter(o.hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", o.hidden!))).orderBy("id")),
+    o.logs ? loadLogTail(db, id, LOG_TAIL_BYTES) : Promise.resolve(null),
+    loadShown(db, namedKeys("jobs.itemsOfJob", { jobId: id })),
+  ]));
+  if (!row || (row.repo && o.hidden && isHidden(o.hidden, row.repo))) return null;
+  const kept = new Set(items.map((i) => refKey(i.repo, i.number)));
+  return { row, items, shown: new Map([...shown].filter(([k]) => kept.has(k))), logTail };
 }
 
-/** Running, queued (limited) and recently ended jobs with their items; one round trip. */
+/**
+ * Running, queued (the first `queuedMax`) and recently ended jobs with their items; one round trip. Steps in `quietSteps`
+ * show only when they failed. Up to `recentMax * 3` ended jobs come back: the caller drops those without items (a failed one
+ * stays) and keeps `recentMax`.
+ */
 export async function loadLiveBoard(db: Db, o: { quietSteps: string[]; recentMs: number; queuedMax: number; recentMax: number; hidden?: HiddenRepos }): Promise<LiveBoard> {
-  throw new Error("not built: jobs.loadLiveBoard");
+  const q = queryDb(db);
+  const since = new Date(Date.now() - o.recentMs).toISOString();
+  const visible = (b: any) => (hasFilter(o.hidden) ? b.where((eb: kx.AnyEb) => repoVisible(db, eb, "repo", o.hidden!)) : b);
+  const shown = () => q.k.selectFrom("jobs").select(jobCols()).$narrowType<{ state: JobState }>()
+    .where((eb) => eb.or([eb("state", "=", "failed"), eb("step", "not in", o.quietSteps.length ? o.quietSteps : [""])]));
+  const runningQ = () => visible(shown().where("state", "=", "running")).orderBy("id");
+  const queuedQ = () => visible(shown().where("state", "=", "queued")).orderBy("id").limit(o.queuedMax);
+  const recentQ = () => visible(shown().where("state", "in", ["done", "failed"]).where("ended_at", ">", since).where("started_at", "is not", null)).orderBy("ended_at", "desc").limit(o.recentMax * 3);
+  const ids = (build: () => any) => (build() as ReturnType<typeof shown>).clearSelect().select("id");
+  const [running, queued, recent, itemRows] = await db.together(() => Promise.all([
+    q.all(runningQ() as ReturnType<typeof shown>), q.all(queuedQ() as ReturnType<typeof shown>), q.all(recentQ() as ReturnType<typeof shown>),
+    q.all(q.k.selectFrom("job_items").select(["id", "job_id", "repo", "number", "outcome", "at"])
+      .where((eb) => eb.or([eb("job_id", "in", ids(runningQ)), eb("job_id", "in", ids(queuedQ)), eb("job_id", "in", ids(recentQ))]))
+      .$if(hasFilter(o.hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", o.hidden!))).orderBy("id")),
+  ]));
+  const items = new Map<number, JobItemRow[]>();
+  for (const r of itemRows) { const l = items.get(r.job_id); if (l) l.push(r); else items.set(r.job_id, [r]); }
+  return { running, queued, recent, items };
 }
 
-/** Recent run durations per step. */
+/** Recent run durations (ms) per step, newest first: the last 60 done jobs of each step. */
 export async function loadStepDurations(db: Db, steps: string[]): Promise<Map<string, number[]>> {
-  throw new Error("not built: jobs.loadStepDurations");
+  const out = new Map<string, number[]>();
+  if (!steps.length) return out;
+  const q = queryDb(db);
+  const ranked = q.k.selectFrom("jobs").select((eb) => ["step", "started_at", "ended_at", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
+    .where(kx.inList(db, "step", steps)).where("state", "=", "done").where("started_at", "is not", null).where("ended_at", "is not", null);
+  for (const r of await q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.started_at", "r.ended_at", "r.rn"]).where("r.rn", "<=", DURATION_SAMPLES).orderBy("r.step").orderBy("r.rn"))) {
+    const ms = Date.parse(r.ended_at!) - Date.parse(r.started_at!);
+    const l = out.get(r.step);
+    if (l) l.push(ms); else out.set(r.step, [ms]);
+  }
+  return out;
 }
 
-/** Latest job per step (window). */
+/** The newest job of each step (a hidden repo's jobs left out). */
 export async function loadLastJobPerStep(db: Db, steps: string[], hidden?: HiddenRepos): Promise<Map<string, JobRow>> {
-  throw new Error("not built: jobs.loadLastJobPerStep");
+  const out = new Map<string, JobRow>();
+  if (!steps.length) return out;
+  const q = queryDb(db);
+  const ranked = q.k.selectFrom("jobs").select((eb) => [...jobCols(), eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
+    .where(kx.inList(db, "step", steps)).$if(hasFilter(hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", hidden!)));
+  const rows = await q.all(q.k.selectFrom(ranked.as("r")).selectAll("r").where("r.rn", "=", 1));
+  for (const { rn: _rn, ...r } of rows) out.set(r.step, r as unknown as JobRow);
+  return out;
 }
 
-/** Per stage: any running, any queued, last finished state; one grouped statement. */
+/** Per stage: any running, any queued, else the state of the newest finished job of its steps; two statements in one wave. */
 export async function loadStageStates(db: Db, stages: { n: number; steps: string[] }[]): Promise<Map<number, StageState>> {
-  throw new Error("not built: jobs.loadStageStates");
+  const out = new Map<number, StageState>();
+  const steps = [...new Set(stages.flatMap((s) => s.steps))];
+  if (!steps.length) { for (const s of stages) out.set(s.n, "idle"); return out; }
+  const q = queryDb(db);
+  const [active, last] = await db.together(() => Promise.all([
+    q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>(eb.case().when("state", "=", "running").then(1).else(0).end()).as("running")])
+      .where(kx.inList(db, "step", steps)).where("state", "in", ["running", "queued"]).groupBy("step")),
+    q.all(q.k.selectFrom(q.k.selectFrom("jobs").select((eb) => ["id", "step", "state", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
+      .where(kx.inList(db, "step", steps)).where("state", "in", ["done", "failed"]).as("r")).select(["r.id", "r.step", "r.state"]).where("r.rn", "=", 1)),
+  ]));
+  const running = new Map(active.map((r) => [r.step, Number(r.running) === 1]));
+  for (const s of stages) {
+    const mine = s.steps;
+    if (mine.some((n) => running.get(n) === true)) { out.set(s.n, "running"); continue; }
+    if (mine.some((n) => running.has(n))) { out.set(s.n, "queued"); continue; }
+    const newest = last.filter((r) => mine.includes(r.step)).sort((a, b) => b.id - a.id)[0];
+    out.set(s.n, newest?.state === "done" ? "ok" : newest?.state === "failed" ? "failed" : "idle");
+  }
+  return out;
 }
 
-/** Grouped counts. */
+/** Grouped counts; every asked state is present (0 when none). */
 export async function countJobs(db: Db, states: JobState[], hidden?: HiddenRepos): Promise<Map<JobState, number>> {
-  throw new Error("not built: jobs.countJobs");
+  const out = new Map<JobState, number>(states.map((s) => [s, 0]));
+  if (!states.length) return out;
+  const q = queryDb(db);
+  for (const r of await q.all(q.k.selectFrom("jobs").select((eb) => ["state", eb.fn.countAll<number>().as("n")]).where("state", "in", states)
+    .$if(hasFilter(hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", hidden!))).groupBy("state"))) out.set(r.state as JobState, Number(r.n));
+  return out;
 }
 
-/** Queued or running jobs naming each item. */
+/** Queued or running jobs naming each item (`params.number` and the job's repo), oldest first. */
 export async function loadActiveJobsOfItems(db: Db, refs: Ref[]): Promise<Map<RefKey, ActiveJob[]>> {
-  throw new Error("not built: jobs.loadActiveJobsOfItems");
+  const out = new Map<RefKey, ActiveJob[]>();
+  if (!refs.length) return out;
+  const q = queryDb(db);
+  for (const part of kx.chunks(refs)) {
+    const rows = await q.all(q.k.selectFrom("jobs as j")
+      .innerJoin(kx.refPairs(db, pairsOf(part), "rp"), (jn) => jn.onRef("rp.repo", "=", "j.repo").on((eb) => eb("rp.number", "=", numberOf(db, "j.params"))))
+      .select(["j.repo", numberOf(db, "j.params").as("number"), "j.id", "j.step", "j.state", "j.requested_by", "j.started_at"]).$narrowType<{ state: JobState }>()
+      .where("j.state", "in", ["queued", "running"]).orderBy("j.id"));
+    for (const r of rows) {
+      const key = refKey(r.repo!, Number(r.number)), row: ActiveJob = { id: r.id, step: r.step, state: r.state, requested_by: r.requested_by, started_at: r.started_at };
+      const l = out.get(key);
+      if (l) l.push(row); else out.set(key, [row]);
+    }
+  }
+  return out;
 }
 
-/** Jobs that crashed before writing a `job_items` row. */
+/** Jobs that failed after `since` naming the item and wrote no `job_items` row for it (they crashed first). */
 export async function loadFailedJobsOfItems(db: Db, refs: Ref[], since: string): Promise<Map<RefKey, FailedJob[]>> {
-  throw new Error("not built: jobs.loadFailedJobsOfItems");
+  const out = new Map<RefKey, FailedJob[]>();
+  if (!refs.length) return out;
+  const q = queryDb(db);
+  for (const part of kx.chunks(refs)) {
+    const rows = await q.all(q.k.selectFrom("jobs as j")
+      .innerJoin(kx.refPairs(db, pairsOf(part), "rp"), (jn) => jn.onRef("rp.repo", "=", "j.repo").on((eb) => eb("rp.number", "=", numberOf(db, "j.params"))))
+      .select(["j.repo", "rp.number as number", "j.id", "j.step", "j.error", "j.ended_at"])
+      .where("j.state", "=", "failed").where("j.ended_at", ">", since)
+      .where((eb) => eb.not(eb.exists(eb.selectFrom("job_items as ji").select(eb.lit(1).as("one")).whereRef("ji.job_id", "=", "j.id").whereRef("ji.repo", "=", "rp.repo").whereRef("ji.number", "=", "rp.number"))))
+      .orderBy("j.id"));
+    for (const r of rows) {
+      const key = refKey(r.repo!, Number(r.number)), row: FailedJob = { id: r.id, step: r.step, error: r.error, ended_at: r.ended_at };
+      const l = out.get(key);
+      if (l) l.push(row); else out.set(key, [row]);
+    }
+  }
+  return out;
 }
 
-/** `row_number() OVER (PARTITION BY step ORDER BY id)` over queued jobs. */
+/** Position in line of queued jobs (1 = next of its step), of the jobs given or of every queued job. */
 export async function loadQueuePositions(db: Db, jobIds?: number[]): Promise<Map<number, number>> {
-  throw new Error("not built: jobs.loadQueuePositions");
+  if (jobIds && !jobIds.length) return new Map();
+  const q = queryDb(db);
+  const ranked = q.k.selectFrom("jobs").select((eb) => ["id", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id")).as("pos")]).where("state", "=", "queued");
+  const rows = await q.all(q.k.selectFrom(ranked.as("r")).select(["r.id", "r.pos"]).$if(!!jobIds, (b) => b.where(kx.inList(db, "r.id", jobIds!, "bigint"))));
+  return new Map(rows.map((r) => [r.id, Number(r.pos)]));
 }
 
-/** Count, newest id and state list of an item's jobs, for the page version stamp. */
+/**
+ * Count, newest id and state list (oldest id first, comma-joined) of the queued and running jobs of a repo that name
+ * one of `refs` (every such job of the repo without `refs`), and the queue positions of the queued ones.
+ */
 export async function loadJobStamp(db: Db, repo: string, refs?: Ref[]): Promise<JobStamp> {
-  throw new Error("not built: jobs.loadJobStamp");
+  const q = queryDb(db);
+  if (refs && !refs.length) return { count: 0, newestId: null, states: "", positions: new Map() };
+  const named = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom(kx.refPairs(db, pairsOf(refs ?? []), "rp")).select(eb.lit(1).as("one")).whereRef("rp.repo", "=", "jobs.repo" as never)
+    .where((e) => e("rp.number", "=", numberOf(db, "jobs.params")));
+  const mine = (b: any, states: string[]): any => b.where("jobs.state", "in", states).where("jobs.repo", "=", repo)
+    .$if(!!refs, (x: any) => x.where((eb: kx.AnyEb) => eb.exists(named(eb))));
+  const ranked = q.k.selectFrom("jobs").select((eb) => ["jobs.id", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("jobs.step").orderBy("jobs.id")).as("pos")]).where("jobs.state", "=", "queued");
+  const [agg, pos] = await db.together(() => Promise.all([
+    q.get(mine(q.k.selectFrom("jobs"), ["queued", "running"]).select((eb: kx.AnyEb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("jobs.id").as("newest"), kx.groupConcat(db, "jobs.state", ",", "jobs.id").as("states")])) as Promise<{ n: number; newest: number | null; states: string | null } | undefined>,
+    q.all(q.k.selectFrom(ranked.as("r")).select(["r.id", "r.pos"]).where("r.id", "in", mine(q.k.selectFrom("jobs"), ["queued"]).select("jobs.id"))),
+  ]));
+  return { count: Number(agg?.n ?? 0), newestId: agg?.newest ?? null, states: agg?.states ?? "", positions: new Map(pos.map((r) => [r.id, Number(r.pos)])) };
 }
 
-/** The health checks' step history. */
+/** Finished runs of the jobs `requestedBy` started: those of the newest `window` job ids that ended in the last `sinceDays` days, a runner restart's left out, newest first. */
 export async function loadStepRuns(db: Db, o: { requestedBy: string; sinceDays: number; window: number }): Promise<StepRun[]> {
-  throw new Error("not built: jobs.loadStepRuns");
+  const q = queryDb(db);
+  const since = new Date(Date.now() - o.sinceDays * 86_400_000).toISOString();
+  return await q.all(q.k.selectFrom("jobs").select(["id", "step", "state", "error", "started_at", "ended_at", "requested_by", "items"]).$narrowType<{ state: JobState }>()
+    .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", o.window))
+    .where("requested_by", "=", o.requestedBy).where("state", "in", ["done", "failed"]).where("ended_at", ">", since)
+    .where((eb) => eb.or([eb("error", "is", null), eb("error", "<>", RUNNER_STOPPED)])).orderBy("id", "desc"));
 }
 
-/** Failed stop rows, last done id per step and `control.loadAuditMax` in one wave. */
+/**
+ * Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has
+ * beaten: failed stop rows of the last 5000 ids, the last done id per step and the acknowledgements, in one wave.
+ */
 export async function loadDeadlineStops(db: Db): Promise<DeadlineStop[]> {
-  throw new Error("not built: jobs.loadDeadlineStops");
+  const q = queryDb(db);
+  const stopped = () => q.k.selectFrom("jobs").select(["step", "id", "error", "ended_at"])
+    .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STOP_WINDOW)).where("state", "=", "failed")
+    .where((eb) => eb.or([kx.like(db, "error", eb.val("stopped: ran past %")), kx.like(db, "error", eb.val("stopped: no progress for %"))]));
+  const [rows, done, acked] = await db.together(() => Promise.all([
+    q.all(stopped().orderBy("id", "desc")),
+    q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>("id").as("m")]).where("state", "=", "done").where("step", "in", (eb) => eb.selectFrom(stopped().as("s")).select("s.step")).groupBy("step")),
+    loadAuditMax(db, "deadline-ack"),
+  ]));
+  const lastDone = new Map(done.map((r) => [r.step, Number(r.m)]));
+  const out: DeadlineStop[] = [];
+  for (const step of new Set(rows.map((r) => r.step))) {
+    const mine = rows.filter((r) => r.step === step), latest = mine[0]!;
+    const doneId = lastDone.get(step) ?? 0;
+    if (doneId > latest.id) continue;
+    const ack = acked.get(`step:${step}`);
+    if (ack && latest.ended_at !== null && ack >= latest.ended_at) continue;
+    out.push({ step, jobId: latest.id, error: latest.error!, endedAt: latest.ended_at, count: mine.filter((r) => r.id > doneId).length });
+  }
+  return out;
 }
 
-/** The jobs half of the rate chart. */
+/** Items handled per step in hourly (`bucket` "hour") or daily buckets of jobs started in `[from, to)`: the bucket is the leading characters of the start time, which the caller completes to the bucket's start. */
 export async function loadItemsByBucket(db: Db, from: string, to: string, bucket: string, hidden?: HiddenRepos): Promise<ItemsByBucket[]> {
-  throw new Error("not built: jobs.loadItemsByBucket");
+  const q = queryDb(db);
+  const prefix = bucket === "hour" ? 13 : 10;
+  return (await q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn<string>("substr", [eb.ref("started_at"), eb.lit(1), eb.lit(prefix)]).as("bucket"), eb.fn.coalesce(eb.fn.sum<number>("items"), eb.lit(0)).as("items")])
+    .where("started_at", ">=", from).where("started_at", "<", to).$if(hasFilter(hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", hidden!)))
+    .groupBy("step").groupBy("bucket"))).map((r) => ({ step: r.step, bucket: r.bucket, items: Number(r.items) }));
 }
 
-/** Sum of `items` of jobs started since a per-step time. */
+/** Sum of `items` of jobs of each step started at or after that step's time in `sinceByStep`; a step without a time is absent. */
 export async function loadItemsSince(db: Db, steps: string[], sinceByStep: Record<string, string>): Promise<Map<string, number>> {
-  throw new Error("not built: jobs.loadItemsSince");
+  const asked = steps.filter((s) => sinceByStep[s] !== undefined);
+  const out = new Map<string, number>(asked.map((s) => [s, 0]));
+  if (!asked.length) return out;
+  const q = queryDb(db);
+  const v = kx.valuesTable(db, asked.map((step) => ({ step, since: sinceByStep[step]! })), { step: "text", since: "text" }, "v");
+  for (const r of await q.all(q.k.selectFrom("jobs as j").innerJoin(v, "v.step", "j.step").select((eb) => ["j.step", eb.fn.coalesce(eb.fn.sum<number>("j.items"), eb.lit(0)).as("n")])
+    .whereRef("j.started_at", ">=", "v.since").groupBy("j.step"))) out.set(r.step, Number(r.n));
+  return out;
 }
 
-/** The CLI wait loop. */
+/** State, summary and error of one job, for the CLI wait loop. */
 export async function loadJobState(db: Db, id: number): Promise<{ state: JobState; summary: string | null; error: string | null } | null> {
-  throw new Error("not built: jobs.loadJobState");
+  const q = queryDb(db);
+  return (await q.get(q.k.selectFrom("jobs").select(["state", "summary", "error"]).$narrowType<{ state: JobState }>().where("id", "=", id))) ?? null;
 }
 
-/** A job of the step running for the repo; key `step\0repo`. */
+/** The probes (`step`, `repo`) that have a running job; keys are `step\0repo`. */
 export async function isRunning(db: Db, probes: { step: string; repo: string }[]): Promise<Set<string>> {
-  throw new Error("not built: jobs.isRunning");
+  if (!probes.length) return new Set();
+  const q = queryDb(db);
+  const v = kx.valuesTable(db, probes, { step: "text", repo: "text" }, "v");
+  const rows = await q.all(q.k.selectFrom(v).select(["v.step", "v.repo"]).where((eb) => eb.exists(eb.selectFrom("jobs as j").select(eb.lit(1).as("one"))
+    .whereRef("j.step", "=", "v.step").whereRef("j.repo", "=", "v.repo").where("j.state", "=", "running"))));
+  return new Set(rows.map((r) => `${r.step}\0${r.repo}`));
 }
