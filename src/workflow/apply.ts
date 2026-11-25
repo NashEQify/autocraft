@@ -59,6 +59,8 @@ export type CommandInput = {
   keepBatch?: boolean;
   /** The app's mention name, for replies that tell the sender what to write back. */
   mention?: string;
+  /** A command a model read in text the parser could not read (read.ts): the unclear reply proposes it. */
+  proposed?: string;
 };
 
 export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string }; /** Why a clear command is not possible on the item. */ refusal?: Refusal["why"] };
@@ -284,7 +286,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
     ({ workflowId, repo: item.repo, number: item.number, login, via, kind, parsed: input.parsed, line, at, ...(kind === "answered" ? { seenAt: wf?.recAt ?? null } : {}) });
   if (r.kind === "ambiguous") {
-    const line = replyLine(r, input.clock, input.mention);
+    const line = replyLine(r, input.clock, input.mention, input.proposed);
     await recordEvents(db, [event("ambiguous", wf?.id ?? null, noted(line))]);
     return out("ambiguous", reply(line), wf?.id ?? null);
   }

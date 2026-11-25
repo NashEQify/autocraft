@@ -23,7 +23,7 @@ import type { Db } from "../../db/index.ts";
 import { t } from "../../i18n/index.ts";
 import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
-import { runCommand } from "../../workflow/apply.ts";
+import { runText } from "../../workflow/read.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
 import { eventsOf } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
@@ -359,9 +359,9 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await runCommand(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
+  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
-  });
+  }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } });
   const text = done.lines.join("\n");
   return { text: /has no write access to/.test(text) ? text + PERMISSION_HINT : text };
 }

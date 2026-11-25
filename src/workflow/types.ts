@@ -154,4 +154,5 @@ export type Parsed =
 /** A registered control: a state change a panel needs that is not one of the command words. */
 export type Control = "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";
 
-export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "resumed" | "weighted" | "closed" | "backlog" | "set";
+/** `read`: a command a model read in a message the parser could not read, with its score and whether it ran (read.ts). */
+export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "resumed" | "weighted" | "closed" | "backlog" | "set" | "read";
