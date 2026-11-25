@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { poolRoom, repoBatches, takersFirst } from "../src/agents/call.ts";
-import { pool, runHaiku } from "../src/classify/run.ts";
+import { pool, runHaiku, setRunner } from "../src/classify/run.ts";
 import type { Item } from "../src/classify/parse.ts";
 import { runTiered } from "../src/agents/step.ts";
 import { PRIORITY } from "../src/agents/steps.ts";
@@ -63,4 +63,26 @@ test("a limited selection takes the items with a taker before the ones nobody ma
   const picked = (await takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }])).slice(0, 1);
   assert.deepEqual(picked, [{ repo: "deckcraft", n: 2 }]);
   assert.deepEqual((await takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }])).map((x) => x.n), [2, 4, 1, 3], "stable within each group, none dropped");
+});
+
+test("an unsure Jev answer whose Haiku batch nobody may take is not asked of Jev again while the item is unchanged", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await setInferenceMode(db, "user-local", "test");
+  await setJevEnabled(db, true, "test");
+  let asked = 0;
+  const restore = setRunner(async () => {
+    asked++;
+    return { code: 0, stderr: "", stdout: JSON.stringify({ answers: { impact: { choice: "P2", probabilities: { P2: 0.5 } } }, usage: { input_tokens: 10, output_tokens: 1 } }) };
+  });
+  try {
+    const item = (title: string) => [{ repo: "photocraft", number: 7, kind: "issue", title, body: "" }] as unknown as Item[];
+    const first = await runTiered(db, PRIORITY, item("t"));
+    assert.deepEqual([...first.skipped], ["photocraft#7"]);
+    const again = await runTiered(db, PRIORITY, item("t"));
+    assert.equal(asked, 1, "the kept unsure answer stands in for Jev");
+    assert.deepEqual(again.jev.get("photocraft#7"), first.jev.get("photocraft#7"));
+    assert.deepEqual([...again.skipped], ["photocraft#7"], "the item still waits for Haiku, unsettled");
+    await runTiered(db, PRIORITY, item("t, edited"));
+    assert.equal(asked, 2, "changed text is asked again");
+  } finally { restore(); }
 });

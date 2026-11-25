@@ -11,6 +11,8 @@ import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
+import { excluded, inList } from "../db/kx.ts";
+import { createHash } from "node:crypto";
 
 /** What a parser knows about the reply it reads. */
 export type ParseCtx = {
@@ -192,7 +194,11 @@ async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C
   return { answers: j?.answers, usage, code: p.code, json: j !== null };
 }
 
-/** A Jev step with its Haiku fallback. Jev answers each item; Haiku answers (in batches) the items Jev is not sure about. */
+/**
+ * A Jev step with its Haiku fallback. Jev answers each item; Haiku answers (in batches) the items Jev is not sure about. An unsure
+ * answer whose Haiku batch no Task Runner could take is kept (jev_unsure) and stands in for Jev's answer while the item's Jev
+ * request is unchanged, so later passes ask only Haiku.
+ */
 export type TieredStep<It, JV, HV, C = void, B = It[]> = {
   jev: JevStep<It, JV, C>;
   /** Haiku answers a batch; its value is `[ref, answer]` pairs, and `rest` the batch items without one. */
@@ -226,7 +232,7 @@ export type TieredOpts<It, C, JV = unknown> = {
 };
 
 export type TieredResult<JV, HV> = {
-  /** Jev's answer per ref (null: none, or Jev was not asked). */
+  /** Jev's answer per ref, asked, given or kept from an earlier pass (null: none, or Jev was not asked). */
   jev: Map<string, JV | null>;
   haiku: Map<string, HV>;
   /** Items Jev could not be asked or answer because it is unavailable, so Haiku decided alone. */
@@ -240,6 +246,8 @@ export type TieredResult<JV, HV> = {
 export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C, JV> = {}): Promise<TieredResult<JV, HV>> {
   const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set() };
   for (const x of items) if (opts.given?.has(tier.ref(x))) out.jev.set(tier.ref(x), opts.given.get(tier.ref(x))!);
+  const kept = await keptUnsure(db, tier, items, opts.ctx as C);
+  for (const x of items) { const k = kept.rows.get(tier.ref(x)); if (k !== undefined && !out.jev.has(tier.ref(x)) && k.hash === kept.hashOf(x)) out.jev.set(tier.ref(x), k.answer); }
   const toJev = items.filter((x) => !out.jev.has(tier.ref(x)));
   if (toJev.length && await jevAvailable(db)) {
     await pool(toJev.map((x) => async () => {
@@ -257,7 +265,8 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
     if (jv === null && down) out.alone.add(tier.ref(x));
     ask.push(x);
   }
-  if (!ask.length || await opts.cancelled?.()) return out;
+  if (!ask.length) { await keepUnsure(db, tier, items, out, kept); return out; }
+  if (await opts.cancelled?.()) return out;
   const per = opts.perCall ?? CLAUDE_PROMPTS[tier.haiku.id].limits.perCall;
   const batches = await repoBatches(db, ask, per, tier.repo, (x) => [tier.item(x)]);
   await pool(batches.map((batch, n) => async () => {
@@ -268,5 +277,44 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
   }), poolRoom(db, (i) => [...new Set(batches[i]!.map(tier.repo))], (i) => batches[i]!.map(tier.item), { promptId: tier.haiku.id }), { first: opts.first, skipped: (i) => {
     for (const x of batches[i]!) { out.skipped.add(tier.ref(x)); out.alone.delete(tier.ref(x)); }
   } });
+  await keepUnsure(db, tier, items, out, kept);
   return out;
+}
+
+type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV }>; hashOf: (x: It) => string };
+
+/** The unsure Jev answers kept for `items` (jev_unsure), and the hash of each item's Jev request they are valid for. */
+async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], ctx: C): Promise<Kept<It, JV>> {
+  const hashes = new Map<It, string>();
+  const hashOf = (x: It): string => {
+    let h = hashes.get(x);
+    if (h === undefined) {
+      const { item, body } = tier.jev.request(x, ctx);
+      hashes.set(x, h = createHash("sha256").update(body ?? renderJev(tier.jev.id, item as Item | DupePair)).digest("hex"));
+    }
+    return h;
+  };
+  const rows = new Map<string, { hash: string; answer: JV }>();
+  if (!items.length) return { rows, hashOf };
+  for (const r of await db.all(db.k.selectFrom("jev_unsure").select(["ref", "input_hash", "answer"]).where("prompt_id", "=", tier.jev.id).where(inList(db, "ref", items.map(tier.ref))))) {
+    try { rows.set(r.ref, { hash: r.input_hash, answer: JSON.parse(r.answer) as JV }); } catch { /* asked again */ }
+  }
+  return { rows, hashOf };
+}
+
+/**
+ * Keeps the unsure Jev answer of each item whose Haiku batch no Task Runner could take, so the next pass asks only Haiku while
+ * the Jev request is unchanged; drops the kept answers of the other items (settled, or sent to Haiku).
+ */
+async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], out: TieredResult<JV, HV>, kept: Kept<It, JV>): Promise<void> {
+  const at = new Date().toISOString();
+  const keep = items.flatMap((x) => {
+    const ref = tier.ref(x), jv = out.jev.get(ref) ?? null;
+    if (!out.skipped.has(ref) || jv === null) return [];
+    const hash = kept.hashOf(x);
+    return kept.rows.get(ref)?.hash === hash ? [] : [{ prompt_id: tier.jev.id, ref, input_hash: hash, answer: JSON.stringify(jv), at }];
+  });
+  const drop = [...kept.rows.keys()].filter((ref) => !out.skipped.has(ref));
+  if (keep.length) await db.run(db.k.insertInto("jev_unsure").values(keep).onConflict((oc) => oc.columns(["prompt_id", "ref"]).doUpdateSet(excluded(["input_hash", "answer", "at"]))));
+  if (drop.length) await db.run(db.k.deleteFrom("jev_unsure").where("prompt_id", "=", tier.jev.id).where(inList(db, "ref", drop)));
 }
