@@ -8,6 +8,9 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 const PATCH_TABLES = ["fixups", "ci_fixes", "conflict_merges"] as const;
 const OPERATOR_ENDED = ["pushing", "pushed", "failed", "refused", "rejected", "cannot-push", "too-large", "push-denied", "asked", "comment-failed", "superseded"];
 
+/** The final states of an operator fix-up's try that say something about the request: every one but a dropped try's. */
+export const FINAL_BUT_DROPPED = OPERATOR_ENDED.filter((s) => s !== "superseded");
+
 /** The pipeline already worked this item: a fix-up or CI fix row exists for it. */
 export function hasPatchWork(eb: Eb, alias: string): Expression<SqlBool> {
   const w = schemaEb(eb);
@@ -22,11 +25,11 @@ export function hasFixupAt(eb: Eb, alias: string, headRef: string, states: reado
     .whereRef("x.number", "=", `${alias}.number` as never).whereRef("x.from_head", "=", headRef as never).where("x.state", "in", [...states]));
 }
 
-/** The operator fix-up request of the row `alias` has a final fixups row of its own at the head it asks for. */
-export function operatorFixEnded(eb: Eb, alias: string): Expression<SqlBool> {
+/** The operator fix-up request of the row `alias` has a final fixups row (in one of `states`) of its own at the head it asks for. */
+export function operatorFixEnded(eb: Eb, alias: string, states: readonly string[] = OPERATOR_ENDED): Expression<SqlBool> {
   const w = schemaEb(eb);
   return w.exists(w.selectFrom("fixups as f").select(w.lit(1).as("one")).whereRef("f.operator_fix", "=", `${alias}.id` as never).whereRef("f.from_head", "=", `${alias}.from_head` as never)
-    .where("f.source", "=", "operator").where("f.state", "in", OPERATOR_ENDED));
+    .where("f.source", "=", "operator").where("f.state", "in", [...states]));
 }
 
 /** Every `lint_task` and `task_id` (column `id`) of the patch rows of `keys`, so `build.loadTaskStates` loads them in the same wave. */

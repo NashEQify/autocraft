@@ -1,5 +1,5 @@
 // `item_workflows` and `workflow_events` (M10 workflow-a).
-// reads: implement.implementations, mirror.items (also through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
+// reads: implement.implementations and mirror.items (through the link fragments), mirror.items (through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
@@ -8,16 +8,15 @@ import { canActExpr, writeCheckedAt } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { attemptOf, LIVE_STATES, notArchived, workScore } from "./fragments.ts";
+import { linkRows, LIVE_STATES, notArchived, prIssueWorkflows, workScore } from "./fragments.ts";
+import { linkWorkflows } from "./link.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import type { Parsed } from "../../workflow/types.ts";
+import { ASKING_STATES, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
-/** Attempt states that no longer work a PR (src/remote/started.ts ENDED_ATTEMPTS). */
-const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 const GO_ON_EVENTS = ["started", "answered"];
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -34,7 +33,7 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null; version: number; accepted_head: string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
@@ -46,7 +45,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: parse<PlanPart[]>(r.plan, []), step: r.step, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
+    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
   };
 }
 
@@ -79,21 +78,12 @@ const loginIn = (db: Db, eb: kx.AnyEb, col: string, logins: string[], alias: str
 
 type EndedRow = { repo: string; number: number | string; state: string };
 
-/**
- * The newest workflow of each item of `keys`, or of the issue a PR of `keys` was opened for that the PR's attempt belongs to (attemptOf),
- * whichever is newer, when it has ended. An issue's workflow that ended as a PR of it merged says nothing about the issue's other PRs and is left out.
- */
+/** The newest workflow of each item of `keys`, or of the issue a PR of `keys` was opened for (prIssueWorkflows), whichever is newer, when it has ended. */
 const endedQuery = (db: Db, keys: KeySource) => {
   const k = queryDb(db).k as any;
-  const on = (alias: string, repo: string, number: string) => (j: any) => j.onRef(`${alias}.repo`, "=", repo).onRef(`${alias}.number`, "=", number);
-  const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ke"), on("ke", "w.repo", "w.number")).select(["w.repo as repo", "w.number as number", "w.state as state", "w.id as id"]);
-  const ofPr = k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, keys, "kf"), on("kf", "i.repo", "i.pr_number"))
-    .innerJoin("main.item_workflows as w", on("w", "i.repo", "i.number")).where("w.entry", "=", "implement").where((eb: any) => attemptOf(eb, "i", "w"))
-    .where((eb: any) => eb.or([eb("w.state", "<>", "done"), eb.not(eb.exists(
-      k.selectFrom("main.implementations as im").innerJoin("main.items as mi", on("mi", "im.repo", "im.pr_number")).select(one(eb))
-        .whereRef("im.repo", "=", "w.repo").whereRef("im.number", "=", "w.number").where("mi.state", "=", "MERGED")
-        .where((m: any) => m.or([m("mi.closed_at", "is", null), m("mi.closed_at", ">=", m.ref("w.started_at"))]))))]))
-    .select(["i.repo as repo", "i.pr_number as number", "w.state as state", "w.id as id"]);
+  const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ke"), (j: any) => j.onRef("ke.repo", "=", "w.repo").onRef("ke.number", "=", "w.number"))
+    .select(["w.repo as repo", "w.number as number", "w.state as state", "w.id as id"]);
+  const ofPr = prIssueWorkflows(db, keys);
   const ranked = k.selectFrom(own.union(ofPr).as("u"))
     .select((e: any) => ["u.repo", "u.number", "u.state", e.fn.agg("row_number").over((o: any) => o.partitionBy(["u.repo", "u.number"]).orderBy("u.id", "desc")).as("rn")]);
   return k.selectFrom(ranked.as("x")).select(["x.repo", "x.number", "x.state"]).where("x.rn", "=", 1).where("x.state", "not in", LIVE_STATES).orderBy("x.repo").orderBy("x.number");
@@ -107,7 +97,7 @@ export async function loadEndedWorkflows(db: Db, keys: KeySource): Promise<Map<R
 }
 
 /**
- * The planner pass's set loader: live workflows with their implementation PR, latest ended state per item (a PR's own or its issue's), merge holds, queued requests and
+ * The planner pass's set loader: live workflows with the PR an implement workflow works on, latest ended state per item (a PR's own or its issue's), merge holds, queued requests and
  * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`: the
  * app identity, and a write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
  */
@@ -123,17 +113,17 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const lastAnswer = (alias: string, col: string) => k.selectFrom(`main.workflow_events as ${alias}`).select(`${alias}.${col}`).whereRef(`${alias}.workflow_id`, "=", "w.id")
     .where(`${alias}.kind`, "=", "answered").orderBy(`${alias}.id`, "desc").limit(1);
   const liveQ = k.selectFrom("main.item_workflows as w")
-    .leftJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number").on("w.entry", "=", "implement").on("i.pr_number", "is not", null).on((eb: any) => attemptOf(eb, "i", "w")))
+    .leftJoin(linkRows(db, LIVE_STATES).as("l"), "l.wid", "w.id")
     .selectAll("w")
     .select((eb: any) => [
-      "i.pr_number as pr",
+      "l.pr as pr",
       eb.case().when(keyed("ko", "w.repo", "w.number")(eb)).then(1).else(0).end().as("own"),
-      eb.case().when(eb.and([eb("i.pr_number", "is not", null), keyed("kp", "w.repo", "i.pr_number")(eb)])).then(1).else(0).end().as("pr_hit"),
+      eb.case().when(eb.and([eb("l.pr", "is not", null), keyed("kp", "w.repo", "l.pr")(eb)])).then(1).else(0).end().as("pr_hit"),
       lastAnswer("a1", "login").as("answer_by"), lastAnswer("a2", "at").as("answer_at"),
       eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on"),
     ])
     .where("w.state", "in", LIVE_STATES)
-    .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("i.pr_number", "is not", null), keyed("kp2", "w.repo", "i.pr_number")(eb)])]))
+    .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("l.pr", "is not", null), keyed("kp2", "w.repo", "l.pr")(eb)])]))
     .orderBy("w.id");
 
   const endedQ = endedQuery(db, keys);
@@ -193,30 +183,21 @@ export async function countWaiting(db: Db, repos: string[]): Promise<Map<string,
   if (repos.length === 0) return new Map();
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.item_workflows as w").select((eb) => ["w.repo", eb.fn.countAll<number>().as("n")])
-    .where("w.state", "=", "recommending").where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
+    .where("w.state", "in", ASKING_STATES).where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
   return new Map(rows.map((r) => [r.repo, Number(r.n)]));
 }
 
-/**
- * The live workflow that works on each PR: its own, else the one its active merge leg belongs to, else the implement workflow of the
- * issue an attempt opened it for (attemptOf). `others`: without the PR's own. One statement.
- */
+/** The live workflow that works on each PR: its own, else the implement workflow of an issue that does (linkRows). `others`: without the PR's own. One statement. */
 export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[], o: { others?: boolean } = {}): Promise<PrWorkflows> {
   const out: PrWorkflows = new Map();
   if (refs.length === 0) return out;
   const q = queryDb(db);
   const k = q.k as any;
-  const onKey = (alias: string, number: string) => (j: any) => j.onRef("kk.repo", "=", `${alias}.repo`).onRef("kk.number", "=", `${alias}.${number}`);
-  const own = k.selectFrom("main.item_workflows as o").innerJoin(resolveKeys(db, refs, "kk"), onKey("o", "number"))
+  const own = k.selectFrom("main.item_workflows as o").innerJoin(resolveKeys(db, refs, "kk"), (j: any) => j.onRef("kk.repo", "=", "o.repo").onRef("kk.number", "=", "o.number"))
     .select((eb: any) => ["o.repo as repo", "o.number as number", "o.id as wid", eb.lit(0).as("rank")]).where("o.state", "in", LIVE_STATES);
-  const leg = k.selectFrom("main.preapprovals as p").innerJoin(resolveKeys(db, refs, "kk"), onKey("p", "number"))
-    .select((eb: any) => ["p.repo as repo", "p.number as number", "p.workflow_id as wid", eb.lit(1).as("rank")]).where("p.state", "in", ACTIVE_LEGS).where("p.workflow_id", "is not", null);
-  const attempt = k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, refs, "kk"), onKey("i", "pr_number"))
-    .innerJoin("main.item_workflows as iw", (j: any) => j.onRef("iw.repo", "=", "i.repo").onRef("iw.number", "=", "i.number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", "iw.id as wid", eb.lit(2).as("rank")]).where("iw.entry", "=", "implement").where("iw.state", "in", LIVE_STATES)
-    .where((eb: any) => attemptOf(eb, "i", "iw"));
-  const rows = await q.all(k.selectFrom(own.unionAll(leg).unionAll(attempt).as("h")).innerJoin("main.item_workflows as w", "w.id", "h.wid")
-    .selectAll("w").select(["h.number as pr", "h.rank as rank"]).where("w.state", "in", LIVE_STATES)
+  const viaIssue = k.selectFrom(linkRows(db, LIVE_STATES, { prs: refs }).as("l")).select((eb: any) => ["l.repo as repo", "l.pr as number", "l.wid as wid", eb.lit(1).as("rank")]);
+  const rows = await q.all(k.selectFrom(own.unionAll(viaIssue).as("h")).innerJoin("main.item_workflows as w", "w.id", "h.wid")
+    .selectAll("w").select(["h.number as pr", "h.rank as rank"])
     .$if(!!o.others, (b: any) => b.whereRef("w.number", "<>", "h.number")).orderBy("h.rank", "desc").orderBy("w.id")) as (WorkflowRow & { pr: number | string; rank: number })[];
   // The best match of a PR comes last and is the one kept.
   for (const { pr, rank: _rank, ...row } of rows) out.set(refKey(row.repo, Number(pr)), workflowOf(row as WorkflowRow));
@@ -321,7 +302,8 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
 
 /**
  * Inserts workflows in the `running` state, one statement per 500 rows, `ON CONFLICT DO NOTHING` against the unique index of live workflows: a
- * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. Joins the caller's `db.write`.
+ * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. An implement workflow takes over the
+ * PR of an attempt that has not ended (linkWorkflows). Joins the caller's `db.write`.
  */
 export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<RefKey, number>> {
   const out = new Map<RefKey, number>();
@@ -340,6 +322,8 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
       })).onConflict((oc: any) => oc.doNothing()).returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[];
       for (const r of got) out.set(refKey(r.repo, Number(r.number)), Number(r.id));
     }
+    const ids = rows.filter((w) => w.entry === "implement").flatMap((w) => out.get(refKey(w.repo, w.number)) ?? []);
+    await linkWorkflows(db, { ids });
   });
   return out;
 }
@@ -417,8 +401,8 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
 }
 
 /**
- * `1e15 + weight * 1e12 - workflow.id` for every item of `keys` with a live workflow and for the implementation PR of a live implement
- * workflow (the maximum when both apply). One statement.
+ * `1e15 + weight * 1e12 - workflow.id` for every item of `keys` with a live workflow and for the PR a live implement workflow works on
+ * (the maximum when both apply). One statement.
  */
 export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKey, number>> {
   const out = new Map<RefKey, number>();
@@ -427,9 +411,7 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
   const k = q.k as any;
   const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ks"), (j: any) => j.onRef("ks.repo", "=", "w.repo").onRef("ks.number", "=", "w.number"))
     .select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
-  const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .innerJoin(resolveKeys(db, keys, "kt"), (j: any) => j.onRef("kt.repo", "=", "i.repo").onRef("kt.number", "=", "i.pr_number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w"));
+  const viaPr = k.selectFrom(linkRows(db, LIVE_STATES, { prs: keys }).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select((eb: any) => ["l.repo as repo", "l.pr as number", workScore(eb).as("s")]);
   for (const r of await q.all(own.unionAll(viaPr)) as { repo: string; number: number; s: number | string }[]) {
     const key = refKey(r.repo, Number(r.number)), s = Number(r.s), old = out.get(key);
     if (old === undefined || s > old) out.set(key, s);
@@ -458,7 +440,7 @@ export async function loadQueuePositions(db: Db, f: { repos?: string[] } = {}): 
   return out;
 }
 
-/** Items a person started or approved (case-insensitive login), with the implementation PR of a live implement workflow; narrowed by workflow state, refs, repos and open state. */
+/** Items a person started or approved (case-insensitive login), with the PRs implement workflows of those work on; narrowed by workflow state, refs, repos and open state. */
 export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Set<RefKey>> {
   const out = new Set<RefKey>();
   if (f.refs?.length === 0 || f.repos?.length === 0 || f.states?.length === 0) return out;
@@ -467,8 +449,7 @@ export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Se
   const who = (b: any) => f.login === undefined ? b : b.where((eb: any) => eb.or([loginIn(db, eb, "w.started_by", [f.login!], "ls"), loginIn(db, eb, "w.approved_by", [f.login!], "la")]));
   const states = f.states ?? LIVE_STATES;
   const own = who(k.selectFrom("main.item_workflows as w").select(["w.repo as repo", "w.number as number"]).where("w.state", "in", states));
-  const viaPr = who(k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .select(["i.repo as repo", "i.pr_number as number"]).where("w.state", "in", states).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w")));
+  const viaPr = who(k.selectFrom(linkRows(db, states).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["l.repo as repo", "l.pr as number"]));
   const rows = await q.all(k.selectFrom(own.union(viaPr).as("s")).select(["s.repo", "s.number"])
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "s", pairs(f.refs!))))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "s.repo", f.repos!)))
@@ -477,15 +458,13 @@ export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Se
   return out;
 }
 
-/** The Task Runner snapshot's input: live workflows and the PRs of live implement workflows with an attempt still working; two result sets in one wave. */
+/** The Task Runner snapshot's input: live workflows and the PRs live implement workflows work on; two result sets in one wave. */
 export async function loadStartedWork(db: Db): Promise<StartedWork> {
   const q = queryDb(db);
   const k = q.k as any;
   const [live, prs] = await db.together(() => Promise.all([
     q.all(k.selectFrom("main.item_workflows as w").select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("w.state", "in", LIVE_STATES).orderBy("w.id")),
-    q.all(k.selectFrom("main.implementations as i").innerJoin("main.item_workflows as w", (j: any) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number"))
-      .select(["i.repo as repo", "i.pr_number as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).distinct()
-      .where("i.pr_number", "is not", null).where("i.state", "not in", ENDED_ATTEMPTS).where("w.entry", "=", "implement").where("w.state", "in", LIVE_STATES)),
+    q.all(k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["l.repo as repo", "l.pr as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).orderBy("w.id")),
   ])) as [{ repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[]];
   return {
     live: live.map((r) => ({ repo: r.repo, number: Number(r.number), entry: r.entry, state: r.state, startedBy: r.started_by, approvedBy: r.approved_by })),

@@ -17,7 +17,7 @@ const TASKS = [
   { id: "fixup", title: "Fix-up", about: "For a take-with-fixes review, applies the listed small fixes to the contributor's branch, or posts them as a comment when the branch cannot be pushed to.", models: ["opus", "sonnet", "haiku"] },
   { id: "verify", title: "Verify", about: "Records upstream CI as the verification of taken PRs in repos that have it.", models: ["opus", "sonnet", "haiku"] },
   { id: "merge", title: "Merge queue", about: "Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge. It also covers the Opus review of a PR's head commit before the PR goes into a batch or a pre-approved merge is handed to the queue.", models: ["opus"] },
-  { id: "postmerge", title: "Post-merge review", about: "Opus reviews each PR the pipeline merged a second time, reading what landed with the pipeline's own commits and reviews of the PR, and lists defects and minor findings.", models: ["opus"] },
+  { id: "postmerge", title: "Post-merge review", about: "Opus reviews what landed with a merge nobody approved, or whose code the pipeline changed after the approval, reading it with the pipeline's own commits and reviews of the PR, and lists defects and minor findings; a PR that merged as a person approved it gets no such review.", models: ["opus"] },
   { id: "other", title: "Other", about: "Calls of steps outside the stages above: the security scan's checks and private fixes, Discord mentions, searches and issue drafts, and any call whose step is not known.", models: ["opus", "haiku"] },
 ];
 

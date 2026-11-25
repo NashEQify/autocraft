@@ -63,7 +63,7 @@ for (const kind of ["pr", "issue"] as const) test(`an approved merge of ${kind =
     vault: { userToken: async () => { asked++; return token ? { ok: true, access: token } : { ok: false, needsSignIn: true, why: "no-token" }; } },
     permission: async () => "write",
   };
-  const merge = () => runMerge(db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, { ...w.gh.mergeDeps(), lane });
+  const merge = () => runMerge(db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, { ...w.gh.mergeDeps(), now: () => new Date(), lane });
   const mergesPlanned = async () => (await planned(db, "merge", { repo: "app" })).length;
   const action = async () => (await loadActions(db, { refs: [{ repo: "app", number: 1 }], kinds: ["merge"] })).get("app#1")?.[0];
 

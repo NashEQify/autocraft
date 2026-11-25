@@ -5,14 +5,24 @@ import type { IssueAttempt } from "../data/implement/types.ts";
 import { ENDED_STATES } from "../implement/types.ts";
 import type { ItemWorkflow, PlanPart } from "./types.ts";
 
-/** The PR of the issue's current attempt, or of one that ended in the workflow: the one `workOf` may name. */
-export function candidatePr(a: IssueAttempt | null | undefined, w: Pick<ItemWorkflow, "startedAt">): number | null {
+/** The workflow's start and the PR it is linked to; a row without a link has none. */
+type Linked = Pick<ItemWorkflow, "startedAt"> & Partial<Pick<ItemWorkflow, "prNumber">>;
+
+/**
+ * The PR an implement workflow works on, as `workOf` may name it: the one it is linked to, else the one it would be linked to (data/workflow
+ * linkingAttempt): the PR of the issue's current attempt, or of one that ended in the workflow.
+ */
+export function candidatePr(a: IssueAttempt | null | undefined, w: Linked): number | null {
   if (!a) return null;
+  if (w.prNumber != null) return w.prNumber;
   const { state, prNumber, updatedAt } = a.attempt;
   if (prNumber !== null && (!ENDED_STATES.has(state) || updatedAt >= w.startedAt)) return prNumber;
   // The latest attempt of this workflow that opened a PR.
   return a.prAttempts.find((p) => p.createdAt >= w.startedAt)?.prNumber ?? null;
 }
+
+/** The PR that an implement workflow started now would go on with: that of an attempt that has not ended. */
+export const takenOver = (a: IssueAttempt | null | undefined): number | null => (a && !ENDED_STATES.has(a.attempt.state) ? a.attempt.prNumber : null);
 
 /** The PR was merged or closed before the workflow started. */
 export const overBefore = (pr: { state: string; closed_at: string | null } | null | undefined, startedAt: string): boolean =>
@@ -23,7 +33,7 @@ export const overBefore = (pr: { state: string; closed_at: string | null } | nul
  * the workflow started is none of it, nor one whose PR was merged or closed before that (its end is recorded a moment later).
  */
 export function workOf(
-  a: IssueAttempt | null | undefined, w: Pick<ItemWorkflow, "startedAt">, pr: { state: string; closed_at: string | null } | null | undefined,
+  a: IssueAttempt | null | undefined, w: Linked, pr: { state: string; closed_at: string | null } | null | undefined,
 ): { attempt: IssueAttempt | null; pr: number | null } {
   if (!a || overBefore(pr, w.startedAt)) return { attempt: null, pr: null };
   return { attempt: ENDED_STATES.has(a.attempt.state) ? null : a, pr: candidatePr(a, w) };

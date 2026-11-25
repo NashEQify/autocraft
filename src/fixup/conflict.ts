@@ -182,7 +182,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
   let baseSha: string | null = null;
   // The push is recorded: what fails after it (the comment) changes nothing about it.
   let merged = false;
-  const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
+  const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
     const reason = x.scrub(raw);
     await record(db, x.at(), c, state, reason, files, baseSha);
     x.summary.failed.push({ ref, reason });
@@ -376,7 +376,9 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
       if (/denied|403|permission|not allowed|protected branch|declined|GH013/i.test(err)) { await held("push-denied", "the branch cannot be pushed to"); return; }
-      if (/stale info|rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the review");
+      // Another push came first: the try says nothing about the merge, and the new head gets its own.
+      if (/stale info/i.test(err)) await fail("superseded", "the branch moved before the push");
+      else if (/rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the review");
       else await fail("failed", `push failed: ${err}`);
       return;
     }

@@ -445,6 +445,10 @@ const worksOn = (a: Action): boolean => {
 /** Queue states on the path to merge: the PR stays assigned in them unless a stage gave it up. */
 const PROGRESS_STATES: ReadonlySet<string> = new Set(["ready", "waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "waiting-main-ci", "decision-answered-merge", "needs-fix-up", "ci-failed", "refused"]);
 
+/** What the merge landed still needs its review: none is stored, or the last try failed and may be repeated. */
+export const landedOpen = (pm: NonNullable<PrFacts["postmerge"]>): boolean =>
+  pm.why !== null && pm.mergedAt >= pm.since && (!pm.review || !!pm.review.error?.startsWith("retry:"));
+
 /** The unassign action of an open PR: kept while it is on the path to merge (in flight, in a batch, work due, a progress state), released in every other state and when a stage gave it up. */
 function unassignOf(f: PrFacts, state: PlanState, actions: Action[]): Action[] {
   const fx = fixupOf(f), cf = cifixBucket(f);
@@ -505,7 +509,10 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const r = f.review;
   const open = f.ghState === "OPEN";
 
-  if (!f.inScope) return plan("out-of-scope", { actions: unassignActions(f.assignment, open, true) });
+  const pm = f.postmerge;
+  const postmerge = pm && landedOpen(pm) && !(pm.review && pm.review.at > new Date(f.now - RETRY_AFTER_MS).toISOString()) ? [act("postmerge", pm.head)] : [];
+  // What a merge landed is reviewed whatever the repo's Pipeline switch says.
+  if (!f.inScope) return open ? plan("out-of-scope", { actions: unassignActions(f.assignment, open, true) }) : plan("closed", { actions: postmerge });
   // Our own integration PRs only carry reviewed PRs: their runs wait for approval like a member's.
   if (f.integration) {
     const approve = f.runs && !f.mergeHeld && (f.runs.reread || (f.runs.crossRepo && f.runs.approvable > 0));
@@ -529,12 +536,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const implementAct = implDue && !implHeld ? act("implement", f.head, { bucket: "revise", issue: im!.issue })
     : attempt && !open ? act("implement", null, { bucket: "revise", issue: attempt.issue }) : null;
   if (implementAct && !open) extra.push(implementAct);
-  const pm = f.postmerge;
-  if (pm && pm.mergedAt >= pm.since) {
-    const retryAfter = new Date(f.now - RETRY_AFTER_MS).toISOString();
-    const reviewed = pm.review && (pm.review.error === null || !pm.review.error.startsWith("retry:") || pm.review.at > retryAfter);
-    if (!reviewed) extra.push(act("postmerge", pm.head));
-  }
+  extra.push(...postmerge);
   // An operator's fix-up of this head (a resolution card's step, or the first part of a pre-approved merge); it needs no review verdict.
   const opFix = f.operator?.fix;
   if (opFix && f.ghState === "OPEN" && !f.heldBacklog && f.head && !f.draft && f.mergeable !== "CONFLICTING" && !f.lint.some((l) => l.source === "operator")

@@ -169,13 +169,6 @@ export async function loadImplementationRepos(db: Db, ids: number[]): Promise<Ma
   return new Map(rows.map((r) => [Number(r.id), r.repo]));
 }
 
-/** Attempts not ended with a PR. */
-export async function listLivePrs(db: Db): Promise<{ repo: string; number: number; prNumber: number }[]> {
-  const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where("pr_number", "is not", null).where("state", "not in", ENDED));
-  return rows.map((r) => ({ repo: r.repo, number: Number(r.number), prNumber: Number(r.pr_number) }));
-}
-
 /** The newest `n` finished attempts per repo after the repo's `since` that ended in a PR or in `stuck`/`failed`, newest first. 1 statement. */
 export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>, n: number): Promise<Map<string, StuckStreakRow[]>> {
   const out = new Map<string, StuckStreakRow[]>();
