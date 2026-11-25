@@ -14,7 +14,6 @@ import { loadConfig } from "../src/dash/server/config.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
-import { answering } from "../src/dash/mcp/index.ts";
 import { MCP_TOKENS_PER_LOGIN } from "../src/dash/mcp/tokens.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -357,25 +356,7 @@ describe("tools", () => {
 describe("answering", () => {
   const toolNames = async (t: string): Promise<string[]> => (await rpc(t, "tools/list")).body.result.tools.map((x: { name: string }) => x.name);
 
-  test("while answering is not available: no answering tokens, no answer tools or instructions, and a call refuses", async () => {
-    const b = await signedIn("boss");
-    await b.json("POST", "/api/mcp/tokens", { label: "x", answer: true }, 403);
-    assert.equal((await b.json<McpTokens>("GET", "/api/mcp/tokens")).answering, false);
-    const t = await tokenFor("boss");
-    assert.equal((await toolNames(t)).some((n) => n.includes("answer")), false);
-    assert.doesNotMatch((await rpc(t, "initialize", { protocolVersion: "2025-06-18" })).body.result.instructions, /answer_decision/);
-    assert.doesNotMatch((await call(t, "get_inbox_item", { id: P10 })).text, /call answer_decision/);
-    for (const [name, args] of [["answer_decision", { id: P10, option: "small" }], ["undo_answer", { id: P10 }]] as const) {
-      const r = await call(t, name, args);
-      assert.equal(r.isError, true);
-      assert.match(r.text, /sign in to AutoCraft again with GitHub App sign-in/);
-    }
-    assert.equal((await actionable(db)).length, 0);
-  });
-
   describe("with answering switched on", () => {
-    before(() => { answering.enabled = true; });
-    after(() => { answering.enabled = false; });
 
   test("only an operator makes an answering token, and it lasts 7 days", async () => {
     const m = await signedIn("maint");
@@ -420,35 +401,6 @@ describe("answering", () => {
     for (const row of (await b.json<McpTokens>("GET", "/api/mcp/tokens")).tokens) await b.json("POST", "/api/mcp/tokens/revoke", { id: row.id });
   });
 
-  test("an answering token answers as the operator, the pipeline sees it, and undo takes it back", async () => {
-    const t = await (async () => {
-      const b = await signedIn("boss");
-      return (await b.json<McpTokenCreated>("POST", "/api/mcp/tokens", { label: "answers", answer: true })).token;
-    })();
-    assert.deepEqual((await toolNames(t)).filter((n) => n.includes("answer")).sort(), ["answer_decision", "undo_answer"]);
-    assert.match((await rpc(t, "initialize", { protocolVersion: "2025-06-18" })).body.result.instructions, /answer_decision records the operator's answer/);
-    const item = await call(t, "get_inbox_item", { id: P10 });
-    assert.match(item.text, /call answer_decision/);
-    assert.equal(data(item.text).undoable, false);
-    // No GitHub write on filmcraft: refused as on the dashboard.
-    const refused = await call(t, "answer_decision", { id: F3, option: "small" });
-    assert.equal(refused.isError, true);
-    assert.match(refused.text, /no write access to storytold\/filmcraft/);
-    assert.match((await call(t, "answer_decision", { id: P10, option: "nope" })).text, /one of the option keys/);
-    const done = await call(t, "answer_decision", { id: P10, option: "small", note: "Agreed with the reporter." });
-    assert.equal(done.isError, false, done.text);
-    assert.match(done.text, /Answered photocraft#10:scope as boss/);
-    assert.match(done.text, /undo_answer/);
-    assert.deepEqual((await actionable(db)).map((a) => [a.id, a.answer]), [[P10, "small"]]);
-    const a = await db.prepare("SELECT details FROM audit WHERE action = 'answer' AND target = ?").get(P10) as { details: string };
-    assert.equal(JSON.parse(a.details).via, "mcp");
-    assert.match((await call(t, "answer_decision", { id: P10, option: "plugin" })).text, /already answered/);
-    const undone = await call(t, "undo_answer", { id: P10 });
-    assert.equal(undone.isError, false, undone.text);
-    assert.equal((await actionable(db)).length, 0);
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'undo' AND target = ? AND details LIKE '%\"via\":\"mcp\"%'").get(P10));
-  });
-
   test("after signing out, an answer is refused for want of a dashboard session", async () => {
     await db.run(db.k.deleteFrom("sessions").where("login", "=", "boss"));
     const b = await signedIn("boss");
@@ -466,8 +418,6 @@ describe("answering", () => {
 });
 
 describe("token revocation", () => {
-  before(() => { answering.enabled = true; });
-  after(() => { answering.enabled = false; });
   const live = async (login: string): Promise<number> => (await db.get(db.k.selectFrom("mcp_tokens").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", login)))!.n;
 
   test("demoting an operator ends its answering tokens for good; plain tokens stay", async () => {

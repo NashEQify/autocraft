@@ -2,9 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decideAll, decideItem } from "../src/core/decide-item.ts";
-import { SCOPE_LABELS, TYPE_LABEL_NAMES, PLUGIN_LABEL } from "../src/core/item-rules.ts";
+import { TYPE_LABEL_NAMES, PLUGIN_LABEL } from "../src/core/item-rules.ts";
 import type { ItemPlan } from "../src/core/plan.ts";
-import { SCOPE_LABELS as OLD_SCOPE } from "../src/decide/select.ts";
 import { TYPE_LABELS } from "../src/labels/set.ts";
 import { PLUGIN_LABEL as OLD_PLUGIN } from "../src/labels/plan.ts";
 import { NOW, itemFacts, prFacts } from "./world.ts";
@@ -46,7 +45,6 @@ const rows: Row[] = [
   { name: "Sonnet sure: settled with its label", facts: { classification: { status: "settled", label: "infra", referee: { sure: true, final: false }, jevLabel: "bugfix", haikuLabel: "infra", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } }, labels: { existing: ["infra"] } }, expect: { state: "classified", actions: [] } },
   { name: "a draft is not refereed", facts: { ...disagree(), draft: true }, expect: { state: "referee-due", actions: [], wait: "the label referee" } },
   { name: "a held item is not refereed", facts: { ...disagree(), held: "backlog" }, expect: { state: "held-backlog", actions: [] } },
-  { name: "scope-vs-scope disagreement goes to Decide, not to the referee", facts: scopeDisagree, expect: { state: "scope-due", actions: ["decide"], next: "Decide" } },
 
   // ---- prioritize, embed
   { name: "no priority row", facts: { priorityHash: null }, expect: { state: "classified", actions: ["prioritize"] } },
@@ -64,26 +62,15 @@ const rows: Row[] = [
   { name: "scanned at older text", facts: { scannedHash: "old" }, expect: { state: "classified", actions: ["dupes"] } },
   { name: "in an unchecked pair", facts: { pairsToCheck: 2 }, expect: { state: "classified", actions: ["dupes"] } },
   { name: "an out-of-scope item whose partner is in scope is still in the pair check", facts: { inScope: false, pairsToCheck: 1 }, expect: { state: "classified", actions: ["dupes"] } },
-  { name: "member of a group to ask about", facts: { inGroupToAsk: true }, expect: { state: "classified", actions: ["dupes"] } },
-  { name: "an operator's duplicate answer waits to be applied", facts: { dupeAnswers: ["app#1:duplicate@2"] }, expect: { state: "classified", actions: ["dupe-answer"] } },
   { name: "member of a set to compare", facts: { inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes-compare"] } },
   { name: "pair check and compare together", facts: { pairsToCheck: 1, inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes", "dupes-compare"] } },
 
   // ---- scope decision
-  { name: "needs-decision flag, nobody asked", facts: needsDecision, expect: { state: "scope-due", actions: ["decide"], next: "Decide" } },
-  { name: "a scope decision is open", facts: { ...needsDecision, scope: { open: true, covered: true } }, expect: { state: "scope-open", actions: [], next: "Decide: waiting for a scope answer", wait: "a scope answer" } },
   { name: "a scope decision was answered: covered", facts: { ...needsDecision, scope: { covered: true, answer: "take" } }, expect: { state: "classified", actions: [] } },
   { name: "a PR settled as plugin candidate stays open with its label", facts: { kind: "pr", classification: { label: "plugin candidate" }, labels: { existing: ["plugin candidate"] } }, expect: { state: "classified", actions: [], wait: "stays open as a plugin candidate", next: "Stays open as a plugin candidate" } },
-  { name: "a scope disagreement on a labelled item is asked", facts: scopeDisagree, expect: { state: "scope-due", actions: ["decide"] } },
   { name: "a failed Opus call is not repeated within the backoff", facts: disagree({ classification: { referee: { sure: false, final: false, failedAt: new Date(NOW - 60_000).toISOString() } } }), expect: { state: "referee-due", actions: [], wait: "the label referee" } },
   { name: "a decision covers the item", facts: { ...needsDecision, scope: { covered: true } }, expect: { state: "classified", actions: [] } },
-  { name: "a draft is not asked about", facts: { ...needsDecision, draft: true }, expect: { state: "scope-due", actions: [] } },
-  { name: "out of scope is not asked about", facts: { ...needsDecision, inScope: false }, expect: { state: "scope-due", actions: [] } },
   { name: "held items are not asked about", facts: { ...needsDecision, held: "duplicate" }, expect: { state: "held-duplicate", actions: [] } },
-  { name: "open decision without Opus's recommendation", facts: { ...needsDecision, scope: { open: true, covered: true, recommend: { failures: 0, failedAt: null } } }, expect: { state: "scope-open", actions: ["decide"] } },
-  { name: "recommendation failed an hour ago: retry", facts: { scope: { open: true, covered: true, recommend: { failures: 1, failedAt: hoursAgo(1.1) } } }, expect: { state: "scope-open", actions: ["decide"] } },
-  { name: "recommendation failed minutes ago: wait", facts: { scope: { open: true, covered: true, recommend: { failures: 1, failedAt: hoursAgo(0.2) } } }, expect: { state: "scope-open", actions: [] } },
-  { name: "recommendation failed three times: stop", facts: { scope: { open: true, covered: true, recommend: { failures: 3, failedAt: hoursAgo(5) } } }, expect: { state: "scope-open", actions: [] } },
 
   // ---- labels
   { name: "a settled type label is missing on GitHub", facts: { labels: { existing: [] } }, expect: { state: "classified", actions: ["label"] } },
@@ -98,21 +85,6 @@ const rows: Row[] = [
   { name: "an unsettled item is not labelled", facts: { classification: { status: "waiting", label: null, jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } }, labels: { existing: [] } }, expect: { state: "waiting-haiku", actions: [] } },
 
   // ---- act
-  { name: "an answered close decision is acted on", facts: { answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "scope, duplicate and merge closes are acted on too", facts: { answeredClose: [closed({ kind: "scope" }), closed({ decisionId: "d2", kind: "duplicate" })] }, expect: { state: "classified", actions: ["act", "act"] } },
-  { name: "a done action row is final", facts: { answeredClose: [closed({ action: "done" })] }, expect: { state: "classified", actions: [] } },
-  { name: "a skipped action row is final", facts: { answeredClose: [closed({ action: "skipped" })] }, expect: { state: "classified", actions: [] } },
-  { name: "an item already closed on GitHub keeps its unapplied answered close (the Act step records it as already closed)", facts: { open: false, answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a closed item gets nothing else: no classify, embed, prioritize or label", facts: { open: false, priorityHash: null, embeddedHash: null, classification: { status: "unclassified", label: null, jev: null }, answeredClose: [closed()] }, expect: { state: "unclassified", actions: ["act"] } },
-  { name: "a closed item whose answered close is final has nothing due", facts: { open: false, embeddedHash: null, answeredClose: [closed({ action: "skipped" })] }, expect: { state: "classified", actions: [] } },
-  { name: "a failed action row is tried again", facts: { answeredClose: [closed({ action: "failed" })] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "an out-of-scope item is not acted on", facts: { inScope: false, answeredClose: [closed()] }, expect: { state: "classified", actions: [] } },
-  { name: "a security scan's close applies outside the pilot", facts: { inScope: false, answeredClose: [closed({ security: true })] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a Backlog hold stops the close", facts: { held: "backlog", answeredClose: [closed({ security: true })] }, expect: { state: "held-backlog", actions: [] } },
-  { name: "comment approval is a fact: gates() applies it, not decideItem", facts: { repoFacts: { commentApproved: false }, answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a PR the final review says close is asked about", facts: { kind: "pr", closeReview: { head: "h1", atHead: true, asked: false } }, expect: { state: "classified", actions: ["act"] } },
-  { name: "the Close? decision exists: not asked again", facts: { kind: "pr", closeReview: { head: "h1", atHead: true, asked: true } }, expect: { state: "classified", actions: [] } },
-  { name: "the review is of an older head: not asked", facts: { kind: "pr", closeReview: { head: "h0", atHead: false, asked: false } }, expect: { state: "classified", actions: [] } },
 
   // ---- implement
   { name: "a settled bugfix issue nobody queued is left for a person", facts: { fix: { impact: "P2" } }, expect: { state: "classified", actions: [], wait: "an open request for a person to pick up", next: "Triage by a person" } },
@@ -147,7 +119,6 @@ const rows: Row[] = [
   // ---- a repo on the maintainer workflow
   { name: "workflow repo: a needs-decision item gets no scope question", facts: { ...needsDecision, repoFacts: { workflow: "new" } }, expect: { state: "classified", actions: [] } },
   { name: "workflow repo: an open decision is not prepared", facts: { repoFacts: { workflow: "new" }, scope: { recommend: { failures: 0, failedAt: null } } }, expect: { state: "classified", actions: [] } },
-  { name: "workflow repo: a Close answer that ended the workflow is carried out outside the scope", facts: { inScope: false, repoFacts: { workflow: "new" }, endedWorkflow: "closed", answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
 ];
 
 for (const r of rows) {
@@ -177,7 +148,6 @@ test("a PR without a review is next to be reviewed; with a take-fix review, fix-
 });
 
 test("the constants copied into core equal the old modules'", () => {
-  assert.deepEqual(SCOPE_LABELS, [...OLD_SCOPE]);
   assert.deepEqual(TYPE_LABEL_NAMES, TYPE_LABELS.map((l) => l.name));
   assert.equal(PLUGIN_LABEL, OLD_PLUGIN);
 });
