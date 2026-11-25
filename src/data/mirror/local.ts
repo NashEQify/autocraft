@@ -23,16 +23,20 @@ async function updateItemsFrom(db: Db, rows: Record<string, Param>[], cols: Para
   const q = queryDb(db);
   const out: RefKey[] = [];
   for (const chunk of kx.chunks(rows)) {
-    const v = kx.valuesTable(db, chunk, cols, "v");
-    const hit = await q.all((q.k.updateTable("main.items") as any).from(v).set(set)
-      .where((eb: kx.AnyEb) => eb.and([eb("main.items.repo", "=", eb.ref("v.repo")), eb("main.items.number", "=", eb.ref("v.number")), ...more(eb)]))
-      .returning(["main.items.repo as repo", "main.items.number as number"]), { label: "mirror.applyLocal" }) as { repo: string; number: number }[];
+    const v = kx.valuesTable(db, chunk.map(keyed), keyedCols(cols), "v");
+    const hit = await q.all((q.k.updateTable("main.items as it") as any).from(v).set(set)
+      .where((eb: kx.AnyEb) => eb.and([eb("it.repo", "=", eb.ref("v.k_repo")), eb("it.number", "=", eb.ref("v.k_number")), ...more(eb)]))
+      .returning(["repo", "number"]), { label: "mirror.applyLocal" }) as { repo: string; number: number }[];
     for (const r of hit) out.push(refKey(r.repo, r.number));
   }
   return out;
 }
 
 const ONE = { repo: "text", number: "bigint" } as const;
+
+// The row source names its key columns `k_repo` and `k_number`, so that an unqualified `RETURNING repo, number` means the updated table on both engines.
+const keyed = ({ repo, number, ...rest }: Record<string, Param>): Record<string, Param> => ({ k_repo: repo!, k_number: number!, ...rest });
+const keyedCols = ({ repo, number, ...rest }: Parameters<typeof kx.valuesTable>[2]) => ({ k_repo: repo!, k_number: number!, ...rest });
 
 /**
  * The one writer for local state after a GitHub write: one `db.write`, one statement per patch kind present, the audit rows of base changes
@@ -48,12 +52,12 @@ export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ chang
   return await db.write(async () => {
     const changed = new Set<RefKey>();
     const add = (refs: RefKey[]) => refs.forEach((r) => changed.add(r));
-    const open = (eb: kx.AnyEb) => [eb("main.items.state", "=", "OPEN")];
+    const open = (eb: kx.AnyEb) => [eb("it.state", "=", "OPEN")];
 
     if (merged.length) add(await updateItemsFrom(db, merged.map((p) => ({ repo: p.repo, number: p.number, at: p.at })), { ...ONE, at: "text" },
-      (eb) => ({ state: eb.val("MERGED"), merged_at: eb.fn.coalesce("main.items.merged_at", eb.ref("v.at")), closed_at: eb.fn.coalesce("main.items.closed_at", eb.ref("v.at")) }), open));
+      (eb) => ({ state: eb.val("MERGED"), merged_at: eb.fn.coalesce("it.merged_at", eb.ref("v.at")), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.at")) }), open));
     if (state.length) add(await updateItemsFrom(db, state.map((p) => ({ repo: p.repo, number: p.number, state: p.state, at: p.at ?? null })), { ...ONE, state: "text", at: "text" },
-      (eb) => ({ state: eb.ref("v.state"), closed_at: eb.fn.coalesce("main.items.closed_at", eb.ref("v.at")) }), open));
+      (eb) => ({ state: eb.ref("v.state"), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.at")) }), open));
     if (labels.length) {
       add(await updateItemsFrom(db, labels.map((p) => ({ repo: p.repo, number: p.number, labels: JSON.stringify(p.labels) })), { ...ONE, labels: "text" }, (eb) => ({ labels: eb.ref("v.labels") })));
       const stages = labels.flatMap((p) => (p.stage ? [{ repo: p.repo, number: p.number, stage: "labeled", ...p.stage }] : []));
@@ -82,26 +86,26 @@ export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ chang
       // The planner reads the mirrored value when the checks row is missing or at another head: a conflict seen live must reach it.
       const known = rows.filter((r) => r.mergeable === "CONFLICTING" || r.mergeable === "MERGEABLE");
       if (known.length) add(await updateItemsFrom(db, known, { ...ONE, head: "text", mergeable: "text" }, (eb) => ({ mergeable: eb.ref("v.mergeable") }),
-        (eb) => [eb("main.items.kind", "=", "pr"), eb("main.items.head_oid", "=", eb.ref("v.head"))]));
+        (eb) => [eb("it.kind", "=", "pr"), eb("it.head_oid", "=", eb.ref("v.head"))]));
       for (const chunk of kx.chunks(rows)) {
-        const v = kx.valuesTable(db, chunk, { ...ONE, head: "text", state: "text", draft: "bigint", mergeable: "text", mcm: "bigint", at: "text" }, "v");
-        const hit = await q.all((q.k.updateTable("main.pr_checks") as any).from(v).set((eb: kx.AnyEb) => {
-          const same = eb("main.pr_checks.head_oid", "=", eb.ref("v.head"));
+        const v = kx.valuesTable(db, chunk.map(keyed), keyedCols({ ...ONE, head: "text", state: "text", draft: "bigint", mergeable: "text", mcm: "bigint", at: "text" }), "v");
+        const hit = await q.all((q.k.updateTable("main.pr_checks as pc") as any).from(v).set((eb: kx.AnyEb) => {
+          const same = eb("pc.head_oid", "=", eb.ref("v.head"));
           return {
             head_oid: eb.ref("v.head"),
-            state: eb.fn.coalesce("v.state", "main.pr_checks.state"),
+            state: eb.fn.coalesce("v.state", "pc.state"),
             is_draft: eb.ref("v.draft"),
             // A known live value wins; UNKNOWN keeps a known stored value at the same head.
             mergeable: eb.case().when(same).then(eb.case().when(eb("v.mergeable", "in", ["CONFLICTING", "MERGEABLE"])).then(eb.ref("v.mergeable"))
-              .else(eb.fn.coalesce(eb.fn("nullif", ["main.pr_checks.mergeable", eb.val("UNKNOWN")]), eb.ref("v.mergeable"))).end()).else(eb.ref("v.mergeable")).end(),
-            maintainer_can_modify: eb.fn.coalesce("v.mcm", "main.pr_checks.maintainer_can_modify"),
+              .else(eb.fn.coalesce(eb.fn("nullif", ["pc.mergeable", eb.val("UNKNOWN")]), eb.ref("v.mergeable"))).end()).else(eb.ref("v.mergeable")).end(),
+            maintainer_can_modify: eb.fn.coalesce("v.mcm", "pc.maintainer_can_modify"),
             // The old head's checks say nothing about the new one: pending until the checks sync reads them.
-            overall: eb.case().when(same).then(eb.ref("main.pr_checks.overall")).else(eb.val("pending")).end(),
-            checks: eb.case().when(same).then(eb.ref("main.pr_checks.checks")).else(eb.val("[]")).end(),
+            overall: eb.case().when(same).then(eb.ref("pc.overall")).else(eb.val("pending")).end(),
+            checks: eb.case().when(same).then(eb.ref("pc.checks")).else(eb.val("[]")).end(),
             fetched_at: eb.ref("v.at"),
           };
-        }).where((eb: kx.AnyEb) => eb.and([eb("main.pr_checks.repo", "=", eb.ref("v.repo")), eb("main.pr_checks.number", "=", eb.ref("v.number"))]))
-          .returning(["main.pr_checks.repo as repo", "main.pr_checks.number as number"]), { label: "mirror.applyLocal" }) as { repo: string; number: number }[];
+        }).where((eb: kx.AnyEb) => eb.and([eb("pc.repo", "=", eb.ref("v.k_repo")), eb("pc.number", "=", eb.ref("v.k_number"))]))
+          .returning(["repo", "number"]), { label: "mirror.applyLocal" }) as { repo: string; number: number }[];
         add(hit.map((r) => refKey(r.repo, r.number)));
       }
     }
@@ -114,7 +118,7 @@ export async function closeGoneItems(db: Db, refs: RefKey[], now: string): Promi
   if (!refs.length) return 0;
   return await db.write(async () => {
     const closed = await updateItemsFrom(db, lastOf(refs.map(splitKey)).map((r) => ({ repo: r.repo, number: r.number, now })), { ...ONE, now: "text" },
-      (eb) => ({ state: eb.val("CLOSED"), closed_at: eb.fn.coalesce("main.items.closed_at", eb.ref("v.now")) }), (eb) => [eb("main.items.state", "=", "OPEN")]);
+      (eb) => ({ state: eb.val("CLOSED"), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.now")) }), (eb) => [eb("it.state", "=", "OPEN")]);
     await addAudit(db, closed.map((target) => ({ login: "sync", action: "item-gone", target, details: { reason: "not found or transferred on GitHub; marked CLOSED" }, at: now })));
     return closed.length;
   });

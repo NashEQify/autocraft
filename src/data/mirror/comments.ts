@@ -87,9 +87,10 @@ export async function loadFormalReviews(db: Db, keys: KeySource): Promise<Map<Re
 export async function loadActivityByLogins(db: Db, repo: string, logins: string[]): Promise<Set<string>> {
   if (!logins.length) return new Set();
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("items").select("author").where("repo", "=", repo).where(kx.inList(db, "author", logins, "citext"))
-    .union(q.k.selectFrom("comments").select("author").where("repo", "=", repo).where(kx.inList(db, "author", logins, "citext"))), { label: "mirror.loadActivityByLogins" });
-  const found = new Set(rows.map((r) => (r.author ?? "").toLowerCase()));
+  const lower = logins.map((l) => l.toLowerCase());
+  const rows = await q.all(q.k.selectFrom("items").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
+    .union(q.k.selectFrom("comments").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))), { label: "mirror.loadActivityByLogins" });
+  const found = new Set(rows.map((r) => r.login));
   return new Set(logins.filter((l) => found.has(l.toLowerCase())));
 }
 
