@@ -48,8 +48,8 @@ export type Recommendation = {
   goes?: "on" | "look";
   /** What the question is about, which may clear without an answer: the question closes then and the item goes on. `lane`: the merge itself was refused for its approver's access. */
   cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" | "red-ci" };
-  /** The review failed for good: the word merge goes on without it at this head. */
-  skipsReview?: true;
+  /** The review failed for good at this head: the word merge starts the PR at the merge queue, without it. Not past what an earlier review there asks: its planned parts, or its verdict. */
+  skipsReview?: { parts: number[]; verdict?: "hold" | "close" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
@@ -123,8 +123,6 @@ export type ItemWorkflow = {
   prNumber: number | null;
   /** A merge entry: a person asked for a model review of the head, made after this time. Null: it merges without one (core/evidence.ts neededReview). */
   reviewAskedAt: string | null;
-  /** The PR head a person said to merge without the review that failed there for good. */
-  unreviewedHead: string | null;
   legacyPreapprovalId: number | null;
   /** How often the row was written since it was made. */
   version: number;

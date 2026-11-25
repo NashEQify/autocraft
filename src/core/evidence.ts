@@ -84,23 +84,20 @@ const codePushes = (pushes: readonly RecordedPush[], reached: ReadonlySet<string
 /** Up to when a person accepted a PR's code: an approval that answers no question (made after they last started or answered it, `said`) accepts what was pushed before it, else what they had seen (`since`). */
 export const agreedAt = (w: { approvedAt: string | null; since: string; said: string }): string => (w.approvedAt !== null && w.approvedAt > w.said ? w.approvedAt : w.since);
 
-/** A started PR as its person last left it. `since`: up to when they have seen it. `reviewAskedAt`: they asked for a model review newer than this of a PR that merges without one.
- * `unreviewedHead`: they said to merge this head without the review that failed there. */
-export type GoneOnPr = { entry: string; startedAt: string; since: string; reviewAskedAt: string | null; unreviewedHead: string | null };
+/** A started PR as its person last left it. `since`: up to when they have seen it. `reviewAskedAt`: they asked for a model review newer than this of a PR that merges without one. */
+export type GoneOnPr = { entry: string; startedAt: string; since: string; reviewAskedAt: string | null };
 /** A head a model reviewed, and when. */
 export type HeadReview = { head: string; at: string };
 
 /**
  * The review a started PR's head merges after, null when it needs none; `from`: only one made after this counts (null: any). Every entry
- * needs one, unless a person said to merge the head without it, but the merge entry, which needs:
+ * needs one but the merge entry, which needs:
  * - the one a person asked for;
  * - one at every push of ours since its start that changed more than a checked merge does, or at a later head of ours. No answer ends that.
  *   A push under someone else's commits (its chain to the head is cut) needs one at what followed them;
  * - then what such a review says, until the person has been asked about it.
  */
 export function neededReview(w: GoneOnPr, pushes: readonly RecordedPush[], head: string, reviews: readonly HeadReview[]): { from: string | null } | null {
-  // What a checked merge or an autorepin adds to that head owes none either.
-  if (w.unreviewedHead !== null && chainsOwn(pushes.filter((p) => p.small), w.unreviewedHead, head)) return null;
   if (w.entry !== "merge") return { from: null };
   const reached = ownHeads(pushes, head);
   const made = reviews.filter((r) => reached.has(r.head));

@@ -162,8 +162,6 @@ export type PrFacts = {
   carriable?: boolean;
   /** A PR of the merge entry, which merges without a review, whose head a model has to read (core/evidence.ts neededReview): it needs a review like any other PR. */
   reviewOwed?: boolean;
-  /** A person said to merge the head without the review that failed there: it goes the way of a merge entry. */
-  reviewSkipped?: boolean;
   /** Why a due review waits (src/review/gate.ts): an open blocker, CI at the head not finished or not passed, the PR's daily review cap, or the minimum time since its last review. */
   reviewHold?: { kind: "blocked" | "ci" | "cap" | "interval" | "failed"; wait: string; /** When a timed wait ends (ms). */ until?: number; /** A ci hold whose head's CI has failed. */ red?: boolean; person?: boolean };
   /** AutoCraft has its own work on this PR: one of its pushes (fix-up, CI fix, base merge) at or since the reviewed head, a stored lint patch, or the PR is our own fix PR. It ends when the PR is closed; selection also drops it while the plan waits on a person (see inFlightNow). */

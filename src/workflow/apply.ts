@@ -257,7 +257,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const closing = batch.closing.get(key)?.at(-1) ?? null;
   // A merge of the sender's that waits for their own sign-in or access: approving it again tries it again.
   const waiting = wf?.approvedBy?.toLowerCase() === login.toLowerCase() ? await waitingMerges(db, wf, login) : [];
-  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, held, closing: closing !== null, mergeWaits: waiting.length > 0, redCi: says(input.parsed, "merge") && wf !== null && await redCi(db, wf, on) });
+  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, held, closing: closing !== null, mergeWaits: waiting.length > 0, ...(says(input.parsed, "merge") && wf !== null ? await mergeFacts(db, wf, on) : {}) });
   const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number }) : undefined;
   if (started) return out("refused", worksElsewhere(ref, started, input.clock), started.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
@@ -306,7 +306,8 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
       + (close !== on ? ` ${t("{ref} closes; {on} stays open and its work ends.", { ref, on: refText(on.repo, on.number) })}` : "");
     const id = await db.write(async () => {
       const id = await done.commit();
-      await recordEvents(db, [event(eventKind(r.run), id, noted(line)), ...more.map((x) => event("stopped", x.workflow!.id, line, x.item))]);
+      const started = done.started ? [event("stopped", wf!.id, noted(line))] : [];
+      await recordEvents(db, [event(eventKind(r.run), id, noted(line), done.started), ...started, ...more.map((x) => event("stopped", x.workflow!.id, line, x.item))]);
       return id;
     });
     return out("run", reply(line), id);
@@ -357,7 +358,7 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
 }
 
 /** `commit` writes the workflow row (started, changed or ended) with the run's own rows and returns its id; it runs in the write that records the event. */
-type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string; waits?: "contributor" | "person" };
+type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string; waits?: "contributor" | "person"; /** The implementation's PR the start was made on, in place of its issue's work. */ started?: fx.Target };
 
 /** Whether our own pushes alone moved the PR from `from` to `to`. */
 const ownSince = async (db: Db, pr: fx.Target, from: string, to: string): Promise<boolean> =>
@@ -434,16 +435,26 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 
   if (r.start) {
     const entry = r.start;
-    const weight = r.weight ?? WEIGHT_NORMAL;
-    const { write, ...conflict } = await fx.start(c, entry, r.approve);
+    const ends = r.replaces ? wf! : null;
+    const pr = ends?.kind === "issue" ? await issuePr(ends) : item;
+    if (!pr) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
+    const weight = r.weight ?? ends?.weight ?? WEIGHT_NORMAL;
+    const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve);
+    // What was dropped stays dropped in a review the new work may owe.
+    const dropped = (ends?.plan ?? []).flatMap((p) => (p.state === "dropped" || r.drop.includes(p.n) ? [{ ...p, state: "dropped" as const }] : []));
     return {
-      failed: [], ...conflict,
+      failed: [], ...conflict, ...(ends && pr !== item ? { started: pr } : {}),
       commit: async () => {
+        if (ends) {
+          const now = (await listWorkflows(db, { ids: [ends.id], live: true }))[0];
+          if (!now || !sameWorkflow(now, ends)) throw new Moved();
+          await saveWorkflows(db, [{ id: ends.id, patch: holdPatch(ends, by, at, undefined), at }]);
+        }
         const id = (await startWorkflows(db, [{
-          repo: item.repo, number: item.number, kind: item.kind, entry, weight, startedBy: by, startedVia: via, baseHead: item.head,
-          step: stepsFor(entry, r.approve)[0]!, at, ...(r.approve ? { approvedBy: by, approvedVia: via } : {}),
-        }])).get(`${item.repo}#${item.number}`);
-        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+          repo: pr.repo, number: pr.number, kind: pr.kind, entry, weight, startedBy: by, startedVia: via, baseHead: pr.head,
+          step: stepsFor(entry, r.approve)[0]!, at, ...(r.approve ? { approvedBy: by, approvedVia: via } : {}), ...(dropped.length ? { plan: dropped } : {}),
+        }])).get(`${pr.repo}#${pr.number}`);
+        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(pr.repo, pr.number) }));
         // Work started on the item takes back a close nobody carried out yet.
         if (o.closing) await fx.stopCloses({ ...c, workflowId: o.closing.workflow_id });
         await write(id);
@@ -481,7 +492,6 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const pr = live.kind === "issue" && !r.pick ? await issuePr(live) : null;
     if (pr?.head) patch.acceptedHead = pr.head;
   }
-  if (r.skipsReview) patch.unreviewedHead = live.recHead;
   // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts).
   if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
   else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits") patch.reviewAskedAt = null;
@@ -591,12 +601,21 @@ async function askToFix(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<ItemWo
   return { ...wf, ...patch };
 }
 
-/** The item's question is about red CI, and CI still fails on the PR's head. */
-async function redCi(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<boolean> {
-  if (openRecommendation(wf)?.cause?.code !== "red-ci") return false;
-  const pr = on.kind === "pr" ? on.number : (await implementationPr(db, wf))?.number;
-  const f = pr === undefined ? null : await loadPrFact(db, on.repo, pr);
-  return f !== null && redAtHead(f);
+/**
+ * What the word merge depends on. `redCi`: the item's question is about red CI, and CI still fails on the PR's head. `reviewFailed`: it is about a
+ * review that failed for good, and no commit of ours that owes a review of its own followed (the author's are refused as for any answer).
+ */
+async function mergeFacts(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<{ redCi?: boolean; reviewFailed?: boolean }> {
+  const rec = openRecommendation(wf), red = rec?.cause?.code === "red-ci";
+  if (!red && !(rec?.skipsReview && wf.recHead !== null)) return {};
+  const pr = on.kind === "pr" ? on : await implementationPr(db, wf);
+  if (!pr?.head) return {};
+  if (red) {
+    const f = await loadPrFact(db, pr.repo, pr.number);
+    return { redCi: f !== null && (f.ci === "failure" || redAtHead(f)) };
+  }
+  const ours = (await loadOwnPushes(db, [{ repo: pr.repo, number: pr.number }])).get(`${pr.repo}#${pr.number}`) ?? [];
+  return { reviewFailed: !chainsOwn(ours, wf.recHead!, pr.head) || chainsOwn(ours.filter((p) => p.small), wf.recHead!, pr.head) };
 }
 
 /** The workflow's merges as `login` that wait for their sign-in or access, on whatever PR they are. */

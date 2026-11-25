@@ -459,13 +459,16 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (repushed && !authorPush && !accepted(pass, w, ref, head)) authorPush = { from: w.recHead, to: head };
 
   // The numbered plan follows the latest review at the head; a merge-queue entry has none, unless it owes one.
-  const gone = { entry: w.entry, startedAt: w.startedAt, since, reviewAskedAt: w.reviewAskedAt, unreviewedHead: w.unreviewedHead };
+  const gone = { entry: w.entry, startedAt: w.startedAt, since, reviewAskedAt: w.reviewAskedAt };
   const needed = neededReview(gone, pass.moves.get(ref) ?? [], head, pass.reviews.get(ref) ?? []);
   const stored = reviewAt(pass, ref, head);
   const review = stored && needed && (needed.from === null || stored.at > needed.from) ? stored : null;
-  const plan: PlanPart[] = review ? planOf(review.fixes, w.plan) : w.plan;
+  const read = pass.facts.get(ref);
+  // Where a new review failed for good, the question also names what an earlier one of the head asks.
+  const says = review ?? (needed && read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined ? stored : null);
+  const plan: PlanPart[] = says ? planOf(says.fixes, w.plan) : w.plan;
   if (!sameJson(plan, w.plan)) patch.plan = plan;
-  const view: ReviewView | null = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
+  const view: ReviewView | null = says ? { verdict: says.verdict, sure: says.sure, rec: says.workflow?.recommendation ?? null } : null;
 
   // The step: the merge leg's state for the merge part, else where the review and its fixes are.
   const leg = legRow?.state ?? null;
@@ -474,7 +477,6 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   else if (leg === "ci") step = stepIn(w, "fix CI and conflicts", "merge");
   else if (leg === "queued") step = stepIn(w, "batch", "merge");
   else if (w.entry === "merge") step = stepIn(w, "update from main");
-  else if (!needed) step = stepIn(w, "merge");
   else if (!review) step = (pass.reviews.get(ref) ?? []).some((r) => r.head !== head) ? stepIn(w, "review again", "review") : stepIn(w, "review");
   else if (review.verdict === "take-fix" && plan.some((p) => p.state === "planned") && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
   else step = stepIn(w, "merge", "recommend");
@@ -493,11 +495,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const approved = w.approvedBy !== null;
   const fresh = review && readAt(pass, ref, review) > since ? review : null;
   const fixed = pushedWork(pass, w, ref, head, since, agreed);
-  const read = pass.facts.get(ref);
   // A question that went leaves the workflow running, as the facts do not say yet.
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
-  const ended = approved ? endedLeg(pass, w, since, resumed) : null;
+  const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
+  // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
+  const ended = stopped && codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null ? null : stopped;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
     const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");

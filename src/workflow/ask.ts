@@ -7,6 +7,7 @@ import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/pla
 import { t } from "../i18n/index.ts";
 import { nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
 import { afterSteps, droppedOf, onConflict, planned, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
+import { earlierReview } from "./status.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
 /** `blocker` and `params` are what an approved item stops at (`params.code`: the wait); one not approved comes back with `rec` alone. */
@@ -94,12 +95,16 @@ function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Reco
 /** Waits on red CI that nothing repairs: no answer merges it. */
 const RED_CI: ReadonlySet<WaitCode> = new Set(["ci-fix-failed", "ci-own-breakage", "ci-nothing-to-fix"]);
 
-/** The recommendation where the review failed for good at the head: a yes tries it once more, the word merge goes on without it. */
-function reviewFailed(o: Pick<Asked, "approved" | "parts">): Recommendation {
+/**
+ * The recommendation where the review failed for good at the head: a yes tries it once more, the word merge goes on without it. `o.review`: an
+ * earlier review of that head, whose open parts and whose hold or close the word merge does not pass over.
+ */
+function reviewFailed(o: Pick<Asked, "approved" | "parts" | "review">): Recommendation {
   const again = "review" as const, merges = o.approved;
+  const parts = o.review ? planned(o.parts) : [], v = o.review?.verdict, verdict = v === "hold" || v === "close" ? v : undefined;
   return {
-    text: `${REVIEW_AGAIN["review-failed"]!()} ${textFor({ fix: [], merges, again })} ${t("Write merge to merge it without that review when CI is green.")}`,
-    parts: { fix: [], drop: droppedOf(o.parts) }, merges, again, skipsReview: true,
+    text: `${REVIEW_AGAIN["review-failed"]!()} ${textFor({ fix: [], merges, again })} ${parts.length || verdict ? earlierReview(parts, verdict) : t("Write merge to merge it without that review when CI is green.")}`,
+    parts: { fix: [], drop: droppedOf(o.parts) }, merges, again, skipsReview: { parts, ...(verdict ? { verdict } : {}) },
   };
 }
 

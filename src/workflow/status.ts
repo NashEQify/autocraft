@@ -104,6 +104,14 @@ export function listText(ns: readonly (number | string)[]): string {
   return t("{list} and {last}", { list: ns.slice(0, -1).join(", "), last: String(ns[ns.length - 1]) });
 }
 
+/** What an earlier review of the commit whose new review failed asks. */
+export function earlierReview(parts: readonly number[], verdict?: "hold" | "close"): string {
+  const vars = { parts: listText(parts) };
+  if (verdict === "hold") return parts.length ? t("An earlier review of this commit says to hold it, and asks to fix {parts}.", vars) : t("An earlier review of this commit says to hold it.");
+  if (verdict === "close") return parts.length ? t("An earlier review of this commit says to close it, and asks to fix {parts}.", vars) : t("An earlier review of this commit says to close it.");
+  return t("An earlier review of this commit asks to fix {parts}.", vars);
+}
+
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts legWait). */
@@ -222,9 +230,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   const end = waits
     ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
     : r.start === "merge"
-      ? t("updating from main, then merging in the next batch when CI is green")
-    : r.skipsReview
-      ? t("merging without the review when CI is green")
+      ? r.replaces ? t("updating from main, then merging without the review when CI is green") : t("updating from main, then merging in the next batch when CI is green")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
@@ -269,7 +275,8 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string): stri
       ? t("Name one of {parts} to go with. Nothing runs until you do.", { parts: listText(a.parts) })
       : t("Every option is dropped. Nothing runs: name one to go with, or answer in a comment on the issue.");
     case "needs-words": return t("A yes can't answer this. {text} Nothing runs until then.", { text: a.text });
-    case "merge-skips-fixes": return t("“merge” could mean merging without fixing {parts}, or the recommendation. Nothing runs: reply yes for the recommendation, or “drop {parts}, merge” to merge without them.", { parts: listText(a.parts) });
+    case "merge-skips-fixes": if (a.verdict) return earlierReview(a.parts, a.verdict) + " " + t("“merge” does not pass over that. Nothing runs: reply yes for the recommendation.");
+      return t("“merge” could mean merging without fixing {parts}, or the recommendation. Nothing runs: reply yes for the recommendation, or “drop {parts}, merge” to merge without them.", { parts: listText(a.parts) });
   }
 }
 

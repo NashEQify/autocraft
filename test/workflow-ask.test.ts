@@ -8,7 +8,9 @@ import { startAttempt } from "../src/data/implement/index.ts";
 import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { textHash } from "../src/core/open-prs.ts";
+import type { PrChecks } from "../src/review/checks.ts";
 import { mergeVerdicts } from "../src/merge/approval.ts";
+import { noteMergeable, unknownOf } from "../src/merge/mergeable.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
@@ -43,9 +45,10 @@ const shown = async (w: World, number = 1) => { const x = await wf(w, number); r
 const actions = async (w: World) => (await w.prPlan(1)).actions.map((a) => a.kind);
 
 /** A PR with a take review, green CI and a clean pre-merge review, `text` said on it by MAINT. */
-async function started(text: string, o: { review?: boolean } = {}): Promise<World> {
+async function started(text: string, o: { review?: boolean } = {}, author?: string): Promise<World> {
   const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
-  await w.pr(1, { label: "feature" });
+  if (author) await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: author }));
+  await w.pr(1, { label: "feature", ...(author ? { author } : {}) });
   await (await w.verified(1)).premerge(1, "clean");
   await say(w, text);
   if (o.review !== false) {
@@ -285,22 +288,121 @@ test("a merge entry whose verification failed is asked once, after its pre-merge
   }
 });
 
-test("where its review failed for good, the word merge goes on without it at that head and no other", async () => {
-  const w = await started("review and merge", { review: false });
+/** `text` said, and the review at sha1 (or a new one) failed for good. */
+async function reviewFailed(text: string, set?: (w: World) => Promise<unknown>): Promise<World> {
+  const w = await started(text, { review: false });
   await pause();
+  await set?.(w);
   await w.db.run(w.db.k.updateTable("main.review_state").set({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }));
   await settle(w);
-  assert.deepEqual(await shown(w), ["blocked", "review-failed", MAINT]);
-  assert.match(await say(w, "merge", ANN), /without the review/);
+  return w;
+}
+const sendAs = async (w: World, text: string, number = 1, login = ANN) => {
+  await pause();
+  return (await runCommand(w.db, { login, canWrite: async () => true }, "github", { parsed: parse(text), items: [{ repo: "app", number }] })).items[0]!;
+};
+
+test("where its review failed for good, the word merge starts it at the merge queue, by whoever says it, approved before or not", async () => {
+  for (const start of ["review and merge", "review"]) {
+    const w = await reviewFailed(start);
+    const asked = await wf(w);
+    assert.equal(asked.rec?.again, "review");
+    assert.match(await say(w, "merge", ANN), /without the review/);
+    await settle(w);
+    const now = await wf(w);
+    assert.notEqual(now.id, asked.id);
+    assert.deepEqual([now.entry, now.state, now.startedBy, now.approvedBy, now.baseHead, await leg(w)], ["merge", "running", ANN, ANN, "sha1", "queued"], start);
+    assert.deepEqual(await w.rows(`SELECT state, stopped_by FROM item_workflows WHERE id = ${asked.id}`), [{ state: "stopped", stopped_by: ANN }]);
+    assert.ok((await actions(w)).includes("merge"));
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure" }));
+    assert.ok(!(await actions(w)).includes("merge"), "not on red CI");
+    await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "cifix", action: "cifix-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1b", before_res: "unknown" }));
+    await w.synced(1, "sha1b");
+    await settle(w);
+    assert.deepEqual([await leg(w), await actions(w)], ["review", ["review"]], "a push of ours owes a review");
+    w.close();
+  }
+});
+
+test("a merge that skips the failed review ends at a later review of it, and at the author's commits", async () => {
+  const w = await reviewFailed("review and merge");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "pending" }));
+  await say(w, "merge", ANN);
   await settle(w);
-  assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "queued"]);
-  assert.ok((await actions(w)).includes("merge"));
-  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure" }));
-  assert.ok(!(await actions(w)).includes("merge"), "not on red CI");
+  await say(w, "review", MAINT);
+  await w.db.run(w.db.k.updateTable("main.review_state").set({ fail_head: null, fail_count: 0 }));
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success" }));
+  await settle(w);
+  assert.deepEqual(await actions(w), ["review"]);
+  w.close();
+
+  const v = await reviewFailed("review and merge");
+  const asked = await wf(v);
+  await v.synced(1, "theirs");
+  const o = await sendAs(v, "merge");
+  assert.deepEqual([o.outcome, (await wf(v)).id], ["refused", asked.id], o.line);
+  assert.match(o.line, /pushed commits after the question/);
+});
+
+test("where a commit of AutoCraft's came after the failed review's question, the word merge approves it as it is: that commit is reviewed", async () => {
+  const w = await reviewFailed("review and merge");
+  const asked = await wf(w);
   await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "cifix", action: "cifix-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1b", before_res: "unknown" }));
   await w.synced(1, "sha1b");
+  assert.doesNotMatch(await say(w, "merge", ANN), /without the review/);
   await settle(w);
+  assert.equal((await wf(w)).id, asked.id);
   assert.deepEqual([await leg(w), await actions(w)], ["review", ["review"]]);
+});
+
+test("an earlier review of the commit whose review failed is named, and the word merge does not pass over what it asks", async () => {
+  const w = await reviewFailed("review and merge", async (x) => {
+    await x.review(1, { verdict: "take-fix", fixes: [{ file: "src/a.rs", change: "rename a" }, { file: "src/b.rs", change: "rename b" }] });
+    await say(x, "review", MAINT);
+  });
+  assert.match((await wf(w)).rec!.text, /asks to fix 1 and 2/);
+  assert.doesNotMatch((await wf(w)).rec!.text, /Write merge/);
+  for (const [text, left] of [["merge", "1 and 2"], ["drop 1, merge", "2"]] as const) {
+    const o = await sendAs(w, text);
+    assert.equal(o.outcome, "ambiguous", o.line);
+    assert.match(o.line, new RegExp(`without fixing ${left},`));
+  }
+  assert.equal((await wf(w)).entry, "review");
+  assert.match(await say(w, "drop 1 and 2, merge", ANN), /dropping 1 and 2.*without the review/i);
+  assert.equal((await wf(w)).entry, "merge");
+  w.close();
+
+  const v = await reviewFailed("review and merge", async (x) => { await x.review(1, { verdict: "hold" }); await say(x, "review", MAINT); });
+  assert.match((await wf(v)).rec!.text, /says to hold it/);
+  const o = await sendAs(v, "merge");
+  assert.equal(o.outcome, "ambiguous", o.line);
+  assert.match(o.line, /hold/);
+  assert.equal((await wf(v)).entry, "review");
+});
+
+test("an implementation whose review failed for good goes to the merge queue as its pull request", async () => {
+  const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
+  await w.issue(7);
+  await setFeature(w.db, "implement", true, MAINT, "app");
+  await say(w, "implement and merge", MAINT, 7);
+  await w.pr(1, { label: "feature" });
+  await (await w.verified(1)).premerge(1, "clean");
+  await w.db.run(w.db.k.insertInto("main.implementations").values({ repo: "app", number: 7, queued_by: MAINT, state: "pr-opened", attempt: 1, text_hash: "x7", pr_number: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }));
+  await w.db.run(w.db.k.updateTable("main.item_workflows").set({ accepted_head: "sha1" }));
+  await settle(w);
+  await w.db.run(w.db.k.insertInto("main.review_state").values({ repo: "app", number: 1, fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }).onConflict((oc) => oc.doUpdateSet({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() })));
+  await settle(w);
+  const asked = await wf(w, 7);
+  assert.deepEqual([asked.state, asked.rec?.again], ["blocked", "review"]);
+  await say(w, "merge", ANN, 7);
+  await settle(w);
+  const now = await wf(w);
+  assert.deepEqual([now.kind, now.entry, now.approvedBy, await leg(w)], ["pr", "merge", ANN, "queued"]);
+  assert.equal(await liveWorkflow(w.db, "app", 7), null);
+  // GitHub's unknown merge state of it is followed.
+  const row = { repo: "app", number: 1, head_oid: "sha1", state: "OPEN", overall: "success", mergeable: "UNKNOWN" } as unknown as PrChecks;
+  await noteMergeable(w.db, [row], T1);
+  assert.ok(await unknownOf(w.db, "app", 1, "sha1"));
 });
 
 test("the word merge on red CI that nothing repairs is refused and the question stays; green CI closes it and the approved merge goes on", async () => {
@@ -320,6 +422,37 @@ test("the word merge on red CI that nothing repairs is refused and the question 
   await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success", checks: "[]" }));
   await settle(w);
   assert.deepEqual([...await shown(w), await leg(w)], ["running", null, MAINT, "queued"]);
+});
+
+test("red CI that ended the merge leg is one question: green CI closes it and a new leg starts", async () => {
+  for (const own of [false, true]) {
+    const w = await started("review and merge", {}, own ? "op-bot" : undefined);
+    if (!own) await setCommentApproval(w.db, OPERATOR, "app", false);
+    await pause();
+    await w.db.run(w.db.k.updateTable("main.preapprovals").set({ state: "ci" }));
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }));
+    await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head: "sha1", kind: "code", state: "capped", attempt: 1, created_at: new Date().toISOString() }));
+    await settle(w);
+    const asked = await wf(w), blocked = async () => (await eventsOf(w.db, "app", 1)).filter((e) => e.kind === "blocked").length;
+    assert.deepEqual([asked.state, asked.rec?.cause?.code, await leg(w), await blocked()], ["blocked", "red-ci", "failed", 1], `own: ${own}`);
+    await pause();
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success", checks: "[]" }));
+    await settle(w);
+    assert.deepEqual([...await shown(w), await leg(w), await blocked()], ["running", null, MAINT, "queued", 1], `own: ${own}`);
+    w.close();
+  }
+});
+
+test("the word merge on a merge entry's red CI is refused and the question stays", async () => {
+  const w = await started("merge", { review: false });
+  await pause();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }));
+  await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head: "sha1", kind: "test", state: "push-denied", attempt: 1, created_at: new Date().toISOString() }));
+  await settle(w);
+  const asked = await wf(w);
+  assert.equal(asked.rec?.cause?.code, "red-ci");
+  const o = await sendAs(w, "merge");
+  assert.deepEqual([o.outcome, (await wf(w)).recAt], ["refused", asked.recAt], o.line);
 });
 
 test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges, approved before or not", async () => {
