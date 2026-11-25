@@ -14,7 +14,10 @@ export type ConversationRow = Selectable<DB["conversations"]>;
 export type TurnRow = Omit<Selectable<DB["conversation_turns"]>, "kind"> & { kind: TurnKind };
 export type CardRow = Omit<Selectable<DB["conversation_cards"]>, "kind" | "state" | "choice_id" | "dispute_by" | "dispute_reason" | "dispute_at"> & { kind: CardKind; state: CardState };
 export type HeldRow = Omit<Selectable<DB["held_followups"]>, "choice_id" | "decision_id" | "answer_seq" | "preapproval_id" | "state"> & { workflow_id: number | null; approved_at: string | null; state: HeldState };
-export type Thread = { conversation: ConversationRow; turns: TurnRow[]; cards: CardRow[]; waiting: TurnRow | null; queue?: Queue };
+/** A turn as `loadThreads` returns it: `block` only when the load asked for blocks. */
+export type ThreadTurn = Omit<TurnRow, "block"> & { block?: string };
+export type Thread = { conversation: ConversationRow; turns: ThreadTurn[]; cards: CardRow[]; waiting: ThreadTurn | null; queue?: Queue };
+/** `lastPersonBlock`: the block of the newest person turn that carries a `<steps>` line (display order), the one the prompt's seen steps come from. */
 export type TurnTail = { maxSeq: number; waiting: TurnRow | null; heldIds: number[]; lastPersonBlock: string | null };
 export type PendingTurn = { repo: string; number: number; turnId: number; kind: "operator" | "maintainer"; login: string };
 export type GuidanceTurn = { kind: TurnKind; login: string; at: string; body: string };
@@ -31,7 +34,9 @@ export type PostMessage = {
 export type CardPatch = Partial<Pick<CardRow, "state" | "result" | "result_url" | "error" | "acted_by" | "acted_at" | "edited_by" | "edited_at" | "text" | "params" | "queued_at" | "queue_args">>;
 export type QueuedCard = CardRow & { place: number };
 export type Queue = { rows: QueuedCard[]; blocked: Set<string> };
-export type ActRoom = { limit: number | null; used: number; reserve: number };
+/** The pure rule `used + reserve + need <= limit` is feature code: it derives the reserve from `running` with the card write counts. */
+export type RunningCard = { id: number; params: string; text: string | null; queue_args: string | null; written: number };
+export type ActRoom = { limit: number | null; used: number; running: RunningCard[] };
 
 export type NewHeld = { card_id: number; workflow_id: number | null; approved_at: string | null; repo: string; number: number; issue_repo: string; title: string; body: string; by: string; at: string };
 export type HeldPatch = Partial<Pick<HeldRow, "state" | "issue_number" | "url" | "reason" | "attempts" | "updated_at">>;
@@ -40,6 +45,6 @@ export type HeldInput = HeldRow & { item: { state: string; merged_at: string | n
 export type DueHeld = { rows: HeldInput[]; byRepo: Map<string, HeldInput[]> };
 
 export type Statement = { id: number; repo: string; number: number | null; text: string };
-export type StatementWork = Statement & { source_kind: string; source_id: string; embedded: boolean };
-export type StatementVec = Statement & { model: string; vec: Uint8Array };
+export type StatementWork = Statement & { source_kind: string; source_id: string; item_title: string; embedded: boolean };
+export type StatementVec = Statement & { source_kind: string; item_title: string; at: string; model: string; vec: Uint8Array };
 export type StatementView = Statement & { kind: string | null; state: string | null; title: string | null };
