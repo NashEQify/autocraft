@@ -139,9 +139,12 @@ export async function moveWorkspaces(db: Db, moves: WorkspaceMove[], now: string
   })), NUMERIC);
 }
 
-/** Patches rows (`whereState` is the compare-and-set); returns the number of rows changed. A row that sets the checkpoint blob has its own statement. */
-export async function patchWorkspaces(db: Db, rows: { id: number; whereState?: WorkspaceStateName[]; set: Partial<Omit<WorkspaceRow, "id">> }[]): Promise<number> {
-  return (await patchRows(db, "workspaces", rows.map((r) => ({ id: r.id, ...(r.whereState ? { from: r.whereState } : {}), set: r.set })), NUMERIC)).size;
+/**
+ * Patches rows (`whereState` and the values of `where` are the compare-and-set); returns the number of rows changed. A row that sets the
+ * checkpoint blob or has a `where` has its own statement.
+ */
+export async function patchWorkspaces(db: Db, rows: { id: number; whereState?: WorkspaceStateName[]; where?: Partial<Pick<WorkspaceRow, "pvc" | "pod" | "checkpoint_error">>; set: Partial<Omit<WorkspaceRow, "id">> }[]): Promise<number> {
+  return (await patchRows(db, "workspaces", rows.map((r) => ({ id: r.id, ...(r.whereState ? { from: r.whereState } : {}), ...(r.where ? { where: r.where } : {}), set: r.set })), NUMERIC)).size;
 }
 
 /**

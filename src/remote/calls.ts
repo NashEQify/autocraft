@@ -723,7 +723,6 @@ export type Outcome =
   /** A follow-up turn that the session's helper did not take in time (STICKY_MS, STICKY_CAP_MS); it was withdrawn. */
   | { state: "unclaimed" };
 
-
 /**
  * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
  * with the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. A lost lease or a gone call among them is ended

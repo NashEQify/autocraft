@@ -6,6 +6,7 @@ import type { Db } from "../db/index.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
 import { REFERENCE_SERVER } from "../remote/bundle.ts";
 import { enqueueCall } from "../remote/calls.ts";
+import { callLevel } from "../remote/level.ts";
 import { bindWorkspaceCall, loadWorkspaces, loadWorkspaceCallSince, WorkspaceError } from "../data/build/index.ts";
 import type { TaskBundle, Tier } from "../remote/protocol.ts";
 import { MCP_PATH, mcpTools } from "../sandbox/agents.ts";
@@ -62,9 +63,10 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
   if (bad) throw new BuildError(400, `a workspace session cannot have the ${bad} server`);
   if (extra.includes(REFERENCE_SERVER) && !r.referenceRepo) throw new BuildError(400, "the reference server needs referenceRepo");
   const servers = [WORKSPACE_SERVER, ...extra].sort();
+  const level = r.level ?? await callLevel(db, r.items[0]);
   return await db.write(async () => {
     const id = await enqueueCall(db, {
-      promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, askedModel: r.model, items: r.items, level: r.level ?? 2, maxAttempts: r.maxAttempts ?? 1,
+      promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, askedModel: r.model, items: r.items, level, maxAttempts: r.maxAttempts ?? 1,
       ...(r.parentId !== undefined && { parentId: r.parentId }), ...(r.referenceRepo && extra.includes(REFERENCE_SERVER) && { referenceRepo: r.referenceRepo }),
       ...(r.forLogin !== undefined && { forLogin: r.forLogin, boundSlot: r.boundSlot === true }),
       bundle: {
