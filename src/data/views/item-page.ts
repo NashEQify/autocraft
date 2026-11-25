@@ -4,8 +4,8 @@
 // implementation attempt. Wave 2: what the first wave's keys name (the build of the head, queue positions of queued jobs, the held
 // issues' audit rows, the implementation's calls, workspaces and PR, the screenshot images' names).
 import type { Db } from "../../db/index.ts";
-import { loadHeldIssueAudits, loadTrackedRepos } from "../control/index.ts";
-import type { TrackedRepo } from "../control/types.ts";
+import { loadHeldIssueAudits, loadTrackedRepos, loadWriteLog } from "../control/index.ts";
+import type { TrackedRepo, WriteLogRow } from "../control/types.ts";
 import { loadArtifacts } from "../build/index.ts";
 import type { ArtifactRow } from "../build/types.ts";
 import { loadHeld, loadThreads } from "../conversations/index.ts";
@@ -26,7 +26,7 @@ import { loadItemTrace, loadItemTraceStamp, type ItemTraceRows, type TraceScope,
 export const FAILED_JOBS_DAYS = 30;
 
 export type ItemPageFacts = {
-  trace: ItemTraceRows; tracked: TrackedRepo | null; legs: Preapproval[]; workflow: ItemWorkflow[];
+  trace: ItemTraceRows; writeLog: WriteLogRow[]; tracked: TrackedRepo | null; legs: Preapproval[]; workflow: ItemWorkflow[];
   failedJobs: FailedJob[]; activeJobs: ActiveJob[]; positions: Map<number, number>;
   prBuild: PrBuildView | null; screenshots: ScreenshotRun[]; screenshotArtifacts: Map<number, ArtifactRow[]>;
   thread: Thread | null; held: HeldRow[]; heldAudits: Map<number, { number: number; url: string }>;
@@ -38,9 +38,9 @@ export async function loadItemPage(db: Db, scope: TraceScope, ref: { repo: strin
   const key = `${ref.repo}#${ref.number}`;
   const refs = [ref];
   const since = new Date(Date.now() - FAILED_JOBS_DAYS * 86_400_000).toISOString();
-  const [trace, tracked, legs, workflow, failedJobs, activeJobs, screenshots, thread, held, view] = await db.together(() => Promise.all([
+  const [trace, writeLog, tracked, legs, workflow, failedJobs, activeJobs, screenshots, thread, held, view] = await db.together(() => Promise.all([
     loadItemTrace(db, scope, ref, writeActions, ["item", "comments", "activity", "commits", "files", "checks", "read"]),
-    loadTrackedRepos(db, [ref.repo]), loadLegs(db, refs), loadWorkflowHistory(db, refs), loadFailedJobsOfItems(db, refs, since), loadActiveJobsOfItems(db, refs),
+    loadWriteLog(db, [key]), loadTrackedRepos(db, [ref.repo]), loadLegs(db, refs), loadWorkflowHistory(db, refs), loadFailedJobsOfItems(db, refs, since), loadActiveJobsOfItems(db, refs),
     loadScreenshotRuns(db, refs), scope.staff ? loadThreads(db, [key]) : Promise.resolve(new Map<string, Thread>()), loadHeld(db, [key]), loadImplementationView(db, key),
   ]));
   const head = trace.detail.item?.head_oid ?? null;
@@ -57,7 +57,7 @@ export async function loadItemPage(db: Db, scope: TraceScope, ref: { repo: strin
     view?.impl.prNumber != null ? loadShown(db, [{ repo: ref.repo, number: view.impl.prNumber }]) : Promise.resolve(new Map<string, ItemShown>()),
   ]));
   return {
-    trace, tracked: tracked.get(ref.repo) ?? null, legs: legs.get(key) ?? [], workflow: workflow.get(key) ?? [], failedJobs: failedJobs.get(key) ?? [], activeJobs: activeJobs.get(key) ?? [], positions,
+    trace, writeLog: writeLog.get(key) ?? [], tracked: tracked.get(ref.repo) ?? null, legs: legs.get(key) ?? [], workflow: workflow.get(key) ?? [], failedJobs: failedJobs.get(key) ?? [], activeJobs: activeJobs.get(key) ?? [], positions,
     prBuild: builds.get(key) ?? null, screenshots: shots, screenshotArtifacts: artifacts, thread: thread.get(key) ?? null, held: heldRows, heldAudits, implementation,
     implementationPr: view?.impl.prNumber != null ? implementationPr.get(`${ref.repo}#${view.impl.prNumber}`) ?? null : null,
   };

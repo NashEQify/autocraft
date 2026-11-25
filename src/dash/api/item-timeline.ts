@@ -158,7 +158,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[], impl: 
       if (!r.finishedAt || r.state === "planned" || r.state === "running") continue;
       const done = base(`${id}:done`, r.finishedAt, "harness", "AutoCraft", "check", r.state === "error" ? "Screenshots failed" : r.held ? "Screenshot regression: held" : "Screenshots compared");
       done.tone = r.state === "error" ? "warn" : r.held ? "bad" : "neutral"; done.major = r.held;
-      done.body = clip((r.state === "error" ? r.reason : r.comparison) ?? "", 300) || null;
+      done.body = clip(String((r.state === "error" ? r.reason : r.comparison) ?? ""), 300) || null;
       out.push(done);
     }
   }
