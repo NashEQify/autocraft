@@ -7,7 +7,8 @@ export type { Action, ActionKind, CifixBucket, FixupBucket, PlanHistoryRow, Plan
 
 export type { RefKey };
 export type ItemKeys = KeySource;
-export type HiddenRepos = ReadonlySet<string>;
+export type { HiddenRepos } from "../control/types.ts";
+import type { HiddenRepos } from "../control/types.ts";
 
 export const BULK_ROWS = 500;
 export const SHADOW_ROWS = 2000;
@@ -40,11 +41,13 @@ export type PlanFilter = {
   limit?: number;
 };
 export type PlanHistoryEntry = PlanHistoryRow & { repo: string; number: number; id: number };
-export type PlanVersion = { plannedAt: string; state: string; head: string | null; historyCount: number; historyNewest: string | null };
+export type PlanVersion = { plannedAt: string; state: string; head: string | null; historyCount: number; /** The newest history row's id. */ historyNewest: number | null };
 
 export type PassCount = { kind: string; passes: number; refs: number; at: string; ms: number; maxMs: number; dbStatements: number; dbRoundTrips: number; dbMs: number; hour: string };
 export type ShadowDiff = { at: string; ref: RefKey; side: "pr" | "item"; fields: string; detail: string };
-export type PassReport = { logged: number; passes: PassCount[]; fullCauses: { source: string; n: number }[]; shadowDiffs: number };
+/** The counts of one kind, summed over every stored hour; `hours` is the hourly series the `query-growth` check compares. */
+export type PassStat = Omit<PassCount, "hour">;
+export type PassReport = { logged: number; passes: PassStat[]; hours: PassCount[]; fullCauses: { source: string; n: number }[]; shadowDiffs: number };
 
 export type Stage = "classified" | "labeled" | "reviewed" | "take" | "hold" | "batched" | "merged" | "closed" | "fixed-by-us" | "verify-ci-enough" | (string & {});
 export type StageEventRow = { repo: string; number: number; stage: Stage; at: string; actor: string | null; note: string | null };
