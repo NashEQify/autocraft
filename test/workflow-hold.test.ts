@@ -14,6 +14,7 @@ import { runCommand, type Actor, type CommandInput } from "../src/workflow/apply
 import { holdBatched, stopBatch } from "../src/workflow/batch.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow, workflowHistory } from "../src/workflow/store.ts";
+import type { Exec } from "../src/fixup/git.ts";
 import { T0, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
@@ -142,7 +143,7 @@ test("hold keeps AutoCraft off a PR nobody started; resume puts it back as it wa
   assert.deepEqual((await eventsOf(w.db, "app", 1)).map((e) => [e.kind, e.login]), [["stopped", MAINT], ["resumed", OTHER]]);
 });
 
-test("a yes written before the hold resumes nothing, the word resume does", async () => {
+test("a yes written before the hold resumes nothing, the word resume sent after it does", async () => {
   const w = await fresh();
   const read = new Date(Date.now() - 60_000).toISOString();
   await run(w, "review");
@@ -150,7 +151,41 @@ test("a yes written before the hold resumes nothing, the word resume does", asyn
   const o = await send(w, "yes", OTHER, 1, { asked: () => read });
   assert.equal(o.outcome, "refused");
   assert.match(o.line, /mira held it/);
-  assert.equal((await send(w, "resume", OTHER, 1, { asked: () => read })).outcome, "run");
+  assert.equal((await send(w, "resume", OTHER)).outcome, "run");
+});
+
+test("work asked for before the hold does not start again what it ended, whatever the word", async () => {
+  const w = await fresh();
+  const read = new Date(Date.now() - 60_000).toISOString();
+  await run(w, "review");
+  await run(w, "hold");
+  for (const text of ["merge", "review", "resume"]) {
+    const o = await send(w, text, OTHER, 1, { asked: () => read });
+    assert.equal(o.outcome, "refused", text);
+    assert.match(o.line, /mira held it after you wrote/);
+  }
+  const now = (await workflowHistory(w.db, "app", 1));
+  assert.deepEqual(now.map((x) => x.state), ["stopped"]);
+  assert.equal((await send(w, "merge", OTHER, 1, { asked: () => new Date(Date.now() + 1000).toISOString() })).outcome, "run", "written after the hold, it starts the item");
+});
+
+test("a held issue whose pull request merged or closed meanwhile ends when it is resumed", async () => {
+  for (const state of ["MERGED", "CLOSED"] as const) {
+    const w = await fresh();
+    await setFeature(w.db, "implement", true, MAINT, "app");
+    await w.issue(7);
+    await run(w, "implement and merge", MAINT, 7);
+    const { id } = (await startAttempt(w.db, { repo: "app", number: 7, queuedBy: MAINT, textHash: "h" } as never))!;
+    await w.db.run(w.db.k.updateTable("main.implementations").set({ state: "pr", pr_number: 1 }).where("id", "=", id));
+    await run(w, "hold", MAINT, 7);
+    await w.db.run(w.db.k.updateTable("main.items").set({ state, closed_at: new Date().toISOString() }).where("number", "=", 1));
+    await tick();
+    await run(w, "resume", OTHER, 7);
+    await settle(w);
+    assert.deepEqual((await workflowHistory(w.db, "app", 7)).map((x) => x.state), [state === "MERGED" ? "done" : "closed"], state);
+    assert.equal((await w.rows("SELECT id FROM implementations")).length, 1);
+    w.close();
+  }
 });
 
 test("a held issue without a pull request is implemented again after a resume, with its approval and its plan's dropped parts", async () => {
@@ -190,4 +225,25 @@ test("removing a PR from its batch holds it, and stopping a batch holds its PRs;
   const r = await stopBatch(w.db, as(OTHER), "dashboard", 6);
   assert.deepEqual([await state(6), r.held, await Promise.all(await states())], ["superseded", [1, 2], ["stopped", "stopped"]]);
   assert.ok((await legs(w)).concat(await legs(w, 2)).every((l) => l.state === "cancelled"), "no merge leg is left");
+});
+
+test("a batch that could not be ended says so, and the same control ends it when it is sent again", async () => {
+  const w = await fresh();
+  await run(w, "merge");
+  await settle(w);
+  let code = 1;
+  const exec: Exec = async () => ({ code, stdout: "", stderr: code ? "HTTP 502" : "" });
+  for (const id of [5, 6]) {
+    await w.db.run(w.db.k.insertInto("merge_batches").values({ id, repo: "app", branch: `integration-app-${id}`, state: "open", base_sha: "b", commit_sha: "t", pr_number: 50 + id, created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: id, number: 1, head_oid: "sha1", position: 1 }));
+    const send1 = async () => (id === 5 ? await holdBatched(w.db, as(MAINT), "dashboard", "app", 1, exec) : await stopBatch(w.db, as(MAINT), "dashboard", id, exec));
+    const state = async () => (await w.rows(`SELECT state FROM merge_batches WHERE id = ${id}`))[0]!.state;
+    code = 1;
+    await assert.rejects(send1(), /could not be closed/);
+    assert.deepEqual([await state(), (await workflowHistory(w.db, "app", 1)).at(-1)!.state], ["open", "stopped"]);
+    code = 0;
+    await send1();
+    assert.equal(await state(), "superseded");
+    if (id === 5) { await tick(); await run(w, "resume"); await settle(w); }
+  }
 });

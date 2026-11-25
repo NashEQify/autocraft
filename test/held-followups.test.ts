@@ -19,8 +19,8 @@ afterEach(() => current?.close());
 const app = async (w: World) => await w.db.run(w.db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
 const canWrite = async () => true;
 
-test("a follow-up issue on a merge command card is opened once after the merge and dropped when the PR closes or the approval ends first", async () => {
-  current = await (await (await (await (await world()).repo()).pr(1)).pr(2)).pr(3);
+test("a follow-up issue on a merge command card is opened once after the merge, also after a hold, and dropped when the PR closes or other work takes its place first", async () => {
+  current = await (await (await (await (await (await world()).repo()).pr(1)).pr(2)).pr(3)).pr(4);
   const w = current;
   await app(w);
   const created: string[] = [];
@@ -35,24 +35,30 @@ test("a follow-up issue on a merge command card is opened once after the merge a
     const r = await doCard(w.db, card, "op", { ...w.gh.actDeps(), exec, canWrite });
     assert.equal(r.card.state, "done", r.card.error ?? "");
   };
-  for (const n of [1, 2, 3]) await press(n);
+  for (const n of [1, 2, 3, 4]) await press(n);
   assert.deepEqual(created, [], "nothing is opened at the press");
   const held = async () => await w.db.all(w.db.k.selectFrom("held_followups").selectAll().orderBy("number"));
   for (const h of await held()) {
     const wf = (await liveWorkflow(w.db, "app", h.number))!;
     assert.deepEqual([h.state, h.workflow_id, h.approved_at], ["held", wf.id, wf.approvedAt], "bound to the workflow and the approval of the press");
   }
-  // PR 3's approval is stopped before anyone merges it.
-  await runCommand(w.db, { login: "op", canWrite }, "dashboard", { parsed: parse("stop"), items: [{ repo: "app", number: 3 }] });
+  const say = async (text: string, number: number) => assert.equal((await runCommand(w.db, { login: "op", canWrite }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number }] })).items[0]!.outcome, "run");
+  // PRs 3 and 4 are held: nothing is due. PR 4 is resumed and merges; PR 3 is started anew.
+  for (const n of [3, 4]) await say("hold", n);
+  assert.deepEqual((await loadDueHeld(w.db, { now: new Date() })).rows.map((h) => heldVerdict(h)), [null, null, null, null]);
+  await new Promise((r) => setTimeout(r, 5));
+  await say("resume", 4);
+  await say("review", 3);
+  await w.db.run(w.db.k.updateTable("items").set({ state: "MERGED", merged_at: new Date(Date.now() + 60_000).toISOString() }).where("repo", "=", "app").where("number", "=", 4));
   await w.db.run(w.db.k.updateTable("items").set({ state: "MERGED", merged_at: new Date(Date.now() + 60_000).toISOString() }).where("repo", "=", "app").where("number", "=", 1));
   await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 2));
   // The issues are filed by the box account here: the test registers no app to mint a token with.
   await w.db.run(w.db.k.deleteFrom("main.settings").where("key", "=", "github_identity"));
   for (let k = 0; k < 2; k++) await runAct(w.db, { repo: "app", dryRun: false }, () => {}, { ...w.gh.actDeps(), exec });
 
-  assert.deepEqual(created, ["Follow-up of 1"], "opened once, after the merge");
-  const [one, two, three] = await held();
-  assert.equal(one!.state, "filed");
+  assert.deepEqual(created, ["Follow-up of 1", "Follow-up of 4"], "opened once, after the merge");
+  const [one, two, three, four] = await held();
+  assert.deepEqual([one!.state, four!.state], ["filed", "filed"]);
   assert.ok(one!.issue_number);
   assert.deepEqual([two!.state, three!.state], ["dropped", "dropped"]);
   assert.match(String(two!.reason), /closed without merging/);

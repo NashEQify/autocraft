@@ -58,14 +58,14 @@ both("events: oldest first, newest n per item, latest kind, go-on time, answers 
   assert.equal(last.get("o/a#1"), "ambiguous");
   assert.equal(last.get("o/a#2"), "started");
   const goOn = await loadGoOnAt(db, [{ id: w1, startedAt: AT }, { id: 999, startedAt: AT }]);
-  assert.deepEqual(goOn.get(w1), { since: "2026-01-01T03:00:00.000Z", said: "2026-01-01T03:00:00.000Z" });
-  assert.deepEqual(goOn.get(999), { since: AT, said: AT });
+  assert.deepEqual(goOn.get(w1), { since: "2026-01-01T03:00:00.000Z", said: "2026-01-01T03:00:00.000Z", resumed: null });
+  assert.deepEqual(goOn.get(999), { since: AT, said: AT, resumed: null });
   assert.deepEqual((await loadAnswers(db, [w1, ids.get("o/a#2")!])).get(w1), { login: "bob", at: "2026-01-01T03:00:00.000Z" });
   assert.equal(await countEventsSince(db, { login: "ann", via: "github", since: "2026-01-01T01:15:00.000Z" }), 2);
   assert.equal(await countEventsSince(db, { login: "ann", via: "cli", since: AT }), 0);
   // An answer counts from when its question was asked, for every reader.
-  await recordEvents(db, [{ ...ev(1, "answered", "2026-01-01T05:00:00.000Z"), seenAt: "2026-01-01T04:00:00.000Z" }]);
-  assert.deepEqual((await loadGoOnAt(db, [{ id: w1, startedAt: AT }])).get(w1), { since: "2026-01-01T04:00:00.000Z", said: "2026-01-01T05:00:00.000Z" });
+  await recordEvents(db, [{ ...ev(1, "answered", "2026-01-01T05:00:00.000Z"), seenAt: "2026-01-01T04:00:00.000Z" }, ev(1, "resumed", "2026-01-01T06:00:00.000Z")]);
+  assert.deepEqual((await loadGoOnAt(db, [{ id: w1, startedAt: AT }])).get(w1), { since: "2026-01-01T04:00:00.000Z", said: "2026-01-01T05:00:00.000Z", resumed: "2026-01-01T06:00:00.000Z" });
   assert.equal((await loadWorkflowFacts(db, [{ repo: "o/a", number: 1 }])).live.get("o/a#1")!.since, "2026-01-01T04:00:00.000Z");
   assert.equal((await loadAnswers(db, [w1])).get(w1)!.at, "2026-01-01T05:00:00.000Z", "who answered last goes by when they answered");
 });
@@ -152,7 +152,9 @@ both("loadPathEnds reads how the approved path of each workflow ended", async ({
   const ids = await startWorkflows(db, [wf("o/a", 1, { approvedBy: "ann", approvedVia: "cli" }), wf("o/a", 2, { approvedBy: "ann", approvedVia: "cli" }), wf("o/a", 3, { approvedBy: "ann", approvedVia: "cli" }), wf("o/a", 4, { approvedBy: "ann", approvedVia: "cli" })]);
   await saveWorkflows(db, [{ id: ids.get("o/a#2")!, patch: { state: "done" } }, { id: ids.get("o/a#3")!, patch: { state: "stopped" } }, { id: ids.get("o/a#4")!, patch: { approvedBy: null, approvedAt: null } }]);
   const ends = await loadPathEnds(db, [1, 2, 3, 4].map((n) => ({ workflowId: ids.get(`o/a#${n}`)!, approvedAt: AT })).concat([{ workflowId: 999, approvedAt: AT }]));
-  assert.deepEqual([ends.get(ids.get("o/a#1")!), ends.get(ids.get("o/a#2")!), ends.get(ids.get("o/a#3")!), ends.get(ids.get("o/a#4")!), ends.get(999)], [null, "merged", "stopped", "stopped", "stopped"]);
+  assert.deepEqual([ends.get(ids.get("o/a#1")!), ends.get(ids.get("o/a#2")!), ends.get(ids.get("o/a#3")!), ends.get(ids.get("o/a#4")!), ends.get(999)], [null, "merged", null, "stopped", "stopped"], "a held one goes on");
+  await startWorkflows(db, [wf("o/a", 3)]);
+  assert.equal((await loadPathEnds(db, [{ workflowId: ids.get("o/a#3")!, approvedAt: AT }])).get(ids.get("o/a#3")!), "stopped", "other work took its place");
 });
 
 // ---- statements do not grow with the number of items ------------------------------------------------------------

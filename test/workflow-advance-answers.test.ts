@@ -69,6 +69,23 @@ test("our own push leaves the question as it is, and an answer accepts it; not o
   }
 });
 
+test("a resume accepts no pushes: ours from before the hold still count towards a large fix", async () => {
+  const w = await approvedReview();
+  await w.pr(2, { label: "feature" });
+  assert.equal((await answer(w, "merge")).outcome, "run");
+  await pause();
+  await pushNow(w, "sha2", "ours", 300);
+  await advanceWorkflows(w.db);
+  const before = (await liveWorkflow(w.db, "app", 2))!;
+  assert.equal(before.state, "running");
+  for (const text of ["hold", "resume"]) { assert.equal((await answer(w, text)).outcome, "run"); await pause(); }
+  await pushNow(w, "ours", "ours2", 300);
+  await advanceWorkflows(w.db);
+  const now = (await liveWorkflow(w.db, "app", 2))!;
+  assert.deepEqual([now.id, now.blocker, now.blockerParams?.lines, now.approvedAt], [before.id, "large-fix", 600, before.approvedAt]);
+  w.close();
+});
+
 test("after an author push a yes to a recommended close closes nothing; the word close does", async () => {
   const w = await askedReview("close");
   await w.synced(2, "theirs");
