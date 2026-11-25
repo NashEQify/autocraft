@@ -11,7 +11,8 @@ import { operatorCommentText } from "../src/fixup/template.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { excluded } from "../src/db/kx.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
-import { queueAdd, queueOrigins, queuePage } from "../src/dash/api/queue-page.ts";
+import { loadLegPass } from "../src/data/workflow/index.ts";
+import { queueAdd, queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
@@ -349,10 +350,11 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     const w = await (await (await fresh()).pr(14)).pr(15);
     await preapproveMerge(w.db, { repo: "app", number: 14, by: OPERATOR });
     const entry = (number: number) => ({ repo: "app", number, decisionId: null, reviewedAt: T0 }) as unknown as CachedEntry;
-    const staff = await queueOrigins(w.db, true);
-    assert.deepEqual({ ...await staff(entry(14)), at: null }, { how: "queued", by: OPERATOR, at: null });
-    assert.equal((await (await queueOrigins(w.db, false))(entry(14))).by, null);
-    assert.deepEqual(await staff(entry(15)), { how: "review", by: null, at: T0 });
+    const facts = { legs: (await loadLegPass(w.db)).rows, carried: new Map() };
+    const staff = queueOriginOf(facts, true);
+    assert.deepEqual({ ...staff(entry(14)), at: null }, { how: "queued", by: OPERATOR, at: null });
+    assert.equal(queueOriginOf(facts, false)(entry(14)).by, null);
+    assert.deepEqual(staff(entry(15)), { how: "review", by: null, at: T0 });
   });
 
   test("the Merge tab lists a queued PR before its take review, and drops it once the review makes it a queue row", async () => {

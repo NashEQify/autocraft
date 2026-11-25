@@ -10,10 +10,10 @@ import { revokeToken, setRunnerScopes, type Scopes } from "../mcp/tokens.ts";
 import { HttpError, RateLimiter, share } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { approveLogin, denyLogin, normalizeCode, pendingLogin } from "../../remote/device-login.ts";
-import { loadHelpers } from "../../data/runners/index.ts";
+import { loadHelpers, loadRunnerSnapshot } from "../../data/runners/index.ts";
 import { loadRunnerTokenOf } from "../../data/access/index.ts";
 import { inferenceMode } from "../../remote/mode.ts";
-import type { Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
+import type { HelperInfo, Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Lookups of a user code that found no waiting login, per login: guessing codes is slow. */
@@ -61,11 +61,17 @@ async function scopesOf(db: Db, req: Req, b: Record<string, unknown>, hadAnswer 
 }
 
 export async function list(db: Db, req: Req): Promise<RunnersReply> {
-  const [helpers, answering] = await Promise.all([loadHelpers(db, [req.user.login], Date.now()), mayGrantAnswer(db, req)]);
+  const now = Date.now();
+  const [helpers, snapshot, answering] = await db.together(() => Promise.all([loadHelpers(db, [req.user.login], now), loadRunnerSnapshot(db, now), mayGrantAnswer(db, req)]));
+  const rows = new Map(snapshot.runners.map((r) => [r.tokenId, r]));
   return {
-    runners: (helpers.get(req.user.login.toLowerCase()) ?? []).map(({ canAgent, canAnswer, cooledUntil, cooledReason, ...h }) => ({
-      ...h, ...(cooledUntil ? { readiness: "cooled-off" as const, until: cooledUntil, reason: cooledReason } : {}), agent: canAgent, answer: canAnswer,
-    })),
+    runners: (helpers.get(req.user.login.toLowerCase()) ?? []).map(({ canAgent, canAnswer, cooledUntil, cooledReason, ...h }) => {
+      const row = rows.get(h.tokenId);
+      return {
+        ...h, harness: h.harness as HelperInfo["harness"], usage: h.usage as HelperInfo["usage"], ...(cooledUntil ? { readiness: "cooled-off" as const, until: cooledUntil, reason: cooledReason } : {}), agent: canAgent, answer: canAnswer,
+        busy: row?.busy ?? null, lastError: row?.lastError ? JSON.parse(row.lastError) as { text: string; at: string } : null,
+      };
+    }),
     answering,
   };
 }

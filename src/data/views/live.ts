@@ -75,6 +75,7 @@ async function loadCards(db: Db, o: { states?: string[]; ids?: number[]; staff: 
  */
 export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: boolean }, o: LiveOptions & { steps: string[] }): Promise<LiveView> {
   const vis = { hidden: scope.hidden, staff: scope.staff };
+  const taskScope = { hiddenRepos: scope.hidden, staff: scope.staff };
   const since = new Date(o.nowMs - o.workerWindowMs).toISOString();
   const [board, looseRuns, batches, standalone, stepDurations, workerRuns, runnerBoard] = await db.together(() => Promise.all([
     loadLiveBoard(db, { quietSteps: o.quietSteps, recentMs: o.recentMs, queuedMax: o.queuedMax, recentMax: o.recentMax, hidden: scope.hidden }),
@@ -89,7 +90,7 @@ export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: 
   const taskIds = batches.flatMap((b) => (b.task_id === null ? [] : [b.task_id]));
   const [jobRuns, jobTasks, batchCards] = await db.together(() => Promise.all([
     loadJobRuns(db, jobIds, vis),
-    loadTaskCards(db, jobIds, vis),
+    loadTaskCards(db, jobIds, taskScope),
     loadCards(db, { ids: taskIds, staff: scope.staff, hidden: scope.hidden }),
   ]));
   const batchTasks = new Map(batchCards.map((t) => [t.id, t]));
