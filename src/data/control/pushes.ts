@@ -85,7 +85,8 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
       .expression((q.k as any).selectFrom(v).select(["v.at", "v.stage", "v.action", "v.repo", "v.number", "v.from_oid", "v.to_oid", "v.before_res"])
         .where((eb: kx.AnyEb) => eb.not(eb.exists(eb.selectFrom("main.push_outcomes as o").select(eb.lit(1).as("one"))
           .whereRef("o.repo", "=", "v.repo").where((ie) => ie("o.number", "is not distinct from", ie.ref("v.number")))
-          .whereRef("o.to_oid", "=", "v.to_oid").whereRef("o.action", "=", "v.action"))))).orderBy("v.ord"));
+          .whereRef("o.to_oid", "=", "v.to_oid").whereRef("o.action", "=", "v.action"))))
+        .orderBy("v.ord")));
   }
 }
 
