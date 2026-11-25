@@ -14,7 +14,9 @@ import { inPilot, setPilot } from "../src/pilot.ts";
 import { fixOnMain, pollLanding, runAdvisory, stallReason, runLand, runPublish, type LandDeps } from "../src/security/land.ts";
 import { runFix, type FixDeps } from "../src/security/fix.ts";
 import { fixBranch, giveaway, parseFixReply, patchGiveaway, quietProblem } from "../src/security/rules.ts";
-import { isQuiet } from "../src/security/quiet.ts";
+import { loadQuiet } from "../src/data/security/index.ts";
+
+const isQuiet = async (db: Parameters<typeof loadQuiet>[0], repo: string, n: number): Promise<boolean> => (await loadQuiet(db, [`${repo}#${n}`])).has(`${repo}#${n}`);
 import { rawFinding } from "../src/security/store.ts";
 import { Git } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
