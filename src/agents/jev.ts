@@ -135,3 +135,20 @@ export function jevFailure(r: { code: number | null; stderr: string }): { kind: 
   if (/api key/i.test(line)) return { kind: "account", reason: "key rejected" };
   return null;
 }
+
+// Statuses of Jev API responses that were not OK, counted in this process since the last take: a job logs them per chunk, so a
+// provider's request rate limit (status 429) shows in the job log.
+const statuses = new Map<string, number>();
+
+/** Counts the API status a failed `jev ask` printed (`jev: API error status=<N> ...`), if any. */
+export function noteJevStatus(stderr: string): void {
+  const status = /API error status=(\d+)/.exec(stderr)?.[1];
+  if (status !== undefined) statuses.set(status, (statuses.get(status) ?? 0) + 1);
+}
+
+/** The counts by status since the last take, and starts counting again. */
+export function takeJevStatuses(): Map<string, number> {
+  const out = new Map(statuses);
+  statuses.clear();
+  return out;
+}
