@@ -13,6 +13,7 @@ import { liveWorkflow } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
+import { SNAPSHOT_CACHE_MS } from "../src/data/runners/snapshot-cache.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import type { Blocker } from "../src/workflow/types.ts";
 import { world, type World } from "./world-db.ts";
@@ -22,8 +23,9 @@ import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
-import { recordAnswers, startAttempt } from "../src/data/implement/index.ts";
+import { startAttempt } from "../src/data/implement/index.ts";
 import { recordPlan } from "../src/implement/plan.ts";
+import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import type { PlanReply } from "../src/implement/types.ts";
 
 let current: World | undefined;
@@ -167,7 +169,8 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
       assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), "Waiting for the pre-merge check: no Task Runner can take it");
       // The approver's runner takes it: the state line names it while it cannot claim, and goes back to the steps once it can.
       const token = (await createToken(db, MAINT, "runner", { kind: "runner" })).row.id;
-      const line = async () => await legWait(db, (await liveWorkflow(db, "app", 1))!);
+      // Read past the window the runner snapshot is kept for, so the new credential shows.
+      const line = async () => await legWait(db, (await liveWorkflow(db, "app", 1))!, Date.now() + 2 * SNAPSHOT_CACHE_MS);
       assert.equal(await line(), "Waiting for mira's Task Runner (offline)");
       const report = (readiness: string) => storeStatus(db, token, MAINT, parseStatus({ slots: 1, busy: 0, readiness, harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
       await report("quota-held");
@@ -181,7 +184,7 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
     await advanceWorkflows(db);
     const wf = (await liveWorkflow(db, "app", 1))!;
     if (kind === "clean") assert.deepEqual([await legState(w), wf.state], ["queued", "running"], "unsure with no finding: the merge queue has it");
-    else assert.deepEqual([await legState(w), wf.state, wf.blocker], ["asked", "blocked", "major-finding"]);
+    else assert.deepEqual([await legState(w), wf.state, wf.blocker], ["failed", "blocked", "major-finding"]);
     w.close();
   }
 });
@@ -239,29 +242,86 @@ async function implementIssue(): Promise<World> {
   return w;
 }
 
-test("an implement question is recorded with its options, and an answer makes the implementation plan again", async () => {
+/** A plan call's reply that asks the maintainers one question with two options, "Per document" recommended. */
+const ASKS: PlanReply = {
+  ready: false, kind: "feature", summary: "Remember the export folder.", plan: "The dialog keeps no folder.", acceptance: [], verification: { tests: [], app: null }, size: "S", risks: [],
+  questions: [{ audience: "maintainer", text: "Remember the folder globally or per document?", options: [{ label: "Globally", hint: "One folder." }, { label: "Per document", hint: "Stored with the file." }], recommended: "Per document" }],
+  workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
+};
+/** The issue's implementation asks `reply`'s questions, and the pass after it. */
+async function asked(reply: PlanReply): Promise<World> {
   const w = await implementIssue();
-  const db = w.db;
-  const asks: PlanReply = {
-    ready: false, kind: "feature", summary: "Remember the export folder.", plan: "The dialog keeps no folder.", acceptance: [], verification: { tests: [], app: null }, size: "S", risks: [],
-    questions: [{ audience: "maintainer", text: "Remember the folder globally or per document?", options: [{ label: "Globally", hint: "One folder." }, { label: "Per document", hint: "Stored with the file." }], recommended: "Per document" }],
-    workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
-  };
-  await recordPlan(db, (await currentAttempt(db, "app", 7))!.impl, { callId: null, reply: asks }, { commentsApproved: true, postComment: async () => null, log: () => {} });
-  const attempt = (await currentAttempt(db, "app", 7))!;
-  assert.equal(attempt.impl.state, "asked");
-  const asked = openQuestion(attempt.rounds);
-  const options = (asked.question!.result as { options: { key: string; label: string }[]; recommended: string }).options;
-  assert.deepEqual(options.map((o) => o.label), ["Globally", "Per document"]);
-  assert.equal(asked.answer, null);
+  await recordPlan(w.db, (await currentAttempt(w.db, "app", 7))!.impl, { callId: null, reply }, { commentsApproved: true, postComment: async () => null, log: () => {} });
+  await advanceWorkflows(w.db);
+  return w;
+}
+const say = async (w: World, text: string) => (await runCommand(w.db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 7 }] })).items[0]!;
+const nextStep = async (w: World) => implementStep((await loadItemFact(w.db, "app", 7))!);
+const labelOf = async (w: World): Promise<string | undefined> => {
+  const { question, answer } = openQuestion((await currentAttempt(w.db, "app", 7))!.rounds);
+  return (question!.result as { options: { key: string; label: string }[] }).options.find((o) => o.key === answer?.option)?.label;
+};
 
-  const chosen = options.find((o) => o.label === "Per document")!;
-  assert.equal(await recordAnswers(db, [{ id: attempt.impl.id, question: asked.question!.id, by: MAINT, via: "dashboard", option: chosen.key }]), 1);
-  const { answer } = openQuestion((await currentAttempt(db, "app", 7))!.rounds);
-  assert.equal(answer?.option, chosen.key);
-  assert.equal(answer?.by, MAINT);
-  assert.deepEqual(implementStep((await loadItemFact(db, "app", 7))!), { bucket: "plan" });
-  assert.equal((await liveWorkflow(db, "app", 7))!.state, "running");
+test("an implement question comes back as one recommendation, and a yes answers it so the implementation plans again", async () => {
+  const w = await asked(ASKS);
+  const wf = (await liveWorkflow(w.db, "app", 7))!;
+  assert.deepEqual([wf.state, wf.rec?.text], ["recommending", ASKS.workflow!.recommendation]);
+  assert.deepEqual(wf.plan.map((p) => [p.n, p.title]), [[1, "Globally"], [2, "Per document"]]);
+  assert.ok("wait" in (await nextStep(w))!, "the implementation waits for the answer");
+
+  const r = await say(w, "yes");
+  assert.equal(r.outcome, "run", r.line);
+  assert.match(r.line, /Per document/);
+  assert.equal(await labelOf(w), "Per document");
+  assert.equal(openQuestion((await currentAttempt(w.db, "app", 7))!.rounds).answer?.by, MAINT);
+  assert.deepEqual(await nextStep(w), { bucket: "plan" });
+  await advanceWorkflows(w.db);
+  const on = (await liveWorkflow(w.db, "app", 7))!;
+  assert.deepEqual([on.state, on.rec, on.plan], ["running", null, []]);
+});
+
+test("an option's number or its words answer an implement question; a reply that names none or several runs nothing", async () => {
+  for (const [text, label] of [["1", "Globally"], ["fix 1", "Globally"], ["go with per document", "Per document"], ["not per document", undefined], ["3", undefined], ["1 or 2", undefined]] as const) {
+    const w = await asked(ASKS);
+    const r = await say(w, text);
+    assert.equal(r.outcome, label ? "run" : "ambiguous", `${text}: ${r.line}`);
+    assert.equal(await labelOf(w), label, text);
+    w.close();
+  }
+});
+
+test("a question set aside elsewhere takes its recommendation with it, and a late yes answers nothing", async () => {
+  const w = await asked(ASKS);
+  const at = (await currentAttempt(w.db, "app", 7))!;
+  // A comment on the issue answered it: the implementation plans again.
+  await writeStep(w.db, at.impl, { to: "planning" });
+  const r = await say(w, "yes");
+  assert.equal(r.outcome, "refused", r.line);
+  await advanceWorkflows(w.db);
+  const wf = (await liveWorkflow(w.db, "app", 7))!;
+  assert.deepEqual([wf.state, wf.rec], ["running", null]);
+});
+
+test("a stuck implementation comes back with Try again, and a yes starts it again", async () => {
+  for (const approved of [false, true]) {
+    const w = await implementIssue();
+    const db = w.db;
+    if (approved) await say(w, "merge");
+    await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "session-failed", null);
+    await advanceWorkflows(db);
+    const wf = (await liveWorkflow(db, "app", 7))!;
+    assert.deepEqual([wf.state, wf.blocker, wf.rec?.merges], approved ? ["blocked", "failed-twice", true] : ["recommending", null, false]);
+    assert.ok("wait" in (await nextStep(w))!);
+
+    const r = await say(w, "yes");
+    assert.equal(r.outcome, "run", r.line);
+    assert.deepEqual(await nextStep(w), { bucket: "build" });
+    assert.match((await applyStuckAnswer(db, (await currentAttempt(db, "app", 7))!))!.did, /attempt 2 started/);
+    await advanceWorkflows(db);
+    const on = (await liveWorkflow(db, "app", 7))!;
+    assert.deepEqual([on.state, on.blocker, on.approvedBy], ["running", null, approved ? MAINT : null]);
+    w.close();
+  }
 });
 
 test("an answer on an implement issue queues a fix-up of the named part on its implementation PR", async () => {
