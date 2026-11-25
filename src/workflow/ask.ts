@@ -1,7 +1,7 @@
 // The question a started item comes back with when nothing of it is due and a person has to move it on: its plan waits for one, or the
 // people it acts for can no longer act. Pure.
 import { needsQuestion, type WaitCode } from "../core/codes.ts";
-import { unapprovedStop, worksOn } from "../core/decide.ts";
+import { unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
 import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
@@ -20,11 +20,11 @@ const moves = (a: Action): boolean => !a.permission || a.permission.ok || a.perm
 const waitsForAnswer = (p: Plan): boolean => p.waitCode === "answer" || p.waitCode === "ci-nothing-to-fix" || p.state === "opus-hold" || p.state === "opus-close";
 
 /** The people the item acts for can no longer write to its repo: whoever says yes takes their place, and an approved merge is approved anew as them. */
-function goneQuestion(repo: string, login: string, o: Pick<Asked, "approved" | "parts">): Question {
+function goneQuestion(repo: string, login: string, o: Pick<Asked, "approved" | "parts">, lane = false): Question {
   const text = o.approved
     ? t("{login} has no write access to {repo} any more, so their approval does not count: approve the merge in their place.", { login, repo })
     : t("{login} has no write access to {repo} any more, so the work has nobody to act for: go on with it in their place.", { login, repo });
-  return { blocker: "other", params: { code: "actor-gone", reason: `${login} has no write access to ${repo}`, login }, rec: { text, parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: "on" } };
+  return { blocker: "other", params: { code: "actor-gone", reason: `${login} has no write access to ${repo}`, login }, rec: { text, parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: "on", cause: { code: "actor-gone", ...(lane ? { lane: true as const } : {}) } } };
 }
 
 const isGone = (s: StandingFact | null | undefined): s is StandingFact => s?.standing === "no" && !s.boxIdentity;
@@ -40,13 +40,16 @@ const REVIEW_AGAIN: Partial<Record<WaitCode, () => string>> = {
   "revision-failed": () => t("The implementation session ended, and its pull request is not ready to merge."),
 };
 
+type GithubCode = "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed";
 /** What only a person can change on GitHub. */
-const ON_GITHUB: Partial<Record<WaitCode, () => string>> = {
+const ON_GITHUB: Record<GithubCode, () => string> = {
   "base-off-default": () => t("Its base is not the default branch, and AutoCraft merges only into that: change its base on GitHub."),
   "no-ci": () => t("The repo has no CI, and AutoCraft merges only on green CI: add a CI workflow, or merge it on GitHub."),
   "mergeable-stuck": () => t("GitHub still reports the merge state as unknown: close and reopen the pull request on GitHub, which makes GitHub compute it."),
   "ci-approval-failed": () => t("AutoCraft could not approve its CI runs: approve them on GitHub."),
 };
+
+const onGithub = (code: WaitCode): code is GithubCode => Object.hasOwn(ON_GITHUB, code);
 
 /** What the pull request may be merged past, once a person says so. */
 const MERGE_PAST: Partial<Record<WaitCode, (f: PrFacts) => string>> = {
@@ -64,8 +67,7 @@ const waitText = (wait: string): string => t("It waits for {what}.", { what: wai
 
 function recFor(code: WaitCode, f: PrFacts, p: Plan, o: Asked): Recommendation {
   const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
-  const github = ON_GITHUB[code];
-  if (github) return { text: github(), parts, merges, goes: "look" };
+  if (onGithub(code)) return { text: ON_GITHUB[code](), parts, merges, goes: "look", cause: { code } };
   const past = MERGE_PAST[code];
   if (past) return { text: past(f), parts, merges: true };
   const why = (REVIEW_AGAIN[code] ?? (() => waitText(p.wait ?? "")))();
@@ -80,15 +82,15 @@ function asItStands(rec: Recommendation, f: PrFacts): Recommendation {
   const code = f.baseOffDefault ? "base-off-default" : f.ci === "none" && f.repoFacts.noCi && f.mergeable !== "CONFLICTING" ? "no-ci" : null;
   if (code === null) return f.screenshots && rec.merges ? { ...rec, text: regression(f, rec.text) } : rec;
   if (!rec.merges) return rec;
-  const text = ON_GITHUB[code]!(), { parts } = rec;
+  const text = ON_GITHUB[code](), { parts } = rec;
   return parts.fix.length
     ? { text: `${text} ${textFor({ fix: parts.fix, merges: false })}`, parts, merges: false }
-    : { text, parts, merges: false, ...(rec.again ? { again: rec.again } : { goes: "look" as const }) };
+    : { text, parts, merges: false, ...(rec.again ? { again: rec.again } : { goes: "look" as const, cause: { code } }) };
 }
 
 /** The question of the PR whose facts are `f` and whose plan is `p`; null when nothing is to be asked. `parts`: the workflow's plan; `conflict`: the conflict with the base branch. */
 export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
-  if (o.approved && (isGone(f.standing?.merge) || f.mergeLacksAccess)) return goneQuestion(f.repo, f.standing?.merge?.login ?? f.may.workflow?.approvedBy ?? "", o);
+  if (o.approved && (isGone(f.standing?.merge) || f.mergeLacksAccess)) return goneQuestion(f.repo, f.standing?.merge?.login ?? f.may.workflow?.approvedBy ?? "", o, !isGone(f.standing?.merge));
   const busy = p.actions.some((a) => worksOn(a) && moves(a));
   // Whoever answers takes the place of a person who is gone.
   if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f) };
@@ -123,4 +125,21 @@ export function itemQuestion(f: ItemFacts, o: Pick<Asked, "approved" | "parts">)
       parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: ended ? "on" : "look",
     },
   };
+}
+
+/** Why a question whose cause clears without an answer closes: what the facts at its head say now. Null while the cause stands, or while they do not say. */
+export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts, approved: boolean): string | null {
+  if (!cause) return null;
+  if (cause.code === "actor-gone") {
+    const s = approved ? f.standing?.merge : f.standing?.work;
+    if (s?.standing !== "yes" || (cause.lane && "mergeLacksAccess" in f && f.mergeLacksAccess)) return null;
+    return t("{login} can act on {repo} again.", { login: s.login, repo: f.repo });
+  }
+  if (!("ci" in f)) return null;
+  switch (cause.code) {
+    case "base-off-default": return f.inScope && !f.baseOffDefault ? t("Its base is the default branch now.") : null;
+    case "no-ci": return !f.repoFacts.noCi || f.ci === "pending" || f.ci === "success" || f.ci === "failure" ? t("CI runs now.") : null;
+    case "mergeable-stuck": return unknownStuck(f) === null && (f.mergeable === "MERGEABLE" || f.mergeable === "CONFLICTING") ? t("GitHub says whether it can be merged now.") : null;
+    case "ci-approval-failed": return f.ci !== "unknown" && f.runs?.blocked !== "failed" && f.runs?.blocked !== "unsupported" ? t("Its CI runs wait for no approval any more.") : null;
+  }
 }

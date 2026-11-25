@@ -46,6 +46,8 @@ export type Recommendation = {
   waits?: "contributor" | "person";
   /** A yes runs no step of its own: the work goes on in the name of the person who says it, or AutoCraft looks again at what they settled on GitHub. */
   goes?: "on" | "look";
+  /** What the question is about, which may clear without an answer: the question closes then and the item goes on. `lane`: the merge itself was refused for its approver's access. */
+  cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
