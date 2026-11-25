@@ -19,7 +19,7 @@ import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-err
 import { exclusive } from "./async-seq.ts";
 import { isFenced } from "./db/fence.ts";
 import type { Db } from "./db/index.ts";
-import { dbLockName, openDb, setDbRole } from "./db/open.ts";
+import { closeDb, dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
@@ -1099,7 +1099,23 @@ async function sync(args: string[]): Promise<void> {
   } finally {
     release();
   }
-  if (stuck.length) process.exit(1);
+  await endRun(stuck.length ? 1 : 0);
+}
+
+/** How long the end of a sync run waits for the database handle to close. */
+const CLOSE_MS = 5_000;
+
+/**
+ * Ends the sync process once its run is done. Whatever still holds the event loop is logged first: nothing should, so a
+ * line here names a handle some code left open. A chore left running past its limit is one of them.
+ */
+async function endRun(code: number): Promise<never> {
+  const open = process.getActiveResourcesInfo();
+  if (open.length) console.log(`sync: open at the end of the run: ${open.join(", ")}`);
+  let t: NodeJS.Timeout | undefined;
+  await Promise.race([closeDb().catch(() => undefined), new Promise((r) => { t = setTimeout(r, CLOSE_MS); })]);
+  clearTimeout(t);
+  process.exit(code);
 }
 
 /** Longest a chore after the mirror run may take before the run goes on without it. */
