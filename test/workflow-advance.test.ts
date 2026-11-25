@@ -22,7 +22,7 @@ import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
-import { startAttempt } from "../src/data/implement/index.ts";
+import { recordAnswers, startAttempt } from "../src/data/implement/index.ts";
 import { recordPlan } from "../src/implement/plan.ts";
 import type { PlanReply } from "../src/implement/types.ts";
 
@@ -239,7 +239,7 @@ async function implementIssue(): Promise<World> {
   return w;
 }
 
-test("an implement question comes back as one recommendation, and a yes answers it so the implementation plans again", async () => {
+test("an implement question is recorded with its options, and an answer makes the implementation plan again", async () => {
   const w = await implementIssue();
   const db = w.db;
   const asks: PlanReply = {
@@ -248,18 +248,17 @@ test("an implement question comes back as one recommendation, and a yes answers 
     workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
   };
   await recordPlan(db, (await currentAttempt(db, "app", 7))!.impl, { callId: null, reply: asks }, { commentsApproved: true, postComment: async () => null, log: () => {} });
-  await advanceWorkflows(db);
-  const wf = (await liveWorkflow(db, "app", 7))!;
-  assert.equal(wf.state, "recommending");
-  assert.deepEqual(wf.plan.map((p) => p.title), ["Globally", "Per document"]);
-  assert.equal(wf.rec?.text, asks.workflow!.recommendation);
+  const attempt = (await currentAttempt(db, "app", 7))!;
+  assert.equal(attempt.impl.state, "asked");
+  const asked = openQuestion(attempt.rounds);
+  const options = (asked.question!.result as { options: { key: string; label: string }[]; recommended: string }).options;
+  assert.deepEqual(options.map((o) => o.label), ["Globally", "Per document"]);
+  assert.equal(asked.answer, null);
 
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 7 }] });
-  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
-  assert.match(r.lines[0]!, /Per document/);
-  const { question, answer } = openQuestion((await currentAttempt(db, "app", 7))!.rounds);
-  const chosen = (question!.result as { options: { key: string; label: string }[] }).options.find((o) => o.key === answer?.option);
-  assert.equal(chosen?.label, "Per document");
+  const chosen = options.find((o) => o.label === "Per document")!;
+  assert.equal(await recordAnswers(db, [{ id: attempt.impl.id, question: asked.question!.id, by: MAINT, via: "dashboard", option: chosen.key }]), 1);
+  const { answer } = openQuestion((await currentAttempt(db, "app", 7))!.rounds);
+  assert.equal(answer?.option, chosen.key);
   assert.equal(answer?.by, MAINT);
   assert.deepEqual(implementStep((await loadItemFact(db, "app", 7))!), { bucket: "plan" });
   assert.equal((await liveWorkflow(db, "app", 7))!.state, "running");
