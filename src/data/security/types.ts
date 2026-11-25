@@ -4,6 +4,7 @@ import type { DB } from "../../db/types.ts";
 
 export type { FindingState, ScanState };
 import type { RefKey } from "../mirror/types.ts";
+import type { ItemRun } from "../inference/types.ts";
 
 export type Ref = RefKey;
 export type HiddenRepos = string[] & { visible?: string[] };
@@ -31,6 +32,12 @@ export type FindingBoardRow = FindingBriefRow & { building_round: number | null;
 export type RoundRow = Selectable<DB["security_fix_rounds"]>;
 export type LogRound = Selectable<DB["security_fix_log"]>;
 export type ScanTestRow = Selectable<DB["security_scan_tests"]>;
+/** A scan test without its patch, as the pages show it. */
+export type ScanTestView = Pick<ScanTestRow, "state" | "detail" | "test_path" | "test_source">;
+/** A live round without its patches and session, as the pages show it. */
+export type LiveRound = Pick<RoundRow, "round" | "state" | "failure" | "created_at">;
+/** The note a finding carries while its fix waits for a confidential build environment. */
+export const ENV_WAIT_NOTE = "Waiting for a confidential build environment.";
 export type BuildingTest = Pick<ScanTestRow, "repo" | "number" | "task_id" | "retried" | "created_at">;
 
 export type FindingPatch = Partial<{
@@ -41,20 +48,26 @@ export type FindingPatch = Partial<{
 export type FindingMove = { repo: string; number: number; from: FindingState[]; to: FindingState; set?: FindingPatch; by?: string };
 
 export type NewArea = { idx: number; name: string; paths: string; entry_points: string; risk: number; why: string | null };
-export type NewScanCall = { scanId: number; kind: string; areaIdx?: number | null; finding?: number | null };
+export type NewScanCall = { scanId: number; kind: string; areaIdx?: number | null; finding?: number | null; resumed?: boolean };
 export type NewFinding = Omit<Selectable<DB["security_findings"]>, "created_at" | "updated_at"> & { created_at?: string; updated_at?: string };
+/** The columns of a finding the scan's verify call needs. */
+export type UnverifiedRow = Pick<FindingRow, "number" | "title" | "severity" | "urgent" | "category" | "refs" | "reach" | "impact">;
 export type ScanRunData = {
   scan: ScanRow; areas: AreaRow[]; known: Pick<FindingRow, "repo" | "number" | "state" | "fingerprint" | "title" | "refs" | "category">[]; nextNumber: number;
-  callCosts: { kind: string; costUsd: number }[]; leftover: { areaIdx: number; unverified: number; findings: number }[];
+  callCosts: { kind: string; costUsd: number }[];
+  /** Per area (by index) that has findings of this scan: whether it has any and its `unverified` ones, by number. */
+  leftover: { areaIdx: number; findings: number; unverified: UnverifiedRow[] }[];
 };
-export type ScanDetailData = { scan: ScanListRow; areas: AreaRow[]; calls: (CallRow & { area_name: string | null })[]; findings: (FindingBriefRow & { scan_test_state: string | null })[]; runs: unknown[] };
+export type ScanDetailData = { scan: ScanListRow; areas: AreaRow[]; calls: (CallRow & { area_name: string | null })[]; findings: (FindingBriefRow & { scan_test_state: string | null })[]; runs: ItemRun[] };
 export type FindingDetailData = {
-  finding: FindingRow; calls: (CallRow & { area_name: string | null })[]; repeats: Pick<FindingRow, "repo" | "number" | "title" | "state">[];
-  scanTest: ScanTestRow | null; log: LogRound[]; rounds: RoundRow[];
+  finding: FindingRow; calls: (CallRow & { area_name: string | null })[]; repeats: Pick<FindingRow, "repo" | "number" | "title" | "state" | "created_at">[];
+  scanTest: ScanTestView | null; log: LogRound[]; rounds: LiveRound[];
 };
-export type FixAdvanceRow = { repo: string; number: number; tasks: { head: number; base: number } | null; roundCreatedAt: string | null; envWaitAt: string | null };
+/** `by` is who started the fix (`decided_by`); `tasks` is null for a finding waiting on a confidential environment. */
+export type FixAdvanceRow = { repo: string; number: number; by: string | null; tasks: { head: number; base: number } | null; roundCreatedAt: string | null; envWaitAt: string | null };
 export type LinkRow = Pick<FindingRow, "repo" | "number" | "state" | "fingerprint" | "title" | "refs" | "category">;
-export type StaleWork = { endedJobScans: number[]; jobless: number[]; findings: FindingKey[] };
+/** `endedJobScans`: active scans whose job ended (`cancelled` when it was cancelled); `jobless`: active scans with no job; `findings`: stuck `fixing` or `landing` findings. */
+export type StaleWork = { endedJobScans: { id: number; cancelled: boolean }[]; jobless: number[]; findings: { repo: string; number: number; state: "fixing" | "landing" }[] };
 export type FindingAttention = {
   openHighCount: number; openHigh: { repo: string; number: number; title: string; created_at: string }[];
   gaveUp: { repo: string; number: number; fix_attempts: number; last_failure: string | null }[];
