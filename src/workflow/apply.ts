@@ -28,7 +28,7 @@ import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
-import { WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
+import { asksForApprover, WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
@@ -220,8 +220,8 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const covered = own === null && !says(input.parsed, "autorepin") ? issue : null;
   if (covered && startsWork(input.parsed)) return out("refused", worksElsewhere(ref, covered, input.clock), covered.id);
   const work = covered ?? own;
-  // An approval whose maker may no longer act on the repo approves nothing: whoever goes on with the merge approves it anew.
-  const lapsed = !!work?.approvedBy && work.approvedBy.toLowerCase() !== login.toLowerCase() && await settlesNow(db, work.approvedBy, repo) === "no";
+  // An approval whose maker may no longer act on the repo, or that the item asks to have made again, approves nothing: whoever goes on with the merge approves it anew.
+  const lapsed = !!work?.approvedBy && (asksForApprover(work) || (work.approvedBy.toLowerCase() !== login.toLowerCase() && await settlesNow(db, work.approvedBy, repo) === "no"));
   const wf = work && lapsed ? { ...work, approvedBy: null, approvedAt: null, approvedVia: null } : work;
   const said: fx.Target = { repo, number: target.number, kind, head };
   const on: fx.Target = covered ? { repo, number: covered.number, kind: covered.kind, head: null } : said;
@@ -421,7 +421,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts).
   if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
   else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits") patch.reviewAskedAt = null;
-  if (runs) patch.state = r.again !== null || r.merges || r.pick ? "running" : r.answers ? "done" : live.state;
+  if (runs) patch.state = r.again !== null || r.merges || r.pick || r.goesOn ? "running" : r.answers ? "done" : live.state;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   return {

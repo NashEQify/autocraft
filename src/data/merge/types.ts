@@ -71,6 +71,8 @@ export type MergeFacts = {
   batchStates: Map<HeadRef, "batch-checking" | "in-batch" | "batch-failed">;
   /** When the batch of each `batch-failed` head failed. */
   batchFailedAt: Map<HeadRef, string>;
+  /** Heads whose screenshots show a clear regression, and when that was found. */
+  regressions: Map<HeadRef, { summary: string | null; at: string }>;
   /** Members of a checking or open batch. */
   activeBatched: Set<RefKey>;
   /** The active batch each of its integration PRs belongs to, members in order. */
@@ -84,7 +86,7 @@ export type BatchListRow = BatchView & { areas: string[] };
 export type { HiddenRepos };
 export type BatchByTask = { id: number; repo: string; branch: string; commitSha: string; baseSha: string; fork: string | null; members: number[] };
 export type BatchDue = { repo: string; id: number; memberRefs: RefKey[] };
-export type BatchEnd = { id: number; by: string; state: "superseded" | "merged" | "failed"; summary: string | null; heldRefs?: RefKey[]; stage?: StageRow[]; audit?: AuditRow[] };
+export type BatchEnd = { id: number; by: string; state: "superseded" | "merged" | "failed"; summary: string | null; stage?: StageRow[]; audit?: AuditRow[] };
 export type BatchUpdate = { id: number; at: string; set: BatchPatch; onlyIf?: BatchState[]; size?: "grow" | "shrink" };
 export type BatchLanded = { batchId: number; runId: string; at: string; mergeSha: string; members: { number: number; head: string; path: string; ci: string | null; mergeable: string | null }[]; by: string };
 

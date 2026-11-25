@@ -134,6 +134,8 @@ export function yesClause(rec: Recommendation): string | null {
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   }
   if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
+  if (rec.goes === "look") return rec.merges ? t("Reply yes to look again, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to look again.");
+  if (rec.goes === "on" && !fix.length && !rec.again) return rec.merges ? t("Reply yes to go on in your name, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to go on in your name.");
   const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
@@ -204,6 +206,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  else if (r.goesOn && !r.merges) did.push(t("going on"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {

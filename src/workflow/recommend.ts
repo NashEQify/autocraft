@@ -27,8 +27,8 @@ export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[])
 
 export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null };
 
-const planned = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "planned").map((p) => p.n);
-const droppedOf = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "dropped").map((p) => p.n);
+export const planned = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "planned").map((p) => p.n);
+export const droppedOf = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "dropped").map((p) => p.n);
 
 /** "Fix 1 and 2, then merge." / "Fix 1, then come back." */
 const fixText = (fix: readonly number[], merges: boolean): string => (merges
@@ -36,7 +36,7 @@ const fixText = (fix: readonly number[], merges: boolean): string => (merges
   : t("Fix {parts}, then come back with the result.", { parts: listText(fix) }));
 
 /** The sentence for what a yes runs, when the review's own sentence does not say it. */
-function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
+export function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
   if (r.close) return t("Close it, as the review recommends.");
   if (r.fix.length) return fixText(r.fix, r.merges);
   if (r.again === "review") return r.merges ? t("Review it again, then merge.") : t("Review it again, then come back with the result.");

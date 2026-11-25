@@ -40,6 +40,8 @@ export type Run = {
   autorepin: string | null;
   /** It answers the open recommendation, which closes. */
   answers: boolean;
+  /** Answers a question whose yes only lets the work go on: the steps end as before. */
+  goesOn: boolean;
   /** The implementation's question this answers, with the option picked, as the person. */
   pick: QuestionAnswer | null;
 };
@@ -83,7 +85,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, autorepin: null, answers: false, pick: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, autorepin: null, answers: false, goesOn: false, pick: null, ...r },
 });
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
@@ -262,7 +264,7 @@ function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: 
 }
 
 /** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
-const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges;
+const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges && !r.goes;
 
 /** Runs the recommendation's plan with these parts; approves the merge when it ends in one (or `merge` was said) and nobody has. */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
@@ -272,7 +274,7 @@ function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number 
   const approve = merges && !wf.approvedBy;
   if (rec.answer && !fix.length) return run({ pick: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
   return run({
-    again: fix.length ? "fixup" : rec.again ?? null, fix, drop, approve, merges, weight, answers: true,
+    again: fix.length ? "fixup" : rec.again ?? null, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
     how: approve ? "approved" : "answered",
   });
 }

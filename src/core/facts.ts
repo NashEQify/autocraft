@@ -382,6 +382,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
   base.handOver = handed !== undefined;
   base.mergeWaiting = mergeWaits(d.mergeActions.get(ref), wfRow, qh);
+  if (c.identity === "app" && mergeWaits(d.mergeActions.get(ref), wfRow, qh, ["waiting-permission"])) base.mergeLacksAccess = true;
   // A hold or close review that the leg went on past is one the person answered after (src/preapproval accepted): it counts as a take.
   const wentOn = !mx && (latest!.verdict === "hold" || latest!.verdict === "close") && !!wfRow
     && !!operator?.legs.some((l) => (l.state === "ci" || l.state === "queued") && l.head === qh && l.workflow_id === wfRow.id && l.updated_at > latest!.at);
@@ -450,6 +451,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note } : null;
   // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
   base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
+  const shots = state === "OPEN" ? d.merge.regressions.get(`${ref}@${qh}`) : undefined;
+  if (shots && (!wfFact || shots.at > wfFact.since)) base.screenshots = { summary: shots.summary };
   if (!base.verification || base.verification.state === "stale") {
     base.verifyUnavailable = !pub ? PRIVATE_REASON : rf.noCi && cachedRust(repo, qh) === false ? NOT_RUST_REASON : null;
   }

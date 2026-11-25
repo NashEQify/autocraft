@@ -1,17 +1,121 @@
-// The question a started PR comes back with when its plan waits for a person. Pure.
-import { MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
-import type { Plan, PrFacts } from "../core/plan.ts";
-import { afterSteps, type Conflict, type ReviewView } from "./recommend.ts";
+// The question a started item comes back with when nothing of it is due and a person has to move it on: its plan waits for one, or the
+// people it acts for can no longer act. Pure.
+import { needsQuestion, type WaitCode } from "../core/codes.ts";
+import { unapprovedStop, worksOn } from "../core/decide.ts";
+import type { Action, ItemFacts, ItemPlan, Plan, PrFacts, StandingFact } from "../core/plan.ts";
+import { t } from "../i18n/index.ts";
+import { afterSteps, droppedOf, onConflict, planned, textFor, type Conflict, type ReviewView } from "./recommend.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
-/** `blocker` and `params` are what an approved item stops at; one not approved comes back with `rec` alone. */
+/** `blocker` and `params` are what an approved item stops at (`params.code`: the wait); one not approved comes back with `rec` alone. */
 export type Question = { blocker: Blocker; params: Record<string, unknown>; rec: Recommendation };
 
+type Asked = { approved: boolean; review: ReviewView | null; parts: readonly PlanPart[]; conflict: Conflict | null };
+
+/** An action that moves the item on by itself, or once something other than a person does. One refused for the question that is being looked at again counts. */
+const moves = (a: Action): boolean => !a.permission || a.permission.ok || a.permission.why.who !== "person" || a.permission.why.code === "blocked";
+
 /** Whether the plan stops for a maintainer's answer: its steps are done, or a review verdict needs a person. */
-const waitsForAnswer = (p: Plan): boolean => p.wait === MAINTAINER_ANSWER_WAIT || p.state === "opus-hold" || p.state === "opus-close";
+const waitsForAnswer = (p: Plan): boolean => p.waitCode === "answer" || p.waitCode === "ci-nothing-to-fix" || p.state === "opus-hold" || p.state === "opus-close";
+
+/** The people the item acts for can no longer write to its repo: whoever says yes takes their place, and an approved merge is approved anew as them. */
+function goneQuestion(repo: string, login: string, o: Pick<Asked, "approved" | "parts">): Question {
+  const text = o.approved
+    ? t("{login} has no write access to {repo} any more, so their approval does not count: approve the merge in their place.", { login, repo })
+    : t("{login} has no write access to {repo} any more, so the work has nobody to act for: go on with it in their place.", { login, repo });
+  return { blocker: "other", params: { code: "actor-gone", reason: `${login} has no write access to ${repo}`, login }, rec: { text, parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: "on" } };
+}
+
+const isGone = (s: StandingFact | null | undefined): s is StandingFact => s?.standing === "no" && !s.boxIdentity;
+
+/** What an approved item waits on that a review of its head may settle, as the question says it. */
+const REVIEW_AGAIN: Partial<Record<WaitCode, () => string>> = {
+  answer: () => t("The review asks for fixes and lists none AutoCraft can make."),
+  "review-failed": () => t("Its review failed too often at this commit."),
+  "ask-failed": () => t("AutoCraft could not post its comment to the contributor."),
+  "ci-fix-failed": () => t("CI fails, and the CI fix could not repair it."),
+  "ci-own-breakage": () => t("CI fails since a push of AutoCraft's, and the CI fix could not repair it."),
+  "ci-nothing-to-fix": () => t("CI fails, and the CI fix has nothing to fix there."),
+  "revision-failed": () => t("The implementation session ended, and its pull request is not ready to merge."),
+};
+
+/** What only a person can change on GitHub. */
+const ON_GITHUB: Partial<Record<WaitCode, () => string>> = {
+  "base-off-default": () => t("Its base is not the default branch, and AutoCraft merges only into that: change its base on GitHub."),
+  "no-ci": () => t("The repo has no CI, and AutoCraft merges only on green CI: add a CI workflow, or merge it on GitHub."),
+  "mergeable-stuck": () => t("GitHub still reports the merge state as unknown: close and reopen the pull request on GitHub, which makes GitHub compute it."),
+  "ci-approval-failed": () => t("AutoCraft could not approve its CI runs: approve them on GitHub."),
+};
+
+/** What the pull request may be merged past, once a person says so. */
+const MERGE_PAST: Partial<Record<WaitCode, (f: PrFacts) => string>> = {
+  "batch-failed": () => t("It failed alone in a merge batch: merge it again in a new one."),
+  "verification-failed": () => t("Its verification failed: merge it anyway."),
+  "merge-refused": (f) => (f.lastMerge?.reason ? t("The merge was refused ({reason}): try it again.", { reason: f.lastMerge.reason }) : t("The merge was refused: try it again.")),
+  screenshots: (f) => regression(f, t("merge it anyway.")),
+};
+
+const regression = (f: PrFacts, rest: string): string =>
+  (f.screenshots?.summary ? t("Its screenshots show a regression ({summary}): {rest}", { summary: f.screenshots.summary, rest }) : t("Its screenshots show a regression: {rest}", { rest }));
+
+/** The sentence of a wait that has none of its own. */
+const waitText = (wait: string): string => t("It waits for {what}.", { what: wait.replace(/\.$/, "") });
+
+function recFor(code: WaitCode, f: PrFacts, p: Plan, o: Asked): Recommendation {
+  const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
+  const github = ON_GITHUB[code];
+  if (github) return { text: github(), parts, merges, goes: "look" };
+  const past = MERGE_PAST[code];
+  if (past) return { text: past(f), parts, merges: true };
+  const why = (REVIEW_AGAIN[code] ?? (() => waitText(p.wait ?? "")))();
+  // The session does not make the review's fixes: a fix-up of ours does.
+  const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];
+  const again = fix.length ? {} : { again: "review" as const };
+  return { text: `${why} ${textFor({ fix, merges, ...again })}`, parts: { ...parts, fix }, merges, ...again };
+}
+
+/** An end recommendation of a PR that no approval merges as it is: the base and the missing CI come first, and its screenshots are named. */
+function asItStands(rec: Recommendation, f: PrFacts): Recommendation {
+  const code = f.baseOffDefault ? "base-off-default" : f.ci === "none" && f.repoFacts.noCi ? "no-ci" : null;
+  if (code === null) return f.screenshots && rec.merges ? { ...rec, text: regression(f, rec.text) } : rec;
+  if (!rec.merges) return rec;
+  const text = ON_GITHUB[code]!(), { parts } = rec;
+  return parts.fix.length
+    ? { text: `${text} ${textFor({ fix: parts.fix, merges: false })}`, parts, merges: false }
+    : { text, parts, merges: false, ...(rec.again ? { again: rec.again } : { goes: "look" as const }) };
+}
 
 /** The question of the PR whose facts are `f` and whose plan is `p`; null when nothing is to be asked. `parts`: the workflow's plan; `conflict`: the conflict with the base branch. */
-export function questionFor(f: PrFacts, p: Plan, o: { approved: boolean; review: ReviewView | null; parts: readonly PlanPart[]; conflict: Conflict | null }): Question | null {
-  if (o.approved || !waitsForAnswer(p)) return null;
-  return { blocker: "other", params: {}, rec: afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict) };
+export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
+  if (o.approved && (isGone(f.standing?.merge) || f.mergeLacksAccess)) return goneQuestion(f.repo, f.standing?.merge?.login ?? f.may.workflow?.approvedBy ?? "", o);
+  const busy = p.actions.some((a) => worksOn(a) && moves(a));
+  // Whoever answers takes the place of a person who is gone.
+  if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f) };
+  if (!o.approved && isGone(f.standing?.work)) return goneQuestion(f.repo, f.standing!.work!.login, o);
+  const code = p.waitCode;
+  if (busy || !code || !p.waitKind || !needsQuestion(code, p.waitKind)) return null;
+  // The implementation's own question, and a review that says hold or close: what the person has not answered comes back by itself (question.ts, blockers.ts).
+  if (code === "implement-question" || code === "implement-stuck" || p.state === "opus-hold" && code === "answer") return null;
+  const rec = recFor(code, f, p, o);
+  return {
+    blocker: code === "verification-failed" ? "major-finding" : "other",
+    params: { code, reason: (p.wait ?? code).replace(/^a person: /, "") }, rec: rec.goes ? rec : onConflict(rec, o.conflict),
+  };
+}
+
+/** The question of an issue whose implementation has no pull request yet; null when nothing is to be asked. The implementation's own questions come back by themselves (question.ts). */
+export function itemQuestion(f: ItemFacts, p: ItemPlan, o: Pick<Asked, "approved" | "parts">): Question | null {
+  const gone = o.approved && isGone(f.standing?.merge) ? f.standing!.merge! : isGone(f.standing?.work) ? f.standing!.work! : null;
+  if (gone) return goneQuestion(f.repo, gone.login, o);
+  const code = p.waitCode;
+  if (!code || !p.waitKind || !needsQuestion(code, p.waitKind) || code === "implement-question" || code === "implement-stuck") return null;
+  if (p.actions.some((a) => a.kind === "implement" && moves(a))) return null;
+  const ended = code === "implement-ended";
+  return {
+    blocker: "other", params: { code, reason: p.wait ?? code },
+    rec: {
+      text: ended ? t("The implementation ended without a merged pull request: implement it again.") : waitText(p.wait ?? ""),
+      parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: ended ? "on" : "look",
+    },
+  };
 }

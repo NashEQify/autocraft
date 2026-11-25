@@ -54,7 +54,7 @@ const storedClassHash = (i: { class_hash: string | null; class_scheme: string | 
 /** Who queued the issue for implementation: who started its live implement workflow. */
 function queuedOf(d: ItemPassData, ref: string): { actors: string[]; at: string } | null {
   const w = d.workflow.live.get(ref);
-  return w?.entry === "implement" ? { actors: d.workflow.actors.get(w.id) ?? [], at: w.startedAt } : null;
+  return w?.entry === "implement" ? { actors: d.workflow.actors.get(w.id) ?? [], at: w.since } : null;
 }
 
 /**
