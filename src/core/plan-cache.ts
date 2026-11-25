@@ -6,7 +6,7 @@ import { cifixBucket, fixupOf, mergeEntry, queueEntry } from "./decide.ts";
 import { pushAllowed } from "./gates.ts";
 import { nextStep } from "./decide-item.ts";
 import { isWork } from "./assignment.ts";
-import type { ItemFacts, MergePath, Plan, PrFacts, WaitKind } from "./plan.ts";
+import type { Action, ItemFacts, MergePath, Plan, PrFacts, WaitKind } from "./plan.ts";
 import { isQueueState } from "./plan.ts";
 import { statusOf, type ItemStatus } from "./item-status.ts";
 import { loadPlanSet, type PlanSet, type PlanSetOptions } from "./plan-set.ts";
@@ -97,6 +97,9 @@ function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFa
   return v;
 }
 
+/** The actions as a row stores them: what is due, without who permits it. */
+const storedActions = (actions: readonly Action[]): string => JSON.stringify(actions.map(({ permission: _, ...a }) => a));
+
 /** One row per PR or item of the set. A PR with item facts gets both its plans in one row. */
 export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOString()): PlanRow[] {
   const prs = new Map(plans.prs.map((p) => [`${p.facts.repo}#${p.facts.number}`, p]));
@@ -112,13 +115,13 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
     const waitKind = hold ? "system" as const : work ? null : pr?.plan.wait != null ? pr.plan.waitKind : item.waitKind;
     rows.push({
       repo: f.repo, number: f.number, kind: f.kind, head: pr?.facts.head ?? null, state: pr ? pr.plan.state : item.state, item_state: item.state,
-      actions: JSON.stringify(actions), wait, reasons: JSON.stringify(pr?.plan.reasons ?? []), note: pr?.plan.note ?? null,
+      actions: storedActions(actions), wait, reasons: JSON.stringify(pr?.plan.reasons ?? []), note: pr?.plan.note ?? null,
       view: JSON.stringify(viewOf(pr, { facts: f, plan: item }, wait, waitKind, plannedAt)),
     });
   }
   // PRs outside the item facts: merged ones with a take review, and PRs of repos that are not tracked.
   for (const { facts: f, plan } of prs.values()) {
-    rows.push({ repo: f.repo, number: f.number, kind: "pr", head: f.head, state: plan.state, item_state: null, actions: JSON.stringify(plan.actions), wait: plan.wait, reasons: JSON.stringify(plan.reasons), note: plan.note, view: JSON.stringify(viewOf({ facts: f, plan }, null, plan.wait, plan.waitKind, plannedAt)) });
+    rows.push({ repo: f.repo, number: f.number, kind: "pr", head: f.head, state: plan.state, item_state: null, actions: storedActions(plan.actions), wait: plan.wait, reasons: JSON.stringify(plan.reasons), note: plan.note, view: JSON.stringify(viewOf({ facts: f, plan }, null, plan.wait, plan.waitKind, plannedAt)) });
   }
   return rows;
 }

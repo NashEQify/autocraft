@@ -60,7 +60,7 @@ export async function moveTurns(db: Db, repo: string, number: number): Promise<v
 /** Whether the issue's implementation may write to the repo without its approval: as the person it runs for. */
 export async function implementMay(db: Db, repo: string, number: number): Promise<MayResult> {
   const by = await queuerOf(db, repo, number);
-  return by ? { ok: true, as: "person", by } : { ok: false, why: `${repo}#${number} is not queued` };
+  return by ? { ok: true, as: "person", by } : { ok: false, code: "not-approved", why: `${repo}#${number} is not queued` };
 }
 
 /** Why an implement job of the issue may not run, or null. `dry`: a dry run, which may run while the repo's Implement switch is off. */

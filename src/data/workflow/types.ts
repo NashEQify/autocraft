@@ -1,6 +1,7 @@
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
 import type { Blocker, Entry, ItemKind, ItemWorkflow, Parsed, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState } from "../../workflow/types.ts";
+import type { Params, StopCode } from "../../core/codes.ts";
 import type { RefKey } from "../mirror/types.ts";
 
 export type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState, RefKey };
@@ -36,7 +37,7 @@ export type NewWorkflow = {
   approvedBy?: string | null; approvedVia?: Surface | null; plan?: PlanPart[]; step?: string | null; at?: string;
 };
 /** The fields of `ItemWorkflow` except identity. */
-export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "updatedAt">>;
+export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "version" | "updatedAt">>;
 export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
 export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string };
@@ -56,7 +57,9 @@ export type LegRow = Preapproval;
 export type LegContext = { workflowId: number; entry: Entry; since: string; approvedBy: string | null };
 /** `requests`: the queued requests of the active legs. */
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
-export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
+export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; /** What `reason` is, as a code, with its parts. */ code?: StopCode; params?: Params; by?: string; via?: string };
+/** What a row was read with, for a write that takes place only while it is still the same. */
+export type WorkflowRead = { state: WorkflowState; updatedAt: string; version?: number };
 /** A queued fix-up request follows the PR's head from `from` to `to`. */
 export type FixupRequestMove = { id: number; from: string; to: string };
 export type LegMoved = LegMove & { repo: string; number: number };

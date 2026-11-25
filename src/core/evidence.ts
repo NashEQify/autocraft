@@ -68,3 +68,57 @@ export const approvedHead = (pushes: readonly RecordedPush[], head: string, sinc
 
 /** A push of ours since the person chose to go on changed more than a checked merge does: the head needs a model's review, also of a PR that merges without one. */
 export const reviewOwed = (pushes: readonly RecordedPush[], head: string, since: string): boolean => pushesSince(pushes, head, since).some((p) => !p.small);
+
+// ---- CI
+
+export type CiState = "success" | "failure" | "pending" | "none" | "unknown";
+type CheckLike = { name: string; state: string };
+
+/**
+ * The CI state merging acts on: a failure whose failing checks are all on the optional list reads as if those
+ * checks had not run (success when nothing else is pending or failing and some other check succeeded).
+ * The stored `overall` and `checks` stay as GitHub reported them.
+ */
+export function effectiveOverall(overall: string, checks: CheckLike[], optional: readonly string[]): string {
+  if (overall !== "failure" || !optional.length) return overall;
+  const failing = checks.filter((c) => c.state === "failure");
+  if (!failing.length || failing.some((c) => !optional.includes(c.name))) return overall;
+  const rest = checks.filter((c) => c.state !== "failure").map((c) => c.state);
+  if (rest.includes("pending")) return "pending";
+  return rest.includes("success") ? "success" : "none";
+}
+
+/** effectiveOverall with the repo's optional list and the PR's stored checks (JSON text or parsed). */
+export function effectiveCiWith(optional: readonly string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
+  if (overall !== "failure") return overall;
+  let list: CheckLike[] = [];
+  try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays failure */ }
+  return effectiveOverall(overall, list, optional);
+}
+
+/**
+ * CI at `head` from the stored checks of the PR: "unknown" when they describe another head or none were read, "pending" while workflow
+ * runs we approved there have not finished (`approvedRuns`), else what the checks say without the repo's optional ones.
+ */
+export function ciAt(
+  c: { head_oid: string | null; overall: string | null; checks: string | CheckLike[] | null } | null | undefined, head: string, o: { optional: readonly string[]; approvedRuns?: number },
+): CiState {
+  if (!c || c.head_oid !== head) return "unknown";
+  if (o.approvedRuns) return "pending";
+  return effectiveCiWith(o.optional, c.overall ?? "none", c.checks) as CiState;
+}
+
+// ---- the heads a person accepted
+
+/**
+ * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`): the workflow's own,
+ * and for an issue's implementation PR the heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
+ */
+export function acceptedHeads(
+  w: { kind: "pr" | "issue"; baseHead: string | null; acceptedHead: string | null }, legs: readonly { from_head: string | null; head: string | null }[],
+): string[] {
+  return [w.baseHead, ...(w.kind === "issue" ? legs.flatMap((l) => [l.from_head, l.head]) : [])].filter((h) => h !== null);
+}
+
+/** Whether `head` is one of `heads` or our own pushes on top of one. */
+export const isAccepted = (heads: readonly string[], pushes: readonly OwnPush[], head: string): boolean => heads.some((h) => chainsOwn(pushes, h, head));

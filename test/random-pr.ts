@@ -223,7 +223,7 @@ function reviewHoldOf(w: PrRows, head: string): PrFacts["reviewHold"] {
   if (w.legs.some((l) => l.state === "review" && l.head === head && (l.fixId !== null || l.head !== l.fromHead))) return undefined;
   const last = w.review;
   if (last && w.gate === "requested") return undefined;
-  if (last?.verdict === "hold" && (last.blockedBy === "open" || last.blockedBy === "asked")) return { kind: "blocked", wait: "app#9 to settle before the next review", ...(last.blockedBy === "asked" ? { person: true } : {}) };
+  if (last?.verdict === "hold" && (last.blockedBy === "open" || last.blockedBy === "asked")) return { kind: "blocked", wait: "app#9, which blocks its review", ...(last.blockedBy === "asked" ? { person: true } : {}) };
   const ci = w.checks.head === head ? w.checks.overall : "unknown";
   if (ci === "pending") return { kind: "ci", wait: "CI on the latest commit to finish" };
   if (ci === "failure" && last && !(last.verdict === "hold" && last.blockedBy === "settled")) return { kind: "ci", wait: "CI on the latest commit to pass", red: true };
@@ -240,7 +240,7 @@ export function factsOf(w: PrRows): PrFacts {
   const heldBacklog = !live && w.ended === "backlog";
   const inScope = !!live || (w.pipelineRepo && !w.outsideHold && !(w.endedOwn && w.ended !== null && w.ended !== "done"));
   const requests = w.request ? [w.request] : [];
-  const legRows = w.legs.map((l) => ({ workflow_id: l.workflow, state: l.state, head: l.head }));
+  const legRows = w.legs.map((l) => ({ workflow_id: l.workflow, state: l.state, from_head: l.fromHead, head: l.head }));
   const wfRow = live ? itemWorkflow(live) : null;
   const outEdge = w.pushedOff ? [{ from: head, to: "next" }] : [];
   // Revisions of our implementation are recorded with the push outcomes, autorepins with their requests, the other pushes by their patch rows.

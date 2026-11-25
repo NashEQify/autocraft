@@ -343,6 +343,12 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "workflow", "TEXT"],
   // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
   ["item_workflows", "step", "TEXT"],
+  // How often a workflow row was written, and the PR head a person accepted (src/core/evidence.ts acceptedHeads).
+  ["item_workflows", "version", "INTEGER NOT NULL DEFAULT 0"],
+  ["item_workflows", "accepted_head", "TEXT"],
+  // Why a merge leg ended, as a code with what it names (src/core/codes.ts StopCode).
+  ["preapprovals", "reason_code", "TEXT"],
+  ["preapprovals", "reason_params", "TEXT"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],
   // The workflow a held follow-up issue belongs to and its merge approval when it was held (src/data/conversations/held.ts).

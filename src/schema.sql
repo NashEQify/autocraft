@@ -2263,7 +2263,9 @@ CREATE TABLE IF NOT EXISTS preapprovals (
   reason TEXT,
   updated_at TEXT NOT NULL,
   fix_id INTEGER,
-  workflow_id INTEGER                 -- the item_workflows row whose merge leg this is; null outside the maintainer workflow
+  workflow_id INTEGER,                -- the item_workflows row whose merge leg this is; null outside the maintainer workflow
+  reason_code TEXT,                   -- what reason is (src/core/codes.ts StopCode); NULL: read from its text
+  reason_params TEXT                  -- JSON: what the reason names
 );
 CREATE INDEX IF NOT EXISTS preapprovals_item ON preapprovals(repo, number, id);
 
@@ -2290,7 +2292,9 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   plan TEXT NOT NULL DEFAULT '[]',
   legacy_preapproval_id INTEGER,
   updated_at TEXT NOT NULL,
-  step TEXT                           -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
+  accepted_head TEXT                  -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);

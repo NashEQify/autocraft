@@ -71,6 +71,8 @@ export type ItemWorkflow = {
   startedAt: string;
   startedVia: Surface;
   baseHead: string | null;
+  /** The PR head a person accepted, for a PR the same head as `baseHead`; null where only `baseHead` and the merge legs say it (src/core/evidence.ts acceptedHeads). */
+  acceptedHead: string | null;
   approvedBy: string | null;
   approvedAt: string | null;
   approvedVia: Surface | null;
@@ -86,6 +88,8 @@ export type ItemWorkflow = {
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */
   step: string | null;
   legacyPreapprovalId: number | null;
+  /** How often the row was written, for the writers that raise it. */
+  version: number;
   updatedAt: string;
 };
 

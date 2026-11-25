@@ -1,7 +1,8 @@
 // The gates on writes: the repo approvals each action needs and the global pipeline switch. Pure. The planner and the
 // guard (guard.ts) both use it; decide() does not (it shows what would run, approved or not).
+import { refusalWho, type Params, type RefusalCode } from "./codes.ts";
 import { ownImplementation } from "./implementation.ts";
-import type { ActionKind, ItemFacts, PrFacts } from "./plan.ts";
+import type { ActionKind, ItemFacts, Permission, PrFacts } from "./plan.ts";
 import { mayMerge, mayPush, mergeApproved, type MayResult, type MergeInputs } from "./may.ts";
 import { tripStageOf } from "./push-outcome.ts";
 
@@ -62,26 +63,36 @@ function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
   return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
 }
 
-/** Why the write is refused, or null. */
-export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
-  if (by === "pipeline" && !f.pipelineOn) return "The pipeline is off";
+const refuse = (code: RefusalCode, text: string, params?: Params): Permission => ({ ok: false, why: { code, who: refusalWho(code), ...(params ? { params } : {}), text } });
+
+/** Whether the write may be made, on whose say and as whom: a merge a person approved is made as them, every other write as the app. */
+export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permission {
+  if (by === "pipeline" && !f.pipelineOn) return refuse("pipeline-off", "The pipeline is off");
   // An implement action of a live attempt whose PR merged or closed only ends the attempt and its workspace: no write, no breaker.
-  if (a.kind === "implement" && endsAttempt(f)) return null;
+  if (a.kind === "implement" && endsAttempt(f)) return { ok: true, as: "app", by: null };
   // A stage that stopped itself on the item's repo (circuit breaker) writes nothing there until it is resumed, whoever asks.
   const stage = tripStageOf(a);
   const tripped = stage && f.tripped?.[stage];
-  if (tripped) return `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`;
+  if (tripped) return refuse("breaker", `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`, { stage, reason: tripped });
   const need = approvalOf(f as { pushable?: boolean }, a);
-  if (!need) return null;
-  if (commandedBy(f, a) !== null) return null;
+  if (!need) return { ok: true, as: "app", by: null };
+  const commander = commandedBy(f, a);
+  if (commander !== null) return { ok: true, as: "app", by: { kind: "person", login: commander } };
   if ("may" in f && (need === "merge" || need === "push")) {
     const may = need === "merge" ? mergeMay(f) : pushMay(f, a);
-    return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
+    if (!may.ok) return refuse(may.code, `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`, { need, repo: f.repo });
+    return { ok: true, as: need === "merge" && may.as === "person" ? `user:${may.by}` : "app", by: { kind: may.as, login: may.by } };
   }
   const r = f.repoFacts as Partial<Record<"commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
   // An item (no PR facts) has no merge and no push of its own.
   const ok = { merge: undefined, push: undefined, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
-  return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
+  return ok ? { ok: true, as: "app", by: null } : refuse("repo-approval", `${WHAT[need]} in ${f.repo} are not approved`, { need, repo: f.repo });
+}
+
+/** Why the write is refused, or null. */
+export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
+  const p = gatePermission(f, a, by);
+  return p.ok ? null : p.why.text;
 }
 
 const mergeInputs = (f: PrFacts): MergeInputs =>
@@ -90,13 +101,16 @@ const mergeInputs = (f: PrFacts): MergeInputs =>
 /** Whether the PR may be merged at its head (src/core/may.ts). */
 export const mergeMay = (f: PrFacts): MayResult => mayMerge(mergeInputs(f));
 
+/** Whether the merge of the PR at its head is approved, handed over or not, on whose say (`mergeApproved`, src/core/may.ts). */
+export const mergeApproval = (f: PrFacts): MayResult => mergeApproved(mergeInputs(f));
+
 /** `mergeMay` as a yes or no. */
 export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f).ok;
 
-/** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts). */
-export const mergeAllowed = (f: PrFacts): boolean => mergeApproved(mergeInputs(f)).ok;
+/** `mergeApproval` as a yes or no. */
+export const mergeAllowed = (f: PrFacts): boolean => mergeApproval(f).ok;
 
-type PushKind = "fixup" | "cifix" | "conflict";
+export type PushKind = "fixup" | "cifix" | "conflict";
 
 /** The push kind `mayPush` judges for an action that pushes. */
 function pushKind(a: Want): PushKind {
@@ -106,7 +120,7 @@ function pushKind(a: Want): PushKind {
 }
 
 /** Whether a push of `kind` is approved (src/core/may.ts). `operatorFix`: a person's fix-up request. */
-const pushMayOf = (f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult =>
+export const pushMayOf = (f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult =>
   mayPush({ kind, repoApproval: f.may.repoPush, workflow: f.may.workflow, operatorFix, ...(operatorFix && f.may.fixupBy ? { by: f.may.fixupBy } : {}) });
 const pushMay = (f: PrFacts, a: Want): MayResult => pushMayOf(f, pushKind(a), a.source === "operator");
 

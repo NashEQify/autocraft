@@ -1,7 +1,8 @@
 import type { StepApproval } from "../data/control/types.ts";
 import type { ActionState, EndedWorkflow, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
-import { chainsOwn, type OwnPush } from "./evidence.ts";
+import type { RefusalCode } from "./codes.ts";
+import { acceptedHeads, chainsOwn, type OwnPush } from "./evidence.ts";
 
 export type WorkflowGate = {
   live: boolean;
@@ -12,6 +13,8 @@ export type WorkflowGate = {
   approvedAt: string | null;
   blocker: string | null;
   baseHead: string | null;
+  /** The heads a person accepted (src/core/evidence.ts acceptedHeads, isAccepted); absent in a gate that judges one head by itself. */
+  accepted?: readonly string[];
   fixupAsked: boolean;
   /** Its merge leg on the PR while the leg is active; null before it starts and once it ended (cancelled, failed). */
   leg: { state: string; head: string | null } | null;
@@ -23,20 +26,20 @@ export type WorkflowGate = {
  * so its implementation PR's base is the head its leg is at: the leg starts at a head of ours or one a person answered at, and
  * follows our own pushes only.
  */
-export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "head">[] } = {}): WorkflowGate | null {
+export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "from_head" | "head">[] } = {}): WorkflowGate | null {
   if (!w) return null;
-  const leg = o.legs?.findLast((l) => l.workflow_id === w.id);
+  const legs = (o.legs ?? []).filter((l) => l.workflow_id === w.id), leg = legs.at(-1);
   return {
     live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
-    blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, fixupAsked: o.fixupAsked ?? false,
+    blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, accepted: acceptedHeads(w, legs), fixupAsked: o.fixupAsked ?? false,
     leg: leg ? { state: leg.state, head: leg.head } : null,
   };
 }
 
-export type MayResult = { ok: true; as: "person" | "repo"; by: string } | { ok: false; why: string };
+export type MayResult = { ok: true; as: "person" | "repo"; by: string } | { ok: false; code: RefusalCode; why: string };
 
 const person = (by: string): MayResult => ({ ok: true, as: "person", by });
-const refuse = (why: string): MayResult => ({ ok: false, why });
+const refuse = (code: RefusalCode, why: string): MayResult => ({ ok: false, code, why });
 const REPO_OFF = "An operator, or a maintainer of the repo, turns it on on the Repos page.";
 const ENDS_WITH_RECOMMENDATION = "Nobody approved this yet; the workflow ends with a recommendation.";
 
@@ -64,15 +67,15 @@ export type MergeInputs = {
 export function mergeApproved(f: MergeInputs): MayResult {
   const w = f.workflow;
   if (w?.live) {
-    if (w.blocker) return refuse(`The workflow asks again: ${w.blocker}`);
-    if (w.baseHead === null || !chainsOwn(f.pushes, w.baseHead, f.head)) return refuse("The author pushed commits after the workflow started; the workflow asks again before merging.");
-    if (w.approvedBy === null && w.entry !== "merge") return refuse(ENDS_WITH_RECOMMENDATION);
+    if (w.blocker) return refuse("blocked", `The workflow asks again: ${w.blocker}`);
+    if (w.baseHead === null || !chainsOwn(f.pushes, w.baseHead, f.head)) return refuse("unaccepted-head", "The author pushed commits after the workflow started; the workflow asks again before merging.");
+    if (w.approvedBy === null && w.entry !== "merge") return refuse("not-approved", ENDS_WITH_RECOMMENDATION);
     return person(w.approvedBy ?? w.startedBy);
   }
   const ended = f.ended && ENDED_WHY[f.ended];
-  if (ended) return refuse(ended);
-  if (f.duplicates?.length) return refuse(`It duplicates ${f.duplicates.join(", ")}; it merges once a maintainer starts it.`);
-  return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse(REPO_OFF);
+  if (ended) return refuse("ended", ended);
+  if (f.duplicates?.length) return refuse("duplicate", `It duplicates ${f.duplicates.join(", ")}; it merges once a maintainer starts it.`);
+  return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse("repo-approval", REPO_OFF);
 }
 
 /**
@@ -84,7 +87,7 @@ export function mayMerge(f: MergeInputs): MayResult {
   const w = f.workflow;
   if (!r.ok || !w?.live) return r;
   if (w.leg?.state === "queued" && w.leg.head === f.head) return r;
-  return refuse(w.leg ? "The merge waits for the workflow's steps to hand it over." : "The workflow's merge is not under way; it merges once the workflow hands it over.");
+  return refuse("not-handed-over", w.leg ? "The merge waits for the workflow's steps to hand it over." : "The workflow's merge is not under way; it merges once the workflow hands it over.");
 }
 
 export function mayPush(f: {
@@ -97,17 +100,17 @@ export function mayPush(f: {
   const w = f.workflow;
   if (f.operatorFix) {
     const by = f.by ?? w?.approvedBy ?? w?.startedBy;
-    return by ? person(by) : refuse("The fix-up command does not name who asked for it.");
+    return by ? person(by) : refuse("request-unnamed", "The fix-up command does not name who asked for it.");
   }
   if (w?.live) {
-    if (f.kind === "implement-revision") return w.entry === "implement" ? person(w.startedBy) : refuse("Only an implement workflow revises its own pull request.");
+    if (f.kind === "implement-revision") return w.entry === "implement" ? person(w.startedBy) : refuse("not-approved", "Only an implement workflow revises its own pull request.");
     if (f.kind === "fixup") {
       if (w.entry !== "review" || w.fixupAsked) return person(w.startedBy);
-      return w.approvedBy !== null ? person(w.approvedBy) : refuse(ENDS_WITH_RECOMMENDATION);
+      return w.approvedBy !== null ? person(w.approvedBy) : refuse("not-approved", ENDS_WITH_RECOMMENDATION);
     }
-    return w.entry !== "review" || w.approvedBy !== null ? person(w.approvedBy ?? w.startedBy) : refuse(ENDS_WITH_RECOMMENDATION);
+    return w.entry !== "review" || w.approvedBy !== null ? person(w.approvedBy ?? w.startedBy) : refuse("not-approved", ENDS_WITH_RECOMMENDATION);
   }
-  return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse(REPO_OFF);
+  return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse("repo-approval", REPO_OFF);
 }
 
 /** States of a person action that waits for its person's sign-in or access. */

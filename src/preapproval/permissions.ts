@@ -90,3 +90,7 @@ export async function settlesLive(db: Db, login: string, repo: string, read: Ref
   }
   return standing(await load(), identity);
 }
+
+/** `settlesLive`, with its options in one argument: whether what `login` approved, started or asked for on `repo` counts, with write access confirmed now. */
+export const standsLive = (db: Db, login: string, repo: string, o: { permission?: RefreshDeps["permission"]; accepted?: boolean } = {}): Promise<Standing> =>
+  settlesLive(db, login, repo, o.permission, { ...(o.accepted !== undefined ? { accepted: o.accepted } : {}) });
