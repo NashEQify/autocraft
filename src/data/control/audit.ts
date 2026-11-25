@@ -164,20 +164,20 @@ export async function loadPaceWaits(db: Db, keys: PaceKey[], now: number): Promi
 }
 
 /** A resumed job's earlier successful and unfinished write rows (those with a `writeKey`), newest first, by `action\ttarget`. */
-export async function loadMadeBefore(db: Db, jobId: number, before: string): Promise<Map<string, { id: number; details: Details }[]>> {
+export async function loadMadeBefore(db: Db, jobId: number, before: string): Promise<Map<string, { id: number; at: string; details: Details }[]>> {
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "action", "target", "details"]).$narrowType<{ details: string }>()
+  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "at", "action", "target", "details"]).$narrowType<{ details: string }>()
     .where("at", "<", before).where("target", "is not", null)
     .where((eb) => eb.and([
       eb(kx.jsonNum(db, valid(db, eb), "$.jobId"), "=", jobId),
       eb(kx.jsonText(db, valid(db, eb), "$.writeKey"), "is not", null),
-      eb(kx.jsonText(db, valid(db, eb), "$.state"), "in", ["done", "started"]),
+      eb(kx.jsonText(db, valid(db, eb), "$.state"), "in", ["done", "started", "failed"]),
     ]))
     .orderBy(kx.rowid(AUDIT), "desc"));
-  const out = new Map<string, { id: number; details: Details }[]>();
+  const out = new Map<string, { id: number; at: string; details: Details }[]>();
   for (const r of rows) {
     const key = `${r.action}\t${r.target}`;
-    (out.get(key) ?? out.set(key, []).get(key)!).push({ id: Number(r.id), details: parseDetails(r.details) ?? {} });
+    (out.get(key) ?? out.set(key, []).get(key)!).push({ id: Number(r.id), at: r.at, details: parseDetails(r.details) ?? {} });
   }
   return out;
 }

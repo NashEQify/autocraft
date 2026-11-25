@@ -205,6 +205,28 @@ describe("runner", () => {
       await comment("something else");
       assert.equal(posts, 2, "a comment the earlier run did not post is posted");
 
+      // The earlier run stopped, or lost GitHub's answer, during a comment: GitHub's own list of comments settles it.
+      const started = (await db.get(db.k.selectFrom("audit").select([rowid("audit").as("id"), "details"]).where("action", "=", "act-comment").where("details", "like", `%"jobId":${id},%`).where("details", "like", "%hello%").limit(1)))!;
+      const was = JSON.parse(started.details!) as { text: string };
+      let resumes = 1;
+      const outcome = async (state: "started" | "failed") => {
+        await db.run(db.k.updateTable("jobs").set({ resumes: ++resumes, started_at: new Date(Date.now() + 1000 * resumes).toISOString() }).where("id", "=", id));
+        await db.run(db.k.updateTable("audit").set({ details: JSON.stringify({ ...was, url: undefined, state, ...(state === "failed" && { error: "timeout" }) }) }).where(rowid("audit"), "=", started.id));
+      };
+      const on = (seen: string | null) => async (_cmd: string, args: string[]) => args[0] !== "api" ? await exec() : seen === null ? { code: 1, stdout: "", stderr: "no network" } : { code: 0, stdout: seen, stderr: "" };
+      const retry = (seen: string | null) => ghComment({ db, login: "act" }, g, on(seen), "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, "hello");
+      for (const state of ["started", "failed"] as const) {
+        await outcome(state);
+        const r = await retry(`${JSON.stringify({ url: "https://github.com/storytold/app/issues/3#issuecomment-77", body: was.text, at: new Date().toISOString() })}\n`);
+        assert.match(r.stdout, /issuecomment-77/);
+        assert.equal(posts, 2, "a comment GitHub already shows is not posted again");
+      }
+      await outcome("started");
+      await assert.rejects(retry(null), /could not be read/);
+      assert.equal(posts, 2, "nothing is posted while GitHub cannot be read");
+      await retry("");
+      assert.equal(posts, 3, "a comment GitHub does not show was never made");
+
       // A stopping job lets a write in flight finish and be recorded, and refuses writes asked for after the stop.
       let send = (): void => {};
       const slow = async () => { await new Promise<void>((r) => { send = r; }); return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-9\n", stderr: "" }; };
