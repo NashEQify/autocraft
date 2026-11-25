@@ -49,7 +49,7 @@ export interface GithubSide {
 }
 export interface ItemPageHeader {
   labels: string[]; assignees: string[]; autocraftAssigned: boolean; pipelineOn: boolean; discord: DiscordInfo | null; queue: QueueSlot | null;
-  fastTracked: boolean; held: boolean; preapproval: Preapproval | null; releases: ItemReleases; tier: Tier; size: "S" | "M" | "L" | "XL" | null;
+  held: boolean; preapproval: Preapproval | null; releases: ItemReleases; tier: Tier; size: "S" | "M" | "L" | "XL" | null;
   /** `held`: a Backlog answer holds the item; `canSettle`: the viewer may put it on the Backlog. */
   backlog: { held: boolean; canSettle: boolean };
 }
@@ -122,7 +122,6 @@ function headerOf(c: Ctx, f: ItemPageFacts, it: Item, backlog: ItemPageHeader["b
   return {
     labels: it.labels, assignees,
     autocraftAssigned: c.box !== "" && assignees.includes(c.box), pipelineOn: it.pipelineOn, discord: it.discord, queue: it.queue,
-    fastTracked: false,
     held: f.trace.header.hold !== null,
     preapproval: it.kind === "pr" ? it.preapproval : null, releases: it.releases, tier: it.tier,
     size: it.kind !== "pr" ? null : lines < 50 ? "S" : lines < 300 ? "M" : lines < 1000 ? "L" : "XL",

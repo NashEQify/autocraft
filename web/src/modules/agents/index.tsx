@@ -4,7 +4,6 @@ import { RobotIcon } from "@phosphor-icons/react";
 
 const AgentsView = lazyView(() => import("./views"), "AgentsView");
 const DetailPanel = lazyView(() => import("./views"), "DetailPanel");
-const FlowRunning = lazyView(() => import("./views"), "FlowRunning");
 const PhoneAgents = lazyView(() => import("./views"), "PhoneAgents");
 const ModelQueueView = lazyView(() => import("./queue"), "ModelQueueView");
 
@@ -12,7 +11,6 @@ export const agentsModule: FeatureModule = {
   id: "agents",
   permission: "viewer",
   nav: { label: "Model calls", icon: RobotIcon, to: "/agents" },
-  slots: [{ slot: "flow.panel", order: 10, component: FlowRunning }],
   routes: [
     {
       path: "agents/:id?",

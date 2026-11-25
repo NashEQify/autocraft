@@ -1,4 +1,4 @@
-// GET /api/maintain/home: the new Home's read (behind each user's `ui_v2` switch). Items come from the live workflow rows
+// GET /api/maintain/home: Home's read. Items come from the live workflow rows
 // (src/workflow/store.ts) of the repos the reader may see, narrowed to the picked project. An item needs an answer when its
 // recommendation is open or its last answer was unclear; it counts for the reader only where they may act on the repo
 // (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
@@ -58,7 +58,7 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const live = new Set(facts.rows.map((w) => w.repo));
   const may = req.user.role === "viewer" ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
   const acting = new Set([...live].filter((_, i) => may[i]));
-  const stops = await stoppedRows(db, facts.attention.stops, hidden, req.user);
+  const stops = await stoppedRows(facts.attention.stops, hidden);
   const [attention, runner] = await Promise.all([
     problems(db, { hidden, staff, nowMs, mode, stops, facts: facts.attention }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
@@ -84,13 +84,12 @@ function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>[
 }
 
 /**
- * What the new Work queue page needs beyond the classic reads: every visible repo is on the workflow (their holds go through the
- * workflow controls) and who approved each started item for merge.
+ * Who approved each started item for merge, for the Work queue.
  */
 export async function queueMeta(db: Db, req: Req): Promise<MaintainQueueMeta> {
   const repos = await visibleRepos(db, req);
   const meta = await loadQueueMeta(db, { repos });
-  return { newRepos: repos, approvedBy: Object.fromEntries(meta.approvedBy) };
+  return { approvedBy: Object.fromEntries(meta.approvedBy) };
 }
 
 const DAY = 86400_000;
@@ -113,7 +112,7 @@ export async function stats(db: Db, req: Req): Promise<MaintainStats> {
   return { period: days === 30 ? "30d" : "7d", merged, implemented, reviewed: f.reviewed, backlog: f.backlog, backlogChange: f.created - closedN, spend: Math.round(f.spendUsd), perDay: labels.map((d) => ({ day: d, n: perDay.get(d)! })) };
 }
 
-// ---- GET /api/maintain/items: the new Items page ------------------------------------------------------------------------
+// ---- GET /api/maintain/items: the Items page ------------------------------------------------------------------------
 // Open items of the repos the reader may see, in four lists (groupOf), each ordered by priority: the workflow weight, then the
 // work rank (src/rank). A started item's line comes from its workflow row; an item nobody started shows the pipeline's status
 // line (the plan view), veiled for the reader as on every other list. Grouping runs here over the open items' narrow columns;
@@ -250,7 +249,7 @@ export async function repos(db: Db, req: Req): Promise<MaintainRepo[]> {
     }
     const live = f.live.get(r.name);
     out.push({
-      name: r.name, workflow: "new", automatic: r.pipeline, canRun: await mayRunRepo(req.user, r.name),
+      name: r.name, automatic: r.pipeline, canRun: await mayRunRepo(req.user, r.name),
       open: f.open.get(r.name) ?? 0, started: live?.started ?? 0, waiting: live?.waiting ?? 0, mergedWeek: f.mergedWeek.get(r.name) ?? 0, trips: stops,
     });
   }

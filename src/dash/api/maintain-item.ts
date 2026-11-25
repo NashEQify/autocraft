@@ -1,7 +1,7 @@
-// GET /api/maintain/items/:repo/:n: the new item page's AutoCraft side (behind each user's `ui_v2` switch). It reads the item's
+// GET /api/maintain/items/:repo/:n: the item page's AutoCraft side. It reads the item's
 // workflow (src/workflow/store.ts) and builds every line with src/workflow/status.ts, so the page says what GitHub, Discord and
-// the agent say. Around it: the signals (duplicates, questions a flip withdrew), security findings of a fix PR, an outside-author
-// hold and the breakers that pause the repo. Viewers get no findings and no withdrawn questions; on a quiet pull request (a
+// the agent say. Around it: the signals (duplicates), security findings of a fix PR, an outside-author
+// hold and the breakers that pause the repo. Viewers get no findings; on a quiet pull request (a
 // security fix) they get no model text either.
 import type { MaintainDuplicate, MaintainEvent, MaintainFinding, MaintainItem, MaintainItemStatus } from "../../../web/src/api/types.ts";
 import type { FindingSeverity, FindingState } from "../../../web/src/api/types.ts";
@@ -101,12 +101,11 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const shown: MaintainEvent[] = events.flatMap((e) => (e.kind === "archived" ? [] : [{ id: e.id, at: e.at, login: e.login, via: e.via ?? "cli", kind: e.kind, line: e.line ?? "" }]));
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
-    repo, number: n, kind: facts.kind, workflowRepo: true, canAct: may,
+    repo, number: n, kind: facts.kind, canAct: may,
     status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf)) : null,
     events: shown,
     duplicates: facts.duplicates.map((d): MaintainDuplicate => ({ repo, number: d.other, kind: d.shown?.kind === "issue" ? "issue" : "pr", state: d.shown?.state ?? "open", title: d.shown?.title ?? "", canonical: d.canonical }))
       .sort((a, b) => a.number - b.number),
-    withdrawn: [],
     security: facts.findings.map((r): MaintainFinding => ({ number: r.number, title: r.title, severity: r.severity as FindingSeverity, state: r.state as FindingState })),
     outside: hold && hold.author !== null ? { reason: hold.reason === "surge" ? "surge" : "limit", author: hold.author, canRelease: may } : null,
     breakers,

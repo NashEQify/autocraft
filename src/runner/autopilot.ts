@@ -1008,9 +1008,8 @@ export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outsid
   const [live, marks] = await db.together(() => Promise.all([loadLiveConfig(db), loadLaneState(db, ["mark"])]));
   const limits = await stageLimits(db);
   return {
-    judgementModel: "", judgementModels: [],
     enabled: live.pipelineEnabled, draining: live.drain, changedBy: live.changedBy, changedAt: live.changedAt,
-    heartbeat: marks.get("mark|heartbeat|")?.value ?? null, limits, pilot: [],
+    heartbeat: marks.get("mark|heartbeat|")?.value ?? null, limits,
   };
 }
 

@@ -1,4 +1,4 @@
-// The new dashboard's reference pages: Prompts, Environments, Repos and Scans.
+// The reference pages: Prompts, Environments, Repos and Scans.
 import type { FeatureModule } from "../../registry/types";
 import { lazyView } from "../../registry/lazyView";
 import { t } from "../../../../src/i18n/index.ts";

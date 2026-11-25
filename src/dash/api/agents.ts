@@ -66,7 +66,7 @@ function intParam(req: Req, name: string): number | undefined {
 export const list = async (db: Db, req: Req) => wrap(async () => {
   const q = (k: string) => req.query.get(k) || undefined;
   const f: AgentRunFilter = {
-    state: q("state") as AgentRunState | "recent" | undefined, step: q("step"), account: q("account"), repo: q("repo"), cursor: q("cursor"), limit: intParam(req, "limit"),
+    state: q("state") as AgentRunState | "recent" | undefined, step: q("step"), repo: q("repo"), cursor: q("cursor"), limit: intParam(req, "limit"),
   };
   return await listRuns(db, f, await hiddenRepos(db, req), canSeeInternals(req));
 });

@@ -47,7 +47,7 @@ function Items({ r, max = 3, expandable }: { r: AgentRun; max?: number; expandab
   );
 }
 
-const who = (r: AgentRun): ReactNode => (r.provider === "jev" ? "Jev (no account)" : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account"));
+const who = (r: AgentRun): ReactNode => (r.provider === "jev" ? "Jev" : r.via ? <RemoteVia via={r.via} /> : "–");
 
 // ---- running now ---------------------------------------------------------------
 
@@ -92,7 +92,6 @@ function useRecent(filter: Omit<AgentRunFilter, "cursor">) {
 }
 
 function Filters({ f, update }: { f: Record<string, string | undefined>; update: (p: Record<string, string | null>) => void }) {
-  const accounts = useQuery("agents-accounts", (a) => a.accounts.list());
   const steps = useQuery("agents-steps", (a) => a.pipeline.overview());
   const repos = useQuery("agents-repos", (a) => a.repos());
   const sel = (label: string, key: string, opts: { value: string; label: string }[]) => (
@@ -110,8 +109,7 @@ function Filters({ f, update }: { f: Record<string, string | undefined>; update:
   );
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line px-4 py-2">
-      {sel("Step", "step", (steps.data?.steps ?? []).filter((s) => ["classify-new", "classify-all", "areas-rescan"].includes(s.name)).map((s) => ({ value: s.name, label: s.name })).concat([{ value: "decide", label: "decide" }, { value: "opus-review", label: "opus-review" }]).filter((o, i, a) => a.findIndex((x) => x.value === o.value) === i))}
-      {sel("Account", "account", (accounts.data ?? []).map((a) => ({ value: a.id, label: a.label })))}
+      {sel("Step", "step", (steps.data?.steps ?? []).filter((s) => ["classify-new", "classify-all", "areas-rescan"].includes(s.name)).map((s) => ({ value: s.name, label: s.name })).concat([{ value: "opus-review", label: "opus-review" }]).filter((o, i, a) => a.findIndex((x) => x.value === o.value) === i))}
       {sel("State", "state", [{ value: "done", label: "Done" }, { value: "failed", label: "Failed" }])}
       {sel("Repo", "repo", (repos.data ?? []).map((r) => ({ value: r, label: r })))}
     </div>
@@ -120,7 +118,7 @@ function Filters({ f, update }: { f: Record<string, string | undefined>; update:
 
 function RecentRuns({ selected }: { selected?: number }) {
   const { state: f, update } = useUrlState();
-  const recent = useRecent({ state: (f.state as AgentRunState | undefined) ?? "recent", step: f.step, account: f.account, repo: f.repo, limit: 50 });
+  const recent = useRecent({ state: (f.state as AgentRunState | undefined) ?? "recent", step: f.step, repo: f.repo, limit: 50 });
   useNow(recent.rows.some((r) => r.state === "running") ? 1000 : undefined);
   return (
     <Block flush title="Recent runs" aside="newest first">
@@ -133,7 +131,7 @@ function RecentRuns({ selected }: { selected?: number }) {
               <th className="h-8 px-3 text-left font-medium">Started</th>
               <th className="h-8 px-3 text-left font-medium">Step</th>
               <th className="h-8 px-3 text-left font-medium max-md:hidden">Model</th>
-              <th className="h-8 px-3 text-left font-medium max-md:hidden">Account</th>
+              <th className="h-8 px-3 text-left font-medium max-md:hidden">Task Runner</th>
               <th className="h-8 px-3 text-left font-medium">Items</th>
               <th className="h-8 px-3 text-right font-medium max-md:hidden">Tokens</th>
               <th className="h-8 px-3 text-left font-medium max-md:hidden">State</th>
@@ -152,7 +150,7 @@ function RecentRuns({ selected }: { selected?: number }) {
                   </Link>
                 </td>
                 <td className="px-3 max-md:hidden">{r.model}</td>
-                <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" ? "–" : r.via ? <RemoteVia via={r.via} /> : r.accountLabel}</td>
+                <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" ? "–" : r.via ? <RemoteVia via={r.via} /> : "–"}</td>
                 <td className="px-3">
                   <Items r={r} max={2} />
                 </td>
@@ -275,11 +273,11 @@ export function DetailPanel({ params }: ViewProps) {
 
 // ---- page ----------------------------------------------------------------------
 
-export function AgentsView({ params, user }: ViewProps) {
+export function AgentsView({ params }: ViewProps) {
   const id = params.id ? Number(params.id) : undefined;
   return (
     <Page title="Agents" sub="Model calls through the prompt registry">
-      {user.inference === "user-local" && <RunsQueueSwitch value="runs" />}
+      <RunsQueueSwitch value="runs" />
       <div className="mt-4 space-y-4">
         <RunningNow selected={id} />
         <RecentRuns selected={id} />
@@ -313,42 +311,3 @@ export function PhoneAgents(props: ViewProps) {
 }
 
 /** The model calls running now in a flowchart stage's steps (slot flow.panel). */
-export function FlowRunning({ params }: ViewProps) {
-  const steps = (params.steps ?? "").split(",").filter(Boolean);
-  const q = useQuery<AgentRunPage>("agents-running", (a) => a.agents.list({ state: "running" }));
-  const runs = (q.data?.runs ?? []).filter((r) => steps.includes(r.step));
-  useNow(runs.length ? 1000 : undefined);
-  if (steps.length === 0) return null;
-  return (
-    <section className="border-t border-line px-4 py-3">
-      <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2">
-        <h3 className="text-xs font-semibold text-ink/60">Running now{q.data && <span className="num ml-1 font-normal text-ink/50">{runs.length}</span>}</h3>
-        <span className="ml-auto flex gap-2 text-xs">
-          {steps.map((s) => (
-            <Link key={s} to={`/agents?step=${encodeURIComponent(s)}`} className="text-accent-ink hover:underline">
-              {steps.length > 1 ? `Agents: ${s}` : "Agents page"}
-            </Link>
-          ))}
-        </span>
-      </div>
-      <ErrorLine error={q.error?.message} />
-      {q.data && runs.length === 0 && <p className="text-sm text-ink/55">No model call is running.</p>}
-      <ul className="divide-y divide-line">
-        {runs.map((r) => (
-          <li key={r.id} className="py-1.5">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <Link to={`/agents/${r.id}`} className="code text-sm font-medium hover:underline">{r.step}</Link>
-              <Badge tone="accent">{r.model}</Badge>
-              <span className="text-xs text-ink/70">{r.provider === "jev" ? "Jev" : r.via ? <RemoteVia via={r.via} /> : (r.accountLabel ?? "unknown account")}</span>
-              <span className="num ml-auto text-xs text-ink/70">{elapsed(r)}</span>
-            </div>
-            <div className="mt-0.5">
-              <Items r={r} />
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
