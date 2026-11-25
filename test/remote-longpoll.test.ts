@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
 
 // Every user-local window, the hold included, at a fifth: a 25 s hold is 5 s, the full retry every second. Read on import.
 process.env.AUTOCRAFT_REMOTE_TIME_SCALE = "0.2";
+const { SCRATCH } = await import("./scratch.ts");
+const { connectDb } = await import("../src/db/open.ts");
 const { addLogin } = await import("../src/access.ts");
 const { apiRoutes } = await import("../src/dash/api/index.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");
@@ -78,12 +78,12 @@ describe("long-polling claims", async () => {
   test("a held claim with nothing to take answers empty at its deadline and records its helper as idle", async () => {
     const r = claim("bob", { wait: 2 });
     await sleep(100);
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL WHERE id = ?").run(tokens.bob!.id);
+    await db.prepare("UPDATE remote_helpers SET idle_claim_at = NULL WHERE token_id = ?").run(tokens.bob!.id);
     const { reply, held } = await r;
     assert.equal(reply.lease, null);
     assert.equal(reply.retryAfter, 0.2);
     assert.ok(held >= 350 && held < 1500, `held ${held} ms of a 400 ms hold`);
-    assert.ok((await db.prepare("SELECT idle_claim_at FROM mcp_tokens WHERE id = ?").get(tokens.bob!.id) as { idle_claim_at: number | null }).idle_claim_at !== null);
+    assert.ok((await db.prepare("SELECT idle_claim_at FROM remote_helpers WHERE token_id = ?").get(tokens.bob!.id) as { idle_claim_at: number | null }).idle_claim_at !== null);
   });
 
   test("a protocol 3 claim is answered at once, whatever it sends as wait", async () => {
