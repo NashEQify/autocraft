@@ -31,7 +31,7 @@ import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { boundAccess } from "../github/commands.ts";
 import { commitIdentity } from "../github/identity.ts";
 import { pipelineAccount } from "../github/pipeline-account.ts";
-import { ghComment, pushRepin, WritePacedError } from "../github/write.ts";
+import { ghComment, pushRepin, WritePacedError, type Writer } from "../github/write.ts";
 import type { Querier } from "../mirror.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission } from "../remote/permission.ts";
@@ -195,6 +195,8 @@ export type RepinDeps = {
   authorPermission?: PermissionReader;
   now?: () => Date;
   log?: (l: string) => void;
+  /** Replaces the installation-token minter of the app identity (tests). */
+  mint?: Writer["mint"];
   /** Autorepins that call GitHub in one drain. */
   limit?: number;
 };
@@ -422,7 +424,7 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
     if (!await still(db, r)) throw new Superseded("the request changed before the push");
     // Written before the push, so a head that reaches the mirror before the outcome is recorded is already known as this commit (ownPush in src/preapproval).
     await patchRow(db, r, { head, to_head: commit });
-    const push = await pushRepin({ db, login: AUDIT_LOGIN }, g, git, { repo: r.repo, number: r.number, remote: headRepo, branch: pr.headRefName, head, sha: commit }, { on: depRef, rev: target, files: changed, by: r.login });
+    const push = await pushRepin({ db, login: AUDIT_LOGIN, mint: d.mint }, g, git, { repo: r.repo, number: r.number, remote: headRepo, branch: pr.headRefName, head, sha: commit }, { on: depRef, rev: target, files: changed, by: r.login });
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
       if (/stale info|rejected|fetch first/i.test(err)) throw new Retry("the branch moved before the push");
@@ -480,7 +482,7 @@ async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "fa
   if ("refused" in g) d.log?.(`autorepin ${refOf(r)}: no comment: ${g.refused}`);
   else {
     try {
-      const out = await ghComment({ db, login: AUDIT_LOGIN }, g, d.exec ?? defaultExec, "autorepin-comment", { repo: r.repo, number: r.number, pr: true }, { by: "fixed-operator" }, noticeText(r), { on: depRefOf(r), state: r.state });
+      const out = await ghComment({ db, login: AUDIT_LOGIN, mint: d.mint }, g, d.exec ?? defaultExec, "autorepin-comment", { repo: r.repo, number: r.number, pr: true }, { by: "fixed-operator" }, noticeText(r), { on: depRefOf(r), state: r.state });
       if (out.code === 0) notice = "posted";
       else d.log?.(`autorepin ${refOf(r)}: the comment failed: ${oneLine(out.stderr || out.stdout)}`);
     } catch (e) {

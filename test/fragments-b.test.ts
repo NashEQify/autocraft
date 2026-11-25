@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import type { Db, Param } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
-import { hiddenTest, hiddenTestExpr, hiddenJsonTest, type HiddenRepos } from "../src/hidden-sql.ts";
-import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
+import { hiddenTestExpr, type HiddenRepos } from "../src/hidden-sql.ts";
+import { quietPrExpr } from "../src/data/security/fragments.ts";
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
-import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
+import { phaseOf } from "../src/data/views/maintain-items.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
 import { MANUAL_ONLY_KEY } from "../src/remote/manual-only.ts";
 import { manualOnlyExpr } from "../src/data/runners/fragments.ts";
@@ -151,18 +151,14 @@ const allow = (...visible: string[]): HiddenRepos => Object.assign([] as string[
 function cases(db: Db): Case[] {
   const out: Case[] = [];
   for (const [label, h, expect] of [["denied", deny, ["ext:1"]], ["allowed", allow("app"), ["ext:1", "lib:1"]], ["none allowed", allow(), ["app:1", "app:2", "ext:1", "lib:1"]]] as const) {
-    const t = hiddenTest("i.repo", h), j = hiddenJsonTest(db, "i.repo", h);
-    const items = "SELECT i.repo, i.number FROM main.items i WHERE i.number <= 2 AND ";
-    out.push({ name: `hiddenTest, ${label}`, text: [`${items}${t.sql} ORDER BY i.repo, i.number`, ...t.args], expect: [...expect],
-      built: (d) => d.k.selectFrom("main.items as i").select(["i.repo", "i.number"]).where("i.number", "<=", 2).where(hiddenTestExpr(d, "i.repo", h)).orderBy("i.repo").orderBy("i.number") });
-    out.push({ name: `hiddenJsonTest, ${label}`, text: [`${items}${j.sql} ORDER BY i.repo, i.number`, j.arg], expect: [...expect],
+    out.push({ name: `hiddenTestExpr, ${label}`, expect: [...expect],
       built: (d) => d.k.selectFrom("main.items as i").select(["i.repo", "i.number"]).where("i.number", "<=", 2).where(hiddenTestExpr(d, "i.repo", h)).orderBy("i.repo").orderBy("i.number") });
   }
-  out.push({ name: "quietSqlFor on columns", text: [`SELECT i.number AS k FROM main.items i WHERE i.repo = 'app' AND ${quietSqlFor("i.repo", "i.number")} ORDER BY i.number`], expect: ["2", "3"],
-    built: (d) => d.k.selectFrom("main.items as i").select("i.number as k").where("i.repo", "=", "app").where((eb) => quietExprFor(d, eb, "i.repo", "i.number")).orderBy("i.number") });
+  out.push({ name: "quietPrExpr on columns", expect: ["2", "3"],
+    built: (d) => d.k.selectFrom("main.items as i").select("i.number as k").where("i.repo", "=", "app").where((eb) => quietPrExpr(eb, "i.repo", "i.number")).orderBy("i.number") });
   for (const n of [2, 6]) {
-    out.push({ name: `quietSqlFor on values (${n})`, text: [`SELECT ${quietSqlFor("?", "?")} AS k`, "app", n], expect: [n === 2 ? "1" : "0"],
-      built: (d) => d.k.selectNoFrom((eb) => quietExprFor(d, eb, eb.val("app"), eb.val(n)).as("k")) });
+    out.push({ name: `quietPrExpr on values (${n})`, expect: [n === 2 ? "1" : "0"],
+      built: (d) => d.k.selectNoFrom((eb) => quietPrExpr(eb, eb.val("app"), eb.val(n)).as("k")) });
   }
   for (const repo of [undefined, "app"]) {
     out.push({ name: `latestCte (${repo ?? "every repo"})`,
@@ -171,10 +167,10 @@ function cases(db: Db): Case[] {
   }
   out.push({ name: "TRACKED", expect: ["app", "lib"],
     built: (d) => d.k.selectFrom("main.items as i").select("i.repo as k").distinct().where((eb) => trackedExpr(d, eb, "i.repo")).orderBy("i.repo") });
-  out.push({ name: "PHASE_SQL", text: [`SELECT i.number, ${PHASE_SQL} AS phase FROM main.items i LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number WHERE i.repo = 'app' AND i.number <= 5 ORDER BY i.number`],
+  out.push({ name: "phaseOf",
     expect: ["1:Review", "2:Triage", "3:Triage", "4:Merged", "5:Closed"],
     built: (d) => d.k.selectFrom("main.items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-      .select((eb) => ["i.number", phaseExpr(d, eb).as("phase")]).where("i.repo", "=", "app").where("i.number", "<=", 5).orderBy("i.number") });
+      .select((eb) => ["i.number", phaseOf(d, eb).as("phase")]).where("i.repo", "=", "app").where("i.number", "<=", 5).orderBy("i.number") });
   for (const not of [false, true]) {
     out.push({ name: `PRIVATE_STEPS_SQL${not ? " (NOT IN)" : ""}`, text: [`SELECT step AS k FROM build_tasks WHERE step ${not ? "NOT " : ""}IN (${PRIVATE_STEPS_SQL}) ORDER BY step`],
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),

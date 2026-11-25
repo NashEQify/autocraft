@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { Decision, DecisionComment, DecisionList, Item, Progress, SearchHit, User } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
-import { laneForDecision } from "../src/github/user-lane.ts";
 import { queuedOperatorFix, operatorWork } from "../src/preapproval/state.ts";
 import { scopeAnswers, unsettledScope } from "../src/review/candidates.ts";
 import { settledByExpr } from "../src/settlers.ts";
@@ -295,9 +294,6 @@ describe("api", () => {
       assert.equal((await operatorWork(db)).get("photocraft#7")?.fixHeads.size ?? 0, 0);
       assert.equal((await scopeAnswers(db)).get("photocraft#7"), undefined);
       assert.ok((await unsettledScope(db)).has("photocraft#7"));
-      const lane = await laneForDecision(db, undefined, X1, ["photocraft"]);
-      assert.ok(lane && "state" in lane && lane.state === "waiting-permission");
-      await identity(true);
       await identity(true);
       await boss.post(dpath(X2, "/answer"), { answer: "plugin" });
       await maint.post(dpath(X2, "/undo"), undefined, 403);

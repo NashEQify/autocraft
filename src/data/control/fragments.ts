@@ -30,6 +30,10 @@ export function pilotNarrows(db: Db, eb: kx.AnyEb, repoCol: kx.Ex, numberCol: kx
 export const hiddenRepos = (db: Db, col: kx.Ex, hidden: HiddenRepos): AliasableExpression<SqlBool> =>
   (hidden.visible ? kx.inList(db, col, hidden.visible) : kx.inList(db, col, [...hidden], "text", true)) as AliasableExpression<SqlBool>;
 
+/** True when the repo in `col` is hidden from the viewer: the negation of `hiddenRepos`. */
+export const hiddenTestExpr = (db: Db | { readonly dialect: Db["dialect"] }, col: kx.Ex, hidden: HiddenRepos): AliasableExpression<SqlBool> =>
+  (hidden.visible ? kx.inList(db, col, hidden.visible, "text", true) : kx.inList(db, col, [...hidden])) as AliasableExpression<SqlBool>;
+
 /** `tripped_at` of the key's `stage_trips` row while it is active, else null. */
 export const tripActiveSince = (eb: kx.AnyEb, key: string): Expression<string | null> =>
   kx.schemaEb(eb).selectFrom("main.stage_trips as sp").select("sp.tripped_at").where("sp.stage", "=", key).where("sp.active", "=", 1) as unknown as Expression<string | null>;
