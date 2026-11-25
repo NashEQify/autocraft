@@ -307,9 +307,8 @@ export function config(db: Db): Config {
 
 /** All settings rows, tracked repos, step approvals, active trips and limits. */
 export async function loadControl(db: Db): Promise<ControlSnapshot> {
-  const [settings, tracked, trips, limits] = await db.together(() => Promise.all([readSettingsSnapshot(db), loadTrackedRepos(db), loadTrips(db, { active: true }), loadStageLimits(db)]));
-  // The approvals are asked for the tracked names, so they follow the first wave.
-  const approvals = await loadStepApprovals(db, [...tracked.keys()]);
+  // Approvals of untracked repos come along too (their rows survive untracking); callers look them up by tracked name.
+  const [settings, tracked, trips, limits, approvals] = await db.together(() => Promise.all([readSettingsSnapshot(db), loadTrackedRepos(db), loadTrips(db, { active: true }), loadStageLimits(db), loadStepApprovals(db, "all")]));
   return { settings, tracked, approvals, trips, limits };
 }
 
