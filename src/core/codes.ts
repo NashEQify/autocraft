@@ -21,7 +21,7 @@ export type WaitCode = RefusalCode
 /** Why a merge leg ended without a merge. */
 export type StopCode =
   | "author-push" | "head-back" | "review-hold" | "review-close" | "review-failed" | "not-reviewable" | "verification-failed"
-  | "premerge-defect" | "premerge-failed" | "merge-refused" | "fix-failed" | "fix-too-large" | "fix-cannot-run" | "ci-failed"
+  | "premerge-defect" | "premerge-failed" | "merge-refused" | "fix-failed" | "fix-too-large" | "fix-cannot-run" | "ci-failed" | "no-ci"
   | "approval-gone" | "actor-gone" | "workflow-ended" | "pr-gone" | "pr-closed" | "pr-merged" | "person" | "blocked" | "other";
 
 export type Params = Readonly<Record<string, string | number | null | readonly (string | number)[]>>;
@@ -148,6 +148,7 @@ const STOP_FORM: readonly (readonly [RegExp, StopCode])[] = [
   [/^the pre-merge review of .* failed$/, "premerge-failed"],
   [/^the merge was refused: /, "merge-refused"],
   [/^CI failed at /, "ci-failed"],
+  [/^the repo has no CI/, "no-ci"],
   [/^merging is no longer approved$/, "approval-gone"],
   [/ no longer may act on /, "actor-gone"],
   [/^its workflow ended$/, "workflow-ended"],

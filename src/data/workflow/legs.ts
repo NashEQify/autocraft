@@ -10,6 +10,7 @@ import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
 import { LIVE_STATES } from "./fragments.ts";
+import { workflowActors } from "./rows.ts";
 import type { Entry, FixupRequest, FixupRequestMove, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
@@ -60,7 +61,7 @@ export async function listWorkflowLegs(db: Db, workflowIds: number[]): Promise<P
 }
 
 /**
- * Active legs of tracked repos joined to their workflow and `goOnAt`, plus the queued requests of those legs; two statements in one wave. A leg
+ * Active legs of tracked repos joined to their workflow, who it acts for and `goOnAt`, plus the queued requests of those legs; two statements in one wave. A leg
  * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); with none it reads `"unlinked"`. A leg of a
  * workflow that is no longer live reads `"ended"`.
  */
@@ -69,13 +70,17 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
   if (f.repos?.length === 0) return pass;
   const q = queryDb(db);
   const k = q.k as any;
+  /** A column of the workflow's newest answer. */
+  const lastAnswer = (alias: string, col: string) => k.selectFrom(`main.workflow_events as ${alias}`).select(`${alias}.${col}`).whereRef(`${alias}.workflow_id`, "=", "w.id")
+    .where(`${alias}.kind`, "=", "answered").orderBy(`${alias}.id`, "desc").limit(1);
   const rowsQ = k.selectFrom("main.preapprovals as p")
     .leftJoin("main.item_workflows as w", (j: any) => j.on((eb: any) => eb.or([
       eb("w.id", "=", eb.ref("p.workflow_id")),
       eb.and([eb("p.workflow_id", "is", null), eb("w.repo", "=", eb.ref("p.repo")), eb("w.number", "=", eb.ref("p.number")), eb("w.state", "in", LIVE_STATES)]),
     ])))
     .selectAll("p")
-    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.started_at as wf_started_at",
+    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.approved_at as wf_approved_at", "w.started_by as wf_started_by", "w.started_at as wf_started_at",
+      lastAnswer("a1", "login").as("wf_answer_by"), lastAnswer("a2", "at").as("wf_answer_at"),
       eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("wf_go_on")])
     .where("p.state", "in", ACTIVE_LEGS)
     .where((eb: any) => trackedRepo(eb, "p.repo"))
@@ -85,15 +90,21 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
     .where("o.preapproval_id", "in", k.selectFrom("main.preapprovals as pl").select("pl.id").where("pl.state", "in", ACTIVE_LEGS))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "o.repo", f.repos!)))
     .orderBy("o.id");
-  type Joined = Preapproval & { wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_started_at: string | null; wf_go_on: string | null };
+  type Joined = Preapproval & {
+    wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_approved_at: string | null;
+    wf_started_by: string | null; wf_started_at: string | null; wf_answer_by: string | null; wf_answer_at: string | null; wf_go_on: string | null;
+  };
   const [rows, requests] = await db.together(() => Promise.all([q.all(rowsQ), q.all(requestsQ)])) as [Joined[], FixupRequest[]];
   for (const r of rows) {
-    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_started_at, wf_go_on, ...rest } = r;
+    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_approved_at, wf_started_by, wf_started_at, wf_answer_by, wf_answer_at, wf_go_on, ...rest } = r;
     const p = legOf(rest as Preapproval);
     pass.rows.push(p);
     const live = wf_id !== null && wf_state !== null && LIVE_STATES.includes(wf_state);
     if (!live) { pass.context.set(p.id, p.workflow_id === null ? "unlinked" : "ended"); continue; }
-    const context: LegContext = { workflowId: num(wf_id), entry: wf_entry!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, approvedBy: wf_approved_by };
+    const context: LegContext = {
+      workflowId: num(wf_id), entry: wf_entry!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, startedBy: wf_started_by!, approvedBy: wf_approved_by,
+      actors: workflowActors({ startedBy: wf_started_by!, startedAt: wf_started_at!, approvedBy: wf_approved_by, approvedAt: wf_approved_at }, wf_answer_by !== null ? { login: wf_answer_by, at: wf_answer_at! } : null),
+    };
     pass.context.set(p.id, context);
   }
   pass.requests = requests.map(requestOf);

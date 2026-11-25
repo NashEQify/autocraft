@@ -54,7 +54,8 @@ export type StartedFilter = { /** Live states only. */ states?: WorkflowState[];
 export type LegState = "fixup" | "review" | "ci" | "queued" | "merged" | "cancelled" | "failed";
 export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { state: LegState };
 export type LegRow = Preapproval;
-export type LegContext = { workflowId: number; entry: Entry; since: string; approvedBy: string | null };
+/** `actors`: who the workflow acts for, newest first (workflowActors). */
+export type LegContext = { workflowId: number; entry: Entry; since: string; startedBy: string; approvedBy: string | null; actors: string[] };
 /** `requests`: the queued requests of the active legs. */
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; /** What `reason` is, as a code, with its parts. */ code?: StopCode; params?: Params; by?: string; via?: string };

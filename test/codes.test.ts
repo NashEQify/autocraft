@@ -65,7 +65,7 @@ const REASONS = (H: string): string[] => [
   "the fix-up cannot run: the PR is a draft", "the fix-up cannot run: the push is not approved: nobody", `${H} cannot be reviewed (backlog)`,
   `the review of ${H} waits on its review failed 4 times at this commit`, `the review of ${H} asks for fixes and its fix-up cannot run`, `the review of ${H} asks for fixes and its fix-up cannot run (asked)`,
   "the review says hold", "the review says hold (unsure): another PR does it", "the review says close: a duplicate", "the review says close: the pre-merge review found it", "the review says hold: the diff is too-large",
-  "merging is no longer approved", `CI failed at ${H} and the CI fix did not repair it`, `the pre-merge review of ${H} failed`, "the pre-merge review found 1 defect", "the pre-merge review found 2 defects",
+  "merging is no longer approved", "the repo has no CI, and nothing is merged without it", `CI failed at ${H} and the CI fix did not repair it`, `the pre-merge review of ${H} failed`, "the pre-merge review found 1 defect", "the pre-merge review found 2 defects",
   `verification failed at ${H}`, "the merge was refused: a required review", "the merge was refused: verification failed", "cancelled by pipeline", "cancelled by mira", "cancelled", "failed", "asked",
 ];
 

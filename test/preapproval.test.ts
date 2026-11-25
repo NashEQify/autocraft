@@ -6,9 +6,12 @@ import { advancePreapprovals, cancelPreapproval, preapprovalOf, preapproveMerge 
 import { mergeAllowed } from "../src/core/gates.ts";
 import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
+import { setCommentApproval } from "../src/act/approval.ts";
+import { stopCodeOf, type StopCode } from "../src/core/codes.ts";
 import { setOptionalCheck } from "../src/optional-checks.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
+import { legBlocker } from "../src/workflow/blockers.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { expectFlat } from "./helpers/query-count.ts";
 import { CHECK, OPERATOR, T0, world, type World } from "./world-db.ts";
@@ -22,7 +25,16 @@ import { refreshPlanCache } from "../src/core/plan-cache.ts";
 let current: World | null = null;
 /** The repo with an operator who may act on it. */
 const fresh = async (): Promise<World> => (current = await (await (await world()).repo()).acting());
-afterEach(() => current?.close());
+/** The ended legs' stop codes, oldest first. */
+const codes = async (w: World, n: number) => (await w.rows("SELECT reason_code FROM preapprovals WHERE number = ? AND state IN ('cancelled', 'failed') ORDER BY id", n)).map((r) => r.reason_code);
+afterEach(async () => {
+  // An older image reads the text: it stands for the same blocker as the code.
+  for (const l of current ? await current.rows("SELECT reason, reason_code FROM preapprovals WHERE reason IS NOT NULL") : []) {
+    assert.ok(l.reason_code, String(l.reason));
+    assert.equal(legBlocker(l.reason_code as StopCode), legBlocker(stopCodeOf(String(l.reason))), String(l.reason));
+  }
+  current?.close();
+});
 
 const start = (w: World, n: number, merge = true) => w.fixup(n, merge);
 const fixId = async (w: World, n: number): Promise<number> => ((await w.rows("SELECT id FROM operator_fixups WHERE number = ? ORDER BY id DESC", n))[0]!.id as number);
@@ -74,13 +86,14 @@ describe("pre-approved merge", () => {
     assert.ok((await w.rows("SELECT action FROM audit WHERE target = 'app#1' AND action = 'preapproval'")).length >= 4);
   });
 
-  test("a push by someone else cancels it, and a red CI the CI fix gave up on fails it", async () => {
+  test("a push by someone else cancels it, and red CI the CI fix gave up on waits for the contributor, or fails it when nobody can be asked", async () => {
     const w = await (await take(await (await take(await fresh(), 2)).review(2, { verdict: "take-fix" }), 3)).review(3, { verdict: "take-fix" });
     await start(w, 2);
     await w.synced(2, "foreign");
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 2))?.state, "cancelled");
     assert.equal((await w.rows("SELECT state FROM operator_fixups WHERE number = 2"))[0]!.state, "ended");
+    assert.deepEqual(await codes(w, 2), ["author-push"]);
 
     await inCi(w, 3);
     await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "failure" }).where("number", "=", 3));
@@ -89,9 +102,41 @@ describe("pre-approved merge", () => {
     assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "ci");
     await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3b", kind: "code", state: "capped", attempt: 1, created_at: T0 }));
     await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "ci");
+    assert.ok((await w.prPlan(3)).actions.some((a) => a.kind === "cifix" && a.params?.bucket === "ask"));
+    assert.equal((await w.rows("SELECT details FROM audit WHERE target = 'app#3' AND action = 'preapproval' AND details LIKE '%ci-ask%'")).length, 1, "said once");
+    await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3b", kind: "code", state: "asked", attempt: 1, created_at: T0 }));
+    await settle(w);
+    assert.deepEqual([(await preapprovalOf(w.db, "app", 3))?.state, (await w.prPlan(3)).waitKind], ["ci", "contributor"]);
+    await w.db.run(w.db.k.deleteFrom("ci_fixes").where("state", "=", "asked"));
+    await setCommentApproval(w.db, OPERATOR, "app", false);
+    await settle(w);
     const p = (await preapprovalOf(w.db, "app", 3))!;
     assert.equal(p.state, "failed");
     assert.match(p.reason!, /CI failed/);
+    assert.deepEqual(await codes(w, 3), ["ci-failed"]);
+  });
+
+  test("fixes on a branch that takes no push are the contributor's: the leg waits, and stops where nobody can be asked", async () => {
+    for (const comment of [true, false]) {
+      const w = await (await (await (await fresh()).pr(5, { canModify: false })).workflow(5)).review(5, { verdict: "take-fix" });
+      await preapproveMerge(w.db, { repo: "app", number: 5, by: OPERATOR });
+      await setCommentApproval(w.db, OPERATOR, "app", comment);
+      await settle(w);
+      assert.equal((await preapprovalOf(w.db, "app", 5))?.state, comment ? "review" : "failed");
+      if (comment) assert.ok((await w.prPlan(5)).actions.some((a) => a.kind === "fixup" && a.params?.bucket === "ask"));
+      else assert.deepEqual(await codes(w, 5), ["fix-cannot-run"]);
+      if (comment) w.close();
+    }
+  });
+
+  test("a repo without CI stops the leg, since nothing merges without it", async () => {
+    const w = await (await take(await fresh(), 8)).review(8, { verdict: "take-fix" });
+    await inCi(w, 8);
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "none", checks: "[]" }));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 8))?.state, "failed");
+    assert.deepEqual(await codes(w, 8), ["no-ci"]);
   });
 
   test("an unsure take of the push goes on to CI; a hold review of it fails it", async () => {
@@ -114,6 +159,27 @@ describe("pre-approved merge", () => {
     const p = (await preapprovalOf(w.db, "app", 10))!;
     assert.equal(p.state, "failed");
     assert.match(p.reason!, /1 defect/);
+    assert.deepEqual(await codes(w, 10), ["premerge-defect"]);
+  });
+
+  test("a pre-merge defect with a safe fix gets one fix-up round; what the round leaves stops the hand-over", async () => {
+    const w = await (await take(await fresh(), 11)).review(11, { verdict: "take-fix" });
+    await inCi(w, 11);
+    await (await w.verified(11)).premerge(11, "defect");
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 11))?.state, "ci");
+    assert.ok((await kindsOf(w, 11)).includes("fixup:premerge"), (await kindsOf(w, 11)).join());
+    assert.equal((await w.rows("SELECT details FROM audit WHERE target = 'app#11' AND action = 'preapproval' AND details LIKE '%premerge-fixup%'")).length, 1, "said once");
+    // The round's push is ours: the leg goes on at its head, where the pre-merge review finds a defect again.
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 11, from_head: "sha11b", to_head: "sha11c", state: "pushed", attempt: 1, created_at: T0, source: "premerge" }));
+    await addOwnCommits(w.db, [{ repo: "app", sha: "sha11c", action: "fixup-push" }]);
+    await (await w.synced(11, "sha11c")).review(11, { head: "sha11c" });
+    await settle(w);
+    assert.deepEqual([(await preapprovalOf(w.db, "app", 11))?.state, (await preapprovalOf(w.db, "app", 11))?.head], ["ci", "sha11c"]);
+    await w.premerge(11, "defect");
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 11))?.state, "failed");
+    assert.deepEqual(await codes(w, 11), ["premerge-defect"]);
   });
 
   test("cancelling after the hand-over takes the PR out of the merge queue, also out of a batch", async () => {

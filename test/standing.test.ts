@@ -1,8 +1,8 @@
-// A merge approval and the work a person started stand while GitHub cannot answer on their write access; only its own answer ends them.
+// A merge approval and the work a person started stand while GitHub cannot answer on their write access; its own answer stops them for that person.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { loadItemFact } from "../src/core/issue-facts.ts";
-import { addLegs, loadLegs, startWorkflows } from "../src/data/workflow/index.ts";
+import { addLegs, loadLegs, saveWorkflows, startWorkflows } from "../src/data/workflow/index.ts";
 import { savePermissions } from "../src/data/access/index.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { T0, world, type World } from "./world-db.ts";
@@ -40,7 +40,7 @@ async function pass(w: World, permission: string | null): Promise<void> {
   await advancePreapprovals(w.db, () => {}, { permission: read, retryMs: 0 });
 }
 
-test("a merge approval outlives unread, stale and failed permission reads, and ends on GitHub's answer", async () => {
+test("a merge approval outlives unread, stale and failed permission reads; on GitHub's answer the leg waits for another maintainer's approval", async () => {
   const w = await fresh();
   await pass(w, null);
   assert.equal(await state(w), "review", "never read and GitHub is down");
@@ -52,7 +52,14 @@ test("a merge approval outlives unread, stale and failed permission reads, and e
     assert.equal(await state(w), "review", `confirmed ${age} minutes ago, GitHub is down`);
   }
   await pass(w, "read");
-  assert.equal(await state(w), "cancelled", "GitHub says the person has no write access");
+  await w.review(1);
+  await pass(w, "read");
+  assert.equal(await state(w), "review", "GitHub says the person has no write access: the leg goes nowhere and stays");
+  await w.acting("other");
+  const id = Number((await w.rows("SELECT id FROM item_workflows WHERE number = 1"))[0]!.id);
+  await saveWorkflows(w.db, [{ id, patch: { approvedBy: "other", approvedVia: "github", approvedAt: new Date().toISOString() } }]);
+  await pass(w, "read");
+  assert.equal(await state(w), "ci", "another maintainer approved");
 });
 
 test("a started implementation waits for GitHub's answer and is not given back to a person meanwhile", async () => {
