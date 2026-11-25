@@ -1,7 +1,6 @@
 // Stage 5, Review: Opus reviews every wanted PR, one PR per call, and its verdict is the
 // one every later stage reads (the `final_reviews` view). After a new push Opus reads only
 // the delta since the head it reviewed before. Reads GitHub (diffs); never writes to it.
-import { repoWorkflow } from "../workflow/store.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { currentJobId, poolRoom, takersCut } from "../agents/call.ts";
 import { pool } from "../classify/run.ts";
@@ -10,12 +9,9 @@ import { REVIEW_OPUS } from "../agents/steps.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { checksOf, refreshChecks } from "./checks.ts";
 import { openBlockers } from "./blockers.ts";
-import { isScopeQuestion, settledScope } from "./candidates.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
-import { MAX_RERUNS_PER_DAY, countRerun, discussionOf, ensurePipelineLogin, liveDiscussion, markedStaleSince, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
-import { withdrawHoldQuestion, withdrawMergeQuestion } from "../merge/withdraw.ts";
-import { headWasUnsure, mergeDecisionId, holdDecisionId } from "../merge/queue.ts";
-import { defaultBranchOf, recordLiveBase, reviewedBaseOf } from "../merge/base.ts";
+import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
+import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
 import type { DiscussionEntry } from "./parse.ts";
 import { reviewAfterBaseMerge } from "./own-diff.ts";
@@ -32,8 +28,10 @@ import { jobItem } from "../runner/job-items.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import * as kx from "../db/kx.ts";
-import type { NotNull } from "kysely";
+import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
+import { loadItems, loadRepos } from "../data/mirror/index.ts";
+import { loadReviewRows, loadReviewsAt, saveReviews, type ReviewRow } from "../data/review/index.ts";
+import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
 export { MAX_DIFF_CHARS };
@@ -59,17 +57,13 @@ export type OpusSummary = {
 };
 
 const now = () => new Date().toISOString();
-const scopeSettledField = async (db: Db, repo: string, number: number): Promise<{ scope_settled?: NonNullable<OpusPr["scope_settled"]> }> => {
-  const s = await settledScope(db, repo, number);
-  return s ? { scope_settled: s } : {};
-};
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 
 export function defaultOpusDeps(): OpusDeps {
   return { querier: new Client(500), fetchDiff: ghDiff, fetchDelta: ghDelta, model: PROMPT.models[0]!, maxChars: MAX_DIFF_CHARS, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log) };
 }
 
-type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string | null; model: string | null; review: OpusReview; /** The fixes this review was given as unapplied, with what the reply did with each. */ unapplied?: (UnappliedFix & { outcome: string })[];
+type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string | null; model: string | null; review: OpusReview;
   /** The base branch the reviewed diff was read against (a delta or carried review: the earlier review's); absent: the cached diff's, else the mirrored base. */ baseRef?: string | null };
 
 /**
@@ -77,95 +71,57 @@ type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string
  * stages row (take-fix counts as take). A second review of the same head counts against
  * the PR's daily cap unless an operator or a merge-time check asked for it.
  * A review of the head against another base than the one before it voids what was decided for the old diff:
- * the Merge answer, the pre-merge review and the verification.
+ * the pre-merge review and the verification.
  */
 export async function saveOpus(db: Db, runId: string | null, c: { repo: string; number: number; head_oid: string }, s: Saved): Promise<void> {
-  const at = now(), r = s.review;
-  const again = await db.get(db.k.selectFrom("opus_reviews").select("at").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
+  const r = s.review, ref = refOf(c);
   const baseRef = s.baseRef !== undefined ? s.baseRef : await reviewedBase(db, c);
-  const before = again ? await reviewedBaseOf(db, c.repo, c.number, c.head_oid) ?? await defaultBranchOf(db, c.repo) : null;
-  const rebased = !!before && !!baseRef && before !== baseRef;
-  const reviewed = await db.get(db.k.selectFrom("opus_reviews").select("at").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid).where("verdict", "is not", null));
-  if (reviewed && !await markedStaleSince(db, c.repo, c.number, reviewed.at)) await countRerun(db, c.repo, c.number);
-  // A head that was ever unsure keeps its Merge? question (and a person's answer to it) through a re-review that stays take or take-fix.
-  // An answered question is withdrawn as for any re-review: the head then needs a new answer.
-  const unanswered = !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", mergeDecisionId(c.repo, c.number, c.head_oid)).where("answer", "is", null));
-  const keepsQuestion = !!again && !rebased && unanswered && (r.verdict === "take" || r.verdict === "take-fix") && await headWasUnsure(db, c.repo, c.number, c.head_oid);
-  // An answered, unapplied merge answer stands through a re-review at the same head and base unless the verdict got worse.
-  const keepsAnswer = !!again && !rebased && (r.verdict === "take" || r.verdict === "take-fix") && r.sure
-    && !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", mergeDecisionId(c.repo, c.number, c.head_oid)).where("answer", "=", "merge").where("applied_at", "is", null));
-  if (again && !keepsQuestion && !keepsAnswer) {
-    const worse = r.verdict === "take" || r.verdict === "take-fix" ? "the new review is unsure" : `the new review is a ${r.verdict}`;
-    await withdrawMergeQuestion(db, c.repo, c.number, c.head_oid, at, rebased ? `the base branch changed from ${before} to ${baseRef}` : `superseded by a new review: ${worse}`);
-  }
-  if (rebased) {
-    await db.run(db.k.deleteFrom("premerge_reviews").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
-    await db.run(db.k.updateTable("verifications").set({ state: "stale" }).where("repo", "=", c.repo).where("number", "=", c.number).where("head_sha", "=", c.head_oid));
-  }
-  // The Hold question belongs to one review: a review made again at the head asks it anew if the verdict is still hold.
-  // An unanswered or Wait-answered question stays while the verdict is still hold: its review time moves, so the prepare is written again.
-  const holdId = holdDecisionId(c.repo, c.number, c.head_oid);
-  const keepsHold = r.verdict === "hold" && !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", holdId).where((eb) => eb.or([eb("answer", "is", null), eb("answer", "=", "wait")])));
-  if (again && !keepsHold) await withdrawHoldQuestion(db, c.repo, c.number, c.head_oid, at, "superseded by a new review");
-  // The row about to be replaced may predate the history: copy it first.
-  await db.run(db.k.insertInto("main.opus_review_history")
-    .columns(["repo", "number", "head_oid", "at", "model", "mode", "verdict", "sure", "reason", "risks", "fixes", "summary", "why", "public_review", "claims", "blocked_by"])
-    .expression((eb) => eb.selectFrom("main.opus_reviews as o")
-      .select(["o.repo", "o.number", "o.head_oid", "o.at", "o.model", "o.mode", "o.verdict", "o.sure", "o.reason", "o.risks", "o.fixes", "o.summary", "o.why", "o.public_review", "o.claims", "o.blocked_by"])
-      .where((eb) => eb.not(eb.exists(eb.selectFrom("main.opus_review_history as h").select(eb.lit(1).as("one"))
-        .whereRef("h.repo", "=", "o.repo").whereRef("h.number", "=", "o.number").whereRef("h.head_oid", "=", "o.head_oid").whereRef("h.at", "=", "o.at"))))
-      .where("o.repo", "=", c.repo).where("o.number", "=", c.number).where("o.head_oid", "=", c.head_oid)));
-  const risks = JSON.stringify(r.risks), fixes = r.fixes.length ? JSON.stringify(r.fixes) : null, pub = r.public ? JSON.stringify(r.public) : null, claims = r.claims.length ? JSON.stringify(r.claims) : null;
-  // Only open tracked items other than the PR can block it: a reference that is already closed would end the wait at once.
-  // A scope question is no blocker once a person has settled scope for this PR.
-  const scopeSettled = await settledScope(db, c.repo, c.number) !== null;
-  const blockers = r.verdict === "hold" ? await filterSeq((await openBlockers(db, r.blocked_by.filter((x) => x !== `${c.repo}#${c.number}`))), async (b) => !(scopeSettled && await isScopeQuestion(db, b))) : [];
-  const blockedBy = blockers.length ? JSON.stringify(blockers) : null;
-  await db.run(db.k.insertInto("opus_review_history").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, at, model: s.model, mode: s.mode, verdict: r.verdict,
-    sure: r.sure ? 1 : 0, reason: r.reason, risks, fixes, summary: r.summary, why: r.why, public_review: pub, claims, blocked_by: blockedBy,
-    trigger: again ? (await markedStaleSince(db, c.repo, c.number, again.at) ? "operator" : rebased ? "base" : "discussion") : "new-head", job_id: currentJobId() }));
-  await db.run(db.k.insertInto("opus_reviews").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, run_id: runId, at, model: s.model, mode: s.mode, base_head: s.base,
-      verdict: r.verdict, sure: r.sure ? 1 : 0, reason: r.reason, fixes, risks, public_review: pub, seen_at: s.snap?.seen ?? at, disc_hash: s.snap?.hash ?? null, summary: r.summary,
-      why: r.why, conflicts: r.conflicts.length ? JSON.stringify(r.conflicts) : null, claims, blocked_by: blockedBy, base_ref: baseRef, workflow: r.workflow ? JSON.stringify(r.workflow) : null })
-    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet(kx.excluded(["run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "public_review",
-      "seen_at", "disc_hash", "summary", "why", "conflicts", "claims", "blocked_by", "base_ref", "workflow"]))));
-  await db.run(db.k.deleteFrom("main.settings").where("key", "=", `review_fail:${c.repo}#${c.number}@${c.head_oid}`));
-  await db.run(db.k.deleteFrom("opus_carried_fixes").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
-  for (const u of s.unapplied ?? []) {
-    await db.run(db.k.insertInto("opus_carried_fixes").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, from_head: u.head, file: u.file, change: u.change, outcome: u.outcome, at }));
-  }
-  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "reviewed", at, actor: "opus-review", note: `${r.verdict}${r.sure ? "" : " (unsure)"} at ${c.head_oid.slice(0, 7)}: ${r.reason}` }));
-  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: r.verdict === "take-fix" ? "take" : r.verdict, at, actor: "opus-review", note: r.reason }));
+  const [repos, blockers] = await Promise.all([
+    loadRepos(db, { names: [c.repo] }),
+    // Only open tracked items other than the PR can block it: a reference that is already closed would end the wait at once.
+    r.verdict === "hold" ? openBlockerRefs(db, r.blocked_by.filter((x) => x !== ref)) : Promise.resolve([] as string[]),
+  ]);
+  await saveReviews(db, [{
+    runId, repo: c.repo, number: c.number, head: c.head_oid, mode: s.mode, base: s.base, baseRef: baseRef ?? null, defaultBranch: repos.get(c.repo)?.default_branch ?? null,
+    model: s.model, review: { verdict: r.verdict, sure: r.sure, reason: r.reason, fixes: r.fixes as never, risks: r.risks, workflow: (r.workflow ?? null) as never, summary: r.summary, why: r.why, public: r.public, conflicts: r.conflicts, claims: r.claims },
+    ...(s.snap ? { snap: { seen: s.snap.seen, hash: s.snap.hash } } : {}), blockedBy: blockers, jobId: currentJobId(),
+  }]);
+}
+
+/** The refs among `refs` that still block a hold. */
+async function openBlockerRefs(db: Db, refs: string[]): Promise<string[]> {
+  return openFrom(await loadBlockerReads(db, refs), refs);
 }
 
 /** The Opus review of the PR's latest earlier head that a model wrote (not a too-large hold), for the delta. */
 export async function earlierOpus(db: Db, c: { repo: string; number: number; head_oid: string }, skip = 0): Promise<EarlierOpus | null> {
-  const o = await db.get(db.k.selectFrom("opus_reviews").select(["head_oid", "verdict", "sure", "reason", "fixes"]).$narrowType<{ verdict: NotNull }>()
-    .where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "<>", c.head_oid).where("verdict", "is not", null).where("model", "is not", null)
-    .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1).offset(skip));
-  if (!o) return null;
-  let fixes: EarlierOpus["fixes"] = [];
-  try { fixes = JSON.parse(o.fixes ?? "[]") as EarlierOpus["fixes"]; } catch { /* none */ }
-  return { head: o.head_oid, verdict: o.verdict, sure: o.sure === 1, reason: o.reason ?? "", fixes };
+  const o = earlierRows(await loadReviewRows(db, [{ repo: c.repo, number: c.number }]), c)[skip];
+  return o ? earlierOf(o) : null;
 }
+
+/** The PR's reviews of other heads that a model wrote (not a too-large hold), newest first. */
+const earlierRows = (rows: Map<string, ReviewRow[]>, c: { repo: string; number: number; head_oid: string }): ReviewRow[] =>
+  (rows.get(`${c.repo}#${c.number}`) ?? []).filter((r) => r.head !== c.head_oid && r.model !== null);
+
+const earlierOf = (o: ReviewRow): EarlierOpus => ({ head: o.head, verdict: o.verdict, sure: o.sure, reason: o.reason ?? "", fixes: o.fixes as EarlierOpus["fixes"] });
 
 /**
  * The fixes of the PR's latest earlier reviewed head, when that review was a take-fix whose fixes were never pushed
  * and never posted as a comment (a conflict merge of ours or an author push made a new head first).
  */
-export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }): Promise<UnappliedFix[]> {
+export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }, rows?: Map<string, ReviewRow[]>): Promise<UnappliedFix[]> {
   // A hold in between (an author push the reviewer could not judge) does not make the older take-fix's fixes moot.
-  let e = await earlierOpus(db, c);
-  if (e?.verdict === "hold") e = await earlierOpus(db, c, 1);
+  const [first, second] = earlierRows(rows ?? await loadReviewRows(db, [{ repo: c.repo, number: c.number }]), c);
+  const e = first && first.verdict === "hold" ? second : first;
   if (!e || e.verdict !== "take-fix") return [];
-  if (await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", e.head).where("state", "in", ["pushed", "asked"]))) return [];
-  return e.fixes.filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string").map((f) => ({ head: e.head, file: f.file, change: f.change }));
+  const facts = (await loadPatchFacts(db, [{ repo: c.repo, number: c.number }])).get(refOf(c));
+  if (facts?.fixups.some((f) => f.fromHead === e.head && (f.state === "pushed" || f.state === "asked"))) return [];
+  return (e.fixes as { file: string; change: string }[]).filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string").map((f) => ({ head: e.head, file: f.file, change: f.change }));
 }
 
 /** The base branch the review's diff was computed against; the mirrored base when the cached diff does not say. */
 async function reviewedBase(db: Db, c: { repo: string; number: number; head_oid: string }): Promise<string | null> {
-  return cachedDiffBase(c.repo, c.number, c.head_oid)
-    ?? (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", c.repo).where("number", "=", c.number)))?.base_ref ?? null;
+  return cachedDiffBase(c.repo, c.number, c.head_oid) ?? (await loadItems(db, [{ repo: c.repo, number: c.number }], "pr")).get(refOf(c))?.base_ref ?? null;
 }
 
 /** `base`: the earlier head a delta was read from; `baseRef`: the base branch the whole PR diff was read against. */
@@ -181,7 +137,11 @@ export type PreparedOpus =
  * review that must not be anchored on the first one (the pre-merge review); the snapshot then marks the time of the read.
  */
 export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean } = {}): Promise<PreparedOpus> {
-  const liveBase = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", c.number)))?.base_ref;
+  const ref = refOf(c);
+  const [items, rows, repos] = await db.together(() => Promise.all([
+    loadItems(db, [{ repo, number: c.number }], "pr"), loadReviewRows(db, [{ repo, number: c.number }]), loadRepos(db, { names: [repo] }),
+  ]));
+  const liveBase = items.get(ref)?.base_ref;
   const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff, liveBase);
   if (!d.ok) return d.tooLarge ? { kind: "large", mode: "full", base: null, baseRef: liveBase ?? null } : { kind: "no-diff", error: d.error };
   const baseRef = d.base ?? liveBase ?? null;
@@ -199,38 +159,38 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
       mode: "full", earlier_opus: null, diff: cd.text,
       related_open: await relatedOpen(db, repo, c.number, cd.files), review_history: await latestReview(db, repo, c.number, c.head_oid),
     };
-    return { kind: "ready", input: { ...input, statements: await relatedStatements(db, repo, c.number), ...await scopeSettledField(db, repo, c.number) }, snap: { seen: now(), hash: null }, mode: "full", base: null, baseRef };
+    return { kind: "ready", input: { ...input, statements: await relatedStatements(db, repo, c.number) }, snap: { seen: now(), hash: null }, mode: "full", base: null, baseRef };
   }
   let mode: "full" | "delta" = "full", diff = cd.text, base: string | null = null;
   // A delta stands on the earlier review only when that review read the PR against the same base branch; after a retarget the whole diff is reviewed.
-  const prior = await earlierOpus(db, c);
-  const priorBase = prior ? await reviewedBaseOf(db, repo, c.number, prior.head) ?? await defaultBranchOf(db, repo) : null;
+  const priorRow = earlierRows(rows, c)[0];
+  const prior = priorRow ? earlierOf(priorRow) : null;
+  const priorBase = priorRow ? priorRow.base_ref ?? repos.get(repo)?.default_branch ?? null : null;
   const earlier = prior && (priorBase === null || baseRef === null || priorBase === baseRef) ? prior : null;
   // A merge commit of ours carries the base branch's changes since the earlier head, so a delta of the heads would show unrelated changes: the delta is taken between the PR's own diffs.
-  const merged = await db.get(db.k.selectFrom("conflict_merges").select(["from_head", "own_diff", "own_delta"]).where("repo", "=", repo).where("number", "=", c.number).where("to_head", "=", c.head_oid).where("state", "=", "merged")
-    .orderBy(kx.rowid("conflict_merges"), "desc").limit(1));
+  const merged = (await loadOwnDeltas(db, [{ ref, toHead: c.head_oid }])).get(`${ref}@${c.head_oid}`);
   if (earlier && !merged) {
     const delta = await deps.fetchDelta(repo, earlier.head, c.head_oid);
     // A delta whose test files do not all fit is not used: the full diff shows them.
     const dd = delta.ok ? codeDiff(delta.text, deps.maxChars) : null;
     if (dd && !dd.testsOmitted.length) { mode = "delta"; diff = dd.text; base = earlier.head; }
     else if (!delta.ok) log(`  ${refOf(c)}: delta since ${earlier.head.slice(0, 7)} unavailable (${delta.error}); full diff`);
-  } else if (earlier && merged?.own_delta && reviewAfterBaseMerge(merged.own_diff) === "delta" && merged.from_head === earlier.head && earlier.sure && (earlier.verdict === "take" || earlier.verdict === "take-fix")) {
+  } else if (earlier && merged?.ownDelta && reviewAfterBaseMerge(merged.ownDiff) === "delta" && merged.fromHead === earlier.head && earlier.sure && (earlier.verdict === "take" || earlier.verdict === "take-fix")) {
     // The delta was computed from the local commits when the merge was made; the diff of the earlier head is never fetched by number.
-    const dd = codeDiff(merged.own_delta, deps.maxChars);
+    const dd = codeDiff(merged.ownDelta, deps.maxChars);
     if (dd.text && !dd.testsOmitted.length) { mode = "delta"; diff = dd.text; base = earlier.head; }
   }
   if (diff.length > deps.maxChars) return { kind: "large", mode, base, baseRef };
   let discussion: DiscussionEntry[], snap: Snapshot, maintDropped: boolean;
   try {
     // What the PR's previous review read is not lost to the budget silently: only maintainers' words since then must fit.
-    const since = (await db.get(db.k.selectFrom("opus_reviews").select((eb) => eb.fn.coalesce("seen_at", "at").as("seen")).where("repo", "=", repo).where("number", "=", c.number).where("verdict", "is not", null)
-      .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1)))?.seen ?? "";
+    const latest = rows.get(ref)?.[0];
+    const since = latest ? latest.seen_at ?? latest.at : "";
     ({ entries: discussion, snap, maintDropped } = await discussionOf(db, repo, c.number, deps.querier ? await withRetry(() => liveDiscussion(deps.querier!, db, repo, c.number)) : undefined, since));
   } catch (e) {
     return { kind: "no-threads", error: String((e as Error).message ?? e) };
   }
-  const unapplied = await unappliedFixes(db, c);
+  const unapplied = await unappliedFixes(db, c, rows);
   // Our own commits since the earlier reviewed head, for the reviewer to check against what was asked of them.
   const ours = earlier ? (await ourCommitsSince(db, repo, c.number, earlier.head, c.head_oid)).commits.map(({ from: _from, ...x }) => x) : [];
   const input: OpusPr = {
@@ -239,7 +199,6 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
     mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}), ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
     related_open: await relatedOpen(db, repo, c.number, cd.files),
     statements: await relatedStatements(db, repo, c.number),
-    ...await scopeSettledField(db, repo, c.number),
   };
   return { kind: "ready", input, snap, mode, base, baseRef, ...(maintDropped ? { maintDropped } : {}) };
 }
@@ -268,7 +227,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       return summary;
     }
     const asked = cands.length;
-    const holds = await reviewHolds(db);
+    const holds = await reviewHolds(db, Date.now(), cands.map(refOf));
     const byNumber = new Map(live.map((l) => [l.number, l]));
     cands = await filterSeq(cands, async (c) => {
       const l = byNumber.get(c.number);
@@ -308,7 +267,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     const { input, snap, mode, base, baseRef } = p;
     const checkout = (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
     if (checkout) input.repo_dir = REPO_PATH;
-    if (await repoWorkflow(db, repo) === "new") input.workflow = true;
+    input.workflow = true;
     const dir = referenceDir(repo);
     const semantic = dir ? deps.semantic ?? defaultSemanticDeps(db, input.ref) : undefined;
     const r = await runModelStep(db, REVIEW_OPUS, input, {
@@ -331,7 +290,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       }
       // A maintainer's word the model was not shown leaves the take to a person.
       if (p.maintDropped && got.sure && (got.verdict === "take" || got.verdict === "take-fix")) got = { ...got, sure: false, risks: [...got.risks, "a maintainer's comment was left out of the review for length"] };
-      await saveOpus(db, runId, c, { mode, base, baseRef, model: (r.ok && r.model) || deps.model, review: got, snap, unapplied: outcomes });
+      await saveOpus(db, runId, c, { mode, base, baseRef, model: (r.ok && r.model) || deps.model, review: got, snap });
       await tally(c, got);
     } else {
       await recordReviewFailure(db, c.repo, c.number, c.head_oid);

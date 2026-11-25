@@ -14,8 +14,8 @@ import { createIssue, IssueError, type Writer } from "../github/write.ts";
 import { pipelineLogin } from "../review/discussion.ts";
 import { ghFileExists, type FileChecker } from "../review/diff.ts";
 import { issueBody, issueTitle, refusal } from "./template.ts";
-import { pilotExprFor } from "../pilot.ts";
-import { excluded } from "../db/kx.ts";
+import { claimFollowups, followupKey, saveFollowups } from "../data/review/index.ts";
+import { listItems, loadRepos } from "../data/mirror/index.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { dedupeDefects, pendingDefects, recentFiled, reviewOf, followupsOf, type FollowupState, type PendingDefect } from "./select.ts";
 import type { Db } from "../db/index.ts";
@@ -39,20 +39,13 @@ type Extra = { issue?: { number: number; url: string }; duplicateOf?: number | n
 const rowOf = (d: PendingDefect): Row => ({ repo: d.repo, number: d.number, review_at: d.review_at, finding: d.finding, title: d.f.title });
 
 async function setFollowup(db: Db, d: Row, state: FollowupState, at: string, x: Extra = {}): Promise<void> {
-  await db.run(db.k.insertInto("postmerge_followups")
-    .values({ repo: d.repo, number: d.number, review_at: d.review_at, finding: d.finding, title: d.title, issue_number: x.issue?.number ?? null, url: x.issue?.url ?? null, state, at,
-      duplicate_of: x.duplicateOf ?? null, attempts: x.attempts ?? 0, note: x.note ?? null })
-    .onConflict((oc) => oc.columns(["repo", "number", "review_at", "finding"]).doUpdateSet(excluded(["title", "issue_number", "url", "state", "at", "duplicate_of", "attempts", "note"]))));
+  await saveFollowups(db, [{ repo: d.repo, number: d.number, review_at: d.review_at, finding: d.finding, title: d.title, issue_number: x.issue?.number ?? null, url: x.issue?.url ?? null, state, at,
+    duplicate_of: x.duplicateOf ?? null, attempts: x.attempts ?? 0, note: x.note ?? null }]);
 }
 
 /** Writes the `filing` row unless another process already holds or finished this finding. */
 async function claim(db: Db, d: Row, at: string, attempts: number): Promise<boolean> {
-  return await db.write(async () => {
-    const cur = await db.get(db.k.selectFrom("postmerge_followups").select("state").where("repo", "=", d.repo).where("number", "=", d.number).where("review_at", "=", d.review_at).where("finding", "=", d.finding));
-    if (cur?.state === "filing" || cur?.state === "filed") return false;
-    await setFollowup(db, d, "filing", at, { attempts });
-    return true;
-  });
+  return (await claimFollowups(db, [{ ...d, attempts }], { at })).has(followupKey(d));
 }
 
 const oneLine = (e: unknown): string => String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 300);
@@ -67,7 +60,7 @@ async function fileDefect(db: Db, deps: FileDeps, w: Writer, g: GuardedRepo, d: 
   const { repo } = d, ref = `${repo}#${d.number}`, row = rowOf(d);
   const at = () => deps.now().toISOString();
   if (d.f.file) {
-    const branch = (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
+    const branch = (await loadRepos(db, { names: [repo] })).get(repo)?.default_branch ?? "main";
     if (await deps.fileExists(repo, branch, d.f.file) === false) {
       await setFollowup(db, row, "skipped-stale", at(), { note: `${d.f.file} is not on ${branch}` });
       log(`  ${ref}: not filed: ${d.f.file} is no longer on ${branch}`);
@@ -169,7 +162,7 @@ export async function fileFinding(db: Db, ref: string, index: number, log: (line
   if (f.severity !== "defect") throw new Error(`finding ${index} of ${ref} is minor; only defects are filed`);
   if (!await commentApprovalOf(db, repo)) throw new Error(`commenting in ${repo} is not approved`);
   if (await isQuiet(db, repo, number)) throw new Error(`${ref} is a quiet pull request: its fix is not public yet, so no issue is filed about it`);
-  if (!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => pilotExprFor(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))))) throw new Error(`${ref} is outside the pipeline's scope (pipeline flag or pilot)`);
+  if (!(await listItems(db, { repos: [repo], numbers: [number], inScope: true }, "ref")).length) throw new Error(`${ref} is outside the pipeline's scope (pipeline flag or pilot)`);
   const have = (await followupsOf(db, repo, number)).find((x) => x.review_at === r.at && x.finding === index);
   if (have?.state === "filed" || have?.state === "filing") throw new Error(`finding ${index} of ${ref} is already ${have.state === "filed" ? `filed as issue ${have.issue_number}` : "being filed with an unknown outcome; check GitHub"}`);
   await audit(db, OPERATOR, "postmerge-file-one", ref, { finding: index });

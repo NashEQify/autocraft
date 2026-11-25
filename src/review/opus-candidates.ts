@@ -3,21 +3,25 @@
 import { planned } from "../core/select.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { type Size } from "./candidates.ts";
-import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
 
 export type OpusCandidate = {
   repo: string; number: number; title: string; body: string; author_association: string | null;
   head_oid: string; lines_changed: number; size: Size; score: number | null;
 };
 
+const candidateOf = (it: { title: string | null; body: string | null; author_association: string | null } | undefined, f: Pick<PrFacts, "repo" | "number" | "lines" | "size" | "score">, head: string, fallbackTitle: string): OpusCandidate =>
+  ({ repo: f.repo, number: f.number, title: it?.title ?? fallbackTitle, body: it?.body ?? "", author_association: it?.author_association ?? null, head_oid: head, lines_changed: f.lines, size: f.size, score: f.score });
+
 /** The candidate of a PR at `head`: its text and author association from the items row, size and score from its facts. */
 export async function opusCandidateOf(db: Db, f: Pick<PrFacts, "repo" | "number" | "lines" | "size" | "score">, head: string, fallbackTitle = ""): Promise<OpusCandidate> {
-  const it = await db.get(db.k.selectFrom("items").select(["title", "body", "author_association"]).where("repo", "=", f.repo).where("number", "=", f.number));
-  return { repo: f.repo, number: f.number, title: it?.title ?? fallbackTitle, body: it?.body ?? "", author_association: it?.author_association ?? null, head_oid: head, lines_changed: f.lines, size: f.size, score: f.score };
+  return candidateOf((await loadItems(db, [{ repo: f.repo, number: f.number }], "text")).get(`${f.repo}#${f.number}`), f, head, fallbackTitle);
 }
 
 /** PRs of `repo` still to review, highest work score first. */
 export async function selectOpusCandidates(db: Db, repo: string, run?: string | null): Promise<OpusCandidate[]> {
-  return await mapSeq((await planned(db, "review", { repo, ...(run !== undefined ? { run } : {}) })), async (p) => await opusCandidateOf(db, p.facts, p.action.head!));
+  const rows = await planned(db, "review", { repo, ...(run !== undefined ? { run } : {}) });
+  const items = await loadItems(db, rows.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), "text");
+  return rows.map((p) => candidateOf(items.get(`${p.facts.repo}#${p.facts.number}`), p.facts, p.action.head!, ""));
 }
