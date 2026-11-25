@@ -24,14 +24,14 @@ export async function queueActions(db: Db, rows: NewAction[]): Promise<Map<strin
   await db.write(async () => {
     for (const part of kx.batches([...unique.values()])) {
       const got = await q.all(q.k.insertInto(T).values(part.map((r) => ({
-        workflow_id: r.workflowId, repo: r.repo, number: r.number, kind: r.kind, by: r.by, head: r.head, state: r.state ?? "pending", attempts: 0,
+        workflow_id: r.workflowId, repo: r.repo, number: r.number, kind: r.kind, by: r.by, head: r.head, state: r.state ?? "pending", attempts: 0, close_as: r.closeAs ?? null,
         created_at: r.at ?? now, updated_at: r.at ?? now,
       }))).onConflict((oc) => oc.columns(["workflow_id", "kind", "repo", "number"]).doUpdateSet((eb) => {
         const reset = (col: string, value: any) => eb.case().when(eb(`${T}.state` as any, "in", RESETS)).then(value).else(eb.ref(`${T}.${col}` as any)).end();
         return {
           by: reset("by", eb.ref("excluded.by")), head: reset("head", eb.ref("excluded.head")), state: reset("state", eb.ref("excluded.state")),
           attempts: reset("attempts", eb.lit(0)), reason: reset("reason", eb.lit(null)), comment_url: reset("comment_url", eb.lit(null)),
-          done_at: reset("done_at", eb.lit(null)), updated_at: reset("updated_at", eb.ref("excluded.updated_at")),
+          done_at: reset("done_at", eb.lit(null)), close_as: reset("close_as", eb.ref("excluded.close_as")), updated_at: reset("updated_at", eb.ref("excluded.updated_at")),
         } as any;
       })).returning(["id", "repo", "number", "kind"]));
       for (const g of got) out.set(`${refKey(g)}:${g.kind}`, g.id);
@@ -56,8 +56,11 @@ export async function loadActionsDue(db: Db, f?: { repos?: string[]; kinds?: Act
   return rows as unknown as DueAction[];
 }
 
-/** Batched update that writes only when the state or, when given, the reason differs from the stored row, so a repeated waiting state wakes nothing. `done` also sets `done_at`. */
-export async function saveActions(db: Db, rows: { id: number; state: ActionState; reason?: string | null; commentUrl?: string | null; attempts?: number; at: string }[]): Promise<void> {
+/**
+ * Batched update that writes only when the state or, when given, the reason, the comment or the tries differ from the stored row, so a
+ * repeated waiting state wakes nothing. `done` also sets `done_at`. `from`: only rows still in one of these states.
+ */
+export async function saveActions(db: Db, rows: { id: number; state: ActionState; reason?: string | null; commentUrl?: string | null; attempts?: number; at: string }[], o: { from?: readonly ActionState[] } = {}): Promise<void> {
   const last = [...new Map(rows.map((r) => [r.id, r])).values()];
   if (!last.length) return;
   const shape = (r: (typeof rows)[number]) => [r.reason !== undefined, r.commentUrl !== undefined, r.attempts !== undefined, r.state === "done"] as const;
@@ -70,7 +73,15 @@ export async function saveActions(db: Db, rows: { id: number; state: ActionState
         ...(attempts ? { attempts: r.attempts! } : {}), ...(done ? { done_at: r.at } : {}),
       }));
       await patchRows(db, T, { id: "bigint" }, set, values, {
-        when: (eb) => eb.or([eb(`${T}.state`, "is distinct from", eb.ref("v.state")), ...(reason ? [eb(`${T}.reason`, "is distinct from", eb.ref("v.reason"))] : [])]),
+        when: (eb) => eb.and([
+          eb.or([
+            eb(`${T}.state`, "is distinct from", eb.ref("v.state")),
+            ...(reason ? [eb(`${T}.reason`, "is distinct from", eb.ref("v.reason"))] : []),
+            ...(url ? [eb(`${T}.comment_url`, "is distinct from", eb.ref("v.comment_url"))] : []),
+            ...(attempts ? [eb(`${T}.attempts`, "is distinct from", eb.ref("v.attempts"))] : []),
+          ]),
+          ...(o.from ? [eb(`${T}.state`, "in", [...o.from])] : []),
+        ]),
       });
     }
   });
