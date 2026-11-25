@@ -1090,7 +1090,7 @@ async function sync(args: string[]): Promise<void> {
         await chore("security", async () => {
           const { exec, fixupDir } = await import("./fixup/git.ts");
           await (await import("./security/land.ts")).pollLandingIfDue(db, { exec, root: fixupDir(), log: (l) => console.log(l) });
-        }, stuck);
+        }, stuck, async () => `at ${(await import("./security/land.ts")).landingStage()}`);
       }
     } catch (e) {
       await finishSyncRun(db, row, { endedAt: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) });
@@ -1107,9 +1107,9 @@ const CHORE_MS = 15 * 60_000;
 
 /**
  * Runs one chore after the mirror run. Its failure is logged under `name` and does not fail the run; one still running after
- * `ms` is logged, added to `stuck` and left behind.
+ * `ms` is logged with `where` it is and the process's open resources, added to `stuck` and left behind.
  */
-async function chore(name: string, fn: () => Promise<void>, stuck: string[], ms = CHORE_MS): Promise<void> {
+async function chore(name: string, fn: () => Promise<void>, stuck: string[], where?: () => Promise<string>, ms = CHORE_MS): Promise<void> {
   let t: NodeJS.Timeout | undefined;
   const late = new Promise<false>((r) => { t = setTimeout(() => r(false), ms); });
   const run = fn().then(() => true, (e: unknown) => {
@@ -1119,7 +1119,8 @@ async function chore(name: string, fn: () => Promise<void>, stuck: string[], ms 
   try {
     if (await Promise.race([run, late])) return;
     stuck.push(name);
-    console.log(`${name}: still running after ${Math.round(ms / 60_000)} min; the run goes on without it`);
+    const place = where ? ` (${await where()})` : "";
+    console.log(`${name}: still running after ${Math.round(ms / 60_000)} min${place}; the run goes on without it; open resources: ${process.getActiveResourcesInfo().join(", ")}`);
   } finally {
     clearTimeout(t);
   }
