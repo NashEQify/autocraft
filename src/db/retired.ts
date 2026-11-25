@@ -76,6 +76,8 @@ export async function dropRetired(db: Db, o: { force?: boolean; target?: string;
     const w = db.k as any;
     await db.run(w.deleteFrom("main.settings").where((eb: any) => eb.or([eb("key", "in", SETTING_KEYS),
       ...SETTING_PREFIXES.map((p) => eb(eb.fn("substr", ["key", eb.lit(1), eb.lit(p.length)]), "=", p))])));
+    // The older release took "started" for all items, so the value is renamed only now; the reader takes both (src/data/runners/user-settings.ts).
+    await db.run(w.updateTable("main.user_settings").set({ value: "started", updated_at: now }).where("key", "=", "task_items").where("value", "=", "fast"));
     // The older runner's heartbeat is gone with the rest, and no older release can run again: the switch stays done.
     const at = (JSON.parse(marker.value) as { at?: string }).at ?? now;
     await db.run(w.updateTable("main.settings").set({ value: JSON.stringify({ at, heartbeat: null }) }).where("key", "=", SWITCH_KEY));

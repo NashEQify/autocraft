@@ -6,7 +6,7 @@ import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
-import { loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
+import { loadEvents, loadLastEventKinds, loadMergeApprovals } from "../src/data/workflow/index.ts";
 
 const COPIED = "2026-11-20T00:00:00.000Z", BEFORE = "2026-11-19T00:00:00.000Z", AFTER = "2026-11-20T01:00:00.000Z", NOW = "2026-11-20T02:00:00.000Z";
 
@@ -28,7 +28,7 @@ async function legacy(): Promise<Db> {
   await insert(db, "tracked_repos", { name: "pilot", workflow: "new" });
   await setting(db, STATE_COPY_DONE, COPIED);
   await setting(db, "runner_heartbeat", AFTER);
-  for (const [n, kind, state] of [[1, "issue"], [2, "pr"], [3, "issue", "CLOSED"], [4, "pr"], [5, "pr"], [6, "issue"], [7, "pr"], [8, "issue"], [9, "pr"]] as [number, string, string?][]) await item(db, n, kind, state);
+  for (const [n, kind, state] of [[1, "issue"], [2, "pr"], [3, "issue", "CLOSED"], [4, "pr"], [5, "pr"], [6, "issue"], [7, "pr"], [8, "issue"], [9, "pr"], [10, "pr"], [11, "pr", "MERGED"], [12, "pr"]] as [number, string, string?][]) await item(db, n, kind, state);
 
   await decision(db, "answered", { number: 2, answer: "take", answered_by: "alice", answered_at: AFTER });
   await decision(db, "open", { number: 2 });
@@ -39,16 +39,23 @@ async function legacy(): Promise<Db> {
   await insert(db, "actions", { decision_id: "answered", repo: "demo", number: 2, kind: "comment-close", state: "done", comment_url: "https://example.test/c", created_at: AFTER });
 
   const fast = (number: number, weight: number) => insert(db, "fast_track", { repo: "demo", number, added_by: "dave", added_at: BEFORE, weight });
-  for (const [n, w] of [[2, 5], [1, 8], [3, 5], [4, 5], [8, 5], [9, 5]] as const) await fast(n, w);
+  for (const [n, w] of [[2, 5], [1, 8], [3, 5], [4, 5], [8, 5], [9, 5], [10, 7]] as const) await fast(n, w);
   await insert(db, "implementations", { repo: "demo", number: 1, queued_by: "dave", state: "pr", attempt: 1, text_hash: "x", pr_number: 9, created_at: BEFORE, updated_at: BEFORE });
 
   const workflow = async (id: number, number: number, state: string) =>
     await insert(db, "item_workflows", { id, repo: "demo", number, kind: "pr", entry: "fixup", state, started_by: "erin", started_at: BEFORE, started_via: "github", approved_by: "erin", approved_at: BEFORE, updated_at: BEFORE });
   await workflow(1001, 4, "running");
   await workflow(1002, 5, "running");
-  const leg = (number: number, state: string, workflow_id: number | null, updated_at: string) =>
-    insert(db, "preapprovals", { repo: "demo", number, by: "erin", at: BEFORE, instructions: "", state, from_head: "h", reason: "CI failed", updated_at, workflow_id });
+  const leg = (number: number, state: string, workflow_id: number | null, updated_at: string, head: string | null = null) =>
+    insert(db, "preapprovals", { repo: "demo", number, by: "erin", at: BEFORE, instructions: "", state, from_head: "h", head, reason: "CI failed", updated_at, workflow_id });
   await leg(5, "asked", 1002, AFTER);
+  // Pre-approved merges in progress: a fast-tracked PR's, the PR's of issue 1, a merged PR's, and one a person stopped since.
+  await leg(10, "queued", null, AFTER, "h10");
+  await leg(9, "fixup", null, AFTER);
+  await leg(11, "queued", null, AFTER, "h11");
+  await leg(12, "review", null, AFTER, "h12");
+  await workflow(1003, 12, "stopped");
+  await db.prepare("UPDATE main.item_workflows SET stopped_at = ? WHERE id = 1003").run(AFTER);
   // Answered after it stopped: the workflow goes on.
   await leg(4, "asked", 1001, BEFORE);
   await insert(db, "workflow_events", { workflow_id: 1001, repo: "demo", number: 4, login: "erin", via: "github", kind: "answered", at: AFTER });
@@ -104,16 +111,27 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
   assert.equal((await rows(db, "SELECT target FROM main.audit WHERE action = 'decision-archived'"))[0]!.target, "decision:no-item");
   assert.equal((await loadLastEventKinds(db, [ref(2)])).get("demo#2"), "started", "an archived row is never an item's latest event");
 
-  const wf = await rows(db, "SELECT number, kind, entry, weight, state, started_by, base_head FROM main.item_workflows WHERE id < 1000 OR id > 1002 ORDER BY number");
+  const wf = await rows(db, "SELECT number, kind, entry, weight, state, started_by, base_head FROM main.item_workflows WHERE id < 1000 OR id > 1003 ORDER BY number");
   assert.deepEqual(wf.map((w) => ({ ...w })), [
-    { number: 1, kind: "issue", entry: "implement", weight: 8, state: "running", started_by: "dave", base_head: null },
+    { number: 1, kind: "issue", entry: "implement", weight: 8, state: "running", started_by: "dave", base_head: "h" },
     { number: 2, kind: "pr", entry: "review", weight: 5, state: "running", started_by: "dave", base_head: "h2" },
     { number: 6, kind: "issue", entry: "implement", weight: 5, state: "backlog", started_by: "carol", base_head: null },
     { number: 8, kind: "issue", entry: "implement", weight: 5, state: "backlog", started_by: "carol", base_head: null },
+    { number: 10, kind: "pr", entry: "merge", weight: 7, state: "running", started_by: "erin", base_head: "h10" },
   ]);
-  assert.deepEqual(r.fastTrackSkipped.map((s) => s.item).sort(), ["demo#4", "demo#8", "demo#9"], "a live workflow, a later Backlog, and the PR of an issue that starts");
+  assert.deepEqual(r.fastTrackSkipped.map((s) => s.item).sort(), ["demo#10", "demo#4", "demo#8", "demo#9"], "a live workflow, a later Backlog, and the PR of an issue that starts");
+  // A pre-approved merge keeps its approval: in a workflow of its own, or in that of the issue its PR implements.
+  const bound = await rows(db, `SELECT p.number, w.number AS item, w.approved_by, w.approved_at FROM main.preapprovals p JOIN main.item_workflows w ON w.id = p.workflow_id
+    WHERE p.state IN ('fixup', 'review', 'ci', 'queued') ORDER BY p.number`);
+  assert.deepEqual(bound.map((b) => ({ ...b })), [
+    { number: 9, item: 1, approved_by: "erin", approved_at: BEFORE },
+    { number: 10, item: 10, approved_by: "erin", approved_at: BEFORE },
+  ]);
+  assert.deepEqual((await loadMergeApprovals(db)).get("demo#10")?.by, "erin", "the merge queue merges it as the person who approved it");
+  assert.deepEqual(r.legs.map((l) => l.item).sort(), ["demo#10", "demo#9"]);
+  assert.deepEqual(r.legsSkipped.map((l) => l.item), ["demo#11", "demo#12"]);
   assert.deepEqual(await rows(db, "SELECT DISTINCT workflow FROM main.tracked_repos").then((x) => x.map((y) => y.workflow)), ["new"]);
-  assert.equal((await rows(db, "SELECT value FROM main.user_settings WHERE key = 'task_items'"))[0]!.value, "started");
+  assert.equal((await rows(db, "SELECT value FROM main.user_settings WHERE key = 'task_items'"))[0]!.value, "fast", "the older release reads it");
 
   const stopped = (await rows(db, "SELECT state, rec, rec_head FROM main.item_workflows WHERE id = 1002"))[0]!;
   assert.equal(stopped.state, "recommending");

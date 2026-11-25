@@ -30,6 +30,7 @@ test("the removal is off in this release, and drops everything retired once it i
   await db.prepare("INSERT INTO main.dupe_group_items (decision_id, group_id, repo, number, kind, role, base_role) VALUES ('g', 'g', 'photocraft', 1, 'pr', 'keep', 'keep')").run();
   await db.prepare("INSERT INTO main.discord_alert_msgs (decision_id, user_hash, sent_at) VALUES ('old', 'u', 'x')").run();
   await db.prepare("INSERT INTO main.settings (key, value) VALUES ('merge_approved:photocraft', '{}'), ('maintainer_writes', 'on'), ('pipeline_login', 'me')").run();
+  await db.prepare("INSERT INTO main.user_settings (login, key, value, updated_at) VALUES ('a', 'task_items', 'fast', 'x')").run();
 
   assert.deepEqual(await dropRetired(db, { target }), [], "off");
   assert.deepEqual(await dropRetired(db, { target, force: true }), [], "not before the switch");
@@ -48,6 +49,8 @@ test("the removal is off in this release, and drops everything retired once it i
   }
   assert.deepEqual((await db.prepare("SELECT line FROM main.workflow_events WHERE kind = 'archived' ORDER BY line").all()).map((r) => r.line), ["Late? Answer: take.", "Q? Answer: take."]);
   assert.deepEqual((await db.prepare("SELECT key FROM main.settings WHERE key IN ('merge_approved:photocraft', 'maintainer_writes', 'pipeline_login')").all()).map((r) => r.key), ["pipeline_login"]);
+
+  assert.equal((await db.prepare("SELECT value FROM main.user_settings WHERE key = 'task_items'").get())!.value, "started");
 
   // The surviving tables keep their rows and take writes, their triggers included, under their new keys.
   assert.equal((await db.prepare("SELECT count(*) AS n FROM main.dupe_group_items WHERE group_id = 'g'").get())!.n, 1);

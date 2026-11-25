@@ -1,6 +1,6 @@
 // The switch to the maintainer workflow, once: what older processes wrote after the state copy is carried over, the answered
 // and open questions and the results of the decision system become `archived` workflow events, every tracked repo runs the
-// maintainer workflow, and each open fast-track row becomes a started workflow.
+// maintainer workflow, and each open fast-track row and each pre-approved merge in progress becomes a started workflow.
 //
 // When. The runner runs it after it won its lease and before it starts work (src/runner/index.ts), on both engines. By then
 // the older runner and its jobs are fenced, so their last writes are in place; older dashboards may serve for some minutes
@@ -27,7 +27,7 @@
 // - discord_filed, plan_pass_stats and every other table: one place for both, nothing to carry.
 import type { ReviewWorkflow } from "../data/review/types.ts";
 import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
-import type { Parsed, PlanPart } from "../workflow/types.ts";
+import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
 import type { Db } from "./index.ts";
 import * as kx from "./kx.ts";
 import { ACTIVE_LEG_STATES, backfills, boundsSql, settingsState, spans, STATE_COPY_DONE, type StateRows, type Task, type Value } from "./state-copy.ts";
@@ -51,15 +51,16 @@ export interface SwitchReport {
   /** Stopped pre-approvals ended, and the workflows that wait with a recommendation for them. */
   legsEnded: number;
   recommending: string[];
-  /** Pre-approved merges in progress on an item nobody started in the workflow: the pre-approval pass ends them. */
-  legsWithoutWorkflow: string[];
+  /** Pre-approved merges in progress that no workflow owned, the person whose approval it is and the workflow it goes on in. */
+  legs: { item: string; by: string; head: string; workflow: number }[];
+  /** Those the pre-approval pass ends. */
+  legsSkipped: { item: string; why: string }[];
   /** Answers nothing had acted on yet. */
   unapplied: string[];
   repos: number;
   fastTrack: { item: string; entry: string; by: string; weight: number; workflow: number }[];
   fastTrackSkipped: { item: string; why: string }[];
   backlog: number;
-  taskItems: number;
 }
 
 export interface SwitchOptions {
@@ -79,8 +80,8 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   // Both sides were equal at this time: at the last switch, else at the state copy (a copy without a time: now).
   const since = marker?.at ?? (copied !== null && /^\d{4}-/.test(copied) ? copied : now);
   const r: SwitchReport = {
-    at: now, archived: { answered: 0, withdrawn: 0, actions: 0, withoutItem: 0 }, carried: {}, legsEnded: 0, recommending: [], legsWithoutWorkflow: [],
-    unapplied: [], repos: 0, fastTrack: [], fastTrackSkipped: [], backlog: 0, taskItems: 0,
+    at: now, archived: { answered: 0, withdrawn: 0, actions: 0, withoutItem: 0 }, carried: {}, legsEnded: 0, recommending: [], legs: [], legsSkipped: [],
+    unapplied: [], repos: 0, fastTrack: [], fastTrackSkipped: [], backlog: 0,
   };
   await carryState(db, r, { now, since, keepAfter: marker ? null : since, perDay: o.perDay });
   await carryColumns(db, r, since);
@@ -89,9 +90,9 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   await db.write(async () => {
     await endAskedLegs(db, r, now);
     r.repos = (await run(db, q(db).updateTable("main.tracked_repos").set({ workflow: "new" }).where("workflow", "<>", "new"))).changes;
-    await startFastTracked(db, r, now);
-    r.taskItems = (await run(db, q(db).updateTable("main.user_settings").set({ value: "started", updated_at: now }).where("key", "=", "task_items").where("value", "=", "fast"))).changes;
-    await reportLeft(db, r);
+    await startWorkflows(db, r, now);
+    r.unapplied = (await all(db, q(db).selectFrom("main.decisions").select("id").where("answer", "is not", null).where("answer", "not in", [WITHDRAWN, BACKLOG]).where("applied_at", "is", null).orderBy("id").limit(LISTED)))
+      .map((d) => d.id as string);
     await run(db, q(db).insertInto("main.audit").values({ at: now, login: ACTOR, action: "workflow-switch", target: null, details: JSON.stringify(r) }));
     await run(db, q(db).insertInto("main.settings").values({ key: SWITCH_KEY, value: JSON.stringify({ at: now, heartbeat }) })
       .onConflict((oc: any) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
@@ -106,11 +107,12 @@ export function reportLines(r: SwitchReport): string[] {
   const carried = Object.entries(r.carried).filter(([, n]) => n).map(([t, n]) => `${t} ${n}`).join(", ");
   return [
     `switch to the maintainer workflow: ${a.answered} answered and ${a.withdrawn} open questions and ${a.actions} actions archived (${a.withoutItem} questions without an item in the audit log)`,
-    `  ${r.repos} repos moved, ${r.legsEnded} stopped pre-approvals ended, ${r.backlog} items kept in the backlog, ${r.taskItems} Task Runner settings renamed; carried over: ${carried || "nothing"}`,
+    `  ${r.repos} repos moved, ${r.legsEnded} stopped pre-approvals ended, ${r.backlog} items kept in the backlog; carried over: ${carried || "nothing"}`,
     ...r.fastTrack.map((f) => `  fast track: ${f.item} starts ${f.entry} for ${f.by} at weight ${f.weight} (workflow ${f.workflow})`),
     ...r.fastTrackSkipped.map((f) => `  fast track: ${f.item} not started: ${f.why}`),
     ...(r.recommending.length ? [`  waiting with a recommendation: ${r.recommending.join(", ")}`] : []),
-    ...(r.legsWithoutWorkflow.length ? [`  pre-approved merges that end because nobody started the item: ${r.legsWithoutWorkflow.join(", ")}`] : []),
+    ...r.legs.map((l) => `  pre-approved merge: ${l.item} goes on at ${l.head.slice(0, 7)}, approved by ${l.by} (workflow ${l.workflow})`),
+    ...r.legsSkipped.map((l) => `  pre-approved merge: ${l.item} ends: ${l.why}`),
     ...(r.unapplied.length ? [`  answers nothing had acted on: ${r.unapplied.join(", ")}`] : []),
   ];
 }
@@ -417,7 +419,7 @@ async function endAskedLegs(db: Db, r: SwitchReport, now: string): Promise<void>
   r.legsEnded = (await run(db, q(db).updateTable("main.preapprovals").set({ state: "cancelled" }).where("state", "=", "asked"))).changes;
 }
 
-// ---- fast track and backlog -------------------------------------------------------------------------------------------
+// ---- starts and backlog --------------------------------------------------------------------------------------------------
 
 /** The items a Backlog answer holds (its own, a batch's, a duplicate group's members), with the latest such answer. */
 async function backlogAnswers(db: Db): Promise<Map<string, { by: string; at: string }>> {
@@ -434,85 +436,149 @@ async function backlogAnswers(db: Db): Promise<Map<string, { by: string; at: str
   return out;
 }
 
+/** What the starts of one run share. */
+interface Starts {
+  backlog: Map<string, { by: string; at: string }>;
+  /** Every workflow per item, and the items with a live one. */
+  of: Map<string, Row[]>;
+  live: Set<string>;
+  /** The live implement workflow per issue. */
+  implementing: Map<string, { id: number; number: number; approved: boolean }>;
+  fast: Row[];
+  /** The issue a PR implements. */
+  issueOf: Map<string, string>;
+}
+
 /**
- * Starts a workflow for each open fast-track row: an issue's `implement`, a PR's `review`, for the person who fast-tracked it at
- * its weight, in the order added (the workflow id orders equal weights). Not when the item has a live workflow, its own or the
- * one whose implementation PR it is, or when a workflow of it started or a person sent it away after the row was added. Then
+ * Starts a workflow for the open fast-track rows of issues, the pre-approved merges in progress and the open fast-track rows of
+ * PRs, in this order: the PR of an issue that starts goes with the issue, and a pre-approved PR goes on with its approval. Then
  * records each remaining open item a Backlog answer holds as a workflow in the backlog, which the automatic path leaves alone.
  */
-async function startFastTracked(db: Db, r: SwitchReport, now: string): Promise<void> {
-  const backlog = await backlogAnswers(db);
-  const workflows = await all(db, q(db).selectFrom("main.item_workflows").select(["id", "repo", "number", "state", "entry", "started_at", "stopped_at"]).orderBy("id"));
+async function startWorkflows(db: Db, r: SwitchReport, now: string): Promise<void> {
+  const workflows = await all(db, q(db).selectFrom("main.item_workflows").select(["id", "repo", "number", "state", "entry", "started_at", "stopped_at", "approved_by"]).orderBy("id"));
   const of = new Map<string, Row[]>();
   for (const w of workflows) (of.get(key(w as never)) ?? of.set(key(w as never), []).get(key(w as never))!).push(w);
-  const live = new Set(workflows.filter((w) => LIVE.includes(w.state as string)).map((w) => key(w as never)));
-  const implementing = new Set(workflows.filter((w) => LIVE.includes(w.state as string) && w.entry === "implement").map((w) => key(w as never)));
-
-  const rows = await all(db, q(db).selectFrom("main.fast_track as f").innerJoin("main.tracked_repos as t", "t.name", "f.repo")
+  const live = workflows.filter((w) => LIVE.includes(w.state as string));
+  const fast = await all(db, q(db).selectFrom("main.fast_track as f").innerJoin("main.tracked_repos as t", "t.name", "f.repo")
     .innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number"))
     .select(["f.id", "f.repo", "f.number", "f.added_by", "f.added_at", "f.weight", "i.kind", "i.head_oid"]).where("i.state", "=", "OPEN").orderBy("f.id"));
-  const prs = rows.filter((f) => f.kind === "pr");
+  const legs = await all(db, q(db).selectFrom("main.preapprovals as p").leftJoin("main.tracked_repos as t", "t.name", "p.repo")
+    .leftJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.id", "p.repo", "p.number", "p.by", "p.at", "p.from_head", "p.head", "t.name as tracked", "i.state as item_state", "i.head_oid"])
+    .where("p.state", "in", [...ACTIVE_LEG_STATES]).where("p.workflow_id", "is", null).orderBy("p.id"));
   const issueOf = new Map<string, string>();
-  if (prs.length) {
-    const ims = await all(db, q(db).selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where(kx.tupleIn(db, ["repo", "pr_number"], prs.map((f) => [f.repo, Number(f.number)]), ["text", "bigint"])));
+  for (const part of kx.batches([...fast.filter((f) => f.kind === "pr"), ...legs])) {
+    const ims = await all(db, q(db).selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where(kx.tupleIn(db, ["repo", "pr_number"], part.map((x) => [x.repo, Number(x.number)]), ["text", "bigint"])));
     for (const im of ims) issueOf.set(`${im.repo}#${im.pr_number}`, key(im as never));
   }
-  // Issues first: the PR of an issue that starts here goes with the issue.
-  const start = async (kind: "issue" | "pr"): Promise<void> => {
-    const entry = kind === "issue" ? "implement" : "review";
-    for (const f of rows.filter((x) => (x.kind === "pr") === (kind === "pr"))) {
-      const item = key(f as never);
-      const why = live.has(item) ? "it has a live workflow"
-        : issueOf.has(item) && implementing.has(issueOf.get(item)!) ? `it is the implementation of ${issueOf.get(item)}`
-        : of.get(item)?.some((w) => w.started_at >= f.added_at || (w.stopped_at ?? "") >= f.added_at) ? "a workflow of it started or stopped later"
-        : (backlog.get(item)?.at ?? "") > f.added_at ? "it was moved to the backlog later" : null;
-      if (why) {
-        r.fastTrackSkipped.push({ item, why });
-        continue;
-      }
-      const weight = Number(f.weight);
-      const got = await all(db, q(db).insertInto("main.item_workflows").values({
-        repo: f.repo, number: Number(f.number), kind, entry, weight, state: "running", started_by: f.added_by, started_at: now, started_via: "cli",
-        base_head: kind === "pr" ? f.head_oid : null, plan: "[]", updated_at: now,
-      }).onConflict((oc: any) => oc.doNothing()).returning("id"));
-      if (!got.length) {
-        r.fastTrackSkipped.push({ item, why: "it has a live workflow" });
-        continue;
-      }
-      const id = Number(got[0]!.id);
-      live.add(item);
-      if (entry === "implement") implementing.add(item);
-      const parsed: Parsed = { kind: "commands", items: [], parts: [{ word: entry }, { word: "weight", weight }] };
-      await run(db, q(db).insertInto("main.workflow_events").values({
-        workflow_id: id, repo: f.repo, number: Number(f.number), login: f.added_by, via: "cli", kind: "started", parsed: JSON.stringify(parsed),
-        line: `Started from the fast track at weight ${weight}.`, at: now,
-      }));
-      r.fastTrack.push({ item, entry, by: f.added_by, weight, workflow: id });
-    }
+  const s: Starts = {
+    backlog: await backlogAnswers(db), of, live: new Set(live.map((w) => key(w as never))), fast, issueOf,
+    implementing: new Map(live.filter((w) => w.entry === "implement").map((w) => [key(w as never), { id: Number(w.id), number: Number(w.number), approved: w.approved_by !== null }])),
   };
-  await start("issue");
-  await start("pr");
+  await startFastTracked(db, r, s, "issue", now);
+  await startLegs(db, r, s, legs, now);
+  await startFastTracked(db, r, s, "pr", now);
+  await keepBacklog(db, r, s, now);
+}
 
-  const held = [...backlog].filter(([item, b]) => !live.has(item) && !of.get(item)?.some((w) => w.state === "stopped" || w.state === BACKLOG || w.started_at >= b.at));
+type Word = "implement" | "review" | "merge";
+type Start = { repo: string; number: number; kind: "issue" | "pr"; entry: Word; weight: number; by: string; head: string | null; approvedAt: string | null; event: "started" | "approved"; line: string };
+
+/** Starts one workflow with its event; null when the item has a live one. */
+async function startOne(db: Db, s: Starts, w: Start, now: string): Promise<number | null> {
+  const got = await all(db, q(db).insertInto("main.item_workflows").values({
+    repo: w.repo, number: w.number, kind: w.kind, entry: w.entry, weight: w.weight, state: "running", started_by: w.by, started_at: now, started_via: "cli",
+    base_head: w.head, approved_by: w.approvedAt === null ? null : w.by, approved_at: w.approvedAt, approved_via: w.approvedAt === null ? null : "cli", plan: "[]", updated_at: now,
+  }).onConflict((oc: any) => oc.doNothing()).returning("id"));
+  if (!got.length) return null;
+  const id = Number(got[0]!.id);
+  s.live.add(key(w));
+  if (w.entry === "implement") s.implementing.set(key(w), { id, number: w.number, approved: false });
+  await addEvent(db, { id, repo: w.repo, number: w.number, by: w.by, kind: w.event, word: w.entry, weight: w.weight, line: w.line }, now);
+  return id;
+}
+
+async function addEvent(db: Db, e: { id: number; repo: string; number: number; by: string; kind: string; word: Word; weight?: number; line: string }, now: string): Promise<void> {
+  const parsed: Parsed = { kind: "commands", items: [], parts: [{ word: e.word }, ...(e.weight === undefined ? [] : [{ word: "weight" as const, weight: e.weight }])] };
+  await run(db, q(db).insertInto("main.workflow_events").values({
+    workflow_id: e.id, repo: e.repo, number: e.number, login: e.by, via: "cli", kind: e.kind, parsed: JSON.stringify(parsed), line: e.line, at: now,
+  }));
+}
+
+/** Why a person's later act on the item overrides what was asked at `at`; null when nothing does. */
+function overridden(s: Starts, item: string, at: string): string | null {
+  return s.of.get(item)?.some((w) => w.started_at >= at || (w.stopped_at ?? "") >= at) ? "a workflow of it started or stopped later"
+    : (s.backlog.get(item)?.at ?? "") > at ? "it was moved to the backlog later" : null;
+}
+
+/**
+ * Starts a workflow for each open fast-track row of `kind`: an issue's `implement`, a PR's `review`, for the person who
+ * fast-tracked it at its weight, in the order added (the workflow id orders equal weights). Not when the item has a live
+ * workflow, its own or the one whose implementation PR it is, or when a workflow of it started or a person sent it away after
+ * the row was added.
+ */
+async function startFastTracked(db: Db, r: SwitchReport, s: Starts, kind: "issue" | "pr", now: string): Promise<void> {
+  const entry = kind === "issue" ? "implement" : "review";
+  for (const f of s.fast.filter((x) => (x.kind === "pr") === (kind === "pr"))) {
+    const item = key(f as never);
+    const weight = Number(f.weight);
+    const why = s.live.has(item) ? "it has a live workflow"
+      : s.issueOf.has(item) && s.implementing.has(s.issueOf.get(item)!) ? `it is the implementation of ${s.issueOf.get(item)}`
+      : overridden(s, item, f.added_at);
+    const id = why ? null : await startOne(db, s, {
+      repo: f.repo, number: Number(f.number), kind, entry, weight, by: f.added_by, head: kind === "pr" ? f.head_oid : null, approvedAt: null,
+      event: "started", line: `Started from the fast track at weight ${weight}.`,
+    }, now);
+    if (id === null) r.fastTrackSkipped.push({ item, why: why ?? "it has a live workflow" });
+    else r.fastTrack.push({ item, entry, by: f.added_by, weight, workflow: id });
+  }
+}
+
+/**
+ * Makes each pre-approved merge in progress that no workflow owns the merge leg of a workflow with the entry `merge`, started and
+ * approved by the person who pre-approved it when they did, at the head the leg works and at the weight of its fast-track row.
+ * The leg of an implementation PR goes on in the issue's live workflow, which takes the approval. The legs of an item with a live
+ * workflow of its own are the workflow's to adopt.
+ */
+async function startLegs(db: Db, r: SwitchReport, s: Starts, legs: Row[], now: string): Promise<void> {
+  for (const p of legs) {
+    const item = key(p as never);
+    if (s.live.has(item)) continue;
+    const why = p.tracked === null ? "its repo is not tracked" : p.item_state !== "OPEN" ? "the pull request is not open" : overridden(s, item, p.at);
+    if (why) {
+      r.legsSkipped.push({ item, why });
+      continue;
+    }
+    // A pushed head the mirror does not show yet is reached from the one it shows along our own push.
+    const head = (p.head_oid === p.from_head ? p.from_head : p.head ?? p.from_head) as string;
+    const line = `${p.by} approved the merge at ${p.at}; it goes on.`;
+    const issue = s.implementing.get(s.issueOf.get(item) ?? "");
+    let id = issue?.id ?? null;
+    if (issue && !issue.approved) {
+      await run(db, q(db).updateTable("main.item_workflows").set((eb: any) => ({ approved_by: p.by, approved_at: p.at, approved_via: "cli", base_head: eb.fn.coalesce("base_head", eb.val(head)), updated_at: now })).where("id", "=", issue.id));
+      issue.approved = true;
+      await addEvent(db, { id: issue.id, repo: p.repo, number: issue.number, by: p.by, kind: "approved", word: "merge", line }, now);
+    } else if (!issue) {
+      const weight = Number(s.fast.find((f) => key(f as never) === item)?.weight ?? WEIGHT_NORMAL);
+      id = await startOne(db, s, { repo: p.repo, number: Number(p.number), kind: "pr", entry: "merge", weight, by: p.by, head, approvedAt: p.at, event: "approved", line }, now);
+    }
+    if (id === null) continue;
+    await run(db, q(db).updateTable("main.preapprovals").set({ workflow_id: id }).where("id", "=", p.id));
+    r.legs.push({ item, by: p.by, head, workflow: id });
+  }
+}
+
+async function keepBacklog(db: Db, r: SwitchReport, s: Starts, now: string): Promise<void> {
+  const held = [...s.backlog].filter(([item, b]) => !s.live.has(item) && !s.of.get(item)?.some((w) => w.state === "stopped" || w.state === BACKLOG || w.started_at >= b.at));
   for (const part of kx.batches(held)) {
     const open = await all(db, q(db).selectFrom("main.items as i").innerJoin("main.tracked_repos as t", "t.name", "i.repo").select(["i.repo", "i.number", "i.kind"])
       .where("i.state", "=", "OPEN").where(kx.refIn(db, "i", part.map(([item]) => item))));
     if (!open.length) continue;
-    const at = (i: Row): { by: string; at: string } => backlog.get(key(i as never))!;
+    const at = (i: Row): { by: string; at: string } => s.backlog.get(key(i as never))!;
     await run(db, q(db).insertInto("main.item_workflows").values(open.map((i) => ({
       repo: i.repo, number: Number(i.number), kind: i.kind, entry: i.kind === "pr" ? "review" : "implement", state: BACKLOG, started_by: at(i).by, started_at: at(i).at, started_via: "cli",
       plan: "[]", updated_at: now,
     }))));
     r.backlog += open.length;
   }
-}
-
-/** What the switch leaves to people: legs no workflow works, and answers nothing acted on. */
-async function reportLeft(db: Db, r: SwitchReport): Promise<void> {
-  const legs = await all(db, q(db).selectFrom("main.preapprovals as p").select(["p.repo", "p.number"]).where("p.state", "in", [...ACTIVE_LEG_STATES]).where("p.workflow_id", "is", null)
-    .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.item_workflows as w").select(eb.lit(1).as("one")).whereRef("w.repo", "=", "p.repo").whereRef("w.number", "=", "p.number").where("w.state", "in", LIVE))))
-    .orderBy("p.id").limit(LISTED));
-  r.legsWithoutWorkflow = legs.map((l) => key(l as never));
-  r.unapplied = (await all(db, q(db).selectFrom("main.decisions").select("id").where("answer", "is not", null).where("answer", "not in", [WITHDRAWN, BACKLOG]).where("applied_at", "is", null).orderBy("id").limit(LISTED)))
-    .map((d) => d.id as string);
 }
