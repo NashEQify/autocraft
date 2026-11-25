@@ -17,10 +17,11 @@ import { retryItemPreapproval } from "../src/dash/api/operator.ts";
 import type { Req } from "../src/dash/types.ts";
 import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals, preapprovalOf } from "../src/preapproval/index.ts";
+import { statusDue } from "../src/prstatus/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow } from "../src/workflow/store.ts";
+import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow, workflowHistory } from "../src/workflow/store.ts";
 import { T0, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
@@ -246,23 +247,29 @@ test("a PR closed during the workflow that opened it ends the workflow", async (
   assert.equal(await liveWorkflow(w.db, "app", 7), null);
 });
 
-test("a PR that a live implement workflow works on takes no workflow of its own, and the issue's approved merge goes on", async () => {
+/** Issue 7 implemented (approved when `text` says so), PR 8 opened by it at sha8. */
+async function implementing(text: string): Promise<World> {
   const w = await (await unstarted(false)).issue(7);
-  await run(w, "implement and merge", 7);
+  await run(w, text, 7);
   await earlier(w, { state: "pr-opened", pr: "OPEN" });
   await addOwnCommits(w.db, [{ repo: "app", sha: "sha8", action: "implement-push" }]);
   await settle(w);
-  const legs = async () => await w.rows("SELECT workflow_id, state FROM preapprovals WHERE number = 8");
-  const before = await legs();
+  return w;
+}
+const legs8 = async (w: World) => await w.rows("SELECT workflow_id, state FROM preapprovals WHERE number = 8 ORDER BY id");
+
+test("a PR that a live implement workflow works on starts no work of its own, and the issue's approved merge goes on", async () => {
+  const w = await implementing("implement and merge");
+  const before = await legs8(w);
   assert.deepEqual(before.map((l) => l.state), ["review"]);
-  for (const text of ["review", "fix-up", "merge", "review and merge", "stop", "yes", "urgent"]) {
+  for (const text of ["review", "fix-up", "implement", "backlog", "review and merge", "fix-up, urgent"]) {
     const o = await send(w, text, 8);
     assert.equal(o.outcome, "refused", `${text}: ${o.line}`);
     assert.match(o.line, /app#7/, "it names where the work runs");
     assert.match(o.line, new RegExp(MAINT), "and who started it");
   }
   assert.equal(await liveWorkflow(w.db, "app", 8), null);
-  assert.deepEqual(await legs(), before);
+  assert.deepEqual(await legs8(w), before);
 
   // Stopped on the issue, the PR can be started on its own; then the issue is not started over it.
   await run(w, "stop", 7);
@@ -270,6 +277,96 @@ test("a PR that a live implement workflow works on takes no workflow of its own,
   const o = await send(w, "implement", 7);
   assert.equal(o.outcome, "refused", o.line);
   assert.match(o.line, /app#8/);
+});
+
+test("stop on the PR of an implement workflow halts the issue's workflow, its merge leg and what is queued on the PR, on every surface", async () => {
+  for (const via of ["github", "discord", "dashboard", "agent"] as const) {
+    const w = await implementing("implement and merge");
+    await w.db.run(w.db.k.insertInto("main.operator_fixups").values({ repo: "app", number: 8, from_head: "sha8", instructions: "x", by: MAINT, at: T0 }));
+    const r = await runCommand(w.db, actor, via, { parsed: parse(via === "discord" ? "stop: app#8" : "stop"), items: via === "discord" ? [] : [{ repo: "app", number: 8 }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+    assert.match(r.lines[0]!, /app#7: Stopped/);
+    const [wf] = await workflowHistory(w.db, "app", 7);
+    assert.deepEqual([wf!.state, wf!.stoppedBy], ["stopped", MAINT]);
+    assert.deepEqual((await legs8(w)).map((l) => l.state), ["cancelled"]);
+    assert.deepEqual((await w.rows("SELECT state FROM operator_fixups")).map((x) => x.state), ["ended"]);
+    const e = (await eventsOf(w.db, "app", 7)).at(-1)!;
+    assert.deepEqual([e.kind, e.workflowId, e.via], ["stopped", wf!.id, via]);
+    assert.match(e.line!, /app#8/, "where it was said");
+    await w.db.run(w.db.k.updateTable("main.items").set({ url: "https://github.com/storytold/app/issues/7" }).where("number", "=", 7));
+    assert.match((await statusDue(w.db, "app")).find((d) => d.number === 7)!.line, /Stopped by mira/, "the issue's status comment says so");
+    assert.deepEqual(await workflowHistory(w.db, "app", 8), [], "the PR gets no workflow");
+    assert.equal((await send(w, "stop", 8)).outcome, "refused", "nothing is left running");
+    w.close();
+  }
+});
+
+test("a stop halts the issue's workflow and the one its PR has of its own, from either item", async () => {
+  for (const number of [8, 7]) {
+    const w = await implementing("implement and merge");
+    await insertWorkflow(w.db, { repo: "app", number: 8, kind: "pr", entry: "review", state: "running", startedBy: MAINT, startedAt: T0, startedVia: "dashboard" });
+    const o = await send(w, "stop", number);
+    assert.equal(o.outcome, "run", o.line);
+    assert.match(o.line, new RegExp(`app#${15 - number} stopped too`));
+    for (const n of [7, 8]) {
+      assert.deepEqual((await workflowHistory(w.db, "app", n)).map((x) => x.state), ["stopped"]);
+      assert.equal((await eventsOf(w.db, "app", n)).at(-1)!.kind, "stopped");
+    }
+    assert.deepEqual((await legs8(w)).map((l) => l.state), ["cancelled"]);
+    w.close();
+  }
+});
+
+test("a list that names the issue and its PR stops them once", async () => {
+  const w = await implementing("implement and merge");
+  const r = await runCommand(w.db, actor, "agent", { parsed: parse("stop: app#8 app#7"), items: [] });
+  assert.deepEqual(r.items.map((o) => o.outcome), ["run", "refused"], r.lines.join("\n"));
+});
+
+test("an answer, the approval, the weight and a drop on the PR act on the issue's workflow", async () => {
+  const w = await implementing("implement");
+  const wf = async () => (await liveWorkflow(w.db, "app", 7))!;
+  await run(w, "urgent", 8);
+  assert.equal((await wf()).weight, 10);
+  const rec = { text: "Merge it.", parts: { fix: [], drop: [] }, merges: true };
+  await updateWorkflow(w.db, (await wf()).id, { state: "recommending", rec, recAt: T0, recHead: "sha8", plan: [{ n: 1, title: "typo", source: "review", state: "planned" }] });
+  const unclear = await send(w, "maybe", 8);
+  assert.equal(unclear.outcome, "ambiguous");
+  assert.equal((await eventsOf(w.db, "app", 7)).at(-1)!.kind, "ambiguous", "it waits for a clear answer on the issue");
+  await run(w, "drop 1, merge", 8);
+  const on = await wf();
+  assert.deepEqual([on.state, on.rec, on.approvedBy, on.plan[0]!.state], ["running", null, MAINT, "dropped"]);
+  assert.deepEqual((await legs8(w)).map((l) => [l.state, l.workflow_id]), [["review", on.id]]);
+  assert.equal((await eventsOf(w.db, "app", 7)).at(-1)!.kind, "answered");
+  const again = await send(w, "merge", 8);
+  assert.deepEqual([again.outcome, /app#7: Already approved/.test(again.line)], ["refused", true], again.line);
+});
+
+test("a yes on the PR answers the issue's recommendation, at the head it was made for", async () => {
+  const w = await implementing("implement");
+  const id = (await liveWorkflow(w.db, "app", 7))!.id;
+  const rec = { text: "Merge it.", parts: { fix: [], drop: [] }, merges: true };
+  await updateWorkflow(w.db, id, { state: "recommending", rec, recAt: T0, recHead: "older" });
+  assert.equal((await send(w, "yes", 8, "sha8")).outcome, "refused");
+  await updateWorkflow(w.db, id, { recHead: "sha8" });
+  const o = await send(w, "yes", 8, "sha8");
+  assert.equal(o.outcome, "run", o.line);
+  assert.match(o.line, /app#7: Merging/);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 7))!.approvedBy, (await legs8(w)).map((l) => l.state)], [MAINT, ["review"]]);
+});
+
+test("close on the PR of an implement workflow closes the PR and ends the issue's workflow; a stop on either takes the close back", async () => {
+  for (const number of [8, 7]) {
+    const w = await implementing("implement and merge");
+    await run(w, "close", 8);
+    assert.deepEqual((await workflowHistory(w.db, "app", 7)).map((x) => x.state), ["closed"]);
+    assert.deepEqual((await legs8(w)).map((l) => l.state), ["cancelled"]);
+    const closes = async () => (await w.rows("SELECT number, head, state FROM workflow_actions")).map((x) => [x.number, x.head, x.state === "stopped" ? "stopped" : "open"]);
+    assert.deepEqual(await closes(), [[8, "sha8", "open"]]);
+    await run(w, "stop", number);
+    assert.deepEqual(await closes(), [[8, "sha8", "stopped"]]);
+    w.close();
+  }
 });
 
 /** Runs `fn` once, before the next write transaction of `db` starts. */

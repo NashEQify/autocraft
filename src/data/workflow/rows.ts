@@ -158,9 +158,9 @@ export async function listWorkflows(db: Db, f: WorkflowFilter = {}): Promise<Ite
 
 /**
  * The live workflow that works on each PR: its own, else the one its active merge leg belongs to, else the implement workflow of the
- * issue an attempt opened it for (attemptOf). One statement.
+ * issue an attempt opened it for (attemptOf). `others`: without the PR's own. One statement.
  */
-export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[]): Promise<PrWorkflows> {
+export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[], o: { others?: boolean } = {}): Promise<PrWorkflows> {
   const out: PrWorkflows = new Map();
   if (refs.length === 0) return out;
   const q = queryDb(db);
@@ -175,7 +175,8 @@ export async function loadPrWorkflows(db: Db, refs: { repo: string; number: numb
     .select((eb: any) => ["i.repo as repo", "i.pr_number as number", "iw.id as wid", eb.lit(2).as("rank")]).where("iw.entry", "=", "implement").where("iw.state", "in", LIVE_STATES)
     .where((eb: any) => attemptOf(eb, "i", "iw"));
   const rows = await q.all(k.selectFrom(own.unionAll(leg).unionAll(attempt).as("h")).innerJoin("main.item_workflows as w", "w.id", "h.wid")
-    .selectAll("w").select(["h.number as pr", "h.rank as rank"]).where("w.state", "in", LIVE_STATES).orderBy("h.rank", "desc").orderBy("w.id")) as (WorkflowRow & { pr: number | string; rank: number })[];
+    .selectAll("w").select(["h.number as pr", "h.rank as rank"]).where("w.state", "in", LIVE_STATES)
+    .$if(!!o.others, (b: any) => b.whereRef("w.number", "<>", "h.number")).orderBy("h.rank", "desc").orderBy("w.id")) as (WorkflowRow & { pr: number | string; rank: number })[];
   // The best match of a PR comes last and is the one kept.
   for (const { pr, rank: _rank, ...row } of rows) out.set(refKey(row.repo, Number(pr)), workflowOf(row as WorkflowRow));
   return out;
