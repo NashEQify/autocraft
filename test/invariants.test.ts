@@ -87,8 +87,7 @@ function randomItem(x: Rnd): ItemFacts {
     pairsToCheck: x.int(2), inGroupToAsk: x.bool(0.1), dupeAnswers: x.bool(0.1) ? ["d1"] : [],
     scope: { open: x.bool(0.1), covered: x.bool(0.2), answer: null, recommend: x.bool(0.1) ? { failures: x.int(3), failedAt: null } : null },
     labels: { existing: x.pick([["bugfix"], []]), pluginAnswer: x.bool(0.1), labeledNote: null },
-    answeredClose: x.bool(0.2) ? [{ decisionId: "d", kind: x.pick(["scope", "close", "duplicate", "merge"] as const), security: x.bool(0.2), action: x.pick([null, null, "failed", "done"]) }] : [],
-    closeReview: x.bool(0.1) ? { head: "h1", atHead: x.bool(), asked: x.bool() } : null,
+    close: x.bool(0.2) ? { id: 1, by: "m", weight: 5, at: "2026-11-04T08:00:00.000Z" } : null,
     fix: {
       attempt: x.bool(0.3) ? { state: x.pick(["retry", "testing", "passed", "skipped", "failed"]), textChanged: x.bool(), headDone: x.bool(), baseDone: x.bool() } : null,
       publicRepo: x.bool(0.9), notRust: x.bool(0.1), openPr: x.bool(0.1) ? { number: 7, closes: x.bool(0.5) } : null, impact: x.pick(["P0", "P2", "P4"]), scopeDecision: null,
@@ -156,12 +155,12 @@ function checkPr(f: PrFacts): void {
 function checkItem(f: ItemFacts): void {
   const p = decideItem(f);
   const writes = p.actions.filter((a) => ["label", "implement", "act"].includes(a.kind));
-  // 6. Out of scope: no write, except the answered close of a security-scan question.
-  if (!f.inScope) for (const a of writes) assert.ok(a.kind === "act" && a.params?.security === true, `${label(a)} for an out-of-scope item`);
+  // 6. Out of scope: no write, except the close a person asked for.
+  if (!f.inScope) for (const a of writes) assert.ok(a.kind === "act" && f.close !== null && a.params?.id === f.close.id, `${label(a)} for an out-of-scope item`);
   // A Backlog hold stops labelling, closing and fixing.
   if (f.held === "backlog") assert.deepEqual(writes, [], "write for an item held by Backlog");
-  // A closed item has only its answered close left.
-  if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act" && !a.params?.ask), "action for a closed item other than its close");
+  // A closed item has only its close left.
+  if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act"), "action for a closed item other than its close");
   if (!f.pipelineOn) for (const a of p.actions) assert.ok(gates(f, asWant(a), "pipeline"), `${label(a)} passes the gates with the pipeline off`);
   for (const a of writes) if (a.kind === "implement") assert.equal(f.kind, "issue", "implement for a PR");
   // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending

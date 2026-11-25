@@ -44,7 +44,7 @@ const itemBase = (): ItemFacts => ({
   embedHash: "e1", embeddedHash: "e1", priorityHash: "e1", scannedHash: "e1", pairsToCheck: 0, inGroupToAsk: false, inCompareSet: false, dupeAnswers: [],
   scope: { open: false, answer: null, covered: false, recommend: null },
   labels: { existing: ["bugfix"], pluginAnswer: false, labeledNote: null },
-  answeredClose: [], closeReview: null,
+  close: null,
   fix: { attempt: null, publicRepo: true, notRust: false, openPr: null, impact: "P4", scopeDecision: null },
   implement: { queuedBy: null, settles: false, featureOn: false, row: null, liveInRepo: 0 },
 });

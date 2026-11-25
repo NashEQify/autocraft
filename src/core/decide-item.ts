@@ -139,8 +139,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
   }
 
   const backlog = f.held === "backlog";
-  // act: a person's close, whatever the item's scope. Selecting applies nothing; the repo's comment approval is applied by gates().
-  if (f.close) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
+  // act: a person's close, whatever the item's scope (a Backlog answer takes it back). Selecting applies nothing; the repo's comment approval is applied by gates().
+  if (f.close && !backlog) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
   // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
   const fix = f.fix, step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
