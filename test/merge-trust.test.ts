@@ -223,3 +223,31 @@ test("a fix-up request without a leg whose try another push overtook goes on at 
   assert.deepEqual((await requests())[0], [1, "queued", "sha1b"]);
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"));
 });
+
+test("a conflict merge of ours that was force-pushed away is made again, and after the tries at the head someone else must act", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  await approved(w, { n: 1, state: "ci", entry: "review" });
+  await w.db.run(w.db.k.updateTable("pr_checks").set({ mergeable: "CONFLICTING" }));
+  await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }));
+  const conflicts = async () => (await w.prPlan(1)).actions.filter((a) => a.kind === "conflict" && a.params?.bucket === "merge").length;
+  for (const [to, again] of [["sha1b", 1], ["sha1c", 0]] as const) {
+    assert.equal(await conflicts(), 1);
+    const at = new Date().toISOString();
+    await merged("same")(w, 1, "sha1", to);
+    await w.db.run(w.db.k.insertInto("push_outcomes").values({ at, stage: "fixup", action: "conflict-push", repo: "app", number: 1, from_oid: "sha1", to_oid: to, before_res: "unknown" }));
+    await tick(w);
+    // Not shown yet: nothing is merged twice.
+    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [0, "ci"]);
+    // Pushed away before the mirror showed it: GitHub's update after the push has the old head.
+    await new Promise((r) => setTimeout(r, 5));
+    const later = new Date().toISOString();
+    await w.db.run(w.db.k.updateTable("items").set({ updated_at: later }));
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ fetched_at: later }));
+    await w.db.run(w.db.k.updateTable("repos").set({ synced_at: later }));
+    await tick(w);
+    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [again, "ci"], to);
+  }
+  await w.verified(1);
+  const plan = await w.prPlan(1);
+  assert.ok(["person", "contributor"].includes(plan.waitKind!) && plan.wait, JSON.stringify([plan.wait, plan.actions]));
+});
