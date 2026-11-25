@@ -158,7 +158,7 @@ export type CallActivity = {
 };
 export type WorkspacePass = { rows: WorkspaceRow[]; calls: Map<number, CallActivity>; bound: Map<number, "queued" | "leased"> };
 export type NewWorkspaceCall = Omit<WorkspaceCallRow, "id">;
-export type ToolCallQuery = { tool?: string; n?: number; id?: number; ids?: number[]; field?: "text" | "image" };
+export type ToolCallQuery = { tool?: string; n?: number; id?: number; ids?: number[] };
 export type CallListRow = {
   id: number; n: number | null; tool: string; args: string; state: string; created_at: string; started_at: string | null; finished_at: string | null;
   has_result: number; is_error: number | null; images: number | null; image_data: string | null; image_bytes: number | null; image_sha: string | null; image_note: string | null;

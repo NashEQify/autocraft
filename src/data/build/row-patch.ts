@@ -12,7 +12,7 @@ const isBlob = (v: unknown): boolean => v instanceof Uint8Array;
  * that sets a blob, or the only row of its shape, has a statement of its own. Returns the ids that matched, so a `from` that no
  * longer holds is seen as a row that did not move. Joins the caller's transaction.
  */
-export async function patchRows(db: Db, table: "workspaces" | "workspace_sessions", rows: RowPatch[], numeric: readonly string[]): Promise<Set<number>> {
+export async function patchRows(db: Db, table: "workspaces" | "workspace_sessions" | "workspace_calls", rows: RowPatch[], numeric: readonly string[]): Promise<Set<number>> {
   const moved = new Set<number>();
   if (!rows.length) return moved;
   const q = queryDb(db);
