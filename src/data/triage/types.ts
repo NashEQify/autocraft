@@ -4,15 +4,17 @@ import type { RefKey } from "../mirror/types.ts";
 
 export type { RefKey };
 
-export type Level = 0 | 1 | 2 | 3 | 4;
+export type Level = "P0" | "P1" | "P2" | "P3" | "P4";
+export type Size = "S" | "M" | "L" | "XL";
 
 /** A `classifications` row; `flags` and `probs` are JSON text. */
-export type ClsRow = { repo: string; number: number; classifier: string; run_id: string; at: string; type_label: string | null; flags: string; probs: string | null; reason: string | null; input_hash: string | null };
+export type ClsRow = { repo: string; number: number; classifier: string; run_id: string; at: string; type_label: string | null; flags: string | null; probs: string | null; reason: string | null; input_hash: string | null };
 export type VerdictInput = ClsRow;
-export type RunVerdict = ClsRow & { title: string | null; kind: string | null };
+/** A verdict row of an evaluation run; the item's title and kind come from `mirror.loadItems`. */
+export type RunVerdict = ClsRow;
 export type JevFailed = { repo: string; number: number; hash: string };
 export type SettledStatus = "settled" | "waiting" | "disagree" | "unclassified";
-export type Referee = { label: string; sure: boolean; reason: string; final?: boolean; failures?: number };
+export type Referee = { label: string; sure: boolean; reason: string; final?: boolean; failures?: number; failedAt?: string };
 export type Settled = {
   status: SettledStatus; label: string | null; source: "jev" | "haiku" | "sonnet" | null; confidence: number | null;
   jevLabel: string | null; haikuLabel: string | null; flags: string[]; referee: Referee | null;
@@ -20,10 +22,14 @@ export type Settled = {
 export type RefereeRow = { at: string; type_label: string | null; reason: string | null; probs: string | null };
 export type ClassifierDuplicates = { of: number[]; by: number[] };
 
-export type PriorityRow = { repo: string; number: number; impact: Level; textHash: string | null; jevImpact: Level | null; jevP: number | null; haikuImpact: Level | null; score: number; model: string | null; reason: string | null; at: string };
-export type RankBreakdown = { level: Level; rated: Level | null; security: boolean; type: string | null; [k: string]: unknown };
+/** `score` is the reach; `savePriorities` writes it only on insert, `rescoreReach` owns it after. */
+export type PriorityRow = { repo: string; number: number; impact: Level; textHash: string; jevImpact: Level | null; jevP: number | null; haikuImpact: Level | null; score: number; model: string; reason: string | null; at: string };
+export type RankBreakdown = { level: Level; rated: Level | null; security: boolean; type: string | null; size: Size; sizeSource: "lines" | "triage" | "default"; reach: number };
 export type RankRow = { score: number; breakdown: RankBreakdown; computedAt: string };
-export type RankItemRow = { repo: string; number: number; kind: string; priority: Selectable<DB["item_priority"]> | null; [k: string]: unknown };
+/** An open tracked item with its stored level and reach (null before it was rated) and, for a PR, its changed lines. */
+export type RankItemRow = { repo: string; number: number; kind: string; lines: number | null; level: Level | null; reach: number | null };
+/** What `loadRankInputs` returns: the items to rank, their settled verdicts (absent: unclassified) and the stored ranks. */
+export type RankInputs = { items: RankItemRow[]; settled: Map<RefKey, Settled>; old: Map<RefKey, { score: number; breakdown: RankBreakdown }> };
 export type RankPut = { repo: string; number: number; score: number; breakdown: RankBreakdown; computedAt: string };
 
 export type Area = { name: string; description: string };
