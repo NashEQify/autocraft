@@ -83,12 +83,14 @@ import type { FunnelFacts } from "./funnel.ts";
 export type { FunnelFacts };
 
 export type ItemsFilter = {
-  show: "open" | "backlog" | "closed"; filters: ("security" | "outside" | "stuck" | "duplicates")[]; areas: string[]; text: string | null; refs: Ref[]; limit: number;
+  show: "open" | "backlog" | "closed" | "merged"; filters: ("security" | "outside" | "stuck" | "duplicates")[]; areas: string[]; text: string | null; refs: Ref[]; limit: number;
 };
 export type ItemBase = {
   repo: string; number: number; kind: "pr" | "issue"; title: string; author: string | null; state: string; updatedAt: string; mergedAt: string | null; closedAt: string | null; planState: string | null; itemState: string | null;
   phase: string | null; score: number | null; weight: number | null; workflowState: string | null; hasRecommendation: boolean; startedBy: string | null;
   approvedBy: string | null; stoppedBy: string | null; lastEvent: WorkflowEventKind | null;
+  /** When and how AutoCraft merged it, in the list of those. */
+  merged?: { at: string; how: "rule" | "approval" | "batch" };
 };
 export type ItemRowFacts = {
   plans: Map<Ref, StoredPlan>; holds: Map<Ref, HoldStatus>; stuck: Set<Ref>; duplicateGroups: Map<Ref, DupeSignal>; areas: Map<Ref, unknown>; workflows: Map<Ref, ItemWorkflow>; permissions: Map<string, Permission>;

@@ -50,37 +50,48 @@ async function guard<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-type Viewer = { login: string; role: string };
+/** Without `canWrite` the stored permissions count as they are. */
+type Viewer = { login: string; role: string; canWrite?: (repo: string) => Promise<boolean> };
 const refOf = (x: { repo: string; number: number }): string => `${x.repo}#${x.number}`;
 /** What the views of several cards share. */
 type CardsView = {
   queue: Queue; stale: Map<number, Stale>;
   /** Items ("repo#n") whose pull request is quiet, and when each item's live recommendation was written. */
   quiet: ReadonlySet<string>; recAt: Map<string, string | null>;
+  /** The repos of the cards the viewer may act on. */
+  mayAct: ReadonlySet<string>;
 };
 
-/** Whether `login` may act on every one of `repos` by the act rule, from cached write permissions. */
-async function mayAct(db: Db, login: string, repos: string[]): Promise<boolean> {
-  if (!repos.length) return false;
-  const verdicts = await canActMany(db, repos.map((repo) => ({ login, repo })), { identity: await githubIdentity(db), mode: "cached", maxAgeMs: PERM_READ_TTL });
-  return repos.every((repo) => verdicts.get(permKey(login, repo))?.ok === true);
+/**
+ * The repos of `cards` the viewer may act on by the act rule. A permission too old to count is read from GitHub first, so the buttons
+ * do not go when the stored one ages; an operator keeps them when GitHub does not answer. Each press checks live (needCard).
+ */
+async function mayActOn(db: Db, cards: CardRow[], who: Viewer | undefined): Promise<Set<string>> {
+  const repos = [...new Set(cards.flatMap((c) => { const p = readParams(c.kind, c.params); return p ? cardRepos(c.repo, p) : []; }))];
+  if (!who || (who.role !== "operator" && who.role !== "maintainer") || !repos.length) return new Set();
+  if (who.canWrite) await Promise.all(repos.map((r) => who.canWrite!(r).catch(() => false)));
+  const identity = await githubIdentity(db);
+  const verdicts = await canActMany(db, repos.map((repo) => ({ login: who.login, repo })), { identity, mode: "cached", maxAgeMs: PERM_READ_TTL });
+  return new Set(repos.filter((repo) => {
+    const v = verdicts.get(permKey(who.login, repo));
+    return v?.ok === true || (who.role === "operator" && identity === "app" && v?.ok === false && v.why === "stale");
+  }));
 }
 
-const cardsView = async (db: Db, cards: CardRow[]): Promise<CardsView> => {
+const cardsView = async (db: Db, cards: CardRow[], who?: Viewer): Promise<CardsView> => {
   const proposed = cards.filter((c) => c.state === "proposed");
   const keys = [...new Set(proposed.map(refOf))];
   const refs = [...new Map(proposed.map((c) => [refOf(c), { repo: c.repo, number: c.number }])).values()];
-  const [queue, stale, quiet, flows] = await Promise.all([
-    loadQueue(db), loadStale(db, proposed), keys.length ? loadQuiet(db, keys) : [], refs.length ? listWorkflows(db, { live: true, refs }) : [],
+  const [queue, stale, quiet, flows, mayAct] = await Promise.all([
+    loadQueue(db), loadStale(db, proposed), keys.length ? loadQuiet(db, keys) : [], refs.length ? listWorkflows(db, { live: true, refs }) : [], mayActOn(db, cards, who),
   ]);
-  return { queue, stale, quiet: new Set(quiet), recAt: new Map(flows.map((w) => [refOf(w), w.recAt])) };
+  return { queue, stale, mayAct, quiet: new Set(quiet), recAt: new Map(flows.map((w) => [refOf(w), w.recAt])) };
 };
 
 /** One card's view. A card of the retired decision system shows its stored line and its result only. */
-export const cardView = async (db: Db, c: CardRow, who?: Viewer): Promise<ConversationCard> => await viewOf(db, c, await cardsView(db, [c]), who);
+export const cardView = async (db: Db, c: CardRow, who?: Viewer): Promise<ConversationCard> => viewOf(c, await cardsView(db, [c], who));
 
-/** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer from cached permissions). */
-async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<ConversationCard> {
+function viewOf(c: CardRow, v: CardsView): ConversationCard {
   const params = readParams(c.kind, c.params);
   const effect = params ? cardEffect(params) : null;
   const issue = params ? issueOf(params) : undefined;
@@ -89,6 +100,7 @@ async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<C
   const stale = c.state === "proposed" ? v.stale.get(c.id) : undefined;
   const one = (t: string) => t.replace(/\s+/g, " ").trim();
   const preview = c.text && one(c.text) ? `Comment: ${one(c.text)}` : issue ? `Issue: ${one(issue.title)}` : undefined;
+  const repos = params ? cardRepos(c.repo, params) : [];
   const place = c.state === "queued" ? v.queue.rows.find((r) => r.id === c.id)?.place ?? null : null;
   return {
     steps: params ? cardLines(params) : [c.description],
@@ -98,7 +110,7 @@ async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<C
     label: params ? buttonLabel(params) : c.description,
     headline: params ? headline(params) : c.description,
     ...(preview && { preview }),
-    canSettle: !!who && params !== null && await mayAct(db, who.login, cardRepos(c.repo, params)),
+    canSettle: repos.length > 0 && repos.every((r) => v.mayAct.has(r)),
     id: c.id, kind: params?.kind ?? "comment", title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
     ...(c.text !== null && { text: c.text }),
     ...(effect && { writes: effect }),
@@ -127,9 +139,9 @@ async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promis
     thread = (await loadThreads(db, [key])).get(key);
   }
   if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [] } };
-  const shared = await cardsView(db, thread.cards);
+  const shared = await cardsView(db, thread.cards, who);
   const actions = new Map<number, ConversationCard[]>();
-  const views = await Promise.all(thread.cards.map((c) => viewOf(db, c, shared, who)));
+  const views = thread.cards.map((c) => viewOf(c, shared));
   for (const [i, c] of thread.cards.entries()) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(views[i]!);
   const turns: ConversationTurn[] = thread.turns.map((t) => ({
     id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,

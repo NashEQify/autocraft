@@ -309,23 +309,28 @@ const strip = ({ detail: _d, ...e }: Ev): TraceEvent => e;
 // ---- events from the view's rows -------------------------------------------------------------------------------------------------
 
 const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
-/** A workflow event (an answer, a start, a stop), of kind "decision". */
-export const workflowEvent = (e: { id: number; login: string; kind: string; line?: string | null; at: string }, staff: boolean): Ev => ({
-  id: `workflow:${e.id}`, kind: "decision", at: e.at, head: null, actor: e.kind === "archived" ? step("decide") : person(e.login),
-  summary: staff && e.line ? clip(e.line, 140) : WORKFLOW_WORDS[e.kind] ?? humanize(e.kind), ref: {},
-});
+/** The row of an earlier system an archived event stands for (src/db/switch-over.ts): a question, or an action taken for one. */
+const legacyOf = (parsed: unknown): string => { const l = (parsed as { legacy?: unknown } | null | undefined)?.legacy; return typeof l === "string" ? l : ""; };
+/** A workflow event (an answer, a start, a stop), of kind "decision". An archived one is the person's who answered, a question nobody answered the pipeline's. */
+export const workflowEvent = (e: { id: number; login: string; kind: string; parsed?: unknown; line?: string | null; at: string }, r: Pick<Reader, "staff" | "hidden">): Ev => {
+  const archived = e.kind === "archived", act = archived && legacyOf(e.parsed).startsWith("action:");
+  const line = blankIfHidden(e.line ?? "", r.hidden);
+  const answer = archived && !act && e.login !== "pipeline" ? /^(?:.* )?Answer: (.*)\.$/.exec(line)?.[1] : undefined;
+  return {
+    id: `workflow:${e.id}`, kind: "decision", at: e.at, head: null, actor: act ? step("act") : archived && e.login === "pipeline" ? step("decide") : person(e.login),
+    summary: r.staff && line ? clip(line, 140) : answer ? `Answered: ${clip(answer, 100)}` : act ? "Earlier action" : WORKFLOW_WORDS[e.kind] ?? humanize(e.kind), ref: {}, detail: { text: line },
+  };
+};
 
 /** The scope the data views take, from the request context. */
 export const traceScope = (c: Ctx) => ({ staff: c.staff, operator: c.operator, hidden: c.hidden });
 
 const least = (a: string | null, b: string | null): string => (a !== null && (b === null || a <= b) ? a : b ?? "");
 
-/** Every source's events of the item, unfiltered and not yet shaped for the reader. Ids the loaders do not carry are made from the row's own keys. */
+/** Every source's events of the item, unfiltered and not yet shaped for the reader. An event's id is made from its stored row's key, as the activity feed makes it. */
 export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
   const { own, staff } = c;
   const out: Ev[] = [];
-  const uniq = new Set<string>();
-  const once = (id: string): string => { let k = id, i = 1; while (uniq.has(k)) k = `${id}.${i++}`; uniq.add(k); return k; };
   const it = r.detail.item;
   if (it?.created_at) out.push(openedEvent(it));
   // AutoCraft's own merge step records its entry (mergeEvent); a second GitHub entry would count the same merge twice.
@@ -343,9 +348,8 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
   }
   for (const a of r.detail.activity) out.push(activityEvent(a, own));
   for (const s of r.stages) out.push(stageEvent(s));
-  // The loader returns the newest first and carries no row id: a change is numbered from the oldest.
-  r.planHistory.forEach((p, i) => out.push(planEventFor(c, { id: r.planHistory.length - 1 - i, head: p.head, old_state: p.oldState, new_state: p.newState, wait: p.wait, reasons: JSON.stringify(p.reasons), at: p.at })));
-  for (const j of r.jobTrail) out.push(jobEvent({ id: once(String(j.job_id)) as unknown as number, job_id: j.job_id, outcome: j.outcome, at: j.at, step: j.step, state: j.state, error: j.error }));
+  for (const p of r.planHistory) out.push(planEventFor(c, { id: p.id, head: p.head, old_state: p.oldState, new_state: p.newState, wait: p.wait, reasons: JSON.stringify(p.reasons), at: p.at }));
+  for (const j of r.jobTrail) out.push(jobEvent({ id: j.id, job_id: j.job_id, outcome: j.outcome, at: j.at, step: j.step, state: j.state, error: j.error }));
   for (const x of r.runs) out.push(runEvent({
     id: x.id, step: x.step, prompt_id: x.promptId, model: x.model, provider: x.provider, state: x.state, started_at: x.startedAt, ended_at: x.endedAt, input_tokens: x.tokens.input,
     output_tokens: x.tokens.output, cost_usd: x.costUsd, summary: x.summary, label: null, tools: x.toolCount, job_id: x.jobId, user_login: x.userLogin, harness: x.harness, reported_model: x.reportedModel,
@@ -361,9 +365,9 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
     out.push(opusEvent({ head_oid: h.head, at: h.at, model: h.model, mode: h.mode, verdict: h.verdict, sure: h.sure ? 1 : 0, reason: h.reason, risks: h.risks, fixes: h.fixes, claims: h.claims }, `opus:${h.rowid}`));
   }
   // Reviews stored before the history table existed.
-  const l = rev?.latest;
-  if (l && !seen.has(`${l.head}|${l.at}`))
-    out.push(opusEvent({ head_oid: l.head, at: l.at, model: l.model, mode: l.mode, verdict: l.verdict, sure: l.sure ? 1 : 0, reason: l.reason, risks: l.risks, fixes: l.fixes }, `opus-latest:${l.head}`));
+  for (const l of rev?.reviews ?? [])
+    if (!seen.has(`${l.head}|${l.at}`))
+      out.push(opusEvent({ head_oid: l.head, at: l.at, model: l.model, mode: l.mode, verdict: l.verdict, sure: l.sure ? 1 : 0, reason: l.reason, risks: l.risks, fixes: l.fixes, claims: l.claims }, `opus-latest:${l.head}`));
   for (const p of rev?.premerge ?? []) out.push(premergeEvent(p));
   if (rev?.postmerge) out.push(postmergeEvent({ merge_sha: rev.postmerge.merge_sha, at: rev.postmerge.at, model: rev.postmerge.model, findings: rev.postmerge.findings as unknown as string, error: rev.postmerge.error }, staff));
   for (const v of r.verifications) out.push(verifyEvent({ head_sha: v.headSha, kind: v.kind, state: v.state, reason: v.reason, summary: v.summary, note: v.note, created_at: v.createdAt, head_task_id: v.tasks.find((t) => t.role === "head")?.id ?? null }));
@@ -372,7 +376,7 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
     out.push(f.kind === "fixup" ? fixupEvent(row) : f.kind === "cifix" ? ciFixEvent(row) : conflictEvent(row));
   }
   for (const m of r.merges) out.push(mergeEvent({ rowid: m.rowid, head_oid: m.head, at: m.at, path: m.path, method: m.method, outcome: m.outcome, reason: m.reason }));
-  for (const w of r.workflowEvents) out.push(workflowEvent(w, staff));
+  for (const w of r.workflowEvents) out.push(workflowEvent(w, c));
   for (const t of r.turns) out.push(turnEvent(t));
   for (const a of r.writes as AuditRow[]) {
     const e = writeEvent(a, staff);

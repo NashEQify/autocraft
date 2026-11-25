@@ -60,8 +60,10 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const callEstimate = (step: string, model: string) => estimateOf((v.callDurations.get(`${step}:${model}`) ?? []).map((d) => Date.parse(d.endedAt) - Date.parse(d.startedAt)));
   const taskEstimate = (repo: string, step: string) => estimateOf(v.taskDurations.get(`${repo}|${step}`) ?? []);
 
+  // The owner of a Private Task Runner is named nowhere on the board, except to themselves.
+  const ownerShown = (c: RunRow): boolean => c.provider !== "jev" && req.user.role === "operator" && !!c.userLogin && v.runnerBoard !== null && !privateTo(req, v.runnerBoard.private)(c.userLogin);
   const callOp = (c: RunRow): LiveOp => ({
-    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" && c.userLogin ? `${stepTitle(c.step)} on ${c.userLogin}` : stepTitle(c.step),
+    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: ownerShown(c) ? `${stepTitle(c.step)} on ${c.userLogin}` : stepTitle(c.step),
     start: c.startedAt, end: c.endedAt, estimate: c.state === "running" ? callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
   });
   /** A finished task as one op per step (from its recorded durations); a running one as one op named by the step its log is on. */
@@ -139,6 +141,9 @@ const WORKER_CALLS_MAX = 400;
 /** The row that holds the calls of every runner its owner keeps private. */
 export const PRIVATE_RUNNER = "Private Task Runner";
 
+/** Whether the reader must not learn who owns a runner: its owner keeps it private, and is someone else. */
+const privateTo = (req: Req, owners: ReadonlySet<string>) => (login: string): boolean => owners.has(login.toLowerCase()) && login.toLowerCase() !== req.user.login.toLowerCase();
+
 /** A runner's label as the board may show it: never the machine's hostname, which a label defaults to (device-login.ts). */
 function shownLabel(label: string | null, machine: { hostname?: string } | null): string | null {
   if (!label) return null;
@@ -161,13 +166,12 @@ function modelsOf(models: RunnerRow["models"]): string[] {
  * or ends. Calls on repos hidden from the reader are left out. No row carries a machine's hostname.
  */
 function workersOf(req: Req, v: LiveView, hidden: HiddenRepos, nowMs: number, callEstimate: (step: string, model: string) => LiveEstimate | null): LiveWorker[] {
-  const me = req.user.login.toLowerCase();
   const runs = v.workerRuns ?? [];
   const board = v.runnerBoard!;
   // The runner credential that leased each remote call (only the lease's run is linked; an older lease falls back to its owner).
   const leases = board.leases;
   const helpers = board.helpers;
-  const isPrivate = (login: string) => board.private.has(login.toLowerCase()) && login.toLowerCase() !== me;
+  const isPrivate = privateTo(req, board.private);
   const ownerOf = new Map(helpers.map((h) => [h.tokenId, h.login]));
 
   const workerOfRun = (r: RunRow): string | null => {

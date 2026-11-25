@@ -3,18 +3,26 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import { latestRows, noKeys, pushTo, refKey } from "./rows.ts";
+import { noKeys, pushTo, refKey, storedReviews } from "./rows.ts";
 import { loadFollowups, loadPosts, loadPostmerge, loadReviewHistory } from "./reviews.ts";
-import type { PremergeRow, RefKey, ReviewEventRow, ReviewRecord, ReviewSignature } from "./types.ts";
+import type { PremergeRow, RefKey, ReviewEventRow, ReviewRecord, ReviewRow, ReviewSignature, StoredReview } from "./types.ts";
+
+/** The newest review that gave a verdict. */
+const latestOf = (stored: StoredReview[]): ReviewRow | null => {
+  const r = stored.find((x) => x.verdict !== null);
+  if (!r) return null;
+  const { claims: _c, ...row } = r;
+  return { ...row, verdict: row.verdict! };
+};
 
 /** Everything the item page, MCP item tool and trace show of reviews: six statements in one wave. A PR with none of them is absent; `premerge` holds every head's row, oldest first. */
 export async function loadReviewRecord(db: Db, keys: KeySource): Promise<Map<RefKey, ReviewRecord>> {
   const out = new Map<RefKey, ReviewRecord>();
   if (noKeys(keys)) return out;
   const q = queryDb(db);
-  const [latest, history, premerge, postmerge, followups, posts] = await db.together(() => Promise.all([
-    latestRows(db, keys),
-    loadReviewHistory(db, keys),
+  const [reviews, history, premerge, postmerge, followups, posts] = await db.together(() => Promise.all([
+    storedReviews(db, keys),
+    loadReviewHistory(db, keys, { any: true }),
     q.all(q.k.selectFrom("main.premerge_reviews as p").innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
       .select(kx.cols("premerge_reviews", "p")).orderBy("p.at")),
     loadPostmerge(db, keys),
@@ -23,9 +31,10 @@ export async function loadReviewRecord(db: Db, keys: KeySource): Promise<Map<Ref
   ]));
   const pm = new Map<RefKey, PremergeRow[]>();
   for (const r of premerge) pushTo(pm, refKey(r.repo, r.number), r as PremergeRow);
-  const refs = new Set<RefKey>([...latest.keys(), ...history.keys(), ...pm.keys(), ...postmerge.keys(), ...followups.keys(), ...posts.keys()]);
+  const refs = new Set<RefKey>([...reviews.keys(), ...history.keys(), ...pm.keys(), ...postmerge.keys(), ...followups.keys(), ...posts.keys()]);
   for (const ref of refs) {
-    out.set(ref, { latest: latest.get(ref) ?? null, history: history.get(ref) ?? [], premerge: pm.get(ref) ?? [], postmerge: postmerge.get(ref) ?? null, followups: followups.get(ref) ?? [], post: posts.get(ref) ?? null });
+    const stored = reviews.get(ref) ?? [];
+    out.set(ref, { latest: latestOf(stored), reviews: stored, history: history.get(ref) ?? [], premerge: pm.get(ref) ?? [], postmerge: postmerge.get(ref) ?? null, followups: followups.get(ref) ?? [], post: posts.get(ref) ?? null });
   }
   return out;
 }

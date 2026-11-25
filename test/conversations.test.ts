@@ -277,6 +277,35 @@ describe("Do it", () => {
     }
   });
 
+  test("a card's buttons stay while a stored write permission has aged: reading the card reads it from GitHub, and an operator keeps them without an answer", async () => {
+    const db = await fresh();
+    const id = await propose(db, 1, [{ kind: "comment" }], "Which version?");
+    await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
+    const people = [["op", "operator"], ["maint", "maintainer"], ["out", "maintainer"], ["view", "viewer"]] as const;
+    await db.run(db.k.insertInto("access").values(people.map(([login, role]) => ({ login, role }))).onConflict((oc) => oc.column("login").doNothing()));
+    const age = async (at: string) => {
+      for (const [login] of people)
+        await db.run(db.k.insertInto("repo_permissions").values({ login, repo: "app", permission: "write", checked_at: at }).onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet({ permission: "write", checked_at: at })));
+    };
+    /** The person's GET, where GitHub answers `permission`, or nothing. */
+    const settles = async (login: string, role: "operator" | "maintainer" | "viewer", permission: string | null) => {
+      const canWrite = async (repo: string) => {
+        if (permission !== null) await db.run(db.k.updateTable("repo_permissions").set({ permission, checked_at: new Date().toISOString() }).where("login", "=", login).where("repo", "=", repo));
+        return permission === "write";
+      };
+      return (await conv.cardView(db, (await cardOf(db, id))!, { login, role, canWrite })).canSettle;
+    };
+    const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+    await age(hourAgo);
+    assert.equal(await settles("op", "operator", "write"), true);
+    assert.equal(await settles("maint", "maintainer", "write"), true);
+    assert.equal(await settles("out", "maintainer", "read"), false, "GitHub's answer decides");
+    assert.equal(await settles("view", "viewer", "write"), false);
+    await age(hourAgo);
+    assert.equal(await settles("op", "operator", null), true);
+    assert.equal(await settles("op", "operator", "read"), false);
+  });
+
   test("a message with ask false is stored without a pending state and queues no Opus reply", async () => {
     const db = await fresh();
     await conv.postMessage(db, req("operator", { repo: "app", n: "3" }, { text: "Note for later", ask: false }));

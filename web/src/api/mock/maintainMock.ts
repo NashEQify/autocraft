@@ -34,7 +34,10 @@ const ITEMS: ItemSeed[] = [
   item({ repo: "deckcraft", number: 90, kind: "issue", title: "Speaker view should show the next slide", author: "rhea-m", group: "rest", phase: "Triage", rank: 8 }),
   item({ repo: "vectorcraft", number: 512, title: "Boolean union leaves a hairline gap", author: "pixel-wrangler", group: "rest", phase: "Pipeline off", rank: 15, area: "Canvas" }),
   item({ repo: "photocraft", number: 702, kind: "issue", title: "Support JPEG XL import", author: "brushstroke42", group: "backlog", phase: "Held", waiting: "the Backlog", rank: 5 }),
-  item({ repo: "designcraft", number: 390, title: "Ruler units follow the document setting", author: "sable-ui", group: "done", state: "merged", phase: "Merged", rank: 0 }),
+  item({ repo: "designcraft", number: 390, title: "Ruler units follow the document setting", author: "sable-ui", group: "done", state: "merged", phase: "Merged", rank: 0, merged: { at: ago(300), how: "approval" } }),
+  item({ repo: "photocraft", number: 779, title: "Clone stamp keeps its source when the tool changes", author: "larkspur-dev", group: "done", state: "merged", phase: "Merged", rank: 0, merged: { at: ago(45), how: "rule" } }),
+  item({ repo: "wordcraft", number: 219, title: "Paragraph spacing survives a paste from another document", author: "rhea-m", group: "done", state: "merged", phase: "Merged", rank: 0, merged: { at: ago(130), how: "batch" } }),
+  item({ repo: "deckcraft", number: 61, title: "Slide numbers restart in each section", author: "brushstroke42", group: "done", state: "closed", phase: "Closed", rank: 0 }),
 ];
 
 const ZERO: Record<MaintainItemGroup, number> = { needs: 0, started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 };
@@ -50,7 +53,7 @@ function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
   const hits = query.refs;
   const shown = ITEMS.filter((s) => {
     if (repo && s.repo !== repo) return false;
-    if (show === "closed" ? s.group !== "done" : show === "backlog" ? s.group !== "backlog" : s.group === "done" || s.group === "backlog") return false;
+    if (show === "merged" ? !s.merged : show === "closed" ? s.group !== "done" : show === "backlog" ? s.group !== "backlog" : s.group === "done" || s.group === "backlog") return false;
     if (text && !`${s.repo}#${s.number} ${s.title}`.toLowerCase().includes(text)) return false;
     if (hits && !hits.includes(`${s.repo}#${s.number}`)) return false;
     for (const f of query.filters ?? []) {
@@ -64,18 +67,19 @@ function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
   });
   const weight = (s: ItemSeed) => (s.weight ? (WEIGHTS[s.weight] ?? 5) : 5);
   const order = (a: ItemSeed, b: ItemSeed) =>
+    show === "merged" ? b.merged!.at.localeCompare(a.merged!.at) :
     query.sort === "updated" ? (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") : weight(b) - weight(a) || (b.rank ?? 0) - (a.rank ?? 0);
   const counts = { ...ZERO };
   for (const s of shown) counts[s.group]++;
   const limit = query.limit ?? 50;
   const rows = ORDER.flatMap((g) => shown.filter((s) => s.group === g).sort(order).slice(0, limit)).map((s): MaintainItemRow => {
     const started = s.group === "needs" || s.group === "started";
-    const { phase, waiting, next, rank: _r, sec: _s, ...rest } = s;
+    const { phase, waiting, next, rank: _r, sec: _s, merged, ...rest } = s;
     return {
       kind: "pr", state: "open", author: null, line: null, status: null, blocked: false, weight: null, startedBy: null, approvedBy: null, stoppedBy: null,
       duplicate: false, outside: false, area: null, updatedAt: ago(60 + (s.number % 300)), ...rest,
       ...(started ? {} : { status: { phase: phase ?? "Triage", waiting: staff ? (waiting ?? null) : null, next: next ?? null, since: ago(90) } }),
-      stuck: staff && !!s.stuck,
+      stuck: staff && !!s.stuck, ...(show === "merged" && { merged }),
       may: me.runRepos.includes(s.repo),
     };
   });
@@ -124,6 +128,7 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
         const mine = repos.map((r) => ({ ...r, canRun: me.runRepos.includes(r.name), trips: r.trips.map((t) => ({ ...t, canResume: me.runRepos.includes(r.name) })) }));
         return new Promise((res) => setTimeout(() => res(structuredClone(mine)), 60));
       },
+      waiting: async () => Object.fromEntries(repos.flatMap((r) => (r.waiting ? [[r.name, r.waiting]] : []))),
       async control(input) {
         if (input.control === "set-automatic") {
           const r = repos.find((x) => x.name === input.repo);

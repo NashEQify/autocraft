@@ -19,6 +19,7 @@ import { mainCiRepos } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
+import { countWaiting } from "../../data/workflow/index.ts";
 import { loadMaintainStats } from "../../data/views/stats.ts";
 import { loadItemRowFacts, loadItemsBase } from "../../data/views/maintain-items.ts";
 import type { ItemBase } from "../../data/views/types.ts";
@@ -118,7 +119,7 @@ export async function stats(db: Db, req: Req): Promise<MaintainStats> {
 
 /** Plan phases in which AutoCraft works an item that nobody started. */
 const WORKING_PHASES: ReadonlySet<ItemPhase> = new Set(["Review", "Fixing", "Verifying", "In queue"]);
-const SHOWS: readonly MaintainItemsShow[] = ["open", "backlog", "closed"];
+const SHOWS: readonly MaintainItemsShow[] = ["open", "backlog", "closed", "merged"];
 const FILTERS: readonly MaintainItemsFilter[] = ["security", "outside", "stuck", "duplicates"];
 const STAFF_FILTERS: readonly MaintainItemsFilter[] = ["security", "stuck"];
 const GROUPS: readonly MaintainItemGroup[] = ["needs", "started", "automatic", "rest", "backlog", "done"];
@@ -148,7 +149,7 @@ const PLAN_BACKLOG = new Set(["backlog", "held-backlog"]);
 export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const q = req.query;
   const show = (q.get("show") ?? "open") as MaintainItemsShow;
-  if (!SHOWS.includes(show)) throw new HttpError(400, "show must be open, backlog or closed");
+  if (!SHOWS.includes(show)) throw new HttpError(400, "show must be open, backlog, closed or merged");
   const staff = canSeeInternals(req);
   const filters = listParam(q, "filter") as MaintainItemsFilter[];
   for (const f of filters) {
@@ -171,7 +172,7 @@ export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const base = await loadItemsBase(db, { repos: visible, hidden }, { show, filters, areas, text: text || null, refs, limit: refPairs.length ? REFS_MAX : limit });
 
   let placed: Placed[];
-  if (show === "closed") {
+  if (show === "closed" || show === "merged") {
     counts.done = base.closedTotal ?? 0;
     placed = base.rows.map((b) => ({ ...b, group: "done", unclear: false }));
   } else {
@@ -188,6 +189,8 @@ export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const updated = (a: Placed, b: Placed) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0);
   const order = (a: Placed, b: Placed): number => {
     if (hitAt.size) return (hitAt.get(`${a.repo}#${a.number}`) ?? 0) - (hitAt.get(`${b.repo}#${b.number}`) ?? 0);
+    // Read in merge order.
+    if (show === "merged") return 0;
     if (sort === "updated") return updated(a, b);
     return (b.weight ?? WEIGHT_NORMAL) - (a.weight ?? WEIGHT_NORMAL) || (b.score ?? -1) - (a.score ?? -1) || updated(a, b) || a.repo.localeCompare(b.repo) || b.number - a.number;
   };
@@ -219,7 +222,7 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
       group: p.group, line: wfLine(wf, p.unclear), status, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
       startedBy: wf?.startedBy ?? null, approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null,
       duplicate: facts.duplicateGroups.get(key(p))?.role === "close", outside: (facts.holds.get(key(p))?.reason ?? null) !== null, stuck: facts.stuck.has(key(p)), area: area?.area ?? null,
-      may: mayRepo.get(p.repo) ?? false, updatedAt: p.updatedAt,
+      may: mayRepo.get(p.repo) ?? false, updatedAt: p.updatedAt, ...(p.merged && { merged: p.merged }),
     };
   });
 }
@@ -229,6 +232,11 @@ function wfLine(wf: ItemWorkflow | null, unclear: boolean): string | null {
   if (unclear) return t("Waiting for a clear answer");
   if (!wf) return null;
   return wf.state === "recommending" && wf.rec !== null ? recommendationText(wf.rec) : stateLine(wf);
+}
+
+/** GET /api/maintain/waiting: per visible repo, the started items that wait for an answer, for the project picker; repos with none are left out. */
+export async function waiting(db: Db, req: Req): Promise<Record<string, number>> {
+  return Object.fromEntries(await countWaiting(db, await allVisibleRepos(db, req)));
 }
 
 /** GET /api/maintain/repos: the Repos page, for every role. Counts and switches are the reader's visible tracked repos; only who may act differs. */

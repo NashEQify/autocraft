@@ -40,7 +40,7 @@ export type PlanFilter = {
   after?: { repo: string; number: number };
   limit?: number;
 };
-export type PlanHistoryEntry = PlanHistoryRow & { repo: string; number: number; id: number };
+export type PlanHistoryEntry = PlanHistoryRow & { repo: string; number: number };
 export type PlanVersion = { plannedAt: string; state: string; head: string | null; historyCount: number; /** The newest history row's id. */ historyNewest: number | null };
 
 export type PassCount = { kind: string; passes: number; refs: number; at: string; ms: number; maxMs: number; dbStatements: number; dbRoundTrips: number; dbMs: number; hour: string };

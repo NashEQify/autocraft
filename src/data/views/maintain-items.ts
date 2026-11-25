@@ -1,7 +1,8 @@
 // reads: mirror.items, planner.item_plans, triage.item_rank, workflow.item_workflows, workflow.workflow_events, intake.outside_holds,
-//        planner.liveness_items, triage.item_areas, triage.item_settled, triage.dupe_group_items, security.security_findings
+//        planner.liveness_items, triage.item_areas, triage.item_settled, triage.dupe_group_items, security.security_findings, merge.merges,
+//        merge.merge_batches, merge.merge_batch_prs
 // The Items page: one statement for the filtered rows with their workflow and plan signals, and the facts of the rows a page shows.
-import type { Expression, SqlBool } from "kysely";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { parseSearch } from "../../db/search.ts";
@@ -11,6 +12,7 @@ import { heldExpr } from "../intake/fragments.ts";
 import * as intake from "../intake/index.ts";
 import { stuckItem } from "../planner/fragments.ts";
 import * as planner from "../planner/index.ts";
+import { inMergedBatch, mergedAt, mergedByUs, mergedOnApproval } from "../merge/fragments.ts";
 import { quietPrExpr } from "../security/fragments.ts";
 import { hasNoArea, inAreas, isDuplicateClose, rankJoin, settledJoin } from "../triage/fragments.ts";
 import * as triage from "../triage/index.ts";
@@ -27,10 +29,13 @@ export const phaseOf = (db: Db, eb: kx.Eb) => eb.fn.coalesce(
 );
 
 const NO_AREA = "none";
+const as = (e: Expression<SqlBool>, name: string) => (e as AliasableExpression<SqlBool>).as(name);
+/** When GitHub merged the item, or our merge step did while the mirror has not read it. */
+const mergeTime = (eb: kx.Eb) => eb.fn.coalesce("i.merged_at", mergedAt(eb, "i.repo", "i.number"));
 
 /**
- * The open items (or one page of closed ones) of `scope.repos` that pass the filter, with plan, rank and live workflow columns and the kind of
- * the item's latest workflow event. `closedTotal` counts the closed items the filter matches, whatever `limit` cuts.
+ * The open items (or one page of closed ones, or of the pull requests AutoCraft merged, newest merge first) of `scope.repos` that pass the filter, with plan, rank and live workflow columns and the kind of
+ * the item's latest workflow event. `closedTotal` counts the closed or merged items the filter matches, whatever `limit` cuts.
  */
 export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden">, f: ItemsFilter): Promise<{ rows: ItemBase[]; closedTotal: number | null }> {
   if (!scope.repos.length) return { rows: [], closedTotal: null };
@@ -38,9 +43,9 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
   const run = f.filters.includes("security") ? await triage.currentRunReady(db) : null;
   const q = queryDb(db);
   const fts = f.text ? parseSearch(f.text) : null;
-  const closed = f.show === "closed";
+  const merged = f.show === "merged", closed = f.show === "closed" || merged;
   const conds = (eb: kx.AnyEb): Expression<SqlBool>[] => {
-    const c: Expression<SqlBool>[] = [kx.inList(db, "i.repo", scope.repos), closed ? eb("i.state", "<>", "OPEN") : eb("i.state", "=", "OPEN")];
+    const c: Expression<SqlBool>[] = [kx.inList(db, "i.repo", scope.repos), merged ? eb.and([eb("i.kind", "=", "pr"), eb.or([mergedByUs(eb, "i.repo", "i.number"), inMergedBatch(eb, "i.repo", "i.number")])]) : closed ? eb("i.state", "<>", "OPEN") : eb("i.state", "=", "OPEN")];
     if (f.refs.length) c.push(kx.refIn(db, "i", f.refs.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))] as const)));
     if (fts) c.push(textHit(eb, db, fts));
     for (const x of f.filters) {
@@ -70,12 +75,13 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
   const cols = (b: ReturnType<typeof base>) => b.select((eb: kx.Eb) => [
     "i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.updated_at", "i.merged_at", "i.closed_at", eb.ref("r.score").as("score"),
     "p.state as plan_state", "p.item_state as plan_item_state", phaseOf(db, eb).as("phase"),
+    ...(merged ? [mergeTime(eb).as("merge_time"), as(mergedByUs(eb, "i.repo", "i.number"), "own_merge"), as(mergedOnApproval(eb, "i.repo", "i.number"), "approved")] : []),
     "w.weight as weight", "w.state as wf_state", "w.rec as wf_rec", "w.started_by", "w.approved_by", "w.stopped_by", "ev.kind as last_event",
   ]);
   const where = <B extends { where: (...a: any[]) => any }>(b: B): B => b.where((eb: kx.AnyEb) => eb.and(conds(eb))) as B;
   const [rows, total] = await db.together(() => Promise.all([
     closed
-      ? q.all(where(cols(base())).orderBy((eb: kx.Eb) => eb.fn.coalesce("i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit))
+      ? q.all(where(cols(base())).orderBy((eb: kx.Eb) => eb.fn.coalesce(merged ? mergeTime(eb) : "i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit))
       : q.all(where(cols(base()))),
     closed ? q.get(where(base().select((eb: kx.Eb) => eb.fn.countAll<number>().as("n")))) : Promise.resolve(null),
   ]));
@@ -85,6 +91,7 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
       mergedAt: r.merged_at, closedAt: r.closed_at, planState: r.plan_state, itemState: r.plan_item_state, phase: r.phase, score: r.score === null ? null : Number(r.score),
       weight: r.weight === null ? null : Number(r.weight), workflowState: r.wf_state, hasRecommendation: r.wf_rec !== null, startedBy: r.started_by, approvedBy: r.approved_by,
       stoppedBy: r.stopped_by, lastEvent: r.last_event,
+      ...(merged && { merged: { at: r.merge_time ?? "", how: !Number(r.own_merge) ? "batch" as const : Number(r.approved) ? "approval" as const : "rule" as const } }),
     })),
     closedTotal: total ? Number((total as { n: number }).n) : null,
   };

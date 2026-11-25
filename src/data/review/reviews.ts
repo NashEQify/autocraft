@@ -6,7 +6,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
 import { discussionEntries, followupFixLinks, premergeBase, unreviewedMerges } from "./cross.ts";
 import { headRef, headTuples, latestRows, listOf, noKeys, parseHistory, parseReview, pushTo, refKey, reviewSelect, reviewWindow } from "./rows.ts";
-import type { Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts } from "./types.ts";
+import type { Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
 
 /** A review that failed with a `retry:` error is tried again after this long; filing retries wait 1 h after the first failed try and 6 h after the second, three tries at most. */
 const FAILED_BACKOFF_MS = [3600_000, 6 * 3600_000];
@@ -62,15 +62,17 @@ export async function loadReviewTexts(db: Db, heads: HeadKey[]): Promise<Map<Hea
   return out;
 }
 
-/** `opus_review_history` rows with a verdict, oldest first; `headOnly` keeps the rows at those heads. 1 statement. */
-export async function loadReviewHistory(db: Db, keys: KeySource, o?: { headOnly?: HeadKey[] }): Promise<Map<RefKey, HistoryRow[]>> {
-  const out = new Map<RefKey, HistoryRow[]>();
+/** `opus_review_history` rows with a verdict (`any`: every row), oldest first; `headOnly` keeps the rows at those heads. 1 statement. */
+export async function loadReviewHistory(db: Db, keys: KeySource, o: { headOnly?: HeadKey[]; any: true }): Promise<Map<RefKey, StoredHistory[]>>;
+export async function loadReviewHistory(db: Db, keys: KeySource, o?: { headOnly?: HeadKey[] }): Promise<Map<RefKey, HistoryRow[]>>;
+export async function loadReviewHistory(db: Db, keys: KeySource, o?: { headOnly?: HeadKey[]; any?: true }): Promise<Map<RefKey, StoredHistory[]>> {
+  const out = new Map<RefKey, StoredHistory[]>();
   if (noKeys(keys) || (o?.headOnly && !o.headOnly.length)) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.opus_review_history as h")
     .innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "h.repo").onRef("kk.number", "=", "h.number"))
     .select(["h.repo", "h.number", kx.rowid("main.opus_review_history", "h").as("rowid"), "h.head_oid", "h.at", "h.model", "h.mode", "h.verdict", "h.sure", "h.reason", "h.summary", "h.risks", "h.fixes", "h.claims", "h.blocked_by", "h.trigger", "h.job_id"])
-    .where("h.verdict", "is not", null)
+    .$if(!o?.any, (b) => b.where("h.verdict", "is not", null))
     .$if(!!o?.headOnly, (b) => b.where(kx.tupleIn(db, ["h.repo", "h.number", "h.head_oid"], headTuples(o!.headOnly!), ["text", "bigint", "text"])))
     .orderBy("h.at").orderBy(kx.rowid("main.opus_review_history", "h")));
   for (const r of rows) pushTo(out, refKey(r.repo, r.number), parseHistory(r));

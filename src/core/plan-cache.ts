@@ -122,7 +122,7 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
   return rows;
 }
 
-export type PlanHistoryRow = { head: string | null; oldState: string | null; newState: string; oldWait: string | null; wait: string | null; reasons: string[]; at: string };
+export type PlanHistoryRow = { id: number; head: string | null; oldState: string | null; newState: string; oldWait: string | null; wait: string | null; reasons: string[]; at: string };
 
 export type PlanCacheDiff = { rows: PlanRow[]; at: string; stored: StoredPlans; changed: boolean; diff: PlanDiff };
 

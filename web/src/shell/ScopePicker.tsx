@@ -8,8 +8,8 @@ import { cn } from "../ui/cn";
 /** `onPicked` runs after a pick, for the phone drawer to close. */
 export function ScopePicker({ className, onPicked, modal }: { className?: string; onPicked?: () => void; modal?: boolean }) {
   const scope = useScope();
-  const { data } = useQuery("maintain-repos", (api) => api.maintain.repos(), { project: null });
-  const counts = useMemo(() => data && { total: data.reduce((n, r) => n + r.waiting, 0), byRepo: Object.fromEntries(data.map((r) => [r.name, r.waiting])) }, [data]);
+  const { data } = useQuery("maintain-waiting", (api) => api.maintain.waiting(), { project: null });
+  const counts = useMemo(() => data && { total: Object.values(data).reduce((n, w) => n + w, 0), byRepo: data }, [data]);
   const pick = (repo: string | null) => {
     setScope(repo);
     onPicked?.();

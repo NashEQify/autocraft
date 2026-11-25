@@ -46,7 +46,8 @@ export const EVENTS: TraceEvent[] = ([
     body: "Thanks for the work on this. Two questions before I look at the diff:\n\n1. Why are the dictionary files committed instead of loaded from the **language pack**?\n2. Do the nonstandard hyphenation rules differ from the pack's?" },
   { id: "review:gh:r1", kind: "github", at: at(50), head: H1, actor: { type: "person", name: "mosswood" }, summary: "Submitted a review: changes requested", ref: { commentId: "r1" },
     body: "Changes requested.\n\n- `crates/text/src/lang/hu.rs`: the loader duplicates `load_pack`.\n- The data files are about 270,000 lines; they make every clone larger.\n\n```rust\nlet pack = load_pack(\"hu\")?;\n```" },
-  { id: "workflow:31", kind: "decision", at: at(95), head: H1, actor: { type: "person", name: "mira-ops" }, summary: "Command: review", ref: {} },
+  { id: "workflow:1", kind: "decision", at: at(190), head: H1, actor: { type: "person", name: "kiri-n" }, summary: "Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation", ref: {} },
+  { id: "workflow:31", kind: "decision", at: at(95), head: H1, actor: { type: "person", name: "mira-ops" }, summary: "Merge the Hungarian dictionary with this change? Answer: Review first.", ref: {} },
   {
     id: "run:901", kind: "model-call", at: at(120), head: H1, actor: { type: "model", name: "opus" }, summary: "Review pull requests: hold", ref: { runId: 901, jobId: 52 },
     call: { promptId: "review.opus", step: "Review pull requests", model: "opus", provider: "claude", via: { login: "kiri-n", harness: "claude", model: "claude-opus-4-5" }, state: "done", inputTokens: 51_000, outputTokens: 3_300, costUsd: 0.97, toolCalls: 11, endedAt: at(118) },
@@ -115,6 +116,8 @@ export function traceRunDetail(id: number): AgentRunDetail | null {
 const FIELDS: Record<string, Record<string, unknown>> = {
   "review:opus:5": { verdict: "take-fix", sure: false, reason: "The change is **correct**, but two spots need care.\n\n- The overset check ignores locked frames.", fixes: [{ file: "crates/app-core/src/frame.rs", change: "skip locked frames in the overset pass" }, { file: "crates/app-core/src/lib.rs", change: "export the new helper" }], risks: ["Frames with negative leading may flicker."] },
   "plan:41": { from: "reviewing", to: "verifying", wait: "CI at 9b8c7d6", reasons: ["review took the fix", "no open conflicts"] },
+  "workflow:1": { text: "Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n). Reply stop to halt." },
+  "workflow:31": { text: "Merge the Hungarian dictionary with this change? Answer: Review first." },
   "task:905": {},
   "audit:77": { action: "review-post", by: "autocraft", state: "done", textLength: 1480 },
 };

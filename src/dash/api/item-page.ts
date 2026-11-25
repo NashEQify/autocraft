@@ -145,15 +145,14 @@ type ReviewRow = { key: string; head_oid: string; at: string; model: string | nu
 
 function reviewsOf(c: Ctx, f: ItemPageFacts, headNow: string | null, events: Ev[]): ReviewHistory {
   const rec = f.trace.review;
-  const rows: (ReviewRow & { rowid: number })[] = (rec?.history ?? []).map((h) => ({
+  const rows: (ReviewRow & { rowid: number })[] = (rec?.history ?? []).filter((h) => h.verdict !== null).map((h) => ({
     key: `opus:${h.rowid}`, head_oid: h.head, at: h.at, model: h.model, verdict: h.verdict, sure: h.sure ? 1 : 0, reason: h.reason, summary: h.summary, risks: h.risks, fixes: h.fixes,
     claims: h.claims, blocked_by: h.blocked_by, trigger: h.trigger, rowid: h.rowid,
   }));
   // Reviews stored before the history table existed.
   const seen = new Set(rows.map((r) => `${r.head_oid}|${r.at}`));
-  const l = rec?.latest;
-  if (l && !seen.has(`${l.head}|${l.at}`))
-    rows.push({ key: `opus-latest:${l.head}`, head_oid: l.head, at: l.at, model: l.model, verdict: l.verdict, sure: l.sure ? 1 : 0, reason: l.reason, summary: null, risks: l.risks, fixes: l.fixes, claims: null, blocked_by: null, trigger: null, rowid: 0 });
+  for (const l of rec?.reviews ?? [])
+    if (l.verdict !== null && !seen.has(`${l.head}|${l.at}`)) rows.push({ key: `opus-latest:${l.head}`, head_oid: l.head, at: l.at, model: l.model, verdict: l.verdict, sure: l.sure ? 1 : 0, reason: l.reason, summary: null, risks: l.risks, fixes: l.fixes, claims: l.claims, blocked_by: null, trigger: null, rowid: 0 });
   rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.rowid - a.rowid));
   const costs = new Map(events.filter((e) => e.kind === "review").map((e) => [e.id, e.costUsd ?? 0]));
   const staff = c.staff;
@@ -278,11 +277,11 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
   void stamped.catch(() => {});
   const c = await context(db, req);
   const scope = traceScope(c);
-  const [digest, discord0, releases0, slots0, card] = await stamped;
-  const stamp = createHash("sha1").update(JSON.stringify([c.staff, c.operator, c.hidden, c.veiled, ...digest, slots0.get(c.ref) ?? null, discord0, releases0])).digest("hex").slice(0, 16);
+  const [[digest, discord0, releases0, slots0, card], canSettle] = await Promise.all([stamped, req.user.role === "viewer" ? false : mayRunRepo(req.user, c.repo)]);
+  const stamp = createHash("sha1").update(JSON.stringify([c.staff, c.operator, c.hidden, c.veiled, ...digest, slots0.get(c.ref) ?? null, discord0, releases0, canSettle])).digest("hex").slice(0, 16);
   if (req.query.get("since") === stamp) return { unchanged: true, stamp };
   const author = card.get(c.ref)?.author;
-  const [facts, cs, canSettle] = await Promise.all([loadItemPage(db, scope, ref, writeActions(c.staff, c.operator)), author ? contributors(db, { login: author }) : [], req.user.role === "viewer" ? false : mayRunRepo(req.user, c.repo)]);
+  const [facts, cs] = await Promise.all([loadItemPage(db, scope, ref, writeActions(c.staff, c.operator)), author ? contributors(db, { login: author }) : []]);
   const detail = facts.trace.detail;
   const row = detail.item!;
   const it = itemOf(c, facts, { tier: TIER[cs.find((x) => x.login === author)?.tier ?? "not"] ?? "not", discord: discord0, releases: releases0, slot: slots0.get(c.ref) ?? null }, c.staff);

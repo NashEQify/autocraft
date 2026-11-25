@@ -95,6 +95,10 @@ test("the worker view: staff see shared runners with owner, slots and models, pr
   const bobs = await call({ runner: { token: bob, login: "bob" }, started: 5 });
 
   assert.equal((await live(db, as("viewer"))).workers, undefined, "viewers get no workers");
+  const steps = async (login: string) => (await live(db, as("operator", login))).lanes.flatMap((l) => l.ops.map((o) => o.detail));
+  assert.ok((await steps("u")).some((d) => d?.endsWith(" on alice")), "an operator's lanes name the shared runner's owner");
+  assert.ok(!(await steps("u")).some((d) => d?.includes("bob")), "and not the private one's");
+  assert.ok((await steps("bob")).some((d) => d?.endsWith(" on bob")), "except to its owner");
   const board = await live(db, as("maintainer"));
   const rows = board.workers!;
   const a = rows.find((w) => w.key === `runner:${alice}`)!;

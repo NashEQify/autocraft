@@ -33,7 +33,7 @@ export interface JobPulse {
 
 export type JobItemRow = { id: number; job_id: number; repo: string; number: number; outcome: string | null; at: string };
 export type NewJobItem = { job_id: number; repo: string; number: number; outcome: string; at: string };
-export type ItemJobRow = { job_id: number; step: string; state: JobState; outcome: string | null; at: string; ended_at: string | null; error: string | null };
+export type ItemJobRow = { /** The `job_items` row. */ id: number; job_id: number; step: string; state: JobState; outcome: string | null; at: string; ended_at: string | null; error: string | null };
 export type JobLeaseOwner = { id: number; step: string };
 export type LogChunkRow = Selectable<DB["job_log_chunks"]>;
 export type LogDrop = { job: number; upTo: number };

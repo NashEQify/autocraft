@@ -17,7 +17,7 @@ export function RowMenu({ repo, number, held, pr, inBatch, backlog }: { repo: st
   const ref = `${repo}#${number}`;
   const run = (key: string, f: () => Promise<unknown>) => () => void write.run(key, f);
   const hold = async () => {
-    const r = await api.controls.run({ control: held ? "release-merge" : "hold-merge", item: { repo, number } });
+    const r = await api.controls.run({ control: held ? "release-merge" : "hold-merge", repo, number });
     if (!r.ok) throw new Error(r.line);
   };
   const toBacklog = async () => {

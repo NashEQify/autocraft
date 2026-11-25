@@ -185,6 +185,8 @@ export interface Api {
     command(text: string): Promise<MaintainCommandResult>;
     /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
     repos(): Promise<MaintainRepo[]>;
+    /** Per visible repo, the started items that wait for an answer; repos with none are left out. */
+    waiting(): Promise<Record<RepoName, number>>;
     /** A registered workflow control (resume a breaker, switch Automatic); answers with the line every surface shows. */
     control(input: { control: "resume-breaker"; key: string } | { control: "set-automatic"; repo: RepoName; on: boolean }): Promise<{ ok: boolean; line: string }>;
   };
@@ -367,7 +369,7 @@ export interface Api {
     heldAuthors(): Promise<HeldAuthor[]>;
     /** Operator only: lets every item now held for the author through. */
     releaseAuthor(author: string): Promise<{ released: number }>;
-    setOutsideLimits(input: Partial<Pick<OutsideState, "prsPerDay" | "issuesPerDay" | "surgePerHour">>): Promise<OutsideState>;
+    setOutsideLimits(input: Partial<Pick<OutsideState, "prsPerDay" | "issuesPerDay" | "surgePerHour">>): Promise<Pick<OutsideState, "prsPerDay" | "issuesPerDay" | "surgePerHour">>;
     /** Operator only: clears the warning about jobs of a step the runner stopped for running past their limit. */
     ackDeadline(step: string): Promise<{ ok: true }>;
     /** Operator only: the two blocker thresholds (changed lines). */
@@ -438,7 +440,7 @@ export interface Api {
     stopBatch(id: number): Promise<void>;
   };
   /** A registered workflow control (src/workflow/apply.ts `runControl`): hold or release a merge. The reply is the line every surface shows. */
-  controls: { run(input: { control: "hold-merge" | "release-merge"; item: { repo: RepoName; number: number } } | { control: "resume-breaker"; key: string }): Promise<{ ok: boolean; line: string }> };
+  controls: { run(input: { control: "hold-merge" | "release-merge"; repo: RepoName; number: number } | { control: "resume-breaker"; key: string }): Promise<{ ok: boolean; line: string }> };
 }
 
 export const ApiContext = createContext<Api | null>(null);
