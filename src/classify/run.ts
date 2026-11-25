@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { createHash } from "node:crypto";
-import { jevParallel } from "../agents/accounts.ts";
+import { loadLiveConfig } from "../data/control/index.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
 import { itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
@@ -499,7 +499,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
       const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });
       if (o.state === "unclaimed") return "unclaimed";
       if (o.state === "failed") {
-        if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: await scrubError(o.error), summary: "failed" });
+        if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: scrubError(o.error), summary: "failed" });
         if (o.error.startsWith(REFUSED_PREFIX)) opts.onRefused?.(o.error);
         return "failed";
       }
@@ -569,11 +569,11 @@ export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: str
     if (outage) await markJevUnavailable(db, outage.kind, outage.reason);
     else if (r.code === 0 && tokens) await markJevWorking(db, Date.parse(start));
     if (r.code === 0 && tokens) await finishRun(db, runId, { state: "done", tokens, costUsd: tokens.input * JEV_USD_PER_INPUT_TOKEN, summary: "answered", output: r.stdout });
-    else await finishRun(db, runId, { state: "failed", error: await scrubError(`${exitClass(r.code)} ${r.stderr}`), summary: r.code === 0 ? JEV_UNREADABLE_SUMMARY : exitClass(r.code), output: r.stdout });
+    else await finishRun(db, runId, { state: "failed", error: scrubError(`${exitClass(r.code)} ${r.stderr}`), summary: r.code === 0 ? JEV_UNREADABLE_SUMMARY : exitClass(r.code), output: r.stdout });
     if (r.code === 0 && !tokens) await markJevUnreadable(db);
     return r;
   } catch (e) {
-    await finishRun(db, runId, { state: "failed", error: await scrubError(String((e as Error).message ?? e)), summary: "failed before the call" });
+    await finishRun(db, runId, { state: "failed", error: scrubError(String((e as Error).message ?? e)), summary: "failed before the call" });
     throw e;
   }
 }
@@ -647,7 +647,7 @@ function splitUsage(row: UsageRow, item: Item, extra: ClassifyExtras, a: Classif
  * the steps (splitUsage).
  */
 export async function runJev(db: Db, runId: string, items: Item[], width?: number, hashes?: ReadonlyMap<string, string>, extras?: ReadonlyMap<string, ClassifyExtras>): Promise<JevRun> {
-  if (width === undefined) width = await jevParallel(db);
+  if (width === undefined) width = (await loadLiveConfig(db)).jevParallel;
   // Read once per chunk; a failed call reads it again, since a call that fails is how an outage shows.
   let up = await jevAvailable(db);
   const sinkUsage: UsageRow[] = [], verdicts: { v: Verdict; hash?: string }[] = [], failed: JevFailed[] = [];

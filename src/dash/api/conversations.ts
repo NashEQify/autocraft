@@ -14,7 +14,7 @@ import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
-import { inferenceMode, tierOfModel } from "../../remote/mode.ts";
+import { tierOfModel } from "../../remote/mode.ts";
 import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
 import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
 
@@ -32,7 +32,7 @@ const isOperator = (req: Req): boolean => req.user.role === "operator";
  */
 export async function canTalk(db: Db, user: Pick<User, "role" | "canWrite">, repo: string): Promise<boolean> {
   if (user.role === "operator") return true;
-  return await inferenceMode(db) === "user-local" && await mayRunRepo(user, repo);
+  return await mayRunRepo(user, repo);
 }
 
 /** The refusal of a maintainer's message to Opus while none of their Task Runners may take it (src/remote/takers.ts). */

@@ -5,7 +5,7 @@ import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { NoTakerError, WaitLimitError, poolRoom, takersFirst, type PoolRoom } from "../agents/call.ts";
-import { inferenceMode, tierOfModel } from "../remote/mode.ts";
+import { tierOfModel } from "../remote/mode.ts";
 import { scaled } from "../remote/time-scale.ts";
 import type { PersonKind } from "./types.ts";
 import { ownTaker } from "../remote/takers.ts";
@@ -82,8 +82,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     if (forLogin === undefined) p.onHandled?.(++handled);
     try {
       if (forLogin !== undefined) {
-        const why = await inferenceMode(db) !== "user-local" ? "a maintainer's message runs only on their own Task Runner, and model calls run on the server's accounts now"
-          : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
+        const why = !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
         if (why) { await failTurn(db, repo, n, claim, why); return; }
       }
       const parts = await promptParts(db, repo, n, wait);

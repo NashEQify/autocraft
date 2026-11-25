@@ -1,4 +1,4 @@
-// `autocraft-server inference [server|user-local]`: shows or sets the inference mode (src/remote/mode.ts). `autocraft-server remote cooloff clear <login>`: ends the cool-off of a login's helpers (src/remote/cooloff.ts).
+// `autocraft-server remote cooloff clear <login>`: ends the cool-off of a login's helpers (src/remote/cooloff.ts).
 // `autocraft-server remote token <login>`: makes a Task Runner credential for a maintainer or operator and prints only the credential,
 // so it can be piped into `autocraft login --stdin` on the same host without anyone seeing it (no device login needed).
 // `autocraft-server remote test-call <login> [<repo>#<n>] [--slot]`: queues a one-line small-tier call bound to the login's own
@@ -9,7 +9,6 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { awaitCall, enqueueCall } from "./calls.ts";
 import { clearCooloff } from "./cooloff.ts";
-import { inferenceMode, isInferenceMode, setInferenceMode } from "./mode.ts";
 import { openDb } from "../db/open.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { loadCalls } from "../data/runners/index.ts";
@@ -19,22 +18,6 @@ import type { Db } from "../db/index.ts";
 const accessOf = async (db: Db, login: string): Promise<{ login: string; role: string } | null> => [...(await loadAccess(db, [login])).values()][0] ?? null;
 
 export const commands = {
-  inference: {
-    summary: "show or set the inference mode: server (accounts on this host) or user-local (maintainers' helpers)",
-    async run(args: string[]): Promise<void> {
-      const db = await openDb();
-      const want = args[0];
-      if (want === undefined) {
-        console.log(`inference: ${await inferenceMode(db)}`);
-        return;
-      }
-      if (!isInferenceMode(want) || args.length > 1) {
-        console.error("usage: autocraft-server inference [server|user-local]");
-        process.exit(1);
-      }
-      console.log(await setInferenceMode(db, want, "cli") ? `inference: ${want}` : `inference was already ${want}`);
-    },
-  },
   remote: {
     summary: "remote cooloff clear <login>: lets the login's helpers claim calls again after a cool-off; remote token <login> [--label <text>]: a Task Runner credential on stdout, for piping into autocraft login --stdin; remote test-call <login> [<repo>#<n>] [--slot]: a one-line call on the login's own Task Runner",
     async run(args: string[]): Promise<void> {

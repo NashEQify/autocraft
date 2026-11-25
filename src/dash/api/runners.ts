@@ -12,7 +12,6 @@ import type { Req } from "../types.ts";
 import { approveLogin, denyLogin, normalizeCode, pendingLogin } from "../../remote/device-login.ts";
 import { loadHelpers } from "../../data/runners/index.ts";
 import { loadRunnerTokenOf } from "../../data/access/index.ts";
-import { inferenceMode } from "../../remote/mode.ts";
 import type { HelperInfo, Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
 import type { Db } from "../../db/index.ts";
 
@@ -78,7 +77,6 @@ export async function pending(db: Db, req: Req): Promise<PendingRunnerLogin> {
 
 export async function approve(db: Db, req: Req): Promise<RunnersReply> {
   staffOnly(req);
-  if (await inferenceMode(db) !== "user-local") throw new HttpError(409, "the instance runs model calls on its own accounts; Task Runners take none now");
   const b = body(req);
   if (b.otherMachine !== undefined && typeof b.otherMachine !== "boolean") throw new HttpError(400, "otherMachine must be true or false");
   const scopes = await scopesOf(db, req, b);

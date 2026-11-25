@@ -669,7 +669,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     return r.accepted ? { accepted: true } : await gone();
   }
   if (s.ok !== false || typeof s.error !== "string") throw new HttpError(400, "ok must be true with text and model, or false with error");
-  const error = await scrubError(`helper: ${unrooted(s.error, l.root)}`);
+  const error = scrubError(`helper: ${unrooted(s.error, l.root)}`);
   if (s.refused === true || SAFETY_REFUSAL.test(s.error)) {
     const to = refusalRetry(await loadViewFor(db, nowMs), l);
     if (await runners.refuseLease(db, l, to, { error, usage, duration }, nowMs)) {

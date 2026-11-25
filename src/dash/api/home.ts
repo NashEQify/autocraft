@@ -1,5 +1,5 @@
 // What the Home page shows about problems: what the pipeline stopped, what is unhealthy and what gave up. The facts come from
-// src/data/views; this file words them. The classic Home read is retired and answers with empty values.
+// src/data/views; this file words them.
 import type { NeedsStoppedRow } from "../../../web/src/api/types.ts";
 import { itemPath } from "../../../web/src/lib/links.ts";
 import { jevEnabled, jevOutage } from "../../agents/jev.ts";
@@ -13,9 +13,8 @@ import type { AttentionFacts } from "../../data/views/types.ts";
 import type { Req } from "../types.ts";
 import { pipelineSwitch } from "./limits.ts";
 import { stepTitle } from "./trace.ts";
-import { ITEM_PHASES, type Home, type HomeProblem, type ItemPhase } from "./home-types.ts";
+import type { HomeProblem } from "./home-types.ts";
 import type { Db } from "../../db/index.ts";
-import type { InferenceMode } from "../../remote/mode.ts";
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -47,7 +46,7 @@ const areaOf = (id: string): "runner" | "deadline" | "liveness" | "workers" | "s
  * check of a repo they cannot see), the Jev outage, red main branches of repos whose pipeline is on, failed jobs of the last hour,
  * findings whose fix gave up and CI fixes that gave up.
  */
-export async function problems(db: Db, o: { hidden: HiddenRepos; staff: boolean; nowMs: number; mode: InferenceMode; stops: NeedsStoppedRow[]; facts: AttentionFacts }): Promise<HomeProblem[]> {
+export async function problems(db: Db, o: { hidden: HiddenRepos; staff: boolean; nowMs: number; stops: NeedsStoppedRow[]; facts: AttentionFacts }): Promise<HomeProblem[]> {
   const { hidden, staff, facts } = o;
   const out: HomeProblem[] = [];
   for (const s of o.stops) out.push({ kind: "stopped", title: s.repo ? `${s.title} in ${s.repo}` : s.title, detail: staff ? s.reason : "", to: "/needs/stopped" });
@@ -56,7 +55,7 @@ export async function problems(db: Db, o: { hidden: HiddenRepos; staff: boolean;
     pipelineSwitch(db),
     jevEnabled(db).then(async (enabled) => (enabled ? await jevOutage(db) : null)),
     mainCiRepos(db, hidden),
-    checksOf(db, facts.health, { nowMs: o.nowMs, mode: o.mode, probe: false }),
+    checksOf(db, facts.health, { nowMs: o.nowMs, probe: false }),
   ]);
   if (!state.enabled) out.push({ kind: "health", title: `Pipeline is ${state.draining ? "draining" : "off"}${state.changedBy ? `, switched ${state.draining ? "to drain" : "off"} by ${state.changedBy}` : ""}`, detail: "", to: "/pipeline" });
   for (const c of checks) {
@@ -83,12 +82,4 @@ export async function problems(db: Db, o: { hidden: HiddenRepos; staff: boolean;
       out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
   }
   return out;
-}
-
-/** The classic Home is retired: the shape stays, every part empty. */
-export async function home(_db: Db, _req: Req, _deps: { progress: (hidden: HiddenRepos) => Promise<unknown> }): Promise<Home> {
-  return {
-    needs: { total: 0, byKind: {}, oldest: [] }, problems: [], phases: Object.fromEntries(ITEM_PHASES.map((p) => [p, 0])) as Record<ItemPhase, number>, running: "",
-    progress: { openNow: 0, openAtStart: 0, done24h: 0, byAutoCraftPct: 0, perHour: [], spendTodayUsd: 0 }, done: [],
-  };
 }

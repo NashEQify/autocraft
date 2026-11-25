@@ -4,7 +4,6 @@
 // (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
 import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRepo, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
-import { inferenceMode } from "../../remote/mode.ts";
 import { recommendationText, stateLine, weightLabel } from "../../workflow/status.ts";
 import type { ItemWorkflow, WorkflowEventKind } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -50,17 +49,16 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const repos = await visibleRepos(db, req);
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
-  const mode = await inferenceMode(db);
   const nowMs = Date.now();
   const facts = await loadMaintainHome(db, { repos, hidden, staff, login: req.user.login }, {
-    nowMs, withRunner: staff && mode === "user-local", health: healthOptions(mode), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY },
+    nowMs, withRunner: staff, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY },
   });
   const live = new Set(facts.rows.map((w) => w.repo));
   const may = req.user.role === "viewer" ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
   const acting = new Set([...live].filter((_, i) => may[i]));
   const stops = await stoppedRows(db, facts.attention.stops, hidden, req.user);
   const [attention, runner] = await Promise.all([
-    problems(db, { hidden, staff, nowMs, mode, stops, facts: facts.attention }),
+    problems(db, { hidden, staff, nowMs, stops, facts: facts.attention }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
   ]);
   const rows = rowsOf(facts.rows);

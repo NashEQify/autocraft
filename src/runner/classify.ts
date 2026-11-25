@@ -10,7 +10,6 @@
 // existed count as changed when the item was updated after the verdict.
 import { refOf, type Item } from "../classify/parse.ts";
 import { takersFirst } from "../agents/call.ts";
-import { freeSlots } from "../agents/accounts.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { haikuBatches, jevAgents, runHaiku, runJev, type JevExtraAnswers } from "../classify/run.ts";
 import { prioritizeAnswered } from "../priority/index.ts";
@@ -138,9 +137,9 @@ async function haikuPass(ctx: StepContext, run: string, todo: Item[], t: Tally, 
   const t0 = new Date().toISOString();
   const answered = () => countVerdicts(db, { run, classifier: "haiku", since: t0 });
   let n = 0;
-  // A chunk holds one batch for every call the accounts can take at once (at least 4), so the calls fill the free slots.
+  // A chunk holds four batches of calls.
   for (let i = 0, size = 0; i < todo.length && !await ctx.cancelled() && await more(); i += size) {
-    size = HAIKU_PER_CALL * Math.max(4, await freeSlots(db));
+    size = HAIKU_PER_CALL * 4;
     const chunk = todo.slice(i, i + size);
     await keepUsage(db, run, Array.from({ length: (await haikuBatches(db, chunk, HAIKU_PER_CALL)).length }, (_, n) => `haiku-${String(n).padStart(2, "0")}`));
     // The first call of the pass runs alone and writes the prompt cache; the rest read it. Items no Task Runner may take are not sent.

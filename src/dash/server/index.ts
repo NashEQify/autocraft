@@ -45,7 +45,6 @@ import { sweepTakers } from "../../remote/takers.ts";
 import { ClaimWaits, heldMsOf } from "../../remote/claim-wait.ts";
 import { scaled, TIME_SCALE } from "../../remote/time-scale.ts";
 import { isBusy } from "../../db.ts";
-import { inferenceMode } from "../../remote/mode.ts";
 import { hasFreshRunner, parseStatus, storeStatus } from "../../remote/helpers.ts";
 import { addressKey, parseLoginStart, pollLogin, startLogin } from "../../remote/device-login.ts";
 import { ENCODINGS, ROUTES, toolContent, type ClaimReply, type LoginPollReply, type LoginStartReply, type StatusReply, type ToolReply } from "../../remote/protocol.ts";
@@ -742,7 +741,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       db, baseUrl: config.baseUrl, limiter: mcpFeedback, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: answering.enabled && caller.canAnswer && (caller.role === "operator" || (caller.role === "maintainer" && await maintainerWritesOn(db))),
       user: async (forWrite) => await userForLogin(db, box, provider, caller.login, caller.role, forWrite),
       // The task tools are offered while one of the login's Task Runners reports in; they never lease.
-      ...(await inferenceMode(db) === "user-local" && { userLocal: true, ...(await hasFreshRunner(db, caller.login) && { run: { canWrite: (await claimPermission(caller.login, caller.role)).canWrite } }) }),
+      ...(await hasFreshRunner(db, caller.login) && { run: { canWrite: (await claimPermission(caller.login, caller.role)).canWrite } }),
     }, m);
     if (mcpWrites(m)) await live.poke();
     // A notification or a response from the client: accepted, nothing to say.

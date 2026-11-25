@@ -83,7 +83,7 @@ describe("runner", () => {
     const pgDb = await connectDb(join(pgDir, "jobs.db"));
     process.env.AUTOCRAFT_DB_URL = `postgres://autocraft@127.0.0.1:${port}/childjob`;
     delete process.env.AUTOCRAFT_DB;
-    const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }), refreshFlow: async () => undefined });
+    const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }) });
     try {
       const job = await enqueue(pgDb, "test-echo", { n: 1 }, "boss");
       const end = Date.now() + 20_000;

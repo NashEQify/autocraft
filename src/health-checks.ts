@@ -7,7 +7,6 @@ import { coverageSnapshot, githubIdentity } from "./github/identity.ts";
 import { readAppSecrets } from "./github/install-token.ts";
 import { FOREIGN_WARN_MS } from "./github/allowed-owners.ts";
 import { PROBE_HEADERS } from "./health.ts";
-import { inferenceMode, type InferenceMode } from "./remote/mode.ts";
 import { CALLER_STALE_MS } from "./remote/room.ts";
 import { NO_TAKER_MS } from "./remote/takers.ts";
 import { interactiveSlotsOf } from "./remote/interactive-slots.ts";
@@ -37,9 +36,9 @@ export const THRESHOLDS = {
   /** GitHub API points left in the hour: warn below `warn`, fail below `fail`. */
   rateWarn: 500,
   rateFail: 100,
-  /** In the user-local mode, a call queued this long with no claim by any helper in that time. */
+  /** A call queued this long with no claim by any helper in that time. */
   remoteQueuedMs: 10 * 60_000,
-  /** In the user-local mode with a ready helper, the longest a queued call of each tier may wait. */
+  /** With a ready helper, the longest a queued call of each tier may wait. */
   /** A Discord (interactive) call is withdrawn after a few seconds without a taker; one queued this long means claims are failing. */
   interactiveWaitMs: 60_000,
   remoteTierWaitMs: { top: 30 * 60_000, mid: 20 * 60_000, small: 5 * 60_000 },
@@ -72,7 +71,7 @@ export type Check = {
   to: string;
 };
 /** `probe`: the unauthenticated endpoint; it reads stored and cached state only (no GitHub App token work). `f` is what the checks read, loaded once. */
-export type CheckCtx = { db: Db; nowMs: number; f: HealthFacts; probe?: boolean; /** The inference mode, read once for every check. */ mode: InferenceMode };
+export type CheckCtx = { db: Db; nowMs: number; f: HealthFacts; probe?: boolean };
 
 const ok = (id: string, to: string, extra: Partial<Check> = {}): Check => ({ id, state: "ok", text: "", brief: "", since: null, to, ...extra });
 const minutes = (ms: number): string => (ms < 90 * 60_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / 3_600_000)} h`);
@@ -352,7 +351,7 @@ async function outsideSurgeCheck({ f }: CheckCtx): Promise<Check[]> {
   return [{ id: "outside-surge", state: "warn", text: `New items from outside authors are held: ${t.reason}`, brief: "New items from outside authors are held", since: t.trippedAt, count: f.surge.held, to: "/pipeline" }];
 }
 
-/** User-local mode: model calls have waited for a helper and none has claimed anything in that time. */
+/** Model calls have waited for a helper and none has claimed anything in that time. */
 async function remoteCallsCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
   const r = f.runner;
   if (!r) return [];
@@ -364,7 +363,7 @@ async function remoteCallsCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
 }
 
 /**
- * User-local mode: a helper that takes calls on its own is ready, yet the oldest queued call of a tier has waited past that
+ * A helper that takes calls on its own is ready, yet the oldest queued call of a tier has waited past that
  * tier's limit (the helpers' models, reserves or repo choices may not fit it). Manual only helpers (manual-only.ts) do not count.
  */
 async function remoteStarvedCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
@@ -384,7 +383,7 @@ async function remoteStarvedCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
   return out.length ? out : [ok("remote-starved", "/pipeline")];
 }
 
-/** User-local mode: calls have waited past remoteQueuedMs while every fresh, ready Task Runner is Manual only: they wait for a person to pick them. */
+/** Calls have waited past remoteQueuedMs while every fresh, ready Task Runner is Manual only: they wait for a person to pick them. */
 async function remoteManualCheck({ f }: CheckCtx): Promise<Check[]> {
   const r = f.runner;
   if (!r) return [];
@@ -397,7 +396,7 @@ async function remoteManualCheck({ f }: CheckCtx): Promise<Check[]> {
 }
 
 /**
- * User-local mode: pipeline-on repos that no Task Runner has been able to take calls on for NO_TAKER_MS (src/remote/takers.ts:
+ * Pipeline-on repos that no Task Runner has been able to take calls on for NO_TAKER_MS (src/remote/takers.ts:
  * the dashboard's minute maintenance keeps the marks). Their queued calls are withdrawn and their work waits, often with
  * nothing queued at all, so the check goes by repo.
  */
@@ -431,14 +430,14 @@ async function takersOf(db: Db, rows: TakerRow[], nowMs: number): Promise<{ read
   return { ready: false, why };
 }
 
-/** Whether a Task Runner can take Discord calls now (user-local mode with Discord configured; `applies` is false otherwise), and when not, why. Shared by interactiveNoTakerCheck and the Discord usage page. */
-export async function interactiveTakers(db: Db, nowMs: number, mode?: InferenceMode): Promise<{ applies: boolean; ready: boolean; why: string | null }> {
-  if (!envVar("DISCORD_KEY_FILE") || (mode ?? await inferenceMode(db)) !== "user-local") return { applies: false, ready: true, why: null };
+/** Whether a Task Runner can take Discord calls now (Discord configured; `applies` is false otherwise), and when not, why. Shared by interactiveNoTakerCheck and the Discord usage page. */
+export async function interactiveTakers(db: Db, nowMs: number): Promise<{ applies: boolean; ready: boolean; why: string | null }> {
+  if (!envVar("DISCORD_KEY_FILE")) return { applies: false, ready: true, why: null };
   return { applies: true, ...await takersOf(db, await loadTakerRows(db, nowMs), nowMs) };
 }
 
 /**
- * User-local mode with Discord configured: Discord calls run only in operators' Interactive slots (src/remote/interactive-slots.ts)
+ * With Discord configured, Discord calls run only in operators' Interactive slots (src/remote/interactive-slots.ts)
  * on a Task Runner that is ready and offers the small tier. Warns when none can take them now, or when a Discord call has waited
  * past THRESHOLDS.interactiveWaitMs (claims failing although a taker looks ready). The text names no login.
  */
@@ -458,19 +457,18 @@ async function interactiveNoTakerCheck({ db, nowMs, f }: CheckCtx): Promise<Chec
 const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, rateCheck, deadlineChecks, stepStalledChecks, livenessCheck, appIdentityChecks, userTokensCheck, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
 
 /** What `loadHealthFacts` needs from the thresholds and the environment. */
-export const healthOptions = (mode: InferenceMode) => ({
-  mode, leaderStaleMs: THRESHOLDS.leaderStaleMs, taskQueuedMs: THRESHOLDS.taskQueuedMs, foreignWarnMs: FOREIGN_WARN_MS, discord: !!envVar("DISCORD_KEY_FILE"), stepWindow: STEP_WINDOW, stepDays: STEP_DAYS,
+export const healthOptions = () => ({
+  leaderStaleMs: THRESHOLDS.leaderStaleMs, taskQueuedMs: THRESHOLDS.taskQueuedMs, foreignWarnMs: FOREIGN_WARN_MS, discord: !!envVar("DISCORD_KEY_FILE"), stepWindow: STEP_WINDOW, stepDays: STEP_DAYS,
   thresholds: { queuedMs: THRESHOLDS.remoteQueuedMs, tierWaitMs: { ...THRESHOLDS.remoteTierWaitMs }, interactiveWaitMs: THRESHOLDS.interactiveWaitMs, callerStaleMs: CALLER_STALE_MS, noTakerMs: NO_TAKER_MS },
 });
 
 /** Every check over facts already loaded; the checks that probe GitHub or the identity run here, after the load. */
-export async function checksOf(db: Db, f: HealthFacts, o: { nowMs: number; mode: InferenceMode; probe?: boolean }): Promise<Check[]> {
-  return (await Promise.all(SOURCES.map((c) => c({ db, nowMs: o.nowMs, probe: o.probe, mode: o.mode, f })))).flat();
+export async function checksOf(db: Db, f: HealthFacts, o: { nowMs: number; probe?: boolean }): Promise<Check[]> {
+  return (await Promise.all(SOURCES.map((c) => c({ db, nowMs: o.nowMs, probe: o.probe, f })))).flat();
 }
 
 export async function computeChecks(db: Db, nowMs: number = Date.now(), probe = false): Promise<Check[]> {
-  const mode = await inferenceMode(db);
-  return await checksOf(db, await loadHealthFacts(db, nowMs, healthOptions(mode)), { nowMs, mode, probe });
+  return await checksOf(db, await loadHealthFacts(db, nowMs, healthOptions()), { nowMs, probe });
 }
 
 /** The answer of GET /healthz/checks for staff: states, times and counts only; no repo, environment, account or error text. */
