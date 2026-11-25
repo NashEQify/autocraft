@@ -1264,9 +1264,12 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
   return applyProposals(db, found.proposals, { ...opts, wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) });
 }
 
-/** What the planner's marks say about the content stages read and the limits that apply to them, from its parts read. */
-const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string): string =>
-  [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers].join(",");
+/**
+ * What the planner's marks say about the content stages read, the limits that apply to them and the operators' releases, from its
+ * parts read. The releases' times are compared as values: on Postgres a release can commit after a planner mark later than its time.
+ */
+const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string, released: Map<string, string>): string =>
+  [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers, ...[...released].sort().flat()].join(",");
 
 /**
  * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, an autopilot job finished, an operator released
@@ -1280,13 +1283,11 @@ export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boole
   ]));
   const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
   const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];
-  const sig = inputSignature(seqs, limits, tasks, takers);
+  const sig = inputSignature(seqs, limits, tasks, takers, released);
   const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
-  const since = plannedAt ?? "";
-  const releasedNow = [...released.values()].some((at) => at > since);
   const woken = wake !== null && Date.parse(wake) <= t;
-  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !releasedNow && !woken) return false;
+  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !woken) return false;
   // The pass about to run sets the next wake time when it is applied. With the switch off nothing is applied, so a
   // wake time that has passed would stay and make every tick plan again.
   await db.write(async () => {
