@@ -18,9 +18,11 @@ export type RemovedSummary = { role: string | null; sessions: number; tokens: nu
 export type ActFacts = { login: string | null; role: Role | null; githubId: number | null; perm: PermEntry | null };
 export type ActRefusal = "no-login" | "no-role" | "no-write" | "box-identity";
 export type ActVerdict =
-  | { ok: true; role: "operator" | "maintainer"; basis: "live" | "cached" | "held" }
+  | { ok: true; role: "operator" | "maintainer"; basis: "live" | "cached" }
   | { ok: false; why: ActRefusal | "stale" };
 export type ActIdentity = "app" | "box";
+/** Whether a person's earlier approval or start still counts; "unknown" until GitHub answers on their write access. */
+export type Standing = "yes" | "no" | "unknown";
 
 /** `rowid` is how the Access page addresses a session; it stays inside access and the dashboard. */
 export type SessionRow = Selectable<DB["sessions"]> & { rowid: number; role: Role | null };

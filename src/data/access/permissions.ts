@@ -3,14 +3,14 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import type { ActFacts, ActIdentity, ActRefusal, ActVerdict, Login, PermEntry, PermKey, PermRow, Role } from "./types.ts";
+import type { ActFacts, ActIdentity, ActRefusal, ActVerdict, Login, PermEntry, PermKey, PermRow, Role, Standing } from "./types.ts";
 
 export const WRITE_PERMISSIONS: readonly string[] = ["write", "maintain", "admin"];
 export const PERM_READ_TTL = 10 * 60_000;
 export const PERM_WRITE_TTL = 60_000;
 /** A write permission older than this is read again, so it stays younger than `PERM_READ_TTL` while GitHub answers. */
 export const REFRESH_AFTER = PERM_READ_TTL - 2 * 60_000;
-/** How long after GitHub last confirmed it a write permission still counts while a re-read is under way or failed. */
+/** How long after GitHub last confirmed it a write permission still counts for work under way, while it is read again. */
 export const HOLD_MAX = 60 * 60_000;
 
 /** The key of a (login, repo) pair in the maps of this file: the login lower-cased. */
@@ -134,18 +134,16 @@ export async function loadActFacts(db: Db, pairs: { login: string | null; repo: 
 }
 
 /** The set form for the planner and bulk commands; never calls GitHub. `why: "stale"` tells the caller to re-read the permission. */
-export async function canActMany(db: Db, pairs: { login: string | null; repo: string }[], o: { identity: ActIdentity; mode: "cached"; maxAgeMs: number; now?: number; held?: ReadonlySet<PermKey> }): Promise<Map<PermKey, ActVerdict>> {
+export async function canActMany(db: Db, pairs: { login: string | null; repo: string }[], o: { identity: ActIdentity; mode: "cached"; maxAgeMs: number; now?: number }): Promise<Map<PermKey, ActVerdict>> {
   const facts = await loadActFacts(db, pairs);
   const now = o.now ?? Date.now();
   const out = new Map<PermKey, ActVerdict>();
   for (const p of pairs) {
     const key = permKey(p.login ?? "", p.repo);
     const f = facts.get(key) ?? { login: p.login, role: null, githubId: null, perm: null };
-    const fresh = freshWrite(f.perm, o.maxAgeMs, now);
-    const write = freshWrite(f.perm, o.maxAgeMs, now, o.held?.has(key)) ? "cached"
+    const write = freshWrite(f.perm, o.maxAgeMs, now) ? "cached"
       : f.perm && !isWrite(f.perm.permission) && now - Date.parse(f.perm.checkedAt) < o.maxAgeMs ? "no" : "unknown";
-    const v = decideAct(f, write, o.identity);
-    out.set(key, v.ok && !fresh ? { ...v, basis: "held" } : v);
+    out.set(key, decideAct(f, write, o.identity));
   }
   return out;
 }
@@ -167,8 +165,8 @@ export function isWrite(permission: string | null | undefined): boolean {
 }
 
 /** Whether a cached write permission is young enough. */
-export function freshWrite(row: PermEntry | null | undefined, maxAgeMs: number, now: number, held?: boolean): boolean {
-  return !!row && isWrite(row.permission) && (now - Date.parse(row.checkedAt) < maxAgeMs || !!held);
+export function freshWrite(row: PermEntry | null | undefined, maxAgeMs: number, now: number): boolean {
+  return !!row && isWrite(row.permission) && now - Date.parse(row.checkedAt) < maxAgeMs;
 }
 
 /** The act rule over loaded facts: login, role, write access, then the identity, in that order. */
@@ -181,8 +179,23 @@ export function decideAct(facts: ActFacts, write: "yes" | "no" | "unknown" | "ca
   return { ok: true, role: facts.role, basis: write === "yes" ? "live" : "cached" };
 }
 
-/** Work a person started, or a message they wrote, still counts: an operator's, or a maintainer's whom the act rule lets act with a write permission read within PERM_READ_TTL. */
-export function stillCounts(facts: ActFacts | undefined, identity: ActIdentity, now: number = Date.now()): boolean {
-  if (!facts) return false;
-  return facts.role === "operator" || decideAct(facts, freshWrite(facts.perm, PERM_READ_TTL, now) ? "cached" : "unknown", identity).ok;
+/**
+ * Whether an approval a person gave, or work they started, still counts for the repo: the act rule (an operator's or maintainer's AutoCraft
+ * role, write access, the app identity) over what GitHub last answered. The write permission is the pipeline's to keep fresh
+ * (src/preapproval/permissions.ts). "unknown" when GitHub has not confirmed it within HOLD_MAX, or never answered: the caller keeps the
+ * state, carries nothing out and waits for the read. "no" only on the role, the identity, or GitHub's own answer within PERM_READ_TTL.
+ */
+export function standing(facts: ActFacts | undefined, identity: ActIdentity, now: number = Date.now()): Standing {
+  if (!facts) return "no";
+  const v = decideAct(facts, "yes", identity);
+  if (!v.ok) return "no";
+  const age = facts.perm ? now - Date.parse(facts.perm.checkedAt) : NaN;
+  if (isWrite(facts.perm?.permission)) return age < HOLD_MAX ? "yes" : "unknown";
+  return age < PERM_READ_TTL ? "no" : "unknown";
+}
+
+/** `standing` of each pair, with one read. */
+export async function standings(db: Db, pairs: { login: string; repo: string }[], o: { identity: ActIdentity; now?: number }): Promise<Map<PermKey, Standing>> {
+  const facts = await loadActFacts(db, pairs);
+  return new Map(pairs.map((p) => { const k = permKey(p.login, p.repo); return [k, standing(facts.get(k), o.identity, o.now)]; }));
 }

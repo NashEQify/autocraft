@@ -179,9 +179,6 @@ function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"
   return { waiting, reread: w.reread, crossRepo: w.crossRepo, approvable: w.runs.filter((x) => x.event === "pull_request" && failed(x.id) < MAX_FAILURES).length, blocked };
 }
 
-/** The retired Merge? and Hold questions: no item has one. */
-const NO_DECISION: PrFacts["decision"] = { asked: false, openQuestion: false, answer: null, mergeAnswerAfterReview: false, inOpenGroup: false, execWaiting: false, hold: { asked: false, open: false, answer: null, otherOpen: false } };
-
 async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx): Promise<PrFacts | null> {
   const { now, refresh } = c;
   const i = m.item, ch = m.checks;
@@ -197,7 +194,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const rf: PrFacts["repoFacts"] = {
     mergeApproved: !!approvals.merge, pushApproved: !!approvals.push, commentApproved: !!approvals.comment, ciApproved: !!approvals.ci,
     noCi: !!d.ciSignals.get(repo)?.noCi, mainRed: c.mainRed.has(repo), fixIssueApproved: !!approvals.fixissue,
-    implementOn: cfg.repo(repo).buildFeature("implement"), workflow: "new",
+    implementOn: cfg.repo(repo).buildFeature("implement"),
   };
   const pub = repoRow?.visibility === "public";
   const defaultBranch = repoRow?.default_branch ?? null;
@@ -230,14 +227,13 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     repo, number, ...(pushedOff ? { pushedOff } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
     tripped: tripsOfRepo(trips, repo), ghState: state, head, draft: fresh ? ch!.state !== "OPEN" || !!ch!.is_draft : !!i.is_draft,
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
-    scopeAnswer: null,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
-    heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", heldDuplicate: false, quiet: c.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
-    fast: false, score: weightScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
+    heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: c.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
+    score: weightScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
     review: null, post: { postable: false, posted: null },
     checksHere: false, checksOpen: false, ci: "unknown", mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
-    decision: NO_DECISION,
+    handOver: null, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
     fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legHead: legHeadOf(operator?.legs, wfRow) }), ownHeads: head ? ownHeads(head) : [],
@@ -285,7 +281,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const legs = operator.legs;
     base.operator = {
       fix: !!head && operator.requests.some((r) => r.from_head === head) ? { attempts: operatorTriesIn(patch.fixups) } : null,
-      hold: legs.some((l) => l.state !== "queued"), premerge: !!head && legs.some((l) => l.state === "ci" && l.head === head), preapproved: legs.length > 0,
+      hold: legs.some((l) => l.state !== "queued"), premerge: !!head && legs.some((l) => l.state === "ci" && l.head === head),
     };
   }
   // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.
@@ -303,8 +299,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const qAt = mx ? wfFact!.startedAt : latest!.at;
   // The merge queue's operator path: the approved workflow's leg handed the PR over at this head (moveLegs sets `updated_at`).
   const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
-  if (handed) base.decision = { ...NO_DECISION, asked: true, answer: "merge", mergeAnswerAfterReview: handed.updated_at > qAt };
-  if (mergeWaits(d.mergeActions.get(ref), wfRow, qh)) base.decision = { ...base.decision, execWaiting: true };
+  if (handed) base.handOver = { afterReview: handed.updated_at > qAt };
+  base.mergeWaiting = mergeWaits(d.mergeActions.get(ref), wfRow, qh);
   const verdict = latest?.verdict;
 
   const take = mx || verdict === "take" || verdict === "take-fix";
@@ -368,6 +364,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   }
   const v = d.merge.verifications.get(`${ref}@${qh}`);
   base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note } : null;
+  // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
+  base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
   if (!base.verification || base.verification.state === "stale") {
     base.verifyUnavailable = !pub ? PRIVATE_REASON : rf.noCi && cachedRust(repo, qh) === false ? NOT_RUST_REASON : null;
   }

@@ -29,12 +29,13 @@ import { jobItem } from "../runner/job-items.ts";
 import { commentApprovalOf } from "./approval.ts";
 import { CLOSE_KINDS } from "./gone.ts";
 import { readLive, type Live } from "./live.ts";
-import { lostAccess } from "./still.ts";
+import { stillActs } from "./still.ts";
+import type { RefreshDeps } from "../preapproval/permissions.ts";
 import { closeComment, duplicateComment } from "./templates.ts";
 
 const ACTOR = "act";
 
-export type ActDeps = { querier: Querier; now: () => Date; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** Replaces the app lane's token minter and client (tests). */ app?: Pick<Writer, "mint" | "appClient">; /** Runs `gh` for the held follow-up issues (tests). */ exec?: Exec };
+export type ActDeps = { querier: Querier; now: () => Date; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** Replaces the app lane's token minter and client (tests). */ app?: Pick<Writer, "mint" | "appClient">; /** Stands in for the GitHub App's read of the person's write permission (tests). */ permission?: RefreshDeps["permission"]; /** Runs `gh` for the held follow-up issues (tests). */ exec?: Exec };
 export const defaultDeps = (): ActDeps => ({ querier: new Client(1000), now: () => new Date() });
 
 export type ActParams = {
@@ -174,7 +175,8 @@ async function closeOne(db: Db, a: DueAction, o: { deps: ActDeps; by: By; log: (
   let asPerson = lane !== null;
   let commentUrl = a.comment_url;
   try {
-    if (await lostAccess(db, a.by, [a.repo], { live: lane !== null, now: d.now().getTime() })) return await end("stopped", `${a.by} may no longer act on ${a.repo}`);
+    const may = await stillActs(db, a.by, [a.repo], { live: lane !== null, permission: d.permission });
+    if (!may.ok) return may.standing === "no" ? await end("stopped", `${a.by} may no longer act on ${a.repo}`) : await left(`not closed yet: GitHub has not answered on ${a.by}'s access to ${a.repo}`);
     const live = await readLive(q, a.repo, a.number);
     if (!live) return await end("skipped", "GitHub returned no such item");
     if (live.state !== "OPEN") return await end("done", `already ${live.state.toLowerCase()} on GitHub`);

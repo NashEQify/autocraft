@@ -120,7 +120,7 @@ export async function plannedItems(db: Db, kind: ActionKind, opts: PlannedOption
       cmp = then((a, b) => (a.facts.classification.jev ? 1 : 0) - (b.facts.classification.jev ? 1 : 0),
         (a, b) => (a.action.params?.source === "haiku" ? str(b.facts.classification.jev?.at ?? "", a.facts.classification.jev?.at ?? "") : updatedDesc(a, b)), byRef);
       break;
-    case "referee": case "decide": cmp = then(score, prFirst, created, byRef); break;
+    case "referee": cmp = then(score, prFirst, created, byRef); break;
     // Items without a priority row first, then changed ones; pull requests first, newest first.
     case "prioritize": cmp = then((a, b) => (a.facts.priorityHash === null ? 0 : 1) - (b.facts.priorityHash === null ? 0 : 1), prFirst, updatedDesc, byRef); break;
     case "implement": cmp = then(score, byRef); break;

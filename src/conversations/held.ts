@@ -11,7 +11,8 @@ import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { createIssue, IssueError, PACE_MAX_WAIT_MS, type Note, type Writer } from "../github/write.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
-import { lostAccess } from "../act/still.ts";
+import { stillActs } from "../act/still.ts";
+import type { RefreshDeps } from "../preapproval/permissions.ts";
 import { roomFor } from "./queue.ts";
 import { systemBlock } from "./store.ts";
 import type { Db } from "../db/index.ts";
@@ -105,7 +106,7 @@ async function move(db: Db, moves: { h: HeldRow; from: HeldState; set: HeldPatch
 const drop = async (db: Db, h: HeldRow, reason: string, at: string): Promise<boolean> =>
   (await move(db, [{ h, from: "held", set: { state: "dropped", reason, updated_at: at }, say: `The issue "${h.title}" held for after the merge is dropped: ${reason}.` }])).has(h.id);
 
-export type HeldDeps = { exec?: Exec; now?: () => Date };
+export type HeldDeps = { exec?: Exec; now?: () => Date; /** Stands in for the GitHub App's read of the presser's write permission. */ permission?: RefreshDeps["permission"] };
 /** `paced`: the write pacing's message when it held a create back (the job fails with it, as other paced jobs do). */
 export type HeldSummary = { filed: number; dropped: number; failed: { ref: string; reason: string }[]; unknown: number; writes: number; paced?: string };
 
@@ -132,7 +133,9 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
     if (!v) continue;
     if ("drop" in v) { if (await drop(db, h, v.drop, at)) s.dropped++; continue; }
     if ((await loadQuiet(db, [`${h.repo}#${h.number}`])).size > 0) { if (await drop(db, h, "the pull request is quiet until its fix is published", at)) s.dropped++; continue; }
-    if (await lostAccess(db, h.by, [h.issue_repo], { now: now().getTime() })) { if (await drop(db, h, `${h.by} no longer has write access to ${h.issue_repo}`, at)) s.dropped++; continue; }
+    const may = await stillActs(db, h.by, [h.issue_repo], { permission: deps.permission });
+    if (!may.ok && may.standing === "no") { if (await drop(db, h, `${h.by} no longer has write access to ${h.issue_repo}`, at)) s.dropped++; continue; }
+    if (!may.ok) { await markHeld(db, [{ id: h.id, from: "held", set: { reason: `GitHub has not answered on ${h.by}'s access to ${h.issue_repo}` } }]); continue; }
     const g = await guardRepo(db, h.issue_repo, "comment", { operator: h.by }, undefined, h.by);
     if ("refused" in g) {
       await markHeld(db, [{ id: h.id, from: "held", set: { reason: g.refused } }]);

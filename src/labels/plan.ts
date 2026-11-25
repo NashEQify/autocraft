@@ -7,9 +7,6 @@ import { listQuietPrs } from "../data/security/index.ts";
 import { loadLabelVerdicts } from "../data/triage/index.ts";
 import type { Db } from "../db/index.ts";
 
-/** The type label of a plugin candidate. */
-export const PLUGIN_LABEL = "plugin candidate";
-
 export type PlanStatus = "add" | "already" | "unsettled" | "conflict";
 export type PlanRow = {
   number: number; kind: string; url: string; status: PlanStatus;

@@ -18,7 +18,7 @@ const DUE_MAX = 10_000;
 /** The queue states of core/plan.ts (a value import from feature code is not allowed here). */
 const QUEUE_STATES = [
   "ready", "decision-answered-merge", "refused", "waiting-ci", "waiting-premerge", "ci-failed", "conflict",
-  "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "declined", "merged", "held-duplicate", "held-backlog",
+  "needs-fix-up", "waiting-verify", "verify-failed", "verify-error", "needs-decision", "merged", "held-backlog",
   "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested", "waiting-main-ci",
 ] as const;
 

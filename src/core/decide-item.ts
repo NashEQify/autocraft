@@ -4,7 +4,7 @@
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
 import { decidePr, implementOffWait, notStarted } from "./decide.ts";
-import { RECOMMEND_RETRY_MS, alreadyLabeled, labelsToAdd } from "./item-rules.ts";
+import { REFEREE_RETRY_MS, alreadyLabeled, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
@@ -18,17 +18,18 @@ export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again"
  * workflow) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
  * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
  * Implement feature and room among the repo's live implementations. A question is planned again when its answer may have
- * come: the issue text changed, a person commented after it, or its decision is answered.
+ * come: the issue text changed, a person commented after it, or the workflow's recommendation is answered.
  */
 export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wait: string; waitKind: WaitKind } | null {
-  const im = f.implement, row = im.row, fix = f.fix;
+  const im = f.implement, row = im.row;
   if (f.kind !== "issue" || !f.open || !f.inScope || f.held || im.queuedBy === null) return null;
   const state = row?.state as ImplementationState | undefined;
   const ended = !row || ENDED_STATES.has(state!);
-  if (!im.settles) return ended ? null : { wait: `a person who settles on ${f.repo} to queue it again`, waitKind: "person" };
+  if (im.standing === "unknown") return { wait: `GitHub's answer on ${im.queuedBy}'s access to ${f.repo}`, waitKind: "system" };
+  if (im.standing === "no") return ended ? null : { wait: `a person who settles on ${f.repo} to queue it again`, waitKind: "person" };
   const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "system" as const });
   if (ended) {
-    if (fix.openPr !== null) return null;
+    if (f.openPr !== null) return null;
     if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
     if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: `${im.liveInRepo} implementations already running in ${f.repo}`, waitKind: "system" };
     return due("plan");
@@ -40,8 +41,8 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   }
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
-  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a decision on the stuck implementation", waitKind: "person" };
-  // pr-opened: the open PR is the wait (fix.openPr); a PR that merged or closed while the issue stayed open ends the attempt with
+  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a maintainer's answer on the stuck implementation", waitKind: "person" };
+  // pr-opened: the open PR is the wait (openPr); a PR that merged or closed while the issue stayed open ends the attempt with
   // it (the revise work records that and ends the workspace). Its revisions, and the end of an attempt whose issue is closed
   // too, are planned on the PR (decidePr).
   // Ending the attempt is bookkeeping: it needs neither the Implement feature nor the approval (gates()).
@@ -55,18 +56,15 @@ const labelDisagreement = (f: ItemFacts): boolean => f.classification.status ===
 export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
 export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+( mentions it)?$/.test(wait);
 
-
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
 export const TRIAGE_WAIT = "an open request for a person to pick up";
-/** The wait of an issue whose fix attempt of the retired Fix stage was skipped or failed; the planner no longer gives it. */
-export const fixStoppedWait = (state: string): string => `a person to retry the ${state} fix`;
 
 const PLUGIN_WAIT = "stays open as a plugin candidate";
 /** A PR settled as a plugin candidate is not reviewed or merged: it stays open with its label. */
 const pluginPr = (f: ItemFacts): boolean => f.kind === "pr" && f.classification.status === "settled" && f.classification.label === "plugin candidate";
 
 export function itemState(f: ItemFacts): ItemState {
-  if (f.held) return f.held === "backlog" ? "held-backlog" : "held-duplicate";
+  if (f.held) return "held-backlog";
   const c = f.classification;
   if (labelDisagreement(f)) return "referee-due";
   if (c.status === "unclassified") return "unclassified";
@@ -75,7 +73,7 @@ export function itemState(f: ItemFacts): ItemState {
 }
 
 const WAITS: Partial<Record<ItemState, string>> = {
-  "held-duplicate": "a duplicate check", "held-backlog": "a Backlog hold", "referee-due": "the label referee",
+  "held-backlog": "a Backlog hold", "referee-due": "the label referee",
   "waiting-haiku": "Haiku's second opinion",
 };
 
@@ -94,8 +92,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
   const haikuDue = !!c.jev && c.jev.unsure && (!c.haiku || c.haiku.at < c.jev.at);
   if (f.run && live && (jevDue || haikuDue)) actions.push(act("classify", null, { source: jevDue ? "jev" : "haiku" }));
   // referee: open, not a draft, not held, in scope.
-  // A failed Opus call is asked again after a backoff; the third failure sends the item to Decide.
-  const backoff = !!c.referee?.failedAt && Date.parse(c.referee.failedAt) > f.now - RECOMMEND_RETRY_MS;
+  // A failed Opus call is asked again after a backoff; after the third failure the label stands unsure.
+  const backoff = !!c.referee?.failedAt && Date.parse(c.referee.failedAt) > f.now - REFEREE_RETRY_MS;
   // Not while Jev or Haiku is due again: the referee would judge the verdicts they are about to replace.
   if (f.run && live && !f.draft && state === "referee-due" && !backoff && !jevDue && !haikuDue) actions.push(act("referee", null, { source: c.referee ? "opus" : "sonnet" }));
   // prioritize: no priority row at the current text hash. Not while Jev's classify call is due: that request asks the impact
@@ -104,42 +102,40 @@ export function decideItem(f: ItemFacts): ItemPlan {
   if (priorityDue(f) && !(f.run && live && jevDue && !c.jevFailed)) actions.push(act("prioritize", null));
   // embed: every open item, with no scope test.
   if (f.embeddedHash !== f.embedHash) actions.push(act("embed", null));
-  // dupes: items to scan, pairs to check, groups to ask.
+  // dupes: items to scan, pairs to check.
   const scan = live && f.embeddedHash === f.embedHash && f.scannedHash !== f.embedHash;
-  if (scan || f.pairsToCheck > 0 || f.inGroupToAsk) actions.push(act("dupes", null, { scan, pairs: f.pairsToCheck, group: f.inGroupToAsk }));
+  if (scan || f.pairsToCheck > 0) actions.push(act("dupes", null, { scan, pairs: f.pairsToCheck }));
   if (f.inCompareSet) actions.push(act("dupes-compare", null));
   // label: the repo's labelling approval is applied by gates().
-  if (f.run && live && f.held !== "backlog") {
+  if (f.run && live && !f.held) {
     const settled = c.status === "settled" && c.label ? { type: c.label, security: c.flags.includes("security") && !f.labels.quietFix, needsDecision: c.flags.includes("needs decision") } : null;
-    const add = labelsToAdd(settled, f.labels.pluginAnswer, f.labels.existing);
+    const add = labelsToAdd(settled, f.labels.existing);
     if (add && add.length && !alreadyLabeled(f.labels.labeledNote, add)) actions.push(act("label", null, { add }));
   }
 
-  const backlog = f.held === "backlog";
-  // act: a person's close, whatever the item's scope (a Backlog answer takes it back). Selecting applies nothing; the repo's comment approval is applied by gates().
-  if (f.close && !backlog) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
+  // act: a person's close, whatever the item's scope (sending the item to the backlog takes it back). Selecting applies nothing; the repo's comment approval is applied by gates().
+  if (f.close && !f.held) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
   // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
-  const fix = f.fix, step = implementStep(f);
+  const step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
 
   // unassign (issues; a PR's is decided with its review-to-merge plan): kept while an implementation is due or runs, or its PR is open;
   // released when the issue waits on a person (a question, a stuck attempt, a switch), was given up or left the scope.
   if (f.kind === "issue") {
     const row = f.implement.row;
-    // A fix attempt of the retired Fix stage whose PR is open keeps it too, until that stage's code goes.
-    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && fix.openPr !== null) || (fix.attempt?.state === "pr-opened" && fix.openPr !== null);
+    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && f.openPr !== null);
     actions.push(...unassignActions(f.assignment, f.open, !f.inScope || !!f.held || !running));
   }
 
   // A closed item is here for its close only.
   if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act"));
   const base = actions.some(isWork) ? null : !f.inScope ? "not in scope" : state === "classified" && pluginPr(f) ? PLUGIN_WAIT : WAITS[state] ?? null;
-  // An issue with nothing else due waits on the PR that closes it, or on a person when its fix attempt was skipped or failed.
-  let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : f.inScope && state === "held-duplicate" ? "person" : "system";
+  // An issue with nothing else due waits on the PR that closes it.
+  let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : "system";
   // A queued issue waits on what holds its implementation.
   if (step && "wait" in step && f.open && actions.every((x) => !isWork(x))) { wait = step.wait; waitKind = step.waitKind; }
-  if (wait === null && f.kind === "issue" && f.open && f.inScope && !backlog && !f.held && actions.every((x) => !isWork(x))) {
-    if (fix.openPr !== null) { wait = openPrWait(fix.openPr.number, fix.openPr.closes); waitKind = "system"; }
+  if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && actions.every((x) => !isWork(x))) {
+    if (f.openPr !== null) { wait = openPrWait(f.openPr.number, f.openPr.closes); waitKind = "system"; }
     else if (state === "classified") { wait = TRIAGE_WAIT; waitKind = "system"; }
   }
   return { repo: f.repo, number: f.number, kind: f.kind, state, actions, wait, waitKind };
@@ -148,7 +144,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
 /** The Work page's next-step text (rank/next.ts nextStepOf), from the item's state and, for a PR, the facts of its review-to-merge path. */
 export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): string {
   switch (item.state) {
-    case "held-duplicate": case "held-backlog": return "Held";
+    case "held-backlog": return "Held";
     case "referee-due": return `Referee: waiting for ${f.classification.referee ? "Opus" : "Sonnet"}`;
     case "unclassified": case "waiting-haiku": return "Classify";
     default:
@@ -156,7 +152,7 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
   if (item.state === "classified" && pluginPr(f)) return "Stays open as a plugin candidate";
   if (f.kind === "issue") {
     const im = f.implement, s = im.row?.state;
-    if (im.queuedBy !== null && im.settles) {
+    if (im.queuedBy !== null && im.standing !== "no") {
       switch (s) {
         case "planning": return "Implement: planning";
         case "asked": return "Implement: waiting for an answer";

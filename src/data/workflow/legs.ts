@@ -5,7 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
-import { PERM_READ_TTL } from "../access/permissions.ts";
+import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
@@ -258,7 +258,7 @@ export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo:
   if (f.refs?.length === 0) return [];
   const q = queryDb(db);
   const k = q.k as any;
-  const after = new Date((f.nowMs ?? Date.now()) - PERM_READ_TTL).toISOString();
+  const after = new Date((f.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const rows = await q.all(k.selectFrom("main.operator_fixups as o").selectAll("o").where("o.state", "=", "queued")
     .where((eb: any) => eb.not(operatorFixEnded(eb, "o.id")))
     .$if(!f.anyMaker, (b: any) => b.where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after)))
