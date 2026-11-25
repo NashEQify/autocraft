@@ -280,6 +280,22 @@ describe("runner", () => {
     await r.stop();
   });
 
+  test("a planner pass that failed once runs again by itself and shows no lasting failure", async () => {
+    let failures = 0;
+    const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => {
+      if (failures > 0) { failures--; throw new Error("no plan"); }
+      return { proposals: [], logs: [] };
+    } });
+    const pass = async () => { await r.tick(); await new Promise((ok) => setTimeout(ok, 20)); };
+    for (let i = 0; i < 3; i++) await pass();
+    failures = 1;
+    await db.run(db.k.deleteFrom("lane_state").where("kind", "=", "mark").where("step", "=", "planned_at"));
+    for (let i = 0; i < 4; i++) await pass();
+    assert.equal(failures, 0);
+    assert.equal((await computeChecks(db, Date.now() + 90_000)).find((c) => c.id === "runner")!.state, "ok");
+    await r.stop();
+  });
+
   test("a workflow pass that throws runs again on the next tick, and the merge legs wait for it", async (t) => {
     const lines: string[] = [];
     const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });

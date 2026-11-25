@@ -13,7 +13,9 @@ import { loadImplementFacts, type ImplementFacts } from "../data/implement/index
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
+import { recheckDelayMs } from "../core/backoff.ts";
 import { decidePr, fixedAfterMerge, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { chainsOwn, type OwnPush } from "../core/may.ts";
@@ -38,6 +40,12 @@ const FAILED_TRY = ["failed", "refused", "rejected", "cannot-push", "push-denied
 
 /** What changed in a pass, for the Discord alerts and the log. */
 export type Moved = { id: number; repo: string; number: number; to: ItemWorkflow["state"] };
+
+/**
+ * A live workflow whose check, or the write of what it found, failed each time since the pass last got it through: how often, the
+ * latest error, and the row's version then. It is tried again at `until`, or when a person's command changed the row.
+ */
+export type FailedCheck = { ref: string; times: number; error: unknown; until: number; version: string };
 
 /** Lockfiles a fix-up may touch as a side effect of its change: never "beyond what was agreed". */
 const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
@@ -143,12 +151,20 @@ function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours
 
 /**
  * One pass over the live workflows. Writes only what changed, in one write at the end, or each workflow by itself when that
- * write fails; returns the workflows that moved to another state. `wake` is told when a workflow failed, so the pass runs again.
+ * write fails; returns the workflows that moved to another state. `failed`, kept between passes, holds by id the workflows the pass
+ * could not check or store (their merge legs must not move), each tried again after a failure backoff; `wake` is told when.
  */
-export async function advanceWorkflows(db: Db, log: (line: string) => void = () => {}, wake: (at: number) => void = () => {}): Promise<Moved[]> {
+export async function advanceWorkflows(db: Db, log: (line: string) => void = () => {}, wake: (at: number) => void = () => {}, failed: Map<number, FailedCheck> = new Map()): Promise<Moved[]> {
   return await withConfig(db, async () => {
     const live = await listWorkflows(db, { live: true });
+    const ids = new Set(live.map((w) => w.id));
+    for (const id of failed.keys()) if (!ids.has(id)) failed.delete(id);
     if (!live.length) return [];
+    const version = (w: ItemWorkflow): string => `${w.state} ${w.updatedAt}`;
+    const now = Date.now();
+    const due = live.filter((w) => { const f = failed.get(w.id); return !f || now >= f.until || f.version !== version(w); });
+    for (const w of live) if (!due.includes(w)) wake(failed.get(w.id)!.until);
+    const errors = new Map<number, unknown>();
     const issues = live.filter((w) => w.kind === "issue").map((w) => ({ repo: w.repo, number: w.number }));
     const [implement, goOn, thresholds] = await db.together(() => Promise.all([
       loadImplementFacts(db, issues, { withPlans: true }), loadGoOnAt(db, live), blockerThresholds(db),
@@ -173,43 +189,55 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     };
     const writes: Writes = { workflows: [], events: [], adopt: [] };
     const moved: Moved[] = [];
-    for (const w of live) {
+    for (const w of due) {
       try {
         const to = await advanceOne(db, pass, writes, w);
         if (to) moved.push({ id: w.id, repo: w.repo, number: w.number, to });
       } catch (e) {
-        log(`workflow ${w.repo}#${w.number}: ${(e as Error).message}`);
-        wake(Date.now());
+        if (isFenced(e)) throw e;
+        errors.set(w.id, e);
       }
     }
-    if (!writes.workflows.length && !writes.adopt.length) return moved;
-    const store = (o: Writes): Promise<Set<number>> => db.write(async () => {
-      const ids = await moveWorkflows(db, o.workflows);
-      await recordEvents(db, o.events.filter((e) => ids.has(e.workflowId)));
-      await adoptLegs(db, o.adopt);
-      return ids;
-    });
-    let written: Set<number>;
-    try {
-      written = await store(writes);
-    } catch (e) {
-      const changed = live.filter((w) => writes.workflows.some((r) => r.id === w.id) || writes.adopt.some((r) => r.workflowId === w.id));
-      log(`workflows: ${changed.length} changes not stored together, now one by one: ${(e as Error).message}`);
-      wake(Date.now());
-      written = new Set();
-      for (const w of changed) {
-        try {
-          const ids = await store({
-            workflows: writes.workflows.filter((r) => r.id === w.id), events: writes.events.filter((r) => r.workflowId === w.id), adopt: writes.adopt.filter((r) => r.workflowId === w.id),
-          });
-          for (const id of ids) written.add(id);
-        } catch (err) {
-          log(`workflow ${w.repo}#${w.number}: ${(err as Error).message}`);
-        }
-      }
+    const written = writes.workflows.length || writes.adopt.length ? await storeWrites(db, writes, due, log, errors) : new Set<number>();
+    for (const w of due) {
+      if (!errors.has(w.id)) { failed.delete(w.id); continue; }
+      const error = errors.get(w.id), times = (failed.get(w.id)?.times ?? 0) + 1, until = Date.now() + recheckDelayMs(times);
+      failed.set(w.id, { ref: key(w.repo, w.number), times, error, until, version: version(w) });
+      log(`workflow ${w.repo}#${w.number}: ${(error as Error).message}`);
+      wake(until);
     }
     return moved.filter((m) => written.has(m.id));
   });
+}
+
+/** Stores the pass's writes in one transaction; when it fails, each workflow's in its own, and those that fail go into `errors`. A fenced write is thrown. Returns the workflows stored. */
+async function storeWrites(db: Db, writes: Writes, due: ItemWorkflow[], log: (line: string) => void, errors: Map<number, unknown>): Promise<Set<number>> {
+  const store = (o: Writes): Promise<Set<number>> => db.write(async () => {
+    const ids = await moveWorkflows(db, o.workflows);
+    await recordEvents(db, o.events.filter((e) => ids.has(e.workflowId)));
+    await adoptLegs(db, o.adopt);
+    return ids;
+  });
+  try {
+    return await store(writes);
+  } catch (e) {
+    if (isFenced(e)) throw e;
+    const changed = due.filter((w) => writes.workflows.some((r) => r.id === w.id) || writes.adopt.some((r) => r.workflowId === w.id));
+    log(`workflows: ${changed.length} changes not stored together, now one by one: ${(e as Error).message}`);
+    const written = new Set<number>();
+    for (const w of changed) {
+      try {
+        const ids = await store({
+          workflows: writes.workflows.filter((r) => r.id === w.id), events: writes.events.filter((r) => r.workflowId === w.id), adopt: writes.adopt.filter((r) => r.workflowId === w.id),
+        });
+        for (const id of ids) written.add(id);
+      } catch (err) {
+        if (isFenced(err)) throw err;
+        errors.set(w.id, err);
+      }
+    }
+    return written;
+  }
 }
 
 /** A ready plan's numbered parts; a part a person dropped before (same title) stays dropped. Null when the plan gave none. */

@@ -2,7 +2,12 @@
 // approved item and keep its approval, a yes resumes it, and an approved review entry with minor findings is fixed, then merged.
 // An implement issue's plan question comes back as its recommendation, and answers on the issue reach its implementation PR.
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { computeChecks } from "../src/health-checks.ts";
+import { Runner } from "../src/runner/runner.ts";
+import { SCRATCH } from "./scratch.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { addOwnCommits, setStepApproval } from "../src/data/control/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
@@ -529,6 +534,47 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
   assert.ok(woken > 0);
   assert.deepEqual(await pass(), ["blocked", "blocked"]);
   assert.equal(woken, 0);
+});
+
+test("a workflow whose change cannot be stored keeps its merge leg where it is, shows in the health check and is not tried on every tick; the others go on", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  await runCommand(db, actor, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 2 }] });
+  const lines: string[] = [];
+  const runner = new Runner({ db, logs: mkdtempSync(join(SCRATCH, "workflow-runner-")), log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });
+  const legs = async () => (await db.all(db.k.selectFrom("main.preapprovals").select(["number", "state"]).orderBy("number"))).map((l) => `${l.number} ${l.state}`);
+  const row = async () => (await liveWorkflow(db, "app", 1))!.updatedAt;
+  const check = async () => (await computeChecks(db, Date.now() + 90_000)).find((c) => c.id === "runner")!;
+  for (let i = 0; i < 2; i++) await runner.tick();
+  assert.deepEqual(await legs(), ["1 review", "2 review"]);
+  for (const number of [1, 2]) await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number, head_oid: `sha${number}`, run_id: "rv", at: later(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r",
+    fixes: JSON.stringify([{ title: "A typo", file: "src/a.rs", change: "fix it", severity: "minor" }]) }));
+  const write = db.write;
+  const was = await row();
+  db.write = (async (f: () => Promise<unknown>, o?: never) => await write.call(db, async () => {
+    const r = await f();
+    if (await row() !== was) throw new Error("bad row");
+    return r;
+  }, o)) as typeof write;
+  const tries = () => lines.filter((l) => l === "workflow app#1: bad row").length;
+  for (let i = 0; i < 3; i++) await runner.tick();
+  assert.deepEqual(await legs(), ["1 review", "2 ci"], lines.join("\n"));
+  const bad = await check();
+  assert.equal(bad.state, "warn");
+  assert.match(bad.text, /app#1: bad row/);
+  const before = tries();
+  // The inputs of the pass change on every tick.
+  for (let i = 0; i < 4; i++) { await review(w, { head: `sha-old${i}`, verdict: "take", at: "2026-01-01T00:00:00Z" }); await runner.tick(); }
+  assert.equal(tries(), before);
+  assert.deepEqual(await legs(), ["1 review", "2 ci"]);
+  // The write works again: a person's command on the item does not wait for the backoff.
+  db.write = write;
+  await runCommand(db, actor, "dashboard", { parsed: parse("urgent"), items: [{ repo: "app", number: 1 }] });
+  for (let i = 0; i < 3; i++) await runner.tick();
+  assert.deepEqual(await legs(), ["1 ci", "2 ci"], lines.join("\n"));
+  assert.equal((await check()).state, "ok");
+  await runner.stop();
 });
 
 test("the third attempt on an issue text offers no Try again, whatever became of the first two", async () => {

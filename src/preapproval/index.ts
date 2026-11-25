@@ -628,10 +628,10 @@ export function preapprovalInputs(seqs: Record<string, number>): string {
 
 /**
  * Moves each merge leg that other steps' rows have carried to a new state; the runner tick runs it when its inputs changed
- * (preapprovalInputs) or a time `wake` was told has come. Writes nothing when nothing moved, except the maintainers' write permissions it
+ * (preapprovalInputs) or a time `wake` was told has come. A leg of a workflow in `held` (its blockers could not be checked) stays where it is. Writes nothing when nothing moved, except the maintainers' write permissions it
  * reads again first (refreshSettlers). A failure tells `wake` the pass's own time, so the next tick runs it again.
  */
-export async function advancePreapprovals(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}, wake: Wake = () => {}): Promise<number> {
+export async function advancePreapprovals(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}, wake: Wake = () => {}, held: { has(workflowId: number): boolean } = new Set<number>()): Promise<number> {
   const t = Date.now();
   let n = 0;
   try {
@@ -657,6 +657,8 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
   let facts: Map<string, PrFacts> | null = null;
   const refs = pass.rows.map((r) => refOf(r.repo, r.number));
   for (const p of pass.rows) {
+    const c = pass.context.get(p.id);
+    if (c && typeof c !== "string" && held.has(c.workflowId)) continue;
     const factOf = async (): Promise<PrFacts | null> => {
       if (!facts) {
         const loaded = await withConfig(db, () => loadPrFacts(db, { refs }));
@@ -667,7 +669,7 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
     };
     try {
       const before = p.state;
-      await advance(db, p, pass.context.get(p.id) ?? "unlinked", pf, factOf, wake);
+      await advance(db, p, c ?? "unlinked", pf, factOf, wake);
       const now = (await loadLegs(db, [{ repo: p.repo, number: p.number }], { ids: [p.id] })).get(refOf(p.repo, p.number))?.[0]?.state;
       if (now !== before) n++;
     } catch (e) {

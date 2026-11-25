@@ -61,6 +61,7 @@ import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
 import { countMainFixes } from "../data/changes/index.ts";
+import { failureDelayMs } from "../core/backoff.ts";
 import { STEP_STAGE, tripKey, tripOf, type TripStage } from "../core/push-outcome.ts";
 import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
@@ -71,9 +72,6 @@ import type { Db } from "../db/index.ts";
 export const PLAN_EVERY_MS = 5 * 60_000;
 /** An incremental planner (the runner's) loads every item's facts again at least this often: the bound on a change the log missed. */
 export const PLAN_FULL_EVERY_MS = 30 * 60_000;
-/** Failed jobs of a step are retried after 1, 2, 4, 8, 16 minutes, then every 30. */
-export const FAIL_BACKOFF_MS = 60_000;
-export const FAIL_BACKOFF_MAX_MS = 30 * 60_000;
 /** Checks younger than this count as current for the review that follows. */
 export const CHECKS_FRESH_MS = 5 * 60_000;
 /** How often the CI and mergeable state of a repo with PRs waiting for CI (or an open batch PR) is read again. */
@@ -363,7 +361,7 @@ const passImplementWork = new WeakMap<PlanSet, Promise<Map<string, ImplementJob>
 /**
  * Per repo, the queued issue its next implement job works on. The revisions of our implementation PRs (planned on the PR,
  * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score). With several, the first
- * whose job may run now (implementRefusal): one that may not keeps no other work of the repo back.
+ * whose job may run now (implementRefusals): one that may not keeps no other work of the repo back.
  */
 async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
   let work = passImplementWork.get(plans);
@@ -378,13 +376,13 @@ async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Pro
   const found = new Map<string, ImplementJob[]>(tracked.map((repo) => [repo, []]));
   for (const p of allowed(await planned(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
   for (const p of allowed(await plannedItems(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
-  const { implementRefusal } = await import("../implement/gate.ts");
+  const choices = [...found].flatMap(([repo, jobs]) => (jobs.length > 1 ? jobs.map((j) => ({ repo, number: j.number })) : []));
+  const refused = choices.length ? await (await import("../implement/gate.ts")).implementRefusals(db, choices) : new Map<string, string | null>();
   const out = new Map<string, ImplementJob>();
-  await Promise.all([...found].map(async ([repo, jobs]) => {
-    const refused = jobs.length > 1 ? await Promise.all(jobs.map((j) => implementRefusal(db, repo, j.number))) : [];
-    const next = jobs.find((_, i) => (refused[i] ?? null) === null) ?? jobs[0];
+  for (const [repo, jobs] of found) {
+    const next = jobs.find((j) => (refused.get(`${repo}#${j.number}`) ?? null) === null) ?? jobs[0];
     if (next) out.set(repo, next);
-  }));
+  }
   return out;
 }
 
@@ -908,9 +906,6 @@ async function releasedAt(db: Db, step: string): Promise<string | null> {
 
 /** The least wait after a job stopped for running past its deadline. */
 export const DEADLINE_BACKOFF_MS = 3600_000;
-
-/** Minutes-long wait after `failures` failed jobs in a row: 1, 2, 4, 8, 16 minutes, then 30. */
-export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOFF_MAX_MS, FAIL_BACKOFF_MS * 2 ** Math.max(0, failures - 1));
 
 /**
  * Failed autopilot jobs of the step (of the repo, when given) since its last success: when it may run again, else null.
