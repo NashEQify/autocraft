@@ -103,7 +103,12 @@ export type DiscordLink = { url: string; at: string };
 /** Message links of an item, newest first. Empty when the key is missing or a row does not open. */
 export async function linksOf(db: Db, keys: DiscordKeys | null, repo: string, number: number): Promise<DiscordLink[]> {
   if (!keys) return [];
-  const rows = (await dc.loadMentionsOfItems(db, [`${repo}#${number}`])).get(`${repo}#${number}`) ?? [];
+  return mentionLinks(keys, (await dc.loadMentionsOfItems(db, [`${repo}#${number}`])).get(`${repo}#${number}`) ?? []);
+}
+
+/** The message links of stored mention rows, newest first; rows the key cannot open are left out. */
+export function mentionLinks(keys: DiscordKeys | null, rows: readonly { sealed: string; msgHash: string }[]): DiscordLink[] {
+  if (!keys) return [];
   return rows.flatMap((r) => {
     const v = keys.open(r.sealed, r.msgHash);
     return v ? [{ url: `https://discord.com/channels/${v.guildId}/${v.channelId}/${v.messageId}`, at: v.at }] : [];

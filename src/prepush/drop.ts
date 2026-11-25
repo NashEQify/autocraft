@@ -1,7 +1,7 @@
 import { TERMINAL, loadTaskStates } from "../data/build/index.ts";
 import { COMMENT_UNSENT_DELAYS_MS } from "../core/rules.ts";
 import { loadLintingRows, supersedePatches, type PatchKind } from "../data/changes/index.ts";
-import { openItemKeys } from "../data/mirror/index.ts";
+import { repoItemKeys } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 
 /**
@@ -9,8 +9,7 @@ import type { Db } from "../db/index.ts";
  * superseded, unless their lint task still runs. `keep` holds the ids of the rows the Plan lists.
  */
 export async function dropUnlistedPatches(db: Db, kind: PatchKind, repo: string, keep: ReadonlySet<number>): Promise<void> {
-  // NEEDS mirror.openItemKeys: a key source of every item of repos (closed ones too); the open PRs miss a stored patch of a PR closed since.
-  const rows = (await loadLintingRows(db, openItemKeys({ repos: [repo], kind: "pr" }))).filter((r) => r.kind === kind && !keep.has(r.id));
+  const rows = (await loadLintingRows(db, repoItemKeys({ repos: [repo], kind: "pr" }))).filter((r) => r.kind === kind && !keep.has(r.id));
   const tasks = await loadTaskStates(db, rows.flatMap((r) => (r.lintTask === null ? [] : [r.lintTask])));
   // A CI fix whose comment did not reach GitHub is kept until its retries are used: the plan lists it again when its backoff ends.
   const drop = rows.filter((r) => {

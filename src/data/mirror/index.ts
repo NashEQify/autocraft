@@ -11,4 +11,5 @@ export * from "./mainci.ts";
 export * from "./authors.ts";
 export * from "./activity.ts";
 export * from "./releases.ts";
+export * from "./images.ts";
 export type * from "./types.ts";

@@ -30,10 +30,11 @@ export async function legWait(db: Db, wf: Pick<ItemWorkflow, "id" | "repo" | "nu
     loadLegs(db, [{ repo: wf.repo, number: pr }], { activeOnly: true, latestOnly: true }),
     loadActions(db, { workflowIds: [wf.id] }),
   ]));
-  const p = (legs.get(`${wf.repo}#${pr}`) ?? []).find((l) => l.workflow_id === wf.id && l.state === "ci");
+  const p = (legs.get(`${wf.repo}#${pr}`) ?? []).find((l) => l.workflow_id === wf.id && (l.state === "ci" || l.state === "queued"));
   if (!p?.head) return null;
   const merge = [...actions.values()].flat().find((a) => a.kind === "merge" && a.number === pr && a.head === p.head && a.state === "waiting-token");
   if (merge) return t("Waiting for {login} to sign in to AutoCraft, so the merge runs as them", { login: merge.by });
+  if (p.state !== "ci") return null;
   const pm = (await loadPremerge(db, [{ repo: wf.repo, number: pr, head: p.head }])).get(`${wf.repo}#${pr}@${p.head}`) ?? null;
   if (pm && (pm.findings !== null || pm.tries >= PREMERGE_MAX_TRIES)) return null;
   const call = { prompt_id: "", repos: [wf.repo], step: "premerge", refs: [{ repo: wf.repo, number: pr }] };

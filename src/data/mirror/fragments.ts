@@ -4,7 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
-import type { OpenItemsArgs } from "./types.ts";
+import type { OpenItemsArgs, RepoItemsArgs } from "./types.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 
@@ -68,3 +68,4 @@ const openItemsKeys = (db: Db, o: OpenItemsArgs) =>
 registerKeySource<OpenItemsArgs>("mirror.openItems", (db, o) => openItemsKeys(db, o));
 registerKeySource<{ from: string }>("mirror.itemsSince", (db, { from }) =>
   queryDb(db).k.selectFrom("main.items as ks").select(["ks.repo", "ks.number"]).where("ks.created_at", ">=", from));
+registerKeySource<RepoItemsArgs>("mirror.repoItems", (db, o) => itemsOfRepos(db, o.repos).$if(!!o.kind, (b) => b.where("ir.kind", "=", o.kind!)));

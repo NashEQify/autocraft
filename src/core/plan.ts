@@ -245,13 +245,13 @@ export type PrFacts = {
     asked: boolean;
     /** An unanswered Merge? question exists at any head. */
     openQuestion: boolean;
-    /** The operator answer at the reviewed head that counts (not yet applied, not Backlog). */
+    /** "merge" once an approved workflow's leg handed the PR to the merge queue at the reviewed head; else null. */
     answer: string | null;
-    /** The operator's Merge answer was given after the review's `at`. */
+    /** The hand-over came after the review's `at`. */
     mergeAnswerAfterReview: boolean;
     /** Member of an open duplicate group (asked after the group is answered). */
     inOpenGroup: boolean;
-    /** The answered decision waits for its person's sign-in or access, or is disputed: the merge step leaves it out, so none is proposed. */
+    /** The merge, made as the person who approved it, waits for their sign-in or access: the merge step leaves it out, so none is proposed. */
     execWaiting: boolean;
     /** The Hold question of a review that says hold, at the reviewed head: asked at all, still unanswered, and the answer given. */
     hold: { asked: boolean; open: boolean; answer: string | null; /** Another open question of the item (scope, Merge?, Close?) is asked first. */ otherOpen: boolean };

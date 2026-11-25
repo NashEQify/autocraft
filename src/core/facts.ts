@@ -4,7 +4,7 @@ import { listQuietPrs } from "../data/security/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
 import { loadAssignments, withConfig, config } from "../data/control/index.ts";
-import { loadReviewFacts } from "../data/review/index.ts";
+import { loadUnsureHeads } from "../data/review/index.ts";
 import { fullPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
@@ -30,7 +30,7 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import type { WorkflowGate } from "./may.ts";
+import { mergeWaits, type WorkflowGate } from "./may.ts";
 import { loadPrPass, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
@@ -256,8 +256,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.workflow = wfFact;
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
-    // NEEDS merge.loadMergeFacts: the batch tip's run approvals only while every member has a final take review at its batched head.
-    base.runs = runsOf(batchRow ? d.merge.runs.get(`${ref}@${batchRow.commitSha}`) : undefined, rf.ciApproved);
+    // The batch tip's run approvals count only while the batch is open and every member keeps its take review at its batched head.
+    const tipRuns = batchRow?.state === "open" && batchRow.membersReviewed ? d.merge.runs.get(`${ref}@${batchRow.commitSha}`) : undefined;
+    base.runs = runsOf(tipRuns, rf.ciApproved);
     return base;
   }
   if (!inScope) {
@@ -308,6 +309,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const mx = mxh !== null;
   const qh = mxh ?? latest!.head;
   const qAt = mx ? wfFact!.startedAt : latest!.at;
+  // The merge queue's operator path: the approved workflow's leg handed the PR over at this head (moveLegs sets `updated_at`).
+  const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
+  if (handed) base.decision = { ...NO_DECISION, asked: true, answer: "merge", mergeAnswerAfterReview: handed.updated_at > qAt };
+  if (mergeWaits(d.mergeActions.get(ref), wfRow, qh)) base.decision = { ...base.decision, execWaiting: true };
   const verdict = latest?.verdict;
 
   const take = mx || verdict === "take" || verdict === "take-fix";
@@ -426,8 +431,7 @@ function statementConflicts(d: PrPassData, stored: unknown[]): PrFacts["statemen
 
 /** True when any stored Opus review at the head (the current row or an overwritten one in the history) was a take or take-fix with sure = 0. */
 export async function headWasUnsure(db: Db, repo: string, number: number, head: string): Promise<boolean> {
-  // NEEDS review.loadUnsureHeads(keys): the unsure heads alone; loadReviewFacts reads the rest of the review facts in the same wave.
-  return (await loadReviewFacts(db, [{ repo, number }], { now: Date.now() })).unsureHeads.has(`${repo}#${number}@${head}`);
+  return (await loadUnsureHeads(db, [{ repo, number }])).has(`${repo}#${number}@${head}`);
 }
 
 export { tierKey, tiersOf, type AuthorRef };

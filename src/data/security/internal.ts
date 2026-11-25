@@ -1,7 +1,7 @@
 // Shared by the security query files; not exported from index.ts.
 import type { ExpressionBuilder } from "kysely";
 import * as kx from "../../db/kx.ts";
-import type { FindingBriefRow, FindingPatch, FindingState } from "./types.ts";
+import type { FindingBriefRow, FindingPatch, StoredFindingState } from "./types.ts";
 import { INTERNAL_FINDING_STATES } from "./types.ts";
 
 export const nowIso = (): string => new Date().toISOString();
@@ -18,7 +18,7 @@ export const severityRank = (eb: ExpressionBuilder<any, any>, col: string) => eb
 export const LISTED_NOT_IN: string[] = [...INTERNAL_FINDING_STATES];
 
 /** The columns of a patch as an update `set`, with the state and `updated_at` it comes with. */
-export function patchSet(patch: FindingPatch | undefined, state: FindingState | undefined, at: string): Record<string, unknown> {
+export function patchSet(patch: FindingPatch | undefined, state: StoredFindingState | undefined, at: string): Record<string, unknown> {
   const { bumpFixAttempts: _b, restoreFixAttempts: _r, ...cols } = patch ?? {};
   return { ...(state ? { state } : {}), updated_at: at, ...cols };
 }

@@ -123,6 +123,10 @@ export const PLAN_INPUTS: PlanInput[] = [
   { table: "stages", class: "item", why: "One item's labeled note.", when: "r.stage = 'labeled'" },
   { table: "verifications", class: "item", why: "Verification runs of one PR." },
   {
+    table: "workflow_actions", class: "item", why: "A merge that waits for its approver's sign-in or access.",
+    when: "r.kind = 'merge'", columns: ["repo", "number", "workflow_id", "state", "head"],
+  },
+  {
     table: "audit", class: "item", why: "Assign and unassign of an item, whose target names it.",
     when: "r.action IN ('assign', 'unassign') AND instr(r.target, '#') > 1",
     refs: "SELECT substr(r.target, 1, instr(r.target, '#') - 1) AS repo, CAST(substr(r.target, instr(r.target, '#') + 1) AS INTEGER) AS number",
@@ -215,7 +219,7 @@ export const PLAN_INPUTS: PlanInput[] = [
   {
     // Commands move a workflow at human pace; its recommendation, plan parts and blocker are not planner facts.
     table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry and approval, the PR of an issue's implement workflow, and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
-    columns: ["repo", "number", "entry", "state", "approved_by", "started_by", "started_at"],
+    columns: ["repo", "number", "entry", "state", "approved_by", "approved_at", "started_by", "started_at"],
     refs: "SELECT r.repo AS repo, r.number AS number UNION SELECT wi.repo, wi.pr_number FROM implementations wi WHERE wi.repo = r.repo AND wi.number = r.number AND wi.pr_number IS NOT NULL",
     full: `r.state IN ${WF_LIVE}`,
     fullUpdate: `(old.state IN ${WF_LIVE}) IS NOT (new.state IN ${WF_LIVE})`,

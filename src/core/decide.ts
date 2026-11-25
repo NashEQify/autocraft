@@ -590,7 +590,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
     // While the diff's reasons are the conservative ones, the Merge? question waits for the re-read that settles them.
     if (e.state === "needs-decision" && !f.decision.asked && !f.decision.inOpenGroup && !f.diffPending) actions.push(act("ask-merge", qHead));
-    if (eligible(f, e) && !refusedAsBefore(f, e) && !(e.path === "operator" && f.decision.execWaiting)) {
+    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.decision.execWaiting) {
       const singleOnly = f.verification?.state === VERIFY_UNAVAILABLE || f.verifyOverride || e.noCi || f.mainFix || f.baseOffDefault;
       actions.push(act("merge", qHead, { singleOnly, batchable: !singleOnly }));
     }

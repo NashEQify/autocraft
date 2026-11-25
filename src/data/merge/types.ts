@@ -58,7 +58,8 @@ export type WaitingRun = { id: number; name: string; event: string };
 export type RunApproval = { head: string; runs: WaitingRun[]; approved: number[]; reread: boolean; failed: Record<string, number>; crossRepo: boolean; checkedAt: string; approvedAt: string | null };
 export type VerificationFact = { head: string; state: VerificationState; kind: string; summary: string | null; note: string | null; finishedAt: string | null };
 export type UnknownState = { head: string; since: string; reads: number; rereads: number; stuck: boolean };
-export type BatchOfPr = { id: number; repo: string; branch: string; state: BatchState; commitSha: string; prNumber: number | null; members: BatchMember[] };
+/** `membersReviewed`: every member has a final take or take-fix review at its batched head, the head of its newest verdict review. */
+export type BatchOfPr = { id: number; repo: string; branch: string; state: BatchState; commitSha: string; prNumber: number | null; members: BatchMember[]; membersReviewed: boolean };
 export type MergeFacts = {
   /** Newest attempt per ref and head, with the count of refused attempts at that head. */
   attempts: Map<HeadRef, MergeAttempt>;
@@ -108,7 +109,8 @@ export type NewPrBuild = { repo: string; number: number; head: string; base: str
 export type PrBuildSettle = { key: HeadRef; from?: "queued" | "failed"; set: { state: string; summary?: string | null; ciOverall?: string | null; disagree?: boolean; finishedAt?: string } };
 export type LateDisagreement = { repo: string; number: number; head: string; summary: string | null };
 
-export type CommandSpec = { doc: string; params: Record<string, unknown>; argv?: string[]; line?: string; capture?: string };
+/** As stored; the screenshot config's parser validates it on every read. */
+export type CommandSpec = { doc: string; params: Record<string, unknown>; argv?: string[]; line?: Record<string, string | number | boolean>; capture?: boolean };
 export type ScreenshotConfig = {
   package: string; example: string; driver: string; commands: Record<string, CommandSpec>; ui_paths: string[]; size?: string;
   repo: string; updatedBy: string; updatedAt: string;

@@ -14,13 +14,14 @@ import { envVar } from "../env.ts";
 import { appChildEnv } from "./install-token.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { Client, GithubError, Transient, type Querier } from "../mirror.ts";
+import { ACTION_WAITS } from "../core/may.ts";
 import { slugOf } from "../owners.ts";
 import { loadAccess, loadUserTokenStatus } from "../data/access/index.ts";
 import { queueActions, retryActions, saveActions, type ActionState, type NewAction, type WorkflowAction } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 
 export type ExecState = ActionState;
-export const WAITING: readonly ActionState[] = ["waiting-token", "waiting-permission"];
+export { ACTION_WAITS as WAITING };
 
 export const SIGN_IN_REASON = "Sign in to let AutoCraft finish this as you";
 export const noWriteReason = (repo: string): string => `You have no write access to ${slugOf(repo)}`;
@@ -172,7 +173,7 @@ export async function laneForOperator(db: Db, deps: LaneDeps | undefined, login:
 }
 
 /** An action that waits for its person's token or access: the stages leave it out of their work until it is retried. */
-export const isWaiting = (a: Pick<WorkflowAction, "state"> | null | undefined): boolean => !!a && WAITING.includes(a.state);
+export const isWaiting = (a: Pick<WorkflowAction, "state"> | null | undefined): boolean => !!a && ACTION_WAITS.includes(a.state);
 
 /**
  * How a failed write as a user is classified, from the HTTP status (a GitHub error's, or gh's own "(HTTP 403)" line in

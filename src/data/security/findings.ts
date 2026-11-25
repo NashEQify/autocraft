@@ -10,7 +10,7 @@ import { briefCols, nowIso, severityRank } from "./internal.ts";
 import {
   ENV_WAIT_NOTE, INTERNAL_FINDING_STATES, TRANSITIONS, findingKey,
   type CallRow, type FindingAttention, type FixAdvanceRow, type FindingBoardRow, type FindingDetailData, type FindingKey, type FindingMove, type FindingRow, type FindingState, type HiddenRepos,
-  type LinkRow, type LiveRound, type LogRound, type NewFinding, type Ref, type ScanTestView, type StaleWork,
+  type LandingWatch, type LinkRow, type LiveRound, type LogRound, type NewFinding, type Ref, type ScanTestView, type StaleWork,
 } from "./types.ts";
 
 const INTERNAL: string[] = [...INTERNAL_FINDING_STATES];
@@ -148,6 +148,22 @@ export async function loadFixesToAdvance(db: Db): Promise<FixAdvanceRow[]> {
 export async function loadFindingsForLinking(db: Db): Promise<LinkRow[]> {
   const q = queryDb(db);
   return await q.all(q.k.selectFrom("security_findings").select(["repo", "number", "state", "fingerprint", "title", "refs", "category"]).orderBy("repo").orderBy("number"), { alone: true, label: "security.loadFindingsForLinking" });
+}
+
+/** The findings the landing poll watches: quiet-route findings landing with a pull request, and findings waiting for an admin with a commit. 1 statement. */
+export async function loadLandingWatch(db: Db): Promise<LandingWatch> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("security_findings").select(["repo", "number", "state", "fix_commit", "fork", "fix_pr"])
+    .where((eb) => eb.or([
+      eb.and([eb("state", "=", "landing"), eb("fix_pr", "is not", null), eb("fork", "is", null)]),
+      eb.and([eb("state", "=", "awaiting-admin"), eb("fix_commit", "is not", null)]),
+    ])).orderBy("repo").orderBy("number"), { label: "security.loadLandingWatch" });
+  const out: LandingWatch = { quiet: [], waiting: [] };
+  for (const { state, ...r } of rows) {
+    if (state === "landing" && r.fix_pr !== null) out.quiet.push({ ...r, fix_pr: Number(r.fix_pr) });
+    else if (state === "awaiting-admin" && r.fix_commit !== null) out.waiting.push({ ...r, fix_commit: r.fix_commit, fix_pr: r.fix_pr === null ? null : Number(r.fix_pr) });
+  }
+  return out;
 }
 
 /** Findings by scan, repo and state. */
@@ -294,8 +310,8 @@ export async function claimAdvisoryId(db: Db, key: FindingKey): Promise<boolean>
     .where((eb) => eb.or([eb("ghsa_id", "is", null), eb.and([eb("ghsa_id", "=", ""), eb("updated_at", "<", stale)])])))).changes > 0;
 }
 
-/** Stores the advisory id over the claim. */
-export async function setAdvisoryId(db: Db, key: FindingKey, ghsa: string): Promise<void> {
+/** Stores the advisory id over the claim; null releases the claim (the draft failed). */
+export async function setAdvisoryId(db: Db, key: FindingKey, ghsa: string | null): Promise<void> {
   const q = queryDb(db);
   const [[repo, number]] = pairs([key]);
   await q.run(q.k.updateTable("security_findings").set({ ghsa_id: ghsa }).where("repo", "=", repo!).where("number", "=", number!).where("ghsa_id", "=", ""));
