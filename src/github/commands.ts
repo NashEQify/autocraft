@@ -343,6 +343,8 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
 
 /** The comment was deleted, or no longer holds the command, by the time a reading's command would run. */
 class CommentChanged extends Error {}
+/** GitHub could not give the comment again just before a reading's command would run. */
+class CommentUnread extends Error {}
 
 /** Comments a model is reading or has read in this process, with when it started: the drain leaves them to readInBackground. */
 const reading = new Map<number, number>();
@@ -360,7 +362,7 @@ function addressedText(body: string, names: readonly string[]): string {
 /**
  * Reads an answer the parser could not read with a model (src/workflow/read.ts runText), off the drain, which would otherwise wait for the
  * call; then settles the command and posts its answer. Just before a command the reading runs, the comment is read again, as a typed one
- * is: deleted or changed meanwhile, the command ends unanswered. It is pinned to the PR's head at the comment, as a typed one is. The row
+ * is: deleted or changed meanwhile, the command ends unanswered; when GitHub cannot give it, the command stays queued and is tried again. It is pinned to the PR's head at the comment, as a typed one is. The row
  * stays queued meanwhile, and the drain passes over it (`reading`); after a restart the drain reads it again.
  */
 function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; names: readonly string[]; text: string; condition: boolean; mention: string | undefined; reply: boolean; allowed: boolean }): void {
@@ -371,7 +373,7 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
   reading.set(id, nowMs);
   const pin = async (p: Parsed): Promise<{ head?: string } | string> => {
     const c = await (deps.comment ?? restComment)(r.repo, r.comment_id).catch(() => null);
-    if (!c) return t("Nothing ran: the comment could not be read again. Send it again.");
+    if (!c) throw new CommentUnread();
     const now = c.kind === "ok" && c.authorId === Number(r.github_id) ? parseComment(c.body, o.names, { repo: r.repo }) : null;
     if (!now || commandKey(now) !== commandKey(o.again)) throw new CommentChanged(c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command");
     if (!pinsHead({ pr: r.pr, parsed: JSON.stringify(p) })) return {};
@@ -389,6 +391,12 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
     } catch (e) {
       if (e instanceof CommentChanged) {
         await settle(db, d, r, "ignored", e.message, clock());
+        return;
+      }
+      if (e instanceof CommentUnread) {
+        // Tried again after RETRY_MS, as a typed command whose comment GitHub could not give; the expiry still counts from requested_at.
+        await saveCommandProgress(db, [{ commentId: id, triedAt: clock().toISOString(), retryInc: true }]);
+        reading.delete(id);
         return;
       }
       deps.log?.(`github command ${refOf(r)}: ${oneLine(String((e as Error)?.message ?? e))}`);

@@ -34,12 +34,22 @@ test("a message the parser cannot read runs the command a model reads in it only
   assert.equal((await liveWorkflow(w.db, "app", 1))?.entry, "review");
 });
 
-test("a reading that names another item than the one the message was written on is only proposed", async () => {
+test("a reading that names other items than the ones the message was written on, or only some of them, is only proposed", async () => {
   const w = await unstarted();
   await w.pr(2);
   const other = await send(w, "app#2 is the better one, could you get that in for me", reads("merge app#2", 0.99, 0.99));
   assert.equal(other.outcome, "ambiguous", other.line);
   assert.match(other.line, /`merge app#2`/);
+  assert.equal(await liveWorkflow(w.db, "app", 1), null);
+  assert.equal(await liveWorkflow(w.db, "app", 2), null);
+
+  // A list of two selected items, and a reading that names one of them.
+  const text = "app#1 is the better one, could you get that in for me";
+  const parsed = parse(text);
+  assert.equal(parsed.kind, "ambiguous");
+  const both = [item, { repo: "app", number: 2 }];
+  const part = await runText(w.db, actor, "dashboard", { parsed, items: both }, { text, own: both, named: false, deps: reads("merge: app#1", 0.99, 0.99) });
+  assert.ok(part.items.every((o) => o.outcome === "ambiguous"), part.lines.join(" "));
   assert.equal(await liveWorkflow(w.db, "app", 1), null);
   assert.equal(await liveWorkflow(w.db, "app", 2), null);
 });

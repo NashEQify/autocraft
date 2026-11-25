@@ -96,9 +96,9 @@ export function refsIn(text: string, repo?: string): ItemRef[] {
 }
 
 /**
- * How the command's items fit the message: `own` when they are the message's own (none or only `own` written on an item, exactly
- * `own` for a named list), `text` when every item the command names stands in the text but they are not that (it may only be
- * proposed), `none` when it names an item the text does not. A duplicate's original and an autorepin target count as named.
+ * How the command's items fit the message: `own` when they are the message's own (none, or exactly the items of `own`; a named list
+ * must name them), `text` when every item the command names stands in the text but they are not that, a part of `own` included (it
+ * may only be proposed), `none` when it names an item the text does not. A duplicate's original and an autorepin target count as named.
  */
 function itemsFit(p: Parsed, command: string, read: ReadText): "own" | "text" | "none" {
   if (p.kind === "ambiguous") return "none";
@@ -109,7 +109,8 @@ function itemsFit(p: Parsed, command: string, read: ReadText): "own" | "text" | 
   // A bare #n in the command's words is a plan part or an item the parse already resolved; named items are checked by name.
   if (![...items, ...originals, ...refsIn(command)].every((i) => inText.some((o) => sameRef(i, o)))) return "none";
   const ofOwn = items.every((i) => read.own.some((o) => sameRef(i, o)));
-  const fits = read.named ? items.length > 0 && ofOwn && read.own.every((o) => items.some((i) => sameRef(i, o))) : ofOwn;
+  const all = ofOwn && read.own.every((o) => items.some((i) => sameRef(i, o)));
+  const fits = read.named ? items.length > 0 && all : items.length === 0 || all;
   return fits ? "own" : "text";
 }
 
@@ -129,7 +130,8 @@ async function mayRead(db: Db, actor: Actor, own: readonly ItemRef[]): Promise<b
 async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean }> {
   const refs = read.own.slice(0, READ_ITEMS_MAX).map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number }));
   const keys = refs.map((r) => `${r.repo}#${r.number}`);
-  const [items, history, quiet] = await Promise.all([loadItems(db, refs, "pr"), loadWorkflowHistory(db, refs), loadQuiet(db, keys)]);
+  // Quiet over every item of the message, not only those the call describes: one quiet item keeps the text on the sender's own Task Runner.
+  const [items, history, quiet] = await Promise.all([loadItems(db, refs, "pr"), loadWorkflowHistory(db, refs), loadQuiet(db, read.own.map((i) => `${i.repo.split("/").pop()!}#${i.number}`))]);
   const out: ReadItem[] = [];
   for (const key of keys) {
     const it = items.get(key as never);
