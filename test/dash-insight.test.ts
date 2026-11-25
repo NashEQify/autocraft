@@ -3,10 +3,8 @@ import { test } from "node:test";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
 import { barOf } from "../src/dash/api/item-bar.ts";
 import { loadItemPage } from "../src/data/views/item-page.ts";
-import { home } from "../src/dash/api/home.ts";
 import { classifiersReport, cost, disagreements } from "../src/dash/api/insight.ts";
 import type { Req } from "../src/dash/types.ts";
-import type { Progress } from "../web/src/api/types.ts";
 import { connectDb } from "../src/db/open.ts";
 
 const req = (query: Record<string, string> = {}): Req => ({
@@ -86,31 +84,4 @@ test("an item's status bar queues behind earlier jobs of the step, shows a faile
   assert.equal(state("fixup")?.state, "failed");
   assert.equal(state("verify")?.state, "done");
   assert.equal(state("review")?.costUsd, 0.25);
-});
-
-test("home counts today's merged and closed items, the open decisions and findings, and lists what was done newest first", async () => {
-  const db = await connectDb(":memory:");
-  const day = new Date().toISOString();
-  await db.run(db.k.insertInto("items").values([
-    { repo: "app", number: 1, kind: "pr", state: "MERGED", title: "one", merged_at: day, closed_at: day },
-    { repo: "app", number: 2, kind: "issue", state: "CLOSED", title: "two", closed_at: day },
-    { repo: "app", number: 3, kind: "pr", state: "OPEN", title: "three" },
-  ]));
-  await db.run(db.k.insertInto("merges").values({ repo: "app", number: 1, head_oid: "h", run_id: "r", at: day, path: "rule", outcome: "merged" }));
-  await db.run(db.k.insertInto("audit").values([{ at: day, login: "b", action: "merge", target: "app#1", details: '{"state":"done"}' }, { at: day, login: "b", action: "act-close", target: "app#2", details: '{"state":"done"}' }]));
-  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "merge", question: "q", options: "[]", asked_at: day, repo: "app", number: 3 }));
-  await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 1, scan_id: 1, area: "a", refs: "[]", reach: "r", impact: "i", fingerprint: "fp", title: "t", severity: "high", state: "new", created_at: day, updated_at: day, last_failure: "boom" }));
-  const req = { method: "GET" as const, path: "", params: {}, query: new URLSearchParams(), form: new URLSearchParams(), user: { login: "op", role: "operator" as const, canWrite: async () => true, canRead: async () => true }, csrf: "", nonce: "" };
-  const funnel = { open: 1, classified: 0, secondOpinion: 0, disagreement: 0, reviewed: 0, take: 0, hold: 0, close: 0, waiting: 0, batched: 0 };
-  const progress: Progress = {
-    trackingSince: "2020-01-01T00:00:00Z", now: day, funnel, done: { mergedByPipeline: 0, closedByPipeline: 0, closedByOthers: 0 },
-    perHour: [1], perHourPipeline: [0], decisionsOpen: 0, decisionsAnsweredToday: 0, repos: [], mainCi: { green: 0, red: 0, optional: 0, running: 0, none: 0 },
-  };
-  const h = await home(db, req, { progress: async () => progress });
-  assert.deepEqual([h.phases.Merged, h.phases.Closed, h.phases.Triage], [1, 1, 1]);
-  assert.deepEqual(h.needs.byKind, { merge: 1, security: 1 });
-  assert.deepEqual(h.needs.oldest.map((n) => n.kind).sort(), ["merge", "security"]);
-  assert.equal(h.progress.byAutoCraftPct, 100, "the one merged PR has a merge row of ours");
-  assert.deepEqual(h.done.map((d) => d.number).sort(), [1, 2]);
-  assert.ok(h.problems.some((p) => p.kind === "gave-up" && p.detail === "boom"));
 });

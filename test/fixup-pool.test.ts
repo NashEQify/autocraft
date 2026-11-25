@@ -8,7 +8,6 @@ import type { Exec, ExecResult } from "../src/fixup/git.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { CancelledError, StoppedError } from "../src/agents/call.ts";
 import { SCRATCH } from "./scratch.ts";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { validating } from "./gql.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -22,7 +21,6 @@ const head = (n: number) => String(n).repeat(40);
 
 async function setup(prs: number): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await useTestAccount(db);
   await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 8 }));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);

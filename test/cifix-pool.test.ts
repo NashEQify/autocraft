@@ -18,8 +18,6 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "cifix-pool-"));
 process.env.AUTOCRAFT_DIFF_CACHE = join(dir, "diffs");
 process.env.AUTOCRAFT_ARTIFACT_DIR = join(dir, "artifacts");
-writeFileSync(join(dir, "accounts.json"), JSON.stringify([{ id: "a1", configDir: join(dir, "a1") }]));
-process.env.AUTOCRAFT_ACCOUNTS = join(dir, "accounts.json");
 after(() => setCallContext(null));
 
 const T0 = "2026-01-01T00:00:00Z", T1 = "2026-01-02T00:00:00Z";

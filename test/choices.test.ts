@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { decisionStamp, validateCard } from "../src/decide/choices-parse.ts";
@@ -33,7 +32,6 @@ async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "choices-test-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
-  await useTestAccount(db);
   const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
     await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
   await item(1, "issue", "Issue 1", null);

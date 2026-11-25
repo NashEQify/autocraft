@@ -17,7 +17,6 @@ import { RestClient, RestError, callbackPayload, type CommandDef, type DiscordRe
 import { deliver, renderMatches } from "../src/discord/reply.ts";
 import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -28,7 +27,6 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-search-"));
 const db = await connectDb(join(dir, "d.db"));
 const keys = new DiscordKeys("k".repeat(40));
-await useTestAccount(db);
 after(async () => {
   await db.close();
   rmSync(dir, { recursive: true, force: true });
