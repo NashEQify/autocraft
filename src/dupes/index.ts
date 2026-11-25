@@ -17,6 +17,8 @@ import { openDb } from "../db/open.ts";
 
 /** Pairs checked per job unless the step's limit says otherwise. */
 export const DEFAULT_LIMIT = 2000;
+/** Pairs whose verdicts are stored before the next ones are asked: what a stop can lose. */
+const CHECK_SLICE = 200;
 /** Items whose neighbours are looked up in one run. */
 const SCAN_MAX = 5000;
 
@@ -25,11 +27,16 @@ export type DupesParams = {
   limit?: number;
   dryRun?: boolean;
   onHandled?: (n: number) => void;
+  progress?: (text: string) => Promise<void>;
+  /** A cancel or a passed deadline: no new unit or model call starts. */
+  cancelled?: () => Promise<boolean>;
+  /** The job's time slice is used: no unit after the first starts, so every job moves the backlog. */
+  timeUp?: () => Promise<boolean>;
 };
 export type DupesDeps = { index: VectorIndex; check: CheckDeps };
 export type DupesSummary = {
   scanned: number; pairsAdded: number; checked: number; jev: number; haiku: number; verdicts: Record<string, number>;
-  unanswered: number; dryRun: boolean;
+  unanswered: number; /** Pairs of this run left for a later job because it was stopped or its time was up. */ left: number; dryRun: boolean;
 };
 
 export function defaultDeps(db: Db): DupesDeps {
@@ -55,8 +62,12 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const limit = params.limit ?? DEFAULT_LIMIT;
   const d = deps ?? defaultDeps(db);
-  const s: DupesSummary = { scanned: 0, pairsAdded: 0, checked: 0, jev: 0, haiku: 0, verdicts: {}, unanswered: 0, dryRun: !!params.dryRun };
+  const s: DupesSummary = { scanned: 0, pairsAdded: 0, checked: 0, jev: 0, haiku: 0, verdicts: {}, unanswered: 0, left: 0, dryRun: !!params.dryRun };
   const at = () => d.check.now();
+  const cancelled = async (): Promise<boolean> => await params.cancelled?.() ?? false;
+  const stop = async (): Promise<boolean> => await cancelled() || (await params.timeUp?.() ?? false);
+  /** The stop of the unit at `i`: the first one runs past the time slice. */
+  const stopAt = (i: number) => (i ? stop : cancelled);
   const model = d.index.embedder.id;
   if (!params.dryRun) await fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
   const planned = await plannedItems(db, "dupes", { model });
@@ -69,7 +80,7 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
   }
   if (todo.length) {
     await d.index.ready(db);
-    for (let i = 0; i < todo.length; i += SCAN_CHUNK) {
+    for (let i = 0; i < todo.length && !await stopAt(i)(); i += SCAN_CHUNK) {
       const chunk = todo.slice(i, i + SCAN_CHUNK);
       s.pairsAdded += await scanChunk(db, d.index, chunk, at());
       s.scanned += chunk.length;
@@ -77,12 +88,24 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
     log(`dupes: scanned ${s.scanned} items, ${s.pairsAdded} new pairs`);
   }
   // A scan adds pairs, which changes what the Plans send to the pair check: loaded again. Without a scan the Plans loaded above stand.
-  const keys = await pairsToCheck(db, todo.length ? await plannedItems(db, "dupes", { model }) : planned, limit);
+  const keys = await cancelled() ? [] : await pairsToCheck(db, todo.length ? await plannedItems(db, "dupes", { model }) : planned, limit);
   if (keys.length) {
-    const c = await checkPairs(db, keys, d.check, params.onHandled);
-    Object.assign(s, { checked: c.checked, jev: c.jev, haiku: c.haiku, verdicts: c.verdicts, unanswered: c.unanswered });
-    log(`dupes: ${keys.length} pairs sent (${c.jev} to Jev, ${c.haiku} answered by Haiku): ${Object.entries(c.verdicts).map(([k, n]) => `${n} ${k}`).join(", ") || "no verdicts"}`);
-    if (c.haikuAlone) log(`dupes: Jev unavailable: Haiku decided ${c.haikuAlone} pairs`);
+    const said = (verdicts: Record<string, number>) => Object.entries(verdicts).map(([k, n]) => `${n} ${k}`).join(", ") || "no verdicts";
+    let handled = 0, haikuAlone = 0, done = 0;
+    for (; done < keys.length && !await stopAt(done)(); done += CHECK_SLICE) {
+      const slice = keys.slice(done, done + CHECK_SLICE);
+      let inSlice = 0;
+      const c = await checkPairs(db, slice, d.check, { stop: stopAt(done), onHandled: (n) => params.onHandled?.(handled + (inSlice = n)) });
+      handled += inSlice;
+      haikuAlone += c.haikuAlone;
+      s.checked += c.checked; s.jev += c.jev; s.haiku += c.haiku; s.unanswered += c.unanswered;
+      for (const [k, n] of Object.entries(c.verdicts)) s.verdicts[k] = (s.verdicts[k] ?? 0) + n;
+      log(`dupes: pairs ${done + 1} to ${done + slice.length} of ${keys.length}: ${c.jev} to Jev, ${c.haiku} answered by Haiku, ${said(c.verdicts)}`);
+      await params.progress?.(`Duplicates: ${done + slice.length} of ${keys.length} pairs`);
+    }
+    if (await stop()) s.left = keys.length - s.checked;
+    log(`dupes: ${s.checked} of ${keys.length} pairs checked (${s.jev} to Jev, ${s.haiku} answered by Haiku): ${said(s.verdicts)}${s.left ? `; stopped, ${s.left} left for a later job` : ""}`);
+    if (haikuAlone) log(`dupes: Jev unavailable: Haiku decided ${haikuAlone} pairs`);
   }
   return s;
 }

@@ -4,11 +4,12 @@ import { loadLiveConfig } from "../data/control/index.ts";
 import { poolRoom, repoBatches } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { askClaude, pool } from "../classify/run.ts";
-import { runModelStep } from "../agents/step.ts";
+import { jevRequestHash, runModelStep } from "../agents/step.ts";
 import { DUPES_HAIKU, DUPES_JEV } from "../agents/steps.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { canonInfoAll, compareCanonical } from "./canonical.ts";
 import { pairRef, settlePair, type DupePair, type PairVerdict } from "./pair.ts";
+import { loadUnsure, saveUnsure } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { savePairVerdicts, type PairKey, type PairVerdictPut } from "../data/triage/index.ts";
 import type { Db } from "../db/index.ts";
@@ -32,8 +33,8 @@ export async function pairInputs(db: Db, keys: readonly PairKey[]): Promise<Dupe
 }
 
 export type CheckDeps = {
-  /** Jev's yes-probability that the pair is one bug or request; null when it gave no valid answer. */
-  jev(pair: DupePair): Promise<number | null>;
+  /** Jev's yes-probability that the pair is one bug or request; null when it gave no valid answer. `stop`: no further attempt starts once it is true. */
+  jev(pair: DupePair, stop?: Stop): Promise<number | null>;
   /** Haiku's reply text for a batch of pairs; null when there was none. */
   haiku(pairs: DupePair[]): Promise<string | null>;
   /** False while Jev is unavailable: Haiku then decides the pairs alone. Absent means available. */
@@ -41,10 +42,12 @@ export type CheckDeps = {
   now(): Date;
 };
 
+type Stop = () => Promise<boolean>;
+
 export function defaultCheckDeps(db: Db): CheckDeps {
   return {
-    async jev(pair) {
-      const r = await runModelStep(db, DUPES_JEV, pair);
+    async jev(pair, stop) {
+      const r = await runModelStep(db, DUPES_JEV, pair, { ...(stop && { cancelled: stop }) });
       return r.ok ? r.value : null;
     },
     async haiku(pairs) {
@@ -55,6 +58,15 @@ export function defaultCheckDeps(db: Db): CheckDeps {
   };
 }
 
+export type CheckOptions = {
+  /**
+   * The running count of pairs sent to a model. Pairs of a Haiku batch the pool skipped (no Task Runner took it) are taken off
+   * again, so a job whose only work was skipped counts as idle.
+   */
+  onHandled?: (n: number) => void;
+  /** Once true, no new call starts: pairs not asked keep no verdict, the answers that came are stored, and the unsure ones are kept. */
+  stop?: Stop;
+};
 export type CheckCounts = { checked: number; jev: number; haiku: number; haikuAlone: number; verdicts: Record<string, number>; unanswered: number };
 
 type Verdicted = { key: PairKey; jev: number | null; haiku: PairVerdict | null; verdict: PairVerdict };
@@ -78,45 +90,76 @@ async function store(db: Db, rows: Verdicted[], at: string): Promise<void> {
   })));
 }
 
+/** Jev's kept answers (jev_unsure) to the pairs' current requests, by ref, and the hash each pair's answer is valid for. */
+async function keptAnswers(db: Db, pairs: readonly DupePair[]): Promise<{ answers: Map<string, number>; hashOf: (pair: DupePair) => string }> {
+  const hashOf = (pair: DupePair) => jevRequestHash(DUPES_JEV, pair, undefined);
+  const rows = await loadUnsure(db, DUPES_JEV.id, pairs.map((p) => p.ref));
+  const answers = new Map<string, number>();
+  for (const p of pairs) {
+    const r = rows.get(p.ref);
+    if (!r || r.hash !== hashOf(p)) continue;
+    const v: unknown = JSON.parse(r.answer);
+    if (typeof v === "number") answers.set(p.ref, v);
+  }
+  return { answers, hashOf };
+}
+
 /**
- * Checks the pairs and stores each answered one. `onHandled` gets the running count of pairs sent to a model; pairs of a Haiku
- * batch the pool skipped (no Task Runner took it) are taken off again, so a job whose only work was skipped counts as idle.
+ * Checks the pairs and stores each answered one. Jev's unsure answers are kept (jev_unsure) until Haiku has settled their pair, so a
+ * pair whose Haiku batch did not run or gave no answer goes straight to Haiku in a later job.
  */
-export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, onHandled?: (n: number) => void): Promise<CheckCounts> {
+export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, o: CheckOptions = {}): Promise<CheckCounts> {
   const c: CheckCounts = { checked: 0, jev: 0, haiku: 0, haikuAlone: 0, verdicts: {}, unanswered: 0 };
-  const jevP = new Map<string, number | null>();
-  /** Pairs Jev could not be asked because it is unavailable. */
-  const alone = new Set<string>();
+  const stop: Stop = o.stop ?? (async () => false);
   const inputs = await pairInputs(db, keys);
   const pairs = new Map(keys.map((k, i) => [pairRef(k.repo, k.a, k.b), { k, pair: inputs[i]! }]));
-  let handled = 0, skipped = 0;
-  await pool([...pairs.entries()].map(([ref, e]) => async () => {
+  const kept = await keptAnswers(db, inputs);
+  const jevP = new Map<string, number | null>(kept.answers);
+  /** Pairs Jev could not be asked because it is unavailable. */
+  const alone = new Set<string>();
+  const sent = new Set<string>();
+  await pool([...pairs.entries()].filter(([ref]) => !kept.answers.has(ref)).map(([ref, e]) => async () => {
+    if (await stop()) return;
     const usable = await deps.jevUsable?.() ?? true;
-    const p = usable ? await deps.jev(e.pair) : null;
+    const p = usable ? await deps.jev(e.pair, stop) : null;
+    // A stopped pair without an answer is asked again by a later job, not handed to Haiku.
+    if (p === null && await stop()) return;
     jevP.set(ref, p);
     if (p === null && !(await deps.jevUsable?.() ?? true)) alone.add(ref);
     else c.jev++;
-    onHandled?.(++handled);
+    o.onHandled?.(sent.add(ref).size);
   }), (await loadLiveConfig(db)).jevParallel);
   const at = deps.now().toISOString();
-  const done = (out: Verdicted[], ref: string, haiku: PairVerdict | null, verdict: PairVerdict) => {
-    out.push({ key: pairs.get(ref)!.k, jev: jevP.get(ref) ?? null, haiku, verdict });
-    c.checked++;
-    c.verdicts[verdict] = (c.verdicts[verdict] ?? 0) + 1;
+  const keep = new Set(kept.answers.keys());
+  const save = async (rows: Verdicted[]): Promise<void> => {
+    await store(db, rows, at);
+    for (const r of rows) {
+      c.checked++;
+      c.verdicts[r.verdict] = (c.verdicts[r.verdict] ?? 0) + 1;
+    }
+    await saveUnsure(db, { promptId: DUPES_JEV.id, keep: [], drop: rows.map((r) => pairRef(r.key.repo, r.key.a, r.key.b)).filter((ref) => keep.delete(ref)) });
   };
+  const row = (ref: string, haiku: PairVerdict | null, verdict: PairVerdict): Verdicted => ({ key: pairs.get(ref)!.k, jev: jevP.get(ref) ?? null, haiku, verdict });
   const second: string[] = [];
   const first: Verdicted[] = [];
   for (const ref of pairs.keys()) {
+    if (!jevP.has(ref)) continue;
     const v = alone.has(ref) ? null : settlePair(jevP.get(ref) ?? null, null);
-    if (v) done(first, ref, null, v);
+    if (v) first.push(row(ref, null, v));
     else second.push(ref);
   }
-  await store(db, first, at);
+  await save(first);
+  const fresh = second.filter((ref) => !keep.has(ref) && jevP.get(ref) !== null);
+  await saveUnsure(db, { promptId: DUPES_JEV.id, drop: [], keep: fresh.map((ref) => ({ ref, hash: kept.hashOf(pairs.get(ref)!.pair), answer: JSON.stringify(jevP.get(ref)), at })) });
+  for (const ref of fresh) keep.add(ref);
   const batches = await repoBatches(db, second, HAIKU.limits.perCall, (r) => pairs.get(r)!.pair.repo, (r) => pairRefs(pairs.get(r)!.pair));
   await pool(batches.map((batch) => async () => {
     // One entry per batch pair; a pair without a valid answer stays in `rest` and is asked again.
     const input = batch.map((r) => pairs.get(r)!.pair);
-    const r = await runModelStep(db, DUPES_HAIKU, input, { ask: async (ps) => {
+    if (await stop()) return void (c.unanswered += input.length);
+    for (const ref of batch) sent.add(ref);
+    o.onHandled?.(sent.size);
+    const r = await runModelStep(db, DUPES_HAIKU, input, { cancelled: stop, ask: async (ps) => {
       const text = await deps.haiku(ps);
       return text === null ? null : { text, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } };
     } });
@@ -125,16 +168,16 @@ export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, onHan
       c.haiku += answers.length;
       for (const a of answers) {
         if (alone.has(a.ref)) c.haikuAlone++;
-        done(out, a.ref, a.verdict, settlePair(jevP.get(a.ref) ?? null, a.verdict, alone.has(a.ref)) ?? "unsure");
+        out.push(row(a.ref, a.verdict, settlePair(jevP.get(a.ref) ?? null, a.verdict, alone.has(a.ref)) ?? "unsure"));
       }
     }
-    await store(db, out, at);
+    await save(out);
     const todo = r.ok ? (r.rest ?? []) : input;
     c.unanswered += todo.length;
   }), poolRoom(db, (i) => [...new Set(batches[i]!.map((r) => pairs.get(r)!.pair.repo))], (i) => batches[i]!.flatMap((r) => pairRefs(pairs.get(r)!.pair)), { promptId: HAIKU.id }), { first: true, skipped: (i) => {
     c.unanswered += batches[i]!.length;
-    skipped += batches[i]!.length;
+    for (const ref of batches[i]!) sent.delete(ref);
+    o.onHandled?.(sent.size);
   } });
-  if (skipped) onHandled?.(handled - skipped);
   return c;
 }
