@@ -215,7 +215,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const approvals = d.control.approvals.get(repo) ?? {};
   const repoRow = d.repos.get(repo);
   const rf: PrFacts["repoFacts"] = {
-    mergeApproved: !!approvals.merge, pushApproved: !!approvals.push, commentApproved: !!approvals.comment, ciApproved: !!approvals.ci,
+    commentApproved: !!approvals.comment, ciApproved: !!approvals.ci,
     noCi: !!d.ciSignals.get(repo)?.noCi, mainRed: d.mainRed.has(repo), fixIssueApproved: !!approvals.fixissue,
     implementOn: cfg.repo(repo).buildFeature("implement"),
   };
