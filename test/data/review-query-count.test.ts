@@ -1,7 +1,7 @@
 // Query-count tests: the review loaders and writers issue the same number of statements for a few PRs and for many.
 import { test } from "node:test";
 import {
-  claimFollowups, countUnreviewedMerges, listReviewEvents, loadDiscussionEntries, loadFixesAsked, loadFollowupFixPrs, loadFollowups, loadLatestReviews, loadPendingDefects, loadPosts, loadPostmerge,
+  claimFollowups, listPostmergeReviewed, listReviewEvents, loadDiscussionEntries, loadFixesAsked, loadFollowupFixPrs, loadFollowups, loadLatestReviews, loadPendingDefects, loadPosts, loadPostmerge,
   loadPremerge, loadRecentFiled, loadReviewFacts, loadReviewHistory, loadReviewRecord, loadReviewRows, loadReviewSignature, loadReviewTexts, loadReviewsAt, loadReviewedRefs, markStale,
   recordReviewFailures, saveFollowups, savePostmerge, savePremerge, saveReviewPosts, saveReviews,
 } from "../../src/data/review/index.ts";
@@ -50,7 +50,7 @@ flat("set loaders by refs and heads", seedAll, async (db, refs) => {
 flat("read models for pages and the follow-up reads", seedAll, async (db, refs) => {
   await loadReviewRecord(db, refs); await loadReviewSignature(db, refs);
   await listReviewEvents(db, { limit: 50, repos: [...new Set(refs.map((r) => r.repo))] });
-  await loadRecentFiled(db, "o/a", { now: NOW }); await countUnreviewedMerges(db, T0); await loadReviewedRefs(db, "o/a", "h1");
+  await loadRecentFiled(db, "o/a", { now: NOW }); await listPostmergeReviewed(db, { since: T0 }); await loadReviewedRefs(db, "o/a", "h1");
 });
 
 flat("saving reviews, marks, pre-merge, post-merge, follow-ups and posts is a fixed number of statements", async (db, refs) => { await saveReviews(db, refs.map((r) => reviewInput(r.repo, r.number, `h${r.number}`))); }, async (db, refs) => {

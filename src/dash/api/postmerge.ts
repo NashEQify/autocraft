@@ -4,9 +4,13 @@ import { heldReason } from "../../postmerge/select.ts";
 import type { Finding } from "../../postmerge/parse.ts";
 import { loadReviewRecord } from "../../data/review/index.ts";
 import type { Followup } from "../../data/review/types.ts";
+import { loadLandedWhy } from "../../data/views/landed.ts";
 import { loadShown } from "../../data/mirror/index.ts";
 import type { ItemShown } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
+
+/** AutoCraft merged the PR as a person approved it: no post-merge review is to come. */
+export const mergedAsApproved = async (db: Db, repo: string, n: number): Promise<boolean> => (await loadLandedWhy(db, [{ repo, number: n }])).get(`${repo}#${n}`) === null;
 
 /** `staff`: operators and maintainers, who also read which stage missed a finding and why. */
 export async function postmergeOf(db: Db, repo: string, n: number, staff: boolean): Promise<ItemPostmerge | null> {

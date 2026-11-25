@@ -1912,6 +1912,8 @@ CREATE TABLE IF NOT EXISTS postmerge_followups (
 CREATE INDEX IF NOT EXISTS postmerge_followups_issue ON postmerge_followups(repo, issue_number);
 -- Only merges from this moment on are reviewed unless `postmerge backfill` moves it back.
 INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+-- Merges outside the pipeline's scope, such as those a person approved in a repo whose Pipeline switch is off, from this moment on.
+INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_unscoped_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 -- CI on the default branch of every synced repo, one row per head commit seen. Written by the main-ci step.
 -- state: green | red | optional | running | none (src/mainci/classify.ts).

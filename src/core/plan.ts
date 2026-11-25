@@ -137,6 +137,9 @@ export type ReviewFacts = {
   staleActionable: boolean;
 };
 
+/** Why what a merge landed is reviewed: nobody approved the merge (`rule`), it was approved before the implementation's PR existed, or a push of ours changed code after the approved head. */
+export type LandedWhy = "rule" | "implementation" | "push";
+
 export type PrFacts = {
   repo: string; number: number;
   /** Time of the decision, ms. */
@@ -301,8 +304,8 @@ export type PrFacts = {
     /** Comments at the head that never reached GitHub, as on `fixup`. */
     unsent?: UnsentAsk;
   } | null;
-  /** The pipeline merged the PR: when, and what the stored post-merge review looks like. */
-  postmerge: { mergedAt: string; head: string | null; since: string; review: { at: string; error: string | null } | null } | null;
+  /** The pipeline merged the PR: when, why what landed is reviewed (null: it merged as a person approved it), the time merges are reviewed from, and what the stored post-merge review looks like. */
+  postmerge: { mergedAt: string; head: string | null; why: LandedWhy | null; since: string; review: { at: string; error: string | null } | null } | null;
   /** The batch the reviewed head is in. */
   batch: "batch-checking" | "in-batch" | "batch-failed" | null;
   /** The PR is one AutoCraft opened to fix main CI. */

@@ -1,6 +1,7 @@
 // What the rows say about a head of a pull request, one rule per question: the planner, the workflow pass, the merge legs and the merge
 // itself ask here. Pure.
 import type { PushEdge } from "../data/changes/types.ts";
+import type { LandedWhy } from "./plan.ts";
 
 /** A push of ours that moved a PR's head: the head it was made on and its commit. */
 export type OwnPush = { from: string; to: string };
@@ -68,6 +69,19 @@ export const approvedHead = (pushes: readonly RecordedPush[], head: string, sinc
 
 /** A push of ours since the person chose to go on changed more than a checked merge does: the head needs a model's review, also of a PR that merges without one. */
 export const reviewOwed = (pushes: readonly RecordedPush[], head: string, since: string): boolean => pushesSince(pushes, head, since).some((p) => !p.small);
+
+// ---- the review after a merge
+
+/** A person's approval of a merge. `since`: when they last chose to go on with the PR. `prOpenedAt`: an implementation's PR, when it was opened. */
+export type LandedApproval = { approvedAt: string; since: string; prOpenedAt: string | null };
+
+/** Why the merge of `head` gets a review of what it landed; null when it merged as a person approved it. */
+export function landedWhy(m: { head: string; approval: LandedApproval | null; pushes: readonly RecordedPush[] }): LandedWhy | null {
+  const a = m.approval;
+  if (!a) return "rule";
+  if (a.prOpenedAt !== null && Date.parse(a.prOpenedAt) > Date.parse(a.approvedAt)) return "implementation";
+  return reviewOwed(m.pushes, m.head, a.since) ? "push" : null;
+}
 
 // ---- CI
 
