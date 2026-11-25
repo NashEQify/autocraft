@@ -10,7 +10,6 @@ import { pilotExpr, pilotExprFor, pilotSql, pilotSqlFor } from "../src/pilot.ts"
 import { backlogHeldExpr, backlogHeldSql } from "../src/dupes/held.ts";
 import { openSubjectExpr, openSubjectSql, prepareStateExpr, prepareStateSql } from "../src/decide/prepared.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
-import { settledOn, settledOnExpr, verdictExpr, VERDICT_SQL } from "../src/classify/settled.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
 import { testDatabase, type TestDatabase } from "./test-db.ts";
 
@@ -186,26 +185,6 @@ const cases = (): Case[] => [
     params: [SINCE],
     built: () => db.k.selectFrom("decisions as d").select((eb) => ["d.id", ...prepareStateExpr(db, eb, "d", SINCE)]).orderBy("d.id"),
     varies: "review_queued",
-  },
-  {
-    name: "VERDICT_SQL",
-    text: `SELECT repo, number, classifier, ${tri(VERDICT_SQL)} AS v FROM classifications ORDER BY repo, number, classifier`,
-    built: () => db.k.selectFrom("classifications").select((eb) => ["repo", "number", "classifier", triExpr(eb, () => verdictExpr(eb)).as("v")])
-      .orderBy("repo").orderBy("number").orderBy("classifier"),
-    varies: "v",
-  },
-  {
-    name: "settledOn",
-    text: `SELECT i.repo, i.number, s.status FROM items i LEFT JOIN item_settled s ON ${settledOn("r1", "s")} ORDER BY i.repo, i.number`,
-    built: () => db.k.selectFrom("items as i").leftJoin("item_settled as s", (j) => j.on((eb) => settledOnExpr(eb, "r1", "s")))
-      .select(["i.repo", "i.number", "s.status"]).orderBy("i.repo").orderBy("i.number"),
-    varies: "status",
-    prep: async () => void await db.run(db.k.insertInto("main.item_settled").values([
-      { run: "r1", repo: "app", number: 1, status: "settled", flags: "[]", security: 0, needs_decision: 0 },
-      { run: "r2", repo: "app", number: 2, status: "settled", flags: "[]", security: 0, needs_decision: 0 },
-      { run: "r1", repo: "lib", number: 2, status: "disputed", flags: "[]", security: 0, needs_decision: 0 },
-    ])),
-    undo: async () => void await db.run(db.k.deleteFrom("main.item_settled")),
   },
 ];
 

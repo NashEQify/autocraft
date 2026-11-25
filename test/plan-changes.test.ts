@@ -12,7 +12,7 @@ import { inReadSnapshot, planPass } from "../src/core/plan-engine.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";
 import { dueCandidates } from "../src/core/plan-read.ts";
 import { planned } from "../src/core/select.ts";
-import { latestRun } from "../src/classify/settled.ts";
+import { classifyRun as latestRun } from "../src/data/triage/index.ts";
 import { setReviewMinInterval } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { SCRATCH } from "./scratch.ts";
