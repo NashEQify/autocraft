@@ -40,7 +40,6 @@ test("a maintainer with write runs one action per area; without write, or as a v
   }
   assert.equal((await db.all(db.k.selectFrom("opus_reviews").select("head_oid"))).length, 0);
   assert.ok(await db.get(db.k.selectFrom("main.merge_holds").select("repo").where("repo", "=", "app")));
-  assert.ok(await db.get(db.k.selectFrom("main.fast_track").select("repo").where("repo", "=", "app")));
 });
 
 test("release-all of outside authors stays with operators", async () => {

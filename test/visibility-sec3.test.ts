@@ -39,7 +39,7 @@ before(async () => {
     VALUES ('open-app', 50, 1, 'a', 't', 'high', 0, 'landing', '[]', 'r', 'i', 'fp', ?, ?, 2)`).run(now, now);
   // Queue rows as the planner stores them, with staff text in every field a viewer must not read.
   const plan = db.prepare("INSERT INTO item_plans (repo, number, kind, head, state, actions, wait, reasons, note, view, planned_at) VALUES (?, ?, 'pr', ?, 'needs-decision', '[]', ?, ?, 'MARK-PLAN-NOTE', ?, ?)");
-  for (const [repo, n] of [["open-app", 1], ["open-app", 2], ["oldrepo", 5]] as const) {
+  for (const [repo, n] of [["open-app", 1], ["open-app", 2], ["vault", 9], ["oldrepo", 5]] as const) {
     const wait = repo === "open-app" && n === 1 ? "vault#7, which blocks its review" : null;
     const view = {
       gh: "OPEN", scope: true, next: n === 2 ? "Fix-up MARK-NEXT" : "Merge", status: { phase: "Merge", waiting: wait, next: "Merge", since: now },
@@ -60,7 +60,6 @@ before(async () => {
     db.run(db.k.insertInto("opus_reviews").values({ repo, number, head_oid, run_id: "r", at: now, verdict, reason: "ok", sure: 1, mode: "full", conflicts, blocked_by }));
   await review("open-app", 1, "h1", "take", JSON.stringify([{ id: 1, reason: "MARK-MODEL-REASON" }]), null);
   await review("vault", 9, "h9", "hold", null, JSON.stringify(["open-app#10"]));
-  await db.run(db.k.insertInto("decision_comments").values({ id: "c1", decision_id: "open-app#2:scope", login: "maint", at: now, body: "MARK-QUIET-COMMENT" }));
   // A model call recorded without item rows, about the hidden repo.
   await finishRun(db, await insertRun(db, { jobId: null, step: "dupes.compare-prs.opus", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [], prompt: "prompt about vault#7" }), { state: "done", output: "vault" });
   await addLogin(db, "cli", "boss", "operator", null);
@@ -98,19 +97,20 @@ async function signIn(login: string) {
   };
 }
 
-test("viewers read no staff text of queue rows or of a quiet pull request's feedback, and nobody an untracked repo's batches", async () => {
+test("viewers read no staff text of queue rows or of a quiet pull request's next step, and nobody an untracked repo's batches", async () => {
   const boss = await signIn("boss"), reader = await signIn("reader"), maint = await signIn("maint");
-  assert.match(await boss("/api/queue"), /MARK-REVIEW-REASON/);
-  const queue = JSON.parse(await reader("/api/queue")) as { rows: { repo: string; number: number; outsideRule: string[] }[] };
-  assert.deepEqual(queue.rows.map((r) => `${r.repo}#${r.number}`), ["open-app#1", "open-app#2"]);
+  const merge = "/api/queue/page?tab=merge&repos=all";
+  assert.match(await boss(merge), /MARK-REVIEW-REASON/);
+  const queue = JSON.parse(await reader(merge)) as { mergeRows: { repo: string; number: number; outsideRule: string[] }[] };
+  assert.deepEqual(queue.mergeRows.map((r) => `${r.repo}#${r.number}`).sort(), ["open-app#1", "open-app#2"]);
   assert.doesNotMatch(JSON.stringify(queue), /MARK-/);
-  assert.deepEqual(queue.rows[0]!.outsideRule, ["conflicts with an owner statement", "verification failed"]);
-  assert.deepEqual(queue.rows[1]!.outsideRule, []);
-  for (const get of [reader, maint]) assert.doesNotMatch(await get("/api/queue/batches"), /oldrepo/);
-  assert.match(await maint("/api/needs?feedback=1"), /MARK-QUIET-COMMENT/);
+  const rulesOf = (n: number) => queue.mergeRows.find((r) => r.number === n)!.outsideRule;
+  assert.deepEqual(rulesOf(1), ["conflicts with an owner statement", "verification failed"]);
+  assert.deepEqual(rulesOf(2), []);
+  for (const get of [reader, maint]) assert.doesNotMatch(await get(merge), /oldrepo/);
   // The quiet pull request keeps its tab (from the stored next step) without the text.
-  assert.match(await boss("/api/work"), /MARK-NEXT/);
-  assert.doesNotMatch(await reader("/api/work"), /MARK-/);
+  assert.match(await boss("/api/queue/page?tab=all&repos=all"), /MARK-NEXT/);
+  assert.doesNotMatch(await reader("/api/queue/page?tab=all&repos=all"), /MARK-/);
   const fix = JSON.parse(await reader("/api/queue/page?tab=fix&repos=all")) as { rows: { number: number; next: string }[] };
   assert.deepEqual(fix.rows.map((r) => [r.number, r.next]), [[2, ""]]);
 });
@@ -119,7 +119,7 @@ test("a maintainer who cannot see a repo finds its name in no fact, wait, statem
   const boss = await signIn("boss"), maint = await signIn("maint");
   assert.match(await boss("/api/agents"), /dupes/);
   assert.match(await boss("/api/pipeline/jobs/1"), /vault#7 failed/);
-  for (const path of ["/api/next", "/api/items/status", "/api/queue",
+  for (const path of ["/api/next", "/api/maintain/items", "/api/queue/page?tab=merge&repos=all",
     "/api/items/open-app/1", "/api/items/open-app/1/page", "/api/items/open-app/1/trace", "/api/agents", "/api/pipeline", "/api/pipeline/jobs", "/api/pipeline/jobs/1"])
     assert.doesNotMatch(await maint(path), /vault/, path);
   assert.match(await maint("/api/items/open-app/1/page"), /another item, which blocks its review/);

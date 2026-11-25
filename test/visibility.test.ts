@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { ItemPageData } from "../src/dash/api/item-page.ts";
-import type { AgentRunDetail, BuildTaskDetail, Item, JobDetail, AgentRunPage, ItemList, Progress, QueueList, SearchHit } from "../web/src/api/types.ts";
+import type { AgentRunDetail, BuildTaskDetail, Item, JobDetail, AgentRunPage, MaintainItems, Progress, QueuePage, SearchHit } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
 import { scopeToTracked } from "../src/repos.ts";
@@ -59,6 +59,11 @@ before(async () => {
     await finishRun(db, id, { state: "done", output: `output for ${repo}` });
   }
   await refreshPlanCache(db);
+  // Queue rows as the planner stores them.
+  for (const repo of ["open-app", "vault"]) {
+    const queue = { author: "alice", tier: "not", head: `h-${repo}`, size: "S", label: "bugfix", verdict: "take", reason: "ok", fixes: 0, ci: "pending", mergeable: "MERGEABLE", path: null, refusedReason: null, reviewedAt: now, held: false, runsBlocked: null, verify: null };
+    await db.run(db.k.updateTable("item_plans").set({ state: "waiting-ci", view: JSON.stringify({ gh: "OPEN", scope: true, next: "Merge", status: { phase: "In queue", waiting: "CI", next: "Merge", since: now }, queue }) }).where("repo", "=", repo));
+  }
   await addLogin(db, "cli", "boss", "operator", null);
   await addLogin(db, "cli", "reader", "viewer", null);
   await addLogin(db, "cli", "maint", "maintainer", null);
@@ -115,14 +120,14 @@ describe("repo visibility", () => {
   test("a viewer without permission sees nothing of the internal repo", async () => {
     const c = await signedIn("outsider");
     assert.deepEqual(await c.get<string[]>("/api/repos"), ["open-app"]);
-    assert.deepEqual(refs((await c.get<ItemList>("/api/items?state=all")).rows), ["open-app#1"]);
+    assert.deepEqual(refs((await c.get<MaintainItems>("/api/maintain/items")).rows), ["open-app#1"]);
     assert.deepEqual(refs(await c.get<SearchHit[]>("/api/search?q=wave")), ["open-app#1"]);
     assert.deepEqual(refs(await c.get<SearchHit[]>("/api/search?q=vault%231")), []);
     assert.equal(await c.status("/api/items/vault/1"), 404);
     assert.equal(await c.status("/api/items/vault/1/page"), 404);
     assert.equal(await c.status("/api/similar/vault/1"), 404);
-    assert.deepEqual((await c.get<QueueList>("/api/queue")).rows.map((r) => r.repo), ["open-app"]);
-    assert.equal(await c.status("/api/queue?repo=vault"), 404);
+    assert.deepEqual((await c.get<QueuePage>("/api/queue/page?tab=merge&repos=all")).mergeRows.map((r) => r.repo), ["open-app"]);
+    assert.equal(await c.status("/api/queue/page?tab=merge&repos=vault"), 404);
     const p = await c.get<Progress>("/api/progress");
     assert.deepEqual(p.repos.map((r) => r.repo), ["open-app"]);
     assert.equal(p.funnel.open, 1);
@@ -149,9 +154,9 @@ describe("repo visibility", () => {
     for (const login of ["reader", "boss"]) {
       const c = await signedIn(login);
       assert.deepEqual(await c.get<string[]>("/api/repos"), ["open-app", "vault"], login);
-      assert.deepEqual(refs((await c.get<ItemList>("/api/items?state=all")).rows), ["open-app#1", "vault#1"], login);
+      assert.deepEqual(refs((await c.get<MaintainItems>("/api/maintain/items")).rows), ["open-app#1", "vault#1"], login);
       assert.equal(await c.status("/api/items/vault/1"), 200, login);
-      assert.deepEqual((await c.get<QueueList>("/api/queue")).rows.map((r) => r.repo), ["open-app", "vault"], login);
+      assert.deepEqual((await c.get<QueuePage>("/api/queue/page?tab=merge&repos=all")).mergeRows.map((r) => r.repo), ["open-app", "vault"], login);
       assert.equal((await c.get<Progress>("/api/progress")).funnel.open, 2, login);
     }
   });
@@ -307,13 +312,12 @@ describe("repo visibility", () => {
       await db.prepare("INSERT INTO main.conversations (repo, number, item_block, item_sig, created_at, created_by) VALUES ('open-app', ?, 'b', 's', ?, 'boss')").run(n, now);
       await db.prepare("INSERT INTO main.conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('open-app', ?, 'opus', 'opus', ?, 'the Opus analysis', 'blk', NULL, 1)").run(n, now);
     }
-    type Conv = { turns: { body: string }[]; choices: unknown };
+    type Conv = { turns: { body: string }[] };
     const reader = await signedIn("reader"), maint = await signedIn("maint");
     assert.equal((await reader.get<Conv>("/api/conversations/open-app/1")).turns[0]!.body, "the Opus analysis");
     const quiet = await reader.get<Conv>("/api/conversations/open-app/2");
     assert.equal(quiet.turns.length, 1);
     assert.equal(quiet.turns[0]!.body, "");
-    assert.equal(quiet.choices, null);
     assert.equal((await maint.get<Conv>("/api/conversations/open-app/2")).turns[0]!.body, "the Opus analysis");
     await db.script("DELETE FROM main.conversation_turns; DELETE FROM main.conversations");
     await db.run(db.k.deleteFrom("security_findings").where("number", "=", 901));
