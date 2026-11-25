@@ -11,7 +11,7 @@ import { autocraftTexts } from "../mainfix/status.ts";
 import { classify, derive, type Culprit, type HeadRow, type MainCheck, type MainCiState } from "./classify.ts";
 import { ownerOf } from "../owners.ts";
 import type { HiddenRepos } from "../hidden-sql.ts";
-import { loadMainCi, loadRepos, loadSyncState, saveMainHeads, saveSyncState } from "../data/mirror/index.ts";
+import { loadMainCi, loadRepos, loadSyncState, saveMainHeads, saveSyncState, type MainHeadSummary } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { warmPass } from "../build/warm-queue.ts";
@@ -21,7 +21,13 @@ export const MAIN_FIX_BRANCH_PREFIX = "autocraft/main-ci-";
 
 /** Repos whose current default-branch head is red. */
 export async function redMainRepos(db: Db): Promise<Set<string>> {
-  return new Set((await mainCiRepos(db)).filter((r) => r.state === "red").map((r) => r.repo));
+  return new Set([...await loadMainCi(db, {})].filter(([, heads]) => currentHead(heads)?.cur.state === "red").map(([repo]) => repo));
+}
+
+/** The repo's current head among its stored ones, and what derive() says of them; null when they name none. */
+function currentHead<H extends MainHeadSummary>(heads: readonly H[]): { cur: H; d: NonNullable<ReturnType<typeof derive>> } | null {
+  const d = derive(heads.map((h): HeadRow => ({ sha: h.head_sha, state: h.state as MainCiState, committedAt: h.committed_at, headline: h.headline, firstSeenAt: h.first_seen_at, stateChangedAt: h.state_changed_at })));
+  return d ? { cur: heads.find((h) => h.head_sha === d.current.sha)!, d } : null;
 }
 
 /** Least time between two polls. */
@@ -132,14 +138,12 @@ export async function mainCiRepos(db: Db, hidden: HiddenRepos = []): Promise<Mai
   const by = await loadMainCi(db, { hiddenOk: hidden });
   const out: MainCiRepoRow[] = [];
   for (const [repo, heads] of by) {
-    const rows = heads.map((h) => ({ ...h, state: h.state as MainCiState }));
-    const rank = (h: (typeof rows)[number]): HeadRow => ({ sha: h.head_sha, state: h.state, committedAt: h.committed_at, headline: h.headline, firstSeenAt: h.first_seen_at, stateChangedAt: h.state_changed_at });
-    const d = derive(rows.map(rank));
-    if (!d) continue;
-    const cur = rows.find((r) => r.head_sha === d.current.sha)!;
+    const at = currentHead(heads);
+    if (!at) continue;
+    const { cur, d } = at;
     let failing: { name: string; url: string | null }[] = [];
     try { failing = JSON.parse(cur.failing) as typeof failing; } catch { /* malformed: none shown */ }
-    out.push({ repo, state: cur.state, branch: cur.branch, headSha: cur.head_sha, headline: cur.headline, committedAt: cur.committed_at, failing, redSince: d.redSince, lastGreenSha: d.lastGreenSha, culprit: d.culprit, updatedAt: cur.updated_at, autocraft: null });
+    out.push({ repo, state: cur.state as MainCiState, branch: cur.branch, headSha: cur.head_sha, headline: cur.headline, committedAt: cur.committed_at, failing, redSince: d.redSince, lastGreenSha: d.lastGreenSha, culprit: d.culprit, updatedAt: cur.updated_at, autocraft: null });
   }
   const texts = await autocraftTexts(db, out.map((r) => ({ repo: r.repo, headSha: r.headSha, state: r.state })));
   for (const r of out) r.autocraft = texts.get(`${r.repo}\0${r.headSha}`) ?? null;

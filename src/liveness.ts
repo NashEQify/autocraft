@@ -79,8 +79,8 @@ export async function computeLiveness(db: Db, nowMs: number = Date.now()): Promi
 }
 
 /** Recomputes and stores the result unless one is newer than REFRESH_MS. Returns true when it ran. */
-export async function refreshLiveness(db: Db, nowMs: number = Date.now(), force = false): Promise<boolean> {
-  const last = Date.parse((await loadLivenessState(db))?.checkedAt ?? "");
+export async function refreshLiveness(db: Db, nowMs: number = Date.now(), force = false, stored?: Awaited<ReturnType<typeof loadLivenessState>>): Promise<boolean> {
+  const last = Date.parse((stored === undefined ? await loadLivenessState(db) : stored)?.checkedAt ?? "");
   if (!force && Number.isFinite(last) && nowMs - last < REFRESH_MS) return false;
   const res = await computeLiveness(db, nowMs);
   await saveLiveness(db, res);

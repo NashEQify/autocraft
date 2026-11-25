@@ -1,7 +1,7 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
 import { decidePr } from "./decide.ts";
 import { loadPass, loadPrFacts } from "./facts.ts";
-import { classifyRun } from "../data/triage/index.ts";
+import { loadPassBase } from "./pass-load.ts";
 import { loadDueRefs } from "../data/planner/index.ts";
 import type { PlanSet } from "./plan-set.ts";
 import { WAITS_ON_PERSON, inFlightNow } from "./assignment.ts";
@@ -43,8 +43,10 @@ export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {
     const pass = loadPass(load.now);
     // Without refs, a step decides only the PRs that can be due (planner.loadDueRefs), unless it asks for another time or
     // run than the stored Plans', or for every PR's Plan (onPlan).
-    const stored = load.refs || onPlan || load.now !== undefined || (typeof load.run === "string" && load.run !== await classifyRun(db)) ? null : await loadDueRefs(db, kind, "pr", load.repo);
-    source = stored && !stored.length ? [] : (await loadPrFacts(db, stored ? { ...load, refs: stored } : load)).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
+    const [current, due] = load.refs || onPlan || load.now !== undefined ? [null, null] : await db.together(() => Promise.all([loadPassBase(db), loadDueRefs(db, kind, "pr", load.repo)]));
+    const stored = current && typeof load.run === "string" && load.run !== current.run ? null : due;
+    const base = current && load.run !== undefined ? { ...current, run: load.run } : current;
+    source = stored && !stored.length ? [] : (await loadPrFacts(db, { ...load, ...(stored ? { refs: stored } : {}), ...(base ? { base } : {}) })).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
   }
   for (const { facts, plan } of source) {
     onPlan?.(facts, plan);

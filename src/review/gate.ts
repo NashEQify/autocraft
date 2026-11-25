@@ -1,15 +1,16 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
 import { effectiveCiWith, optionalChecksOf } from "../optional-checks.ts";
-import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads } from "./blockers.ts";
+import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
-import { ourCommitsLoader } from "./ours.ts";
+import { ourPathIn } from "./ours.ts";
 import type { Db } from "../db/index.ts";
 import type { KeySource } from "../data/keys.ts";
+import { loadPushEdges, type PushEdge } from "../data/changes/index.ts";
 import { saveSettings, setting } from "../data/control/index.ts";
 import { loadReviewRunCounts } from "../data/inference/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
-import { loadReviewFacts, recordReviewFailures } from "../data/review/index.ts";
+import { loadReviewFacts, recordReviewFailures, type ReviewFacts } from "../data/review/index.ts";
 import { loadLegs } from "../data/workflow/index.ts";
 
 /** Opus review calls of one PR per UTC day, new heads, re-runs and failed calls together (a reply-fix turn is part of its review). */
@@ -23,11 +24,13 @@ const MIN_INTERVAL_MAX = 7 * 24 * 60;
 /** Waits after the 1st, 2nd and 3rd failed review at one head; a 4th failure holds the head until a new commit or Review again. */
 export const FAILURE_BACKOFF_MS = [10 * 60_000, 30 * 60_000, 2 * 3600_000];
 
-export async function reviewMinInterval(db: Db): Promise<number> {
-  const v = await setting(db, MIN_INTERVAL_KEY);
+/** The setting's value as stored. */
+export function minIntervalOf(v: string | null | undefined): number {
   const n = Number(v);
-  return v !== undefined && Number.isInteger(n) && n >= 0 && n <= MIN_INTERVAL_MAX ? n : MIN_INTERVAL_DEFAULT;
+  return v != null && Number.isInteger(n) && n >= 0 && n <= MIN_INTERVAL_MAX ? n : MIN_INTERVAL_DEFAULT;
 }
+
+export const reviewMinInterval = async (db: Db): Promise<number> => minIntervalOf(await setting(db, MIN_INTERVAL_KEY));
 
 export async function setReviewMinInterval(db: Db, input: unknown, by: string): Promise<number> {
   const n = typeof input === "number" ? input : typeof input === "string" && /^[0-9]+$/.test(input) ? Number(input) : NaN;
@@ -56,31 +59,54 @@ export async function headCi(db: Db, repo: string, number: number, head: string)
 
 export { nextUtcMidnight };
 
+/** What the hold check of a set of PRs reads besides their review facts: one wave. */
+export async function loadHoldInputs(db: Db, keys: KeySource, nowMs: number) {
+  const [runs, legs, checks] = await db.together(() => Promise.all([
+    loadReviewRunCounts(db, keys, new Date(nowMs).toISOString().slice(0, 10)), loadLegs(db, keys, { activeOnly: true }), loadChecks(db, keys, { checksOnlyIfFailing: true }),
+  ]));
+  return { runs, legs, checks };
+}
+
+export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
+  facts: ReviewFacts;
+  optional: (repo: string) => string[];
+  /** The least minutes between two reviews of one PR. */
+  interval: number;
+  /** The blockers the holds among the latest reviews name. */
+  reads: BlockerReads;
+  /** The pushes of ours to each PR, by "repo#number". */
+  edges: ReadonlyMap<string, readonly PushEdge[]>;
+};
+
+export type HoldCheck = (repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>;
+
+/** The hold check of `refs` ("repo#number"; every PR without them), with what it reads loaded once. */
+export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<HoldCheck> {
+  const keys: KeySource = refs ? [...refs].map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) })) : { mode: "full" };
+  const [facts, inputs, interval, optional, edges] = await db.together(() => Promise.all([
+    loadReviewFacts(db, keys, { now: nowMs }), loadHoldInputs(db, keys, nowMs), reviewMinInterval(db), optionalChecksOf(db), loadPushEdges(db, keys),
+  ]));
+  const reads = await loadBlockerReads(db, [...facts.latest.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
+  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges }, nowMs);
+}
+
 /**
- * The hold check of every PR of one planning pass: the statements run once. A hold is what keeps the next review of a PR at `head`
+ * The hold check of every PR of one planning pass, from its loads. A hold is what keeps the next review of a PR at `head`
  * from starting, or null. A maintainer's or operator's request after the latest review lifts every hold.
  * An unknown CI state does not hold (the review step reads the checks live before asking the model and applies this again).
  * Not held by CI: the first review of a PR when CI is red (running CI still waits), and the one review after the blockers settled.
  * Not held by the cap or the interval: a head that only our own pushes made since the last review.
  * `refresh` is told when a hold without an `until` of its own ends with the clock (a blocker list expiring).
  */
-export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<(repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>> {
-  // Everything is read once, for every PR (or only `refs`, "repo#number"), keyed by `repo#number`.
-  const keys: KeySource = refs ? [...refs].map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) })) : { mode: "full" };
-  const today = new Date(nowMs).toISOString().slice(0, 10);
-  const interval = await reviewMinInterval(db) * 60_000;
-  const [facts, runs, legs, checks, optional] = await db.together(() => Promise.all([
-    loadReviewFacts(db, keys, { now: nowMs }), loadReviewRunCounts(db, keys, today), loadLegs(db, keys, { activeOnly: true }),
-    loadChecks(db, keys, { checksOnlyIfFailing: true }), optionalChecksOf(db),
-  ]));
+export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
+  const { facts, runs, legs, checks, optional, reads } = d;
+  const interval = d.interval * 60_000;
   const lastReviews = facts.latest;
   const history = facts.reviewsToday;
   const staleSince = staleMarksOf(facts);
   // A "Queue items" row at the head it started on (no fix-up, no push since) asks for no review of its own: CI, the cap and the interval hold it as any PR.
   const preapproved = new Set([...legs.values()].flat().filter((p) => p.state === "review" && (p.fix_id !== null || p.head !== p.from_head) && p.head !== null).map((p) => `${p.repo}#${p.number}@${p.head}`));
   const states = discussionStateOf(facts);
-  const reads = await loadBlockerReads(db, [...lastReviews.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
-  const ourPath = ourCommitsLoader(db, keys);
   // CI at the head as headCi() reads it.
   const ciAt = async (repo: string, number: number, head: string): Promise<"ok" | "pending" | "failure" | "unknown"> => {
     const c = checks.get(`${repo}#${number}`);
@@ -122,7 +148,7 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
     const ci = await ciAt(repo, number, head);
     if (ci === "pending") return { kind: "ci", wait: "CI on the latest commit to finish" };
     if (ci === "failure" && last && !settled) return { kind: "ci", wait: "CI on the latest commit to pass", red: true };
-    const ours = last && last.head !== head ? await ourPath(repo, number, last.head, head) : null;
+    const ours = last && last.head !== head ? ourPathIn(d.edges.get(ref) ?? [], last.head, head) : null;
     if (ours?.complete && ours.commits.length) return null;
     const h = history.get(ref) ?? { n: 0, last: null };
     const r = runs.get(ref) ?? { n: 0, last: null };

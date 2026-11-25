@@ -1,6 +1,5 @@
 // The commits our pipeline pushed to a PR between two heads, for the review prompt and for carrying a verdict over our own fix-up.
 import type { Db } from "../db/index.ts";
-import type { KeySource } from "../data/keys.ts";
 import { loadPushEdges, madeBy as pushMadeBy, type PushEdge } from "../data/changes/index.ts";
 import { loadFixesAsked } from "../data/review/index.ts";
 
@@ -50,14 +49,10 @@ export async function ourCommitsSince(db: Db, repo: string, number: number, earl
 }
 
 /**
- * ourCommitsSince() for many PRs of `keys`: the pushes are read once, on first use. The commits carry no `fixes_meant`: the callers
- * of the loader read only whether the path is complete and how many commits it has.
+ * ourCommitsSince() from one PR's stored pushes. The commits carry no `fixes_meant`: the callers read only whether the path is
+ * complete and which commits it has.
  */
-export function ourCommitsLoader(db: Db, keys: KeySource): (repo: string, number: number, earlier: string, head: string) => Promise<OurPath> {
-  let all: Map<string, PushEdge[]> | undefined;
-  return async (repo, number, earlier, head) => {
-    all ??= await loadPushEdges(db, keys);
-    const { rows, complete } = walk(all.get(`${repo}#${number}`) ?? [], earlier, head);
-    return pathOf(rows, complete, () => []);
-  };
+export function ourPathIn(edges: readonly PushEdge[], earlier: string, head: string): OurPath {
+  const { rows, complete } = walk(edges, earlier, head);
+  return pathOf(rows, complete, () => []);
 }

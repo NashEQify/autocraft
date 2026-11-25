@@ -10,6 +10,7 @@
 //
 // The planner reads the database, writes only its Plan cache (item_plans) and queues jobs; the runner starts them.
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
+import { AsyncLocalStorage } from "node:async_hooks";
 import { REFEREE_RETRY_MS } from "../core/item-rules.ts";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
 import { TOPICS } from "../db/live.ts";
@@ -18,11 +19,11 @@ import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { loadPlanSet, type PlanSet } from "../core/plan-set.ts";
 import { gates, type Want } from "../core/gates.ts";
 import type { Action, ActionKind } from "../core/plan.ts";
-import { writePlanCache } from "../core/plan-cache.ts";
+import { planCacheDiff, writePlanDiff } from "../core/plan-cache.ts";
 import { refreshLiveness } from "../liveness.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { jevUsable } from "../agents/jev.ts";
-import { PACE_MAX_WAIT_MS, pipelineWriteWait } from "../github/write.ts";
+import { PACE_MAX_WAIT_MS, pipelineWriteWaits } from "../github/write.ts";
 import { embedDue } from "../embed/store.ts";
 import { selectFixups } from "../fixup/select.ts";
 import { ciApproveRepos } from "../merge/ci-approval.ts";
@@ -34,7 +35,7 @@ import { isWork } from "../core/assignment.ts";
 import { collectDue } from "../verify/results.ts";
 import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
-import { prBuildDue, reposWithQueuedBuilds } from "../prbuild/index.ts";
+import { prBuildsDue } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
@@ -42,19 +43,20 @@ import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stage
 import { premergeCandidates } from "../premerge/review.ts";
 import { pendingDefects, postmergeRepos } from "../postmerge/select.ts";
 import { mainFixDueRepos } from "../mainfix/index.ts";
-import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
+import { statusDueIn, statusRetriesAt, statusRetriesDue } from "../prstatus/index.ts";
 import { waitsForHaiku } from "../priority/index.ts";
-import { classifyRun } from "../data/triage/index.ts";
+import { loadOwnLogins } from "../data/access/index.ts";
+import { loadLivenessState, loadStoredPlans } from "../data/planner/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
-import { DEADLINE_ERROR, enqueue, JobError, now } from "./jobs.ts";
+import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { loadSteps, type Params, type StepDef } from "./steps.ts";
 import { scopeRepos } from "./scope.ts";
 import { refreshOutsideHolds } from "../outside.ts";
-import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withConfig, limitsSignature } from "../data/control/index.ts";
+import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
-import { loadDeadlineStops, loadLaneInputs, loadLaneState, loadPipelineEndedSince, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { enqueueJobs, loadDeadlineStops, loadLaneInputs, loadLaneState, loadPipelineEndedSince, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadEndedTaskSignature } from "../data/build/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -150,6 +152,10 @@ export type PlanCtx = {
   marks?: Map<string, string>;
   /** The repos in scope (scopeRepos) as the pass read them. */
   scope?: Set<string>;
+  /** Every tracked repo, in scope or not. */
+  names?: string[];
+  /** The topic counters the pass read with the change log, so a change after them is new input to the next pass. */
+  seqs?: Record<string, number>;
   /** The planner pass's candidates of each lane, by lane name: the Next lists reuse what the pass detected. */
   detected?: Map<string, Promise<Candidate[]>>;
   /** The incremental pass that built `plans`, when the planner keeps facts between passes. */
@@ -157,11 +163,11 @@ export type PlanCtx = {
 };
 
 /** Only the repos in scope (pipeline on, or with started work) are planned for; a job for another repo is never proposed. */
-export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => {
+export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<string>): Promise<PlanCtx> => {
   // The outside-author holds first: the facts below read them through the scope condition (src/outside.ts).
   const wake: number[] = [];
   try {
-    const outside = await refreshOutsideHolds(db);
+    const outside = await refreshOutsideHolds(db, Date.now(), own);
     if (outside.wakeAt !== null) wake.push(outside.wakeAt);
   } catch (e) {
     console.error(`autopilot: outside-author holds: ${(e as Error).message}`);
@@ -169,19 +175,17 @@ export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => 
   if (incremental) {
     // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
     return await inReadSnapshot(db, async () => {
-      await rereadSettingsSnapshot(db);
-      const scope = await scopeRepos(db);
-      const run = await classifyRun(db);
-      const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
+      let scope = new Set<string>(), names: string[] = [], seqs: Record<string, number> = {};
+      const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
+      const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
       wakeAtRefresh(pass.plans, wake);
-      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
+      return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
     });
   }
-  const scope = await scopeRepos(db);
-  const run = await classifyRun(db);
-  const plans = await loadPlanSet(db, { run });
+  const [scope, names, seqs] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db), db.seqs()]));
+  const plans = await loadPlanSet(db);
   wakeAtRefresh(plans, wake);
-  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
+  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope, names, seqs };
 };
 
 /**
@@ -250,18 +254,24 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
 export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs", "workflow-events"].includes(t));
 
 /** The Task Runners that could take calls (loadTakerSignature). Work a pool left for want of a taker waits on it. */
-const takersOf = async (db: Db): Promise<string> => {
+const takersOf = async (db: Db): Promise<string> => passOf(db)?.takers ?? await loadTakerSignature(db, Date.now());
+
+/** The lane's input that no topic reports, read once per pass (several lanes share a reading). */
+const extraOf = async (db: Db, extra: Lane["extra"]): Promise<string> => {
   const pass = passOf(db);
-  if (pass?.takers !== undefined) return pass.takers;
-  const sig = await loadTakerSignature(db, Date.now());
-  if (pass) pass.takers = sig;
-  return sig;
+  if (!extra || !pass) return await extra?.(db) ?? "";
+  let r = pass.extras.get(extra);
+  if (!r) {
+    pass.extras.set(extra, (r = extra(db)));
+    void r.catch(() => pass.extras.delete(extra));
+  }
+  return await r;
 };
 
 /** Sandbox tasks that ended, for lanes that read their results. */
 const tasksSig = async (db: Db): Promise<string> => await loadEndedTaskSignature(db);
 
-const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
+const repoOf = (c: { params: Params }): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
 type JobEnd = { id: number; endedAt: string; state: string; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null };
 
@@ -277,11 +287,13 @@ type PassReads = {
   db: Db; reads: Reads;
   /** The Task Runner signature (takersOf). */
   takers?: string;
+  /** The lanes' `extra` readings, by function. */
+  extras: Map<NonNullable<Lane["extra"]>, Promise<string>>;
   /** Act's usage per UTC day start. */
-  act?: Map<string, number>;
+  act: Map<string, number>;
 };
-let passReads: PassReads | null = null;
-const passOf = (db: Db): PassReads | null => (passReads?.db === db ? passReads : null);
+const passScope = new AsyncLocalStorage<PassReads>();
+const passOf = (db: Db): PassReads | null => { const p = passScope.getStore(); return p?.db === db ? p : null; };
 
 async function loadReads(db: Db, ms: number): Promise<Reads> {
   const [inputs, limits, tripRows, released] = await db.together(() => Promise.all([
@@ -295,10 +307,9 @@ async function loadReads(db: Db, ms: number): Promise<Reads> {
 /** The pass's reads, or a fresh load for a caller outside a pass. */
 const readsOf = async (db: Db, ms: number = Date.now()): Promise<Reads> => passOf(db)?.reads ?? await loadReads(db, ms);
 
-async function withPassReads<T>(db: Db, ms: number, fn: () => Promise<T>): Promise<T> {
-  if (passReads) return await fn();
-  passReads = { db, reads: await loadReads(db, ms) };
-  try { return await fn(); } finally { passReads = null; }
+async function withPassReads<T>(db: Db, r: Pick<PassReads, "reads"> & Partial<PassReads>, fn: () => Promise<T>): Promise<T> {
+  if (passOf(db)) return await fn();
+  return await passScope.run({ extras: new Map(), act: new Map(), ...r, db }, fn);
 }
 
 async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy?: string): Promise<JobEnd | undefined> {
@@ -319,7 +330,7 @@ type FpRecord = { job: number | null; fp: string };
 export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
   if (seqs === undefined) seqs = await db.seqs();
   const topics = lane.topics ?? INPUT_TOPICS;
-  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await lane.extra?.(db) ?? "", await takersOf(db)].join("|");
+  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await extraOf(db, lane.extra), await takersOf(db)].join("|");
 }
 
 async function fpRecord(db: Db, step: string, repo: string | null): Promise<FpRecord | null> {
@@ -473,14 +484,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const repos = new Set(allowed(await plannedItems(db, "label", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       // A repo whose GitHub write budget is used up would label nothing (the writes are refused as paced): it waits for the window to move.
       const now = Date.now();
-      return (await filterSeq(ctx.tracked, async (repo) => {
-        if (!repos.has(repo)) return false;
-        const wait = await pipelineWriteWait(db, "labels-apply", repo, now);
+      const waits = await pipelineWriteWaits(db, "labels-apply", ctx.tracked.filter((r) => repos.has(r)), now);
+      return ctx.tracked.filter((repo) => {
+        const wait = waits.get(repo);
+        if (wait === undefined) return false;
         if (wait <= PACE_MAX_WAIT_MS) return true;
         ctx.wake?.push(now + wait);
         if (ctx.notes) ctx.notes["labels-apply"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
         return false;
-      })).map((repo) => ({ step: "labels-apply", params: { repo } }));
+      }).map((repo) => ({ step: "labels-apply", params: { repo } }));
     },
   },
   {
@@ -524,9 +536,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     // Queued card presses: the drain runs when the first press fits under the daily limit, so the room (and the limit) is part of the input.
     extra: async (db) => {
-      const h = await queueHead(db);
-      const held = (await heldDue(db)).sig;
-      return [h ? `queue:${h.fits ? 1 : 0}:${await actLimit(db) ?? "n"}` : "", held ? `${held}:${await actLimit(db) ?? "n"}` : ""].filter(Boolean).join("|");
+      const [h, { sig: held }, limit] = await db.together(() => Promise.all([queueHead(db), heldDue(db), actLimit(db)]));
+      return [h ? `queue:${h.fits ? 1 : 0}:${limit ?? "n"}` : "", held ? `${held}:${limit ?? "n"}` : ""].filter(Boolean).join("|");
     },
     detect: async (db, ctx) => {
       // Repos in the order of their best close: workflow weight, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest command.
@@ -536,15 +547,14 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
       const first = { weight: Infinity, at: "" };
-      const approved = await loadStepApprovals(db, ctx.tracked, ["comment"]);
+      const [approved, head, wakes, held] = await db.together(() => Promise.all([loadStepApprovals(db, ctx.tracked, ["comment"]), queueHead(db), filingWakes(db), heldDue(db)]));
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
-      const head = await queueHead(db);
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
       else if (head && approved.has(head.repo)) best.set(head.repo, first);
       // Follow-up issues held until a PR merged: filed by the job of the PR's repo once it merged, dropped once it closed or its merge path ended.
       // A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
-      ctx.wake?.push(...await filingWakes(db));
-      for (const [repo, fits] of (await heldDue(db)).repos) {
+      ctx.wake?.push(...wakes);
+      for (const [repo, fits] of held.repos) {
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
         else if (approved.has(repo)) best.set(repo, first);
       }
@@ -605,8 +615,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     extra: tasksSig,
     detect: async (db, ctx) => {
-      const queued = new Set(await reposWithQueuedBuilds(db));
-      return (await filterSeq([...new Set([...ctx.tracked, ...queued])], async (repo) => await prBuildDue(db, repo, queued))).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
+      return (await prBuildsDue(db, ctx.tracked)).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
     },
   },
   {
@@ -662,7 +671,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => {
       const waiting = await pendingConversations(db, undefined, "maintainer");
       const logins = [...new Set(waiting.map((c) => c.login.toLowerCase()))].sort();
-      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leaseTurnover(db, l)}`)).join(",")}`;
+      return `${waiting.map((c) => c.turnId).join(",")}|${(await Promise.all(logins.map(async (l) => `${l}:${await leaseTurnover(db, l)}`))).join(",")}`;
     },
     detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },
@@ -706,19 +715,19 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      const tracked = await trackedNames(db);
-      const approved = await loadStepApprovals(db, tracked, ["prstatus"]);
-      return (await filterSeq(tracked.filter((repo) => approved.has(repo)), async (repo) => {
-        const retry = await statusRetryAt(db, repo, now);
-        if (retry !== null) ctx.wake?.push(retry);
-        if (!(await statusDue(db, repo, now)).length) return false;
+      const [tracked, approved] = await db.together(() => Promise.all([ctx.names ?? trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
+      const repos = tracked.filter((repo) => approved.has(repo));
+      const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
+      for (const at of retries.values()) ctx.wake?.push(at);
+      return repos.filter((repo) => {
+        if (!dueIn.get(repo)?.length) return false;
         // A repo whose GitHub write budget is used up would write nothing (the writes are refused as paced): it waits for the window to move.
-        const wait = await pipelineWriteWait(db, "pr-status-comment", repo, now);
+        const wait = waits.get(repo)!;
         if (wait <= PACE_MAX_WAIT_MS) return true;
         ctx.wake?.push(now + wait);
         if (ctx.notes) ctx.notes["pr-status"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
         return false;
-      })).sort().map((repo) => ({ step: "pr-status", params: { repo } }));
+      }).sort().map((repo) => ({ step: "pr-status", params: { repo } }));
     },
   },
   {
@@ -805,9 +814,9 @@ export async function usageToday(db: Db, step: string, ms: number = Date.now()):
   if (step === "act") {
     const pass = passOf(db);
     if (!pass) return await actUsedToday(db, ms);
-    const day = dayStart(ms), act = (pass.act ??= new Map());
-    if (!act.has(day)) act.set(day, await actUsedToday(db, ms));
-    return act.get(day)!;
+    const day = dayStart(ms);
+    if (!pass.act.has(day)) pass.act.set(day, await actUsedToday(db, ms));
+    return pass.act.get(day)!;
   }
   return (await readsOf(db, ms)).inputs.usedToday.get(step) ?? 0;
 }
@@ -995,8 +1004,8 @@ async function stepStatus(db: Db, step: string, why: string | undefined): Promis
 
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
   const steps = await loadSteps();
-  return await withPassReads(db, Date.now(), async () => {
-    const [why, active] = await Promise.all([stageStatus(db), loadTrips(db, { active: true })]);
+  const [reads, why, active] = await db.together(() => Promise.all([loadReads(db, Date.now()), stageStatus(db), loadTrips(db, { active: true })]));
+  return await withPassReads(db, { reads }, async () => {
     const trips = [...active.values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
     return await Promise.all(LIMIT_STEPS.map(async (step) => {
       const [l, usedToday, pausedReason, status] = await Promise.all([limitRow(db, step), usageToday(db, step), pauseReason(db, step), stepStatus(db, step, why[step])]);
@@ -1047,30 +1056,34 @@ const nextUtcMidnight = (ms: number): number => Date.parse(dayStart(ms)) + 86_40
  * unchanged input, minimum gap.
  */
 export async function detectAutopilot(db: Db, opts: PlanOptions = {}): Promise<Detected> {
-  const steps = await loadSteps();
-  // The rest of the pass is synchronous, so its settings come from one reading of the table.
-  return await withConfig(db, async () => await withPassReads(db, opts.nowMs ?? Date.now(), async () => await detectPass(db, opts, steps)));
+  const steps = await loadSteps(), ms = opts.nowMs ?? Date.now();
+  // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
+  const untaken = await untakenTest(db, steps, ms);
+  const [settings, reads, cap, takers, act, own] = await db.together(() => Promise.all([
+    readSettingsSnapshot(db), loadReads(db, ms), stepParallel(db), loadTakerSignature(db, Date.now()), actUsedToday(db, ms), loadOwnLogins(db), untaken.load?.(),
+  ]));
+  // Every setting the pass reads comes from that reading of the table (planCtx reads it again in its snapshot).
+  return await withSettingsSnapshot(db, async () => await withPassReads(db, { reads, takers, act: new Map([[dayStart(ms), act]]) }, async () => await detectPass(db, opts, steps, { untaken, cap, own })), Promise.resolve(settings));
 }
 
-async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>): Promise<Detected> {
+async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>, read: { untaken: UntakenTest; cap: number; own: ReadonlySet<string> }): Promise<Detected> {
   const lanes = opts.lanes ?? LANES, ms = opts.nowMs ?? Date.now();
   const logs: string[] = [];
   const log = (l: string) => { logs.push(l); opts.log?.(l); };
   const proposals: Proposal[] = [];
   const t0 = performance.now();
-  const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
+  const { untaken, cap } = read;
+  const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw", read.own);
   ctx.detected = new Map();
-  // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
-  const untaken = (ctx.untaken = await untakenTest(db, steps, ms));
+  ctx.untaken = untaken;
   const loadMs = performance.now() - t0;
   const scope = ctx.scope ?? await scopeRepos(db);
-  const seqs = await db.seqs();
+  const seqs = ctx.seqs ?? await db.seqs();
   const status: Record<string, string> = {};
   // The queued and running jobs, read with the pass's other job reads.
   const live = (await readsOf(db, ms)).inputs.live;
   const active: Active[] = live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
   ctx.marks = (await readsOf(db, ms)).inputs.marks;
-  const cap = await stepParallel(db);
   const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(cap, 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();
@@ -1125,6 +1138,22 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     return limitLeft.get(stepName)!;
   };
 
+  // A lane whose steps cannot start is not worth detecting, but the Next lists still name its items.
+  const closed = new Set<string>();
+  for (const lane of lanes) {
+    try {
+      if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) closed.add(lane.name);
+    } catch (e) { closed.add(lane.name); log(`autopilot: ${lane.name}: ${(e as Error).message}`); }
+  }
+  // The lanes' reads and what the writes below compare with go out together. A read that fails here runs again by itself where it is used.
+  const ahead = async <T>(p: Promise<T>): Promise<T | undefined> => { try { return await p; } catch { return undefined; } };
+  const [storedLanes, storedPlans, liveness] = await db.together(() => Promise.all([
+    opts.lanes ? undefined : ahead(loadLanes(db)), ahead(loadStoredPlans(db)), ahead(loadLivenessState(db)),
+    ...lanes.filter((l) => !closed.has(l.name) || (!opts.lanes && LANE_KINDS[l.name])).map(async (l) => {
+      await Promise.all([ahead(detectOf(db, ctx, l)), closed.has(l.name) ? undefined : ahead(extraOf(db, l.extra))]);
+    }),
+  ] as const));
+
   const tops = new Map<string, number | null>();
   for (const lane of lanes) {
     if (!lane.topScore) continue;
@@ -1132,8 +1161,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   }
   for (const lane of orderLanes(lanes, tops)) {
     try {
-      // A lane whose steps cannot start is not worth detecting.
-      if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) continue;
+      if (closed.has(lane.name)) continue;
       const candidates = await detectOf(db, ctx, lane);
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
@@ -1152,24 +1180,27 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     }
   }
   // The lists the Next page shows come from the same pass, so the page needs no Plans of its own.
+  let laneRows: LaneRow[] = [];
   if (!opts.lanes) {
-    try { await storeLaneItems(db, lanes, ctx); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
+    try { laneRows = await changedLanes(db, lanes, ctx, storedLanes); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
   }
   const lanesMs = performance.now() - t0 - loadMs;
-  // The Plan cache: the planner's output for the dashboard.
+  // The Plan cache: the planner's output for the dashboard. It is written with the Next lists and the pass's records in one transaction.
   let cache = { written: 0, deleted: 0 };
   const t1 = performance.now();
-  let cached = false;
   try {
-    cache = await writePlanCache(db, ctx.plans!);
-    cached = true;
+    const diff = await planCacheDiff(db, ctx.plans!, storedPlans);
+    const write = async (): Promise<void> => {
+      await saveLanes(db, laneRows, true);
+      cache = await writePlanDiff(db, diff);
+      await ctx.pass?.finish(performance.now() - t0);
+    };
+    if (laneRows.length || diff.changed || ctx.pass?.logged) await db.write(write);
+    else await write();
   } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
   const cacheMs = performance.now() - t1;
-  if (cached) {
-    try { await ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
-  }
   // The liveness check follows the plan cache and stores its own result at most every few minutes.
-  try { await refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
+  try { await refreshLiveness(db, Date.now(), false, liveness); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
   const passKind = ctx.pass ? `${ctx.pass.kind}, ${ctx.pass.refs} loaded${ctx.pass.diffs.length ? `, ${ctx.pass.diffs.length} shadow differences` : ""}` : undefined;
   if (ctx.pass?.diffs.length) log(`autopilot: plan shadow: ${ctx.pass.diffs.length} differences (plan_shadow_diffs)`);
   if (loadMs + lanesMs + cacheMs > 2000) log(`autopilot: pass took ${Math.round(loadMs + lanesMs + cacheMs)} ms${passKind ? ` (${passKind})` : ""}: plans ${Math.round(loadMs)}, lanes ${Math.round(lanesMs)}, cache ${Math.round(cacheMs)} (${cache.written} rows written, ${cache.deleted} deleted)`);
@@ -1207,54 +1238,84 @@ async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp:
 
 const warned = new Set<string>();
 
-/** Queues the proposals: per lane and repo the first one that is accepted. Returns the queued job ids. */
+/**
+ * Queues the proposals: per lane and repo the first one that is accepted. Returns the queued job ids. One reading decides them all,
+ * and one transaction queues the jobs and writes the planner's marks.
+ */
 export async function applyProposals(db: Db, proposals: Proposal[], opts: PlanOptions & { wakeAt?: number | null; status?: Record<string, string> } = {}): Promise<number[]> {
   const lanes = opts.lanes ?? LANES, log = opts.log ?? (() => {});
-  const queued: number[] = [];
+  const accepted = proposals.length ? await acceptProposals(db, proposals, log) : [];
+  // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
+  const marks: LaneStatePut[] = [
+    ...(opts.wakeAt ? [{ kind: "mark" as const, step: MARK_WAKE_AT, value: new Date(opts.wakeAt).toISOString() }] : []),
+    ...(opts.status ? [{ kind: "mark" as const, step: MARK_STATUS, value: JSON.stringify(opts.status) }] : []),
+  ];
+  const ids = await db.write(async () => {
+    const { queued } = await enqueueJobs(db, accepted.map(({ p, params }) => ({ step: p.step, params, repo: repoOf(p), by: AUTOPILOT_USER })));
+    const fps = accepted.flatMap(({ p }, i): LaneStatePut[] => (p.fp !== undefined && queued.has(i) ? [{ kind: "fp", step: p.step, repo: repoOf(p) ?? "", value: p.fp, job_id: queued.get(i)! }] : []));
+    await saveLaneState(db, [...marks, ...fps]);
+    if (!opts.wakeAt) await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
+    for (const [i, { p }] of accepted.entries()) {
+      const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
+      if (queued.has(i)) await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
+    }
+    return queued;
+  });
+  for (const [i, { p, params }] of accepted.entries()) {
+    log(ids.has(i) ? `autopilot: job ${ids.get(i)}: ${p.step} ${JSON.stringify(params)}` : `autopilot: ${p.step}: not queued: ${p.step} with these settings is already queued`);
+  }
+  return accepted.flatMap((_, i) => (ids.has(i) ? [ids.get(i)!] : []));
+}
+
+/** The proposals to queue, with their params. The detection ran a moment ago: a job of the same step and repo may have been queued since. */
+async function acceptProposals(db: Db, proposals: Proposal[], log: (line: string) => void): Promise<{ p: Proposal; params: Params }[]> {
+  const steps = await loadSteps(), ms = Date.now();
+  const untaken = await untakenTest(db, steps);
+  const [loaded, cap, names] = await db.together(() => Promise.all([loadReads(db, ms), stepParallel(db), trackedNames(db), untaken.load?.()]));
+  const active: Active[] = loaded.inputs.live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  // The jobs accepted here count against the limits of the next ones.
+  const reads: Reads = { ...loaded, inputs: { ...loaded.inputs, live: [...loaded.inputs.live] } };
+  const out: { p: Proposal; params: Params }[] = [];
   const done = new Set<string>();
-  // Jobs queued in this pass and the steps their proposals gate: they hold a repo of the step, so with step_parallel 1 no other repo takes it.
+  // Jobs accepted in this pass and the steps their proposals gate: they hold a repo of the step, so with step_parallel 1 no other repo takes it.
   const reserved: Active[] = [];
   const asActive = (step: string, params: Params, state: string): Active => ({ id: 0, step, state, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null });
-  const steps = await loadSteps();
-  const untaken = await untakenTest(db, steps);
-  // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
-  const fps: LaneStatePut[] = [];
-  await db.write(async () => {
-    if (opts.wakeAt) await saveLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT, value: new Date(opts.wakeAt).toISOString() }]);
-    else await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
-    if (opts.status) await saveLaneState(db, [{ kind: "mark", step: MARK_STATUS, value: JSON.stringify(opts.status) }]);
+  const blocked = (step: string, params: Params): Promise<string | null> => jobBlock(db, steps, { step, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { reserved, untaken, active, cap });
+  // The checks of the requests go out together; a refusal is told when its proposal's turn comes.
+  const checks = new Map<Proposal, Promise<Awaited<ReturnType<typeof checkRequest>>>>();
+  await db.together(async () => {
+    for (const p of proposals) checks.set(p, checkRequest(db, p.step, p.params, names));
+    await Promise.allSettled(checks.values());
   });
-  for (const p of proposals) {
-    const slot = `${p.lane}\0${typeof p.params.repo === "string" ? p.params.repo : ""}`;
-    if (done.has(slot)) continue;
-    try {
-      // The detection ran a moment ago: a job of the same step and repo may have been queued since.
-      if (await jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken })) continue;
-      if (p.gate && await jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken })) continue;
-      // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
-      const job = await enqueue(db, p.step, p.params, AUTOPILOT_USER, async (step, params) => {
-        if (typeof params.limit !== "number") return params;
-        // The reads are fresh for each proposal: the jobs queued before it count.
-        const lim = await withPassReads(db, Date.now(), async () => await jobLimit(db, step, Date.now(), params.limit as number, untaken));
-        return lim ? { ...params, ...lim } : null;
-      });
-      queued.push(job.id);
-      reserved.push(asActive(p.step, p.params, "queued"));
-      if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
-      done.add(slot);
-      if (p.fp !== undefined) fps.push({ kind: "fp", step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : "", value: p.fp, job_id: job.id });
-      const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
-      await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
-      log(`autopilot: job ${job.id}: ${p.step} ${JSON.stringify(job.params)}`);
-    } catch (e) {
-      if (!(e instanceof JobError)) {
-        log(`autopilot: ${p.lane}: ${(e as Error).message}`);
+  await withPassReads(db, { reads }, async () => {
+    for (const p of proposals) {
+      const slot = `${p.lane}\0${repoOf(p) ?? ""}`;
+      if (done.has(slot)) continue;
+      try {
+        if (await blocked(p.step, p.params) || (p.gate && await blocked(p.gate.step, p.gate.params))) continue;
+        // A failed read of one check fails its whole wave: the check then runs by itself.
+        const { step, params: checked } = await checks.get(p)!.catch((e: unknown) => { if (e instanceof JobError) throw e; return checkRequest(db, p.step, p.params, names); });
+        let params: Params = checked;
+        // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
+        if (typeof params.limit === "number") {
+          const lim = await jobLimit(db, step, ms, params.limit, untaken);
+          if (!lim) throw new JobError(409, `the daily limit of ${step.name} leaves too little for a job`);
+          params = { ...params, ...lim };
+        }
+        out.push({ p, params });
+        reserved.push(asActive(p.step, p.params, "queued"));
+        reads.inputs.live.push({ ...asActive(p.step, p.params, "queued"), params: JSON.stringify(params), items: null } as Reads["inputs"]["live"][number]);
+        if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
         done.add(slot);
-      } else log(`autopilot: ${p.step}: not queued: ${e.message}`);
+      } catch (e) {
+        if (!(e instanceof JobError)) {
+          log(`autopilot: ${p.lane}: ${(e as Error).message}`);
+          done.add(slot);
+        } else log(`autopilot: ${p.step}: not queued: ${e.message}`);
+      }
     }
-  }
-  await saveLaneState(db, fps);
-  return queued;
+  });
+  return out;
 }
 
 /** Detection and queueing in one go, on one connection. */
@@ -1375,11 +1436,13 @@ const plain = (why: string): string => { const t = why.replace(/^(paused|tripped
 const NEXT_PER_LANE = 500;
 export type StoredLaneItems = Record<string, { total: number; items: LaneItem[] }>;
 
-/** Writes each lane's items as this pass sees them: only the lanes that changed. The table belongs to the `plans` topic, which the planner does not take as input. */
-async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void> {
-  const old = await loadLanes(db);
+type LaneRow = { lane: string; total: number; items: unknown[]; at: string };
+
+/** Each lane's items as this pass sees them: only the lanes that differ from the stored lists. The table belongs to the `plans` topic, which the planner does not take as input. */
+async function changedLanes(db: Db, lanes: Lane[], ctx: PlanCtx, stored?: Awaited<ReturnType<typeof loadLanes>>): Promise<LaneRow[]> {
+  const old = new Map(stored ?? await loadLanes(db));
   const at = new Date().toISOString();
-  const changed: { lane: string; total: number; items: unknown[]; at: string }[] = [];
+  const changed: LaneRow[] = [];
   for (const lane of lanes) {
     const all = await laneItems(db, ctx, lane);
     const prev = old.get(lane.name);
@@ -1389,7 +1452,7 @@ async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void
     if (!prev || prev.total !== all.length || JSON.stringify(prev.items) !== JSON.stringify(items)) changed.push({ lane: lane.name, total: all.length, items, at });
   }
   for (const lane of old.keys()) changed.push({ lane, total: 0, items: [], at });
-  await saveLanes(db, changed, true);
+  return changed;
 }
 
 /** The lane lists of the planner's last pass, keyed by lane name. */
@@ -1413,19 +1476,28 @@ export async function actBlockedReason(db: Db, repo: string): Promise<string | n
 
 export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "backoff"; why: string | null };
 
-/** Whether a job of the lane can start now, from the same checks the planner's gate() makes. */
-export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<LaneGate> {
-  if (!await isEnabled(db)) return { canRun: false, kind: "off", why: await isDraining(db) ? "The pipeline is draining" : "The pipeline is off" };
-  const steps = lane.steps ?? [];
-  let blocked: LaneGate | null = null;
-  for (const s of steps) {
-    // Blocked only when no repo can start: the step already works its most repos.
-    const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true });
-    if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
-    const why = await pauseReason(db, s, ms);
-    if (!why) return { canRun: true, kind: "ok", why: null };
-    const kind = /^tripped/.test(why) ? "breaker" : /^failed/.test(why) ? "backoff" : "limit";
-    blocked ??= { canRun: false, kind, why: plain(why) };
-  }
-  return blocked ?? { canRun: true, kind: "ok", why: null };
+/** Whether a job of each lane can start now, from the same checks the planner's gate() makes; one reading serves them all. */
+export async function laneGates(db: Db, lanes: readonly Pick<Lane, "name" | "steps">[], allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<Map<string, LaneGate>> {
+  const untaken = await untakenTest(db, allSteps, ms);
+  const [cfg, reads, cap, act] = await db.together(() => Promise.all([freshConfig(db, [KEY_ENABLED]), loadReads(db, ms), stepParallel(db), actUsedToday(db, ms), untaken.load?.()]));
+  const off: LaneGate | null = cfg.pipelineEnabled ? null : { canRun: false, kind: "off", why: cfg.pipelineDraining ? "The pipeline is draining" : "The pipeline is off" };
+  const active: Active[] = reads.inputs.live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  const gateOf = async (lane: Pick<Lane, "steps">): Promise<LaneGate> => {
+    let blocked: LaneGate | null = null;
+    for (const s of lane.steps ?? []) {
+      // Blocked only when no repo can start: the step already works its most repos.
+      const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true, untaken, active, cap });
+      if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
+      const why = await pauseReason(db, s, ms);
+      if (!why) return { canRun: true, kind: "ok", why: null };
+      const kind = /^tripped/.test(why) ? "breaker" : /^failed/.test(why) ? "backoff" : "limit";
+      blocked ??= { canRun: false, kind, why: plain(why) };
+    }
+    return blocked ?? { canRun: true, kind: "ok", why: null };
+  };
+  return await withPassReads(db, { reads, act: new Map([[dayStart(ms), act]]) }, async () => {
+    const out = new Map<string, LaneGate>();
+    for (const l of lanes) out.set(l.name, off ?? await gateOf(l));
+    return out;
+  });
 }

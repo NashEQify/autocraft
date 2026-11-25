@@ -47,14 +47,18 @@ export async function loadPrBuildViews(db: Db, items: { ref: RefKey; head?: stri
   return new Map(rows.map((r) => [refOf(r.repo, r.number), viewOf(r)]));
 }
 
-/** Builds created after `sinceMs` (epoch ms) and the `number@head` set the repo already has. 2 statements in one wave. */
-export async function loadPrBuildState(db: Db, repo: string, sinceMs: number): Promise<{ usedSince: number; have: Set<string> }> {
+/** Per repo the builds created after `sinceMs` (epoch ms) and the `number@head` set it already has. 2 statements in one wave. */
+export async function loadPrBuildStates(db: Db, repos: readonly string[], sinceMs: number): Promise<Map<string, { usedSince: number; have: Set<string> }>> {
+  const out = new Map<string, { usedSince: number; have: Set<string> }>(repos.map((r) => [r, { usedSince: 0, have: new Set() }]));
+  if (!repos.length) return out;
   const q = queryDb(db);
   const [used, have] = await db.together(() => Promise.all([
-    q.get(q.k.selectFrom("pr_builds").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", repo).where("created_at", ">", new Date(sinceMs).toISOString())),
-    q.all(q.k.selectFrom("pr_builds").select(["number", "head_sha"]).where("repo", "=", repo)),
+    q.all(q.k.selectFrom("pr_builds").select((eb) => ["repo", eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "repo", [...repos])).where("created_at", ">", new Date(sinceMs).toISOString()).groupBy("repo")),
+    q.all(q.k.selectFrom("pr_builds").select(["repo", "number", "head_sha"]).where(kx.inList(db, "repo", [...repos]))),
   ]));
-  return { usedSince: Number(used?.n ?? 0), have: new Set(have.map((r) => `${r.number}@${r.head_sha}`)) };
+  for (const r of used) out.get(r.repo)!.usedSince = Number(r.n);
+  for (const r of have) out.get(r.repo)!.have.add(`${r.number}@${r.head_sha}`);
+  return out;
 }
 
 /** Queued builds (of `repo`, or all) with the item's and the task's state and the item's head, oldest first. 1 statement. */
@@ -77,12 +81,6 @@ export async function loadLateDisagreements(db: Db, repo?: string): Promise<Late
     .$if(!!repo, (s: any) => s.where("b.repo", "=", repo!))
     .orderBy("b.repo").orderBy("b.number")) as { repo: string; number: number; head_sha: string; summary: string | null }[];
   return rows.map((r) => ({ repo: r.repo, number: r.number, head: r.head_sha, summary: r.summary }));
-}
-
-/** Repos with a queued build. */
-export async function listReposWithQueuedBuilds(db: Db): Promise<string[]> {
-  const q = queryDb(db);
-  return (await q.all(q.k.selectFrom("pr_builds").select("repo").distinct().where("state", "=", "queued"))).map((r) => r.repo);
 }
 
 /**

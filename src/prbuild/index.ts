@@ -6,15 +6,17 @@ import { BuildError } from "../build/envs.ts";
 import { featureOn } from "../build/features.ts";
 import { warmKeyOf } from "../build/tasks.ts";
 import { QueueFullError, TERMINAL, cancelTasks, cloneTasks, loadTasks } from "../data/build/index.ts";
-import { listReposWithQueuedBuilds, loadLateDisagreements, loadPendingPrBuilds, queuePrBuilds, restartPrBuilds, savePrBuildErrors, settlePrBuilds, type NewPrBuild } from "../data/merge/index.ts";
+import { loadLateDisagreements, loadPendingPrBuilds, queuePrBuilds, restartPrBuilds, savePrBuildErrors, settlePrBuilds, type NewPrBuild } from "../data/merge/index.ts";
+import { config, withConfig } from "../data/control/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
+import { loadInScope } from "../data/workflow/index.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { defaultDeps } from "../verify/index.ts";
 import { cachedCrates, ghCrates, type CratesFetcher } from "../verify/crates.ts";
 import { planFor } from "./plans.ts";
-import { buildScope, scopeOf, selectPrBuilds } from "./select.ts";
+import { buildScope, scopeOf, selectPrBuilds, selectPrBuildsIn } from "./select.ts";
 import type { Db } from "../db/index.ts";
 
 const ACTOR = "pr-build";
@@ -25,25 +27,22 @@ const headKey = (repo: string, number: number, head: string): string => `${repo}
 
 export type PrBuildDeps = { fetchCrates: CratesFetcher; /** The PR's base commit, or null when GitHub did not answer. Default: GitHub. */ baseOf?: (repo: string, number: number) => Promise<string | null> };
 
-/** Repos with queued builds: they need a collect run (stale heads, a switch turned off, a repo that left scope) whatever the switch says. */
-export async function reposWithQueuedBuilds(db: Db): Promise<string[]> {
-  return await listReposWithQueuedBuilds(db);
-}
-
 /**
- * Whether the repo has work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only.
- * `queued`: the repos with queued builds (reposWithQueuedBuilds), when the caller has read them.
+ * The repos of `repos`, and of those with a queued build, with work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only.
  */
-export async function prBuildDue(db: Db, repo: string, queued?: ReadonlySet<string>): Promise<boolean> {
-  const on = await featureOn(db, "pr-builds", repo);
-  if (on && (await selectPrBuilds(db, repo)).some((c) => c.rust !== false)) return true;
-  if (on && (await loadLateDisagreements(db, repo)).length) return true;
-  if (queued && !queued.has(repo)) return false;
-  const pending = await loadPendingPrBuilds(db, repo);
-  if (!pending.length) return false;
-  const inScope = on ? await buildScope(db, repo, pending.map((p) => p.number)) : new Set<number>();
-  return pending.some((p) => !on || p.itemState !== "OPEN" || p.currentHead !== p.headSha || p.taskId === null || !inScope.has(p.number)
-    || (p.taskState !== null && (TERMINAL as readonly string[]).includes(p.taskState)));
+export async function prBuildsDue(db: Db, repos: readonly string[]): Promise<string[]> {
+  return await withConfig(db, async () => {
+    const onIn = (r: string): boolean => config(db).repo(r).buildFeature("pr-builds");
+    const on = new Set(repos.filter(onIn));
+    const [selected, late, pending] = await db.together(() => Promise.all([selectPrBuildsIn(db, [...on]), on.size ? loadLateDisagreements(db) : [], loadPendingPrBuilds(db)]));
+    const inScope = await loadInScope(db, pending.filter((p) => onIn(p.repo)).map((p) => ({ repo: p.repo, number: p.number })));
+    const due = new Set([...late.map((d) => d.repo).filter((r) => on.has(r)), ...[...selected].filter(([, cs]) => cs.some((c) => c.rust !== false)).map(([r]) => r)]);
+    for (const p of pending) {
+      if (!onIn(p.repo) || p.itemState !== "OPEN" || p.currentHead !== p.headSha || p.taskId === null || !inScope.has(`${p.repo}#${p.number}`)
+        || (p.taskState !== null && (TERMINAL as readonly string[]).includes(p.taskState))) due.add(p.repo);
+    }
+    return [...due];
+  });
 }
 
 export type PrBuildSummary = { queued: number; passed: number; failed: number; errors: number; stale: number; retried: number; disagreements: number };

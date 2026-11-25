@@ -1,6 +1,6 @@
 // A take or take-fix verdict carries over our own checked fix-up: when the only change since a sure review is the fix-up commit
 // whose patch the patch check approved (and whose lint passed, since it was pushed), the new head gets the same verdict without an Opus call.
-import { ourCommitsLoader } from "./ours.ts";
+import { ourPathIn } from "./ours.ts";
 import type { OpusReview } from "./opus-parse.ts";
 import { reviewAfterBaseMerge } from "./own-diff.ts";
 import type { Db } from "../db/index.ts";
@@ -23,8 +23,8 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
   const out = new Map<string, Carried>();
   if (!cs.length) return out;
   const refs = cs.map((c) => ({ repo: c.repo, number: c.number }));
-  const [rows, items, repos] = await db.together(() => Promise.all([
-    loadReviewRows(db, refs), loadItems(db, refs, "pr"), loadRepos(db, { names: [...new Set(cs.map((c) => c.repo))] }),
+  const [rows, items, repos, edges] = await db.together(() => Promise.all([
+    loadReviewRows(db, refs), loadItems(db, refs, "pr"), loadRepos(db, { names: [...new Set(cs.map((c) => c.repo))] }), loadPushEdges(db, refs),
   ]));
   type Pick = { c: Cand; e: ReviewRow; baseRef: string | null };
   const picked: Pick[] = [];
@@ -39,19 +39,15 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
     picked.push({ c, e, baseRef });
   }
   if (!picked.length) return out;
-  const pickedRefs = picked.map((p) => ({ repo: p.c.repo, number: p.c.number }));
-  const ours = ourCommitsLoader(db, pickedRefs);
-  const paths = await Promise.all(picked.map((p) => ours(p.c.repo, p.c.number, p.e.head, p.c.head_oid)));
-  const [texts, edges] = await db.together(() => Promise.all([
-    loadReviewTexts(db, picked.map((p) => ({ repo: p.c.repo, number: p.c.number, head: p.e.head }))),
-    loadPushEdges(db, pickedRefs),
-  ]));
+  const paths = picked.map((p) => ourPathIn(edges.get(`${p.c.repo}#${p.c.number}`) ?? [], p.e.head, p.c.head_oid));
   const fixups: { ref: string; subject: string }[] = [];
   picked.forEach((p, i) => {
     const path = paths[i]!;
     if (path.complete && path.commits.length === 1 && path.commits[0]!.kind === "fix-up" && !path.sources[0]) fixups.push({ ref: `${p.c.repo}#${p.c.number}`, subject: p.e.head });
   });
-  const verdicts = await loadFixupVerdicts(db, fixups);
+  const [texts, verdicts] = await db.together(() => Promise.all([
+    loadReviewTexts(db, picked.map((p) => ({ repo: p.c.repo, number: p.c.number, head: p.e.head }))), loadFixupVerdicts(db, fixups),
+  ]));
   picked.forEach((p, i) => {
     const { c, e, baseRef } = p, path = paths[i]!, key = `${c.repo}#${c.number}`;
     const t = texts.get(`${key}@${e.head}`);

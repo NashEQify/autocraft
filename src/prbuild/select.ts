@@ -2,8 +2,8 @@
 // Scope per repo (settings `pr_builds_scope:<repo>`): "outside" (default) builds only outside authors' PRs, "all" every PR.
 import { loadHolds, isOutsideAuthor, loadInsiders } from "../data/intake/index.ts";
 import { config, saveSettings, withConfig } from "../data/control/index.ts";
-import { loadPrBuildState } from "../data/merge/index.ts";
-import { listItems, loadRepos } from "../data/mirror/index.ts";
+import { loadPrBuildStates } from "../data/merge/index.ts";
+import { listItems, loadRepos, openItemKeys } from "../data/mirror/index.ts";
 import { cachedRust, type RustCheck } from "../verify/candidates.ts";
 import type { Db } from "../db/index.ts";
 
@@ -36,34 +36,34 @@ export async function buildScope(db: Db, repo: string, numbers: number[]): Promi
   return new Set((await listItems(db, { repos: [repo], numbers, inScope: true }, "ref")).map((i) => i.number));
 }
 
-/** The PRs to build now, oldest first, within the repo's daily cap. Writes nothing. */
-export async function selectPrBuilds(db: Db, repo: string, o: { rust?: RustCheck; now?: number } = {}): Promise<PrBuildCandidate[]> {
+/** The PRs to build now per repo, oldest first, within each repo's daily cap. Writes nothing. */
+export async function selectPrBuildsIn(db: Db, repos: readonly string[], o: { rust?: RustCheck; now?: number } = {}): Promise<Map<string, PrBuildCandidate[]>> {
+  const out = new Map<string, PrBuildCandidate[]>();
+  if (!repos.length) return out;
   return await withConfig(db, async () => {
-    const [row, state] = await db.together(() => Promise.all([
-      loadRepos(db, { names: [repo] }),
-      loadPrBuildState(db, repo, (o.now ?? Date.now()) - DAY_MS),
+    const [rows, states] = await db.together(() => Promise.all([loadRepos(db, { names: [...repos] }), loadPrBuildStates(db, repos, (o.now ?? Date.now()) - DAY_MS)]));
+    const roomOf = (repo: string): number => config(db).prBuildsPerDay - (states.get(repo)?.usedSince ?? 0);
+    const all = (repo: string): boolean => config(db).repo(repo).prBuildsScope === "all";
+    const building = repos.filter((r) => rows.get(r)?.visibility === "public" && roomOf(r) > 0);
+    if (!building.length) return out;
+    const [items, held, insiders] = await db.together(() => Promise.all([
+      listItems(db, { repos: building, kind: "pr", states: ["OPEN"], inScope: true }, "text"),
+      loadHolds(db, openItemKeys({ repos: building, kind: "pr" })),
+      building.every(all) ? Promise.resolve(new Set<string>()) : loadInsiders(db),
     ]));
-    if (row.get(repo)?.visibility !== "public") return [];
-    const room = config(db).prBuildsPerDay - state.usedSince;
-    if (room <= 0) return [];
-    const all = config(db).repo(repo).prBuildsScope === "all";
-    const [items, insiders] = await db.together(() => Promise.all([
-      listItems(db, { repos: [repo], kind: "pr", states: ["OPEN"], inScope: true }, "text"),
-      all ? Promise.resolve(new Set<string>()) : loadInsiders(db),
-    ]));
-    const open = items.filter((i) => !i.is_draft && i.head_oid && !state.have.has(`${i.number}@${i.head_oid}`))
+    const open = items.filter((i) => !i.is_draft && i.head_oid && !states.get(i.repo)?.have.has(`${i.number}@${i.head_oid}`))
       .sort((a, b) => (a.created_at === b.created_at ? 0 : a.created_at === null ? -1 : b.created_at === null ? 1 : a.created_at < b.created_at ? -1 : 1) || a.number - b.number);
-    const held = await loadHolds(db, open.map((i) => ({ repo, number: i.number })));
     const rust = o.rust ?? cachedRust;
-    const out: PrBuildCandidate[] = [];
     for (const r of open) {
-      if (held.has(`${repo}#${r.number}`)) continue;
-      if (!all && !isOutsideAuthor(r, insiders)) continue;
+      const repo = r.repo, list = out.get(repo) ?? out.set(repo, []).get(repo)!;
+      if (list.length >= roomOf(repo) || held.has(`${repo}#${r.number}`)) continue;
+      if (!all(repo) && !isOutsideAuthor(r, insiders)) continue;
       const isRust = rust(repo, r.head_oid!);
       if (isRust === false) continue;
-      out.push({ repo, number: r.number, head: r.head_oid!, rust: isRust });
-      if (out.length >= room) break;
+      list.push({ repo, number: r.number, head: r.head_oid!, rust: isRust });
     }
     return out;
   });
 }
+
+export const selectPrBuilds = async (db: Db, repo: string, o: { rust?: RustCheck; now?: number } = {}): Promise<PrBuildCandidate[]> => (await selectPrBuildsIn(db, [repo], o)).get(repo) ?? [];

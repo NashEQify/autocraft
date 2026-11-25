@@ -11,8 +11,8 @@ export const OUTSIDE_SURGE = "outside-surge";
 export type { Hold, OutsideLimits, OutsideState } from "./data/intake/index.ts";
 export type OutsideRefresh = { holds: Hold[]; tripped: boolean; wakeAt: number | null };
 
-export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Promise<OutsideRefresh> {
-  return await intake.recomputeHolds(db, { now, whitelist: whitelistVerdict });
+export async function refreshOutsideHolds(db: Db, now: number = Date.now(), own?: ReadonlySet<string>): Promise<OutsideRefresh> {
+  return await intake.recomputeHolds(db, { now, whitelist: whitelistVerdict, ...(own ? { own } : {}) });
 }
 
 /** Stores the three numbers (0 turns a protection off) and audits the change. */

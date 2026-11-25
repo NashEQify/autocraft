@@ -6,18 +6,17 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
 import { blockerRefsOf } from "../planner/fragments.ts";
 import { discussionAgg, discussionBodies, premergeBase } from "./cross.ts";
-import { headRef, headTuples, latestRows, noKeys, parseReview, pushTo, refKey, refsOf, reviewWindow } from "./rows.ts";
+import { headRef, latestRows, noKeys, parseReview, pushTo, refKey, refsOf, reviewWindow } from "./rows.ts";
 import { loadPosts } from "./reviews.ts";
 import { unsureHeadsQuery } from "./unsure.ts";
-import type { DiscussionStat, HeadKey, ReviewFacts, ReviewMarks, Verdict } from "./types.ts";
+import type { DiscussionStat, ReviewFacts, ReviewMarks, Verdict } from "./types.ts";
 
 /**
  * Eleven statements in one wave: latest reviews, unsure heads, today's reviews, carried chains, posts, pre-merge rows, post-merge rows,
  * `review_state` marks, the discussion aggregate and its conditional bodies, and blocker verdicts.
  * `o.own`: our logins (`access.loadOwnLogins`); read first, in one more wave, when not given.
- * `o.premergeHeads`: further heads whose pre-merge row is read (a merge entry's head); the latest review's head is always read.
  */
-export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number; own?: readonly string[]; premergeHeads?: HeadKey[] }): Promise<ReviewFacts> {
+export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number; own?: readonly string[] }): Promise<ReviewFacts> {
   const facts: ReviewFacts = { latest: new Map(), unsureHeads: new Set(), reviewsToday: new Map(), carriedChains: new Map(), posts: new Map(), premerge: new Map(), postmerge: new Map(), marks: new Map(), discussion: new Map(), blockerLatest: new Map() };
   if (noKeys(keys)) return facts;
   const own = o.own ?? [...await loadOwnLogins(db)];
@@ -44,7 +43,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
     q.all(premergeBase(db).innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
       .leftJoin(latestHead.as("lr"), (j) => j.onRef("lr.repo", "=", "p.repo").onRef("lr.number", "=", "p.number"))
       .select(kx.cols("premerge_reviews", "p"))
-      .where((eb) => eb.or([eb("p.head_oid", "=", eb.ref("lr.head_oid")), kx.tupleIn(db, ["p.repo", "p.number", "p.head_oid"], headTuples(o.premergeHeads ?? []), ["text", "bigint", "text"])]))),
+      .where("p.head_oid", "=", (eb) => eb.ref("lr.head_oid"))),
     q.all(q.k.selectFrom("main.postmerge_reviews as r").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "r.repo").onRef("kk.number", "=", "r.number")).select(["r.repo", "r.number", "r.at", "r.error"])),
     q.all(q.k.selectFrom("main.review_state as s").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "s.repo").onRef("kk.number", "=", "s.number"))
       .select(["s.repo", "s.number", "s.stale_at", "s.rerun_day", "s.rerun_count", "s.fail_head", "s.fail_count", "s.fail_at"])),

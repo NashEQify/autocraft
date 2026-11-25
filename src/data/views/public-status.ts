@@ -62,23 +62,22 @@ function queuedPrs(db: Db, repos: string[], withHidden: boolean) {
 }
 
 /**
- * The stored facts the step mapping reads for `numbers` of `repo`, and the repo's queue members (for place and length). The queue
+ * The stored facts the step mapping reads for `refs`, and the queue members of `repos` (for place and length). The queue
  * is read only when `queue` is true. `withHidden`: the queue counts the security cases too (the PR status comment does).
  */
-export async function loadPublicStatusRows(db: Db, repo: string, numbers: number[], o: { withHidden: boolean; queue?: boolean }): Promise<{ rows: PublicStatusRow[]; queue: QueueMember[] }> {
+export async function loadPublicStatusRows(db: Db, refs: readonly { repo: string; number: number }[], repos: string[], o: { withHidden: boolean; queue?: boolean }): Promise<{ rows: PublicStatusRow[]; queue: QueueMember[] }> {
   const q = queryDb(db);
   const wantQueue = o.queue ?? true;
-  if (!numbers.length && !wantQueue) return { rows: [], queue: [] };
+  if (!refs.length && !wantQueue) return { rows: [], queue: [] };
   const [rows, members, scores, positions] = await db.together(() => Promise.all([
-    numbers.length ? q.all(q.k.selectFrom("main.items as i")
+    refs.length ? q.all(q.k.selectFrom("main.items as i").innerJoin(resolveKeys(db, [...refs], "kk"), (j) => j.onRef("kk.repo", "=", "i.repo").onRef("kk.number", "=", "i.number"))
       .leftJoin("main.item_stage as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
       .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
       .select((eb) => ["i.repo", "i.number", "i.kind", "i.title", "i.url", "i.state", "s.stage", "s.reviewed", "p.state as plan", "p.view",
-        hidden(db, eb, "i.repo", "i.number", "i.labels").as("hidden"), needsPerson(eb, "i.repo", "i.number").as("needs")])
-      .where("i.repo", "=", repo).where(kx.inList(db, "i.number", numbers, "bigint"))) : Promise.resolve([]),
-    wantQueue ? q.all(queuedPrs(db, [repo], o.withHidden).select(["p.repo", "p.number", "p.state"])) : Promise.resolve([]),
-    wantQueue ? loadRankScores(db, { repos: [repo] }) : Promise.resolve(new Map<string, number>()),
-    wantQueue ? loadQueuePositions(db, { repos: [repo] }) : Promise.resolve(new Map<string, { weight: number }>()),
+        hidden(db, eb, "i.repo", "i.number", "i.labels").as("hidden"), needsPerson(eb, "i.repo", "i.number").as("needs")])) : Promise.resolve([]),
+    wantQueue ? q.all(queuedPrs(db, repos, o.withHidden).select(["p.repo", "p.number", "p.state"])) : Promise.resolve([]),
+    wantQueue ? loadRankScores(db, { repos }) : Promise.resolve(new Map<string, number>()),
+    wantQueue ? loadQueuePositions(db, { repos }) : Promise.resolve(new Map<string, { weight: number }>()),
   ]));
   return {
     rows: rows.map((r) => ({

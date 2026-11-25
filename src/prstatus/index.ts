@@ -25,11 +25,11 @@ import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import { freshConfig } from "../data/control/index.ts";
-import { countStatusRetriesDue, loadStatusRetryAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
+import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
-import { legWait } from "../workflow/waits.ts";
+import { legWaits } from "../workflow/waits.ts";
 
 export const ACTOR = "pr-status";
 /** Ends every status comment, so the comment is found again on GitHub when the stored row is missing. */
@@ -48,7 +48,7 @@ const WORDS: Record<PublicStep, string> = {
 const NO_FIRST_POST = new Set<PublicStep>(["New", "Triaged", "Merged", "Closed"]);
 
 /** An item a person started in a repo on the maintainer workflow: its latest workflow, the latest answer, and whether it is a quiet PR. */
-export type WorkflowFacts = { wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean; /** waits.ts legWait. */ wait?: string | null };
+export type WorkflowFacts = { wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean; /** waits.ts legWaits. */ wait?: string | null };
 export type StatusFacts = {
   status: PublicStatus;
   /** The PR number of the PR's open merge batch, or of the batch it merged with. */ batch?: { pr: number };
@@ -156,45 +156,55 @@ const retryAt = (failures: number, now: number): string =>
   new Date(now + Math.min(RETRY_MAX_MS, RETRY_FIRST_MS * 2 ** Math.max(0, failures - RETRY_AFTER))).toISOString();
 
 /**
- * The PRs of a repo whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
+ * The PRs of each of `repos` whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
  * whose posted line differs from its line now. Out of scope (the repo's Pipeline off, a person ended the item) a posted
  * comment still gets its Merged or Closed edit. Batch PRs get none; a PR waiting out a failure backoff is left out; a member
  * of a batch whose PR has not opened yet keeps its line.
  */
-export async function statusDue(db: Db, repo: string, now: number = Date.now()): Promise<Due[]> {
-  const { stored, inScope, started } = await loadStatusInputs(db, repo);
-  const byNumber = new Map(stored.map((r) => [r.number, r]));
-  const numbers = [...new Set([...inScope, ...[...started].filter(([, w]) => w.open).map(([n]) => n), ...stored.map((r) => r.number)])]
-    .filter((n) => { const at = byNumber.get(n)?.retry_at; return !at || Date.parse(at) <= now; });
-  if (!numbers.length) return [];
-  const statuses = await commentStatuses(db, repo, numbers);
-  const wfIds = numbers.flatMap((n) => { const w = started.get(n); return w ? [w.wf.id] : []; });
-  const { batches, answered, quiet } = await loadStatusExtras(db, repo, numbers, wfIds);
-  const out: Due[] = [];
-  for (const n of numbers.sort((a, b) => a - b)) {
-    const status = statuses.get(n), prev = byNumber.get(n) ?? null;
+export async function statusDueIn(db: Db, repos: readonly string[], now: number = Date.now()): Promise<Map<string, Due[]>> {
+  const inputs = await loadStatusInputs(db, repos);
+  const refs: { repo: string; number: number }[] = [];
+  const prevOf = new Map<string, Stored>();
+  for (const [repo, { stored, inScope, started }] of inputs) {
+    for (const r of stored) prevOf.set(`${repo}#${r.number}`, r);
+    for (const n of new Set([...inScope, ...[...started].filter(([, w]) => w.open).map(([n]) => n), ...stored.map((r) => r.number)])) {
+      const at = prevOf.get(`${repo}#${n}`)?.retry_at;
+      if (!at || Date.parse(at) <= now) refs.push({ repo, number: n });
+    }
+  }
+  const out = new Map<string, Due[]>();
+  if (!refs.length) return out;
+  const wfs = refs.flatMap(({ repo, number }) => { const w = inputs.get(repo)!.started.get(number); return w ? [w.wf] : []; });
+  const [statuses, { batches, answered, quiet }, waits] = await db.together(() => Promise.all([
+    commentStatuses(db, refs), loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs),
+  ]));
+  for (const { repo, number: n } of refs.sort((a, b) => a.number - b.number)) {
+    const key = `${repo}#${n}`, { inScope, started } = inputs.get(repo)!;
+    const status = statuses.get(key), prev = prevOf.get(key) ?? null;
     if (!status) continue;
     const ended = status.step === "Merged" || status.step === "Closed";
     const w = started.get(n);
     if (!inScope.has(n) && !w?.open && !ended) continue;
-    const open = status.queue ? batches.get(`open:${n}`) : undefined;
+    const open = status.queue ? batches.get(`open:${key}`) : undefined;
     if (open && open.pr === null) continue;
-    const merged = status.step === "Merged" ? batches.get(`merged:${n}`) : undefined;
+    const merged = status.step === "Merged" ? batches.get(`merged:${key}`) : undefined;
     const pr = (open ?? merged)?.pr;
     const a = w ? answered.get(w.wf.id) : undefined;
-    const workflow: WorkflowFacts | undefined = w ? { wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(n), wait: await legWait(db, w.wf) } : undefined;
+    const workflow: WorkflowFacts | undefined = w ? { wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(key), wait: waits.get(w.wf.id) ?? null } : undefined;
     const facts: StatusFacts = { status, ...(pr ? { batch: { pr } } : {}), ...(workflow ? { workflow } : {}) };
     // A started item's line is its whole comment text, so any change edits it; once it ended, the final line is the same as any PR's.
     const line = facts.workflow && !ended ? workflowLines({ ...facts, workflow: facts.workflow }).join("\n\n") : statusLine(facts);
     const first = facts.workflow ? !ended : !NO_FIRST_POST.has(status.step);
-    if (prev?.line != null ? prev.line !== line : first) out.push({ number: n, facts, line, prev });
+    if (prev?.line != null ? prev.line !== line : first) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev });
   }
   return out;
 }
 
-/** The earliest end of a failure backoff of the repo's comments after `now`, or null. */
-export async function statusRetryAt(db: Db, repo: string, now: number = Date.now()): Promise<number | null> {
-  return await loadStatusRetryAt(db, repo, now);
+export const statusDue = async (db: Db, repo: string, now: number = Date.now()): Promise<Due[]> => (await statusDueIn(db, [repo], now)).get(repo) ?? [];
+
+/** The earliest end of a failure backoff of each repo's comments after `now`. */
+export async function statusRetriesAt(db: Db, repos: readonly string[], now: number = Date.now()): Promise<Map<string, number>> {
+  return await loadStatusRetriesAt(db, repos, now);
 }
 
 /** Backoffs that have ended, for the lane's fingerprint: the planner tries those PRs again once the time has passed. */

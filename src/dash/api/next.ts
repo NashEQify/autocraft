@@ -1,6 +1,6 @@
 // The Next page: per pipeline step, the items its next job will take, in the autopilot's own order (laneItems, stored by each planner pass), whether the step can run now, and the items waiting on something outside.
 import type { NextItem, NextPage, NextStep, NextWaiting } from "../../../web/src/api/types.ts";
-import { LANES, laneGate, stageStatus, storedLaneItems } from "../../runner/autopilot.ts";
+import { LANES, laneGates, stageStatus, storedLaneItems } from "../../runner/autopilot.ts";
 import { lanesInOrder, STAGES } from "../../stages/registry.ts";
 import { loadSteps } from "../../runner/steps.ts";
 import * as control from "../../data/control/index.ts";
@@ -22,7 +22,8 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
   const visible = new Set(visibleNames), ms = opts.nowMs ?? Date.now();
   const reader = opts.reader ?? { staff: true, quiet: new Set<string>(), hidden: Object.assign([...(await control.loadTrackedRepos(db)).keys()].filter((r) => !visible.has(r)), { visible: visibleNames }) };
   const hidden = reader.hidden;
-  const [stored, stepDefs, status, rows] = await Promise.all([storedLaneItems(db), loadSteps(), stageStatus(db), planner.listPlans(db, { hasWait: true })]);
+  const stepDefs = await loadSteps();
+  const [stored, status, rows, gates] = await db.together(() => Promise.all([storedLaneItems(db), stageStatus(db), planner.listPlans(db, { hasWait: true }), laneGates(db, LANES, stepDefs, ms)]));
   const scoped = rows.filter((r) => visible.has(r.repo) && viewOf(r).scope);
   const wanted = Object.values(stored).flatMap((l) => (l?.items ?? []).filter((i) => visible.has(i.repo)).map((i) => ({ repo: i.repo, number: i.number })));
   const [plans, items] = await db.together(() => Promise.all([planner.loadPlans(db, wanted), shownMap(db, [...wanted, ...scoped.slice(0, WAITING_LIMIT)])]));
@@ -31,12 +32,11 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
     (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText(plans.get(`${repo}#${number}`)), hidden) || null) ?? action;
   const stageOf = new Map(lanesInOrder().map((l) => [l.name, STAGES.find((s) => s.id === l.stage)?.title ?? l.stage]));
   const steps: NextStep[] = [];
-  const gates = await Promise.all(LANES.map((lane) => laneGate(db, lane, stepDefs, ms)));
-  for (const [at, lane] of LANES.entries()) {
+  for (const lane of LANES) {
     const kept = stored[lane.name]?.items ?? [];
     const items: NextItem[] = kept.filter((i) => visible.has(i.repo)).map((i) => ({ ...i, ...shown(i.repo, i.number), why: why(i.repo, i.number, i.action) }));
     const total = (stored[lane.name]?.total ?? 0) - (kept.length - items.length);
-    const gate = gates[at]!;
+    const gate = gates.get(lane.name)!;
     const open = items.filter((i) => !i.blocked);
     // Every item blocked by a repo approval: the step cannot do its work although it could start.
     const refused = !open.length && items.length ? items[0]!.blocked : null;

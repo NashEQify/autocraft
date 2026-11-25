@@ -6,7 +6,6 @@ import { config, withConfig } from "../data/control/index.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
-import { classifyRun } from "../data/triage/index.ts";
 import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
@@ -18,7 +17,7 @@ import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classi
 import { embedderId, modelName } from "../embed/model.ts";
 import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts";
 import { openPrsByRepo, textHash, type OpenPr } from "./open-prs.ts";
-import { loadItemPass, type ItemPassData, type ItemPassNeeds } from "./pass-load.ts";
+import { inStep, loadItemPass, loadPassBase, type EndWave, type ItemPassData, type ItemPassNeeds, type PassBase } from "./pass-load.ts";
 import type { ItemFacts } from "./plan.ts";
 import type { Db } from "../db/index.ts";
 
@@ -34,6 +33,8 @@ export type ItemLoadOptions = {
   model?: string;
   /** The classification run (default: latestRun, the current run else the newest verdict run). */
   run?: string | null;
+  /** Our logins and the run, when the caller read them. */
+  base?: PassBase;
 };
 
 const json = <T>(s: string | null, d: T): T => { try { return s ? (JSON.parse(s) as T) : d; } catch { return d; } };
@@ -94,17 +95,22 @@ function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<stri
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
 export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise<ItemFacts[]> {
+  return await db.read(async () => {
+    const base = opts.base ?? await loadPassBase(db, opts.run);
+    return (await inStep<[ItemFacts[]]>(db, (endWave) => itemFacts(db, { ...opts, base }, endWave)))[0];
+  });
+}
+
+/** loadItemFacts() as one load of a group that runs in step. */
+export async function itemFacts(db: Db, opts: ItemLoadOptions & { base: PassBase }, endWave: EndWave): Promise<ItemFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
   if (refs && !refs.size) return [];
   const model = opts.model ?? embedderId(modelName());
   const keys: KeySource = refs ? [...refs].map(asRef) : openItemKeys({ tracked: true, ...(opts.repo ? { repos: [opts.repo] } : {}) });
   const keep = { repo: opts.repo, refs };
-  return await db.read(async () => {
-    const run = opts.run !== undefined ? opts.run : await classifyRun(db);
-    const d = await loadItemPass(db, keys, { now, run, model, repo: opts.repo, needs: (x) => needsOf(x, keep) });
-    return await withConfig(db, async () => factsOf(db, d, rowsOf(d, keep)), { preload: d.control });
-  });
+  const d = await loadItemPass(db, keys, { now, base: opts.base, model, repo: opts.repo, needs: (x) => needsOf(x, keep) }, endWave);
+  return await withConfig(db, async () => factsOf(db, d, rowsOf(d, keep)), { preload: d.control });
 }
 
 function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): ItemFacts[] {

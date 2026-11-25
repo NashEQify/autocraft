@@ -168,12 +168,15 @@ async function keyWait(db: Db, action: string, identity: string, owner: string, 
 }
 
 /**
- * How long the pipeline's write of `action` on `repo` (made as the app, or the box account while writes use it) waits for
+ * How long the pipeline's write of `action` on each of `repos` (made as the app, or the box account while writes use it) waits for
  * the budget now; 0 when it may start. The planner reads it so it does not queue a job whose writes would be refused as paced.
  */
-export async function pipelineWriteWait(db: Db, action: string, repo: string, now: number = Date.now()): Promise<number> {
+export async function pipelineWriteWaits(db: Db, action: string, repos: readonly string[], now: number = Date.now()): Promise<Map<string, number>> {
+  if (!repos.length) return new Map();
   const identity = await githubIdentity(db) === "box" ? "legacy" : "app";
-  return await keyWait(db, action, identity, paceOwner(identity, repo), now);
+  const owners = new Map(repos.map((r) => [r, paceOwner(identity, r)] as const));
+  const waits = await loadPaceWaits(db, [...new Set(owners.values())].map((owner) => ({ action, identity, owner })), now);
+  return new Map(repos.map((r) => [r, waits.get(`${action}\t${identity}\t${owners.get(r)!}`) ?? 0]));
 }
 
 /** Adds the `started` row when the key is under budget (the module counts the key's rows of the last hour under the writer lock); else how long to wait before the window frees. */

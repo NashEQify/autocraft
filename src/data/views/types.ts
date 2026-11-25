@@ -160,4 +160,4 @@ export type StatusInputs = {
   inScope: Set<number>;
   started: Map<number, { wf: ItemWorkflow; open: boolean }>;
 };
-export type StatusExtras = { batches: Map<string, { pr: number | null }>; answered: Map<number, { login: string; at: string }>; quiet: Set<number> };
+export type StatusExtras = { batches: Map<string, { pr: number | null }>; answered: Map<number, { login: string; at: string }>; quiet: Set<string> };

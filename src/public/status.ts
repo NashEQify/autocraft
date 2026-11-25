@@ -77,24 +77,25 @@ function statusOf(repo: string, row: PublicStatusRow, place: () => { position: n
 
 export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
   if (!await isPublicRepo(db, repo)) return null;
-  const { rows, queue } = await loadPublicStatusRows(db, repo, [number], { withHidden: false });
+  const { rows, queue } = await loadPublicStatusRows(db, [{ repo, number }], [repo], { withHidden: false });
   const row = rows[0];
   if (!row || row.hidden) return null;
   return statusOf(repo, row, () => queuePlace(queueOrder(queue), number));
 }
 
 /**
- * The statuses of PRs of one repo, for the PR status comment (src/prstatus), which the PR's own readers see on GitHub:
+ * The statuses of PRs, by "repo#number", for the PR status comment (src/prstatus), which the PR's own readers see on GitHub:
  * private repos too, and the security cases `publicStatus` leaves out get the same steps and places as any PR (the queue
  * counts them here), so their comment does not single them out. The queue is read once.
  */
-export async function commentStatuses(db: Db, repo: string, numbers: number[]): Promise<Map<number, PublicStatus>> {
-  const out = new Map<number, PublicStatus>();
-  const { rows, queue } = await loadPublicStatusRows(db, repo, numbers, { withHidden: true });
-  const order = queueOrder(queue);
+export async function commentStatuses(db: Db, refs: readonly { repo: string; number: number }[]): Promise<Map<string, PublicStatus>> {
+  const out = new Map<string, PublicStatus>();
+  const { rows, queue } = await loadPublicStatusRows(db, refs, [...new Set(refs.map((r) => r.repo))], { withHidden: true });
+  const orders = new Map<string, number[]>();
+  const orderOf = (repo: string): number[] => orders.get(repo) ?? orders.set(repo, queueOrder(queue.filter((m) => m.repo === repo))).get(repo)!;
   for (const row of rows) {
-    const s = statusOf(repo, row, () => queuePlace(order, row.number));
-    if (s) out.set(row.number, s);
+    const s = statusOf(row.repo, row, () => queuePlace(orderOf(row.repo), row.number));
+    if (s) out.set(`${row.repo}#${row.number}`, s);
   }
   return out;
 }

@@ -20,13 +20,13 @@ import { OUTSIDE_SURGE, OutsideError, type Hold, type HoldInput, type OutsideLim
  * holds, the breaker) plus 1 more when an author's whitelist standing is needed; write: one transaction (trip, admissions, holds).
  * `whitelist` is the pure policy of `src/whitelist.ts`. Never calls GitHub or a model.
  */
-export async function recomputeHolds(db: Db, opts: { now?: number; whitelist: WhitelistPolicy }): Promise<{ holds: Hold[]; tripped: boolean; wakeAt: number | null }> {
+export async function recomputeHolds(db: Db, opts: { now?: number; whitelist: WhitelistPolicy; /** Our logins, when the caller read them. */ own?: ReadonlySet<string> }): Promise<{ holds: Hold[]; tripped: boolean; wakeAt: number | null }> {
   const now = opts.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const q = queryDb(db);
   const limits = await limitsOf(db);
   const on = limits.prsPerDay > 0 || limits.issuesPerDay > 0 || limits.surgePerHour > 0;
-  const own = on ? [...await loadOwnLogins(db)].map((l) => l.toLowerCase()) : [];
+  const own = on ? [...opts.own ?? await loadOwnLogins(db)].map((l) => l.toLowerCase()) : [];
   const [rows, have, trip] = await db.together(() => Promise.all([
     on ? loadCandidates(db, { dayAgo: new Date(now - DAY_MS).toISOString(), surge: limits.surgePerHour > 0, own, bots: reviewBots() }) : Promise.resolve([]),
     q.all(q.k.selectFrom("main.outside_holds").select(["repo", "number", "author", "kind", "reason"]).$narrowType<{ kind: Hold["kind"]; reason: Hold["reason"] }>()),
