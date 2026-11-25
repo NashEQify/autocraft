@@ -155,7 +155,6 @@ export class ClaimWaits {
     try {
       let seq: number;
       try {
-        // NEEDS db.seqs (C01): one topic's sequence; the change log's reader of every topic is used meanwhile.
         seq = (await this.#db.seqs(["remote-queue"]))["remote-queue"] ?? 0;
       } catch (e) {
         if (isBusy(e)) return;
