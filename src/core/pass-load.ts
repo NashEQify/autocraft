@@ -13,12 +13,12 @@ import { loadImplementFacts, type ImplementFacts } from "../data/implement/index
 import { loadHolds as loadOutsideHolds, recomputeHolds, type HoldInfo } from "../data/intake/index.ts";
 import { loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
 import {
-  listItems, loadDiffFacts, loadFormalReviews, loadGates, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
+  loadDiffFacts, loadFormalReviews, loadGates, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
   type DiffFactsRow, type Gate, type PrMirror, type RepoCiSignals, type RepoRow, type ReviewFact,
 } from "../data/mirror/index.ts";
 import { loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { loadRanks, type RankRow } from "../data/triage/index.ts";
-import { listWorkflows, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
+import { listWorkflows, loadInScope, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { mergeDecisionId } from "./rules.ts";
 import { whitelistVerdict } from "../whitelist.ts";
@@ -94,13 +94,12 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
         loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
         loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
         loadReviewFacts(db, keys, { now: o.now }), loadAssignments(db, {}), loadOutsideHolds(db, keys), loadOwnLogins(db),
-        // NEEDS workflow.loadInScope: the scope fragment for a key source (Set<RefKey>); the filter below reads every in-scope PR.
-        listItems(db, { kind: "pr", states: ["OPEN", "MERGED"], inScope: true }, "ref"),
+        loadInScope(db, keys),
       ]));
     const data: PrPassData = {
       now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow,
       workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins,
-      inScope: new Set(scoped.map((r) => refKey(r.repo, r.number))), tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
+      inScope: scoped, tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
     };
 
     const pairs: { repo: string; sha: string }[] = [];
@@ -117,11 +116,15 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
       const qh = eh ?? latest?.head;
       if (qh && merge.attempts.get(`${key}@${qh}`)?.outcome === "refused") retryTargets.push(mergeDecisionId(repo, number, qh));
     }
-    const [tasks, ownCommits, stacked, retries, entryReview] = await db.together(() => Promise.all([
+    // Members of an integration PR's batch decide its scope; a ref list of keys may leave them out.
+    const members = [...merge.integration.values()].flatMap((b) => b.members.map((m) => ({ repo: b.repo, number: m.number }))).filter((m) => !mirror.has(refKey(m.repo, m.number)));
+    const [tasks, ownCommits, stacked, retries, entryReview, membersInScope] = await db.together(() => Promise.all([
       loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs), loadStackedHeads(db, [...new Set([...mirror.values()].map((m) => m.item.repo))]),
       retryTargets.length ? loadAuditMax(db, "retry", retryTargets) : Promise.resolve(new Map<string, string>()),
       entryHeads.length ? loadReviewFacts(db, entryHeads.map((h) => ({ repo: h.repo, number: h.number })), { now: o.now, own: [...ownLogins], premergeHeads: entryHeads }) : Promise.resolve(null),
+      loadInScope(db, members),
     ]));
+    for (const k of membersInScope) data.inScope.add(k);
     data.tasks = tasks;
     data.ownCommits = ownCommits;
     data.stacked = stacked;

@@ -25,14 +25,14 @@ export { buildQueue, countStates, QUEUE_STATES, type QueueEntry, type QueueState
 import { envVar } from "../env.ts";
 import { effectiveCi, optionalChecks } from "../optional-checks.ts";
 import { jobItem } from "../runner/job-items.ts";
-import { authFailure, laneForOperator, type Lane, type LaneDeps } from "../github/user-lane.ts";
+import { authFailure, laneForOperator, noWriteReason, SIGN_IN_REASON, type Lane, type LaneDeps } from "../github/user-lane.ts";
 import { ownerOf } from "../owners.ts";
 import { readEnvFor } from "../github/read.ts";
 import { addAudit } from "../data/control/index.ts";
 import { recordAttempts, verificationOf } from "../data/merge/index.ts";
 import type { AttemptInput } from "../data/merge/types.ts";
 import { addStageEventsOnce } from "../data/planner/index.ts";
-import { loadWorkScores } from "../data/workflow/index.ts";
+import { listWorkflows, loadActions, loadWorkScores, queueActions, saveActions, type ActionState } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -219,11 +219,11 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     if (may.as === "person") {
       const lr = await laneForOperator(db, d.lane, may.by, [repo]);
       if (lr && !("lane" in lr)) {
-        // NEEDS workflow: a place to record that the merge waits for the approver's sign-in or access (decisions.exec_state is retired).
+        if (!("transient" in lr)) await noteMergeAction(db, repo, e, may.by, lr.state, lr.reason);
         log(`  ${refOf(e)}: ${"transient" in lr ? `not merged yet: ${lr.transient}` : `waiting: ${lr.reason}`}`);
         continue;
       }
-      if (lr) lane = lr.lane;
+      if (lr) { lane = lr.lane; await noteMergeAction(db, repo, e, may.by, "pending", null); }
     }
     summary.attempted.push(refOf(e));
     seen = null;
@@ -277,6 +277,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
       const denied = lane ? authFailure(new Error(why)) : null;
       if (denied) {
         // The approver's token may not merge (or GitHub answered with a transient error): no refusal is recorded, so the PR stays queued.
+        if (denied !== "transient" && lane) await noteMergeAction(db, repo, e, lane.login, denied, denied === "waiting-token" ? SIGN_IN_REASON : noWriteReason(repo));
         log(`  ${refOf(e)}: ${denied === "transient" ? "not merged yet" : "waiting"}: ${why}`);
         summary.attempted.pop();
         continue;
@@ -291,6 +292,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
       log(`  ${refOf(e)}: merged, but recording it failed (${oneLine(String((err as Error).message ?? err))}); trying again`);
       await recordAttempts(db, [landed]);
     });
+    if (lane) await noteMergeAction(db, repo, e, lane.login, "done", null);
     await jobItem(db, e.repo, e.number, `merged by ${method} at ${short(e.head)}`, log);
     summary.merged.push(refOf(e));
     params.onMerged?.(summary.merged.length);
@@ -298,6 +300,30 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   }
   log(`merge ${repo}: ${summary.merged.length} merged, ${summary.refused.length} refused; run ${runId}`);
   return summary;
+}
+
+/**
+ * The merge made as its approver, as the workflow's person action: it waits while the approver has no usable sign-in or no write
+ * access (the workflow's state line shows it), and a waiting row goes back to pending once the lane opens and to done after the merge.
+ * Only a wait creates the row; the other states update an existing one.
+ */
+async function noteMergeAction(db: Db, repo: string, e: QueueEntry, by: string, state: ActionState, reason: string | null): Promise<void> {
+  const ref = { repo, number: e.number };
+  const [workflows, actions] = await db.together(() => Promise.all([listWorkflows(db, { refs: [ref], live: true }), loadActions(db, { refs: [ref] })]));
+  const wf = workflows.at(-1);
+  if (!wf) return;
+  const at = new Date().toISOString();
+  const row = actions.get(`${repo}#${e.number}`)?.find((a) => a.kind === "merge" && a.workflow_id === wf.id);
+  if (state === "waiting-token" || state === "waiting-permission") {
+    await db.write(async () => {
+      // A row of an earlier head is stopped first, so the upsert takes it over with this head and approver.
+      if (row && row.head !== e.head) await saveActions(db, [{ id: row.id, state: "stopped", at }]);
+      const id = (await queueActions(db, [{ workflowId: wf.id, repo, number: e.number, kind: "merge", by, head: e.head, state, at }])).get(`${repo}#${e.number}:merge`);
+      if (id !== undefined) await saveActions(db, [{ id, state, reason, at }]);
+    });
+  } else if (row && row.head === e.head && row.state !== state && row.state !== "done") {
+    await saveActions(db, [{ id: row.id, state, reason, at }]);
+  }
 }
 
 function parseArgs(args: string[]): { repo: string; limit?: number; apply: boolean } {
