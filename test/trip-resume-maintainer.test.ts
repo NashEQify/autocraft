@@ -43,7 +43,7 @@ test("broken pushes on one repo stop Implement there; broken pushes on two repos
     at: t(m), stage: "implement", action: "implement-push", repo, number, from_oid: null, to_oid: `${repo}${number}`.padEnd(40, "0"), before_res: "green", after_res: outcome === "broke" ? "red" : "green", outcome, resolved_at: t(m),
   }));
   for (const repo of ["a", "b"]) {
-    await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(repo);
+    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES (?, 1)").run(repo);
     await db.run(db.k.insertInto("items").values({ repo, number: 10, kind: "issue", state: "OPEN", title: "Crash on start" }));
   }
   // Two broken pushes on a and one on b: a's own breaker stops a, and a's pushes then no longer count for every repo.
