@@ -199,7 +199,7 @@ export class Git {
    * The merge of `base` into `head` in memory (`git merge-tree --write-tree`, no working tree): the result tree, and the
    * conflicted paths when it has conflicts. The tree then holds conflict markers in those files.
    */
-  async mergeInto(head: string, base: string): Promise<{ clean: boolean; tree: string; conflicted: string[] }> {
+  async mergeTreeOf(head: string, base: string): Promise<{ clean: boolean; tree: string; conflicted: string[] }> {
     const r = await this.git(["-c", "merge.conflictStyle=merge", "merge-tree", "--write-tree", "--name-only", "-z", head, base]);
     if (r.code !== 0 && r.code !== 1) throw new Error(`git merge-tree failed: ${r.stderr.trim().split("\n").pop() ?? r.code}`);
     const parts = r.stdout.split("\0");
