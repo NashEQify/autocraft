@@ -1,11 +1,11 @@
 // The question a started item comes back with when nothing of it is due and a person has to move it on: its plan waits for one, or the
 // people it acts for can no longer act. Pure.
-import { needsQuestion, type WaitCode } from "../core/codes.ts";
-import { unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
+import { needsQuestion, type StopCode, type WaitCode } from "../core/codes.ts";
+import { redAtHead, unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
 import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
-import { nobodyFixes } from "../preapproval/paths.ts";
+import { nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
 import { afterSteps, droppedOf, onConflict, planned, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
@@ -66,24 +66,51 @@ const regression = (f: PrFacts, rest: string): string =>
 /** The sentence of a wait that has none of its own. */
 const waitText = (wait: string): string => t("It waits for {what}.", { what: wait.replace(/\.$/, "") });
 
-/** An approved PR whose review asks for fixes nobody makes comes back to go on without them; null for any other. */
+/** A PR whose review asks for fixes nobody makes comes back to go on without them; null for any other. */
 export function withoutFixes(f: PrFacts, o: Asked): Recommendation | null {
   const parts = planned(o.parts);
-  return o.approved && o.review?.verdict === "take-fix" && parts.length && nobodyFixes(f) ? without(parts, f.fixup!.fixes === 0) : null;
+  return o.review?.verdict === "take-fix" && parts.length && (o.approved ? nobodyFixes(f) : nobodyFixesFor(f)) ? without(parts, f.fixup!.fixes === 0) : null;
 }
 
-function recFor(code: WaitCode, f: PrFacts, p: Plan, o: Asked): Recommendation {
+/** A recommendation to make the review's fixes, without those nobody can make, not even for the person who says yes. */
+export const fixable = (rec: Recommendation, f: PrFacts, o: Asked): Recommendation =>
+  (rec.parts.fix.length && nobodyFixesFor(f) ? withoutFixes(f, { ...o, approved: false }) ?? rec : rec);
+
+function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Recommendation {
   const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
   if (onGithub(code)) return { text: ON_GITHUB[code](), parts, merges, goes: "look", cause: { code } };
   const past = MERGE_PAST[code];
   if (past) return { text: past(f), parts, merges: true };
   const skip = code === "answer" || code === "ask-failed" ? withoutFixes(f, o) : null;
   if (skip) return skip;
-  const why = (REVIEW_AGAIN[code] ?? (() => waitText(p.wait ?? "")))();
+  if (code === "review-failed") return reviewFailed(o);
+  const why = (REVIEW_AGAIN[code] ?? (() => waitText(wait ?? "")))();
   // The session does not make the review's fixes: a fix-up of ours does.
   const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];
   const again = fix.length ? {} : { again: "review" as const };
-  return { text: `${why} ${textFor({ fix, merges, ...again })}`, parts: { ...parts, fix }, merges, ...again };
+  return { text: `${why} ${textFor({ fix, merges, ...again })}`, parts: { ...parts, fix }, merges, ...again, ...(RED_CI.has(code) ? { cause: { code: "red-ci" as const } } : {}) };
+}
+
+/** Waits on red CI that nothing repairs: no answer merges it. */
+const RED_CI: ReadonlySet<WaitCode> = new Set(["ci-fix-failed", "ci-own-breakage", "ci-nothing-to-fix"]);
+
+/** The recommendation where the review failed for good at the head: a yes tries it once more, the word merge goes on without it. */
+function reviewFailed(o: Pick<Asked, "approved" | "parts">): Recommendation {
+  const again = "review" as const, merges = o.approved;
+  return {
+    text: `${REVIEW_AGAIN["review-failed"]!()} ${textFor({ fix: [], merges, again })} ${t("Write merge to merge it without that review when CI is green.")}`,
+    parts: { fix: [], drop: droppedOf(o.parts) }, merges, again, skipsReview: true,
+  };
+}
+
+/** The recommendation of a stopped merge leg that says what its wait would: going on with it as it is would stop it there again. */
+export function legStop(code: StopCode, f: PrFacts, o: Asked): Recommendation | null {
+  switch (code) {
+    case "fix-cannot-run": case "fix-failed": case "fix-too-large": return withoutFixes(f, o);
+    case "review-failed": return reviewFailed(o);
+    case "ci-failed": return recFor(f.brokeByUs ? "ci-own-breakage" : "ci-fix-failed", f, null, o);
+    default: return null;
+  }
 }
 
 /** An end recommendation of a PR that no approval merges as it is: the base and the missing CI (which a conflict may have kept from running) come first, and its screenshots are named. */
@@ -103,13 +130,13 @@ export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
   if (approver && (isGone(approver) || f.mergeLacksAccess)) return goneQuestion(f.repo, approver.login, o, !isGone(approver));
   const busy = p.actions.some((a) => worksOn(a) && moves(a));
   // Whoever answers takes the place of a person who is gone.
-  if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f) };
+  if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(fixable(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f, o), f) };
   if (!o.approved && isGone(f.standing?.work)) return goneQuestion(f.repo, f.standing!.work!.login, o);
   const code = p.waitCode;
   if (busy || !code || !p.waitKind || !needsQuestion(code, p.waitKind)) return null;
   // The implementation's own question, and a review that says hold or close: what the person has not answered comes back by itself (question.ts, blockers.ts).
   if (code === "implement-question" || code === "implement-stuck" || p.state === "opus-hold" && code === "answer") return null;
-  const rec = recFor(code, f, p, o);
+  const rec = recFor(code, f, p.wait, o);
   return {
     blocker: code === "verification-failed" ? "major-finding" : "other",
     params: { code, reason: (p.wait ?? code).replace(/^a person: /, "") }, rec: rec.goes ? rec : onConflict(rec, o.conflict),
@@ -150,6 +177,7 @@ export function causeWent(cause: Recommendation["cause"], f: PrFacts | ItemFacts
     case "base-off-default": return f.inScope && !f.baseOffDefault ? t("Its base is the default branch now.") : null;
     case "no-ci": return !f.repoFacts.noCi || f.ci === "pending" || f.ci === "success" || f.ci === "failure" ? t("CI runs now.") : null;
     case "mergeable-stuck": return unknownStuck(f) === null && (f.mergeable === "MERGEABLE" || f.mergeable === "CONFLICTING") ? t("GitHub says whether it can be merged now.") : null;
+    case "red-ci": return f.ci === "success" && !redAtHead(f) ? t("CI is green now.") : null;
     case "ci-approval-failed": return f.ci !== "unknown" && f.runs?.blocked !== "failed" && f.runs?.blocked !== "unsupported" ? t("Its CI runs wait for no approval any more.") : null;
   }
 }

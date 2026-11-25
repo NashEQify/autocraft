@@ -147,7 +147,8 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       }
       return go(t("Review it again with the failing checks, then merge."), { again: "review" });
     }
-    case "large-fix": return go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
+    // The fix-up a leg stopped at pushed nothing.
+    case "large-fix": return p.lines === undefined ? afterStop(String(p.reason ?? ""), go) : go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
     case "beyond-agreed": return go(t("Keep the changes to {files}, then merge.", { files: listText((p.files as string[] | undefined) ?? []) }));
     case "outside-purpose":
     case "major-finding": {
@@ -157,9 +158,10 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       return found.blocker === "outside-purpose" ? go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) })) : go(t("Merge it as it is."));
     }
     case "other": {
-      const reason = String(p.reason ?? "");
-      if (!reason) return go(t("Go on with the merge."));
-      return go(t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }));
+      return afterStop(String(p.reason ?? ""), go);
     }
   }
 }
+
+const afterStop = (reason: string, go: (text: string) => Recommendation): Recommendation =>
+  go(reason ? t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }) : t("Go on with the merge."));

@@ -165,7 +165,8 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
   const mergeEntryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;
-    return workflowFactOf(d, ref)?.entry === "merge" ? currentHead(m) : null;
+    const wf = workflowFactOf(d, ref);
+    return wf && (wf.entry === "merge" || wf.unreviewedHead !== null) ? currentHead(m) : null;
   };
   const carryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref)!, latest = d.review.latest.get(ref);
@@ -283,11 +284,12 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const implementation = d.implement.byPr.get(ref);
   // A merge entry's review is the one it needs: an older review stays ignored.
   const stored = d.review.latest.get(ref);
-  const needed = state === "OPEN" && head && wfFact?.entry === "merge" ? neededReview(wfFact, ours, head, d.mergeEntryReviews.get(ref) ?? []) : null;
-  const owed = needed !== null;
+  const mayMergeUnread = state === "OPEN" && !!head && !!wfFact && (wfFact.entry === "merge" || wfFact.unreviewedHead !== null);
+  const needed = mayMergeUnread ? neededReview(wfFact, ours, head, d.mergeEntryReviews.get(ref) ?? []) : null;
+  const unread = mayMergeUnread && needed === null;
   const latest = stored && needed?.from != null && stored.at <= needed.from ? undefined : stored;
   const base: PrFacts = {
-    repo, number, ...(pushedOff ? { pushedOff } : {}), ...(owed ? { reviewOwed: true } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
+    repo, number, ...(pushedOff ? { pushedOff } : {}), ...(needed !== null ? { reviewOwed: true } : {}), ...(unread && wfFact.entry !== "merge" ? { reviewSkipped: true } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
     tripped: tripsOfRepo(trips, repo), ghState: state, head, ...draftOf(i, ch),
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
@@ -346,7 +348,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     return t === "not" && isOwn(i.author) && c.ownPrs.has(ref) && !!h && ownHead(h) ? "whitelisted" : t;
   };
   base.tier = tierOf(head);
-  const mxh = state === "OPEN" && wfFact?.entry === "merge" && !owed ? head : null;
+  const mxh = unread ? head : null;
   // Checks describe the PR when they were fetched for the reviewed head (or, without a review, the current one).
   const checksAtHead = ch?.head_oid === (mxh ?? latest?.head ?? head);
   base.mergeable = (checksAtHead ? ch?.mergeable : i.mergeable) ?? "UNKNOWN";

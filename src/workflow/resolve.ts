@@ -13,7 +13,7 @@ import { heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry,
  * queued or waits for its person, which a hold takes back. `mergeWaits`: the merge the sender approved
  * waits for their own sign-in or access.
  */
-export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; held?: ItemWorkflow | null; closing?: boolean; mergeWaits?: boolean };
+export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; held?: ItemWorkflow | null; closing?: boolean; mergeWaits?: boolean; /** The question is about red CI, and CI fails on the head now. */ redCi?: boolean };
 
 /** How the confirmation line attributes the run: "approved by", "started by", ...; null: "by". */
 export type How = "started" | "approved" | "answered" | "held" | "resumed" | "set" | null;
@@ -29,6 +29,8 @@ export type Run = {
   drop: number[];
   /** Records merge approval now. */
   approve: boolean;
+  /** Merges the head the question was asked at without the review that failed there. */
+  skipsReview: boolean;
   /** Approves again a merge that waits for the sender's sign-in or access: it is tried again. */
   retryMerge: boolean;
   /** The steps end in a merge (approved now or before); false: they end in a recommendation. */
@@ -77,7 +79,9 @@ export type Refusal =
   /** A ready plan's part: the implementation is built from the whole plan, so a part can't be fixed or dropped on its own. */
   | { why: "implement-part"; parts: number[] }
   /** The pre-merge review found defects, and nothing merges past them as they are. */
-  | { why: "premerge-defects" };
+  | { why: "premerge-defects" }
+  /** CI fails on the head and nothing repairs it; `approved`: it merges once CI is green. */
+  | { why: "red-ci"; approved: boolean };
 
 export type Resolved =
   | { kind: "run"; run: Run }
@@ -91,7 +95,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, skipsReview: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, ...r },
 });
 
 /** The item stopped at defects of the pre-merge review: their plan parts (none where nobody asked for their fixes yet); null otherwise. */
@@ -219,6 +223,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (rec && drop.length && !fix.length && !entry) {
     // A close drops nothing: dropping parts of it could mean "close anyway" or "don't close".
     if (rec.close) return ambiguous({ why: "conflict", words: ["close", ...named.map((p) => `drop ${p.part}`)] });
+    if (merge && state.redCi) return refused({ why: "red-ci", approved });
     const left = rec.parts.fix.filter((n) => !drop.includes(n));
     if (!left.length && (merge || rec.merges) && premergeStopped(wf)) return refused({ why: "premerge-defects" });
     return accept(wf, left, [...new Set([...rec.parts.drop, ...drop])], weight, merge);
@@ -226,6 +231,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (!entry && !named.length && merge) {
     if (rec) {
       if (premergeStopped(wf)) return refused({ why: "premerge-defects" });
+      if (state.redCi) return refused({ why: "red-ci", approved });
       if (rec.parts.fix.length) return ambiguous({ why: "merge-skips-fixes", parts: rec.parts.fix });
       return accept(wf, [], rec.parts.drop, weight, true);
     }
@@ -299,7 +305,7 @@ function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number 
   const approve = merges && !wf.approvedBy;
   if (rec.answer && !fix.length) return run({ pick: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
   return run({
-    again: fix.length ? "fixup" : merge ? null : rec.again ?? null, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
+    again: fix.length ? "fixup" : merge ? null : rec.again ?? null, skipsReview: merge && !fix.length && !!rec.skipsReview, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
     how: approve ? "approved" : "answered",
   });
 }

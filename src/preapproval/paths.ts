@@ -40,6 +40,10 @@ export function nobodyFixes(f: PrFacts): boolean {
   return f.fixup?.fixes === 0 && r?.verdict === "take-fix" && r.head === f.head && !r.stale && f.mergeable !== "CONFLICTING" && !f.changesRequested && !ownImplementation(f);
 }
 
+/** As `nobodyFixes`, once the merge is approved, and a fix-up that a person asks for cannot make them either. */
+export const nobodyFixesFor = (f: PrFacts): boolean =>
+  (f.fixup?.fixes === 0 || !f.pushable) && nobodyFixes(f.workflow ? { ...f, workflow: { ...f.workflow, approved: true } } : f);
+
 /** Who makes the fixes of the take-fix review at the leg's head, as `redCiPath`. */
 export function fixPath(f: PrFacts): FixPath {
   const fx = fixupOf(f);

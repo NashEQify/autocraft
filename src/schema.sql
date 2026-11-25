@@ -2309,7 +2309,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   pr_number INTEGER,                  -- an implement workflow: the PR it works on, the newest an attempt of its issue opened for it; null before that (src/data/workflow/link.ts)
   version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
   accepted_head TEXT,                 -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
-  review_asked_at TEXT                -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
+  review_asked_at TEXT,               -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
+  unreviewed_head TEXT                -- the PR head a person said to merge without the review that failed there for good (src/core/evidence.ts neededReview)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);

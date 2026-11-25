@@ -29,7 +29,7 @@ import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
-import { causeWent, itemQuestion, questionFor, withoutFixes, type Question } from "./ask.ts";
+import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
 import { blockWorkflow } from "./block.ts";
 import { codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
@@ -135,9 +135,6 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
 
 /** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */
 const HOLD_ENDS: readonly StopCode[] = ["person", "workflow-ended"];
-
-/** How a merge leg ends at the fixes of the review. */
-const FIX_STOPS: readonly StopCode[] = ["fix-cannot-run", "fix-failed", "fix-too-large"];
 
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
@@ -462,7 +459,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (repushed && !authorPush && !accepted(pass, w, ref, head)) authorPush = { from: w.recHead, to: head };
 
   // The numbered plan follows the latest review at the head; a merge-queue entry has none, unless it owes one.
-  const gone = { entry: w.entry, startedAt: w.startedAt, since, reviewAskedAt: w.reviewAskedAt };
+  const gone = { entry: w.entry, startedAt: w.startedAt, since, reviewAskedAt: w.reviewAskedAt, unreviewedHead: w.unreviewedHead };
   const needed = neededReview(gone, pass.moves.get(ref) ?? [], head, pass.reviews.get(ref) ?? []);
   const stored = reviewAt(pass, ref, head);
   const review = stored && needed && (needed.from === null || stored.at > needed.from) ? stored : null;
@@ -477,6 +474,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   else if (leg === "ci") step = stepIn(w, "fix CI and conflicts", "merge");
   else if (leg === "queued") step = stepIn(w, "batch", "merge");
   else if (w.entry === "merge") step = stepIn(w, "update from main");
+  else if (!needed) step = stepIn(w, "merge");
   else if (!review) step = (pass.reviews.get(ref) ?? []).some((r) => r.head !== head) ? stepIn(w, "review again", "review") : stepIn(w, "review");
   else if (review.verdict === "take-fix" && plan.some((p) => p.state === "planned") && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
   else step = stepIn(w, "merge", "recommend");
@@ -500,10 +498,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const ended = approved ? endedLeg(pass, w, since, resumed) : null;
-  // A leg that stopped at the review's fixes would stop there again.
-  const skips = (x: Found): Recommendation | null =>
-    (ended && x.params.reason === ended.reason && FIX_STOPS.includes(codeOf(ended)) && f?.head === head ? withoutFixes(f, { approved, review: view, parts: plan, conflict }) : null);
-  const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(skips(x) ?? atBlocker(x, view, parts, w.entry === "merge"), conflict);
+  const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
+    const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
+    const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
+    return onConflict(now && !x.params.premerge ? fixable(rec, now, o) : rec, conflict);
+  };
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.

@@ -18,6 +18,8 @@ import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
+import { redAtHead } from "../core/decide.ts";
+import { loadPrFact } from "../core/facts.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -29,7 +31,7 @@ import { isOpenQuestion } from "./question.ts";
 import { premergeParts } from "./premerge.ts";
 import { atBlocker } from "./recommend.ts";
 import { isLive, premergeStopped, resolve, type Refusal, type Run } from "./resolve.ts";
-import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
+import { attributionLines, confirmLine, currentStep, listText, recommendationLine, recommendationText, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { asksForApprover, heldWork, openRecommendation, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
@@ -255,7 +257,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const closing = batch.closing.get(key)?.at(-1) ?? null;
   // A merge of the sender's that waits for their own sign-in or access: approving it again tries it again.
   const waiting = wf?.approvedBy?.toLowerCase() === login.toLowerCase() ? await waitingMerges(db, wf, login) : [];
-  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, held, closing: closing !== null, mergeWaits: waiting.length > 0 });
+  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, held, closing: closing !== null, mergeWaits: waiting.length > 0, redCi: says(input.parsed, "merge") && wf !== null && await redCi(db, wf, on) });
   const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number }) : undefined;
   if (started) return out("refused", worksElsewhere(ref, started, input.clock), started.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
@@ -283,6 +285,10 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const now = await askToFix(db, wf!, on);
     const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: [replyLine(r, input.clock, input.mention), premergeStopped(now)?.length ? t("Fix them first?") : null, recommendationLine(now.rec)].filter((x) => x !== null).join(" ") });
     return { ...out("refused", reply(line), now.id), ...(now.recAt ? { question: { workflowId: now.id, recAt: now.recAt } } : {}) };
+  }
+  if (r.kind === "refused" && r.refusal.why === "red-ci") {
+    const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: `${replyLine(r, input.clock, input.mention)} ${t("Already asked: {question}", { question: recommendationText(wf!.rec!) })}` });
+    return { ...out("refused", reply(line), wf!.id), ...(wf!.recAt ? { question: { workflowId: wf!.id, recAt: wf!.recAt } } : {}) };
   }
   if (r.kind === "refused") return { ...out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null), refusal: r.refusal.why };
 
@@ -475,6 +481,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const pr = live.kind === "issue" && !r.pick ? await issuePr(live) : null;
     if (pr?.head) patch.acceptedHead = pr.head;
   }
+  if (r.skipsReview) patch.unreviewedHead = live.recHead;
   // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts).
   if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
   else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits") patch.reviewAskedAt = null;
@@ -582,6 +589,14 @@ async function askToFix(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<ItemWo
   const patch = { plan, blockerParams, recAt, rec: atBlocker({ blocker: wf.blocker!, params: blockerParams }, null, plan) };
   if (!(await moveWorkflows(db, [{ id: wf.id, patch, at: recAt, was: wf }])).size) throw new Moved();
   return { ...wf, ...patch };
+}
+
+/** The item's question is about red CI, and CI still fails on the PR's head. */
+async function redCi(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<boolean> {
+  if (openRecommendation(wf)?.cause?.code !== "red-ci") return false;
+  const pr = on.kind === "pr" ? on.number : (await implementationPr(db, wf))?.number;
+  const f = pr === undefined ? null : await loadPrFact(db, on.repo, pr);
+  return f !== null && redAtHead(f);
 }
 
 /** The workflow's merges as `login` that wait for their sign-in or access, on whatever PR they are. */

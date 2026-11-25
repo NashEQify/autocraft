@@ -223,6 +223,8 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
     ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
     : r.start === "merge"
       ? t("updating from main, then merging in the next batch when CI is green")
+    : r.skipsReview
+      ? t("merging without the review when CI is green")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
@@ -281,6 +283,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "not-held": return t("This item is not held.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
     case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or hold it.", { parts: listText(r.parts) });
+    case "red-ci": return r.approved ? t("CI fails on the head; it merges when CI is green.") : t("CI fails on the head, and nothing merges on red CI. Send merge again when it is green.");
     case "premerge-defects": return t("The pre-merge review found defects, and nothing merges past them as they are.");
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }

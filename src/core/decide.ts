@@ -48,7 +48,7 @@ export const notStarted = (f: PrFacts): boolean => !workflowOf(f) && (!onAutoPat
  * The merge entry: the PR goes to the merge queue with no Opus review; the pre-merge review, Verify, CI and GitHub's gates still apply. Once it
  * owes a review (core/evidence.ts neededReview), the PR goes the way of a reviewed one.
  */
-export const mergeEntry = (f: PrFacts): boolean => workflowOf(f)?.entry === "merge" && !f.reviewOwed;
+export const mergeEntry = (f: PrFacts): boolean => !!workflowOf(f) && (f.reviewSkipped === true || (workflowOf(f)!.entry === "merge" && !f.reviewOwed));
 /** A started PR not approved for merge stops when its steps are done, for a person's answer to the recommendation. */
 export const NOT_APPROVED_REASON = "not approved for merge";
 /** The review's own fix-up runs on the auto path, for the fix-up and implement entries and once merge is approved; a review-entry PR that is not approved waits for its recommendation instead. */
@@ -302,7 +302,7 @@ export function refusedWait(actions: readonly Action[]): Wait | null {
 export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
 
 /** Red CI at the PR's current head: at the reviewed head, our own push that broke it, or the review gate's red CI at a new head. */
-const redAtHead = (f: PrFacts): boolean =>
+export const redAtHead = (f: PrFacts): boolean =>
   (!!f.review && f.review.head === f.head && f.ci === "failure") || !!f.brokeByUs || !!f.gateRed || (f.reviewHold?.kind === "ci" && f.reviewHold.red === true);
 
 /**

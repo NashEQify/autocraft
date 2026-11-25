@@ -285,7 +285,44 @@ test("a merge entry whose verification failed is asked once, after its pre-merge
   }
 });
 
-test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges", async () => {
+test("where its review failed for good, the word merge goes on without it at that head and no other", async () => {
+  const w = await started("review and merge", { review: false });
+  await pause();
+  await w.db.run(w.db.k.updateTable("main.review_state").set({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }));
+  await settle(w);
+  assert.deepEqual(await shown(w), ["blocked", "review-failed", MAINT]);
+  assert.match(await say(w, "merge", ANN), /without the review/);
+  await settle(w);
+  assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "queued"]);
+  assert.ok((await actions(w)).includes("merge"));
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure" }));
+  assert.ok(!(await actions(w)).includes("merge"), "not on red CI");
+  await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "cifix", action: "cifix-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1b", before_res: "unknown" }));
+  await w.synced(1, "sha1b");
+  await settle(w);
+  assert.deepEqual([await leg(w), await actions(w)], ["review", ["review"]]);
+});
+
+test("the word merge on red CI that nothing repairs is refused and the question stays; green CI closes it and the approved merge goes on", async () => {
+  const w = await started("review and merge");
+  await pause();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }));
+  await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head: "sha1", kind: "test", state: "push-denied", attempt: 1, created_at: new Date().toISOString() }));
+  await settle(w);
+  assert.deepEqual(await shown(w), ["blocked", "ci-fix-failed", MAINT]);
+  const asked = await wf(w);
+  await pause();
+  const o = (await runCommand(w.db, { login: ANN, canWrite: async () => true }, "github", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] })).items[0]!;
+  assert.equal(o.outcome, "refused");
+  assert.match(o.line, /CI fails on the head; it merges when CI is green\. Already asked: CI fails, and the CI fix could not repair it/);
+  await settle(w);
+  assert.deepEqual([(await wf(w)).recAt, (await wf(w)).rec], [asked.recAt, asked.rec]);
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success", checks: "[]" }));
+  await settle(w);
+  assert.deepEqual([...await shown(w), await leg(w)], ["running", null, MAINT, "queued"]);
+});
+
+test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges, approved before or not", async () => {
   const cases: Record<string, (w: World) => Promise<unknown>> = {
     protected: (w) => w.review(1, { verdict: "take-fix", fixes: [{ file: ".git/config", change: "drop the hook path" }, { file: "../deny.toml", change: "allow the licence" }] }),
     "cannot run": async (w) => {
@@ -294,16 +331,16 @@ test("fixes nobody can make are asked about once: a yes or the word merge drops 
       await w.review(1, { verdict: "take-fix", fixes: [{ file: "src/a.rs", change: "rename a" }, { file: "src/b.rs", change: "rename b" }] });
     },
   };
-  for (const [name, set] of Object.entries(cases)) for (const answer of ["yes", "merge"]) {
+  for (const [name, set] of Object.entries(cases)) for (const start of ["review and merge", "review"]) for (const answer of ["yes", "merge"]) {
     const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
     await w.pr(1, { label: "feature" });
     await (await w.verified(1)).premerge(1, "clean");
-    await say(w, "review and merge");
+    await say(w, start);
     await set(w);
     await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
     await settle(w);
-    const x = await wf(w), at = `${name}, ${answer}: ${x.rec?.text}`;
-    assert.deepEqual([x.state, x.rec?.parts, x.rec?.merges, x.rec?.again], ["blocked", { fix: [], drop: [1, 2] }, true, undefined], at);
+    const x = await wf(w), at = `${name}, ${start}, ${answer}: ${x.rec?.text}`;
+    assert.deepEqual([x.state, x.rec?.parts, x.rec?.merges, x.rec?.again], [start === "review" ? "recommending" : "blocked", { fix: [], drop: [1, 2] }, true, undefined], at);
     assert.match(x.rec!.text, /1 and 2/);
     assert.match(await say(w, answer, ANN), /dropping 1 and 2, then merging/i);
     await settle(w);
