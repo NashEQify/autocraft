@@ -46,7 +46,7 @@ export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { stat
 export type LegRow = Preapproval;
 export type LegContext = { workflowId: number; entry: Entry; since: string; approvedBy: string | null };
 /** `requests`: the queued requests of the active legs. */
-export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended">; requests: FixupRequest[] };
+export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
 export type LegMoved = LegMove & { repo: string; number: number };
 export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };

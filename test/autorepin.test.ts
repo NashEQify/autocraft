@@ -284,6 +284,7 @@ describe("autorepin", () => {
 
   test("a merge pre-approved at the old head goes on at the repinned head, to be reviewed again", async () => {
     const s = await setup({ lock: false });
+    await s.w.acting();
     const started = await runCommand(s.w.db, { login: OPERATOR, canWrite: async () => true }, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 1 }] });
     assert.equal(started.items[0]!.outcome, "run", started.lines.join("\n"));
     await set(s);

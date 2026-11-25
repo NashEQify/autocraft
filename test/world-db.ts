@@ -15,6 +15,7 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { setFixIssueApproval } from "../src/implement/approval.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { setMergeApproval } from "../src/merge/approval.ts";
+import { startWorkflows } from "../src/data/workflow/index.ts";
 import { setCiApproval } from "../src/merge/ci-approval.ts";
 import type { BatchDeps } from "../src/merge/batch.ts";
 import type { CommandResult, MergeDeps } from "../src/merge/index.ts";
@@ -28,6 +29,8 @@ import { connectDb } from "../src/db/open.ts";
 
 export const T0 = "2026-01-01T00:00:00Z";
 export const T1 = "2026-01-02T00:00:00Z";
+/** Before T0: a workflow started then has seen nothing the stages wrote. */
+const BEFORE = "2025-12-31T00:00:00Z";
 export const OPERATOR = "op";
 /** The one CI check of every PR. */
 export const CHECK = "gate / test";
@@ -160,6 +163,22 @@ export async function world() {
       await setCiApproval(db, OPERATOR, "app", on("ci"));
       await setFixIssueApproval(db, OPERATOR, "app", on("fixissue"));
       return await w.pipeline(true);
+    },
+    /** The app identity, and the people who may act on the repo: write permission on it, read just now. */
+    async acting(...logins: string[]) {
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+      const at = new Date().toISOString();
+      for (const login of logins.length ? logins : [OPERATOR]) {
+        await db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'maintainer')").run(login);
+        await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'app', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = 'write', checked_at = excluded.checked_at").run(login, at);
+      }
+      return w;
+    },
+    /** A running workflow of the PR, started (and by default approved for merge) before anything the stages write (T0). */
+    async workflow(n: number, o: { entry?: "review" | "fixup" | "merge"; by?: string; approved?: boolean } = {}) {
+      const by = o.by ?? OPERATOR;
+      await startWorkflows(db, [{ repo: "app", number: n, kind: "pr", entry: o.entry ?? "review", weight: 5, startedBy: by, startedVia: "dashboard", baseHead: await headOf(n), at: BEFORE, ...(o.approved === false ? {} : { approvedBy: by, approvedVia: "dashboard" as const }) }]);
+      return w;
     },
     /** The global pipeline switch. */
     async pipeline(on: boolean) {

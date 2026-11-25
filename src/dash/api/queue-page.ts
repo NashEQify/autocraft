@@ -7,11 +7,9 @@ import type { CachedEntry } from "../../data/views/merge-queue.ts";
 import { closingOf, loadQueuePage, type QueuePageFacts } from "../../data/views/queue.ts";
 import { loadPrBuildViews, type PrBuildView } from "../../data/merge/index.ts";
 import { loadTrackedRepos } from "../../data/control/index.ts";
-import { loadItems, loadOpenPrLinks } from "../../data/mirror/index.ts";
+import { loadOpenPrLinks } from "../../data/mirror/index.ts";
 import { featureOn } from "../../build/features.ts";
 import { ownerOf } from "../../owners.ts";
-import { HEAD_CHANGED, preapproveMerge } from "../../preapproval/index.ts";
-import { actRefusal } from "../../github/identity.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { ControlError, holdMerge, releaseMerge, removeFromBatch, stopBatch } from "../../merge/controls.ts";
 import { loadBatches } from "../../data/merge/index.ts";
@@ -27,7 +25,6 @@ import { mayRunRepo } from "../repo-access.ts";
 import { readerOf, veiledFor } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import type { Db } from "../../db/index.ts";
-import { implementRefusal } from "../../implement/gate.ts";
 
 export const TABS: QueueTab[] = ["all", "review", "fix", "verify", "merge"];
 const NEXT_LIMIT = 10;
@@ -269,9 +266,6 @@ async function guarded<T>(f: () => Promise<Promise<T> | T>): Promise<T> {
   }
 }
 
-/** Queuing an issue is the start of its workflow: the row that carries the queuer and the weight is written by the command, so nothing is stored here. */
-export async function queueIssue(_db: Db, _by: string, _repo: string, _number: number, _w: number | null, _via?: string): Promise<void> {}
-
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror), in number order. */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
   return (closingIndex(await loadOpenPrLinks(db, [repo])).get(`${repo}#${issue}`) ?? []);
@@ -287,54 +281,6 @@ function closingIndex(links: Awaited<ReturnType<typeof loadOpenPrLinks>>): Map<s
   }
   for (const l of out.values()) l.sort((a, b) => a - b);
   return out;
-}
-
-/** What Queue items does, as the refusal names it. */
-export const queueWhat = (repo: string): string => `queues items on ${repo}`;
-
-/**
- * "Queue items", one line, for an operator or a maintainer who may act on the repo. A PR is pre-approved at its current head (it merges
- * once the review says take, the pre-merge review is clean and CI is green). An issue is queued for Fix; when exactly one open PR closes
- * it, that PR is queued as above. Several closing PRs are only listed: a person picks one.
- * `pin` (a command in a comment) names the one head each PR may be pre-approved at, or null for a PR that may not be queued: one
- * opened or pushed to after the comment.
- */
-export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number) => string | null): Promise<{ label: string; fast: string[] }> {
-  const r = item(req);
-  await needVisible(db, req, r.repo);
-  // A pre-approved merge is a merge approval given ahead, so it takes the act rule: an AutoCraft login with write access on the repo.
-  if (await actRefusal(db, req.user, r.repo)) throw new HttpError(403, `only an operator, or a maintainer with write access where the app acts for them, ${queueWhat(r.repo)}`);
-  const by = req.user.login;
-  const kind = (await loadItems(db, [r], "ref")).get(refText(r))?.kind;
-  if (kind === "issue") {
-    await queueIssue(db, by, r.repo, r.number, null, via);
-    const prs = await openPrsClosing(db, r.repo, r.number);
-    if (!prs.length) {
-      const waits = await implementRefusal(db, r.repo, r.number);
-      return { label: waits ? `Queued; it is not implemented while ${waits}` : "Queued: AutoCraft plans and implements it", fast: [] };
-    }
-    let rest: string;
-    if (prs.length > 1) rest = `${prs.map((n) => `#${n}`).join(", ")} close it; queue one of them`;
-    else if (pin && pin(prs[0]!) === null) rest = `#${prs[0]} closes it but was opened or pushed to after your comment, so it was not queued; comment on #${prs[0]} to queue it`;
-    else {
-      try {
-        await preapproveMerge(db, { repo: r.repo, number: prs[0]!, by, via, ...(pin ? { head: pin(prs[0]!)! } : {}) });
-        rest = `queued #${prs[0]}, which closes it`;
-      } catch (e) {
-        rest = `#${prs[0]} closes it but was not queued: ${(e as Error).message}`;
-      }
-    }
-    return { label: `Queued the issue; ${rest}`, fast: [] };
-  }
-  let done: { label: string };
-  const head = pin ? pin(r.number) : undefined;
-  if (head === null) throw new HttpError(409, HEAD_CHANGED);
-  try {
-    done = await preapproveMerge(db, { repo: r.repo, number: r.number, by, via, ...(head === undefined ? {} : { head }) });
-  } catch (e) {
-    throw new HttpError(409, (e as Error).message);
-  }
-  return { label: done.label, fast: [] };
 }
 
 export async function mergeHoldPr(db: Db, req: Req, on: boolean): Promise<{ ok: true }> {

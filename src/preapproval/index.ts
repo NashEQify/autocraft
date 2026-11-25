@@ -405,7 +405,9 @@ const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large
  * blocker and gives its recommendation (src/workflow/advance.ts). A merge-queue entry has no Opus review to wait for, and a review the
  * person answered after (a yes past a major finding) counts as a take.
  */
-async function advance(db: Db, p: Row, ctx: LegContext | "ended", held: ReadonlySet<string>, pf: PassFacts, factOf: () => Promise<PrFacts | null>, wake: Wake): Promise<void> {
+async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", held: ReadonlySet<string>, pf: PassFacts, factOf: () => Promise<PrFacts | null>, wake: Wake): Promise<void> {
+  // A row no workflow owns waits for the start that is writing its workflow (stop, backlog and close cancel it by its PR).
+  if (ctx === "unlinked") return;
   const ref = refOf(p.repo, p.number);
   const it = pf.items.get(ref);
   const cancel = async (reason: string) => void await cancelRow(db, p, ACTOR, reason, `The pre-approved merge was cancelled: ${reason}.`);
@@ -613,7 +615,7 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
   }
   const pass = await loadLegPass(db);
   // A leg written before its workflow's row is linked to the live workflow of its PR.
-  const adopt = pass.rows.flatMap((r) => { const c = pass.context.get(r.id); return r.workflow_id === null && c && c !== "ended" ? [{ id: r.id, workflowId: c.workflowId }] : []; });
+  const adopt = pass.rows.flatMap((r) => { const c = pass.context.get(r.id); return r.workflow_id === null && c && typeof c !== "string" ? [{ id: r.id, workflowId: c.workflowId }] : []; });
   if (adopt.length) await adoptLegs(db, adopt);
   if (!pass.rows.length) return 0;
   const pf = await loadPassFacts(db, pass.rows);
@@ -631,7 +633,7 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
     };
     try {
       const before = p.state;
-      await advance(db, p, pass.context.get(p.id) ?? "ended", held, pf, factOf, wake);
+      await advance(db, p, pass.context.get(p.id) ?? "unlinked", held, pf, factOf, wake);
       const now = (await loadLegs(db, [{ repo: p.repo, number: p.number }], { ids: [p.id] })).get(refOf(p.repo, p.number))?.[0]?.state;
       if (now !== before) n++;
     } catch (e) {
