@@ -10,7 +10,8 @@ import { tripKey, tripOf } from "../../core/push-outcome.ts";
 import { loadMaintainItem } from "../../data/views/maintain-item.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
-import { isLive, type StoredEvent } from "../../workflow/store.ts";
+import { isLive } from "../../workflow/store.ts";
+import type { StoredEvent } from "../../data/workflow/types.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -97,7 +98,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const breakers = await Promise.all(mineTrips.map(async (t) => ({
     key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.trippedAt, canResume: may && await mayResumeTrip(req.user, t.stage),
   })));
-  const shown: MaintainEvent[] = events.map((e) => ({ id: e.id, at: e.at, login: e.login, via: e.via, kind: e.kind, line: e.line }));
+  const shown: MaintainEvent[] = events.flatMap((e) => (e.kind === "archived" ? [] : [{ id: e.id, at: e.at, login: e.login, via: e.via ?? "cli", kind: e.kind, line: e.line ?? "" }]));
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
     repo, number: n, kind: facts.kind, workflowRepo: true, canAct: may,

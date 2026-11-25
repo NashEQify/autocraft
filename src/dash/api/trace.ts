@@ -54,7 +54,7 @@ export const closedEvent = (it: ItemRow): Ev => ({ id: "gh:closed", kind: "githu
 /** Longest comment text a trace event carries. */
 export const TRACE_BODY_MAX = 20_000;
 /** `body`, when given, is the stored text (the item trace selects it; the activity feed does not, to keep its pages light). */
-export const commentEvent = (c: { id: string; kind: string | null; author: string | null; created_at: string; review_state: string | null; commit_oid: string | null; len: number; body?: string | null; cut?: SqlBool | null }, own: Set<string>): Ev => {
+export const commentEvent = (c: { id: string; kind: string | null; author: string | null; created_at: string; review_state: string | null; commit_oid: string | null; len: number; body?: string | null; cut?: boolean | 0 | 1 | null }, own: Set<string>): Ev => {
   const ours = !!c.author && own.has(c.author);
   const what = c.kind === "review" ? `review (${(c.review_state ?? "commented").toLowerCase().replace("_", " ")})` : "comment";
   return {
@@ -312,7 +312,7 @@ const strip = ({ detail: _d, ...e }: Ev): TraceEvent => e;
 
 const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question answered", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
 /** A workflow event (an answer, a start, a stop) in the place the retired decision events held: the kind "decision". */
-export const workflowEvent = (e: { id: number; login: string; kind: string; line: string | null; at: string }, staff: boolean): Ev => ({
+export const workflowEvent = (e: { id: number; login: string; kind: string; line?: string | null; at: string }, staff: boolean): Ev => ({
   id: `workflow:${e.id}`, kind: "decision", at: e.at, head: null, actor: e.kind === "archived" ? step("decide") : person(e.login),
   summary: staff && e.line ? clip(e.line, 140) : WORKFLOW_WORDS[e.kind] ?? humanize(e.kind), ref: {},
 });

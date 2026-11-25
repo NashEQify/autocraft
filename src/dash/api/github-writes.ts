@@ -4,6 +4,7 @@ import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { loadGithubWrites } from "../../data/views/github-writes.ts";
 import { ownLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
+import type { WriteLogRow } from "../../data/control/types.ts";
 
 /** A comment written before its URL was recorded matches by time within this window. */
 export const MATCH_WINDOW_MS = 120_000;
