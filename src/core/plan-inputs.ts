@@ -109,6 +109,8 @@ const PERMISSION_FULL_UPDATE_PG = permissionMoved(`to_char(now() AT TIME ZONE 'U
 
 export const PLAN_INPUTS: PlanInput[] = [
   // ---- item-keyed ----
+  // A bookkeeping column (src/live.ts) that the Plan reads: it is watched here on its own.
+  { table: "items", class: "item", why: "A classify request that gave no valid verdict at the item's input (jev_failed_hash) ends the prioritize hold.", columns: ["jev_failed_hash"] },
   { table: "actions", class: "item", why: "Act's comment-and-close record of one item (answeredClose)." },
   { table: "agent_run_items", class: "item", why: "Links a model run to an item; the review gate counts the item's Opus review runs." },
   { table: "ci_fixes", class: "item", why: "CI fix rows of one PR (cifix facts, push chain, lint)." },

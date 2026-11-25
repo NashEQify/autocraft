@@ -7,7 +7,7 @@ import type { ItemRef } from "../../web/src/api/types.ts";
 import { createHash } from "node:crypto";
 import { jevParallel } from "../agents/accounts.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
-import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, noteJevStatus } from "../agents/jev.ts";
+import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
 import { accountConfigDir, itemRepos, NoTakerError, poolRoom, repoBatches, startClaudeRun, type PoolRoom, startJevRun, tryStartFollowUp, isHalt, type Started } from "../agents/call.ts";
 import { touchStore, type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun, packText, setRunProgress } from "../agents/runs.ts";
@@ -868,7 +868,6 @@ export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: str
     } catch { /* the caller reports an unreadable answer */ }
     // A step that sums its retries into one row (usage option of runModelStep) saves nothing here.
     if (tokens && perCallUsage) await saveUsage(db, String(runId), "jev", id.split(".")[0]!, JEV_PROMPTS[id].models[0]!, 1, { ...tokens, cost: tokens.input * JEV_USD_PER_INPUT_TOKEN }, start, now());
-    noteJevStatus(r.stderr);
     const outage = jevFailure(r);
     if (outage) await markJevUnavailable(db, outage.kind, outage.reason);
     else if (r.code === 0 && tokens) await markJevWorking(db, Date.parse(start));
@@ -913,14 +912,15 @@ export async function runHaiku(db: Db, runId: string, items: Item[], batchSize =
  */
 /** Answers of the extra questions a chunk's classify requests carried (renderClassifyJev), by ref; only valid ones. */
 export type JevExtraAnswers = { impact: Map<string, JevImpact>; area: Map<string, AreaAnswer> };
-export type JevRun = { saved: Set<string> } & JevExtraAnswers;
+/** `statuses`: the API statuses of the chunk's calls that were not OK, with their counts. */
+export type JevRun = { saved: Set<string>; statuses: Map<string, number> } & JevExtraAnswers;
 
 /** Usage agent names of an item's classify request: classify's row, and the rows of the extra steps it asks for. */
 export const jevAgents = (ref: string, extra?: ClassifyExtras): string[] => [`jev-${ref}`, ...(extra?.impact ? [`priority-jev-${ref}`] : []), ...(extra?.areas ? [`areas-jev-${ref}`] : [])];
 
 /**
  * The usage row of a classify request split into one row per step it asked for, each step's share in proportion to the length of
- * the request it would have sent alone; the classify row keeps the rounding remainder, so the rows add up to the call. A share's
+ * the request it would have sent alone; the classify row keeps the rounding remainder and the cache counts, so the rows add up to the call. A share's
  * items count is 1 when that step's answer was valid.
  */
 function splitUsage(row: UsageRow, item: Item, extra: ClassifyExtras, a: ClassifyAnswer | null): UsageRow[] {
@@ -934,11 +934,12 @@ function splitUsage(row: UsageRow, item: Item, extra: ClassifyExtras, a: Classif
   const total = parts.reduce((n, x) => n + x.len, 0);
   const share = (n: number, len: number) => Math.floor((n * len) / total);
   const rows = parts.map((x) => {
-    const input = share(row.u.input, x.len), output = share(row.u.output, x.len);
-    return { ...row, agent: x.agent, stage: x.stage, items: x.items, u: { ...row.u, input, output } };
+    const u: Usage = { input: share(row.u.input, x.len), output: share(row.u.output, x.len), cacheRead: 0, cacheWrite: 0, cost: null };
+    return { ...row, agent: x.agent, stage: x.stage, items: x.items, u };
   });
   const first = rows[0]!;
-  first.u = { ...first.u, input: row.u.input - rows.slice(1).reduce((n, r) => n + r.u.input, 0), output: row.u.output - rows.slice(1).reduce((n, r) => n + r.u.output, 0) };
+  // Cache counts and any per-model extras stay whole on the classify row.
+  first.u = { ...row.u, input: row.u.input - rows.slice(1).reduce((n, r) => n + r.u.input, 0), output: row.u.output - rows.slice(1).reduce((n, r) => n + r.u.output, 0) };
   for (const r of rows) r.u = { ...r.u, cost: r.u.input * JEV_USD_PER_INPUT_TOKEN };
   return rows;
 }
@@ -952,25 +953,30 @@ export async function runJev(db: Db, runId: string, items: Item[], width?: numbe
   if (width === undefined) width = await jevParallel(db);
   // Read once per chunk; a failed call reads it again, since a call that fails is how an outage shows.
   let up = await jevAvailable(db);
-  const sinkUsage: UsageRow[] = [], verdicts: { v: Verdict; hash?: string }[] = [];
-  const out: JevRun = { saved: new Set(), impact: new Map(), area: new Map() };
+  const sinkUsage: UsageRow[] = [], verdicts: { v: Verdict; hash?: string }[] = [], failed: [string, number, string][] = [];
+  const out: JevRun = { saved: new Set(), impact: new Map(), area: new Map(), statuses: new Map() };
   try {
     await pool(items.map((item) => async () => {
       // Once a call shows Jev is unavailable, the items still waiting are left for Haiku.
       if (!up) return;
       const ref = refOf(item), extra = extras?.get(ref) ?? {};
       const mine: UsageRow[] = [];
-      const r = await runModelStep(db, CLASSIFY_JEV, { item, ...extra }, { available: async () => up, usage: { run: runId, agent: `jev-${ref}`, stage: "classify", sink: mine, items: (ok) => (ok ? 1 : 0), withoutUsage: true, skipWhen: async (x) => !x.ok && !(up = await jevAvailable(db)) } });
+      const r = await runModelStep(db, CLASSIFY_JEV, { item, ...extra }, { onJevProc: (p) => { const s = jevStatus(p.stderr); if (s !== null) out.statuses.set(s, (out.statuses.get(s) ?? 0) + 1); }, available: async () => up, usage: { run: runId, agent: `jev-${ref}`, stage: "classify", sink: mine, items: (ok) => (ok ? 1 : 0), withoutUsage: true, skipWhen: async (x) => !x.ok && !(up = await jevAvailable(db)) } });
       for (const row of mine) sinkUsage.push(...splitUsage(row, item, extra, r.ok ? r.value : null));
       if (r.ok) {
         verdicts.push({ v: r.value.verdict, ...(hashes?.has(ref) && { hash: hashes.get(ref)! }) });
         if (r.value.impact) out.impact.set(ref, r.value.impact);
         if (r.value.area) out.area.set(ref, r.value.area);
-      } else if (up = await jevAvailable(db)) console.error(`jev: no valid answer for ${ref}`);
+      } else if (up = await jevAvailable(db)) {
+        console.error(`jev: no valid answer for ${ref}`);
+        if (hashes?.has(ref)) failed.push([item.repo, item.number, hashes.get(ref)!]);
+      }
     }), width);
   } finally {
     await saveUsages(db, sinkUsage);
     out.saved = await saveVerdicts(db, "jev", runId, verdicts);
+    // The Plan stops holding the prioritize step for these items until their input changes (src/core/decide-item.ts).
+    for (const [repo, number, hash] of failed) await db.run(db.k.updateTable("main.items").set({ jev_failed_hash: hash }).where("repo", "=", repo).where("number", "=", number));
   }
   return out;
 }

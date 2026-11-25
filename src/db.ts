@@ -118,6 +118,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["items", "embed_hash", "TEXT"],
   ["items", "class_hash", "TEXT"],
   ["items", "class_scheme", "TEXT"],
+  // The classifier input hash (class_hash) at which a classify.jev request gave no valid verdict while Jev was up: the Plan then stops holding the prioritize step for that request.
+  ["items", "jev_failed_hash", "TEXT"],
   ["jobs", "repo", "TEXT"],
   ["build_tasks", "patch", "TEXT"],
   ["build_tasks", "warm_key", "TEXT"],

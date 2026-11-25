@@ -96,6 +96,8 @@ export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
   onAttempt?: (input: I, attempt: number) => void;
   /** Called with each Claude reply before it is parsed (log the lint outcome, read `turns`). */
   onReply?: (reply: LintedReply) => void;
+  /** Jev: called with each finished `jev ask` (its exit code and stderr), before it is parsed. */
+  onJevProc?: (p: { code: number | null; stderr: string }) => void;
 };
 
 export type StepResult<I, V> =
@@ -180,12 +182,13 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
 async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C>): Promise<Reply | null> {
   if (step.provider === "claude") {
     const lint = step.lint?.make(input, opts.ctx as C);
-    const { ctx: _c, usage: _u, cancelled: _x, ask, model: m, onAttempt: _a, onReply: _r, ...ask_ } = opts;
+    const { ctx: _c, usage: _u, cancelled: _x, ask, model: m, onAttempt: _a, onReply: _r, onJevProc: _p, ...ask_ } = opts;
     const model = m ?? step.model ?? CLAUDE_PROMPTS[step.id].models[0]!;
     return ask ? ask(input, lint) : askClaude(step.id, model, (step.toPrompt ? step.toPrompt(input) : input) as never, db, { ...ask_, ...(lint && { lint }) });
   }
   const { item, body } = step.request(input, opts.ctx as C);
   const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupePair), opts.usage === undefined);
+  opts.onJevProc?.(p);
   type Json = { answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number } };
   let parsed: unknown = null;
   try { parsed = JSON.parse(p.stdout); } catch { /* the step reports an unreadable answer */ }

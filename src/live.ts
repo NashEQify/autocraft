@@ -15,7 +15,7 @@ type Source = { table: string; ops?: ("INSERT" | "UPDATE" | "DELETE")[]; when?: 
 export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
   workspaces: ["updated_at", "last_call_at", "next_call", "create_tries", "pod_created_at"],
   repos: ["synced_at", "high_water", "reconciled_at"],
-  items: ["embed_hash", "class_hash", "class_scheme", "text_refs"],
+  items: ["embed_hash", "class_hash", "class_scheme", "text_refs", "jev_failed_hash"],
   classifications: ["at", "input_hash"],
   pr_checks: ["fetched_at"],
   main_ci: ["updated_at"],

@@ -66,7 +66,7 @@ const itemRows = (db: Db, model: string) => db.k.selectFrom("items as i").innerJ
   .leftJoin("fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "i.repo").onRef("fa.number", "=", "i.number"))
   .leftJoin("build_tasks as ht", "ht.id", "fa.head_task_id").leftJoin("build_tasks as bt", "bt.id", "fa.base_task_id")
   .select((eb) => ["i.repo", "i.number", "i.kind", "i.state", "i.author", "i.assignees", "i.is_draft", "i.updated_at", "i.labels", "i.embed_hash",
-    eb.case().when("i.class_scheme", "=", SCHEME_ID).then(eb.ref("i.class_hash")).end().as("class_hash"),
+    eb.case().when("i.class_scheme", "=", SCHEME_ID).then(eb.ref("i.class_hash")).end().as("class_hash"), "i.jev_failed_hash",
     fastScoreExpr(db, eb, "i.repo", "i.number", "r.score").as("score"),
     pilotExpr(db, eb, "i").as("in_pilot"), notOwnIntegrationExpr(db, eb, "i").as("not_integration"), backlogHeldExpr(db, eb, "i").as("held_backlog"),
     eb.or([
@@ -316,6 +316,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
       classification: {
         status: settled.status, label: settled.label, flags: settled.flags, jevLabel: settled.jevLabel, haikuLabel: settled.haikuLabel,
         referee: settled.referee ? { sure: settled.referee.sure, final: refereeClosed(settled.referee), failedAt: settled.referee.failedAt ?? null } : null, jev, haiku,
+        jevFailed: classHash !== null && r.jev_failed_hash === classHash,
       },
       embedHash, embeddedHash: asText(r.e_hash, r.embed_hash), priorityHash: asText(r.pr_hash, r.embed_hash), scannedHash: asText(r.scan_hash, r.embed_hash),
       pairsToCheck: pairs.get(ref) ?? 0, inGroupToAsk: inGroup.has(ref), inCompareSet: inCompare.get(ref) ?? false, dupeAnswers: dupeAnswers.get(ref) ?? [],
