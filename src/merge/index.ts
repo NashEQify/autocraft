@@ -7,6 +7,7 @@
 import { mergeHeld } from "./holds.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
 import { mergeScope, mergeVerdicts } from "./approval.ts";
+import { DRAFT_REFUSAL } from "./safe-merge.ts";
 import { ACTION_WAITS, mergeWaits } from "../core/may.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
