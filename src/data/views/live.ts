@@ -1,8 +1,8 @@
 // The live board: running, queued and lately ended jobs, calls and build tasks without a job, open integration batches and, for staff,
-// the worker rows, in three waves of loaders. The lanes are assembled by the handler.
+// the worker rows, in two waves of loaders. The lanes are assembled by the handler.
 import type { Db } from "../../db/index.ts";
 import type { HiddenRepos } from "../control/types.ts";
-import { loadStandaloneTasks, loadTaskCards, loadTaskDurations } from "../build/tasks-views.ts";
+import { loadOpenTaskDurations, loadStandaloneTasks, loadTaskCards } from "../build/tasks-views.ts";
 import type { TaskCard } from "../build/types.ts";
 import { loadCallDurations, loadJobRuns, loadLooseRuns, loadWorkerRuns } from "../inference/views.ts";
 import type { RunRow } from "../inference/types.ts";
@@ -29,9 +29,9 @@ export type LiveView = {
   jobTasks: Map<number, TaskCard[]>;
   /** The combined-tree tasks of the open batches, by task id. */
   batchTasks: Map<number, TaskCard>;
-  /** Earlier done calls by `step:model`. */
+  /** Earlier done calls by `step:model`, of the calls running now. */
   callDurations: Map<string, { startedAt: string; endedAt: string }[]>;
-  /** Earlier done tasks' durations in ms by `repo|step`. */
+  /** Earlier done tasks' durations in ms by `repo|step`, of the tasks not ended. */
   taskDurations: Map<string, number[]>;
   shown: Map<string, ItemShown>;
 };
@@ -40,9 +40,9 @@ export type LiveView = {
 export const LIVE_SAMPLES = 60;
 
 /**
- * Wave 1: the job board, runs without a job, open batches, standalone tasks, and, for staff,
- * the worker runs and runner board. Wave 2: calls and tasks of the board's jobs and of the batches, and the durations of the running jobs' steps. Wave 3: the earlier durations behind the
- * estimates of what runs now and the shown fields of every first item.
+ * Wave 1: the job board, runs without a job, open batches, standalone tasks, and, for staff, the worker runs and runner board.
+ * Wave 2: calls and tasks of the board's jobs and of the batches, the durations of the running jobs' steps, the earlier durations
+ * behind the estimates of the calls and tasks that run now, and the shown fields of every first item.
  */
 export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: boolean }, o: LiveOptions): Promise<LiveView> {
   const vis = { hidden: scope.hidden, staff: scope.staff };
@@ -58,18 +58,6 @@ export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: 
   ]));
   const jobIds = [...board.running, ...board.queued, ...board.recent].map((j) => j.id);
   const taskIds = batches.flatMap((b) => (b.task_id === null ? [] : [b.task_id]));
-  const [jobRuns, jobTasks, batchCards, stepDurations] = await db.together(() => Promise.all([
-    loadJobRuns(db, jobIds, vis),
-    loadTaskCards(db, jobIds, taskScope),
-    loadStandaloneTasks(db, { ids: taskIds }, taskScope),
-    loadStepDurations(db, [...new Set(board.running.map((j) => j.step))]),
-  ]));
-  const batchTasks = new Map(batchCards.map((t) => [t.id, t]));
-
-  const running = [...looseRuns, ...[...jobRuns.values()].flat(), ...(workerRuns ?? [])].filter((r) => r.state === "running");
-  const pairs = new Map<string, { step: string; model: string }>(running.map((r) => [`${r.step}:${r.model}`, { step: r.step, model: r.model }]));
-  const jobTaskCards = [...jobTasks.values()].flat();
-  const tasks = new Map<string, { repo: string; step: string }>([...standalone, ...jobTaskCards, ...batchCards].filter((t) => !t.endedAt).map((t) => [`${t.repo}|${t.step}`, { repo: t.repo, step: t.step }]));
   const refs = [
     ...[...board.items.values()].flatMap((l) => (l[0] ? [{ repo: l[0].repo, number: l[0].number }] : [])),
     ...looseRuns.flatMap((r) => (r.firstRepo !== null && r.firstNumber !== null ? [{ repo: r.firstRepo, number: r.firstNumber }] : [])),
@@ -77,10 +65,15 @@ export async function loadLiveView(db: Db, scope: { hidden: HiddenRepos; staff: 
     ...batches.flatMap((b) => (b.members[0] ? [{ repo: b.repo, number: b.members[0].number }] : [])),
     ...standalone.flatMap((t) => (t.number === null ? [] : [{ repo: t.repo, number: t.number }])),
   ];
-  const [callDurations, taskDurations, shown] = await db.together(() => Promise.all([
-    loadCallDurations(db, [...pairs.values()], LIVE_SAMPLES),
-    loadTaskDurations(db, [...tasks.values()], LIVE_SAMPLES),
+  const [jobRuns, jobTasks, batchCards, stepDurations, callDurations, taskDurations, shown] = await db.together(() => Promise.all([
+    loadJobRuns(db, jobIds, vis),
+    loadTaskCards(db, jobIds, taskScope),
+    loadStandaloneTasks(db, { ids: taskIds }, taskScope),
+    loadStepDurations(db, [...new Set(board.running.map((j) => j.step))]),
+    loadCallDurations(db, "running", LIVE_SAMPLES),
+    loadOpenTaskDurations(db, LIVE_SAMPLES),
     loadShown(db, refs),
   ]));
+  const batchTasks = new Map(batchCards.map((t) => [t.id, t]));
   return { board, looseRuns, batches, standalone, stepDurations, workerRuns, runnerBoard, jobRuns, jobTasks, batchTasks, callDurations, taskDurations, shown };
 }

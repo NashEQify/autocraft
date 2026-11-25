@@ -54,6 +54,14 @@ export async function loadSession(db: Db, id: string | undefined): Promise<Sessi
   return { rowid: row.rowid, idHash, login: row.login, role: row.role, csrf: row.csrf, tokenEnc: row.token_enc };
 }
 
+/** A login's cached repo permissions, by repo. */
+export type CachedPermissions = ReadonlyMap<string, access.PermEntry>;
+
+/** The cached permissions of the session's login; empty without one. Read alongside loadSession, whose answer says whether they count. */
+export async function loadSessionPermissions(db: Db, id: string | undefined): Promise<CachedPermissions> {
+  return !id || id.length > 100 ? new Map() : await access.loadPermissionsOfSession(db, sha256hex(id));
+}
+
 export async function deleteSession(db: Db, id: string): Promise<void> {
   await access.endSession(db, sha256hex(id));
 }
@@ -91,10 +99,13 @@ export async function accessToken(db: Db, box: TokenBox, provider: Provider, idH
  * unless public, and a pick is shown as `none`.
  */
 export async function userForLogin(db: Db, box: TokenBox, provider: Provider, login: string, role: Role, forWrite: boolean): Promise<User> {
-  const s = (await access.loadLiveSessionsOf(db, login)).find((x) => Date.now() < sessionEndsAt(x.created_at, role));
-  if (s) return makeUser(db, box, provider, { rowid: s.rowid, idHash: s.id_hash, login: s.login, role, csrf: s.csrf, tokenEnc: s.token_enc }, forWrite);
+  // A read's checks take every cached permission; a write's are few and read when they come.
+  const [live, cachedAll] = await Promise.all([access.loadLiveSessionsOf(db, login), forWrite ? undefined : access.loadPermissionsOf(db, login)]);
+  const s = live.find((x) => Date.now() < sessionEndsAt(x.created_at, role));
+  if (s) return makeUser(db, box, provider, { rowid: s.rowid, idHash: s.id_hash, login: s.login, role, csrf: s.csrf, tokenEnc: s.token_enc }, forWrite, false, cachedAll);
+  const permissions = permissionsOnce(db, login, cachedAll);
   const cached = async (repo: string): Promise<string | null> => {
-    const row = (await access.loadPermissions(db, [{ login, repo }])).get(access.permKey(login, repo));
+    const row = (await permissions()).get(repo);
     return row && Date.now() - Date.parse(row.checkedAt) < (forWrite ? PERM_WRITE_TTL : PERM_READ_TTL) ? row.permission : null;
   };
   return {
@@ -102,6 +113,18 @@ export async function userForLogin(db: Db, box: TokenBox, provider: Provider, lo
     canWrite: async (repo) => WRITE_PERMISSIONS.has(await cached(repo) ?? ""),
     canRead: async (repo) => { const p = await cached(repo); return p !== null && p !== "none"; },
     permissionError: async (repo) => await cached(repo) === null ? `${login} has no live dashboard session to read the permission on ${repo} from GitHub` : null,
+  };
+}
+
+/** Reads a login's cached permissions at the first call, unless given; a failed read is tried again. */
+function permissionsOnce(db: Db, login: string, given?: CachedPermissions): () => Promise<CachedPermissions> {
+  let read: Promise<CachedPermissions> | undefined = given && Promise.resolve(given);
+  return () => {
+    if (!read) {
+      read = access.loadPermissionsOf(db, login);
+      void read.catch(() => { read = undefined; });
+    }
+    return read;
   };
 }
 
@@ -113,8 +136,10 @@ export async function cachedWrite(db: Db, login: string, repo: string, maxAgeMs:
 
 // `forWrite` is true on POST requests: a handler that calls canWrite there is
 // about to write, so the cached permission must be at most a minute old.
-export function makeUser(db: Db, box: TokenBox, provider: Provider, s: Session, forWrite: boolean, mirrorUserTokens = false): User {
+// `cached` holds the login's cached permissions when the caller has read them already; else they are read at the first check, all at once.
+export function makeUser(db: Db, box: TokenBox, provider: Provider, s: Session, forWrite: boolean, mirrorUserTokens = false, cached?: CachedPermissions): User {
   const memo = new Map<string, Promise<string | null>>();
+  const permissions = permissionsOnce(db, s.login, cached);
   const failed = new Map<string, string>();
   const fail = (repo: string, why: string): null => {
     failed.set(repo, why);
@@ -124,8 +149,8 @@ export function makeUser(db: Db, box: TokenBox, provider: Provider, s: Session, 
   const check = async (repo: string): Promise<string | null> => {
     if (!REPO_NAME.test(repo)) return fail(repo, `${repo} is not a repo name`);
     const maxAge = forWrite ? PERM_WRITE_TTL : PERM_READ_TTL;
-    const cached = (await access.loadPermissions(db, [{ login: s.login, repo }])).get(access.permKey(s.login, repo));
-    if (cached && Date.now() - Date.parse(cached.checkedAt) < maxAge) return cached.permission;
+    const known = (await permissions()).get(repo);
+    if (known && Date.now() - Date.parse(known.checkedAt) < maxAge) return known.permission;
     let permission: string | undefined;
     try {
       const noToken = (t: string | null | undefined): null => fail(repo, t === null ? `${s.login}'s dashboard session has ended; sign in again` : `${s.login}'s GitHub token could not be refreshed (GitHub did not answer)`);

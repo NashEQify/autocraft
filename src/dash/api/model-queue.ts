@@ -46,9 +46,7 @@ export async function get(db: Db, req: Req): Promise<ModelQueue> {
   const hidden = await hiddenRepos(db, req);
   // Operators see every repo; others only repos on their allow-list.
   const visible = req.user.role === "operator" ? null : new Set(hidden.visible ?? []);
-  const { calls, runners } = await queueView(db, nowMs, staff);
-  const state = await pickerState(db, req.user, nowMs);
-  const fresh = await pickerLogins(db, nowMs);
+  const [{ calls, runners }, state, fresh, onlyPicked] = await Promise.all([queueView(db, nowMs, staff), pickerState(db, req.user, nowMs), pickerLogins(db, nowMs), manualOnly(db, req.user.login)]);
   const memo = new Map<string, Promise<boolean>>();
   const user = { ...req.user, canWrite: (repo: string) => { let p = memo.get(repo); if (!p) memo.set(repo, (p = req.user.canWrite(repo).catch(() => false))); return p; } };
   const out: ModelQueueCall[] = [];
@@ -67,7 +65,7 @@ export async function get(db: Db, req: Req): Promise<ModelQueue> {
   return {
     calls: out,
     runners: { autopilot: runners.length - manual.length, manual: manual.length, ...(staff && { manualLogins: [...new Set(manual.map((r) => r.login))].sort() }) },
-    me: { canPick: state.canPick, manualOnly: await manualOnly(db, req.user.login), picks: state.picks, pickMax: state.pickMax },
+    me: { canPick: state.canPick, manualOnly: onlyPicked, picks: state.picks, pickMax: state.pickMax },
   };
 }
 

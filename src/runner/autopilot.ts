@@ -996,20 +996,19 @@ async function stepStatus(db: Db, step: string, why: string | undefined): Promis
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
   const steps = await loadSteps();
   return await withPassReads(db, Date.now(), async () => {
-    const why = await stageStatus(db);
-    const trips = [...(await loadTrips(db, { active: true })).values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
-    return await mapSeq(LIMIT_STEPS, async (step) => {
-      const l = await limitRow(db, step);
+    const [why, active] = await Promise.all([stageStatus(db), loadTrips(db, { active: true })]);
+    const trips = [...active.values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
+    return await Promise.all(LIMIT_STEPS.map(async (step) => {
+      const [l, usedToday, pausedReason, status] = await Promise.all([limitRow(db, step), usageToday(db, step), pauseReason(db, step), stepStatus(db, step, why[step])]);
       // canResume is the viewer's: the dashboard API sets it per request.
       const mine = trips.filter((t) => t.tripStage === STEP_STAGE[step]).map((t) => ({ key: t.stage, repo: t.repo, reason: t.reason, since: t.trippedAt, canResume: false }));
-      return { step, title: steps.get(step)?.title ?? step, perDay: l.perDay, usedToday: await usageToday(db, step), pausedReason: await pauseReason(db, step), ...(mine.length ? { trips: mine } : {}), status: await stepStatus(db, step, why[step]) };
-    });
+      return { step, title: steps.get(step)?.title ?? step, perDay: l.perDay, usedToday, pausedReason, ...(mine.length ? { trips: mine } : {}), status };
+    }));
   });
 }
 
 export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside" | "blockers">> {
-  const [live, marks] = await db.together(() => Promise.all([loadLiveConfig(db), loadLaneState(db, ["mark"])]));
-  const limits = await stageLimits(db);
+  const [live, marks, limits] = await db.together(() => Promise.all([loadLiveConfig(db), loadLaneState(db, ["mark"]), stageLimits(db)]));
   return {
     enabled: live.pipelineEnabled, draining: live.drain, changedBy: live.changedBy, changedAt: live.changedAt,
     heartbeat: marks.get("mark|heartbeat|")?.value ?? null, limits,

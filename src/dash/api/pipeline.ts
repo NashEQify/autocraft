@@ -44,12 +44,12 @@ function requireOperator(req: Req, step?: StepDef): void {
 
 /** The pipeline state for the requester: reasons that name a hidden repo and trips on one are left out. */
 async function pipelineState(db: Db, req: Req): Promise<PipelineState> {
-  const [s, hidden] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req)]);
+  const [s, hidden, outside, large, minLines] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req), hiddenRepos(db, req).then((h) => outsideState(db, h)), largeFixLines(db), outsidePurposeMin(db)]);
   const limits = await mapSeq(s.limits, async ({ trips, ...l }) => {
     const shown = await mapSeq((trips ?? []).filter((t) => t.repo === null || !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(db, req.user, t.key) }));
     return { ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null, ...(shown.length ? { trips: shown } : {}) };
   });
-  return { ...s, outside: await outsideState(db, hidden), limits, blockers: { largeFixLines: await largeFixLines(db), outsidePurposeMin: await outsidePurposeMin(db) } };
+  return { ...s, outside, limits, blockers: { largeFixLines: large, outsidePurposeMin: minLines } };
 }
 
 /** Viewers read that a job failed, not why: the error carries log and command text. */

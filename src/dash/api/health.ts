@@ -10,7 +10,7 @@ import { checksOf, healthOptions } from "../../health-checks.ts";
 import { effectsInTx } from "../../db/effects.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { t } from "../../i18n/index.ts";
-import { mainCiRepos } from "../../mainci/index.ts";
+import { mainCiRepos, type MainCiRepoRow } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadSteps } from "../../runner/steps.ts";
 import type { Req } from "../types.ts";
@@ -26,17 +26,16 @@ const areaOf = (id: string): HealthProblem["area"] =>
   id === "runner" ? "runner" : id.startsWith("deadline:") ? "deadline" : id === "liveness" ? "liveness" : id.startsWith("worker:") || id === "build-queue" ? "workers" : id === "user-tokens" ? "account" : "sync";
 
 /** Facts several problem lists read, so the Jev outage and the red main branches are read once per request. */
-export type ProblemFacts = { hidden: HiddenRepos; staff: boolean; nowMs: number; facts: Pick<AttentionFacts, "health" | "failedJobs"> };
+export type ProblemFacts = { hidden: HiddenRepos; staff: boolean; nowMs: number; facts: Pick<AttentionFacts, "health" | "failedJobs">; ci: MainCiRepoRow[] };
 
 /** The pipeline switch, the health checks that are not ok, the Jev outage, red main branches of repos whose pipeline is on and the last hour's failed jobs. */
 export async function healthProblems(db: Db, o: ProblemFacts): Promise<{ state: PipelineSwitch; problems: HealthProblem[] }> {
-  const { hidden, staff, facts } = o;
+  const { hidden, staff, facts, ci } = o;
   // Repos with the pipeline off are off by design; their red mains stay on the Main CI page.
   const on = new Set([...facts.health.tracked.values()].filter((r) => r.pipeline).map((r) => r.name));
-  const [state, outage, ci, checks] = await Promise.all([
+  const [state, outage, checks] = await Promise.all([
     pipelineSwitch(db),
     jevEnabled(db).then(async (enabled) => (enabled ? await jevOutage(db) : null)),
-    mainCiRepos(db, hidden),
     checksOf(db, facts.health, { nowMs: o.nowMs, probe: false }),
   ]);
   const out: HealthProblem[] = [];
@@ -68,11 +67,11 @@ export async function health(db: Db, req: Req): Promise<Health> {
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
   const nowMs = Date.now();
-  const [facts, steps] = await Promise.all([
+  const [facts, ci, steps] = await Promise.all([
     loadAttention(db, { hidden }, { nowMs, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY } }),
-    loadSteps(),
+    mainCiRepos(db, hidden), loadSteps(),
   ]);
-  const { state, problems } = await healthProblems(db, { hidden, staff, nowMs, facts });
+  const { state, problems } = await healthProblems(db, { hidden, staff, nowMs, facts, ci });
   for (const trip of facts.stops.trips) {
     // A push stage trips per repo or on every repo: the problem says which, and a trip on a hidden repo is left out.
     const k = tripOf(trip.stage);

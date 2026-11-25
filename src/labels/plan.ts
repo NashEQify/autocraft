@@ -2,6 +2,7 @@
 import { forRun, settleRows, type ClsRow } from "./settled.ts";
 import { isTypeLabel, sameLabel } from "./set.ts";
 import { listItems } from "../data/mirror/index.ts";
+import type { ItemOf } from "../data/mirror/types.ts";
 import { loadOwnIntegration } from "../data/merge/index.ts";
 import { listQuietPrs } from "../data/security/index.ts";
 import { loadLabelVerdicts } from "../data/triage/index.ts";
@@ -14,29 +15,36 @@ export type PlanRow = {
 };
 export type PlanCounts = { toAdd: number; already: number; unsettled: number; conflicts: number };
 
-export async function planLabels(db: Db, repo: string, runId?: string): Promise<PlanRow[]> {
-  const [listed, own, quiet, cls] = await db.together(() => Promise.all([
-    listItems(db, { repos: [repo], states: ["OPEN"], inScope: true }, "card"), loadOwnIntegration(db, [repo]), listQuietPrs(db, { repo }), loadLabelVerdicts(db, repo, runId),
-  ]));
-  const items = listed.filter((i) => !own.has(`${repo}#${i.number}`));
-  const byItem = (n: number): ClsRow[] => cls.get(`${repo}#${n}`) ?? [];
+export const planLabels = async (db: Db, repo: string, runId?: string): Promise<PlanRow[]> => (await planLabelsOf(db, [repo], runId)).get(repo) ?? [];
 
-  return items.map((it) => {
-    let existing: string[] = [];
-    try {
-      existing = (JSON.parse(it.labels ?? "[]") as unknown[]).map(String);
-    } catch { /* unreadable labels count as none */ }
-    const row = { number: it.number, kind: it.kind, url: it.url ?? "", settled: "", existing, add: [] as string[], note: "" };
-    const settled = settleRows(forRun(byItem(it.number), runId));
-    const s = settled && quiet.has(`${repo}#${it.number}`) ? { ...settled, security: false } : settled;
-    if (!s) return { ...row, status: "unsettled" as const };
-    row.settled = s.type;
-    const other = existing.filter((l) => isTypeLabel(l) && !sameLabel(l, s.type));
-    if (other.length) return { ...row, status: "conflict" as const, note: `has ${other.join(", ")}` };
-    const want = [s.type, ...(s.security ? ["security"] : []), ...(s.needsDecision ? ["needs decision"] : [])];
-    const add = want.filter((w) => !existing.some((e) => sameLabel(e, w)));
-    return { ...row, add, status: add.length ? ("add" as const) : ("already" as const) };
-  });
+/** The plan of each repo, in one wave. */
+export async function planLabelsOf(db: Db, repos: string[], runId?: string): Promise<Map<string, PlanRow[]>> {
+  const [listed, own, quiet, cls] = await db.together(() => Promise.all([
+    listItems(db, { repos, states: ["OPEN"], inScope: true }, "card"), loadOwnIntegration(db, repos), listQuietPrs(db), loadLabelVerdicts(db, repos, runId),
+  ]));
+  const out = new Map<string, PlanRow[]>();
+  for (const it of listed) {
+    if (own.has(`${it.repo}#${it.number}`)) continue;
+    (out.get(it.repo) ?? out.set(it.repo, []).get(it.repo)!).push(planOf(it, cls.get(`${it.repo}#${it.number}`) ?? [], quiet, runId));
+  }
+  return out;
+}
+
+function planOf(it: ItemOf<"card">, rows: ClsRow[], quiet: ReadonlySet<string>, runId: string | undefined): PlanRow {
+  let existing: string[] = [];
+  try {
+    existing = (JSON.parse(it.labels ?? "[]") as unknown[]).map(String);
+  } catch { /* unreadable labels count as none */ }
+  const row = { number: it.number, kind: it.kind, url: it.url ?? "", settled: "", existing, add: [] as string[], note: "" };
+  const settled = settleRows(forRun(rows, runId));
+  const s = settled && quiet.has(`${it.repo}#${it.number}`) ? { ...settled, security: false } : settled;
+  if (!s) return { ...row, status: "unsettled" as const };
+  row.settled = s.type;
+  const other = existing.filter((l) => isTypeLabel(l) && !sameLabel(l, s.type));
+  if (other.length) return { ...row, status: "conflict" as const, note: `has ${other.join(", ")}` };
+  const want = [s.type, ...(s.security ? ["security"] : []), ...(s.needsDecision ? ["needs decision"] : [])];
+  const add = want.filter((w) => !existing.some((e) => sameLabel(e, w)));
+  return { ...row, add, status: add.length ? ("add" as const) : ("already" as const) };
 }
 
 export function countPlan(rows: PlanRow[]): PlanCounts {

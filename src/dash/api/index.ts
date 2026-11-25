@@ -355,11 +355,8 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
 }
 
 async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
-  const heavy = await progressItems(db, hidden);
-  return {
-    ...heavy,
-    mainCi: summarize(await mainCiRepos(db, hidden)),
-  };
+  const [heavy, ci] = await Promise.all([progressItems(db, hidden), mainCiRepos(db, hidden)]);
+  return { ...heavy, mainCi: summarize(ci) };
 }
 
 // ---- routes --------------------------------------------------------------

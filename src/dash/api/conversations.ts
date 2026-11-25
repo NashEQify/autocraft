@@ -3,7 +3,7 @@
 import type { Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
 import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandText, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
 import { queueReason } from "../../conversations/queue.ts";
-import { cardDigest, cardOf, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
+import { cardDigest, cardOf, dismissCard, doCard, editCard, isStaleRunning, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
 import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
 import { ConversationError, loadQueue, loadThreads, type Queue, type Thread } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
@@ -119,14 +119,18 @@ function issueOf(p: CardParams): { title: string } | undefined {
 export type ConversationView = Conversation;
 
 async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promise<{ thread: Thread | undefined; view: Omit<ConversationView, "canTalk" | "canWithdraw"> }> {
-  // A card left Running by a crash must not show as running until the next restart.
-  await sweepRunningCards(db);
   const key = `${repo}#${n}`;
-  const thread = (await loadThreads(db, [key])).get(key);
+  let thread = (await loadThreads(db, [key])).get(key);
+  // A card left Running by a crash must not show as running until the next restart.
+  if (thread?.cards.some((c) => isStaleRunning(c))) {
+    await sweepRunningCards(db);
+    thread = (await loadThreads(db, [key])).get(key);
+  }
   if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [] } };
   const shared = await cardsView(db, thread.cards);
   const actions = new Map<number, ConversationCard[]>();
-  for (const c of thread.cards) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(await viewOf(db, c, shared, who));
+  const views = await Promise.all(thread.cards.map((c) => viewOf(db, c, shared, who)));
+  for (const [i, c] of thread.cards.entries()) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(views[i]!);
   const turns: ConversationTurn[] = thread.turns.map((t) => ({
     id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,
     actions: actions.get(t.id) ?? [],
@@ -162,17 +166,17 @@ function ask(req: Req): boolean {
 
 /** The conversation as the requester sees it, with whether they may write to Opus and withdraw the maintainer's message that waits. */
 async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<ConversationView> {
-  const { thread, view } = await threadView(db, repo, n, req.user);
+  const [{ thread, view }, may] = await Promise.all([threadView(db, repo, n, req.user), canTalk(db, req.user, repo)]);
   const wait = thread?.waiting;
   const canWithdraw = wait?.kind === "maintainer" && (isOperator(req) || wait.login.toLowerCase() === req.user.login.toLowerCase());
-  return { ...view, canTalk: await canTalk(db, req.user, repo), canWithdraw };
+  return { ...view, canTalk: may, canWithdraw };
 }
 
 export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
-  const view = await viewFor(db, req, repo, n);
-  return !canSeeInternals(req) && (await loadQuiet(db, [`${repo}#${n}`])).size > 0 ? veilConversation(view) : view;
+  const [view, quiet] = await Promise.all([viewFor(db, req, repo, n), canSeeInternals(req) ? new Set<string>() : loadQuiet(db, [`${repo}#${n}`])]);
+  return quiet.size > 0 ? veilConversation(view) : view;
 }
 
 /** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, and cards go. */

@@ -41,16 +41,16 @@ function viewOf(r: Row, tasks: ReadonlyMap<number, TaskRecord>): VerificationVie
 }
 
 /**
- * Verification rows of the items in `keys` with their tasks: the rows in one statement, the tasks in a second wave. With
+ * Verification rows of the items in `keys` with their tasks (none with `tasks: false`): two statements in one wave. With
  * `heads`, only the row at the item's current head.
  */
-export async function loadVerifications(db: Db, keys: KeySource, o?: { heads?: boolean }): Promise<Map<HeadRef, VerificationView>> {
+export async function loadVerifications(db: Db, keys: KeySource, o?: { heads?: boolean; tasks?: boolean }): Promise<Map<HeadRef, VerificationView>> {
   const q = queryDb(db);
-  const rows = await q.all((q.k as any).selectFrom("verifications as v")
+  const of = (): any => (q.k as any).selectFrom("verifications as v")
     .innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "v.repo").onRef("kk.number", "=", "v.number"))
-    .select(cols)
-    .$if(!!o?.heads, (s: any) => s.where((eb: any) => eb("v.head_sha", "=", itemHead(eb, "v.repo", "v.number")))) as any) as Row[];
-  const tasks = await tasksOf(db, rows);
+    .$if(!!o?.heads, (s: any) => s.where((eb: any) => eb("v.head_sha", "=", itemHead(eb, "v.repo", "v.number"))));
+  const ids = of().select("v.head_task_id as id").unionAll(of().select("v.base_task_id as id"));
+  const [rows, tasks] = await db.together(() => Promise.all([q.all(of().select(cols)) as Promise<Row[]>, o?.tasks === false ? new Map<number, TaskRecord>() : loadTasks(db, ids)]));
   return new Map(rows.map((r) => [headOf(r.repo, r.number, r.head_sha), viewOf(r, tasks)]));
 }
 

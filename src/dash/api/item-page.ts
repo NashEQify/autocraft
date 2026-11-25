@@ -7,14 +7,14 @@ import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemImplementation, 
 import { statusFromItem, type ItemStatus } from "../../core/item-status.ts";
 import { triggerWhy } from "../../review/trigger.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
-import { context, eventsFrom, shape, traceScope, writeActions, obj, arr, type Ctx, type Ev } from "./trace.ts";
+import { context, contextScope, eventsFrom, shape, traceScope, writeActions, obj, arr, type Ctx, type Ev } from "./trace.ts";
 import { timelineOf } from "./item-timeline.ts";
 import { implementationFrom, implementationView } from "./item-implementation.ts";
 import { barOf } from "./item-bar.ts";
 import { discordOf } from "./discord.ts";
 import { matchWrites, pushedIn, MATCH_WINDOW_MS, type WriteRow } from "./github-writes.ts";
 import { actionsOf as releasesOf } from "../../operator-actions.ts";
-import { queueSlots } from "../../rank/position.ts";
+import { computeStages, slotsOf } from "../../rank/position.ts";
 import { visibleRepos } from "./visible.ts";
 import { itemReader, statusFor } from "./reader.ts";
 import type { Req } from "../types.ts";
@@ -22,6 +22,7 @@ import { contributors } from "../../whitelist.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { featureOn } from "../../build/features.ts";
 import { loadItemPage, loadItemStamp, type ItemPageFacts } from "../../data/views/item-page.ts";
+import { loadItems } from "../../data/mirror/index.ts";
 import { itemState } from "./shown.ts";
 import type { Db } from "../../db/index.ts";
 import type { Preapproval as Leg } from "../../data/workflow/types.ts";
@@ -267,20 +268,24 @@ const prBuildOf = (c: Ctx, f: ItemPageFacts, on: boolean): ItemPrBuild | null =>
 // ---- the route -------------------------------------------------------------------------------------------------------------
 
 export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPageUnchanged> {
+  const ref = { repo: req.params.repo!, number: Number(req.params.n) };
+  // The stamp is read before the page, so it is never newer than the data it goes with, and an unchanged page costs only the stamp.
+  // It and the parts the view does not read (the Discord counts, the releases, the queue slot) go out with the context, whose checks decide whether they count.
+  const stamped = Promise.all([
+    contextScope(db, req).then((s) => loadItemStamp(db, s, ref)), discordOf(db, ref.repo, ref.number), releasesOf(db, ref.repo, ref.number),
+    Promise.all([visibleRepos(db, req), computeStages(db)]).then(([v, stages]) => slotsOf(stages, v)), loadItems(db, [ref], "card"),
+  ]);
+  void stamped.catch(() => {});
   const c = await context(db, req);
   const scope = traceScope(c);
-  const ref = { repo: c.repo, number: c.n };
-  // Parts the view does not read: the Discord counts, the releases, the queue slot, the author's tier and the viewer's right to use the Backlog.
-  const outside = () => Promise.all([discordOf(db, c.repo, c.n), releasesOf(db, c.repo, c.n), visibleRepos(db, req).then((v) => queueSlots(db, v))]);
-  // The stamp is read before the page, so it is never newer than the data it goes with, and an unchanged page costs only the stamp.
-  const [digest, [discord0, releases0, slots0]] = await Promise.all([loadItemStamp(db, scope, ref), outside()]);
+  const [digest, discord0, releases0, slots0, card] = await stamped;
   const stamp = createHash("sha1").update(JSON.stringify([c.staff, c.operator, c.hidden, c.veiled, ...digest, slots0.get(c.ref) ?? null, discord0, releases0])).digest("hex").slice(0, 16);
   if (req.query.get("since") === stamp) return { unchanged: true, stamp };
-  const [facts, canSettle] = await Promise.all([loadItemPage(db, scope, ref, writeActions(c.staff, c.operator)), req.user.role === "viewer" ? false : mayRunRepo(req.user, c.repo)]);
+  const author = card.get(c.ref)?.author;
+  const [facts, cs, canSettle] = await Promise.all([loadItemPage(db, scope, ref, writeActions(c.staff, c.operator)), author ? contributors(db, { login: author }) : [], req.user.role === "viewer" ? false : mayRunRepo(req.user, c.repo)]);
   const detail = facts.trace.detail;
   const row = detail.item!;
-  const cs = row.author ? (await contributors(db, { login: row.author })).find((x) => x.login === row.author) : undefined;
-  const it = itemOf(c, facts, { tier: TIER[cs?.tier ?? "not"] ?? "not", discord: discord0, releases: releases0, slot: slots0.get(c.ref) ?? null }, c.staff);
+  const it = itemOf(c, facts, { tier: TIER[cs.find((x) => x.login === author)?.tier ?? "not"] ?? "not", discord: discord0, releases: releases0, slot: slots0.get(c.ref) ?? null }, c.staff);
   const events = eventsFrom(c, facts.trace);
   const ev = shape(c, events, null);
   const status = statusOf(c, facts, it);

@@ -7,7 +7,7 @@ import type { PlanView, QueueView } from "../../core/plan-cache.ts";
 import type { QueueState } from "../../core/plan.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import type { HiddenRepos } from "../control/types.ts";
-import { planGh, queuedPlan } from "../planner/fragments.ts";
+import { planGh, planScope, queuedPlan } from "../planner/fragments.ts";
 
 /** A PR in a queue state as the merge queue lists it: the plan's state, reasons and note and the cached queue fields. `gh` is GitHub's state as mirrored. */
 export type CachedEntry = QueueView & {
@@ -49,10 +49,10 @@ export async function loadMergeQueue(db: Db, o: MergeQueueOptions = {}): Promise
   });
 }
 
-/** The cached view of every open item with a plan, by `repo#number`. 1 statement. */
-export async function loadOpenPlanViews(db: Db): Promise<Map<string, PlanView>> {
+/** The open items whose stored plan is in the pipeline's scope, as `repo#number`. 1 statement. */
+export async function loadPipelineScope(db: Db): Promise<Set<string>> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.item_plans as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-    .select(["p.repo", "p.number", "p.view"]).where("i.state", "=", "OPEN"), { label: "views.loadOpenPlanViews" });
-  return new Map(rows.map((r) => [`${r.repo}#${r.number}`, JSON.parse(r.view) as PlanView]));
+    .select(["p.repo", "p.number"]).where("i.state", "=", "OPEN").where(planScope(db, "p"), "=", 1), { label: "views.loadPipelineScope" });
+  return new Set(rows.map((r) => `${r.repo}#${r.number}`));
 }

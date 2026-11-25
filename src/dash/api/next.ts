@@ -6,10 +6,9 @@ import { loadSteps } from "../../runner/steps.ts";
 import * as control from "../../data/control/index.ts";
 import * as planner from "../../data/planner/index.ts";
 import type { Req } from "../types.ts";
-import { shownLookup } from "./shown.ts";
+import { shownMap } from "./shown.ts";
 import { blankIfHidden, visibleRepos } from "./visible.ts";
 import { readerOf, statusFor, veiledFor, type Reader } from "./reader.ts";
-import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 
 const WAITING_LIMIT = 500;
@@ -23,21 +22,21 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
   const visible = new Set(visibleNames), ms = opts.nowMs ?? Date.now();
   const reader = opts.reader ?? { staff: true, quiet: new Set<string>(), hidden: Object.assign([...(await control.loadTrackedRepos(db)).keys()].filter((r) => !visible.has(r)), { visible: visibleNames }) };
   const hidden = reader.hidden;
-  const stored = await storedLaneItems(db);
-  const shown = shownLookup(db);
-  const stepDefs = await loadSteps();
-  const status = await stageStatus(db);
+  const [stored, stepDefs, status, rows] = await Promise.all([storedLaneItems(db), loadSteps(), stageStatus(db), planner.listPlans(db, { hasWait: true })]);
+  const scoped = rows.filter((r) => visible.has(r.repo) && viewOf(r).scope);
   const wanted = Object.values(stored).flatMap((l) => (l?.items ?? []).filter((i) => visible.has(i.repo)).map((i) => ({ repo: i.repo, number: i.number })));
-  const plans = await planner.loadPlans(db, wanted);
-  const why = async (repo: string, number: number, action: string): Promise<string> =>
+  const [plans, items] = await db.together(() => Promise.all([planner.loadPlans(db, wanted), shownMap(db, [...wanted, ...scoped.slice(0, WAITING_LIMIT)])]));
+  const shown = (repo: string, number: number) => ({ ...(items.get(`${repo}#${number}`) ?? { kind: null, state: null, title: null }) });
+  const why = (repo: string, number: number, action: string): string =>
     (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText(plans.get(`${repo}#${number}`)), hidden) || null) ?? action;
   const stageOf = new Map(lanesInOrder().map((l) => [l.name, STAGES.find((s) => s.id === l.stage)?.title ?? l.stage]));
   const steps: NextStep[] = [];
-  for (const lane of LANES) {
+  const gates = await Promise.all(LANES.map((lane) => laneGate(db, lane, stepDefs, ms)));
+  for (const [at, lane] of LANES.entries()) {
     const kept = stored[lane.name]?.items ?? [];
-    const items: NextItem[] = await mapSeq(kept.filter((i) => visible.has(i.repo)), async (i) => ({ ...i, ...await shown(i.repo, i.number), why: await why(i.repo, i.number, i.action) }));
+    const items: NextItem[] = kept.filter((i) => visible.has(i.repo)).map((i) => ({ ...i, ...shown(i.repo, i.number), why: why(i.repo, i.number, i.action) }));
     const total = (stored[lane.name]?.total ?? 0) - (kept.length - items.length);
-    const gate = await laneGate(db, lane, stepDefs, ms);
+    const gate = gates[at]!;
     const open = items.filter((i) => !i.blocked);
     // Every item blocked by a repo approval: the step cannot do its work although it could start.
     const refused = !open.length && items.length ? items[0]!.blocked : null;
@@ -47,15 +46,14 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
       note: blankIfHidden((lane.steps ?? []).map((s) => status[s]).find(Boolean) ?? null, hidden) || null, total, items,
     });
   }
-  const rows = await planner.listPlans(db, { hasWait: true });
-  const scoped = rows.filter((r) => visible.has(r.repo) && viewOf(r).scope);
-  const waiting: NextWaiting[] = await mapSeq(scoped.slice(0, WAITING_LIMIT), async (r) => {
+  const waiting: NextWaiting[] = scoped.slice(0, WAITING_LIMIT).map((r) => {
     const s = statusFor(reader, r.repo, r.number, { waiting: r.wait, next: nextText(r) });
-    return { repo: r.repo, number: r.number, ...await shown(r.repo, r.number), wait: s.waiting ?? "", why: s.next };
+    return { repo: r.repo, number: r.number, ...shown(r.repo, r.number), wait: s.waiting ?? "", why: s.next };
   });
   return { steps, waiting, waitingTotal: scoped.length };
 }
 
 export async function next(db: Db, req: Req): Promise<NextPage> {
-  return nextPage(db, await visibleRepos(db, req), { reader: await readerOf(db, req) });
+  const [visible, reader] = await Promise.all([visibleRepos(db, req), readerOf(db, req)]);
+  return nextPage(db, visible, { reader });
 }

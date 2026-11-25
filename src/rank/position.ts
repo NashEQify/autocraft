@@ -3,12 +3,8 @@
 // stage follows the Merge tab's order. Items whose next step is not a queued stage (a person's answer, a running job, held, done) have none.
 // The place is current, not an estimate.
 import type { QueueSlot } from "../../web/src/api/types.ts";
-import { sortSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { openItemKeys } from "../data/mirror/index.ts";
-import { listPlans } from "../data/planner/index.ts";
-import { loadRankScores } from "../data/triage/index.ts";
-import { loadHolds, loadWorkScores } from "../data/workflow/index.ts";
+import { loadQueuedSteps } from "../data/views/queue-places.ts";
 
 /** Next step text → queued stage and the Queue tab that lists it. Steps not listed here are not queued. */
 const QUEUED: Record<string, Pick<QueueSlot, "stage" | "tab">> = {
@@ -24,27 +20,9 @@ const BATCHED = new Set(["batch-checking", "in-batch"]);
 type Entry = { repo: string; number: number; score: number } & Pick<QueueSlot, "stage" | "tab">;
 export type Stages = Map<string, Entry[]>;
 
-/** Work score of an item with started ones raised (the workflow weight), one lookup per repo. */
-export function scoreLookup(db: Db): (repo: string, number: number) => Promise<number | undefined> {
-  // The read in flight is kept, so lookups made together read each repo once.
-  const by = new Map<string, Promise<Map<string, number>>>();
-  return async (repo, number) => {
-    let m = by.get(repo);
-    if (!m) by.set(repo, (m = repoScores(db, repo)));
-    return (await m).get(`${repo}#${number}`);
-  };
-}
-
-async function repoScores(db: Db, repo: string): Promise<Map<string, number>> {
-  const [ranks, work] = await db.together(() => Promise.all([loadRankScores(db, { repos: [repo] }), loadWorkScores(db, openItemKeys({ repos: [repo] }))]));
-  return new Map([...ranks, ...work]);
-}
-
 /** The Merge tab's order, the same as every other stage's: started items first, then the work rank, then repo and number. Batched PRs are listed under their batch, not here. */
-export async function mergeOrder<T extends { repo: string; number: number; state?: string }>(db: Db, entries: T[]): Promise<T[]> {
-  const score = scoreLookup(db);
-  const s = async (e: T): Promise<number> => await score(e.repo, e.number) ?? 0;
-  return await sortSeq(entries.filter((e) => !BATCHED.has(e.state ?? "")), async (a, b) => await s(b) - await s(a) || a.repo.localeCompare(b.repo) || a.number - b.number);
+export function mergeOrder<T extends { repo: string; number: number; state?: string }>(entries: T[], score: (e: T) => number): T[] {
+  return entries.filter((e) => !BATCHED.has(e.state ?? "")).sort((a, b) => score(b) - score(a) || a.repo.localeCompare(b.repo) || a.number - b.number);
 }
 
 /** Orders items by stage: best first by score. */
@@ -61,20 +39,10 @@ export function orderStages(items: { repo: string; number: number; score: number
   return by;
 }
 
-/** Orders the pipeline's open ranked items by stage, from the Plan cache: the next-step text of each item in scope, and the batch states of the PRs. */
+/** Orders the pipeline's open ranked items by stage, from the Plan cache: the next-step text of each item in scope, and the batch states of the PRs. One wave. */
 export async function computeStages(db: Db): Promise<Stages> {
-  const plans = await listPlans(db, { open: true, scope: true });
-  const refs = plans.map((p) => ({ repo: p.repo, number: p.number }));
-  const [ranks, work, held] = await db.together(() => Promise.all([loadRankScores(db, refs), loadWorkScores(db, refs), loadHolds(db, { refs })]));
-  const out: { repo: string; number: number; score: number; next: string }[] = [];
-  for (const p of plans) {
-    const step = p.view.next ?? "";
-    const k = `${p.repo}#${p.number}`;
-    // An item without a rank is not queued. A held PR has no place in the merge order, and batched PRs are listed under their batch on the Merge tab.
-    if (!ranks.has(k) || !QUEUED[step] || (step === "Merge queue" && (held.has(k) || BATCHED.has(p.state)))) continue;
-    out.push({ repo: p.repo, number: p.number, score: work.get(k) ?? ranks.get(k)!, next: step });
-  }
-  return orderStages(out);
+  // A held PR has no place in the merge order, and batched PRs are listed under their batch on the Merge tab.
+  return orderStages((await loadQueuedSteps(db, Object.keys(QUEUED))).filter((s) => s.next !== "Merge queue" || (!s.held && !BATCHED.has(s.state))));
 }
 
 /** Slots of `repo#number` for the items in `visible` repos; places count only visible items. Pure over the ordered stages. */
