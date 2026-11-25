@@ -1,11 +1,13 @@
-import type { Selectable } from "kysely";
+import type { Selectable, SelectQueryBuilder } from "kysely";
 import type {
-  BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, Requires, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage,
+  BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, EnvTask, ItemShown, Requires, SandboxEnv, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage,
 } from "../../../web/src/api/types.ts";
 import type { DB } from "../../db/types.ts";
+import type { TrackedRepo } from "../control/types.ts";
 import type { KeySource } from "../keys.ts";
+import type { BatchByTask } from "../merge/types.ts";
 
-export type { BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, Requires, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage };
+export type { BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, EnvTask, ItemShown, Requires, SandboxEnv, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage };
 import type { RefKey } from "../mirror/types.ts";
 
 export type Ref = RefKey;
@@ -13,8 +15,8 @@ export type HiddenRepos = string[] & { visible?: string[] };
 /** Which rows a viewer may see: hidden repos are filtered out, and only staff read logs and patches. */
 export type ViewScope = { hiddenRepos: HiddenRepos; staff: boolean };
 /** A list of ids, or an id subquery from a module's `fragments.ts`. */
-export type IdSource = number[] | KeySource;
-export type RefSource = Ref[] | KeySource;
+export type IdSource = number[] | SelectQueryBuilder<any, any, { id: number }>;
+export type RefSource = KeySource;
 
 export const TERMINAL: readonly TaskState[] = ["done", "failed", "cancelled", "lost"];
 export const LOST_AFTER_MS = 2 * 60_000;
@@ -27,6 +29,10 @@ export const MAX_LOG_BYTES = 20 * 1024 * 1024;
 export const MAX_CHUNK_BYTES = 64 * 1024;
 export const LOG_TAIL_BYTES = 64 * 1024;
 export const WARM_STEP = "warm";
+/** An environment is online when it called within this long. */
+export const ONLINE_MS = 60_000;
+/** A private task's wait while no confidential environment can take it. */
+export const CONFIDENTIAL_WAIT = "Waiting for a confidential build environment.";
 export const PRIVATE_STEPS: readonly string[] = ["fix-check", "scan-test"];
 export const WORKSPACE_STATES = ["requested", "starting", "seeding", "ready", "parked", "ended", "failed"] as const;
 export type WorkspaceStateName = (typeof WORKSPACE_STATES)[number];
@@ -35,13 +41,14 @@ export const POD_STATES: WorkspaceStateName[] = ["starting", "seeding", "ready"]
 
 export type TaskState = "queued" | "claimed" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type Warm = { key: string; role: "use" | "build" };
-export type SandboxEnv = Record<string, string>;
 export type TaskRecord = {
   id: number; jobId: number | null; step: string; repo: string; number: number | null; headSha: string; baseSha: string | null; requires: Requires;
   priority: number; plan: TaskStep[]; state: TaskState; envId: string | null; attempts: number; queuedAt: string; claimedAt: string | null;
   startedAt: string | null; endedAt: string | null; heartbeatAt: string | null; cancelRequestedAt: string | null; results: TaskResult[]; summary: string | null;
   logBytes: number; artifactBytes: number; hasPatch: boolean; warmKey: string | null; warmRole: "use" | "build" | null; warmImage: string | null;
   warmVersion: string | null; warmRev: number | null; sandbox: SandboxEnv | null;
+  /** The stored diff; set only by loads that ask for it. */
+  patch?: string | null;
 };
 export type TaskLite = Pick<TaskRecord, "id" | "step" | "repo" | "number" | "headSha" | "state" | "envId" | "queuedAt" | "startedAt" | "endedAt" | "summary" | "jobId">;
 export type TaskBrief = TaskLite & { logStep: string | null };
@@ -61,22 +68,55 @@ export type WorkspaceRow = Selectable<DB["workspaces"]>;
 export type SessionRow = Selectable<DB["workspace_sessions"]>;
 export type WorkspaceCallRow = Selectable<DB["workspace_calls"]>;
 export type NewSession = Omit<SessionRow, "id">;
-export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string; createdAt: string };
+export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string };
 
-export type TaskCard = { id: number; step: string; state: TaskState; repo: string; number: number | null; startedAt: string | null; endedAt: string | null; logStep: string | null };
-export type TaskEvent = { id: number; step: string; state: TaskState; queuedAt: string; startedAt: string | null; endedAt: string | null; summary: string | null; envId: string | null };
+export type TaskCard = {
+  id: number; jobId: number | null; step: string; state: TaskState; repo: string; number: number | null; queuedAt: string; startedAt: string | null; endedAt: string | null;
+  results: TaskResult[]; summary: string | null; logStep: string | null;
+};
+export type TaskEvent = { id: number; jobId: number | null; headSha: string; step: string; state: TaskState; queuedAt: string; startedAt: string | null; endedAt: string | null; summary: string | null; envId: string | null };
 export type TaskHistoryStat = { n: number; newestId: number; ended: boolean; states: string };
-export type MemRow = { repo: string; step: string; builds: number; peakMemBytes: number };
+export type MemRow = { repo: string; step: string; steps: number; medianBytes: number; maxBytes: number; oom: number };
 export type EnvTasks = { runs: PodRun[]; tasks: TaskRecord[] };
-export type EnvRecord = BuildEnv & { keyHash?: string; kind: "worker" | "kubernetes" | "workspace" | string; settings: unknown; health: EnvHealth | null; confidentialOnlineAt: string | null };
+/** The queue is full: `queued` tasks wait and the set would pass `limit`. */
+export class QueueFullError extends Error {
+  queued: number;
+  limit: number;
+  constructor(queued: number, limit: number) {
+    super(`${limit} tasks are already queued`);
+    this.queued = queued;
+    this.limit = limit;
+  }
+}
+/** A refusal the caller maps to an HTTP status (400 bad input, 404 missing, 409 conflict). */
+export class StatusError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+/** A worker call named a task that is missing (404) or not running on its environment (409). */
+export class TaskAccessError extends Error {
+  status: 404 | 409;
+  constructor(status: 404 | 409, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+/** `settings` is the stored JSON, parsed, for the caller's `settingsOf`; `slots` is the smaller of the operator's and the reported count. */
+export type EnvRecord = Omit<BuildEnv, "settings"> & {
+  keyHash: string; settings: unknown; health: EnvHealth | null; confidentialOnlineAt: string | null; operatorSlots: number; reportedSlots: number | null;
+  confidentialSince: string | null; updatedBy: string | null; updatedAt: string | null; createdAt: string;
+};
 export type EnvHealth = { state: string; text: string; since: string };
 export type HealthPatch = { state: string; text: string };
-export type EnvPatch = { id: string; label?: string; kind?: string; enabled?: boolean; settings?: unknown; keyHash?: string; slots?: number };
+export type EnvPatch = { id: string; label?: string; kind?: string; enabled?: boolean; confidential?: boolean; settings?: unknown; keyHash?: string; slots?: number };
 export type ClaimPick = { id: number; head?: string; base?: string; plan?: TaskStep[] };
 export type ClaimFit = (task: TaskRecord) => boolean;
 export type ClaimInputs = {
   env: EnvRecord | null; running: number; candidates: TaskRecord[]; otherEnvs: EnvRecord[]; sizings: Map<string, RepoSizing>; warm: Map<string, WarmFacts>;
-  liveRepos: Set<string>; startedRefs: Set<Ref>; batches: Map<number, { id: number; repo: string; branch: string; commitSha: string; baseSha: string; fork: string | null; members: number[] }>;
+  liveRepos: Set<string>; startedRefs: Set<Ref>; batches: Map<number, BatchByTask>; tracked: Map<string, TrackedRepo>;
   pendingUpdate: UpdateSpec | null;
 };
 export type EnvPassState = { envs: EnvRecord[]; tasks: Map<string, EnvTasks>; reservations: { node: string; cpuM: number; memBytes: number }[] };
