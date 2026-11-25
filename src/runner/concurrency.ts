@@ -47,7 +47,10 @@ export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["qu
 export type JobOfRepo = { step: string; repo: string | null; params?: Params | string | null };
 
 /** Why a job waits for a Task Runner, or null when it does not: see untakenTest. */
-export type UntakenTest = (j: JobOfRepo) => Promise<string | null>;
+export type UntakenTest = ((j: JobOfRepo) => Promise<string | null>) & {
+  /** Reads the runners now, so a pass can do it with its other first reads. */
+  load?: () => Promise<unknown>;
+};
 
 /** The reason a job of `repo` waits: shown for the step, the lane's items and the queued job. */
 export const noRunnerFor = (repo: string): string => `No Task Runner takes ${repo}`;
@@ -65,16 +68,18 @@ export const noRunnerForTask = (repo: string, step: string): string => {
  */
 export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: number = Date.now()): Promise<UntakenTest> {
   const takes = takerTest(db, nowMs);
+  const load = (): Promise<unknown> => takes({ prompt_id: "", repos: [] });
   const claude = (j: JobOfRepo): boolean => {
     let params: Params = {};
     if (typeof j.params === "string") { try { params = JSON.parse(j.params) as Params; } catch { /* the step's defaults */ } }
     else if (j.params) params = j.params;
     return usesClaude(modelsOf(steps?.get(j.step) ?? knownStep(j.step), params));
   };
-  return async (j) => {
+  const test: UntakenTest = async (j) => {
     if (j.repo === null || !claude(j) || await takes({ prompt_id: "", repos: [j.repo], step: j.step })) return null;
     return await takes({ prompt_id: "", repos: [j.repo] }) ? noRunnerForTask(j.repo, j.step) : noRunnerFor(j.repo);
   };
+  return Object.assign(test, { load });
 }
 
 /** Two jobs of one step do the same work: the same repo (and finding), or one of them is not about a single repo. */

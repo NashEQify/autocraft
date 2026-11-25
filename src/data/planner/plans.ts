@@ -60,27 +60,33 @@ export async function loadStoredPlans(db: Db): Promise<StoredPlans> {
   return { rev, rows };
 }
 
+export type PlanDiff = { changed: PlanRow[]; gone: string[] };
+
+function diffRows(planned: PlanRow[], have: StoredRows): PlanDiff {
+  // `since` moves only when phase or wait does; recomputing it every pass would change every row's signature.
+  const next = planned.map((r) => {
+    const old = have.get(refKey(r.repo, r.number))?.status;
+    const v = JSON.parse(r.view) as PlanView;
+    return old && old.phase === v.status.phase && old.waiting === v.status.waiting && old.since !== v.status.since ? { ...r, view: JSON.stringify({ ...v, status: { ...v.status, since: old.since } }) } : r;
+  });
+  const changed = next.filter((r) => have.get(refKey(r.repo, r.number))?.sig !== sig(r));
+  const keep = new Set(next.map((r) => refKey(r.repo, r.number)));
+  return { changed, gone: [...have.keys()].filter((k) => !keep.has(k)) };
+}
+
+/** What savePlans() would write for `planned`: the rows to upsert and the refs to delete. Pure. */
+export const diffPlans = (planned: PlanRow[], stored: StoredPlans): PlanDiff => diffRows(planned, stored.rows as StoredRows);
+
 /**
  * Diffs `planned` against the stored rows, keeps `since` while phase and wait are unchanged, writes history for changed state or wait
  * and a `gone` row per exit, upserts changed rows in chunks, deletes exited rows. Joins the pass's transaction; a quiet pass writes
  * nothing and opens none. Inside the transaction it reads the revision again (compare-and-set against `stored.rev`); on a mismatch
- * it reads every stored row under the lock and diffs again.
+ * it reads every stored row under the lock and diffs again. `found`: diffPlans() of the same `stored`, when the caller has it.
  */
-export async function savePlans(db: Db, planned: PlanRow[], plannedAt: string, stored?: StoredPlans): Promise<{ written: number; deleted: number }> {
+export async function savePlans(db: Db, planned: PlanRow[], plannedAt: string, stored?: StoredPlans, found?: PlanDiff): Promise<{ written: number; deleted: number }> {
   const first = stored ?? await loadStoredPlans(db);
   let rows = first.rows as StoredRows | null ?? await readStored(db);
-  const diff = (have: StoredRows) => {
-    // `since` moves only when phase or wait does; recomputing it every pass would change every row's signature.
-    const next = planned.map((r) => {
-      const old = have.get(refKey(r.repo, r.number))?.status;
-      const v = JSON.parse(r.view) as PlanView;
-      return old && old.phase === v.status.phase && old.waiting === v.status.waiting && old.since !== v.status.since ? { ...r, view: JSON.stringify({ ...v, status: { ...v.status, since: old.since } }) } : r;
-    });
-    const changed = next.filter((r) => have.get(refKey(r.repo, r.number))?.sig !== sig(r));
-    const keep = new Set(next.map((r) => refKey(r.repo, r.number)));
-    return { changed, gone: [...have.keys()].filter((k) => !keep.has(k)) };
-  };
-  let { changed, gone } = diff(rows);
+  let { changed, gone } = found ?? diffRows(planned, rows);
   if (!changed.length && !gone.length) return { written: 0, deleted: 0 };
   memo.delete(db);
   const q = queryDb(db);
@@ -88,7 +94,7 @@ export async function savePlans(db: Db, planned: PlanRow[], plannedAt: string, s
     // A write by another connection since the rows were read is in the table but not in `rows`.
     if (await planRev(db) !== first.rev) {
       rows = await readStored(db);
-      ({ changed, gone } = diff(rows));
+      ({ changed, gone } = diffRows(planned, rows));
     }
     const have = rows;
     const history = changed.flatMap((r) => {

@@ -50,14 +50,20 @@ export async function loadPrBuildViews(db: Db, items: { ref: RefKey; head: strin
 }
 
 /** Builds created after `sinceMs` (epoch ms) and the `number@head` set the repo already has. 2 statements in one wave. */
-export async function loadPrBuildState(db: Db, repo: string, sinceMs: number): Promise<{ usedSince: number; have: Set<string> }> {
+export async function loadPrBuildStates(db: Db, repos: readonly string[], sinceMs: number): Promise<Map<string, { usedSince: number; have: Set<string> }>> {
+  const out = new Map<string, { usedSince: number; have: Set<string> }>(repos.map((r) => [r, { usedSince: 0, have: new Set() }]));
+  if (!repos.length) return out;
   const q = queryDb(db);
   const [used, have] = await db.together(() => Promise.all([
-    q.get(q.k.selectFrom("pr_builds").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", repo).where("created_at", ">", new Date(sinceMs).toISOString())),
-    q.all(q.k.selectFrom("pr_builds").select(["number", "head_sha"]).where("repo", "=", repo)),
+    q.all(q.k.selectFrom("pr_builds").select((eb) => ["repo", eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "repo", [...repos])).where("created_at", ">", new Date(sinceMs).toISOString()).groupBy("repo")),
+    q.all(q.k.selectFrom("pr_builds").select(["repo", "number", "head_sha"]).where(kx.inList(db, "repo", [...repos]))),
   ]));
-  return { usedSince: Number(used?.n ?? 0), have: new Set(have.map((r) => `${r.number}@${r.head_sha}`)) };
+  for (const r of used) out.get(r.repo)!.usedSince = Number(r.n);
+  for (const r of have) out.get(r.repo)!.have.add(`${r.number}@${r.head_sha}`);
+  return out;
 }
+
+export const loadPrBuildState = async (db: Db, repo: string, sinceMs: number): Promise<{ usedSince: number; have: Set<string> }> => (await loadPrBuildStates(db, [repo], sinceMs)).get(repo)!;
 
 /** Queued builds (of `repo`, or all) with the item's state and head, oldest first; the task states come in a second wave. */
 export async function loadPendingPrBuilds(db: Db, repo?: string): Promise<PendingBuild[]> {

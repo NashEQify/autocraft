@@ -9,7 +9,7 @@ import type { ItemFacts, MergePath, Plan, PrFacts, WaitKind } from "./plan.ts";
 import { isQueueState } from "./plan.ts";
 import { statusOf, type ItemStatus } from "./item-status.ts";
 import { loadPlanSet, type PlanSet, type PlanSetOptions } from "./plan-set.ts";
-import { savePlans } from "../data/planner/index.ts";
+import { diffPlans, loadStoredPlans, savePlans, type PlanDiff, type StoredPlans } from "../data/planner/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** The merge-queue fields of a PR whose Plan is in a queue state: what the Queue page and the flow counts show besides the Plan's own state, reasons and note. */
@@ -123,6 +123,19 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
 }
 
 export type PlanHistoryRow = { head: string | null; oldState: string | null; newState: string; oldWait: string | null; wait: string | null; reasons: string[]; at: string };
+
+export type PlanCacheDiff = { rows: PlanRow[]; at: string; stored: StoredPlans; changed: boolean; diff: PlanDiff };
+
+/** What the Plans change in the stored rows; nothing is written. `stored`: the stored rows, when the caller read them. */
+export async function planCacheDiff(db: Db, plans: PlanSet, stored?: StoredPlans, at: string = new Date().toISOString()): Promise<PlanCacheDiff> {
+  const rows = planRows(plans, at);
+  const have = stored ?? await loadStoredPlans(db);
+  const diff = diffPlans(rows, have);
+  return { rows, at, stored: have, changed: diff.changed.length > 0 || diff.gone.length > 0, diff };
+}
+
+/** Writes what planCacheDiff() found; inside the caller's transaction when one is open. */
+export const writePlanDiff = async (db: Db, d: PlanCacheDiff): Promise<{ written: number; deleted: number }> => await savePlans(db, d.rows, d.at, d.stored, d.diff);
 
 /** Writes the rows that differ from the stored ones and deletes the stored rows with no Plan. Returns the numbers written and deleted. */
 export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string = new Date().toISOString()): Promise<{ written: number; deleted: number }> {

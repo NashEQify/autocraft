@@ -49,14 +49,10 @@ export async function loadRunningCards(db: Db, sinceIso: string): Promise<CardRo
  */
 export async function loadActRoom(db: Db, now: Date): Promise<ActRoom> {
   const day = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
-  const [limit, limits, running] = await db.together(() => Promise.all([
-    control.loadActLimit(db), control.loadStageLimits(db), loadRunningCards(db, new Date(now.getTime() - RUNNING_RESERVE_MS).toISOString()),
+  const [limit, used, running] = await db.together(() => Promise.all([
+    control.loadActLimit(db), control.loadActUsage(db, day), loadRunningCards(db, new Date(now.getTime() - RUNNING_RESERVE_MS).toISOString()),
   ]));
-  const reset = limits.get("act")?.resetAt;
-  const [used, written] = await db.together(() => Promise.all([
-    control.loadActUsage(db, reset && reset > day ? reset : day),
-    running.length ? control.countCardWrites(db, running.map((r) => ({ id: r.id, since: r.acted_at ?? undefined }))) : Promise.resolve(new Map<number, number>()),
-  ]));
+  const written = await control.countCardWrites(db, running.map((r) => ({ id: r.id, since: r.acted_at ?? undefined })));
   return { limit, used, running: running.map((r): RunningCard => ({ id: r.id, kind: r.kind, params: r.params, text: r.text, queue_args: r.queue_args, written: written.get(r.id) ?? 0 })) };
 }
 

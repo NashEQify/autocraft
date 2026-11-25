@@ -56,12 +56,13 @@ export async function loadActLimit(db: Db, defaults?: StageDefaults): Promise<nu
   return row && row.limit_set === 1 ? row.per_day : defaults?.act ?? null;
 }
 
-/** Act job items started at or after `since`, plus finished conversation-card GitHub writes since then, in one statement. */
-export async function loadActUsage(db: Db, since: string): Promise<number> {
+/** Act job items started since `dayStart`, or since an operator reset Act's count after it, plus finished conversation-card GitHub writes since then, in one statement. */
+export async function loadActUsage(db: Db, dayStart: string): Promise<number> {
   const q = queryDb(db);
+  const since = (eb: kx.AnyEb) => eb.fn.coalesce(kx.schemaEb(eb).selectFrom("main.stage_limits as sl").select("sl.reset_at").where("sl.step", "=", "act").where("sl.reset_at", ">", dayStart), eb.val(dayStart));
   const r = await q.get(q.k.selectNoFrom((eb) => [
-    eb.fn.coalesce(itemsSumSince(eb, "act", eb.val(since)), eb.lit(0)).as("jobs"),
-    eb.selectFrom("main.audit").select((e) => e.fn.countAll<number>().as("n")).where("at", ">=", since)
+    eb.fn.coalesce(itemsSumSince(eb, "act", since(eb)), eb.lit(0)).as("jobs"),
+    eb.selectFrom("main.audit").select((e) => e.fn.countAll<number>().as("n")).where((e) => e("at", ">=", since(e)))
       .where((e) => e.and([kx.like(db, "details", e.val('%"source":"conversation"%')), kx.like(db, "details", e.val('%"state":"done"%')), kx.inList(db, "action", Object.keys(GITHUB_ACTIONS))])).as("cards"),
   ]));
   return Number(r?.jobs ?? 0) + Number(r?.cards ?? 0);

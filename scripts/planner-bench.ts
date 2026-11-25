@@ -55,8 +55,11 @@ for (let n = 1; n <= PRS; n++) {
   if (n !== 2) await w.workflow(n, { entry: n === 1 ? "merge" : "review" });
 }
 for (let n = 101; n <= 100 + ISSUES; n++) await w.issue(n, { label: n % 2 ? "bugfix" : "feature", ...(n % 3 ? { impact: "medium" } : {}) });
+for (const step of ["labels", "prstatus"]) await direct.run(direct.k.insertInto("repo_step_approvals").values({ repo: "app", step, by: "op", at: iso(600) } as never));
+for (let i = 0; i < 25; i += 2) await direct.run(direct.k.insertInto("settings").values({ key: `build_feature:pr-builds:${i ? `app${i}` : "app"}`, value: "on" }));
+for (let n = 1; n <= 4; n++) await direct.run((direct.k as any).insertInto("item_stage").values({ repo: "app", number: n, stage: "reviewed", at: iso(90), reviewed: 1 }));
 const k = direct.k as unknown as import("kysely").Kysely<Record<string, Record<string, unknown>>>;
-const tables: (keyof typeof COLUMNS)[] = ["tracked_repos", "repos", "items", "classifications", "pr_checks", "opus_reviews", "verifications", "premerge_reviews", "item_priority", "repo_step_approvals", "pr_files", "item_workflows", "workflow_approvals"] as never;
+const tables: (keyof typeof COLUMNS)[] = ["tracked_repos", "repos", "items", "classifications", "pr_checks", "opus_reviews", "verifications", "premerge_reviews", "item_priority", "repo_step_approvals", "pr_files", "item_workflows", "item_stage"] as never;
 for (const table of tables.filter((t) => COLUMNS[t])) {
   const repoCol = table === "tracked_repos" || table === "repos" ? "name" : "repo";
   const cols = [...COLUMNS[table]].filter((c) => c !== "id");

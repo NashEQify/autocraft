@@ -48,6 +48,8 @@ export type PlanPass = {
   kind: string;
   /** Items loaded: every one on a full load, else the logged and refreshed ones. */
   refs: number;
+  /** The pass read change-log rows: `finish` writes. */
+  logged: boolean;
   /** Differences the shadow check found (empty when it did not run). */
   diffs: Diff[];
   /** Prunes the change log rows the pass read and records the pass with its duration (ms; a quiet pass: at most once a minute); call after the pass's writes, the Plan cache among them, succeeded. */
@@ -214,7 +216,7 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
   const { plans, reason, refs, refreshUnchanged, shadowRan, diffs, cursor } = loaded;
   const kind = reason ? `full:${reason}` : "incremental";
   return {
-    plans, kind, refs, diffs,
+    plans, kind, refs, diffs, logged: cursor.seen.size > 0,
     finish: async (passMs = 0) => {
       const rec = records.get(db) ?? records.set(db, { flushedAt: 0, counts: new Map(), diffs: [] }).get(db)!;
       const at = new Date(now).toISOString();
@@ -242,9 +244,7 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       // A quiet pass records nothing: its counts wait for a difference, a full load or the next minute.
       if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) { if (pruneError) throw pruneError; return; }
       await recordPass(db, [...rec.counts.values()], rec.diffs);
-      rec.counts.clear();
-      rec.diffs = [];
-      rec.flushedAt = Date.now();
+      db.afterCommit(() => { rec.counts.clear(); rec.diffs = []; rec.flushedAt = Date.now(); });
       if (pruneError) throw pruneError;
     },
   };

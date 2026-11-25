@@ -10,7 +10,7 @@ import {
   queueActions, loadActionsDue, saveActions, loadActions, retryActions,
   queueCommands, loadCommandWork, hasCommandWork, saveCommandProgress, pruneCommands, loadNudges, recordNudges,
   requestRepin, loadRepinsDue, hasRepinDue, loadRepins, loadRepinOffs, saveRepins,
-  loadStatusComments, loadLatestWorkflows, saveStatusComments, loadStatusRetryAt, countStatusRetriesDue,
+  loadStatusComments, loadLatestWorkflows, saveStatusComments, loadStatusRetriesAt, countStatusRetriesDue,
 } from "../../src/data/workflow/index.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -178,18 +178,18 @@ both("status comments: a Closed line on a closed item is final; the latest workf
   const row = (number: number, line: string, o: object = {}) => ({ repo: "app", number, comment_id: `c${number}`, author: "bot", line, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: T0, ...o });
   await saveStatusComments(db, [row(1, "In review"), row(2, "Closed"), row(3, "Closed"), row(4, "Merged", { final: 1 })]);
   await saveStatusComments(db, [row(1, "Waiting for CI", { retry_at: "2026-06-01T00:00:00.000Z" })]);
-  const rows = await loadStatusComments(db, "app");
+  const rows = await loadStatusComments(db, ["app"]);
   assert.deepEqual(rows.map((r) => [r.number, r.line]), [[1, "Waiting for CI"], [3, "Closed"]]);
-  assert.equal(await loadStatusRetryAt(db, "app", Date.parse(T0)), Date.parse("2026-06-01T00:00:00.000Z"));
-  assert.equal(await loadStatusRetryAt(db, "app", Date.parse(T2) + 1e11), null);
+  assert.equal((await loadStatusRetriesAt(db, ["app"], Date.parse(T0))).get("app"), Date.parse("2026-06-01T00:00:00.000Z"));
+  assert.equal((await loadStatusRetriesAt(db, ["app"], Date.parse(T2) + 1e11)).get("app"), undefined);
   assert.equal(await countStatusRetriesDue(db, Date.parse("2026-07-01T00:00:00.000Z")), 1);
   assert.equal(await countStatusRetriesDue(db, Date.parse(T0)), 0);
 
   await workflow(db, "app", 1, "stopped");
   const latest = await workflow(db, "app", 1, "running");
   await workflow(db, "app", 2, "running");
-  const m = await loadLatestWorkflows(db, "app");
-  assert.equal(m.get(1)!.wf.id, latest.id);
-  assert.equal(m.get(1)!.open, true);
-  assert.equal(m.get(2)!.open, false);
+  const m = await loadLatestWorkflows(db, ["app"]);
+  assert.equal(m.get("app#1")!.wf.id, latest.id);
+  assert.equal(m.get("app#1")!.open, true);
+  assert.equal(m.get("app#2")!.open, false);
 });
