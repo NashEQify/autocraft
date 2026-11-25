@@ -32,8 +32,11 @@ export async function stoppedRows(facts: AttentionFacts["stops"], hidden: Hidden
   return out;
 }
 
-/** The problems list: the stopped rows first, then the instance's health problems, findings whose fix gave up and CI fixes that gave up. */
-export async function problems(db: Db, o: Omit<ProblemFacts, "facts"> & { stops: StoppedRow[]; facts: AttentionFacts }): Promise<HomeProblem[]> {
+/**
+ * The problems list: the stopped rows first, then the instance's health problems, findings whose fix gave up and CI fixes that gave up, and closes that were not made
+ * in the repos the reader acts on (`acting`).
+ */
+export async function problems(db: Db, o: Omit<ProblemFacts, "facts"> & { stops: StoppedRow[]; facts: AttentionFacts; acting: ReadonlySet<string> }): Promise<HomeProblem[]> {
   const { staff, facts } = o;
   const out: HomeProblem[] = [];
   for (const s of o.stops) out.push({ kind: "stopped", title: s.repo ? `${s.title} in ${s.repo}` : s.title, detail: staff ? s.reason : "", to: s.to });
@@ -43,6 +46,10 @@ export async function problems(db: Db, o: Omit<ProblemFacts, "facts"> & { stops:
       out.push({ kind: "gave-up", title: `${f.repo} finding ${f.number}: fix gave up after ${f.fix_attempts} round${f.fix_attempts === 1 ? "" : "s"}`, detail: f.last_failure ?? "", to: `/security/${f.repo}/${f.number}` });
     for (const r of facts.ciFixFailed)
       out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
+    for (const r of facts.closesFailed) {
+      if (!o.acting.has(r.repo)) continue;
+      out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: not closed`, detail: r.state === "waiting-permission" ? `${r.by} has no write access` : r.reason ?? r.state, to: itemPath(r.repo, r.number) });
+    }
   }
   return out;
 }

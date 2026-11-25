@@ -58,8 +58,11 @@ export type VisibilityInputs = { tracked: Map<string, TrackedRepo>; everTracked:
 /** `updatedAt` is empty when the limit was never written. */
 export type StoppedFacts = { trips: TripRow[]; zeroLimits: { step: string; updatedAt: string }[]; heldAuthors: HeldAuthorRow[] };
 export type GaveUpFinding = FindingAttention["gaveUp"][number];
+export type FailedClose = { repo: string; number: number; by: string; state: string; reason: string | null };
 export type AttentionFacts = {
   stops: StoppedFacts; health: HealthFacts; gaveUp: GaveUpFinding[]; ciFixFailed: { repo: string; number: number; title: string }[];
+  /** Open items whose latest workflow was closed while the close could not be made (src/act), newest first. */
+  closesFailed: FailedClose[];
   /** Jobs that failed in the last hour, per step and repo (null repo: not about a repo). */
   failedJobs: { step: string; repo: string | null; n: number }[];
 };
