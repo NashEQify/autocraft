@@ -10,7 +10,7 @@ export type PermKey = string;
 /** A value sealed by `TokenBox`; loaders never open it, so no secret reaches a log or read model. */
 export type Sealed = string & { readonly __sealed: true };
 
-export type AccessRow = Selectable<DB["access"]>;
+export type AccessRow = Omit<Selectable<DB["access"]>, "role"> & { role: Role };
 export type PermRow = Selectable<DB["repo_permissions"]>;
 export type PermEntry = { permission: string; checkedAt: string };
 export type RemovedSummary = { role: string | null; sessions: number; tokens: number; userTokens: number; links: number };
