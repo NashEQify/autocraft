@@ -3,9 +3,8 @@
 // to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, with no Task Runner that may take it, or only
 // the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
 // close from being made. The status comment, the item page and the agent show it as the state line.
-import { loadImplementFacts } from "../data/implement/index.ts";
 import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
-import { loadActions, loadLegs, type WorkflowAction } from "../data/workflow/index.ts";
+import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { t, tk } from "../i18n/index.ts";
@@ -38,12 +37,12 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
   const out = new Map<number, string>();
   const closed = wfs.filter((w) => w.state === "closed"), moving = wfs.filter((w) => w.state === "running" || w.state === "waiting");
   const ofPrs = moving.filter((w) => w.kind === "pr").map((w) => ({ repo: w.repo, number: w.number }));
-  const issues = moving.filter((w) => w.kind !== "pr").map((w) => ({ repo: w.repo, number: w.number }));
-  const [identity, closes, actions, implement, prLegs] = await db.together(() => Promise.all([
+  const issues = moving.filter((w) => w.kind !== "pr").map((w) => w.id);
+  const [identity, closes, actions, links, prLegs] = await db.together(() => Promise.all([
     moving.length ? githubIdentity(db) : "app",
     closed.length ? loadActions(db, { workflowIds: closed.map((w) => w.id), kinds: ["close", "comment-close"] }) : new Map<string, WorkflowAction[]>(),
     moving.length ? loadActions(db, { workflowIds: moving.map((w) => w.id) }) : new Map<string, WorkflowAction[]>(),
-    loadImplementFacts(db, issues), loadLegs(db, ofPrs, { activeOnly: true, latestOnly: true }),
+    loadLinks(db, { workflowIds: issues }), loadLegs(db, ofPrs, { activeOnly: true, latestOnly: true }),
   ]));
   const add = (id: number, line: string | null): void => { if (line !== null) out.set(id, line); };
   const byWorkflow = (m: ReadonlyMap<string, WorkflowAction[]>): Map<number, WorkflowAction[]> => {
@@ -53,12 +52,9 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
   };
   const closesOf = byWorkflow(closes), actionsOf = byWorkflow(actions);
   for (const w of closed) add(w.id, closeWait(closesOf.get(w.id)?.at(-1)));
-  // The PR the workflow's merge leg is on: the item, or an implement workflow's latest implementation PR.
-  const prOf = (w: Waiter): number | null => {
-    if (w.kind === "pr") return w.number;
-    const a = implement.byIssue.get(`${w.repo}#${w.number}`);
-    return a?.attempt.prNumber ?? a?.prAttempts[0]?.prNumber ?? null;
-  };
+  // The PR the workflow's merge leg is on: the item, or the PR an implement workflow works on.
+  const linked = new Map(links.map((l) => [l.workflowId, l.pr]));
+  const prOf = (w: Waiter): number | null => (w.kind === "pr" ? w.number : linked.get(w.id) ?? null);
   const implPrs = moving.flatMap((w) => { const pr = w.kind === "pr" ? null : prOf(w); return pr === null ? [] : [{ repo: w.repo, number: pr }]; });
   const legs = new Map([...prLegs, ...await loadLegs(db, implPrs, { activeOnly: true, latestOnly: true })]);
   const inCi: { w: Waiter; pr: number; head: string }[] = [];

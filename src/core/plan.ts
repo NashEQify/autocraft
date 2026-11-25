@@ -137,6 +137,9 @@ export type ReviewFacts = {
   staleActionable: boolean;
 };
 
+/** Why what a merge landed is reviewed: nobody approved the merge (`rule`), it was approved before the implementation's PR existed, or a push of ours changed code after the approved head. */
+export type LandedWhy = "rule" | "implementation" | "push";
+
 export type PrFacts = {
   repo: string; number: number;
   /** Time of the decision, ms. */
@@ -184,8 +187,10 @@ export type PrFacts = {
   labelUnsure?: boolean;
   /** The open or merged PRs this open PR duplicates (src/data/triage/dupe-sets.ts); `compared` false until the group is compared. Holds only what nobody started. */
   duplicates?: { of: number[]; compared: boolean };
-  /** What the cached diff of the current head holds that keeps the PR outside the merge rule whatever a review says; absent when nothing, no diff is cached or it waits for its extras. */
+  /** What keeps the PR outside the merge rule whatever a review says: a base other than the default branch, and what the cached diff of the current head holds (unknown while no diff is cached or it waits for its extras); absent when nothing. */
   ruledOut?: string[];
+  /** A fix-up or CI fix of the head was about to be pushed, by a job that is at it or that stopped there. */
+  pushing?: true;
   // scope
   /** In scope: a maintainer started it, or its repo's Pipeline switch is on. */
   inScope: boolean;
@@ -260,6 +265,8 @@ export type PrFacts = {
   /** The pre-merge review row at the reviewed head. */
   premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   premergeFixUsed: boolean;
+  /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
+  premergeFixRunning?: boolean;
   /** Owner statements (owner_statements) that the Opus review or the pre-merge review at the reviewed head says the PR goes against; any keeps the PR off the merge rule. */
   /** Reasons from the PR's diff that keep it off the merge rule (README, brand files, third-party links); read from the diff cache at the reviewed head, null when the diff is not cached. */
   sensitive: string[] | null;
@@ -301,8 +308,8 @@ export type PrFacts = {
     /** Comments at the head that never reached GitHub, as on `fixup`. */
     unsent?: UnsentAsk;
   } | null;
-  /** The pipeline merged the PR: when, and what the stored post-merge review looks like. */
-  postmerge: { mergedAt: string; head: string | null; since: string; review: { at: string; error: string | null } | null } | null;
+  /** The pipeline merged the PR: when, why what landed is reviewed (null: it merged as a person approved it), the time merges are reviewed from, and what the stored post-merge review looks like. */
+  postmerge: { mergedAt: string; head: string | null; why: LandedWhy | null; since: string; review: { at: string; error: string | null } | null } | null;
   /** The batch the reviewed head is in. */
   batch: "batch-checking" | "in-batch" | "batch-failed" | null;
   /** The PR is one AutoCraft opened to fix main CI. */
@@ -321,10 +328,8 @@ export type PrFacts = {
     /** GitHub writes go out as the box account, under which nobody's standing is known. */
     boxIdentity?: boolean;
   } | null;
-  /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
+  /** The PR's base is not its repository's default branch: nothing merges it. */
   baseOffDefault: boolean;
-  /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */
-  stackedOn: number | null;
   /** A maintainer's formal block: why, and whether from a live read. */
   changesRequested: { why: string; live: boolean } | null;
   /** The note when live review reads failed several times in a row. */

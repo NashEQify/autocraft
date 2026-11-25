@@ -160,6 +160,23 @@ export async function supersedePatches(db: Db, rows: { kind: PatchKind; id: numb
   });
 }
 
+export type PushingSettle = { kind: "fixup" | "cifix"; id: number; state: "pushed" | "linting" | "superseded"; reason: string | null; note: StageEventRow | null };
+/** Sets rows still `pushing` to what became of the push; back to `linting`, the stored patch has its push ahead again. Returns the rows changed. */
+export async function settlePushingRows(db: Db, rows: readonly PushingSettle[]): Promise<number> {
+  if (!rows.length) return 0;
+  const q = queryDb(db);
+  return await db.write(async () => {
+    let n = 0;
+    for (const r of rows) {
+      const set = r.state === "linting" ? { state: r.state, to_head: null } : { state: r.state, reason: r.reason };
+      const changed = Number((await q.run((q.k as any).updateTable(TABLE[r.kind]).set(set).where(kx.rowid(TABLE[r.kind]), "=", r.id).where("state", "=", "pushing"))).changes);
+      if (changed && r.note) await addStageEvents(db, [r.note]);
+      n += changed;
+    }
+    return n;
+  });
+}
+
 /** Records whether conflict merges kept the PR's own diff, and the delta the review reads: one statement per 10,000 rows, on the merged row at each `toHead`. */
 export async function setOwnDiff(db: Db, rows: { repo: string; number: number; toHead: string; ownDiff: string; ownDelta: string | null }[]): Promise<void> {
   if (!rows.length) return;

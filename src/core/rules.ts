@@ -40,8 +40,10 @@ export const TRANSIENT_REFUSAL = /\b5\d\d\b|timed? ?out|ETIMEDOUT|ECONN|EAI_AGAI
 
 /** A merge refusal that only reports the state of CI, mergeable or the head: it clears when that state changes. Any other refusal is asked about. */
 export const STATE_REFUSAL = /^(not ready at merge time|head moved|no longer open|GitHub returned no such PR|the operator's merge answer is gone|verification at)/;
-export const ciAllows = (path: "rule" | "operator" | "maintainer" | null, ci: string | null | undefined, noCi: boolean): boolean =>
-  ci === "success" || (path === "operator" && ci === "none" && noCi);
+/** Why nothing merges a PR aimed elsewhere, whoever approves it. */
+export const OFF_DEFAULT_REASON = "its base is not the default branch";
+/** CI lets a head merge only once it passed, also where a person approved the merge and in a repo that has no CI. */
+export const ciAllows = (ci: string | null | undefined): boolean => ci === "success";
 
 export type Size = "S" | "M" | "L";
 

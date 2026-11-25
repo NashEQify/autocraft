@@ -10,6 +10,7 @@ test("an open recommendation or an unclear answer needs an answer; a Backlog ite
 
   const recommending = waitsForAnswer({ state: "recommending", rec }, "started");
   assert.equal(at({ live: true, waits: recommending }), "needs");
+  assert.equal(at({ live: true, waits: waitsForAnswer({ state: "blocked", rec }, "blocked") }), "needs");
   // An unclear answer counts whether or not the item was started, and wins over a running workflow.
   assert.equal(at({ waits: waitsForAnswer(null, "ambiguous") }), "needs");
   assert.equal(at({ live: true, waits: waitsForAnswer({ state: "running", rec: null }, "ambiguous") }), "needs");

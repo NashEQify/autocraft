@@ -6,7 +6,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
 import { listAudit } from "../control/index.ts";
 import { unclearWrite } from "../../github/unsent.ts";
-import { discussionEntries, followupFixLinks, premergeBase, unreviewedMerges } from "./cross.ts";
+import { discussionEntries, followupFixLinks, premergeBase } from "./cross.ts";
 import { headRef, headTuples, latestRows, listOf, noKeys, parseHistory, parseReview, pushTo, refKey, reviewSelect, reviewWindow } from "./rows.ts";
 import type { Filing, Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
 
@@ -178,7 +178,7 @@ const retryDue = (f: Pick<Followup, "state" | "attempts" | "at">, now: number): 
 /**
  * Defects of the latest clean post-merge review of each PR of `keys` that filing may still try, oldest review first: no row yet, a
  * skipped-limit row, or a failed row whose backoff has passed. A review held by an earlier filed or filing follow-up of the PR, or
- * by the PR fixing a follow-up issue, has none. `keys` holds the in-scope, non-quiet PRs. Three statements in one wave.
+ * by the PR fixing a follow-up issue, has none. `keys` holds the non-quiet PRs whose defects are filed. Three statements in one wave.
  */
 export async function loadPendingDefects(db: Db, keys: KeySource, o: { now: number }): Promise<PendingDefect[]> {
   if (noKeys(keys)) return [];
@@ -234,11 +234,11 @@ export async function loadFilings(db: Db, o: { repo?: string } = {}): Promise<Fi
   });
 }
 
-/** Merged PRs since `since` with no post-merge row. 1 statement. */
-export async function countUnreviewedMerges(db: Db, since: string): Promise<number> {
+/** The PRs whose post-merge review, stored at or after `since`, is without an error. 1 statement. */
+export async function listPostmergeReviewed(db: Db, o: { since: string; repo?: string }): Promise<{ repo: string; number: number }[]> {
   const q = queryDb(db);
-  const iso = Number.isNaN(Date.parse(since)) ? since : new Date(since).toISOString();
-  return Number((await q.get(unreviewedMerges(db, iso)))?.n ?? 0);
+  return await q.all(q.k.selectFrom("main.postmerge_reviews as r").select(["r.repo", "r.number"]).where("r.error", "is", null).where("r.at", ">=", o.since)
+    .$if(o.repo !== undefined, (b) => b.where("r.repo", "=", o.repo!)).orderBy("r.repo").orderBy("r.number"));
 }
 
 /** PRs whose latest review was at `head`. 1 statement. */

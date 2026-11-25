@@ -18,10 +18,10 @@ test("selection order: our broken push, then work in flight, then score", { skip
   const mk = (n: number, over: Parameters<typeof prFacts>[0]) => { const facts = prFacts({ number: n, review: { head: "old" }, head: "h", ...over }); return { facts, plan: decidePr(facts) }; };
   const plans: PlanSet = {
     run: null, now: 0, pass: { rereadPaceAt: 0 }, items: [],
-    prs: [mk(1, { score: 900 }), mk(2, { score: 10, inFlight: true }), mk(3, { score: 5, brokeByUs: true, inFlight: true }), mk(4, { score: 500, inFlight: true, mergeHeld: true })],
+    prs: [mk(1, { score: 900 }), mk(2, { score: 10, inFlight: true }), mk(3, { score: 5, brokeByUs: true, inFlight: true }), mk(4, { score: 500, inFlight: true })],
   };
   const order = (await planned(await dbFor(new DatabaseSync(":memory:")), "review", { plans })).map((p) => p.facts.number);
-  assert.deepEqual(order, [3, 2, 1, 4]);
+  assert.deepEqual(order, [3, 4, 2, 1]);
 });
 
 test("a verdict carries over only a single checked fix-up of ours", async () => {

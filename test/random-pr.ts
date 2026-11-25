@@ -1,7 +1,7 @@
 // Random pull requests for test/invariants.test.ts: the rows behind a PR (its commits, workflow, merge leg, requests, approvals, review,
 // checks, patch rows), and the facts src/core/facts.ts would build from them. The facts are made from the rows alone, so a row can be
 // changed (a repo approval taken away) and the facts built again.
-import { conflictAskRetryAtOf, conflictBucketOf, attemptsIn, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../src/data/changes/index.ts";
+import { conflictAskRetryAtOf, conflictBucketOf, attemptsIn, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, pushChainOf } from "../src/data/changes/index.ts";
 import type { CifixRow, ConflictRow, FixupRow, PatchFacts, PushEdge, TaskStates } from "../src/data/changes/types.ts";
 import { pushAllowed } from "../src/core/gates.ts";
 import { ownPushes, reviewOwed } from "../src/core/evidence.ts";
@@ -65,7 +65,7 @@ export type PrRows = {
   verification: { state: string; finishedAt: string } | null;
   premerge: { findings: boolean; tries: number; at: string; unsure: boolean; defects: number; fixable: boolean; safe: boolean } | null;
   patches: PatchFacts; tasks: TaskStates;
-  batch: PrFacts["batch"]; changesRequested: boolean; stackedOn: boolean; baseOffDefault: boolean; baseOk: boolean; sensitive: string[] | null; diffPending: boolean; conflictsWithStatement: boolean;
+  batch: PrFacts["batch"]; changesRequested: boolean; baseOffDefault: boolean; baseOk: boolean; sensitive: string[] | null; diffPending: boolean; conflictsWithStatement: boolean;
   assignedToUs: boolean;
 };
 
@@ -186,7 +186,7 @@ export function randomPrRows(x: Rnd): PrRows {
     premerge: x.bool(0.2) ? null : { findings: x.bool(0.9), tries: 1 + x.int(3), at: x.pick([at("11:40"), at("09:40")]), unsure: x.bool(0.15), defects: x.pick([0, 0, 0, 0, 1, 2]), fixable: x.bool(0.7), safe: x.bool(0.8) },
     ...randomPatches(x, { commits, checks, mergeable, review, request }),
     batch: inBatch ? "in-batch" : x.pick([null, null, null, null, null, null, null, "batch-checking", "in-batch", "batch-failed"] as const),
-    changesRequested: x.bool(0.05), stackedOn: x.bool(0.04), baseOffDefault: x.bool(0.05), baseOk: x.bool(0.95), sensitive: x.pick([[], [], [], [], [], ["changes the README"], null]), diffPending: x.bool(0.05), conflictsWithStatement: x.bool(0.04),
+    changesRequested: x.bool(0.05), baseOffDefault: x.bool(0.08), baseOk: x.bool(0.95), sensitive: x.pick([[], [], [], [], [], ["changes the README"], null]), diffPending: x.bool(0.05), conflictsWithStatement: x.bool(0.04),
     assignedToUs: x.bool(0.5),
   };
 }
@@ -200,7 +200,7 @@ export function greenRows(over: Partial<PrRows> = {}): PrRows {
     legs: [{ state: "queued", head: "c0", fromHead: "c0", workflow: 7, updatedAt: at("10:20"), fixId: null }], request: null, mergeHeld: false, mergeWaits: false, implementation: null,
     review: reviewed("take"), gate: null, carried: false, posted: true, checks: { head: "c0", overall: "success", approvedRuns: false }, mergeable: "MERGEABLE", unknownStuck: false, pushable: true, runs: null, brokeByUs: false,
     attempt: null, runsApprovedAfterMerge: false, verification: { state: "passed", finishedAt: at("10:10") }, premerge: { findings: true, tries: 1, at: at("10:15"), unsure: false, defects: 0, fixable: true, safe: true },
-    patches: { fixups: [], cifixes: [], conflicts: [], pushes: [] }, tasks: new Map(), batch: null, changesRequested: false, stackedOn: false, baseOffDefault: false, baseOk: true, sensitive: [], diffPending: false, conflictsWithStatement: false,
+    patches: { fixups: [], cifixes: [], conflicts: [], pushes: [] }, tasks: new Map(), batch: null, changesRequested: false, baseOffDefault: false, baseOk: true, sensitive: [], diffPending: false, conflictsWithStatement: false,
     assignedToUs: true, ...over,
   };
 }
@@ -245,7 +245,7 @@ export function factsOf(w: PrRows): PrFacts {
   const outEdge = w.pushedOff ? [{ from: head, to: "next" }] : [];
   // Revisions of our implementation are recorded with the push outcomes, autorepins with their requests, the other pushes by their patch rows.
   const made = (by: CommitBy) => w.commits.flatMap((c, i) => (i > 0 && c.by === by ? [{ from: w.commits[i - 1]!.sha, to: c.sha, at: c.at ?? at("08:00") }] : []));
-  const ours = ownPushes(w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push", lines: null })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50"), lines: null }))], made("repin"));
+  const ours = ownPushes([], w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push" })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50") }))], made("repin"));
   const moves = ours.map(({ from, to }) => ({ from, to }));
   const owed = open && live?.entry === "merge" && reviewOwed(ours, head, at("09:00"));
   const ownCommit = (h: string): boolean => w.commits.some((c) => c.sha === h && isOurs(c));
@@ -258,7 +258,7 @@ export function factsOf(w: PrRows): PrFacts {
     repoFacts: { commentApproved: w.approvals.comment, ciApproved: w.approvals.ci, noCi: w.noCi, mainRed: w.mainRed, fixIssueApproved: w.approvals.fixissue, implementOn: w.implementOn },
     review: null, post: { postable: false, posted: null }, checksHere: false, checksOpen: false, ci: "unknown", mergeable: w.mergeable, unknown: null, runs: null, lastMerge: null, runsApprovedAfterMerge: false,
     verifyOverride: false, verification: null, verifyUnavailable: null, handOver: false, mergeWaiting: false, premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [],
-    conflict: null, inActiveBatch: w.batch === "in-batch" || w.batch === "batch-checking", fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null,
+    conflict: null, inActiveBatch: w.batch === "in-batch" || w.batch === "batch-checking", fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false,
     changesRequested: null, gateFailureNote: null,
     may: {
       repoMerge: w.approvals.merge ? APPROVAL : null, repoPush: w.approvals.push ? APPROVAL : null, workflow: workflowGate(wfRow, { fixupAsked: requests.length > 0, legs: legRows }),
@@ -271,7 +271,8 @@ export function factsOf(w: PrRows): PrFacts {
   };
   if (w.integration || !f.inScope) return f;
   if (open && w.duplicates) f.duplicates = { of: [3], compared: true };
-  if (open && w.ruledOut) f.ruledOut = ["changes the README"];
+  if (open) f.baseOffDefault = w.baseOffDefault;
+  if (open && (w.ruledOut || w.baseOffDefault)) f.ruledOut = [...(w.ruledOut ? ["changes the README"] : []), ...(w.baseOffDefault ? ["its base is not the default branch"] : [])];
   f.label = w.label; f.labelUnsure = w.labelUnsure; f.needsDecisionFlag = w.needsDecision;
   f.tier = w.tier === "not" && w.ours && ownHead ? "whitelisted" : w.tier;
   const mx = open && live?.entry === "merge" && !owed, r = w.review;
@@ -329,10 +330,13 @@ export function factsOf(w: PrRows): PrFacts {
   if (pm) {
     const defects = pm.findings ? pm.defects : 0;
     f.premerge = { at: pm.at, tries: pm.tries, hasFindings: pm.findings, unsure: pm.findings && pm.unsure, defects, defectsAllFixable: pm.fixable || !defects, fixesSafe: (pm.fixable && pm.safe) || !defects, minor: 0, error: pm.findings ? null : "no answer" };
-    if (defects) f.premergeFixUsed = premergeFixUsedIn(w.patches.fixups);
+    if (defects) {
+      f.premergeFixUsed = premergeFixUsedIn(w.patches.fixups);
+      if (premergeFixRunningIn(w.patches.fixups, qh, w.pushedOff)) f.premergeFixRunning = true;
+    }
   }
   if (f.mergeable === "CONFLICTING") {
-    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
+    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable, gone: qh === head && !f.pushedOff }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment }, NOW);
     const until = bucket === "capped" ? NOW + 12 * 3600_000 : bucket === "ask-retry" ? conflictAskRetryAtOf(w.patches.conflicts, qh, NOW) : undefined;
     f.conflict = { bucket, base: "main", baseOk: w.baseOk, ...(until !== undefined ? { until } : {}) };
   }
@@ -341,8 +345,6 @@ export function factsOf(w: PrRows): PrFacts {
   if (f.lint.length) f.inFlight = true;
   if (f.ci === "failure" || f.brokeByUs || f.gateRed) f.cifix = cifixOf(f.brokeByUs || f.gateRed || head !== qh ? head : qh);
   f.batch = w.batch;
-  f.stackedOn = w.stackedOn ? 2 : null;
-  f.baseOffDefault = w.baseOffDefault || w.stackedOn;
   f.mainFix = w.mainFix && ownHead;
   f.changesRequested = w.changesRequested ? { why: "ana asked for changes", live: true } : null;
   return f;

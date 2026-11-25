@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Db } from "../db/index.ts";
 import { listAudit } from "../data/control/index.ts";
 import { applyLocal, loadItems } from "../data/mirror/index.ts";
-import { listWorkflows } from "../data/workflow/index.ts";
+import { linkWorkflows, listWorkflows } from "../data/workflow/index.ts";
 import { diffStat } from "../build/workspaces.ts";
 import { guardItem, guardRepo, type GuardedItem, type ItemWant } from "../core/guard.ts";
 import { implementMay } from "./gate.ts";
@@ -266,7 +266,11 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
   const stale = (): OpenPrResult => { d.log(`  ${ref}: the implementation left opening meanwhile; nothing more is written`); return { ok: false, reason: "the implementation left opening meanwhile", retry: true, stale: true }; };
   const move = async (from: ImplementationState, to: ImplementationState | null, patch: ImplementationPatch = {}): Promise<boolean> =>
     !!await writeStep(db, im, { ...(to && { to }), patch, expect: [from] });
-  const write = (patch: ImplementationPatch, to: "pr-opened" | null = null) => move("opening", to, patch);
+  const write = (patch: ImplementationPatch, to: "pr-opened" | null = null): Promise<boolean> => db.write(async () => {
+    if (!await move("opening", to, patch)) return false;
+    if (patch.prNumber !== undefined) await linkWorkflows(db, { issues: [{ repo, number }] });
+    return true;
+  });
   try {
     if (!im.baseSha) return fail("the implementation has no base commit", false);
     if (input.base !== im.baseSha) return fail(`the workspace diff is against ${input.base.slice(0, 12)}, not the implementation's base commit ${im.baseSha.slice(0, 12)}`, false);

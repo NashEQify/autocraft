@@ -132,13 +132,13 @@
 
 ## Post-merge review
 
-**What.** A second Opus review of each merged pull request, reading what landed.
+**What.** A second Opus review of a merge, reading what landed.
 
-**When.** Once per merged pull request, oldest first.
+**When.** Once per merge that nobody approved, or whose code AutoCraft changed after the approval, oldest first. A pull request that merged as a person approved it gets none.
 
 **Model.** Opus.
 
-**You see.** Findings on the item, and follow-up issues for defects.
+**You see.** Findings on the item, and follow-up issues for defects; or that the pull request merged as approved and needs no review.
 
 **Can go wrong.** An invalid reply is asked again. After three tries the review is held.
 

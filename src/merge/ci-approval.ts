@@ -21,7 +21,6 @@ import type { StepApproval } from "../data/control/types.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadRunApprovals, markRereads, recordRuns as saveRuns, saveRunResults } from "../data/merge/index.ts";
 import type { RunsInput, Suite, WaitingRun } from "../data/merge/types.ts";
-import { mergeHeld } from "./holds.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -131,7 +130,6 @@ export async function approveRuns(db: Db, repo: string, d: ApproveDeps): Promise
     await saveRunResults(db, [{ key: headOf(repo, c.number, c.head), runs, approved, failed, approvedNow: approved.length > 0 }]);
   for (const c of await needsWork(db, repo, d.by, log)) {
     if (out.approved.length + out.failed.length >= d.limit) break;
-    if (await mergeHeld(db, repo, c.number)) continue;
     const ref = `${repo}#${c.number}`;
     let runs = c.runs;
     let pr: { state?: string; draft?: boolean; head?: { sha?: string; repo?: { full_name?: string } | null }; base?: { repo?: { full_name?: string } | null } };

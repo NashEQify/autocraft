@@ -2,6 +2,7 @@
 // is asked again, and the new head goes through the review, CI and the pre-merge review it needs. Anyone else's commits end it.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { addOwnPush, landOwnPush } from "../src/data/control/index.ts";
 import { loadOwnPushes } from "../src/data/views/own-pushes.ts";
 import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals, preapprovalOf, preapproveMerge } from "../src/preapproval/index.ts";
@@ -26,6 +27,10 @@ const repin = (w: World, number: number, head: string, to_head: string) =>
 const pushing = (w: World, n: number, from: string, to: string) =>
   w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: n, head: from, to_head: to, kind: "code", state: "pushing", attempt: 1, created_at: T0 }));
 
+/** A push recorded right before it was made; a crash came before git's answer was stored. */
+const made = (action: string) => (w: World, number: number, from_oid: string, to_oid: string) =>
+  w.db.run(w.db.k.insertInto("own_pushes").values({ repo: "app", number, from_oid, to_oid, action, at: T0 }));
+
 const PUSHES: { name: string; push: (w: World, n: number, from: string, to: string) => Promise<unknown>; /** Nothing a model wrote: a PR that merges without a review needs none after it. */ small?: true }[] = [
   { name: "review fix-up", push: fixup(null) },
   { name: "pre-merge fix-up", push: fixup("premerge") },
@@ -36,7 +41,9 @@ const PUSHES: { name: string; push: (w: World, n: number, from: string, to: stri
   { name: "resolved conflict", push: merged("changed") },
   { name: "base merge whose diff nobody could read", push: merged(null) },
   { name: "implementation revision", push: revision },
-  { name: "autorepin", push: repin, small: true },
+  { name: "implementation revision left by a crash", push: made("implement-push") },
+  { name: "autorepin", push: made("autorepin-push"), small: true },
+  { name: "autorepin from before own_pushes", push: repin, small: true },
 ];
 const STATES = ["review", "ci", "queued"] as const;
 
@@ -160,15 +167,87 @@ test("a push of ours the mirror does not show yet neither moves the leg nor ends
   // The push never shows: the leg judges the head it has.
   await w.db.run(w.db.k.updateTable("repos").set({ synced_at: new Date(Date.now() + 1000).toISOString() }));
   await tick(w);
-  assert.equal((await legOf(w, 1)).state, "failed");
+  assert.equal((await legOf(w, 2)).state, "failed");
 });
 
 test("every push of ours is one list: its kind, its size, and the newest time recorded for it", async () => {
   const w = (current = await (await (await world()).repo()).pr(1));
   await fixup(null)(w, 1, "a", "b");
-  await w.db.run(w.db.k.insertInto("push_outcomes").values({ at: "2026-12-01T00:00:00.000Z", stage: "fixup", action: "fixup-push", repo: "app", number: 1, from_oid: "a", to_oid: "b", before_res: "unknown", lines: 12 }));
+  await addOwnPush(w.db, { repo: "app", number: 1, from: "a", to: "b", action: "fixup-push", lines: 12 }, "2026-11-01T00:00:00.000Z");
+  // Tried again, and done; a later record of the same commit changes nothing.
+  for (const at of ["2026-12-01T00:00:00.000Z", "2026-12-02T00:00:00.000Z"]) {
+    await addOwnPush(w.db, { repo: "app", number: 1, from: "a", to: "b", action: "fixup-push", lines: 12 }, at);
+    await landOwnPush(w.db, { repo: "app", number: 1, to: "b" }, at);
+  }
   await repin(w, 1, "b", "c");
   const got = (await loadOwnPushes(w.db, [{ repo: "app", number: 1 }])).get("app#1")!;
-  assert.deepEqual(got.map((p) => [p.from, p.to, p.what, p.lines, p.small]), [["a", "b", "fix-up", 12, false], ["b", "c", "autorepin", null, true]]);
+  assert.deepEqual(got.map((p) => [p.from, p.to, p.what, p.lines, p.landed, p.small]), [["a", "b", "fix-up", 12, true, false], ["b", "c", "autorepin", null, false, true]]);
   assert.equal(got[0]!.at, "2026-12-01T00:00:00.000Z");
+});
+
+test("a push whose patch is older than the start owes its review by the time it was made", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  await approved(w, { n: 1, state: "ci", entry: "merge" });
+  await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 1, head: "sha1", to_head: "sha1b", kind: "code", state: "pushing", attempt: 1, created_at: "2020-01-01T00:00:00.000Z" }));
+  await made("cifix-push")(w, 1, "sha1", "sha1b");
+  await w.synced(1, "sha1b");
+  await tick(w);
+  assert.equal((await legOf(w, 1)).state, "review");
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "review"));
+});
+
+test("a fix-up request without a leg whose try another push overtook goes on at the new head, and is dropped with a line when the push was not ours", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  const drop = async (n: number, at = T0) => {
+    await (await (await w.pr(n)).workflow(n)).review(n, { verdict: "take-fix" });
+    await w.fixup(n, false);
+    const id = Number((await w.rows("SELECT id FROM operator_fixups WHERE number = ?", n))[0]!.id);
+    if (at !== T0) await w.db.run(w.db.k.updateTable("operator_fixups").set({ at }).where("id", "=", id));
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, state: "superseded", reason: "the branch moved before the push", attempt: 1, created_at: T0, source: "operator", operator_fix: id }));
+  };
+  for (const n of [1, 2]) await drop(n);
+  await drop(3, "2020-01-01T00:00:00.000Z");
+  await w.db.run(w.db.k.updateTable("items").set({ maintainer_can_modify: 1 }));
+  // The mirror does not show the push that came first: the request waits for it.
+  await addOwnPush(w.db, { repo: "app", number: 1, from: "sha1", to: "sha1b", action: "implement-push", lines: 3 });
+  await landOwnPush(w.db, { repo: "app", number: 1, to: "sha1b" });
+  await w.synced(2, "theirs");
+  await cifix(w, 3, "sha3", "sha3b");
+  await w.synced(3, "sha3b");
+  await tick(w, 1);
+  const requests = async () => (await w.rows("SELECT number, state, from_head FROM operator_fixups ORDER BY number")).map((r) => [Number(r.number), r.state, r.from_head]);
+  // 3: made before a person last chose to go on; nobody waits for it any more.
+  assert.deepEqual(await requests(), [[1, "queued", "sha1"], [2, "ended", "sha2"], [3, "queued", "sha3"]]);
+  await w.synced(1, "sha1b");
+  await tick(w, 1);
+  assert.deepEqual((await requests())[0], [1, "queued", "sha1b"]);
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"));
+});
+
+test("a conflict merge of ours that was force-pushed away is made again, and after the tries at the head someone else must act", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  await approved(w, { n: 1, state: "ci", entry: "review" });
+  await w.db.run(w.db.k.updateTable("pr_checks").set({ mergeable: "CONFLICTING" }));
+  await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }));
+  const conflicts = async () => (await w.prPlan(1)).actions.filter((a) => a.kind === "conflict" && a.params?.bucket === "merge").length;
+  for (const [to, again] of [["sha1b", 1], ["sha1c", 0]] as const) {
+    assert.equal(await conflicts(), 1);
+    const at = new Date().toISOString();
+    await merged("same")(w, 1, "sha1", to);
+    await w.db.run(w.db.k.insertInto("push_outcomes").values({ at, stage: "fixup", action: "conflict-push", repo: "app", number: 1, from_oid: "sha1", to_oid: to, before_res: "unknown" }));
+    await tick(w);
+    // Not shown yet: nothing is merged twice.
+    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [0, "ci"]);
+    // Pushed away before the mirror showed it: GitHub's update after the push has the old head.
+    await new Promise((r) => setTimeout(r, 5));
+    const later = new Date().toISOString();
+    await w.db.run(w.db.k.updateTable("items").set({ updated_at: later }));
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ fetched_at: later }));
+    await w.db.run(w.db.k.updateTable("repos").set({ synced_at: later }));
+    await tick(w);
+    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [again, "ci"], to);
+  }
+  await w.verified(1);
+  const plan = await w.prPlan(1);
+  assert.ok(["person", "contributor"].includes(plan.waitKind!) && plan.wait, JSON.stringify([plan.wait, plan.actions]));
 });

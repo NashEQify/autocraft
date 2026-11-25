@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -29,7 +29,7 @@ import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
-import { candidatePr } from "./work.ts";
+import { takenOver } from "./work.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
 export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; githubId?: number | null };
@@ -226,7 +226,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   // A merge of the sender's that waits for their own sign-in or access: approving it again tries it again.
   const waiting = wf?.approvedBy?.toLowerCase() === login.toLowerCase() ? await waitingMerges(db, wf, login) : [];
   const r = resolve(input.parsed, { kind: on.kind, workflow: wf, closing: closing !== null, mergeWaits: waiting.length > 0 });
-  const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number, startedAt: at }) : undefined;
+  const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number }) : undefined;
   if (started) return out("refused", worksElsewhere(ref, started, input.clock), started.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
     ({ workflowId, repo: item.repo, number: item.number, login, via, kind, parsed: input.parsed, line, at });
@@ -436,19 +436,19 @@ async function waitingMerges(db: Db, w: ItemWorkflow, login: string): Promise<Wo
   return [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ACTION_WAITS })).values()].flat().filter((a) => a.by.toLowerCase() === login.toLowerCase());
 }
 
-/** The PR's own live workflow, when an implement start of its issue would go on with that PR. */
-async function prWorkflow(db: Db, w: Pick<ItemWorkflow, "repo" | "number" | "startedAt">): Promise<ItemWorkflow | undefined> {
-  const pr = await implementationPr(db, w);
+/** The PR's own live workflow, when an implement start of the issue would go on with that PR. */
+async function prWorkflow(db: Db, issue: { repo: string; number: number }): Promise<ItemWorkflow | undefined> {
+  const pr = await openPr(db, issue.repo, takenOver((await loadImplementFacts(db, [issue])).byIssue.get(`${issue.repo}#${issue.number}`)));
   return pr ? (await listWorkflows(db, { live: true, refs: [{ repo: pr.repo, number: pr.number }] }))[0] : undefined;
 }
 
-/** The open implementation PR of an implement workflow, with its head; null while the issue has none. */
-async function implementationPr(db: Db, w: Pick<ItemWorkflow, "repo" | "number" | "startedAt">): Promise<fx.Target | null> {
-  const a = (await loadImplementFacts(db, [{ repo: w.repo, number: w.number }])).byIssue.get(`${w.repo}#${w.number}`);
-  const candidate = candidatePr(a, w);
-  if (candidate === null) return null;
-  const it = (await loadItems(db, [{ repo: w.repo, number: candidate }], "pr")).get(`${w.repo}#${candidate}`);
-  return it?.state === "OPEN" ? { repo: w.repo, number: candidate, kind: "pr", head: it.head_oid } : null;
+/** The open PR an implement workflow works on, with its head; null while it has none. */
+const implementationPr = async (db: Db, w: ItemWorkflow): Promise<fx.Target | null> =>
+  openPr(db, w.repo, (await loadLinks(db, { workflowIds: [w.id] }, { ended: true }))[0]?.pr ?? null);
+
+async function openPr(db: Db, repo: string, number: number | null): Promise<fx.Target | null> {
+  const it = number === null ? undefined : (await loadItems(db, [{ repo, number }], "pr")).get(`${repo}#${number}`);
+  return it?.state === "OPEN" ? { repo, number: it.number, kind: "pr", head: it.head_oid } : null;
 }
 
 // ---- controls ------------------------------------------------------------------------------------------------------------
