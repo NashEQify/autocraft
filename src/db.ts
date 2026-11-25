@@ -340,6 +340,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "workflow", "TEXT"],
   // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
   ["item_workflows", "step", "TEXT"],
+  // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
+  ["user_tokens", "refresh_error", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
