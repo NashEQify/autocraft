@@ -1,14 +1,15 @@
-// Help pages: Getting started, Commands, After a command, Workflows, Who can do what, Keyboard.
+// Help pages: Getting started, Commands, After a command, Workflows, Examples, Who can do what, Keyboard.
 import { Fragment, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ArrowDownIcon, ArrowLeftIcon, CaretRightIcon, ChatCircleIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { t } from "../../../../src/i18n/index.ts";
 import { COMMANDS, CONTROLS, ENTRY_LABEL, WEIGHT_HELP, type CommandDef } from "../../../../src/workflow/vocab.ts";
 import { blockerLabel, stepLabel, stepsFor, type StepName } from "../../../../src/workflow/status.ts";
-import type { Blocker, Entry } from "../../../../src/workflow/types.ts";
+import type { Blocker } from "../../../../src/workflow/types.ts";
 import type { ViewProps } from "../../registry/types";
 import { modules } from "../../registry";
-import { cn } from "../../ui/cn";
+import { MessageSample } from "../../ui/molecules/MessageSample";
+import { StepFlow, type FlowRow } from "../../ui/molecules/StepFlow";
 import { useQuery } from "../../api/client";
 
 /** What to type after the `@` in a GitHub comment: the app's mention name or slug; a placeholder until it is known or without an app. */
@@ -20,14 +21,29 @@ function useMention(): string {
 const MAIN = COMMANDS.filter((c) => !c.more);
 const MORE = COMMANDS.filter((c) => c.more);
 const BLOCKERS: Blocker[] = ["major-finding", "author-commits", "failed-twice", "beyond-agreed", "large-fix", "outside-purpose"];
-const ENTRIES: Entry[] = ["review", "fixup", "implement"];
 const ITEM = "photocraft#803";
+
+/** Phrasings the parser reads, with the command each one runs. */
+const WORKS: [string, () => string][] = [
+  ["looks good, can you merge it please", () => "merge"],
+  ["yes except 3", () => t("yes, without finding 3")],
+  ["drop the second one", () => "drop 2"],
+  ["merge once CI is green", () => t("merge; it only merges on green CI anyway")],
+  ["close, it's a dupe of #12", () => "close as duplicate of #12"],
+];
+/** Phrasings that run nothing, with why. */
+const NOT_RUN: [string, () => string][] = [
+  ["maybe merge it?", () => t("A question or maybe never runs.")],
+  ["merge after Friday's release", () => t("A condition AutoCraft can't check. At most it suggests a command.")],
+  ["don't fix 2", () => t("A negation never runs. Write drop 2.")],
+];
 
 const PAGES = [
   { id: "start", title: () => t("Getting started") },
   { id: "commands", title: () => t("Commands") },
   { id: "after", title: () => t("After a command") },
   { id: "workflows", title: () => t("Workflows") },
+  { id: "examples", title: () => t("Examples") },
   { id: "roles", title: () => t("Who can do what") },
   { id: "keyboard", title: () => t("Keyboard") },
 ];
@@ -183,6 +199,32 @@ function Commands() {
           <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>.
         </p>
       </Part>
+      <Part title={t("Writing normally")}>
+        <p>{t("Ordinary phrasing works too. These run:")}</p>
+        <ul className="flex flex-col gap-2">
+          {WORKS.map(([said, does]) => (
+            <li key={said}>
+              <MessageSample tone="ok" note={`→ ${does()}`}>
+                <Code>{said}</Code>
+              </MessageSample>
+            </li>
+          ))}
+        </ul>
+        <p>
+          <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code> {t("mean merge, backlog and resume.")}
+        </p>
+        <p>{t("These don't run:")}</p>
+        <ul className="flex flex-col gap-2">
+          {NOT_RUN.map(([said, why]) => (
+            <li key={said}>
+              <MessageSample tone="bad" note={why()}>
+                <Code>{said}</Code>
+              </MessageSample>
+            </li>
+          ))}
+        </ul>
+        <p>{t("A message with not, maybe or a question mark never runs as written. The phrases don't merge yet, not yet and not now still hold. When nothing runs, AutoCraft says what it understood.")}</p>
+      </Part>
       <Part title={t("Several items")}>
         <p>
           {t("On Discord, in an agent and in this app, write them inline:")} <Code>merge photocraft#803 photocraft#19</Code>, {t("or as a list after a colon:")} <Code>merge, urgent: photocraft#803 #19</Code>. {t("A bare number takes the repo before it. Each item gets its own answer line. A GitHub comment acts only on the item it is written on.")}
@@ -223,32 +265,42 @@ function After() {
       <Part title={t("Following progress")}>
         <p>{t("The item page shows the steps and history beside the GitHub activity. The Work queue shows what runs, what waits and why.")}</p>
       </Part>
+      <Part title={t("When AutoCraft asks you")}>
+        <p>{t("AutoCraft asks one question with one recommendation. The findings are numbered in the item's status.")}</p>
+        <MessageSample tone="asks">{t("Recommendation: Fix 1 and 2, then merge. Reply yes to fix 1 and 2, then merge (after the pre-merge check and green CI).")}</MessageSample>
+        <ul className="flex list-disc flex-col gap-1 pl-5">
+          <li>
+            <Code>yes</Code>, <Code>lgtm</Code>, <Code>go</Code>: {t("runs the recommendation. If it ends in a merge, the yes also approves the merge.")}
+          </li>
+          <li>
+            {t("Or say what you want instead:")} <Code>fix 1, drop 2, then merge</Code>, <Code>review</Code>, <Code>close</Code>, <Code>hold</Code>.
+          </li>
+          <li>{t("Anything unclear runs nothing as written. AutoCraft reads it as the part below says.")}</li>
+        </ul>
+        <p>{t("It comes back to you when:")}</p>
+        <ul className="flex list-disc flex-col gap-1 pl-5">
+          <li>{t("the steps are done and the merge is not approved;")}</li>
+          <li>{t("an implementation's plan has a question, approved or not;")}</li>
+          <li>{t("only a person can go on: the base branch, missing CI, red CI AutoCraft can't repair, or an approver who lost write access;")}</li>
+          <li>{t("an approved item reaches a blocker (below).")}</li>
+        </ul>
+      </Part>
       <Part title={t("Merge approval")}>
-        <p>
-          <Code>merge</Code> {t("approves. An approved item merges when its steps are done and CI is green. Without approval, AutoCraft comes back with one recommendation.")}
-        </p>
-        <p>{t("An approved item comes back to you only at a blocker:")}</p>
+        <ul className="flex list-disc flex-col gap-1 pl-5">
+          <li>
+            <Code>merge</Code> {t("approves, alone or with a start command. So does a yes to a recommendation that ends in a merge.")}
+          </li>
+          <li>{t("An approved item merges when its steps are done, the pre-merge check is clean and CI is green, in the approver's name.")}</li>
+          <li>{t("The approval stays through AutoCraft's own fixes and through a hold. It ends with backlog or close, and when the approver loses write access.")}</li>
+          <li>{t("An approved item still comes back at a blocker:")}</li>
+        </ul>
         <ol className="list-decimal pl-6 text-sm">
           {BLOCKERS.map((b) => (
             <li key={b}>{blockerLabel(b)}</li>
           ))}
         </ol>
         <p className="text-sm">{t("At a blocker the approval stays. A yes resumes the plan.")}</p>
-      </Part>
-      <Part title={t("Answering a recommendation")}>
-        <ul className="flex list-disc flex-col gap-1 pl-5">
-          <li>
-            <Code>yes</Code>, <Code>lgtm</Code>, <Code>go</Code>: {t("runs the recommendation.")}
-          </li>
-          <li>
-            {t("An instruction,")} <Code>fix 1, drop 2, then merge</Code>: {t("runs as written.")}
-          </li>
-          <li>
-            {t("You can also write")} <Code>looks good, merge it</Code>, <Code>yes except 3</Code>, <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code>, <Code>close, it's a dupe of #12</Code>.{" "}
-            {t("A message with not, maybe or a question mark is not run as written; don't merge yet holds.")}
-          </li>
-          <li>{t("Anything unclear runs nothing as written. AutoCraft reads it as the next part says.")}</li>
-        </ul>
+        <p className="text-sm">{t("After the merge, a model reviews the change if AutoCraft changed code after the approval, wrote the pull request after it, or merged it automatically.")}</p>
       </Part>
       <Part title={t("Messages AutoCraft can't read")}>
         <ul className="flex list-disc flex-col gap-1 pl-5">
@@ -277,88 +329,109 @@ function After() {
   );
 }
 
-const box = "rounded border border-line-strong bg-raised px-2.5 py-1";
-const Down = () => (
-  <li aria-hidden className="ml-3 text-ink/50">
-    <ArrowDownIcon />
-  </li>
-);
-const Asked = () => <ChatCircleIcon aria-label={t("A person is asked")} className="mr-1 inline align-[-2px] text-accent-ink" />;
-
-/** A step list drawn top to bottom, ending in branches when there are any. Asked branches carry the speech-bubble mark. */
-function Flow({ steps, ends }: { steps: StepName[]; ends?: [string, string, boolean?][] }) {
-  return (
-    <ol className="flex flex-col items-start gap-0.5 text-sm">
-      {steps.map((s, i) => (
-        <Fragment key={i}>
-          {i > 0 && <Down />}
-          <li className={box}>{stepLabel({ name: s, state: "next" })}</li>
-        </Fragment>
-      ))}
-      {ends && (
-        <>
-          <Down />
-          <li className="flex flex-col gap-1">
-            {ends.map(([when, what, asked]) => (
-              <span key={when} className={cn(box, asked && "border-accent/60 bg-accent/10")}>
-                <span className="text-ink/70">{when}: </span>
-                {asked && <Asked />}
-                {what}
-              </span>
-            ))}
-          </li>
-        </>
-      )}
-    </ol>
-  );
+/** One flow per starting point; the person's command first, the points where AutoCraft asks marked. */
+function flows(): { title: string; note?: string; rows: FlowRow[] }[] {
+  const ends = (approved: string): FlowRow => [
+    { when: t("Merge approved"), text: approved, kind: "done" },
+    { when: t("Not approved"), text: t("one recommendation"), kind: "asks" },
+  ];
+  return [
+    { title: t(ENTRY_LABEL.review), rows: [{ text: "review", kind: "you" }, { text: t("Model review of the pull request") }, ends(t("Fix the findings, review again, merge"))] },
+    { title: t(ENTRY_LABEL.fixup), rows: [{ text: "fix-up", kind: "you" }, { text: t("Review") }, { text: t("Fix what the review found") }, { text: t("Review again") }, ends(t("Merge"))] },
+    {
+      title: t(ENTRY_LABEL.implement),
+      rows: [{ text: "implement", kind: "you" }, { text: t("a plan question, if the plan has one, even when the merge is approved"), kind: "asks" }, { text: t("Write the change and its tests in a new pull request") }, { text: t("Review, fix, review again") }, ends(t("Merge"))],
+    },
+    {
+      title: t(ENTRY_LABEL.merge),
+      note: t("On a pull request nobody started. No model review; the approval is the command itself."),
+      rows: [{ text: "merge", kind: "you" }, { text: t("Update from main") }, { text: t("Fix CI and conflicts") }, { text: t("Pre-merge check and green CI") }, { text: t("Merge in a batch, in your name"), kind: "done" }],
+    },
+    {
+      title: t("Automatic, for everything new"),
+      note: t("Only small and medium bug fixes and infra changes from contributors with a good merge history, in repos where automatic work is on. Everything else waits for a maintainer's command."),
+      rows: [
+        { text: t("Classify: kind, size, duplicates, priority") },
+        { text: t("Review, and fix if needed") },
+        { text: t("Pre-merge check and green CI") },
+        [{ when: t("All clear"), text: t("Merge"), kind: "done" }, { when: t("Needs a person"), text: t("one recommendation; whoever answers takes the item over"), kind: "asks" }],
+      ],
+    },
+  ];
 }
 
 function Workflows() {
   return (
     <Page id="workflows">
-      <p>
-        {t("A command picks where the item enters.")} <Asked />
-        {t("marks where a person is asked.")}
-      </p>
-      <Part title={t("Automatic, for everything new")}>
-        <ol className="flex flex-col items-start gap-0.5 text-sm">
-          <li className={box}>{t("classify: kind, size, duplicates, priority")}</li>
-          <Down />
-          <li className="flex flex-col gap-1">
-            <span className={box}>
-              <span className="text-ink/70">{t("Small or medium bug fix:")} </span>
-              {t("review → fix-up if needed → merge")}
-            </span>
-            <span className={cn(box, "border-accent/60 bg-accent/10")}>
-              <span className="text-ink/70">{t("Anything else:")} </span>
-              <Asked />
-              {t("waits for a maintainer's command")}
-            </span>
-          </li>
-        </ol>
-        <p className="text-sm">{t("When the automatic path stops for a person, it asks like any other workflow. Whoever answers takes the item over.")}</p>
-      </Part>
-      {ENTRIES.map((e) => (
-        <Part key={e} title={t(ENTRY_LABEL[e])}>
-          <Flow
-            steps={stepsFor(e, false).slice(0, -1)}
-            ends={[
-              [t("Approved"), t("merge when CI is green")],
-              [t("Not approved"), t("one recommendation"), true],
-            ]}
-          />
+      <p>{t("A command picks where the item enters. Every merge waits for the pre-merge check and green CI, and goes only into the default branch.")}</p>
+      {flows().map((f) => (
+        <Part key={f.title} title={f.title}>
+          {f.note && <p className="text-sm">{f.note}</p>}
+          <StepFlow label={t("Steps of {flow}", { flow: f.title })} rows={f.rows} />
         </Part>
       ))}
-      <Part title={t(ENTRY_LABEL.merge)}>
-        <p className="text-sm">{t("No review. Approval is implied.")}</p>
-        <Flow steps={stepsFor("merge", true)} />
-      </Part>
       <Part title={t("At any step")}>
-        <p>
-          <Asked />
-          {t("A blocker stops the item and asks, even when it is approved.")}
-        </p>
+        <p>{t("A blocker stops the item and asks, even when it is approved.")}</p>
       </Part>
+    </Page>
+  );
+}
+
+/** A worked example: numbered steps, each a sentence with an optional message under it. */
+function Story({ title, steps }: { title: string; steps: { text: ReactNode; said?: string; tone?: "ok" | "asks" }[] }) {
+  return (
+    <Part title={title}>
+      <ol className="flex list-decimal flex-col gap-3 pl-6">
+        {steps.map((s, i) => (
+          <li key={i} className="flex flex-col gap-1.5 pl-1">
+            <span>{s.text}</span>
+            {s.said && <MessageSample tone={s.tone ?? "ok"}>{s.said}</MessageSample>}
+          </li>
+        ))}
+      </ol>
+    </Part>
+  );
+}
+
+function Examples() {
+  const mention = useMention();
+  const by = (who: string, typed: string) => (
+    <>
+      <span className="font-semibold">{who}:</span> <Code>{typed}</Code>
+    </>
+  );
+  return (
+    <Page id="examples">
+      <Story
+        title={t("A contributor's bug fix")}
+        steps={[
+          { text: t("A contributor with a good merge history opens a 40-line bug fix. Nobody types anything.") },
+          { text: t("AutoCraft reviews it, finds two small problems and fixes them.") },
+          { text: t("The pre-merge check is clean and CI is green. AutoCraft merges it, then reviews the merged change.") },
+          { text: t("Another time the review is unsure, and AutoCraft asks:"), said: t("The automatic merge rule stops here: the review is unsure. Review it again, then come back with the result."), tone: "asks" },
+          { text: <>{by("mira", `@${mention} fix-up and merge`)} {t("Mira now owns the item. Had the author pushed before anyone answered, the question would have closed and the automatic rule would have taken the pull request back.")}</> },
+        ]}
+      />
+      <Story
+        title={t("A review with findings")}
+        steps={[
+          { text: by("mira", `@${mention} review`), said: t("Reviewing, then coming back with a recommendation (started by mira, 09:31 UTC). Reply hold to halt.") },
+          { text: t("The review finds three problems. Nothing is fixed yet: the merge is not approved.") },
+          { text: t("AutoCraft asks:"), said: t("Recommendation: Fix 1 and 2, then merge."), tone: "asks" },
+          { text: by("mira", "drop 2, merge"), said: t("Dropping 2, fixing 1, then merging when CI is green (approved by mira, 10:02 UTC). Reply hold to halt.") },
+          { text: t("AutoCraft fixes 1, reviews again, waits for the pre-merge check and green CI, and merges in Mira's name. It changed code after the approval, so it reviews the merged change.") },
+        ]}
+      />
+      <Story
+        title={t("A normal reply read by the model")}
+        steps={[
+          { text: t("AutoCraft has asked: Fix 1 and 2, then merge.") },
+          { text: by("mira", `@${mention} sure thing, just get the export bug sorted and land it`) },
+          { text: t("That is not a command AutoCraft can read. A model on Mira's Task Runner reads it as fix 1, merge.") },
+          { text: t("A second model check is sure, and the message has no but, if or question. So it runs:"), said: t("Fixing 1, then merging when CI is green (approved by mira, 10:02 UTC). Reply hold to halt. Read from your words as `fix 1, merge`.") },
+          { text: t("Had she written land it once you've sorted the export bug, it would not run. AutoCraft would reply with the command to send instead.") },
+        ]}
+      />
     </Page>
   );
 }
@@ -430,6 +503,7 @@ function HelpPage({ page }: { page?: string }) {
   if (page === "commands") return <Commands />;
   if (page === "after") return <After />;
   if (page === "workflows") return <Workflows />;
+  if (page === "examples") return <Examples />;
   if (page === "roles") return <Roles />;
   if (page === "keyboard") return <Keyboard />;
   return (
