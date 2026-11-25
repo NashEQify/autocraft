@@ -115,7 +115,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
   if (f.run && live && !f.draft && state === "referee-due" && !backoff && !jevDue && !haikuDue) actions.push(act("referee", null, { source: c.referee ? "opus" : "sonnet" }));
   // prioritize: no priority row at the current text hash. Not while Jev's classify call is due: that request asks the impact
   // question too and settles the priority (src/runner/classify.ts), so the two steps never ask Jev the same item at once.
-  if (priorityDue(f) && !(f.run && live && jevDue)) actions.push(act("prioritize", null));
+  // The hold ends once a classify request failed for the item's current input, so an item Jev cannot classify still gets a priority.
+  if (priorityDue(f) && !(f.run && live && jevDue && !c.jevFailed)) actions.push(act("prioritize", null));
   // embed: every open item, with no scope test.
   if (f.embeddedHash !== f.embedHash) actions.push(act("embed", null));
   // dupes: items to scan, pairs to check, groups to ask.

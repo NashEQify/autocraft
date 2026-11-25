@@ -52,6 +52,7 @@ const rows: Row[] = [
   { name: "no priority row", facts: { priorityHash: null }, expect: { state: "classified", actions: ["prioritize"] } },
   { name: "priority made at older text", facts: { priorityHash: "old" }, expect: { state: "classified", actions: ["prioritize"] } },
   { name: "no priority row while Jev's classify call is due: that request asks the impact", facts: { priorityHash: null, classification: { jev: jev({ changed: true }) } }, expect: { state: "classified", actions: ["classify"] } },
+  { name: "no priority row after a classify request failed for the item's current input: prioritize asks it", facts: { priorityHash: null, classification: { jev: jev({ changed: true }), jevFailed: true } }, expect: { state: "classified", actions: ["classify", "prioritize"] } },
   { name: "no priority row while only Haiku's classify call is due: prioritize asks it", facts: { priorityHash: null, classification: { status: "waiting", label: null, jev: jev({ unsure: true }) } }, expect: { state: "waiting-haiku", actions: ["classify", "prioritize"] } },
   { name: "no vector for the current model", facts: { embeddedHash: null }, expect: { state: "classified", actions: ["embed"] } },
   { name: "vector of older text: embed again, no scan until it is current", facts: { embeddedHash: "old", scannedHash: null }, expect: { state: "classified", actions: ["embed"] } },

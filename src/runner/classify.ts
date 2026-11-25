@@ -11,11 +11,12 @@
 import { refOf, type Item } from "../classify/parse.ts";
 import { takersFirst } from "../agents/call.ts";
 import { freeSlots } from "../agents/accounts.ts";
-import { jevAvailable, takeJevStatuses } from "../agents/jev.ts";
+import { jevAvailable } from "../agents/jev.ts";
 import { haikuBatches, jevAgents, runHaiku, runJev, type JevExtraAnswers } from "../classify/run.ts";
 import { prioritizeAnswered } from "../priority/index.ts";
 import { priorityDue } from "../core/decide-item.ts";
 import type { ClassifyExtras } from "../prompts/index.ts";
+import { AREAS, PRIORITY } from "../agents/steps.ts";
 import { fillClassHashes } from "../itemhash.ts";
 import { itemPlans, itemsOf, plannedItems, type ItemPlans, type PlannedItem } from "../core/select-items.ts";
 import { startedRefs } from "../pilot.ts";
@@ -85,9 +86,8 @@ export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashe
     for (const [ref, a] of r.impact) out.impact.set(ref, a);
     for (const [ref, a] of r.area) out.area.set(ref, a);
     t.answered("jev", out.done.size);
-    const limited = takeJevStatuses();
     await ctx.progress(`Jev: ${Math.min(i + JEV_CHUNK, todo.length)} of ${todo.length} items`);
-    if (limited.size) ctx.log(`Jev responses that were not OK in this chunk: ${[...limited].map(([status, n]) => `${n} with status ${status}`).join(", ")}`);
+    if (r.statuses.size) ctx.log(`Jev responses that were not OK in this chunk: ${[...r.statuses].map(([status, n]) => `${n} with status ${status}`).join(", ")}`);
   }
   return out;
 }
@@ -215,14 +215,17 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   ctx.log(`Haiku: ${unsure.length} items where Jev is unsure of the type (under ${SURE * 100} %) or of a flag`);
   const haiku = await haikuPass(ctx, run, unsure, t, "haiku", more);
   const jev = jevDone.size, left = due.length - jev - haikuAlone;
-  // Impact answers the classify requests carried are settled and stored whatever the time, as the prioritize step would.
-  const prio = await ctx.cancelled() || !jevRes.impact.size ? null : await prioritizeAnswered(ctx.db, todo.filter((x) => jevRes.impact.has(refOf(x))).map((x) => ({ ...x, hash: ask.priority.get(refOf(x))! })), jevRes.impact, { cancelled: ctx.cancelled, log: ctx.log });
+  // Past the slice (with items left) only the answers Jev is sure of are stored from the classify requests: an unsure one would
+  // need Haiku, so it is left to the prioritize step or the area pass.
+  const late = left > 0 && await ctx.timeUp();
+  const impact = late ? new Map([...jevRes.impact].filter(([, v]) => PRIORITY.sure(v))) : jevRes.impact;
+  const prio = await ctx.cancelled() || !impact.size ? null : await prioritizeAnswered(ctx.db, todo.filter((x) => impact.has(refOf(x))).map((x) => ({ ...x, hash: ask.priority.get(refOf(x))! })), impact, { cancelled: ctx.cancelled, log: ctx.log });
   if (prio) ctx.log(`Priority from the classify requests: ${prio.saved} of ${prio.due} items saved (${prio.haiku} by Haiku where Jev was unsure)`);
   // Items of repos with an area list that were not asked against its current version; Jev's answers share the job's limit with the type pass.
   // Past the slice the areas wait for a job with time left, since the planner queues classify-new only while Jev has items due;
-  // the job that clears the last of them asks them whatever its time. Answers the classify requests carried are stored in any case.
-  const given = new Map([...jevRes.area].map(([ref, answer]) => [ref, { answer, version: ask.lists.get(ref)!.version }]));
-  const areaLimit = left > 0 && await ctx.timeUp() ? 0 : Math.min(limit, AREAS_PER_CLASSIFY_JOB);
+  // the job that clears the last of them asks them whatever its time.
+  const given = new Map([...jevRes.area].filter(([, a]) => !late || AREAS.sure(a)).map(([ref, answer]) => [ref, { answer, version: ask.lists.get(ref)!.version }]));
+  const areaLimit = late ? 0 : Math.min(limit, AREAS_PER_CLASSIFY_JOB);
   const areas = await ctx.cancelled() || (!areaLimit && !given.size) ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: areaLimit, given, usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
   return { areas, jev, due: due.length, haiku, haikuDue: unsure.length, haikuAlone, aloneDue: alone.length, left, asked: t.asked() };
 }

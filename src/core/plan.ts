@@ -387,6 +387,8 @@ export type ItemFacts = {
     jev: { at: string; changed: boolean; unsure: boolean } | null;
     /** Haiku's verdict in the run; `aloneCurrent`: it classified the item alone at its current input (that settles it without Jev). */
     haiku: { at: string; aloneCurrent: boolean } | null;
+    /** A classify.jev request gave no valid verdict for the item's current input while Jev was up. */
+    jevFailed?: boolean;
   };
 
   /** Hash of the item's embedded text (stored by sync, else computed). */

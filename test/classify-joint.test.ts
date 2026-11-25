@@ -12,6 +12,12 @@ import { world, type World } from "./world-db.ts";
 let current: World | null = null;
 afterEach(() => current?.close());
 
+const jobCtx = (w: World): StepContext => ({
+  db: w.db, job: { id: 1, requestedBy: "pipeline", startedAt: new Date().toISOString(), resumes: 0 }, params: { limit: 50 },
+  progress: async () => {}, log: () => {}, usageRun: () => {}, handled: () => {}, acted: () => {},
+  cancelled: async () => false, stopping: async () => false, timeUp: async () => false,
+});
+
 test("one Jev request per item answers its type, priority and area, and the other steps see them done", async () => {
   const w = (current = await (await world()).repo());
   await w.issue(1);
@@ -26,11 +32,7 @@ test("one Jev request per item answers its type, priority and area, and the othe
     };
     return { code: 0, stderr: "", stdout: JSON.stringify({ answers, usage: { input_tokens: 900, output_tokens: 3 } }) };
   });
-  const ctx: StepContext = {
-    db: w.db, job: { id: 1, requestedBy: "pipeline", startedAt: new Date().toISOString(), resumes: 0 }, params: { limit: 50 },
-    progress: async () => {}, log: () => {}, usageRun: () => {}, handled: () => {}, acted: () => {},
-    cancelled: async () => false, stopping: async () => false, timeUp: async () => false,
-  };
+  const ctx = jobCtx(w);
   try { await classifyNew(ctx); } finally { restore(); }
   const asked = bodies.map((b) => JSON.parse(b) as { state: string; questions: Record<string, unknown> }).filter((b) => b.state.includes("app#2"));
   assert.equal(asked.length, 1, "one request for the new item");
@@ -40,4 +42,15 @@ test("one Jev request per item answers its type, priority and area, and the othe
   const area = await w.db.get(w.db.k.selectFrom("item_areas").select(["area", "source"]).where("number", "=", 2));
   assert.deepEqual(area, { area: "Export", source: "jev" });
   assert.ok(!(await plannedItems(w.db, "prioritize")).some((p) => p.facts.number === 2), "prioritize no longer has the item");
+});
+
+test("an item Jev gives no valid verdict for is released to the prioritize step", async () => {
+  const w = (current = await (await world()).repo());
+  await w.issue(1);
+  await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 2, kind: "issue", state: "OPEN", title: "Export drops the alpha channel", body: "Saving a PNG loses transparency.", author: "someone", created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" }));
+  const held = async () => !(await plannedItems(w.db, "prioritize")).some((p) => p.facts.number === 2);
+  assert.ok(await held(), "held while its classify request is due");
+  const restore = setRunner(async () => ({ code: 0, stderr: "", stdout: JSON.stringify({ answers: { type: { choice: "not a label" } }, usage: { input_tokens: 9, output_tokens: 0 } }) }));
+  try { await classifyNew(jobCtx(w)); } catch { /* no item answered: the job fails */ } finally { restore(); }
+  assert.ok(!await held(), "prioritize has the item after the failed request");
 });

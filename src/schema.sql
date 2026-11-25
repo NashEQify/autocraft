@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS items (
   embed_hash TEXT,                    -- hash of the embedded text, set at sync (src/itemhash.ts)
   class_hash TEXT,                    -- the classifier's input hash under class_scheme
   class_scheme TEXT,
+  jev_failed_hash TEXT,               -- class_hash at which a classify.jev request gave no valid verdict while Jev was up
   PRIMARY KEY (repo, number)
 );
 CREATE INDEX IF NOT EXISTS items_state ON items(repo, kind, state);
