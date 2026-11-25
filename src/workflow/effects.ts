@@ -1,19 +1,20 @@
 // What a maintainer's command does to the machinery that already works: the review-again mark, operator fix-ups, pre-approved
 // merges (the merge leg, owned through preapprovals.workflow_id), the close made as the person (a `workflow_actions` row the
-// action executor carries out), autorepin and the stop of every queued step. The command core (apply.ts) calls these and then
-// writes the workflow row; nothing here touches item_workflows.
+// action executor carries out), autorepin and the stop of every queued step. A start, an answer and a close check first and return
+// what they write; the command core (apply.ts) writes that in one transaction with the workflow row, so no check reads state the
+// command itself creates and a refusal leaves nothing behind. Nothing here touches item_workflows.
 import { endWorkspace } from "../build/workspaces.ts";
 import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
 import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { withdrawItemCalls } from "../data/runners/index.ts";
-import { endFixupRequests, holdMerges, listWorkflowLegs, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs } from "../data/workflow/index.ts";
+import { adoptLegs, endFixupRequests, holdMerges, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
-import { cancelPreapproval, inActiveBatch, INSTRUCTIONS_MAX, preapproveMerge, PreapprovalRefused, runPipelineStep } from "../preapproval/index.ts";
+import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
 import { markReviewsStale } from "../review/discussion.ts";
@@ -31,12 +32,8 @@ const LEGACY_TEXT: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^(\S+#\d+) is not open$/, (m) => t("{ref} is not open.", { ref: m[1]! })],
   [/^(\S+#\d+) is outside the pipeline's scope/, (m) => t("{ref} is outside the pipeline's scope.", { ref: m[1]! })],
   [/^(\S+#\d+) cannot be reviewed yet: it is a draft$/, (m) => t("{ref} is a draft, so it cannot be reviewed yet.", { ref: m[1]! })],
-  [/^(\S+#\d+) cannot be reviewed yet: it is in the backlog$/, (m) => t("{ref} is in the backlog, so it cannot be reviewed yet.", { ref: m[1]! })],
-  [/^(\S+#\d+) cannot be reviewed yet: it is held as a duplicate$/, (m) => t("{ref} is held as a duplicate, so it cannot be reviewed yet.", { ref: m[1]! })],
-  [/^(\S+#\d+) cannot be reviewed yet: (.+)$/, (m) => t("{ref} cannot be reviewed yet: {why}", { ref: m[1]!, why: m[2]! })],
   [/^(\S+#\d+) has no head commit in the mirror yet$/, (m) => t("AutoCraft has not read the head commit of {ref} yet.", { ref: m[1]! })],
   [/^the PR changed after your comment; comment again$/, () => t("The pull request changed after the command was written. Send it again.")],
-  [/^merging is not approved for (\S+)$/, (m) => t("Merging is not approved for {repo}. An operator or a maintainer of the repo can turn it on, on the Repos page.", { repo: m[1]! })],
   [/^pushing is not approved for (\S+)$/, (m) => t("Pushing is not approved for {repo}. An operator or a maintainer of the repo can turn it on, on the Repos page.", { repo: m[1]! })],
   [/^(\S+#\d+) already has a pre-approved merge in progress$/, (m) => t("{ref} is already on its way to a merge.", { ref: m[1]! })],
   [/^(\S+#\d+) conflicts with its base branch/, (m) => t("{ref} conflicts with its base branch: the conflict merge comes first.", { ref: m[1]! })],
@@ -72,38 +69,48 @@ async function step<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** The PR's newest active merge leg. */
-const activePreapproval = async (db: Db, t: Target): Promise<number | null> =>
-  (await loadLegs(db, [{ repo: t.repo, number: t.number }], { activeOnly: true })).get(ref(t))?.at(-1)?.id ?? null;
+/** The PR's active merge leg. */
+const activeLeg = async (db: Db, t: Target): Promise<Preapproval | null> =>
+  (await loadLegs(db, [{ repo: t.repo, number: t.number }], { activeOnly: true })).get(ref(t))?.at(-1) ?? null;
 
 // ---- starts --------------------------------------------------------------------------------------------------------------
 
-/** The merge leg: a pre-approved merge at the current head, or the one already in progress. Returns its id. */
-async function mergeLeg(c: Ctx): Promise<number> {
-  const had = await activePreapproval(c.db, c.item);
-  if (had !== null) return had;
+/** What a checked command writes, in the caller's transaction, for the workflow: a refusal rolls it back. */
+export type Write = (workflowId: number) => Promise<void>;
+const nothing: Write = async () => {};
+
+const writeOf = (s: CheckedStep): Write => async (id) => {
   try {
-    await preapproveMerge(c.db, { repo: c.item.repo, number: c.item.number, by: c.by, via: c.via, ...(c.item.head ? { head: c.item.head } : {}) });
+    await s.write(id);
   } catch (e) {
-    if (!(e instanceof PreapprovalRefused && e.active)) throw new EffectError(effectText((e as Error).message));
+    throw e instanceof PreapprovalRefused ? new EffectError(effectText(e.message)) : e;
   }
-  const id = await activePreapproval(c.db, c.item);
-  if (id === null) throw new EffectError(t("{ref} is not on its way to a merge.", { ref: ref(c.item) }));
-  return id;
+};
+
+/** The merge leg: a pre-approved merge at the current head, or the one already in progress (`had`). */
+async function mergeLeg(c: Ctx, had: Preapproval | null): Promise<Write> {
+  if (had === null) return writeOf(await step(() => checkMergeLeg(c.db, { repo: c.item.repo, number: c.item.number, by: c.by, via: c.via, ...(c.item.head ? { head: c.item.head } : {}) })));
+  const owner = had.workflow_id;
+  if (owner === null) return async (id) => void await adoptLegs(c.db, [{ id: had.id, workflowId: id }]);
+  // A merge is made through its own workflow's leg. One of another live workflow (the PR's issue) is already at work; one whose workflow
+  // ended is cancelled by the pre-approval pass, and this workflow's leg starts after it (src/workflow/advance.ts).
+  if (owner !== c.workflowId && (await listWorkflows(c.db, { ids: [owner], live: true })).length) throw new EffectError(t("{ref} is already on its way to a merge.", { ref: ref(c.item) }));
+  return nothing;
 }
 
 /**
  * Starts the item at `entry`. Review and Fix-up mark the PR for a review of its current head (the fix-up follows from what the
  * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself. An approved PR gets its
- * merge leg now. Returns the pre-approval the workflow owns, if any.
+ * merge leg at once.
  */
-export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<{ preapproval: number | null }> {
+export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<Write> {
   const { db, by, item } = c;
-  if (entry === "implement") return { preapproval: null };
-  // The pre-approval validates the PR first (open, reviewable, merging approved), so nothing else is written when it refuses.
-  const preapproval = approved || entry === "merge" ? await mergeLeg(c) : null;
-  if (entry !== "merge") await step(() => markReviewsStale(db, by, item.repo, item.number));
-  return { preapproval };
+  if (entry === "implement") return nothing;
+  const leg = approved || entry === "merge" ? await mergeLeg(c, await activeLeg(db, item)) : nothing;
+  return async (id) => {
+    await leg(id);
+    if (entry !== "merge") await markReviewsStale(db, by, item.repo, item.number);
+  };
 }
 
 // ---- answers on a started item -------------------------------------------------------------------------------------------
@@ -124,18 +131,23 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
 /**
  * What runs again on a started PR: a review of the current head, or a fix-up of the named parts. With `merges`, the fix-up
  * carries the merge (a new pre-approval in `fixup`), unless a pre-approved merge is already in progress; a PR with no fix-up
- * this time gets its merge leg when it has none. Returns the pre-approval the workflow owns, if any.
+ * this time gets its merge leg when it has none.
  */
-export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean }): Promise<{ preapproval: number | null }> {
+export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean }): Promise<Write> {
   const { db, by, item } = c;
-  if (item.kind !== "pr") return { preapproval: null };
+  if (item.kind !== "pr") return nothing;
+  const had = o.merges ? await activeLeg(db, item) : null;
   if (o.again === "fixup") {
-    const had = await activePreapproval(db, item);
-    const r = await step(() => runPipelineStep(db, { repo: item.repo, number: item.number, by, step: { kind: "fixup", instructions: fixInstructions(o.plan, o.fix), merge: o.merges && had === null } }));
-    return { preapproval: r.preapproval ?? (o.merges ? had : null) };
+    const merge = o.merges && had === null;
+    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix), merge })));
+    const leg = o.merges && !merge ? await mergeLeg(c, had) : nothing;
+    return async (id) => { await leg(id); await fix(id); };
   }
-  if (o.again === "review") await step(() => markReviewsStale(db, by, item.repo, item.number));
-  return { preapproval: o.merges ? await mergeLeg(c) : null };
+  const leg = o.merges ? await mergeLeg(c, had) : nothing;
+  return async (id) => {
+    await leg(id);
+    if (o.again === "review") await markReviewsStale(db, by, item.repo, item.number);
+  };
 }
 
 // ---- stop, backlog, close ------------------------------------------------------------------------------------------------
@@ -157,7 +169,7 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   await stopCloses(c);
   if (item.kind === "pr") {
     const [active, requests, holds] = await db.together(() => Promise.all([
-      activePreapproval(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), loadHolds(db, { refs: one }),
+      activeLeg(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), loadHolds(db, { refs: one }),
     ]));
     if (active !== null) await attempt(() => cancelPreapproval(db, by, item.repo, item.number, c.exec, c.via));
     await endFixupRequests(db, requests.filter((r) => r.state === "queued").map((r) => ({ id: r.id, reason: why })));
@@ -189,23 +201,14 @@ export async function stopCloses(c: Ctx): Promise<void> {
   await saveActions(c.db, rows.map((a) => ({ id: a.id, state: "stopped", reason: `stopped by ${c.by}`, at: c.at })), { from: open });
 }
 
-/** The Backlog: open, nothing planned. Stops what runs; the workflow row's state is the backlog. */
-export async function backlog(c: Ctx): Promise<string[]> {
-  return await stopAll(c);
-}
-
 /**
- * Closes the item as the person: a close action the action executor carries out (a comment as the app, then the close through
- * the user lane). A PR's action names its current head, so a push after the command stops the close. Stops what runs first, so no
- * fix-up pushes to an item about to close.
+ * Queues the close of the item as the person: a close action the action executor carries out (a comment as the app, then the close
+ * through the user lane). A PR's action names its current head, so a push after the command stops the close. Everything that runs is
+ * stopped first (`stopAll`), so no fix-up pushes to an item about to close.
  */
-export async function close(c: Ctx, closeAs: CloseAs | null = null): Promise<string[]> {
+export async function queueClose(c: Ctx, workflowId: number, closeAs: CloseAs | null = null): Promise<void> {
   const { db, by, item, at } = c;
-  if (c.workflowId === undefined) throw new EffectError(t("{ref} has no started workflow to close.", { ref: ref(item) }));
-  if (item.kind === "pr" && !item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: ref(item) }));
-  const failed = await stopAll(c);
-  await queueLaneActions(db, [{ workflowId: c.workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at, closeAs }]);
-  return failed;
+  await queueLaneActions(db, [{ workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at, closeAs }]);
 }
 
 // ---- autorepin -----------------------------------------------------------------------------------------------------------

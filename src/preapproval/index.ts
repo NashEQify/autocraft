@@ -1,4 +1,4 @@
-// Pipeline steps of a resolution card (review again, fix-up, fix-up then merge) and the pre-approved merge they can start.
+// The fix-up a person asks for, and the pre-approved merge it or an approval can start.
 //
 // A pre-approved merge is the merge leg of a person's workflow: the merge they approved, worked through a fix-up, its review, CI
 // and the pre-merge review. States (see Preapproval in web/src/api/types.ts):
@@ -24,7 +24,7 @@ import { repoHasNoCi } from "../merge/no-ci.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { releaseMerge, removeFromBatch } from "../merge/controls.ts";
 import type { Exec } from "../fixup/git.ts";
-import { markReviewsStale, staleReviews } from "../review/discussion.ts";
+import { staleReviews } from "../review/discussion.ts";
 import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { operatorTriesLeft, queuedOperatorFix } from "./state.ts";
@@ -39,13 +39,11 @@ import { permKey, standings } from "../data/access/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { addTurns } from "../data/conversations/index.ts";
 import {
-  addFixupRequests, addLegs, adoptLegs, endFixupRequests, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadRepins, loadWorkflowFacts, moveLegs,
+  addFixupRequests, addLegs, adoptLegs, endFixupRequests, listWorkflows, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadRepins, loadWorkflowFacts, moveLegs,
   type LegContext, type LegMove, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
-
-export type PipelineStep = { kind: "review" } | { kind: "fixup"; instructions: string; merge: boolean };
 
 const ACTOR = "pipeline";
 export const INSTRUCTIONS_MAX = 1500;
@@ -75,7 +73,7 @@ export async function preapprovalsOf(db: Db, repo: string, n: number): Promise<P
   return ((await loadLegs(db, [{ repo, number: n }])).get(refOf(repo, n)) ?? []).map(toView);
 }
 
-/** The system lines of the items' threads (items with no conversation are skipped). Not inside a transaction: the thread writes its own. */
+/** The system lines of the items' threads (items with no conversation are skipped). */
 async function sayAll(db: Db, lines: { repo: string; number: number; text: string }[]): Promise<void> {
   if (!lines.length) return;
   await addTurns(db, lines.map((l) => ({ ref: refOf(l.repo, l.number), kind: "system", login: "system", body: l.text, block: systemBlock(l.text), onlyIfThread: true })));
@@ -88,7 +86,7 @@ async function moveRaw(db: Db, p: Row, to: LegState, o: { head?: string | null; 
   return (await moveLegs(db, [m])).length === 1;
 }
 
-/** `moveRaw`, then says it in the thread. Not inside a transaction: the thread writes its own. */
+/** `moveRaw`, then says it in the thread. */
 async function move(db: Db, p: Row, to: LegState, o: { head?: string | null; reason?: string | null; by?: string; line: string }): Promise<boolean> {
   if (!await moveRaw(db, p, to, o)) return false;
   await say(db, p.repo, p.number, o.line);
@@ -99,9 +97,8 @@ async function move(db: Db, p: Row, to: LegState, o: { head?: string | null; rea
 const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): boolean => !!head && m.attempts.get(`${refOf(repo, n)}@${head}`)?.outcome === "merged";
 
 /**
- * Whether the merge leg may work towards a merge at `head` (mergeApproved, src/core/may.ts): with a live workflow, as the person who approved it; a leg is
- * itself that person's approval (the merge command and the approval start it before the workflow row records the approval), so
- * `by` stands in until the row has it. With no live workflow, the repo's merge approval. The leg's own head rules decide which heads it
+ * Whether the merge leg may go on towards a merge at `head` (mergeApproved, src/core/may.ts), as the person who approved its workflow;
+ * a leg is itself that person's approval, so `by` stands in when the row has none. The leg's own head rules decide which heads it
  * may merge (a push that is not ours cancels it), and the workflow stops its leg at a blocker, so the gate takes `head` as the base
  * and no blocker.
  */
@@ -112,12 +109,6 @@ function mergeGate(approval: StepApproval | null, wf: WorkflowFact | null, head:
   } : null;
   const r = mergeApproved({ repoApproval: approval, workflow, ended: null, head, pushes: [] });
   return r.ok ? { ok: true } : { ok: false, why: r.why };
-}
-
-/** The live workflow of the PR, or of the issue it implements, and the repo's merge approval. */
-async function gateFacts(db: Db, repo: string, n: number): Promise<{ wf: WorkflowFact | null; approval: StepApproval | null }> {
-  const [facts, approvals] = await db.together(() => Promise.all([loadWorkflowFacts(db, [{ repo, number: n }]), loadStepApprovals(db, [repo], ["merge"])]));
-  return { wf: facts.live.get(refOf(repo, n)) ?? facts.ofPr.get(refOf(repo, n)) ?? null, approval: approvals.get(repo)?.merge ?? null };
 }
 
 /** Cancels the row in one transaction, whatever state the caller read. False when the row had ended meanwhile. */
@@ -141,29 +132,55 @@ async function cancelRow(db: Db, leg: { id: number; repo: string; number: number
 
 // ---- starting a step ----------------------------------------------------------------------------------------------------
 
-/** Queues a card's pipeline step for the PR; `label` is the done line the card shows. Throws when the step cannot start. */
-/** `preapproval`: the id of the pre-approved merge a fix-up that merges started. */
-export async function runPipelineStep(db: Db, o: { repo: string; number: number; step: PipelineStep; by: string }): Promise<{ label: string; preapproval?: number }> {
-  const { repo, number, step, by } = o;
-  const ref = `${repo}#${number}`;
+/**
+ * A step whose checks passed. `write` makes its rows in the caller's transaction, for the live workflow it belongs to, and returns its merge
+ * leg (null for a fix-up alone): the workflow may be written in that same transaction, so no check here reads it.
+ */
+export type CheckedStep = { write: (workflowId: number) => Promise<number | null> };
+
+/** A step's refusal by rule (the PR or its state); other errors may pass on a later try. `active`: a merge leg is in progress already. */
+export class PreapprovalRefused extends Error {
+  readonly active: boolean;
+  constructor(message: string, active = false) { super(message); this.active = active; }
+}
+
+/** Why a leg pinned to a head (a command's) was refused: the PR has another head now. */
+export const HEAD_CHANGED = "the PR changed after your comment; comment again";
+
+const busy = (ref: string) => new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
+const hasLeg = async (db: Db, repo: string, number: number): Promise<boolean> => (await loadLegs(db, [{ repo, number }], { activeOnly: true })).size > 0;
+
+/** The open PR with its head; refused otherwise. */
+async function openPr(db: Db, repo: string, number: number): Promise<PrRow> {
   const it = await prRow(db, repo, number);
-  if (!it || it.kind !== "pr") throw new Error(`${ref} is not a pull request`);
-  if (it.state !== "OPEN") throw new Error(`${ref} is not open`);
-  if (step.kind === "review") {
-    await markReviewsStale(db, by, repo, number);
-    return { label: "Queued a new review of the current head" };
-  }
-  // The fix-up step and the review of its push only see PRs the planner works: out of scope, integration and unreviewable PRs would wait for ever.
+  if (!it || it.kind !== "pr") throw new PreapprovalRefused(`${refOf(repo, number)} is not a pull request`);
+  if (it.state !== "OPEN") throw new PreapprovalRefused(`${refOf(repo, number)} is not open`);
+  return it;
+}
+const needHead = (it: PrRow, ref: string): string => {
+  if (!it.head_oid) throw new Error(`${ref} has no head commit in the mirror yet`);
+  return it.head_oid;
+};
+const outOfScope = (ref: string) => new PreapprovalRefused(`${ref} is outside the pipeline's scope`);
+const isDraft = (ref: string) => new PreapprovalRefused(`${ref} cannot be reviewed yet: it is a draft`);
+
+/**
+ * Checks a fix-up of the PR's current head with these instructions, made as `by`; with `merge`, its merge leg goes on after it. The PR has a
+ * live workflow. Reads the author's permission on GitHub when it has to.
+ */
+export async function checkFixup(db: Db, o: { repo: string; number: number; by: string; instructions: string; merge: boolean }): Promise<CheckedStep> {
+  const { repo, number, by, merge } = o;
+  const ref = refOf(repo, number);
+  const it = await openPr(db, repo, number);
+  // The fix-up step and the review of its push only see PRs the planner works: out of scope and integration PRs would wait for ever.
   const fact = await loadPrFact(db, repo, number);
-  const planState = fact ? decidePr(fact).state : null;
-  if (!planState || planState === "out-of-scope" || planState === "integration") throw new Error(`${ref} is outside the pipeline's scope: no fix-up runs on it`);
-  if (step.merge === true && NOT_REVIEWABLE.includes(planState)) throw new Error(`${ref} cannot be reviewed (${planState}): a merge after the fix-up could not follow`);
-  const instructions = step.instructions.trim();
+  if (!fact?.inScope || fact.integration) throw outOfScope(ref);
+  if (merge && fact.draft) throw isDraft(ref);
+  const instructions = o.instructions.trim();
   if (!instructions) throw new Error("the fix-up needs instructions");
   if (instructions.length > INSTRUCTIONS_MAX) throw new Error(`the instructions are over ${INSTRUCTIONS_MAX} characters`);
-  const head = it.head_oid;
-  if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
-  const checks = (await loadChecks(db, [{ repo, number }])).get(refOf(repo, number)) as PrChecksView | undefined;
+  const head = needHead(it, ref);
+  const checks = (await loadChecks(db, [{ repo, number }])).get(ref) as PrChecksView | undefined;
   if (checks?.mergeable === "CONFLICTING") throw new Error(`${ref} conflicts with its base branch: the conflict merge comes first`);
   // A person's fix-up runs as that person (mayPush, src/core/may.ts); the repo's push approval is for pushes nobody asked for.
   const may = mayPush({ kind: "fixup", repoApproval: null, workflow: null, operatorFix: true, by });
@@ -173,78 +190,65 @@ export async function runPipelineStep(db: Db, o: { repo: string; number: number;
   if (!pushable(it.head_repo, repo, checks?.head_oid === head ? checks.maintainer_can_modify : null, it.head_ref, await longLivedOf(db, repo), false, writes === "yes")) throw new Error("can't push to the contributor's branch");
   if (!await operatorTriesLeft(db, repo, number)) throw new Error("the fix-up tries for this PR are used up");
   if (await queuedOperatorFix(db, repo, number, head)) throw new Error(`a fix-up of ${ref} is already queued`);
-  const merge = step.merge === true;
-  const activeCheck = async () => {
-    if ((await loadLegs(db, [{ repo, number }], { activeOnly: true })).has(ref)) throw new Error(`${ref} already has a pre-approved merge in progress`);
+  if (merge && await hasLeg(db, repo, number)) throw busy(ref);
+  return {
+    write: async (workflowId) => {
+      if (merge && await hasLeg(db, repo, number)) throw busy(ref);
+      const made = (await addFixupRequests(db, [{ repo, number, fromHead: head, instructions, by, merge, ...(merge ? { workflowId } : {}) }])).get(ref);
+      await say(db, repo, number, merge
+        ? `${by} approved a merge after a fix-up: a fix-up of ${short(head)} is queued; if its review says take and CI is green, the PR goes to the merge queue.`
+        : `${by} queued a fix-up of ${short(head)}.`);
+      return made?.legId ?? null;
+    },
   };
-  let workflowId: number | undefined;
-  if (merge) {
-    const g = await gateFacts(db, repo, number);
-    const ok = mergeGate(g.approval, g.wf, head, by);
-    if (!ok.ok) throw new Error(g.wf ? ok.why : `merging is not approved for ${repo}`);
-    workflowId = g.wf?.id;
-    await activeCheck();
-  }
-  // The insert of a merge request refuses a second active leg itself (the partial unique index): it throws and writes nothing.
-  const made = (await addFixupRequests(db, [{ repo, number, fromHead: head, instructions, by, merge, ...(workflowId !== undefined ? { workflowId } : {}) }])).get(ref);
-  const id = made?.legId ?? null;
-  await say(db, repo, number, merge
-    ? `${by} approved a merge after a fix-up: a fix-up of ${short(head)} is queued; if its review says take and CI is green, the PR goes to the merge queue.`
-    : `${by} queued a fix-up of ${short(head)}.`);
-  return { label: merge ? "Queued the fix-up; the PR merges if its review says take and CI is green" : "Queued the fix-up", ...(id !== null ? { preapproval: id } : {}) };
-}
-
-/** Why a PR in a NOT_REVIEWABLE plan state gets no code review, in words a commenter can act on. */
-function notReviewableWhy(state: string): string {
-  switch (state) {
-    case "backlog": return "it is in the backlog";
-    case "draft": return "it is a draft";
-    default: return state;
-  }
-}
-
-/** Why a pre-approval pinned to a head (a comment's) was refused: the PR has another head now. */
-export const HEAD_CHANGED = "the PR changed after your comment; comment again";
-
-/** preapproveMerge's refusal by rule (the PR, its state or the repo's approval); other errors may pass on a later try. `active`: one is in progress already. */
-export class PreapprovalRefused extends Error {
-  readonly active: boolean;
-  constructor(message: string, active = false) { super(message); this.active = active; }
 }
 
 /**
- * The merge leg of an approved workflow, with no fix-up. A row starts in `review` at the current head,
- * so the PR merges only after a take review, a clean pre-merge review and green CI there. The approval
- * says the change is wanted, so an unsure review does not stop it, and a take-fix review's fixes are made by the pipeline's fix-up,
- * whose push is reviewed again; a pre-merge defect, a red head the CI fix cannot repair or a fix-up that cannot run stops the leg
- * and the workflow asks. Throws when it cannot start; a draft and the backlog refuse it.
+ * Checks a merge leg with no fix-up: it starts in `review` at the current head, so the PR merges only after a take review, a clean
+ * pre-merge review and green CI there. The approval says the change is wanted, so an unsure review does not stop it, and a take-fix
+ * review's fixes are made by the pipeline's fix-up, whose push is reviewed again; a pre-merge defect, a red head the CI fix cannot
+ * repair or a fix-up that cannot run stops the leg and the workflow asks.
  *
- * `head`, when given, is the only head it may pre-approve: the head the person saw (a command's comment-time head).
+ * The workflow the leg belongs to puts the PR in the pipeline's scope and is its merge approval, so neither is checked. `head`, when
+ * given, is the only head it may start at: the one the person saw (a command's comment-time head).
  */
-export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; workflowId?: number }): Promise<{ label: string }> {
+export async function checkMergeLeg(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string }): Promise<CheckedStep> {
   const { repo, number, by, via } = o;
-  const ref = `${repo}#${number}`;
-  const it = await prRow(db, repo, number);
-  if (!it || it.kind !== "pr") throw new PreapprovalRefused(`${ref} is not a pull request`);
-  if (it.state !== "OPEN") throw new PreapprovalRefused(`${ref} is not open`);
+  const ref = refOf(repo, number);
+  const it = await openPr(db, repo, number);
   const fact = await loadPrFact(db, repo, number);
-  const planState = fact ? decidePr(fact).state : null;
-  if (!planState || planState === "out-of-scope" || planState === "integration") throw new PreapprovalRefused(`${ref} is outside the pipeline's scope`);
-  if (NOT_REVIEWABLE.includes(planState)) throw new PreapprovalRefused(`${ref} cannot be reviewed yet: ${notReviewableWhy(planState)}`);
-  const head = it.head_oid;
-  if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
+  if (!fact || fact.integration) throw outOfScope(ref);
+  if (fact.draft) throw isDraft(ref);
+  const head = needHead(it, ref);
   if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
-  const g = await gateFacts(db, repo, number);
-  const wf = o.workflowId !== undefined && g.wf?.id !== o.workflowId ? null : g.wf;
-  const ok = mergeGate(g.approval, wf, head, by);
-  if (!ok.ok) throw new PreapprovalRefused(wf ? ok.why : `merging is not approved for ${repo}`);
-  const busy = () => new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
-  if ((await loadLegs(db, [{ repo, number }], { activeOnly: true })).has(ref)) throw busy();
-  // `workflowId`: the workflow whose merge leg this is, written with the row so no pass sees it unowned. The insert refuses a second active leg.
-  const made = (await addLegs(db, [{ repo, number, by, workflowId: (o.workflowId ?? wf?.id ?? null) as number, head, state: "review", ...(via ? { via } : {}) }])).get(ref);
-  if (made === "active") throw busy();
-  await say(db, repo, number, `${by} added the PR to the merge queue at ${short(head)}: it merges once the review there says take, the pre-merge review is clean and CI is green.`);
-  return { label: "Added to the merge queue; it merges once the review says take and CI is green" };
+  if (await hasLeg(db, repo, number)) throw busy(ref);
+  return {
+    write: async (workflowId) => {
+      // The insert refuses a second active leg itself (the partial unique index).
+      const made = (await addLegs(db, [{ repo, number, by, workflowId, head, state: "review", ...(via ? { via } : {}) }])).get(ref);
+      if (made === undefined || made === "active") throw busy(ref);
+      await say(db, repo, number, `${by} added the PR to the merge queue at ${short(head)}: it merges once the review there says take, the pre-merge review is clean and CI is green.`);
+      return made;
+    },
+  };
+}
+
+/**
+ * Starts the merge leg (`checkMergeLeg`) of the live workflow that works on the PR: its own, or the one of the issue it implements.
+ * Refused when there is none, or when it is not the one the caller names.
+ */
+export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; workflowId?: number }): Promise<void> {
+  const { repo, number } = o;
+  const ref = refOf(repo, number);
+  const facts = await loadWorkflowFacts(db, [{ repo, number }]);
+  const id = (facts.live.get(ref) ?? facts.ofPr.get(ref))?.id;
+  if (id === undefined) throw new PreapprovalRefused(`${ref} is not started`);
+  if (o.workflowId !== undefined && o.workflowId !== id) throw new PreapprovalRefused(`another workflow works on ${ref}`);
+  const leg = await checkMergeLeg(db, o);
+  await db.write(async () => {
+    if (!(await listWorkflows(db, { ids: [id], live: true })).length) throw new PreapprovalRefused(`the workflow of ${ref} ended a moment ago`);
+    await leg.write(id);
+  });
 }
 
 // ---- the state machine ---------------------------------------------------------------------------------------------------
@@ -393,7 +397,7 @@ const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large
  * person answered after (a yes past a major finding) counts as a take.
  */
 async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", pf: PassFacts, factOf: () => Promise<PrFacts | null>, wake: Wake): Promise<void> {
-  // A row no workflow owns waits for the start that is writing its workflow (stop, backlog and close cancel it by its PR).
+  // A row no workflow owns waits for one to start on its PR (stop, backlog and close cancel it by its PR).
   if (ctx === "unlinked") return;
   const ref = refOf(p.repo, p.number);
   const it = pf.items.get(ref);
@@ -600,7 +604,7 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
     wake(t);
   }
   const pass = await loadLegPass(db);
-  // A leg written before its workflow's row is linked to the live workflow of its PR.
+  // A leg no workflow owns is linked to the live workflow of its PR.
   const adopt = pass.rows.flatMap((r) => { const c = pass.context.get(r.id); return r.workflow_id === null && c && typeof c !== "string" ? [{ id: r.id, workflowId: c.workflowId }] : []; });
   if (adopt.length) await adoptLegs(db, adopt);
   if (!pass.rows.length) return 0;
@@ -665,18 +669,5 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
       if (!heldBefore) await releaseMerge(db, by, repo, n);
     }
   } else await finish();
-  return (await preapprovalOf(db, repo, n))!;
-}
-
-/**
- * Queues the PR's failed pre-approved merge again with the same instructions at the PR's current head, as a new pre-approval (the
- * same path as the first press: the audit entry and the thread line are the ones of any pre-approval). Throws when the latest
- * pre-approval did not fail.
- */
-export async function retryPreapproval(db: Db, by: string, repo: string, n: number): Promise<Preapproval> {
-  const p = (await loadLegs(db, [{ repo, number: n }], { latestOnly: true })).get(refOf(repo, n))?.at(-1);
-  if (!p || p.state !== "failed") throw new Error(`${repo}#${n} has no failed pre-approved merge`);
-  if (await settlesNow(db, by, repo) !== "yes") throw new Error(`${by} may not act on ${repo}`);
-  await runPipelineStep(db, { repo, number: n, step: { kind: "fixup", instructions: p.instructions, merge: true }, by });
   return (await preapprovalOf(db, repo, n))!;
 }

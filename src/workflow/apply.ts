@@ -1,7 +1,7 @@
 // The command core: every surface (GitHub, Discord, the agent, the dashboard, the CLI) parses text with parse.ts and hands the
 // result here. For each item it checks the repo is tracked and that the person may act (actRefusal in src/github/identity.ts), resolves
-// the text against the item's workflow (resolve.ts), carries the run out on the existing machinery (effects.ts), writes the
-// workflow row with its event in one write and returns the line every surface shows (status.ts).
+// the text against the item's workflow (resolve.ts), checks the run on the existing machinery (effects.ts), writes the workflow
+// row, what the machinery works on and the event in one write, and returns the line every surface shows (status.ts).
 //
 // A list of items runs item by item: one that is refused or fails leaves the others running, and the reply lists it. GitHub takes
 // one item per comment. Each person has an hourly number of items per surface, counted from the recorded events so every
@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { adoptLegs, countEventsSince, listWorkflows, loadActions, recordEvents, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, recordEvents, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import type { Db } from "../db/index.ts";
@@ -192,10 +192,10 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
   return `duplicate ${repo}#${number}`;
 }
 
-/** `commit` writes the workflow row (started, changed or ended) and returns its id; it runs in the write that records the event. */
+/** `commit` writes the workflow row (started, changed or ended) with the run's own rows and returns its id; it runs in the write that records the event. */
 type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
-/** Runs the resolved command on the machinery, then returns the write of the workflow row. */
+/** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
 async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
@@ -206,17 +206,20 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const end: WorkflowPatch = { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null };
     // A stop of a close that is still to be made ends the workflow that close belongs to.
     const stopped = wf === null && r.end === "stop" ? o.closing?.workflow_id ?? null : null;
-    // An item nobody started gets a row that records the close or the backlog, ended at once.
-    const id = wf?.id ?? stopped ?? await db.write(async () => {
-      const id = (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
-        .get(`${item.repo}#${item.number}`);
-      if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
-      await saveWorkflows(db, [{ id, patch: end, at }]);
-      return id;
-    });
-    const cw: fx.Ctx = { ...c, workflowId: id };
-    const failed = r.end === "stop" ? await fx.stopAll(cw) : r.end === "close" ? await fx.close(cw, o.closeAs) : await fx.backlog(cw);
-    return { failed, commit: async () => { if (wf || stopped !== null) await saveWorkflows(db, [{ id, patch: end, at }]); return id; } };
+    const known = wf?.id ?? stopped;
+    const failed = await fx.stopAll({ ...c, ...(known !== null ? { workflowId: known } : {}) });
+    return {
+      failed,
+      commit: async () => {
+        // An item nobody started gets a row that records the close or the backlog, ended at once.
+        const id = known ?? (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
+          .get(`${item.repo}#${item.number}`);
+        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+        await saveWorkflows(db, [{ id, patch: end, at }]);
+        if (r.end === "close") await fx.queueClose(c, id, o.closeAs);
+        return id;
+      },
+    };
   }
   if (r.autorepin !== null) {
     const githubId = actor.githubId ?? (await loadAccess(db, [by])).get(by.toLowerCase())?.github_id ?? null;
@@ -226,10 +229,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 
   if (r.start) {
     const entry = r.start;
-    // Work started on the item takes back a close nobody carried out yet.
-    if (o.closing) await fx.stopCloses(c);
     const weight = r.weight ?? WEIGHT_NORMAL;
-    const { preapproval } = await fx.start(c, entry, r.approve);
+    const work = await fx.start(c, entry, r.approve);
     return {
       failed: [],
       commit: async () => {
@@ -238,7 +239,9 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
           step: stepsFor(entry, r.approve)[0]!, at, ...(r.approve ? { approvedBy: by, approvedVia: via } : {}),
         }])).get(`${item.repo}#${item.number}`);
         if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
-        if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: id }]);
+        // Work started on the item takes back a close nobody carried out yet.
+        if (o.closing) await fx.stopCloses(c);
+        await work(id);
         return id;
       },
     };
@@ -250,7 +253,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.weight !== null && r.weight !== live.weight) patch.weight = r.weight;
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
-  let on = c;
+  let on: fx.Ctx = { ...c, workflowId: live.id };
   if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await implementationPr(db, live);
     // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
@@ -260,8 +263,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await implementationPr(db, live)] : [])].filter((x) => x !== null);
-  let preapproval: number | null = null;
-  if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
+  const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges }) : null;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
@@ -275,10 +277,11 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   return {
     failed: [],
     commit: async () => {
+      if (!(await listWorkflows(db, { ids: [live.id], live: true })).length) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
-      if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: live.id }]);
+      await work?.(live.id);
       return live.id;
     },
   };

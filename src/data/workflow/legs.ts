@@ -61,8 +61,8 @@ export async function listWorkflowLegs(db: Db, workflowIds: number[]): Promise<P
 
 /**
  * Active legs of tracked repos joined to their workflow and `goOnAt`, plus the queued requests of those legs; two statements in one wave. A leg
- * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); with none it reads `"unlinked"`: its
- * start writes the workflow row after it. A leg of a workflow that is no longer live reads `"ended"`.
+ * whose `workflow_id` is null reads the live workflow of its PR (`adoptLegs` links it); with none it reads `"unlinked"`. A leg of a
+ * workflow that is no longer live reads `"ended"`.
  */
 export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise<LegPass> {
   const pass: LegPass = { rows: [], context: new Map(), requests: [] };

@@ -16,7 +16,8 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { setFixIssueApproval } from "../src/implement/approval.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { setMergeApproval } from "../src/merge/approval.ts";
-import { startWorkflows } from "../src/data/workflow/index.ts";
+import { listWorkflows, startWorkflows } from "../src/data/workflow/index.ts";
+import { checkFixup } from "../src/preapproval/index.ts";
 import { setCiApproval } from "../src/merge/ci-approval.ts";
 import type { BatchDeps } from "../src/merge/batch.ts";
 import type { CommandResult, MergeDeps } from "../src/merge/index.ts";
@@ -182,6 +183,14 @@ export async function world() {
     async workflow(n: number, o: { entry?: "review" | "fixup" | "merge"; by?: string; approved?: boolean } = {}) {
       const by = o.by ?? OPERATOR;
       await startWorkflows(db, [{ repo: "app", number: n, kind: "pr", entry: o.entry ?? "review", weight: 5, startedBy: by, startedVia: "dashboard", baseHead: await headOf(n), at: BEFORE, ...(o.approved === false ? {} : { approvedBy: by, approvedVia: "dashboard" as const }) }]);
+      return w;
+    },
+    /** The operator's fix-up of the PR's head ("rename a to b"), with the merge leg of its live workflow unless `merge` is false. */
+    async fixup(n: number, merge = true) {
+      const step = await checkFixup(db, { repo: "app", number: n, by: OPERATOR, instructions: "rename a to b", merge });
+      const id = (await listWorkflows(db, { live: true, refs: [{ repo: "app", number: n }] }))[0]?.id;
+      if (merge && id === undefined) throw new Error(`app#${n} has no live workflow`);
+      await db.write(() => step.write(id ?? 0));
       return w;
     },
     /** The global pipeline switch. */

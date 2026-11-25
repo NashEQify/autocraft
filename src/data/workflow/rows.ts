@@ -142,9 +142,10 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
 
 /** Filter loader ordered by id. An empty list in any filter matches nothing. */
 export async function listWorkflows(db: Db, f: WorkflowFilter = {}): Promise<ItemWorkflow[]> {
-  if (f.refs?.length === 0 || f.repos?.length === 0 || f.states?.length === 0 || f.logins?.length === 0) return [];
+  if (f.ids?.length === 0 || f.refs?.length === 0 || f.repos?.length === 0 || f.states?.length === 0 || f.logins?.length === 0) return [];
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("main.item_workflows as w").selectAll("w")
+    .$if(!!f.ids, (b: any) => b.where(kx.inList(db, "w.id", f.ids!, "bigint")))
     .$if(f.live !== undefined, (b: any) => b.where("w.state", f.live ? "in" : "not in", LIVE_STATES))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "w.repo", f.repos!)))
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "w", pairs(f.refs!))))

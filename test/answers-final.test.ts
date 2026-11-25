@@ -1,7 +1,7 @@
 // An approved merge goes on through the pipeline's own fix-ups, and a review that failed for good is tried again once per request.
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
-import { advancePreapprovals, preapprovalOf, runPipelineStep } from "../src/preapproval/index.ts";
+import { advancePreapprovals, preapprovalOf } from "../src/preapproval/index.ts";
 import { markReviewsStale } from "../src/review/discussion.ts";
 import { recordReviewFailure, reviewHold } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
@@ -12,7 +12,7 @@ const fresh = async (): Promise<World> => (current = await (await world()).repo(
 afterEach(() => current?.close());
 
 const startPushed = async (w: World, n: number, to: string) => {
-  await runPipelineStep(w.db, { repo: "app", number: n, step: { kind: "fixup", instructions: "rename a to b", merge: true }, by: OPERATOR });
+  await w.fixup(n);
   const fix = (await w.rows("SELECT id FROM operator_fixups WHERE number = ? ORDER BY id DESC", n))[0]!.id as number;
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state: "pushed", attempt: 1, created_at: T0, source: "operator", operator_fix: fix }));
   await w.synced(n, to);

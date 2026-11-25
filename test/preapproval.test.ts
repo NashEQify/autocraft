@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { reviewHolds } from "../src/review/gate.ts";
-import { advancePreapprovals, cancelPreapproval, preapprovalOf, preapproveMerge, runPipelineStep } from "../src/preapproval/index.ts";
+import { advancePreapprovals, cancelPreapproval, preapprovalOf, preapproveMerge } from "../src/preapproval/index.ts";
 import { mergeAllowed } from "../src/core/gates.ts";
 import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
@@ -22,8 +22,7 @@ let current: World | null = null;
 const fresh = async (): Promise<World> => (current = await (await (await world()).repo()).acting());
 afterEach(() => current?.close());
 
-const start = (w: World, n: number, merge = true) =>
-  runPipelineStep(w.db, { repo: "app", number: n, step: { kind: "fixup", instructions: "rename a to b", merge }, by: OPERATOR });
+const start = (w: World, n: number, merge = true) => w.fixup(n, merge);
 const fixId = async (w: World, n: number): Promise<number> => ((await w.rows("SELECT id FROM operator_fixups WHERE number = ? ORDER BY id DESC", n))[0]!.id as number);
 const fixRow = async (w: World, n: number, state: string, to: string | null = null) =>
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state, attempt: 1, created_at: T0, source: "operator", operator_fix: await fixId(w, n) }));
@@ -307,9 +306,10 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     assert.equal((await preapprovalOf(w.db, "app", 17))?.state, "queued");
   });
 
-  test("a row written just before its workflow waits for it, and is the workflow's leg from then on", async () => {
+  test("a row no workflow owns waits for one to start on its PR, and is the workflow's leg from then on", async () => {
     const w = await (await fresh()).pr(20);
-    await preapproveMerge(w.db, { repo: "app", number: 20, by: OPERATOR });
+    await assert.rejects(preapproveMerge(w.db, { repo: "app", number: 20, by: OPERATOR }), /is not started/);
+    await w.db.run(w.db.k.insertInto("preapprovals").values({ repo: "app", number: 20, by: OPERATOR, at: T0, instructions: "", state: "review", from_head: "sha20", head: "sha20", updated_at: T0, fix_id: null, workflow_id: null }));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 20))?.state, "review");
     await w.workflow(20);
