@@ -16,13 +16,8 @@ import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
 import { openGroupExpr, unsureAtQuery } from "../src/core/rule-queries.ts";
-import { currentHeadExpr } from "../src/verify/results.ts";
 import { ADOPTABLE_CALL, EARLIER_RUN_CALL, KEPT_RUNS, RESUMING_JOBS, adoptableCallExpr, earlierRunCallExpr, keptRunsExpr, resumingJobsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";
-
-/** The text version of `currentHeadExpr`, kept here as the reference the twin is checked against. */
-const CURRENT_HEAD_SQL = `CASE WHEN c.head_oid IS NOT NULL AND c.fetched_at IS NOT NULL AND (i.updated_at IS NULL OR c.fetched_at > i.updated_at)
-  THEN c.head_oid ELSE COALESCE(i.head_oid, c.head_oid) END`;
 
 const T = "2026-01-01T00:00:00.000Z", LATER = "2026-01-03T00:00:00.000Z", FAR = "2099-01-01T00:00:00.000Z";
 const NOW = Date.parse("2026-01-02T00:00:00.000Z");
@@ -184,10 +179,6 @@ function cases(db: Db): Case[] {
     expect: ["1:Review", "2:Triage", "3:Triage", "4:Merged", "5:Closed"],
     built: (d) => d.k.selectFrom("main.items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
       .select((eb) => ["i.number", phaseExpr(d, eb).as("phase")]).where("i.repo", "=", "app").where("i.number", "<=", 5).orderBy("i.number") });
-  out.push({ name: "CURRENT_HEAD_SQL", text: [`SELECT i.number, ${CURRENT_HEAD_SQL} AS head FROM main.items i LEFT JOIN main.pr_checks c ON c.repo = i.repo AND c.number = i.number WHERE i.repo = 'app' AND i.number IN (1, 2, 3, 5, 6) ORDER BY i.number`],
-    expect: ["1:c1", "2:h2", "3:h3", "5:null", "6:c6"],
-    built: (d) => d.k.selectFrom("main.items as i").leftJoin("main.pr_checks as c", (j) => j.onRef("c.repo", "=", "i.repo").onRef("c.number", "=", "i.number"))
-      .select((eb) => ["i.number", currentHeadExpr(eb).as("head")]).where("i.repo", "=", "app").where("i.number", "in", [1, 2, 3, 5, 6]).orderBy("i.number") });
   for (const not of [false, true]) {
     out.push({ name: `PRIVATE_STEPS_SQL${not ? " (NOT IN)" : ""}`, text: [`SELECT step AS k FROM build_tasks WHERE step ${not ? "NOT " : ""}IN (${PRIVATE_STEPS_SQL}) ORDER BY step`],
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),

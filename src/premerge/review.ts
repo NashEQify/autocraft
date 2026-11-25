@@ -24,7 +24,8 @@ import { opusCandidateOf, type OpusCandidate } from "../review/opus-candidates.t
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
 import { type PremergeReview } from "./parse.ts";
-import { savePremerge } from "./store.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { savePremerge as saveReviews } from "../data/review/index.ts";
 import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 
@@ -90,13 +91,14 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   }
   const opusDeps: OpusDeps = { ...deps, fetchDelta: async () => ({ ok: false, tooLarge: false, error: "not used" }) };
   let handled = 0;
+  const bases = await loadItems(db, cands.filter((e) => e.facts.diffPending).map((e) => ({ repo, number: e.number })), "pr");
   // Read once per pass, before the first re-read.
   let rateLowP: Promise<boolean> | undefined;
   await pool(cands.map((e) => async () => {
     const start = now(), ref = refOf(e), head = e.head;
     const fail = async (error: string, final = false) => {
       await jobItem(db, repo, e.number, error, log);
-      await savePremerge(db, { repo, number: e.number, head, at: now(), runId, model: deps.model, error, final });
+      await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: deps.model, error, final }]);
       s.failed.push(ref);
     };
     // A diff that waits for what the merge rule reads beside it is read again, with no model call, within the hour's re-reads
@@ -113,7 +115,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         params.onHandled?.(++handled);
         return;
       }
-      const liveBase = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", e.number)))?.base_ref;
+      const liveBase = bases.get(ref)?.base_ref;
       const d = await rereadDiff(db, repo, e.number, head, deps.fetchDiff, liveBase, deps.now?.() ?? Date.now());
       if (d.ok && d.base && liveBase !== undefined && d.base !== liveBase) await recordLiveBase(db, repo, e.number, head, d.base, { by: "premerge", keepDiff: true });
       await jobItem(db, repo, e.number, d.ok ? "diff read again for the merge rule" : `diff not read again: ${d.error}`, log);
@@ -141,7 +143,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         await jobItem(db, repo, e.number, "the head moved during the review; not stored", log);
         s.moved.push(ref);
       } else if (got) {
-        await savePremerge(db, { repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef });
+        await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef }]);
         await jobItem(db, repo, e.number, `pre-merge review: ${got.findings.length} findings`, log);
         s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect").length;
       } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
