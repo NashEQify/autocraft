@@ -11,6 +11,12 @@ import { awaitCall, enqueueCall } from "./calls.ts";
 import { clearCooloff } from "./cooloff.ts";
 import { inferenceMode, isInferenceMode, setInferenceMode } from "./mode.ts";
 import { openDb } from "../db/open.ts";
+import { loadAccess } from "../data/access/index.ts";
+import { loadCalls } from "../data/runners/index.ts";
+import type { Db } from "../db/index.ts";
+
+/** The access row of a login (compared without case), or null. */
+const accessOf = async (db: Db, login: string): Promise<{ login: string; role: string } | null> => [...(await loadAccess(db, [login])).values()][0] ?? null;
 
 export const commands = {
   inference: {
@@ -59,7 +65,7 @@ async function makeToken(args: string[]): Promise<void> {
     process.exit(1);
   }
   const db = await openDb();
-  const role = (await db.get(db.k.selectFrom("access").select("role").where("login", "=", login)))?.role;
+  const role = (await accessOf(db, login))?.role;
   if (role !== "maintainer" && role !== "operator") {
     console.error(`refused: ${login} is ${role ? `a ${role}` : "not on the access list"}; only maintainers and operators run model calls`);
     process.exit(1);
@@ -95,12 +101,8 @@ async function testCall(args: string[]): Promise<void> {
     process.exit(1);
   }
   const db = await openDb();
-  if (await inferenceMode(db) !== "user-local") {
-    console.error("refused: the inference mode is server; Task Runners take calls only in user-local");
-    process.exit(1);
-  }
   // access.login compares without case (NOCASE, citext): the call is bound to the login as the access list spells it.
-  const user = await db.get(db.k.selectFrom("access").select(["login", "role"]).where("login", "=", login));
+  const user = await accessOf(db, login);
   const role = user?.role;
   if (!user || (role !== "maintainer" && role !== "operator")) {
     console.error(`refused: ${login} is ${role ? `a ${role}` : "not on the access list"}; only maintainers and operators run model calls`);
@@ -121,8 +123,8 @@ async function testCall(args: string[]): Promise<void> {
     // A wait limit or a missing taker: the call was withdrawn, and its row says why.
     console.error((e as Error).message);
   }
-  const r = (await db.get(db.k.selectFrom("remote_calls").select(["state", "user_login", "own_lane", "error"]).where("id", "=", id)))!;
-  const lane = r.user_login === null ? "no lease" : `leased by ${r.user_login} in ${Number(r.own_lane) === 1 ? "the own lane" : "a slot"}`;
+  const r = (await loadCalls(db, [id])).get(id)!;
+  const lane = r.userLogin === null ? "no lease" : `leased by ${r.userLogin} in ${r.ownLane ? "the own lane" : "a slot"}`;
   console.log(`call ${id}: ${r.state}, ${lane}${reply !== null ? `; reply: ${reply}` : r.error ? `; ${r.error}` : ""}`);
   if (reply === null) process.exit(1);
 }

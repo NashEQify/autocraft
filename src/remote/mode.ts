@@ -1,30 +1,22 @@
-// The instance's inference mode. `server`: Claude model calls run on this host with the registered accounts.
-// `user-local`: they are queued as remote calls that maintainers' helpers claim, run on their own machines and
-// submit (src/remote/calls.ts). Jev calls and embeddings run on this host in both modes.
-import { audit } from "../dash/audit.ts";
+// The instance's inference mode. Claude model calls are queued as remote calls that maintainers' helpers claim, run on their
+// own machines and submit (src/remote/calls.ts). Jev calls and embeddings run on this host. The `server` mode, which ran
+// Claude calls on this host's accounts, is retired: there are no server accounts.
 import { EFFORTS, type Effort, type HarnessId, type Tier } from "./protocol.ts";
-import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { saveSettings, setting } from "../data/control/index.ts";
 
 export const INFERENCE_MODES = ["server", "user-local"] as const;
 export type InferenceMode = (typeof INFERENCE_MODES)[number];
-export const INFERENCE_KEY = "inference";
 
 export const isInferenceMode = (v: unknown): v is InferenceMode => typeof v === "string" && (INFERENCE_MODES as readonly string[]).includes(v);
 
-export const inferenceMode = async (db: Db): Promise<InferenceMode> => modeOf(await setting(db, INFERENCE_KEY));
+export const inferenceMode = async (db: Db): Promise<InferenceMode> => { void db; return "user-local"; };
 
-/** The mode of a stored `inference` value (undefined: no row). */
-export const modeOf = (value: string | undefined): InferenceMode => (value === "user-local" ? "user-local" : "server");
-
-/** Sets the mode and audits the change as `by`; false when it already was `mode`. */
+/** The mode is always `user-local`: false for it, and an error for the retired `server` mode. */
 export async function setInferenceMode(db: Db, mode: InferenceMode, by: string): Promise<boolean> {
-  if (await inferenceMode(db) === mode) return false;
-  if (mode === "server") await db.run(db.k.deleteFrom("main.settings").where("key", "=", INFERENCE_KEY));
-  else await db.run(db.k.insertInto("main.settings").values({ key: INFERENCE_KEY, value: mode }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-  await audit(db, by, "inference", INFERENCE_KEY, { value: mode });
-  return true;
+  void db; void by;
+  if (mode === "server") throw new Error("the server inference mode is retired: Claude calls run on Task Runners");
+  return false;
 }
 
 /** The tier a model name of the prompt registry belongs to. */
@@ -133,8 +125,7 @@ export async function setAcceptedModels(db: Db, raw: unknown, by: string, minEff
     for (const t of clear) { if (!isTier(t)) throw new Error(`unknown tier ${t}`); delete floors[t]; }
   }
   const stored = { ...next, ...(Object.keys(floors).length && { minEffort: floors }) };
-  await db.run(db.k.insertInto("main.settings").values({ key: REMOTE_MODELS_KEY, value: JSON.stringify(stored) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-  await audit(db, by, "remote-models", REMOTE_MODELS_KEY, stored);
+  await saveSettings(db, [{ key: REMOTE_MODELS_KEY, value: JSON.stringify(stored) }], by, { action: "remote-models", target: REMOTE_MODELS_KEY, details: stored });
   return next;
 }
 

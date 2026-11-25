@@ -11,7 +11,8 @@ import { hiddenExpr as statusHiddenExpr, hiddenSql as statusHiddenSql } from "..
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
-import { MANUAL_ONLY_KEY, manualExpr, manualSql } from "../src/remote/manual-only.ts";
+import { MANUAL_ONLY_KEY } from "../src/remote/manual-only.ts";
+import { manualOnlyExpr } from "../src/data/runners/fragments.ts";
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
@@ -192,8 +193,8 @@ function cases(db: Db): Case[] {
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),
       built: (d) => d.k.selectFrom("build_tasks").select("step as k").where((eb) => (not ? eb.not(privateStepExpr(eb)) : privateStepExpr(eb))).orderBy("step") });
   }
-  out.push({ name: "manualSql", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE ${manualSql("t.login")} ORDER BY t.login`], expect: ["alice"],
-    built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualExpr(d, eb, "t.login")).orderBy("t.login") });
+  out.push({ name: "manualOnlyExpr", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE EXISTS (SELECT 1 FROM main.user_settings mo WHERE mo.login = t.login AND mo.key = '${MANUAL_ONLY_KEY}' AND mo.value = '1') ORDER BY t.login`], expect: ["alice"],
+    built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualOnlyExpr(eb as never, "t.login")).orderBy("t.login") });
   out.push({ name: "COMMAND_WORK_SQL", text: [`SELECT comment_id AS k FROM main.github_commands WHERE ${COMMAND_WORK_SQL} ORDER BY comment_id`], expect: ["1", "2"],
     built: (d) => d.k.selectFrom("main.github_commands").select("comment_id as k").where((eb) => commandWorkExpr(eb)).orderBy("comment_id") });
   out.push({ name: "OPEN_GROUP_SQL", text: [`SELECT g.id AS k FROM decisions g WHERE ${OPEN_GROUP_SQL} ORDER BY g.id`], expect: ["app:dupegroup:1", "app:dupegroup:3", "app:dupegroup:4"],
