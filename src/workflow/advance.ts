@@ -14,7 +14,7 @@ import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
+import { decidePr, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { chainsOwn, type OwnPush } from "../core/may.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -378,7 +378,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const f = pass.facts.get(ref);
   if (!approved) {
     if (f && f.head === head && waitsForAnswer(f)) {
-      let rec: Recommendation = afterSteps(view, plan);
+      let rec: Recommendation = afterSteps(view, plan, unapprovedStop(f));
       // The end recommendation also says which files the implementation changed beyond its plan; they count as shown.
       if (beyond?.length) {
         rec = { ...rec, text: t("{text} The implementation also changes {files}, which no part of its plan names.", { text: rec.text, files: listText(beyond.slice(0, 10)) }) };

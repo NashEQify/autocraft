@@ -6,13 +6,12 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { withConfig } from "../src/data/control/index.ts";
-import { MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../src/core/decide.ts";
+import { MAINTAINER_ANSWER_WAIT } from "../src/core/decide.ts";
 import { CLI_BY, gates } from "../src/core/gates.ts";
 import { guard, guardItem, guardRepo, liveOf } from "../src/core/guard.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";
 import { implementMay, implementRefusal } from "../src/implement/gate.ts";
 import { computeLiveness } from "../src/liveness.ts";
-import { afterSteps } from "../src/workflow/recommend.ts";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
@@ -554,11 +553,10 @@ describe("a repo with no step approvals", () => {
       const wf = await liveWorkflow(w.db, "app", n);
       assert.equal(wf?.state, "recommending");
       assert.ok(wf?.rec?.merges);
+      assert.match(wf.rec.text, n === 1 ? /conflicts/ : /CI fails/, "it names what stopped the PR");
     }
     await writePlanCache(w.db, await w.plan());
     assert.deepEqual((await withConfig(w.db, () => computeLiveness(w.db))).items.filter((i) => i.verdict === "stuck"), []);
-    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 1)!.facts)).text, /conflicts/);
-    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 2)!.facts)).text, /CI fails/);
   });
 
   test("a repo whose fix-up selection fails leaves the lane to the others", async () => {
