@@ -5,7 +5,7 @@
 import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
 import { jevParallel } from "./accounts.ts";
-import { add, askClaude, askJev, pool, saveUsage, type AskOptions, type LintedReply, type Usage } from "../classify/run.ts";
+import { add, askClaude, askJev, pool, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
@@ -75,6 +75,8 @@ export type UsageSave = {
   skipWhen?: (r: { ok: boolean }) => Promise<boolean>;
   /** Jev: also save the row (with zero tokens) when no reply carried a usage field. */
   withoutUsage?: boolean;
+  /** Collect the row here instead of saving it, for the caller to save a chunk of rows in one write (saveUsages). */
+  sink?: UsageRow[];
 };
 
 export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
@@ -84,6 +86,8 @@ export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
   ctx?: C;
   usage?: UsageSave;
   cancelled?: () => Promise<boolean>;
+  /** Jev: whether Jev may be called, in place of reading the stored state before every attempt. */
+  available?: () => Promise<boolean>;
   /** The call itself, in place of the real model call (tests, injected dependencies). Gets the lint the step declares. */
   ask?: (input: I, lint: Lint | undefined) => Promise<LintedReply | null>;
   /** Called before each call with the input still to answer (the first call included). */
@@ -121,7 +125,7 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
   let ran: string | undefined, untaken: NoTakerError | undefined;
   for (let attempt = 0; attempt < attempts && todo !== undefined; attempt++) {
     if (await opts.cancelled?.()) break;
-    if (step.provider === "jev" && !await jevAvailable(db)) { error = "jev unavailable"; break; }
+    if (step.provider === "jev" && !await (opts.available ?? (() => jevAvailable(db)))()) { error = "jev unavailable"; break; }
     if (attempt > 0 && step.backoffMs) await sleep(step.backoffMs);
     opts.onAttempt?.(todo, attempt);
     let r: Reply | null;
@@ -161,7 +165,9 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     if (u.keepEarlier) await db.run(db.k.updateTable("main.token_usage")
       .set((eb) => ({ agent: eb(eb("agent", "||", eb.val("@")), "||", eb.fn.coalesce("started_at", eb.val(""))) }))
       .where("run_id", "=", u.run).where("agent", "=", u.agent));
-    await saveUsage(db, u.run, u.agent, u.stage, model, items, saved, start, new Date().toISOString());
+    const row = { runId: u.run, agent: u.agent, stage: u.stage, model, items, u: saved, start, end: new Date().toISOString() };
+    if (u.sink) u.sink.push(row);
+    else await saveUsages(db, [row]);
   }
   if (untaken) throw untaken;
   const runId = opts.usage?.run;

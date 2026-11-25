@@ -20,7 +20,7 @@ import type { StepContext } from "./steps.ts";
 import { latestRun } from "../classify/settled.ts";
 import { assignAreas, type AssignResult } from "../areas/assign.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { batches, excluded } from "../db/kx.ts";
 
 export { inputHash } from "../itemhash.ts";
 
@@ -37,10 +37,10 @@ const JEV_CHUNK = 40, HAIKU_PER_CALL = 25;
  * names are renamed first so their cost stays on record.
  */
 async function keepUsage(db: Db, run: string, agents: string[]): Promise<void> {
-  for (const a of agents) {
+  for (const slice of batches(agents)) {
     await db.run(db.k.updateTable("main.token_usage")
       .set((eb) => ({ agent: eb(eb("agent", "||", eb.val("@")), "||", eb.fn.coalesce("started_at", eb.val(""))) }))
-      .where("run_id", "=", run).where("agent", "=", a));
+      .where("run_id", "=", run).where("agent", "in", slice));
   }
 }
 
@@ -50,18 +50,14 @@ const sentCounter = (ctx: StepContext) => {
   return (n: number) => ctx.handled((sent += n));
 };
 
-async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, sent: (n: number) => void): Promise<Set<string>> {
+export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, sent: (n: number) => void): Promise<Set<string>> {
   const { db } = ctx;
-  const setHash = (hash: string, repo: string, number: number, at: string) => db.run(db.k.updateTable("main.classifications").set({ input_hash: hash })
-    .where("repo", "=", repo).where("number", "=", number).where("classifier", "=", "jev").where("run_id", "=", run).where("at", ">=", at));
   const done = new Set<string>();
   for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
     await keepUsage(db, run, chunk.map((x) => `jev-${refOf(x)}`));
-    const t0 = new Date().toISOString();
     sent(chunk.length);
-    await runJev(db, run, chunk);
-    for (const x of chunk) if ((await setHash(hashes.get(refOf(x))!, x.repo, x.number, t0)).changes) done.add(refOf(x));
+    for (const ref of await runJev(db, run, chunk, undefined, hashes)) done.add(ref);
     await ctx.progress(`Jev: ${Math.min(i + JEV_CHUNK, todo.length)} of ${todo.length} items`);
   }
   return done;

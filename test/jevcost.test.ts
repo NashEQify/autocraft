@@ -50,3 +50,16 @@ test("priority and dupes Jev calls are saved under their own stage", async () =>
   assert.equal(row.model, "jev-latest");
   assert.ok(Math.abs(row.c! - 0.021) < 1e-9);
 });
+
+test("runJev saves a chunk's verdicts and usage together, with the input hash", async () => {
+  const db = await fresh();
+  const restore = setRunner(async () => ({ code: 0, stderr: "", stdout: JSON.stringify({ answers, usage: { input_tokens: 10, output_tokens: 1 } }) }));
+  try {
+    const items = [1, 2, 3].map((number) => ({ repo: "a", number, kind: "pr" as const, title: "t", body: "b", lines_changed: 1, files_changed: 1, author_association: null }));
+    const saved = await runJev(db, "run1", items, 3, new Map([["a#1", "h1"], ["a#3", "h3"]]));
+    assert.deepEqual([...saved].sort(), ["a#1", "a#2", "a#3"]);
+  } finally { restore(); }
+  const rows = await db.all(db.k.selectFrom("classifications").select(["number", "input_hash"]).orderBy("number"));
+  assert.deepEqual(rows.map((r) => r.input_hash), ["h1", null, "h3"]);
+  assert.equal((await db.all(db.k.selectFrom("token_usage").select("agent"))).length, 3);
+});

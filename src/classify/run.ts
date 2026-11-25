@@ -46,6 +46,8 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+import type { DB } from "../db/types.ts";
+import type { InsertObject } from "kysely";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
   const out: { repo: string; number: number }[] = [];
@@ -229,9 +231,51 @@ export function resultUsage(j: { usage?: Record<string, number>; total_cost_usd?
   return { usage: { ...main, ...(extra.length > 0 && { extra }) }, all: { input: sum("input"), output: sum("output"), cacheRead: sum("cacheRead"), cacheWrite: sum("cacheWrite") } };
 }
 
-export async function saveVerdict(db: Db, classifier: string, runId: string, v: Verdict): Promise<void> {
-  const [repo, num] = v.ref.split("#");
-  await replaceClassification(db, [repo!, Number(num), classifier, runId, now(), v.type_label, flagsOf(v), v.reason, v.probs]);
+export async function saveVerdict(db: Db, classifier: string, runId: string, v: Verdict, inputHash?: string): Promise<void> {
+  await saveVerdicts(db, classifier, runId, [{ v, ...(inputHash !== undefined && { hash: inputHash }) }]);
+}
+
+/**
+ * Stores the verdicts of one chunk in one write: a multi-row delete of the old rows of the same keys, then a multi-row insert
+ * (the rows get new rowids, in the order given). `hash` is written as the row's input_hash. If the batch fails, each verdict is
+ * stored on its own so one bad verdict does not lose the others; the first error is thrown after the rest are stored.
+ * Returns the refs stored.
+ */
+export async function saveVerdicts(db: Db, classifier: string, runId: string, list: readonly { v: Verdict; hash?: string }[]): Promise<Set<string>> {
+  const stored = new Set<string>();
+  if (!list.length) return stored;
+  const at = now();
+  const byRef = new Map<string, { v: Verdict; hash?: string }>();
+  for (const x of list) byRef.set(x.v.ref, x);
+  const rows = [...byRef.values()].map(({ v, hash }) => {
+    const [repo, num] = v.ref.split("#");
+    return { repo: repo!, number: Number(num), classifier, run_id: runId, at, type_label: v.type_label ?? null, flags: flagsOf(v), reason: v.reason ?? null, probs: v.probs ?? null, ...(hash !== undefined && { input_hash: hash }) };
+  });
+  try {
+    await db.write(async () => {
+      for (const chunk of kx.batches(rows)) {
+        await db.run(db.k.deleteFrom("main.classifications").where("classifier", "=", classifier).where("run_id", "=", runId)
+          .where((eb) => eb.or(chunk.map((r) => eb.and([eb("repo", "=", r.repo), eb("number", "=", r.number)])))));
+        await db.run(db.k.insertInto("main.classifications").values(chunk));
+      }
+    });
+    for (const r of rows) stored.add(`${r.repo}#${r.number}`);
+    return stored;
+  } catch (e) {
+    let first: unknown = e;
+    for (const r of rows) {
+      try {
+        await replaceClassification(db, [r.repo, r.number, classifier, runId, at, r.type_label, r.flags, r.reason, r.probs]);
+        if (r.input_hash !== undefined) await db.run(db.k.updateTable("main.classifications").set({ input_hash: r.input_hash }).where("repo", "=", r.repo).where("number", "=", r.number).where("classifier", "=", classifier).where("run_id", "=", runId));
+        stored.add(`${r.repo}#${r.number}`);
+      } catch (err) {
+        console.error(`classify: could not save the verdict of ${r.repo}#${r.number}: ${String((err as Error).message ?? err)}`);
+        if (first === e) first = err;
+      }
+    }
+    if (first !== e) throw first;
+    return stored;
+  }
 }
 
 /**
@@ -248,15 +292,22 @@ export async function replaceClassification(db: Db, row: [string, number, string
 
 const USAGE_COLS = ["stage", "model", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"] as const;
 
+export type UsageRow = { runId: string; agent: string; stage: string; model: string; items: number; u: Usage; start: string; end: string };
+
 export async function saveUsage(db: Db, runId: string, agent: string, stage: string, model: string, items: number, u: Usage, start: string, end: string): Promise<void> {
-  await db.run(db.k.insertInto("main.token_usage")
-    .values({ run_id: runId, agent, stage, model, items, input_tokens: u.input, output_tokens: u.output, cache_read_tokens: u.cacheRead, cache_write_tokens: u.cacheWrite, started_at: start, ended_at: end, cost_usd: u.cost })
-    .onConflict((oc) => oc.columns(["run_id", "agent"]).doUpdateSet(kx.excluded(USAGE_COLS))));
-  // Subagent models get their own rows (same run and stage), so the Cost page splits by model and its totals stay whole.
-  for (const e of u.extra ?? []) {
-    await db.run(db.k.insertInto("main.token_usage")
-      .values({ run_id: runId, agent: `${agent}+${e.model}`, stage, model: e.model, items: 0, input_tokens: e.usage.input, output_tokens: e.usage.output, cache_read_tokens: e.usage.cacheRead, cache_write_tokens: e.usage.cacheWrite, started_at: start, ended_at: end, cost_usd: e.usage.cost })
-      .onConflict((oc) => oc.columns(["run_id", "agent"]).doUpdateSet(kx.excluded(USAGE_COLS))));
+  await saveUsages(db, [{ runId, agent, stage, model, items, u, start, end }]);
+}
+
+/** Saves usage rows in one upsert per slice; subagent models get their own rows (same run and stage), so the Cost page splits by model and its totals stay whole. */
+export async function saveUsages(db: Db, list: readonly UsageRow[]): Promise<void> {
+  const rows = new Map<string, InsertObject<DB, "main.token_usage">>();
+  for (const { runId, agent, stage, model, items, u, start, end } of list) {
+    const row = (a: string, m: string, n: number, x: Usage) => ({ run_id: runId, agent: a, stage, model: m, items: n, input_tokens: x.input, output_tokens: x.output, cache_read_tokens: x.cacheRead, cache_write_tokens: x.cacheWrite, started_at: start, ended_at: end, cost_usd: x.cost });
+    rows.set(`${runId}\0${agent}`, row(agent, model, items, u));
+    for (const e of u.extra ?? []) rows.set(`${runId}\0${agent}+${e.model}`, row(`${agent}+${e.model}`, e.model, 0, e.usage));
+  }
+  for (const chunk of kx.batches([...rows.values()])) {
+    await db.run(db.k.insertInto("main.token_usage").values(chunk).onConflict((oc) => oc.columns(["run_id", "agent"]).doUpdateSet(kx.excluded(USAGE_COLS))));
   }
 }
 
@@ -846,23 +897,38 @@ export async function runHaiku(db: Db, runId: string, items: Item[], batchSize =
   let skipped = 0;
   await pool(batches.map((batch, n) => async () => {
     const r = await runModelStep(db, CLASSIFY_HAIKU, batch, { model, usage: { run: runId, agent: `haiku-${String(n).padStart(2, "0")}`, stage: "classify" } });
-    if (r.ok) for (const verdicts of r.values) for (const v of verdicts) await saveVerdict(db, "haiku", runId, v);
+    if (r.ok) await saveVerdicts(db, "haiku", runId, r.values.flat().map((v) => ({ v })));
     const left = r.ok ? r.rest ?? [] : batch;
     if (left.length) console.error(`haiku batch ${n}: no valid answer for ${left.map(refOf).join(", ")}`);
   }), poolRoom(db, (i) => itemRepos(batches[i]!), (i) => batches[i]!, { promptId: CLASSIFY_HAIKU.id }), { first: opts.cold, skipped: (i) => void (skipped += batches[i]!.length) });
   return items.length - skipped;
 }
 
-export async function runJev(db: Db, runId: string, items: Item[], width?: number): Promise<void> {
+/**
+ * Asks Jev for each item (`width` calls at once). The usage rows and verdicts of the chunk are saved together when the calls
+ * have ended (also after a failure), in one write each. `hashes` (by ref) are stored as the verdicts' input_hash. Returns the
+ * refs whose verdict was saved.
+ */
+export async function runJev(db: Db, runId: string, items: Item[], width?: number, hashes?: ReadonlyMap<string, string>): Promise<Set<string>> {
   if (width === undefined) width = await jevParallel(db);
-  await pool(items.map((item) => async () => {
-    // Once a call shows Jev is unavailable, the items still waiting are left for Haiku.
-    if (!await jevAvailable(db)) return;
-    const ref = refOf(item);
-    const r = await runModelStep(db, CLASSIFY_JEV, item, { usage: { run: runId, agent: `jev-${ref}`, stage: "classify", items: (ok) => (ok ? 1 : 0), withoutUsage: true, skipWhen: async (x) => !x.ok && !await jevAvailable(db) } });
-    if (r.ok) await saveVerdict(db, "jev", runId, r.value);
-    else if (await jevAvailable(db)) console.error(`jev: no valid answer for ${ref}`);
-  }), width);
+  // Read once per chunk; a failed call reads it again, since a call that fails is how an outage shows.
+  let up = await jevAvailable(db);
+  const sinkUsage: UsageRow[] = [], verdicts: { v: Verdict; hash?: string }[] = [];
+  let saved: Set<string>;
+  try {
+    await pool(items.map((item) => async () => {
+      // Once a call shows Jev is unavailable, the items still waiting are left for Haiku.
+      if (!up) return;
+      const ref = refOf(item);
+      const r = await runModelStep(db, CLASSIFY_JEV, item, { available: async () => up, usage: { run: runId, agent: `jev-${ref}`, stage: "classify", sink: sinkUsage, items: (ok) => (ok ? 1 : 0), withoutUsage: true, skipWhen: async (x) => !x.ok && !(up = await jevAvailable(db)) } });
+      if (r.ok) verdicts.push({ v: r.value, ...(hashes?.has(ref) && { hash: hashes.get(ref)! }) });
+      else if (up = await jevAvailable(db)) console.error(`jev: no valid answer for ${ref}`);
+    }), width);
+  } finally {
+    await saveUsages(db, sinkUsage);
+    saved = await saveVerdicts(db, "jev", runId, verdicts);
+  }
+  return saved;
 }
 
 /** A failed CLI result in words: the turn limit by name, else the CLI's text. */
