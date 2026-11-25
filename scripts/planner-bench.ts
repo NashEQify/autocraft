@@ -21,7 +21,8 @@ import { plannedItems } from "../src/core/select-items.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { dropPlanState } from "../src/core/plan-engine.ts";
 import { enqueueCall } from "../src/remote/calls.ts";
-import { applyProposals, detectAutopilot, planDue } from "../src/runner/autopilot.ts";
+import { applyProposals, detectAutopilot, laneGates, LANES, planDue } from "../src/runner/autopilot.ts";
+import { loadSteps } from "../src/runner/steps.ts";
 import { SCHEME_ID } from "../src/itemhash.ts";
 import { world } from "../test/world-db.ts";
 import { startLatencyProxy } from "./latency-proxy.ts";
@@ -158,6 +159,8 @@ try {
   await unit("job start: items to label", () => plannedItems(db, "label", { repo: "app1" }));
   await unit("due check, quiet", () => planDue(db));
   await unit("due check, quiet again", () => planDue(db));
+  const defs = await loadSteps();
+  await unit("Next page: lane gates", () => laneGates(db, LANES, defs));
   const found = await pass("incremental, before apply");
   await unit(`apply ${found.proposals.length} proposals`, () => applyProposals(db, found.proposals, { wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) }));
   if (dump) {

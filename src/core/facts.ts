@@ -130,7 +130,9 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase }, en
   };
   const keep = (ref: string): boolean => (!opts.repo || asRef(ref).repo === opts.repo) && (!refs || refs.has(ref));
   const rowsOf = (d: PrPassData) => {
-    const all = [...d.mirror].filter(([ref, m]) => keep(ref) && m.item.kind === "pr" && inUniverse(d, ref, m.item.state)).map(([ref]) => ref);
+    // In repo and number order, as the planner keeps them (plan-engine.ts byRef).
+    const all = [...d.mirror].filter(([ref, m]) => keep(ref) && m.item.kind === "pr" && inUniverse(d, ref, m.item.state))
+      .sort(([, { item: x }], [, { item: y }]) => (x.repo === y.repo ? x.number - y.number : x.repo < y.repo ? -1 : 1)).map(([ref]) => ref);
     return { all, scoped: all.filter((ref) => d.inScope.has(ref) && !integrationOf(d, ref)) };
   };
   // Clock-driven changes the facts below do not show as a time of their own (expiries, daily counts, cache lifetimes), per PR.
