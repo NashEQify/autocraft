@@ -288,7 +288,7 @@ export type PrFacts = {
   mainFix: boolean;
   /**
    * The implementation (src/implement) whose PR this is: the latest attempt that opened it, with its issue, its state and the
-   * heads its revisions started from. Absent or null for every other PR. While it owns the PR (decide.ts ownImplementation), it takes
+   * heads its revisions started from. Absent or null for every other PR. While it owns the PR (implementation.ts ownImplementation), it takes
    * the PR's review fixes and red CI itself (implement{revise}) instead of the fix-up and the CI fix.
    */
   implementation?: {

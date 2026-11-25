@@ -5,9 +5,9 @@ import {
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
-import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
+import { liveAttempt, ownImplementation } from "./implementation.ts";
 import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind, WorkflowFact } from "./plan.ts";
 
 /** The start of a statement for a reason line: one line, at most 80 characters. */
@@ -184,18 +184,6 @@ type Wait = { text: string; kind: WaitKind };
 const person = (text: string): Wait => ({ text, kind: "person" });
 const contributor = (text: string): Wait => ({ text, kind: "contributor" });
 const system = (text: string): Wait => ({ text, kind: "system" });
-
-/** The implementation whose PR this is, while it is not merged, closed, failed or cancelled. */
-const liveAttempt = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
-  f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
-
-/**
- * The implementation that owns the PR's fixes: its session takes the review's fixes and red CI (implement{revise}), and the fix-up and the CI
- * fix leave the PR alone (a conflict still goes to the conflict step). It owns them while the issue's implement workflow is live; a PR whose
- * issue's work ended, or that was started on its own, gets the normal steps.
- */
-export const ownImplementation = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
-  f.implementation && f.implementation.queuedBy !== null && !workflowOf(f)?.own ? liveAttempt(f) : null;
 
 /** The wait of started work while GitHub writes go out as the box account: nobody's started work counts then (data/access standing). */
 export const BOX_IDENTITY_WAIT = "an operator to switch AutoCraft to its GitHub App: started work runs as the person who started it only through the app";

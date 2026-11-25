@@ -14,7 +14,8 @@
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf, notStarted, ownImplementation, reviseOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, notStarted, reviseOf } from "../core/decide.ts";
+import { ownImplementation } from "../core/implementation.ts";
 import { pushRefusal } from "../core/gates.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";

@@ -1,5 +1,6 @@
 // The gates on writes: the repo approvals each action needs and the global pipeline switch. Pure. The planner and the
 // guard (guard.ts) both use it; decide() does not (it shows what would run, approved or not).
+import { ownImplementation } from "./implementation.ts";
 import type { ActionKind, ItemFacts, PrFacts } from "./plan.ts";
 import { mayMerge, mayPush, mergeApproved, type MayResult, type MergeInputs } from "./may.ts";
 import { tripStageOf } from "./push-outcome.ts";
@@ -55,9 +56,9 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
 const endsAttempt = (f: PrFacts | ItemFacts): boolean =>
   "ghState" in f ? f.ghState !== "OPEN" : f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
 
-/** Who commanded the implementation (and with it its PR's revisions) or the close; null for other work. Their command is the approval, in any repo. */
+/** Who the implementation (and with it its PR's revisions) runs for, or who commanded the close; null for other work. Their command is the approval, in any repo. */
 function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
-  if (a.kind === "implement") return ("ghState" in f ? f.implementation?.queuedBy : f.implement.queuedBy) ?? null;
+  if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
   return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
 }
 

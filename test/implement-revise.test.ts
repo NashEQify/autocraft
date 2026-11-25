@@ -20,11 +20,13 @@ import { pushRevision, type ReviseDeps } from "../src/implement/revise.ts";
 import { implementationById, setImplementationState, startImplementation } from "./implement-rows.ts";
 import type { Implementation, ReviseRound } from "../src/implement/types.ts";
 
+/** The live implement workflow of the PR's issue. */
+const ISSUES = { entry: "implement", approved: true, startedBy: "op", startedAt: "2026-11-04T09:00:00.000Z", own: false } as const;
 const kinds = (f: Parameters<typeof prFacts>[0]) =>
   decidePr(prFacts(f)).actions.filter((a) => a.kind !== "unassign").map((a) => `${a.kind}${a.params?.bucket ? `:${a.params.bucket}` : ""}${a.params?.issue ? `#${a.params.issue}` : ""}`);
 
 test("an implementation PR's review fixes and red CI go to its session; a conflict goes to the conflict step", () => {
-  const ours = { implementation: { issue: 7, state: "pr-opened", revisedHeads: [] as string[], queuedBy: "op", standing: "yes" as const } };
+  const ours = { workflow: ISSUES, implementation: { issue: 7, state: "pr-opened", revisedHeads: [] as string[], queuedBy: "op", standing: "yes" as const } };
   const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
   const red = { ci: "failure" as const, cifix: { states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, skipReason: null, checksAt: null } };
 
@@ -41,18 +43,18 @@ test("an implementation PR's review fixes and red CI go to its session; a confli
 
   // A head the session already revised waits for its push, a revision that started goes on from the PR (its issue may be
   // closed or held), and a stuck one plans nothing new.
-  assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, revisedHeads: ["h1"] } }).some((k) => /^(fixup|implement)/.test(k)));
-  assert.deepEqual(kinds({ ...takeFix, implementation: { ...ours.implementation, state: "revising", revisedHeads: ["h1"] } }).filter((k) => /^(fixup|implement)/.test(k)), ["implement:revise#7"]);
-  assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, state: "stuck" } }).some((k) => /^(fixup|implement)/.test(k)));
+  assert.ok(!kinds({ ...takeFix, ...ours, implementation: { ...ours.implementation, revisedHeads: ["h1"] } }).some((k) => /^(fixup|implement)/.test(k)));
+  assert.deepEqual(kinds({ ...takeFix, ...ours, implementation: { ...ours.implementation, state: "revising", revisedHeads: ["h1"] } }).filter((k) => /^(fixup|implement)/.test(k)), ["implement:revise#7"]);
+  assert.ok(!kinds({ ...takeFix, ...ours, implementation: { ...ours.implementation, state: "stuck" } }).some((k) => /^(fixup|implement)/.test(k)));
 });
 
 test("an implementation PR waits on the Implement switch while it is off, and on a revision in progress instead of merging", () => {
   const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
-  const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [], queuedBy: "op", standing: "yes" }, repoFacts: { implementOn: false } }));
+  const off = decidePr(prFacts({ ...takeFix, workflow: ISSUES, implementation: { issue: 7, state: "pr-opened", revisedHeads: [], queuedBy: "op", standing: "yes" }, repoFacts: { implementOn: false } }));
   assert.ok(!off.actions.some((a) => a.kind === "implement"), JSON.stringify(off.actions));
   assert.equal(off.wait, implementOffWait("app"));
   // A ready PR whose session is revising it is not merged meanwhile: it waits on the revision.
-  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"], queuedBy: "op", standing: "yes" } }));
+  const revising = decidePr(prFacts({ workflow: ISSUES, implementation: { issue: 7, state: "revising", revisedHeads: ["h1"], queuedBy: "op", standing: "yes" } }));
   assert.ok(!revising.eligible && !revising.actions.some((a) => a.kind === "merge"), JSON.stringify(revising.actions));
   assert.match(revising.wait ?? "", /revision for #7/);
 });
