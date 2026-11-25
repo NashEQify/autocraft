@@ -26,7 +26,6 @@ import { endJob, recoverJobs } from "./lifecycle.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
-import { groupsFile, killGroups, removeGroupsFile } from "./groups.ts";
 import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { jobBlock, stepParallel } from "./concurrency.ts";
@@ -77,7 +76,6 @@ export type RunnerOptions = {
   log?: (line: string) => void;
   /** The planner's detection pass (default: a worker thread on its own connection to `dbTarget`). Tests pass a fake. */
   detect?: (nowMs: number) => Promise<Detected>;
-  /** The flowchart summary refresh (default: a worker thread). */
   /** Longest run of a job of a step in minutes, given the job's `limit` param (default: stepDeadlineMin). Tests pass a short one. */
   maxMin?: (step: string, items?: number) => number;
   /** Minutes a job may show no progress, by step (default: stepNoProgressMin). */
@@ -527,15 +525,13 @@ export class Runner {
     // One guarded statement: a command-line run cannot take the step in between.
     const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
     if (!claimed) return null;
-    const groups = groupsFile(this.o.logs, id);
-    removeGroupsFile(groups);
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
     try {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...dbEnv(this.o.dbTarget), AUTOCRAFT_JOB_GROUPS: groups, [JOB_DEADLINE_ENV]: String(deadlineMin) },
+        env: { ...dbEnv(this.o.dbTarget), [JOB_DEADLINE_ENV]: String(deadlineMin) },
       });
     } finally {
       closeSync(fd);
@@ -545,7 +541,6 @@ export class Runner {
     child.on("error", (e) => (spawnError = e.message));
     const exited = new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
-        removeGroupsFile(groups);
         void this.finish(id, code, signal, spawnError)
           .catch((e) => {
             this.unrecorded.set(id, { code, signal, spawnError });
@@ -587,8 +582,6 @@ export class Runner {
   abandon(): void {
     this.stopping = true;
     for (const r of this.running.values()) if (r.child.pid) killGroup(r.child.pid, "SIGKILL");
-    // Model calls run in groups of their own; the jobs list theirs in their groups files.
-    killGroups([...this.running.keys()].map((id) => groupsFile(this.o.logs, id)));
   }
 
   /** Resolves when every running job has ended. */

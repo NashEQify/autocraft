@@ -18,7 +18,6 @@ import { FakeProvider } from "../src/dash/server/provider.ts";
 import { HttpError, RateLimiter } from "../src/dash/server/util.ts";
 import { parseClaim } from "../src/remote/calls.ts";
 import { addressKey, MAX_PENDING_PER_ADDRESS, startLogin } from "../src/remote/device-login.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { setMaintainerWrites } from "../src/settlers.ts";
 import { PROTOCOL_VERSION, ROUTES, type LoginStartReply, type PendingRunnerLogin } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -76,7 +75,6 @@ describe("over HTTP", async () => {
   let base = "";
   let close: () => Promise<void>;
   before(async () => {
-    await setInferenceMode(db, "user-local", "test");
     await addLogin(db, "cli", "maint", "maintainer", null);
     await addLogin(db, "cli", "watcher", "viewer", null);
     await addLogin(db, "cli", "boss", "operator", null);

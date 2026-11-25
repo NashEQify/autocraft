@@ -11,7 +11,6 @@ import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import type { Blocker } from "../src/workflow/types.ts";
@@ -161,7 +160,6 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
     await review(w, { head: "sha1", verdict: "take", at: new Date().toISOString() });
     if (kind === "clean") {
       // Waiting in ci for a pre-merge check no Task Runner can take: the state line says so.
-      await setInferenceMode(db, "user-local", "test");
       for (let i = 0; i < 2; i++) await advancePreapprovals(db);
       assert.equal(await legState(w), "ci");
       assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), "Waiting for the pre-merge check: no Task Runner can take it");

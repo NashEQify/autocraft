@@ -16,7 +16,6 @@ import { cleanReason } from "../src/act/templates.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import * as conv from "../src/dash/api/conversations.ts";
 import { HttpError } from "../src/dash/server/util.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { allocation } from "../src/agents/call.ts";
@@ -289,7 +288,6 @@ describe("maintainers talk to Opus", () => {
     const db = await fresh();
     const maint = (write: boolean, json: unknown): Req => ({ ...req("viewer", { repo: "app", n: "1" }, json), user: { login: "maint", role: "maintainer", canWrite: async () => write, canRead: async () => true } });
     const refused = async (r: Req, status: number, re?: RegExp) => await assert.rejects(() => conv.postMessage(db, r), (e) => e instanceof HttpError && e.status === status && (!re || re.test(e.message)));
-    await setInferenceMode(db, "user-local", "test");
     await refused(maint(false, { text: "Hi" }), 403, /write in conversations/);
     await refused(maint(true, { text: "Hi" }), 409, /pipeline is off/);
     await setEnabled(db, true, "test");
@@ -303,7 +301,6 @@ describe("maintainers talk to Opus", () => {
 describe("maintainers' messages wait and are withdrawn", () => {
   test("a maintainer's message no runner of theirs took in time waits again, uncounted; they or an operator withdraw one, another maintainer cannot", async () => {
     const db = await fresh();
-    await setInferenceMode(db, "user-local", "test");
     await db.run(db.k.insertInto("access").values({ login: "maint", role: "maintainer" }));
     const token = (await createToken(db, "maint", "runner", { kind: "runner" })).row.id;
     await storeStatus(db, token, "maint", parseStatus({ slots: 2, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));

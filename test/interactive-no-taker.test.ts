@@ -6,7 +6,6 @@ import { test } from "node:test";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { computeChecks } from "../src/health-checks.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 
@@ -14,7 +13,6 @@ mkdirSync(SCRATCH, { recursive: true });
 
 test("warns when no ready runner has an interactive slot, ok when one does or Discord is off", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "interactive-no-taker-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const now = Date.now();
   const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;

@@ -12,7 +12,6 @@ import { type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun } from "../agents/runs.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type Lint, type LintProblem } from "../replylint.ts";
 import { scrubError } from "../agents/text.ts";
-import { registerGroup, unregisterGroup } from "../runner/groups.ts";
 import { hasFixedCredential, scrub } from "../runner/scrub.ts";
 import { itemTools } from "../itemtools/index.ts";
 import { CHECK_SERVER } from "../checktool/bridge.ts";
@@ -32,7 +31,6 @@ import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeA
 import { stripMarks } from "../prompts/harness.ts";
 import type { DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
-import { envVar } from "../env.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
@@ -62,40 +60,16 @@ export async function loadItems(db: Db, refs: { repo: string; number: number }[]
   });
 }
 
-/** `idleMs` is how long the process may stay silent (the time since its last output, counted as zero while `busy()` is true) before it is stopped. */
-export type IdleWatch = { idleMs: number; busy?: () => boolean };
-type Proc = { code: number | null; stdout: string; stderr: string; /** The idle watchdog stopped the process. */ idle?: boolean };
-
-/** How long a model call may produce no output before it is stopped: `AUTOCRAFT_CALL_IDLE_MIN` minutes, default 15. */
-export function callIdleMs(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(envVar("CALL_IDLE_MIN", env));
-  return (Number.isFinite(n) && n > 0 ? n : 15) * 60_000;
-}
-/** Time between SIGTERM and SIGKILL when the watchdog stops a process. */
-export const IDLE_KILL_GRACE_MS = 10_000;
+type Proc = { code: number | null; stdout: string; stderr: string };
 /** `env` is added to the process environment of the child, or with `exactEnv` is the child's whole environment. `onLine` gets each complete line of stdout as it arrives (the whole stdout is still returned). */
-export type Runner = (cmd: string, args: string[], input: string, cwd?: string, timeoutMs?: number, env?: Record<string, string>, onLine?: (line: string) => Promise<void>, exactEnv?: boolean, watch?: IdleWatch) => Promise<Proc>;
+export type Runner = (cmd: string, args: string[], input: string, cwd?: string, timeoutMs?: number, env?: Record<string, string>, onLine?: (line: string) => Promise<void>, exactEnv?: boolean) => Promise<Proc>;
 
-export function exec(cmd: string, args: string[], input: string, cwd?: string, timeoutMs = 600_000, env?: Record<string, string>, onLine?: (line: string) => void, exactEnv = false, watch?: IdleWatch): Promise<Proc> {
+export function exec(cmd: string, args: string[], input: string, cwd?: string, timeoutMs = 600_000, env?: Record<string, string>, onLine?: (line: string) => void, exactEnv = false): Promise<Proc> {
   return new Promise((resolve) => {
-    // With a watchdog the child leads its own process group, so the stop reaches everything it started.
-    const p = spawn(cmd, args, { cwd, stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, windowsHide: true, ...(watch && { detached: true }), ...(env && { env: exactEnv ? env : { ...process.env, ...env } }) });
-    if (watch) registerGroup(p.pid);
+    const p = spawn(cmd, args, { cwd, stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, windowsHide: true, ...(env && { env: exactEnv ? env : { ...process.env, ...env } }) });
     let stdout = "", stderr = "";
     let partial = "";
-    let last = Date.now(), idle = false, ended = false;
-    const signal = (sig: NodeJS.Signals) => { try { process.kill(-p.pid!, sig); } catch { try { p.kill(sig); } catch { /* gone */ } } };
-    const timer = watch && setInterval(() => {
-      if (watch.busy?.()) last = Date.now();
-      if (idle || Date.now() - last < watch.idleMs) return;
-      idle = true;
-      signal("SIGTERM");
-      setTimeout(() => { if (!ended) signal("SIGKILL"); }, IDLE_KILL_GRACE_MS).unref();
-    }, Math.max(10, Math.min(30_000, Math.floor(watch.idleMs / 4))));
-    timer?.unref();
-    const done = (r: Proc) => { ended = true; if (timer) clearInterval(timer); if (watch) unregisterGroup(p.pid); resolve(idle ? { ...r, idle: true } : r); };
     p.stdout.on("data", (d) => {
-      last = Date.now();
       stdout += d;
       if (!onLine) return;
       partial += d;
@@ -103,9 +77,9 @@ export function exec(cmd: string, args: string[], input: string, cwd?: string, t
       partial = lines.pop()!;
       for (const l of lines) try { onLine(l); } catch { /* progress is best effort */ }
     });
-    p.stderr.on("data", (d) => { last = Date.now(); stderr += d; });
-    p.on("error", (e) => done({ code: -1, stdout, stderr: String(e) }));
-    p.on("close", (code) => done({ code, stdout, stderr }));
+    p.stderr.on("data", (d) => { stderr += d; });
+    p.on("error", (e) => resolve({ code: -1, stdout, stderr: String(e) }));
+    p.on("close", (code) => resolve({ code, stdout, stderr }));
     p.stdin.on("error", () => {});
     p.stdin.end(input);
   });

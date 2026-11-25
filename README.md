@@ -59,7 +59,7 @@ Items is one filterable list; a row's details open inline under it. Needs you sh
 | `git` | Clones, diffs and pushes |
 | `claude` (Claude Code CLI) | All Claude calls |
 | `bwrap` (bubblewrap, `/usr/bin/bwrap`) | Sandbox for tool-using calls. Without it, those calls run without tools; `AUTOCRAFT_NO_SANDBOX=1` forces that |
-| `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server accounts jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Claude accounts (more Claude usage) |
+| `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server inference jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Task Runners (more Claude usage) |
 | Podman and a second OS user | Build environments for Verify and Implement (optional) |
 | `sqlite3`, `curl` | `deploy/backup.sh` and `deploy/hook.sh` |
 
@@ -110,32 +110,17 @@ To sign in through a GitHub App instead, register it from the dashboard's GitHub
 
 The server speaks plain HTTP; put a reverse proxy with HTTPS in front. More variables are in [docs/operations.md](docs/operations.md).
 
-### Claude accounts
+### Model calls
 
-Claude calls run under accounts that an operator enables. Each account is a Claude Code config directory that is logged in. Describe them in a JSON file and set `AUTOCRAFT_ACCOUNTS` to its path:
-
-```json
-[{ "id": "a", "configDir": "/srv/autocraft/config/claude/a" }]
-```
-
-`configDir` becomes `CLAUDE_CONFIG_DIR` of the `claude` child process. Related variables:
-
-| Variable | Meaning |
-|---|---|
-| `AUTOCRAFT_ACCOUNTS_ROOT` | Directory for accounts added on the dashboard's Accounts page, which runs `claude auth login` for you |
-| `AUTOCRAFT_USAGE_DIR` | One `<id>.json` per account with its rate-limit readings |
-| `AUTOCRAFT_CLAUDE_BIN` | The `claude` command, default from `PATH` |
-
-New accounts start disabled. Enable and size them:
+Claude calls run on Task Runners, never on this host (see [Model calls on maintainers' machines](#model-calls-on-maintainers-machines)). Jev and embeddings run here:
 
 ```sh
-autocraft-server accounts list
-autocraft-server accounts set a --label main --enabled yes --max-concurrent 3
-autocraft-server accounts jev 4        # parallel Jev calls
-autocraft-server accounts jev off      # Haiku does Jev's work; `on` switches Jev back on
+autocraft-server inference jev 4        # parallel Jev calls
+autocraft-server inference jev off      # Haiku does Jev's work; `on` switches Jev back on
+autocraft-server inference pause        # the usage levels at which a Task Runner stops taking calls
 ```
 
-See [Claude accounts and agent runs](docs/pipeline.md#claude-accounts-and-agent-runs).
+See [Agent runs](docs/pipeline.md#agent-runs).
 
 ### Track repos and sync
 
@@ -199,10 +184,7 @@ Details, including the worker and build environments: [docs/operations.md](docs/
 
 ## Model calls on maintainers' machines
 
-An instance runs its model calls in one of two modes, which an operator switches on the Inference page or with `autocraft-server inference`:
-
-- `server` (default): calls run on this host with the Claude accounts registered on the Accounts page.
-- `user-local`: calls are queued, and maintainers' and operators' own Claude Code or Codex subscriptions run them through a small Task Runner (`autocraft`) on their machines, in a sandbox. A Task Runner logs in with `autocraft login`, approved on the Connect page; its credential is separate from an MCP Connector token. Held claims make pickup immediate. Maintainers and operators can also reserve a queued call for their own Task Runners (**Run on my Task Runner** in the model call queue) or switch their Task Runners to Manual only.
+Claude calls are queued, and maintainers' and operators' own Claude Code or Codex subscriptions run them through a small Task Runner (`autocraft`) on their machines, in a sandbox. A Task Runner logs in with `autocraft login`, approved on the Connect page; its credential is separate from an MCP Connector token. Held claims make pickup immediate. Maintainers and operators can also reserve a queued call for their own Task Runners (**Run on my Task Runner** in the model call queue) or switch their Task Runners to Manual only.
 
 The planner, gates, Jev calls, embeddings, GitHub writes and builds always stay on the server. A Task Runner only receives a call's prompt, read-only checkouts and per-call tools, and sends back a reply. See [User-local inference](docs/operations.md#user-local-inference) for setup, eligibility and limits.
 
@@ -224,7 +206,7 @@ The mock API serves fixture data; pick the role with `?as=operator|maintainer|vi
 | `src/classify`, `src/priority`, `src/dupes`, `src/embed`, `src/rank` | Classification, priority, duplicates, embeddings, work rank |
 | `src/decide`, `src/conversations`, `src/act` | Decisions, Opus conversations and cards, applying answers |
 | `src/review`, `src/implement`, `src/fixup`, `src/verify`, `src/merge` | Review, fix, fix-up, verify, merge queue |
-| `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Claude accounts and calls, prompts, bubblewrap, read-only item tools |
+| `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Agent runs and Jev calls, prompts, bubblewrap, read-only item tools |
 | `src/github` | `write.ts`, the only module that writes to GitHub |
 | `src/runner`, `src/worker`, `src/build` | Job runner, sandbox worker, build environments |
 | `src/dash`, `src/flow` | Dashboard server, API and flowchart counts |

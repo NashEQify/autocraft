@@ -20,7 +20,7 @@ import * as userSettings from "../src/dash/api/user-settings.ts";
 import type { Req } from "../src/dash/types.ts";
 import { listHelpers, parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { remoteRoom } from "../src/remote/room.ts";
-import { setAcceptedModels, setInferenceMode } from "../src/remote/mode.ts";
+import { setAcceptedModels } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
@@ -33,7 +33,6 @@ const dir = mkdtempSync(join(SCRATCH, "remote-calls-"));
 describe("user-local remote calls", async () => {
   const db = await connectDb(join(dir, "t.db"));
   allocation.pollMs = 10;
-  await setInferenceMode(db, "user-local", "test");
   const T0 = new Date().toISOString();
   await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 1287, kind: "pr", state: "OPEN", title: "t", author: "alice", created_at: T0, updated_at: T0 }));
   await db.run(db.k.insertInto("pr_commits").values({ repo: "photocraft", number: 1287, oid: "abc", committed_at: T0, author: "carol", co_authors: JSON.stringify(["carol", "Dave"]) }));
