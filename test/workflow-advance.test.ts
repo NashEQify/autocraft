@@ -13,6 +13,7 @@ import { liveWorkflow } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
+import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import type { Blocker } from "../src/workflow/types.ts";
 import { world, type World } from "./world-db.ts";
 import { setFeature } from "../src/build/features.ts";
@@ -140,13 +141,20 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
     const db = w.db;
     await review(w, { head: "sha1", verdict: "take", at: new Date().toISOString() });
     if (kind === "clean") {
-      // Waiting in ci for a pre-merge check no Task Runner can take: the state line says so; the approver's runner, even never connected, takes it.
+      // Waiting in ci for a pre-merge check no Task Runner can take: the state line says so.
       await setInferenceMode(db, "user-local", "test");
       for (let i = 0; i < 2; i++) await advancePreapprovals(db);
       assert.equal(await legState(w), "ci");
       assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), "Waiting for the pre-merge check: no Task Runner can take it");
-      await createToken(db, MAINT, "runner", { kind: "runner" });
-      assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), null);
+      // The approver's runner takes it: the state line names it while it cannot claim, and goes back to the steps once it can.
+      const token = (await createToken(db, MAINT, "runner", { kind: "runner" })).row.id;
+      const line = async () => await legWait(db, (await liveWorkflow(db, "app", 1))!);
+      assert.equal(await line(), "Waiting for mira's Task Runner (offline)");
+      const report = (readiness: string) => storeStatus(db, token, MAINT, parseStatus({ slots: 1, busy: 0, readiness, harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
+      await report("quota-held");
+      assert.equal(await line(), "Waiting for mira's Task Runner (usage limit)");
+      await report("ready");
+      assert.equal(await line(), null);
     }
     await w.premerge(1, kind, false);
     await db.run(db.k.updateTable("main.premerge_reviews").set({ unsure: 1 }).where("number", "=", 1));

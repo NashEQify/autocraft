@@ -122,6 +122,29 @@ async function ownerTakes(db: Db, nowMs: number): Promise<(c: TakerCall) => bool
   return (c) => s.waitersFor(c).size > 0;
 }
 
+/** Why a person's Task Runner cannot claim now: no fresh report, held for its plan usage, cooling off, or another readiness. */
+export type RunnerHold = "offline" | "usage-limit" | "cooling-off" | "not-ready";
+
+/**
+ * The people whose own Task Runners a call waits for: the call has a taker (takerTest), but only through the runners of the
+ * people whose started work it is (StartedCalls.waitersFor), none of which may claim it now; with why each one cannot. Empty
+ * when a runner may claim it now, or when it has no taker at all.
+ */
+export async function waitingOn(db: Db, c: TakerCall, nowMs: number = Date.now()): Promise<{ login: string; hold: RunnerHold }[]> {
+  const [{ runners, canWrite }, s] = await Promise.all([readRunners(db, nowMs), readStartedCalls(db, nowMs)]);
+  if (runners.some((r) => runnerTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
+  const logins = [...s.waitersFor(c)].sort();
+  if (!logins.length) return [];
+  const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").leftJoin("main.remote_helpers as h", "h.token_id", "t.id").select(["t.login", "h.readiness", "h.reported_at"])
+    .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where(kx.inList(db, "t.login", logins, "citext")));
+  const cooled = new Set((await db.all(db.k.selectFrom("main.remote_cooloffs").select("login").where("until", ">", nowMs).where(kx.inList(db, "login", logins, "citext")))).map((r) => r.login.toLowerCase()));
+  return logins.map((login) => {
+    const fresh = rows.filter((r) => r.login.toLowerCase() === login && r.reported_at !== null && r.reported_at >= nowMs - STATUS_FRESH_MS);
+    const hold: RunnerHold = !fresh.length ? "offline" : fresh.some((r) => r.readiness === "quota-held") ? "usage-limit" : cooled.has(login) || fresh.some((r) => r.readiness === "cooled-off") ? "cooling-off" : "not-ready";
+    return { login, hold };
+  });
+}
+
 /**
  * Whether a taker other than the runner token `exceptToken` (null: any) may take `c` on `c.tier` now: where a call that a
  * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners.
