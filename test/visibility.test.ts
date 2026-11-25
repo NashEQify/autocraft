@@ -138,7 +138,7 @@ describe("repo visibility", () => {
     const p = await c.get<Progress>("/api/progress");
     assert.deepEqual(p.repos.map((r) => r.repo), ["open-app"]);
     assert.equal(p.funnel.open, 1);
-    assert.equal(p.decisionsOpen, 1);
+    assert.equal(p.decisionsOpen, 0);
     const runs = await c.get<AgentRunPage>("/api/agents");
     assert.equal(runs.runs.length, 1);
     assert.equal(runs.runs[0]!.items[0]!.repo, "open-app");

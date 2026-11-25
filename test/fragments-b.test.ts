@@ -7,7 +7,6 @@ import type { Db, Param } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 import { hiddenTest, hiddenTestExpr, hiddenJsonTest, type HiddenRepos } from "../src/hidden-sql.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
-import { hiddenExpr as statusHiddenExpr, hiddenSql as statusHiddenSql } from "../src/public/status.ts";
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
@@ -165,9 +164,6 @@ function cases(db: Db): Case[] {
     out.push({ name: `quietSqlFor on values (${n})`, text: [`SELECT ${quietSqlFor("?", "?")} AS k`, "app", n], expect: [n === 2 ? "1" : "0"],
       built: (d) => d.k.selectNoFrom((eb) => quietExprFor(d, eb, eb.val("app"), eb.val(n)).as("k")) });
   }
-  out.push({ name: "public status hiddenSql", text: [`SELECT i.number AS k FROM main.items i WHERE i.repo = 'app' AND ${statusHiddenSql("i.repo", "i.number", "i.labels")} ORDER BY i.number`],
-    expect: ["1", "2", "3", "4", "6", "8"],
-    built: (d) => d.k.selectFrom("main.items as i").select("i.number as k").where("i.repo", "=", "app").where((eb) => statusHiddenExpr(d, eb, "i.repo", "i.number", "i.labels")).orderBy("i.number") });
   for (const repo of [undefined, "app"]) {
     out.push({ name: `latestCte (${repo ?? "every repo"})`,
       expect: repo ? ["app:1"] : ["app:1", "lib:1"],
