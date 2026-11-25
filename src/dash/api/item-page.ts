@@ -26,6 +26,7 @@ import { loadItems } from "../../data/mirror/index.ts";
 import { itemState } from "./shown.ts";
 import type { Db } from "../../db/index.ts";
 import type { Preapproval as Leg } from "../../data/workflow/types.ts";
+import { isOwnLogin } from "../../github/identity.ts";
 
 export type ItemPhase = ItemStatus["phase"];
 export type { ItemStatus };
@@ -204,7 +205,7 @@ function githubOf(c: Ctx, f: ItemPageFacts, it: Item, ev: Ev[], url: string, syn
   if (it.createdAt) events.push({ id: "gh:opened", type: "opened", at: it.createdAt, actor: it.author, body: clean(it.body, 1500), autocraft: null });
   for (const m of comments) {
     const w = byComment.get(m.id);
-    const mine = !!w || (!!m.author && own.has(m.author));
+    const mine = !!w || isOwnLogin(own, m.author);
     if (w) used.add(w.rowid);
     events.push({
       id: `comment:${m.id}`, type: m.kind === "review" ? "review" : "comment", at: m.created_at!, actor: mine ? "autocraft" : m.author ?? "unknown",
@@ -213,7 +214,7 @@ function githubOf(c: Ctx, f: ItemPageFacts, it: Item, ev: Ev[], url: string, syn
   }
   const labelWrites = writes.filter((w) => w.action === "labels-apply" || w.action === "act-unlabel");
   for (const a of d.activity) {
-    const mine = !!a.actor && own.has(a.actor);
+    const mine = isOwnLogin(own, a.actor);
     const w = mine && a.kind !== "force-push" ? labelWrites.find((x) => Math.abs(Date.parse(x.at) - Date.parse(a.at)) <= MATCH_WINDOW_MS) : undefined;
     if (w) used.add(w.rowid);
     events.push({
@@ -234,7 +235,7 @@ function githubOf(c: Ctx, f: ItemPageFacts, it: Item, ev: Ev[], url: string, syn
   events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
   const commits = d.commits.map((m) => ({ oid: m.oid, message: m.message, author: m.author, at: m.committed_at < (m.first_seen_at ?? m.committed_at) ? m.committed_at : m.first_seen_at ?? m.committed_at }))
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.oid < b.oid ? -1 : 1))
-    .map((m) => ({ sha: short(m.oid), message: clean(m.message ?? "", 500), author: m.author ?? "unknown", at: m.at, byAutoCraft: (!!m.author && own.has(m.author)) || pushed.has(m.oid) }));
+    .map((m) => ({ sha: short(m.oid), message: clean(m.message ?? "", 500), author: m.author ?? "unknown", at: m.at, byAutoCraft: isOwnLogin(own, m.author) || pushed.has(m.oid) }));
   return {
     description: clean(it.body, 6000), events, checks: it.ciChecks.filter((x) => x.state !== "none").map((x) => ({ name: x.name, state: x.state })), commits,
     files: it.files.map((x) => ({ path: x.path, additions: x.additions, deletions: x.deletions })), url, syncedAt,

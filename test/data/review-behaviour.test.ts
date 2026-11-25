@@ -122,7 +122,7 @@ both("discussion: counted entries by others, the maintainer's newest, bodies onl
   await seedComments(db, [
     { repo: "o/a", number: 1, id: "c1", author: "maint", at: "2026-01-01T10:00:00.5Z" },
     { repo: "o/a", number: 2, id: "c2", author: "maint", at: "2026-01-01T10:00:01Z" },
-    { repo: "o/a", number: 2, id: "c2b", author: "bot", at: "2026-01-01T12:00:00Z" },
+    { repo: "o/a", number: 2, id: "c2b", author: "Bot", at: "2026-01-01T12:00:00Z" },
     { repo: "o/a", number: 3, id: "c3", author: "outsider", at: "2026-01-02T00:00:00Z", assoc: "NONE" },
   ]);
   const facts = await loadReviewFacts(db, [1, 2, 3, 4, 5].map((n) => ref("o/a", n)), { now: Date.parse(T0), own: ["bot"] });

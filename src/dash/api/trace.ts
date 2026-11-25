@@ -13,7 +13,7 @@ import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import { reasonsFor, waitFor, type Reader } from "./reader.ts";
 import type { HiddenRepos } from "../../hidden-sql.ts";
-import { ownLogins } from "../../github/identity.ts";
+import { isOwnLogin, ownLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
 import { setting } from "../../data/control/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -54,7 +54,7 @@ export const closedEvent = (it: ItemRow): Ev => ({ id: "gh:closed", kind: "githu
 export const TRACE_BODY_MAX = 20_000;
 /** `body`, when given, is the stored text (the item trace selects it; the activity feed does not, to keep its pages light). */
 export const commentEvent = (c: { id: string; kind: string | null; author: string | null; created_at: string; review_state: string | null; commit_oid: string | null; len: number; body?: string | null; cut?: boolean | 0 | 1 | null }, own: Set<string>): Ev => {
-  const ours = !!c.author && own.has(c.author);
+  const ours = isOwnLogin(own, c.author);
   const what = c.kind === "review" ? `review (${(c.review_state ?? "commented").toLowerCase().replace("_", " ")})` : "comment";
   return {
     id: `comment:${c.id}`, kind: "github", at: c.created_at, head: c.commit_oid, actor: ours ? step("AutoCraft") : person(c.author),
@@ -63,7 +63,7 @@ export const commentEvent = (c: { id: string; kind: string | null; author: strin
   };
 };
 export const activityEvent = (a: { id: string; kind: string; at: string; actor: string | null; label: string | null; after_oid: string | null; before_oid: string | null }, own: Set<string>): Ev => {
-  const ours = !!a.actor && own.has(a.actor);
+  const ours = isOwnLogin(own, a.actor);
   const summary = a.kind === "force-push" ? `Force-pushed ${(a.before_oid ?? "").slice(0, 7)} → ${(a.after_oid ?? "").slice(0, 7)}` : `${a.kind === "labeled" ? "Added" : "Removed"} label ${a.label ?? ""}`;
   return { id: `activity:${a.id}`, kind: "github", at: a.at, head: a.kind === "force-push" ? a.after_oid : null, actor: ours ? step("AutoCraft") : person(a.actor), summary, ref: a.after_oid ? { head: a.after_oid } : {} };
 };
@@ -338,7 +338,7 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
   }
   for (const m of r.detail.commits) {
     // Our own commits are shown by their audit rows.
-    if (m.author && own.has(m.author)) continue;
+    if (isOwnLogin(own, m.author)) continue;
     out.push({ id: `commit:${m.oid}`, kind: "github", at: least(m.committed_at, m.first_seen_at ?? m.committed_at), head: m.oid, actor: person(m.author), summary: `Pushed commit ${m.oid.slice(0, 7)}`, ref: { head: m.oid } });
   }
   for (const a of r.detail.activity) out.push(activityEvent(a, own));

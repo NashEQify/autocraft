@@ -10,7 +10,7 @@ const node = (text: string, login = "bot") => ({ databaseId: 9, body: withNote({
 
 test("a second review-fix push extends our newest comment; anything else posts a new one", async () => {
   const first = commentText(["a.rs", "b.md"]);
-  const mine = await newestOwnComment(q([node(first)]), BOT, "app", 1);
+  const mine = await newestOwnComment(q([node(first, "Bot")]), BOT, "app", 1);
   assert.equal(mine?.id, "9");
   const lines = fixupCommentLines(mine!.body)!;
   const edited = fixupCommentEdited(lines, ["c.rs"]);

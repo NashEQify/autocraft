@@ -10,11 +10,11 @@ import { reviewWindow } from "./rows.ts";
 
 const MAINTAINER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
 
-/** "Written by someone other than us" (`c` is the comments alias): not one of our logins, not our review post, and not a comment the pipeline wrote (its audited text) under a person's login. */
+/** "Written by someone other than us" (`c` is the comments alias): not one of our logins (`own`, lower case), not our review post, and not a comment the pipeline wrote (its audited text) under a person's login. */
 const notOurs = (db: Db, eb: kx.AnyEb, own: readonly string[]) => {
   const e: kx.AnyEb = eb;
   return eb.and([
-    kx.inList(db, eb.fn.coalesce("c.author", eb.val("")), own.length ? own : [""], "text", true),
+    kx.inList(db, eb.fn("lower", [eb.fn.coalesce("c.author", eb.val(""))]), own.length ? own : [""], "text", true),
     eb("c.id", "not in", e.selectFrom("main.review_posts as rp").select("rp.review_id").whereRef("rp.repo", "=", "c.repo").whereRef("rp.number", "=", "c.number")),
     eb.not(eb.exists(e.selectFrom("main.audit as au").select(e.lit(1).as("one")).where((a) => a.and([
       a("au.target", "=", a(a(a.ref("c.repo"), "||", a.val("#")), "||", kx.exprOf(a, "c.number"))),

@@ -185,13 +185,17 @@ export function appSlug(): string | null {
 /**
  * Logins whose items and comments are ours: the box account (when recorded) and the bot of every app slug ever seen (a bare slug in the
  * mirror, `<slug>[bot]` in REST), on every repo whatever the identity setting, so items from before a switch stay ours.
- * `slug` is an extra slug injectable for tests; the registered app's is recorded and included by default.
+ * Lower case: compare GitHub's spelling with isOwnLogin. `slug` is an extra slug injectable for tests; the registered app's is recorded
+ * and included by default.
  */
 export async function ownLogins(db: Db, _repo: string, slug: string | null = null): Promise<Set<string>> {
   const out = await access.loadOwnLogins(db);
   if (slug) out.add(slug.toLowerCase()).add(`${slug.toLowerCase()}[bot]`);
   return out;
 }
+
+/** Whether `login`, as GitHub or the mirror spells it, is one of `own` (ownLogins: lower case, every form of the app's logins). */
+export const isOwnLogin = (own: ReadonlySet<string>, login: string | null | undefined): boolean => !!login && own.has(login.toLowerCase());
 
 /** A login as ownLogins compares it: lowercased, without an `app/` prefix or a `[bot]` suffix. */
 export const plainLogin = (login: string): string => login.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");

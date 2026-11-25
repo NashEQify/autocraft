@@ -5,7 +5,7 @@
 // guard ran right before. Transports (querier, exec, git, merge command) stay
 // injected so tests fake them and assert the rows.
 import type { Grant, Guarded, GuardedFiling, GuardedItem, GuardedRepo } from "../core/guard.ts";
-import { auditIdentity, githubIdentity, identityFor, type WriteKind } from "./identity.ts";
+import { auditIdentity, githubIdentity, identityFor, isOwnLogin, type WriteKind } from "./identity.ts";
 
 /** The PR steps that push to a contributor's branch or ask on the PR where it is closed to us (`lint`: the collect step of a stored patch). */
 export type AskKind = "fixup" | "conflict" | "cifix" | "lint";
@@ -629,7 +629,7 @@ export async function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, acti
 
 /**
  * Deletes a comment of ours (`commentId` is the number in its `#issuecomment-` URL). The comment's author must be one of
- * `logins` (the box account and the app's bot names); a comment that is already gone counts as done (the audit row carries `gone: true`).
+ * `logins` (the box account and the app's bot names, lower case); a comment that is already gone counts as done (the audit row carries `gone: true`).
  */
 export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string; logins: ReadonlySet<string> }, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
@@ -642,7 +642,7 @@ export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, ac
       const author = await exec("gh", ["api", path, "--jq", ".user.login"]);
       if (gone(author)) return goneResult;
       if (author.code !== 0) return author;
-      if (!o.logins.has(author.stdout.trim())) return { code: 1, stdout: "", stderr: "the comment is not ours" };
+      if (!isOwnLogin(o.logins, author.stdout.trim())) return { code: 1, stdout: "", stderr: "the comment is not ours" };
       const del = await exec("gh", ["api", "-X", "DELETE", path]);
       return gone(del) ? goneResult : del;
     },

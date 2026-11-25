@@ -525,7 +525,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const body = c.operator ? operatorCommentText(v.files, quiet ? [] : await postableChanges(db, repo, `${repo}#${c.number}`, split.changes, c.operator.instructions)) : commentText(v.files, c.attempt);
       const note: Note = c.operator ? { by: "fixed-operator" } : { by: "model", kind: "comment", model: PROMPT.models[0] };
       // A plain review-fix push right after our own review-fix comment extends that comment instead of adding a second one.
-      const prev = c.operator ? null : await newestOwnComment(d.querier, new Set([who.login, ...await ownLogins(db, repo)]), repo, c.number);
+      const prev = c.operator ? null : await newestOwnComment(d.querier, new Set([who.login.toLowerCase(), ...await ownLogins(db, repo)]), repo, c.number);
       const prevLines = prev ? fixupCommentLines(prev.body) : null;
       const cm = prev && prevLines
         ? await ghEditComment(gw, g, d.exec, "fixup-comment-edit", { repo, number: c.number, commentId: prev.id }, note, fixupCommentEdited(prevLines, v.files), { run: runId })

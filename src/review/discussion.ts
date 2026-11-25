@@ -11,7 +11,7 @@ import { ENTRY_LIMIT, TOTAL_LIMIT, type DiscussionEntry } from "./parse.ts";
 import { ownerOf } from "../owners.ts";
 import type { Exec } from "../fixup/git.ts";
 import { pipelineMe, setPipelineLogin } from "../github/pipeline-account.ts";
-import { ownLogins } from "../github/identity.ts";
+import { isOwnLogin, ownLogins } from "../github/identity.ts";
 import type { Db } from "../db/index.ts";
 import { loginsWithRole } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
@@ -144,7 +144,7 @@ export async function liveDiscussion(q: Querier, db: Db, repo: string, number: n
   if (!pr) throw new Error(`${repo}#${number} not found on GitHub`);
   const own = await ownLogins(db, repo);
   const posted = new Set([...(await loadPosts(db, [{ repo, number }])).values()].map((r) => r.review_id));
-  const mine = (a: Author | undefined, id?: string) => (!!a?.login && own.has(a.login)) || (!!id && posted.has(id));
+  const mine = (a: Author | undefined, id?: string) => isOwnLogin(own, a?.login) || (!!id && posted.has(id));
   const prAuthor: string | null = pr.author?.login ?? null;
   const entries: DiscussionEntry[] = [];
   const counted: { id: string; body: string | null }[] = [];
