@@ -1,5 +1,6 @@
 import type { HiddenRepos } from "../control/types.ts";
-import type { RefKey } from "../mirror/types.ts";
+import type { Override } from "../access/types.ts";
+import type { AuthorHistory, RefKey } from "../mirror/types.ts";
 
 export type { HiddenRepos, RefKey };
 
@@ -14,11 +15,25 @@ export type HeldRow = Hold & { title: string | null; created_at: string | null }
 export type HeldAuthorRow = { author: string; count: number; prs: number; oldest: string | null; surge: boolean };
 export type HoldCounts = { limit: number; surge: number; authors: number };
 export type OutsideAuthorRow = { author: string | null; author_association: string | null; author_type: string | null };
-export type HoldInput = {
-  candidates: (Hold & { created_at: string; rank: number; windowCount: number; overLimit: boolean; inSurge: boolean; recent: boolean; released: boolean; admitted: boolean })[];
-  limits: OutsideLimits; nowMs: number; surge: { active: boolean; since: string | null } | null; whitelisted: ReadonlySet<string>;
+/** The settings key of the surge breaker's `stage_trips` row (control owns the trip rows). */
+export const OUTSIDE_SURGE = "outside-surge";
+
+/** An in-scope item of an outside author, with its admission and release flags. */
+export type Candidate = Omit<Hold, "reason"> & { author_id: number | null; state: string; created_at: string; released: boolean; admitted: boolean };
+/** The breaker row as the pure rule reads it. */
+export type SurgeTrip = { active: boolean; trippedAt: string; clearedAt: string | null };
+export type HoldInput = { rows: Candidate[]; limits: OutsideLimits; nowMs: number; trip: SurgeTrip | null; whitelisted: ReadonlySet<string> };
+export type HoldResult = {
+  holds: Hold[]; admissions: { repo: string; number: number }[]; wakeAt: number | null;
+  /** Set when this pass trips the surge breaker; the holds are then computed as if tripped at `nowMs`. */
+  tripSurge: { reason: string; evidence: string[] } | null;
 };
-export type HoldResult = { holds: Hold[]; admissions: { repo: string; number: number }[]; tripSurge: boolean; wakeAt: number | null };
+/** An author account as the whitelist policy names it. */
+export type AuthorRef = { login: string; id: number | null };
+/** What the pure whitelist policy (`src/whitelist.ts`) reads: the loaded overrides, PR history, id bindings and the rule. */
+export type WhitelistInput = { authors: AuthorRef[]; overrides: Map<string, Override>; history: AuthorHistory[]; bound: Map<string, number>; rule: { minMerged: number; minRate: number } };
+/** Verdicts keyed by `${login}\0${id ?? ""}` (`tierKey` of `src/whitelist.ts`): true when the author account is whitelisted. */
+export type WhitelistPolicy = (input: WhitelistInput) => Map<string, boolean>;
 export class OutsideError extends Error {
   status: number;
   constructor(message: string, status = 400) {
