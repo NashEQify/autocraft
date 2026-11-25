@@ -25,7 +25,7 @@ const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, a
 const conflicting = (o: Partial<NonNullable<PrFacts["conflict"]>> = {}) => ({ mergeable: "CONFLICTING", conflict: { bucket: "merge", base: "main", baseOk: true, ...o } });
 const CI_FAIL = { ci: "failure" } as const;
 const cifix = (o: Partial<NonNullable<PrFacts["cifix"]>> = {}) => ({ states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, checksAt: "2026-11-04T11:00:00.000Z", ...o });
-const merged = (o: Partial<NonNullable<PrFacts["postmerge"]>> = {}) => ({ mergedAt: "2026-11-04T09:00:00.000Z", head: "h1", since: "2026-11-01T00:00:00.000Z", review: null, ...o });
+const merged = (o: Partial<NonNullable<PrFacts["postmerge"]>> = {}) => ({ mergedAt: "2026-11-04T09:00:00.000Z", head: "h1", why: "rule" as const, since: "2026-11-01T00:00:00.000Z", review: null, ...o });
 const runs = (o: Partial<NonNullable<PrFacts["runs"]>> = {}) => ({ waiting: 1, reread: false, crossRepo: true, approvable: 1, ...o });
 
 const rows: Row[] = [
@@ -250,6 +250,8 @@ const rows: Row[] = [
 
   // ---- post-merge review
   { name: "postmerge: merged by the pipeline, no review stored", facts: { ghState: "MERGED", postmerge: merged() }, expect: { state: "merged", actions: ["postmerge"] } },
+  { name: "postmerge: merged as approved", facts: { ghState: "MERGED", postmerge: merged({ why: null }) }, expect: { state: "merged", actions: [] } },
+  { name: "postmerge: merged outside the scope", facts: { ghState: "MERGED", inScope: false, postmerge: merged({ why: "push" }) }, expect: { state: "closed", actions: ["postmerge"] } },
   { name: "postmerge: merged before the cut-off", facts: { ghState: "MERGED", postmerge: merged({ since: "2026-11-04T10:00:00.000Z" }) }, expect: { state: "merged", actions: [] } },
   { name: "postmerge: review stored", facts: { ghState: "MERGED", postmerge: merged({ review: { at: "2026-11-04T09:30:00.000Z", error: null } }) }, expect: { actions: [] } },
   { name: "postmerge: failed review waits an hour", facts: { ghState: "MERGED", postmerge: merged({ review: { at: new Date(NOW - 600_000).toISOString(), error: "retry: no diff" } }) }, expect: { actions: [] } },

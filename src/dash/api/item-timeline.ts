@@ -48,6 +48,8 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[], impl: 
   const stepOfJob = new Map<number, string>([...f.trace.jobTrail.map((j): [number, string] => [j.job_id, j.step]), ...f.activeJobs.map((j): [number, string] => [j.id, j.step]), ...f.failedJobs.map((j): [number, string] => [j.id, j.step])]);
   const jobsWithCalls = new Set(ev.filter((e) => e.kind === "job").map((e) => e.ref.jobId));
   const mergeSteps = ev.filter((e) => e.kind === "step" && e.id.startsWith("merge:"));
+  // A review that exists all the same has its own line.
+  const asApproved = f.landed?.why === null && !f.trace.review?.postmerge;
   const near = (a: string, b: string, ms: number) => Math.abs(Date.parse(a) - Date.parse(b)) <= ms;
   // The model calls named by the reader-filtered review refs, read once.
   const reviewRunIds = ev.flatMap((e) => e.kind === "review" ? (e.ref.runIds ?? (validRunId(e.ref.runId) ? [e.ref.runId] : [])) : []).filter(validRunId);
@@ -126,7 +128,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[], impl: 
       } else if (e.id.startsWith("merge:")) {
         const m = /: (\w+)(?:, (.*))?$/.exec(e.summary);
         const merged = m?.[1] === "merged";
-        const t = base(e.id, e.at, "harness", "AutoCraft", "merge", merged ? "Merged" : `Merge attempt: ${m?.[1] ?? "no result"}${m?.[2] && staff ? `, ${m[2]}` : ""}`);
+        const t = base(e.id, e.at, "harness", "AutoCraft", "merge", merged ? (asApproved ? "Merged as approved, no post-merge review" : "Merged") : `Merge attempt: ${m?.[1] ?? "no result"}${m?.[2] && staff ? `, ${m[2]}` : ""}`);
         t.major = true; t.tone = merged ? "ok" : toneOf(m?.[1] ?? ""); t.githubId = e.id;
         out.push(t);
       } else {

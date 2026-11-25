@@ -133,6 +133,7 @@ export function resultsOf(r: RealItem): ResultCard[] {
     const n = p.findings?.length ?? 0;
     out.push({ id: "postmerge", kind: "postmerge", title: "Post-merge review", outcome: p.error ? "failed" : `${n} ${n === 1 ? "finding" : "findings"} on ${short(p.mergeSha)}`, tone: p.error ? "bad" : n ? "warn" : "ok", at: p.at, detail: p.error ?? (n ? String(p.findings[0].title ?? "") : null), earlier: (p.earlier ?? []).map((x: Json) => ({ at: x.at, outcome: `${x.findings?.length ?? 0} findings` })) });
   }
+  else if (it.mergedAsApproved) out.push({ id: "postmerge", kind: "postmerge", title: "Post-merge review", outcome: "not needed, merged as approved", tone: "neutral", at: it.mergedAt, detail: null, earlier: [] });
   const cls: Json[] = it.classifications ?? [];
   if (cls.length) {
     const labels = new Set(cls.map((c) => c.typeLabel));

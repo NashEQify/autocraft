@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
+import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLandedApprovals, loadLegPass, loadLegs, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number, o: Record<string, unknown> = {}) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT, ...o });
@@ -97,6 +97,7 @@ async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; clo
     db: o.db, close: () => o.t.close(),
     run: async () => {
       await loadLegs(o.db, keys, { latestOnly: true });
+      await loadLandedApprovals(o.db, keys);
       await loadLegPass(o.db);
       await loadFixupRequests(o.db, { open: true });
       await loadHolds(o.db, { refs: keys });

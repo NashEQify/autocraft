@@ -45,7 +45,7 @@ export interface Evidence { stage: StageId; state: "done" | "failed"; at: string
 export function deriveSteps(i: {
   kind: ItemKind; state: ItemState; current: StageId | null; running: boolean; evidence: Evidence[]; costs: Map<StageId, number>;
   /** Stages ahead show: the repo's pipeline is on and the phase is active. */
-  ahead: boolean; /** The post-merge review is still to come: AutoCraft merged it a short while ago in a repo with the pipeline on. */ postmergeNext: boolean;
+  ahead: boolean; /** The post-merge review: still to come (AutoCraft merged it a short while ago), or none because it merged as a person approved it. */ postmerge: "next" | "not-needed" | null;
 }): ItemBarStep[] {
   const latest = new Map<StageId, Evidence>();
   for (const e of i.evidence) {
@@ -61,9 +61,9 @@ export function deriveSteps(i: {
     const ev = latest.get(s.id);
     if (st === "next") {
       if (r !== "core" || idx < last) return;
-      if (i.state === "open" ? !i.ahead : s.id !== "postmerge" || i.state !== "merged" || !i.postmergeNext) return;
+      if (i.state === "open" ? !i.ahead : s.id !== "postmerge" || i.state !== "merged" || !i.postmerge) return;
     }
-    out.push({ stage: s.id, title: s.title, state: st, running: st === "current" && i.running, at: st === "next" ? null : ev?.at ?? null, costUsd: i.costs.get(s.id) ?? null, jobId: ev?.jobId ?? null });
+    out.push({ stage: s.id, title: s.title, state: st === "next" && i.state === "merged" ? i.postmerge! : st, running: st === "current" && i.running, at: st === "next" ? null : ev?.at ?? null, costUsd: i.costs.get(s.id) ?? null, jobId: ev?.jobId ?? null });
   });
   // The current step never sits before a step shown done or failed: it goes after the last one.
   const cur = out.findIndex((x) => x.state === "current");
@@ -174,8 +174,8 @@ export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: 
 
   const ahead = open && it.pipelineOn && !INACTIVE.includes(status.phase);
   const mergedMs = it.mergedAt ? Date.now() - Date.parse(it.mergedAt) : Infinity;
-  const postmergeNext = mergedByUs && it.pipelineOn && mergedMs < POSTMERGE_MS;
-  const steps = deriveSteps({ kind: it.kind, state: it.state, current, running: headline.tone === "running", evidence, costs, ahead, postmergeNext });
+  const postmerge = !mergedByUs || !f.landed ? null : f.landed.why === null ? "not-needed" : mergedMs < POSTMERGE_MS ? "next" : null;
+  const steps = deriveSteps({ kind: it.kind, state: it.state, current, running: headline.tone === "running", evidence, costs, ahead, postmerge });
   if (preFailed) {
     // The stage the pre-approval failed in shows failed, whatever else the stepper says.
     const k = steps.findIndex((x) => x.stage === (preFailed.label === "Fix-up" ? "fixup" : "merge"));

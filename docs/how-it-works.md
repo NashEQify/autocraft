@@ -48,7 +48,7 @@ Lists every taken pull request with one state, such as ready, waiting for CI or 
 
 ## Post-merge review
 
-Opus reviews each merged pull request a second time and reads what actually landed. Each defect that no open item covers becomes a follow-up issue. Minor findings are only shown.
+Opus reviews what actually landed when a pull request merged without a person's approval, or when AutoCraft changed its code after the approval. A pull request that merged as a person approved it gets no such review. Each defect that no open item covers becomes a follow-up issue. Minor findings are only shown.
 
 ## Security deep scan
 

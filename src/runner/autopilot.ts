@@ -781,19 +781,21 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Opus reviews what each pipeline merge landed; reads only, so it needs no repo approval.
+    // Opus reviews what the pipeline's merges landed, also where the Pipeline switch is off; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
+    anyTracked: true,
     detect: async (db, ctx) => {
       const due = new Set(await postmergeRepos(db, await plansOf(db, ctx), Date.now(), ctx.run));
-      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
+      return (ctx.names ?? ctx.tracked).filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
     },
   },
   {
     // The defects of those reviews become issues in repos approved for comments. A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
     name: "postmerge-file",
     perRepo: true,
-    detect: async (db, { tracked, wake }) => {
+    anyTracked: true,
+    detect: async (db, { tracked: scoped, names: tracked = scoped, wake }) => {
       const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), loadStepApprovals(db, tracked, ["comment"])]));
       wake?.push(...stuck.wakes);
       const pending = new Set([...defects.map((d) => d.repo), ...stuck.due.map((x) => x.row.repo)]);
