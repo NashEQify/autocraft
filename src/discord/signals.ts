@@ -12,7 +12,7 @@ import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { jevSignal, parseSignal, signalBand, signalState, type SignalAsk } from "./signal-ask.ts";
-import { isWatched, trackedRepos, type DiscordLink } from "./store.ts";
+import { isWatched, mentionLinks, trackedRepos, type DiscordLink } from "./store.ts";
 import { messageText, parseRefs, type ItemKey } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
@@ -172,16 +172,11 @@ export class Signals {
   }
 }
 
-const open = (url: { guildId: string; channelId: string; messageId: string }): string => `https://discord.com/channels/${url.guildId}/${url.channelId}/${url.messageId}`;
 
 /** Messages that asked for attention on an item, newest first. Empty when the key is missing or a row does not open. */
 export async function signalLinks(db: Db, keys: DiscordKeys | null, repo: string, number: number): Promise<DiscordLink[]> {
   if (!keys) return [];
-  const rows = ((await loadMentionsOfItems(db, [`${repo}#${number}`])).get(`${repo}#${number}`) ?? []).filter((r) => r.signal);
-  return rows.flatMap((r) => {
-    const v = keys.open(r.sealed, r.msgHash);
-    return v ? [{ url: open(v), at: v.at }] : [];
-  }).sort((a, b) => b.at.localeCompare(a.at));
+  return mentionLinks(keys, ((await loadMentionsOfItems(db, [`${repo}#${number}`])).get(`${repo}#${number}`) ?? []).filter((r) => r.signal));
 }
 
 export const signalCountOf = async (db: Db, repo: string, number: number): Promise<number> =>

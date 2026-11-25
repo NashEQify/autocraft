@@ -6,8 +6,7 @@ import type { VectorIndex } from "../embed/vectors.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { isPublicRepo, publicRepoNames } from "../public/status.ts";
 import { loadRepos, loadItems } from "../data/mirror/index.ts";
-import { loadFixPrFindings, loadQuiet } from "../data/security/index.ts";
-import { loadLatestVerdicts } from "../data/triage/index.ts";
+import { loadPublicItems } from "../data/views/public-status.ts";
 import type { Db } from "../db/index.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
@@ -40,11 +39,6 @@ export type SearchDeps = {
 };
 
 type Fact = { repo: string; number: number; kind: string; state: string; title: string | null; body: string | null; url: string; state_reason: string | null; closed_at: string | null; merged_at: string | null; updated_at: string | null; comments_count: number | null; reactions_count: number | null };
-
-/** A JSON array of strings (labels, flags); anything else is empty. */
-function flagsOf(json: string | null): string[] {
-  try { const v: unknown = json ? JSON.parse(json) : []; return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []; } catch { return []; }
-}
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -101,17 +95,12 @@ export class Search {
     const hits = (await index.nearest(db, vec, SCAN, undefined, only)).filter((h) => isPublic.has(h.repo));
     if (!hits.length) return out;
     const refs = hits.map((h) => ({ repo: h.repo, number: h.number }));
-    const keys = hits.map((h) => `${h.repo}#${h.number}`);
-    const [items, quiet, fixPrs, verdicts, repos] = await db.together(() => Promise.all([
-      loadItems(db, refs, "full"), loadQuiet(db, keys), loadFixPrFindings(db, keys),
-      loadLatestVerdicts(db, refs), loadRepos(db, { all: true, names: [...new Set(hits.map((h) => h.repo))] }),
+    const [items, visible, repos] = await db.together(() => Promise.all([
+      loadItems(db, refs, "full"), loadPublicItems(db, refs), loadRepos(db, { all: true, names: [...new Set(hits.map((h) => h.repo))] }),
     ]));
-    // NEEDS views.loadPublicItems: the public hidden rule as one read (any finding's fix PR on any route, a security flag in any run's verdict); fixPrs and verdicts above only approximate it.
-    const hidden = (key: string, labels: string | null): boolean =>
-      quiet.has(key) || fixPrs.has(key) || (verdicts.get(key) ?? []).some((v) => flagsOf(v.flags).includes("security")) || flagsOf(labels).some((l) => l.toLowerCase().includes("security"));
     const facts = new Map<string, Fact>();
     for (const [key, x] of items) {
-      if ((x.kind !== "issue" && x.kind !== "pr") || hidden(key, x.labels)) continue;
+      if ((x.kind !== "issue" && x.kind !== "pr") || !visible.has(key)) continue;
       const owner = repos.get(x.repo)?.owner ?? DEFAULT_OWNER;
       facts.set(key, { ...x, url: x.url ?? `https://github.com/${owner}/${x.repo}/${x.kind === "pr" ? "pull" : "issues"}/${x.number}` });
     }

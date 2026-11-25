@@ -11,6 +11,7 @@ import { needsPerson } from "../workflow/fragments.ts";
 import { mergedByUs, inMergedBatch } from "../merge/fragments.ts";
 import { loadRankScores } from "../triage/index.ts";
 import { loadQueuePositions } from "../workflow/index.ts";
+import { resolveKeys } from "../keys.ts";
 import type { PublicStatsFacts, PublicStatusRow, QueueMember } from "./types.ts";
 
 /** Plan states of an open PR that is in line to merge. */
@@ -34,6 +35,18 @@ function hidden(db: Db, eb: Eb, repo: string, number: string, labels: string) {
     hasSecurityVerdict(db, eb, repo, number),
     eb.exists(t.selectFrom(kx.jsonEach(db, array, "l")).select(eb.lit(1).as("one")).where((e) => kx.like(db, e.fn("lower", ["l.value"]), e.val("%security%")))),
   ]);
+}
+
+/** The items of `refs` an anonymous viewer may see: mirrored and not a security case (the rule of `hidden`). One statement per 10,000 refs. */
+export async function loadPublicItems(db: Db, refs: { repo: string; number: number }[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const q = queryDb(db);
+  for (const part of kx.chunks(refs)) {
+    const rows = await q.all(q.k.selectFrom("main.items as i").innerJoin(resolveKeys(db, part, "k"), (j) => j.onRef("k.repo", "=", "i.repo").onRef("k.number", "=", "i.number"))
+      .select(["i.repo", "i.number"]).where((eb) => eb.not(hidden(db, eb, "i.repo", "i.number", "i.labels"))), { label: "views.loadPublicItems" });
+    for (const r of rows) out.add(`${r.repo}#${r.number}`);
+  }
+  return out;
 }
 
 /** The queue's rows of one repo (or of several): open PRs in a queue plan state, not merge-held and not waiting on a person. */
