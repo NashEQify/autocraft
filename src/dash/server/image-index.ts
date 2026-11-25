@@ -4,13 +4,11 @@
 // bot's token. Built by scanning the mirror, and rebuilt when the mirror has
 // changed and the last build is at least `minIntervalMs` old.
 import { allowedImage } from "./images.ts";
+import * as control from "../../data/control/index.ts";
+import * as mirror from "../../data/mirror/index.ts";
 import type { Db } from "../../db/index.ts";
-import * as kx from "../../db/kx.ts";
 
 const URL_RE = /https:\/\/[^\s<>"'`)\]]+/g;
-// Cheap row filter so the scan reads only bodies that can hold a proxied image.
-const mayHaveImage = (db: Db, eb: kx.Eb) => eb.or([kx.like(db, "t.body", eb.val("%githubusercontent.com%")), kx.like(db, "t.body", eb.val("%user-attachments%"))]);
-
 /** Allowed image hrefs found in `text`. */
 export function imageUrlsIn(text: string): string[] {
   const out: string[] = [];
@@ -36,40 +34,37 @@ export class ImageIndex {
     return (await this.#current()).get(href) ?? [];
   }
 
-  async #signature(): Promise<string> {
+  // NEEDS mirror.loadImageSignature: item count, newest item update and comment count of the tracked repos (the statement counts both tables once).
+  async #signature(repos: string[]): Promise<string> {
     const db = this.#db;
-    const r = await db.get(db.k.selectNoFrom((eb) => [
-      eb.selectFrom("main.settings").select("value").where("key", "=", "org_high_water").as("hw"),
-      eb.selectFrom("main.items").select((e) => e.fn.countAll<number>().as("n")).as("itemCount"),
-      eb.selectFrom("main.items").select((e) => e.fn.max<string | null>("updated_at").as("m")).as("itemUpdated"),
-      eb.selectFrom("main.comments").select((e) => e.fn.countAll<number>().as("n")).as("cm"),
-      eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("g")).as("tr"),
-    ]));
-    return JSON.stringify(r);
+    const [sync, items] = await db.together(() => Promise.all([mirror.loadSyncState(db), mirror.countItems(db, { repos })]));
+    return JSON.stringify({ hw: sync.org_high_water, items: items.get("") ?? 0, tracked: repos });
   }
 
   async #current(): Promise<Map<string, string[]>> {
     const now = Date.now();
     if (this.#built && now - this.#built.at < this.#minIntervalMs) return this.#built.urls;
-    const sig = await this.#signature();
+    const db = this.#db;
+    const repos = [...(await control.loadTrackedRepos(db)).keys()];
+    const sig = await this.#signature(repos);
     if (this.#built && this.#built.sig === sig) {
       this.#built.at = now;
       return this.#built.urls;
     }
     const urls = new Map<string, string[]>();
-    const add = (repo: string, body: string | null) => {
+    const add = (repo: string, body: string | null | undefined) => {
       if (!body) return;
       for (const href of imageUrlsIn(body)) {
-        const repos = urls.get(href);
-        if (!repos) urls.set(href, [repo]);
-        else if (!repos.includes(repo)) repos.push(repo);
+        const known = urls.get(href);
+        if (!known) urls.set(href, [repo]);
+        else if (!known.includes(repo)) known.push(repo);
       }
     };
-    const db = this.#db;
-    for (const row of await db.all(db.k.selectFrom("main.items as t").innerJoin("main.tracked_repos as r", "r.name", "t.repo")
-      .select(["t.repo", "t.body"]).where((eb) => mayHaveImage(db, eb)))) add(row.repo, row.body);
-    for (const row of await db.all(db.k.selectFrom("main.comments as t").innerJoin("main.tracked_repos as r", "r.name", "t.repo")
-      .select(["t.repo", "t.body"]).where((eb) => mayHaveImage(db, eb)))) add(row.repo, row.body);
+    // NEEDS mirror.loadImageSources: bodies of items and comments that contain a proxied image host, filtered in the statement; until then every body of the tracked repos is read.
+    const items = await mirror.listItems(db, { repos }, "text");
+    for (const i of items) add(i.repo, i.body);
+    const comments = await mirror.loadComments(db, items.map((i) => ({ repo: i.repo, number: i.number })), { order: "rowid", body: true });
+    for (const [key, list] of comments) for (const c of list) add(key.slice(0, key.lastIndexOf("#")), c.body);
     this.#built = { sig, at: now, urls };
     return urls;
   }

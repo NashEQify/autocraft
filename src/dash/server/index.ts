@@ -35,7 +35,8 @@ import { FakeProvider, WRITE_PERMISSIONS, GitHubProvider, oauthProviderFor, prov
 import { retryWaiting } from "../../github/user-lane.ts";
 import { appPermission } from "../../remote/permission.ts";
 import { cachedWrite, createSession, deleteSession, loadSession, makeUser, PERM_READ_TTL, pruneExpired, SESSION_TTL, userForLogin, type Session } from "./sessions.ts";
-import { readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../../settings-read.ts";
+import { readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../../data/control/index.ts";
+import * as sessions from "../../data/access/index.ts";
 import { answering, handleMcp, mcpReply, writes as mcpWrites, type Msg as McpMsg, type Reply as McpReply } from "../mcp/index.ts";
 import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
@@ -436,8 +437,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
 
   async function startOAuth(returnTo: string, selectAccount: boolean, scopes?: string[], p: Provider = provider): Promise<{ r: Res; cookies: string[] }> {
     const state = randomToken(24), verifier = randomToken(48);
-    await db.run(db.k.insertInto("oauth_states")
-      .values({ state, verifier, return_to: returnTo, identity: await githubIdentity(db), created_at: new Date().toISOString() }));
+    await sessions.addOauthState(db, { state, verifier, returnTo, identity: await githubIdentity(db), createdAt: new Date().toISOString() });
     return {
       r: { redirect: await p.authorizeUrl(state, pkceChallenge(verifier), callbackUrl, selectAccount, scopes) },
       cookies: [cookie(STATE_COOKIE, state, 600)],
@@ -485,10 +485,9 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       const state = url.searchParams.get("state") ?? "";
       const code = url.searchParams.get("code") ?? "";
-      const row = await db.get(db.k.selectFrom("oauth_states").select(["verifier", "return_to", "identity", "created_at"]).where("state", "=", state));
       const cookieState = cookies.get(STATE_COOKIE) ?? "";
+      const row = await sessions.takeOauthState(db, state, { cookieMatches: safeEqual(cookieState, state) });
       const stateOk = !!row && safeEqual(cookieState, state);
-      if (stateOk) await db.run(db.k.deleteFrom("oauth_states").where("state", "=", state));
       if (!row || !code || !stateOk || Date.now() - Date.parse(row.created_at) > 600_000) {
         return { r: errorPage(nonce, 400, "Sign-in expired", "Start again from the sign-in link."), cookies: clear };
       }
@@ -602,7 +601,16 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     return role === "operator" || role === "maintainer";
   };
 
+  /** One request, counted by the database meter; a request that ran many statements is logged. The live stream is not a request-sized unit. */
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if ((req.url ?? "").split("?")[0] === "/api/live") return await serve(req, res);
+    const { stats } = await db.meter(() => serve(req, res));
+    if (stats.statements > REQUEST_STATEMENTS_LOGGED) {
+      console.log(`${req.method} ${(req.url ?? "").split("?")[0]}: ${stats.statements} statements, ${stats.roundTrips} round trips, ${Math.round(stats.ms)} ms in the database`);
+    }
+  }
+
+  async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (await serveHealth(req, res, async () => await dbReady(db)) || await serveChecks(req, res, db, Date.now(), 5_000, staffCaller)) return;
     const nonce = randomToken(16);
     try {
@@ -614,8 +622,8 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep. The check
       // runs alongside the session read; routes that return before it leave it running on its own.
-      const revocations = db.get(db.k.selectFrom("user_token_revocations").select("id").where("attempts", "=", 0).limit(1))
-        .then((r) => { if (r) void vault.sweepRevocations(true).catch(() => {}); });
+      const revocations = sessions.hasFreshRevocation(db)
+        .then((fresh) => { if (fresh) void vault.sweepRevocations(true).catch(() => {}); });
       revocations.catch(() => {});
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
@@ -1060,6 +1068,9 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   // Shutting down answers the held claims at once, each with its own short retry, and holds no new ones.
   return { handle, routes: opts.routes, provider, live, close: () => { clearInterval(maintenance); claimWaits.close(); live.close(); } };
 }
+
+/** A request that runs more statements than this is logged with its counts. */
+const REQUEST_STATEMENTS_LOGGED = 100;
 
 export async function startServer(opts: AppOptions): Promise<{ server: Server; url: string; app: Awaited<ReturnType<typeof createApp>>; close(): Promise<void> }> {
   const feedbackLimiter = opts.feedbackLimiter ?? new RateLimiter(share(60), 3600_000);
