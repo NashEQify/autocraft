@@ -251,7 +251,7 @@ test("a yes does not bring the question of a pre-merge stop back: where no fix i
   await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
   await settle(w);
   const x = await wf(w);
-  assert.deepEqual([x.state, x.rec?.parts.fix.length, x.rec?.again], ["blocked", 1, undefined], x.rec?.text);
+  assert.deepEqual([x.state, x.rec?.parts.fix.length, x.rec?.again], ["blocked", 1, undefined], x.rec?.text ?? "");
   await say(w, "yes");
   await settle(w);
   assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "fixup"]);

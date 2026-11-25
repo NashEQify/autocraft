@@ -798,7 +798,9 @@ test("merge at a stop on defects the pre-merge review gave no fix for is refused
   await w.premerge(1, "defect", false);
   await settle(w);
   const stopped = (await liveWorkflow(w.db, "app", 1))!;
-  assert.deepEqual([stopped.state, stopped.rec!.parts.fix, stopped.rec!.again], ["blocked", [], "review"], stopped.rec?.text ?? "");
+  assert.deepEqual([stopped.state, stopped.rec!.parts.fix, stopped.rec!.again], ["blocked", [1], undefined], stopped.rec?.text ?? "");
+  // A stop stored without its defects as parts gets them when someone says merge.
+  await updateWorkflow(w.db, stopped.id, { plan: [], blockerParams: { ...stopped.blockerParams, premerge: [] }, rec: { text: "Review it again, then merge.", parts: { fix: [], drop: [] }, merges: true, again: "review" } });
   const o = await send(w, "merge");
   assert.equal(o.outcome, "refused", o.line);
   assert.match(o.line, /nothing merges past them.*Fix them first\?.*Reply yes to fix 1, then merge/);

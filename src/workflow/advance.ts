@@ -370,10 +370,13 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       ? await block({ ...asked, blocker: "failed-twice", blockerParams: { step: "implement" } }, patch)
       : write({ ...asked, state: "recommending", blocker: null, blockerParams: null }) };
   };
+  /** The approver's merge, refused before for their access, is tried again with this pass's write. */
+  let retried = false;
   /** Closes the question whose cause went: the item goes on with the plan and the approval it had. */
   const closeQuestion = async (why: string): Promise<void> => {
     const gone = w.rec?.cause?.code === "actor-gone" && w.approvedBy !== null && target !== null;
     const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat() : [];
+    retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
     const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
     Object.assign(base, on);
@@ -484,7 +487,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const fixed = pushedWork(pass, w, ref, head, since, agreed);
   const read = pass.facts.get(ref);
   // A question that went leaves the workflow running, as the facts do not say yet.
-  const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } } } : read;
+  const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts, w.entry === "merge"), conflict);
   const ended = approved ? endedLeg(pass, w, since) : null;

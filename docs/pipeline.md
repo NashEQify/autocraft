@@ -139,11 +139,13 @@ Nobody's model time goes to an item nobody picked. A maintainer starts an item w
 
   | The item waits because | A yes |
   |---|---|
-  | its approver (or, not approved, everyone it acts for) has no write access any more, or the merge could not be made as its approver for lack of access | goes on in the name of the person who says it, who becomes the approver |
+  | its approver (or, not approved, everyone it acts for) has no write access any more, or the merge could not be made as its approver for lack of access | goes on in the name of the person who says it, who becomes the approver. Once the approver can act again, the question closes by itself |
   | it failed alone in a batch, its verification failed, the merge was refused for good, or its screenshots show a clear regression | merges it: the next hand-over tries again |
   | its review failed for good, the review asks for fixes and lists none we can make, a comment to the contributor could not be posted, CI stays red after the CI fix (it could not repair it, had nothing to fix, or our own push broke it), or the implementation session ended without what its PR needs | reviews it again (a review's fixes the session left are made by a fix-up) |
-  | its base is not the default branch, the repo has no CI, GitHub keeps the merge state unknown, or its CI runs could not be approved | looks again; the question says what to do on GitHub first, and comes back while nothing changed there |
+  | its base is not the default branch, the repo has no CI, GitHub keeps the merge state unknown, or its CI runs could not be approved | looks again; the question says what to do on GitHub first, and comes back while nothing changed there. Once it is settled there, the question closes by itself |
   | the issue's implementation ended without a pull request | implements it again |
+
+  A question that closes by itself leaves the item with the plan and the approval it had, at the head it was asked at or pushes of AutoCraft's on it; the item's history names why. After someone else's push it stays a question.
 
   Nothing is asked where the person acts somewhere else: a hold, a missing repo approval, a maintainer's changes-requested review, the approver's sign-in, a conflict a person resolves, an open pull request, a circuit breaker, the switch to the GitHub App, or another item's open question that blocks the review. The state line says who must act there, and where the item waits for the contributor. A contributor is asked before a step that failed twice is a question, once per answer.
 - **Weight.** `urgent`, `high` and `low` (10, 8 and 2; normal is 5), or `weight <1-10>`, in a command or alone on a started item. Heavier items go first in every stage; items of equal weight go in the order they were started. Started items of weight 3 and up go before items nobody started, those of weight 2 and below after them (`src/core/work-score.ts`).
