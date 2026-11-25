@@ -10,9 +10,6 @@ import { createEnv, hello } from "../src/build/envs.ts";
 import { claim, createTask } from "../src/build/tasks.ts";
 import { PIPELINE_LOGIN_KEY } from "../src/core/rules.ts";
 import { ownFixPrs } from "../src/core/facts.ts";
-import { setPilot } from "../src/data/control/index.ts";
-import { inScopeExpr } from "../src/data/workflow/fragments.ts";
-import type { Db } from "../src/db/index.ts";
 import { fixOnMain, pollLanding, runAdvisory, stallReason, runLand, runPublish, type LandDeps } from "../src/security/land.ts";
 import { runFix, type FixDeps } from "../src/security/fix.ts";
 import { fixBranch, giveaway, parseFixReply, patchGiveaway, quietProblem } from "../src/security/rules.ts";
@@ -24,9 +21,6 @@ import { Git } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 
-/** The item is in the pipeline's scope (the workflow scope fragment), read as the planner reads it. */
-const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
-  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 import { excluded, like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -201,7 +195,7 @@ describe("private fix and landing", () => {
     assert.equal((await stateOf(n)).state, "awaiting-admin");
   });
 
-  test("the quiet pull request is the pipeline's own: counted as an own fix PR and in pilot scope; a stalled one shows why", async () => {
+  test("the quiet pull request is the pipeline's own: counted as an own fix PR; a stalled one shows why", async () => {
     await db.run(db.k.insertInto("settings").values({ key: PIPELINE_LOGIN_KEY, value: "pipeline-bot" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft", pipeline: 1 }).onConflict((oc) => oc.column("name").doUpdateSet({ pipeline: 1 })));
     const n = await finding("landing", { fix_pr: 91 });
@@ -211,10 +205,6 @@ describe("private fix and landing", () => {
     assert.ok((await ownFixPrs(db, "photocraft")).quiet.has("photocraft#91"), "still quiet after the merge, until published");
     await db.run(db.k.updateTable("security_findings").set({ state: "landing" }).where("number", "=", n));
     await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 5, kind: "issue", state: "OPEN" }));
-    await setPilot(db, "boss", ["photocraft#5"]);
-    assert.equal(await inPilot(db, "photocraft", 91), true, "in scope although the pilot list names other items");
-    assert.equal(await inPilot(db, "photocraft", 92), false);
-    await setPilot(db, "boss", []);
     // The finding page shows why a stalled pull request waits.
     await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 91, kind: "pr", state: "OPEN", ci_state: "FAILURE" }));
     assert.match(await stallReason(db, "photocraft", 91), /checks failed/);

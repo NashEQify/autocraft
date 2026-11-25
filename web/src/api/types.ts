@@ -1341,13 +1341,11 @@ export interface CommentTemplate {
 
 /**
  * Where a taken PR stands in the merge queue:
- * ready (may merge by the rule now), decision-answered-merge (the operator answered merge),
+ * ready (may merge by the rule now), decision-answered-merge (a person approved the merge),
  * refused (the merge command or a pre-merge check said no; tried again next run),
  * waiting-ci (CI pending or none, or GitHub still computing mergeability), ci-failed, conflict,
  * needs-fix-up (take-fix), waiting-premerge (rule-path PRs waiting for the pre-merge review), waiting-verify (no passed verification at the head yet), verify-failed, verify-error,
- * needs-decision (outside the rule; Merge? asked or about to be),
- * declined (the operator answered hold or close), merged,
- * held-duplicate (an open Duplicate? decision keeps it out of every later stage), held-backlog (answered Backlog),
+ * needs-decision (outside the rule and not approved: waits for a maintainer), merged, held-backlog (sent to the backlog),
  * batch-checking (in an integration batch whose combined tree is being checked), in-batch (the batch PR is open),
  * batch-failed (failed alone in a batch: on hold until a new head), changes-requested (a maintainer's
  * changes-requested review stands), waiting-main-ci (ready, but the repo's main CI is red; AutoCraft's main-fix PRs are not held).
@@ -1365,9 +1363,7 @@ export type QueueState =
   | "verify-failed"
   | "verify-error"
   | "needs-decision"
-  | "declined"
   | "merged"
-  | "held-duplicate"
   | "held-backlog"
   | "batch-checking"
   | "in-batch"

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fakeTaskRunner } from "./fake-runner.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
+import { savePermissions } from "../src/data/access/index.ts";
 import type { ActDeps } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { setFixIssueApproval } from "../src/implement/approval.ts";
@@ -106,7 +107,11 @@ export async function world() {
       /** GitHub's own state of a PR (its head, mergeable state, CI), which the database learns only from a fetch. */
       live: (n: number, patch: Partial<Live> = {}) => { Object.assign(live.get(n)!, patch); return w; },
       mergeDeps: (): MergeDeps => ({ querier, run: runMergeCommand, now: () => new Date(T1), mergeCommand: "safe-merge" }),
-      actDeps: (): ActDeps => ({ querier, now: () => new Date(T1) }),
+      /** Everyone has write access, as far as this GitHub is asked. */
+      actDeps: (): ActDeps => ({ querier, now: () => new Date(T1), permission: async (d, login, repo) => {
+        await savePermissions(d, [{ login, repo, permission: "write", checkedAt: new Date().toISOString() }]);
+        return { kind: "ok", permission: "write" };
+      } }),
       /** Deps of the batch stage over a fake git: a batch branch is "pushed", its PR is #900 and merges with the merge command. */
       batchDeps: (o: { ci?: () => string } = {}): BatchDeps => {
         const MAIN = "a".repeat(40);

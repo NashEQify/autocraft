@@ -60,8 +60,6 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (!f.label || !RULE_LABELS.includes(f.label)) reasons.push(f.label ? `label ${f.label}` : "no settled label");
   else if (f.labelUnsure) reasons.push("label settled by an unsure referee");
   if (!RULE_TIERS.includes(f.tier)) reasons.push(f.author ? "author not on the whitelist" : "author unknown");
-  // Carried code is judged by whose code it is, not by the kept PR's author.
-  for (const c of f.carriedFrom ?? []) if (!RULE_TIERS.includes(c.tier)) reasons.push(`carries code from #${c.number}${c.author ? ` by ${c.author}` : ""} (not whitelisted)`);
   reasons.push(...(f.sensitive ?? []));
   for (const c of f.statementConflicts) reasons.push(`conflicts with ${c.where}: "${excerpt(c.text)}" (${c.reason})`);
   if (f.verification?.state === VERIFY_UNAVAILABLE) reasons.push(`not verified: ${f.verification.summary ?? "Verify cannot build this repo"}`);
@@ -363,7 +361,7 @@ const worksOn = (a: Action): boolean => {
   switch (a.kind) {
     // A contributor's push during our work leaves a new head to review: the PR is still ours to carry on.
     case "review": case "carry": return true;
-    case "fixup": return b === "fix" && a.params?.source !== "carry";
+    case "fixup": return b === "fix";
     case "conflict": return b === "merge";
     case "cifix": return b === "work" || b === "collect" || b === "rerun";
     case "merge": case "premerge": case "lint": case "implement": return true;
@@ -553,9 +551,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     // A conflict resolution is collected while the PR still conflicts; every other patch needs it not to.
     const conflicted = l.step === "conflict";
     const basic = l.ended && open && !f.draft && (conflicted ? f.mergeable === "CONFLICTING" && !!f.conflict?.baseOk && !f.inActiveBatch : f.mergeable !== "CONFLICTING") && !f.mergeHeld && !f.heldBacklog && !!f.head;
-    // A carry-over needs no review at the head; every other patch needs a take review there that is not stale.
+    // An operator's patch needs no review at the head; every other patch needs a take review there that is not stale.
     // A CI fix of our own breakage is reviewed against the head before the push.
-    const reviewed = l.source === "carry" || l.source === "operator" || (mx && notHeld(f)) || (l.step === "cifix" && (!!f.brokeByUs || !!f.gateRed) && !!r && takeReview && notHeld(f)) || (!!r && takeReview && r.head === f.head && !r.stale && notHeld(f));
+    const reviewed = l.source === "operator" || (mx && notHeld(f)) || (l.step === "cifix" && (!!f.brokeByUs || !!f.gateRed) && !!r && takeReview && notHeld(f)) || (!!r && takeReview && r.head === f.head && !r.stale && notHeld(f));
     const approved = f.pushable ? pushAllowed(f, l.step, l.source === "operator") : l.step === "cifix" && f.repoFacts.commentApproved;
     // A CI fix patch whose comment did not reach GitHub is posted again once the backoff ends, and not after the last one.
     const unsentHeld = l.step === "cifix" && !!f.cifix?.unsent;

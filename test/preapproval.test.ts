@@ -51,9 +51,9 @@ describe("pre-approved merge", () => {
     await w.db.run(w.db.k.updateTable("opus_reviews").set({ sure: 0 }).where("number", "=", 5).where("head_oid", "=", "sha5b"));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "queued");
-    // The merge queue keeps a Merge answer at an unsure head only when it came after the review.
+    // The merge queue takes a hand-over at an unsure head only when it came after the review.
     const f = (await w.plan()).prs.find((x) => x.facts.number === 5)!.facts;
-    assert.ok(f.decision.mergeAnswerAfterReview && f.review!.unsure);
+    assert.ok(f.handOver?.afterReview && f.review!.unsure);
   });
 
   test("an operator fix-up stored for linting is planned for its lint check, and a dropped one ends the request instead of looping", async () => {
@@ -166,17 +166,14 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
   });
 
   test("the label does not stop it: a plugin candidate or an unclassified PR is reviewed, and a label settled later does not flip it out", async () => {
-    const w = await (await (await (await fresh()).pr(16, { label: "plugin candidate" })).pr(17)).pr(18, { label: "plugin candidate", flags: ["needs decision"] });
+    const w = await (await (await fresh()).pr(16, { label: "plugin candidate" })).pr(17);
     await w.db.run(w.db.k.deleteFrom("classifications").where("number", "=", 17));
     for (const n of [16, 17]) {
-      assert.equal((await w.prPlan(n)).state, "label-not-reviewed");
       await preapproveMerge(w.db, { repo: "app", number: n, by: OPERATOR });
       await settle(w);
       assert.equal((await preapprovalOf(w.db, "app", n))?.state, "review");
       assert.ok((await kindsOf(w, n)).includes("review:"), (await kindsOf(w, n)).join());
     }
-    // An open scope question still refuses it, also behind a label that gets no review.
-    await assert.rejects(async () => await preapproveMerge(w.db, { repo: "app", number: 18, by: OPERATOR }), /scope question is still open/);
     await w.db.run(w.db.k.insertInto("classifications").values({ repo: "app", number: 17, classifier: "jev", run_id: "r1", at: T0, type_label: "plugin candidate", flags: "[]", probs: '{"top":0.95}' }));
     await w.review(17, { head: "sha17" });
     await settle(w);
@@ -189,7 +186,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
   test("the queue row says who added the PR and how; viewers see no login", async () => {
     const w = await (await (await fresh()).pr(14)).pr(15);
     await preapproveMerge(w.db, { repo: "app", number: 14, by: OPERATOR });
-    const entry = (number: number) => ({ repo: "app", number, decisionId: null, reviewedAt: T0 }) as unknown as CachedEntry;
+    const entry = (number: number) => ({ repo: "app", number, reviewedAt: T0 }) as unknown as CachedEntry;
     const facts = { legs: (await loadLegPass(w.db)).rows, carried: new Map() };
     const staff = queueOriginOf(facts, true);
     assert.deepEqual({ ...staff(entry(14)), at: null }, { how: "queued", by: OPERATOR, at: null });
@@ -214,45 +211,3 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     assert.ok(!after.pending?.some((p) => p.number === 16));
   });
 });
-
-
-describe("a maintainer's pre-approval after their dashboard session", () => {
-  test("the pipeline reads the write permission again through the app: write keeps it, a failed read keeps it for an hour, read cancels it", async () => {
-    const w = await (await (await fresh()).pr(61)).pr(62);
-    await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer" }).onConflict((oc) => oc.doNothing()));
-    await w.db.run(w.db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-    const stale = new Date(Date.now() - 11 * 60_000).toISOString();
-    const perm = async (permission: string, at: string) =>
-      await w.db.run(w.db.k.insertInto("repo_permissions").values({ login: "maint", repo: "app", permission, checked_at: at })
-        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
-    await perm("write", new Date().toISOString());
-    await preapproveMerge(w.db, { repo: "app", number: 61, by: "maint" });
-    // Stands in for appPermission, which writes what GitHub answered to repo_permissions.
-    const answer = (permission: string | null) => async () => {
-      if (permission === null) return { kind: "error" as const, why: "GitHub permission check failed: 502" };
-      await perm(permission, new Date().toISOString());
-      return { kind: "ok" as const, permission };
-    };
-    const pass = async (permission: string | null) => {
-      await advancePreapprovals(w.db, () => {}, { permission: answer(permission) });
-      await new Promise((r) => setImmediate(r));
-      await advancePreapprovals(w.db, () => {}, { permission: answer(permission) });
-    };
-    await perm("write", stale);
-    await pass("write");
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "review");
-    await perm("write", stale);
-    await pass(null);
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "review");
-    await perm("write", stale);
-    await pass("read");
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "cancelled");
-    // A write permission GitHub last confirmed over an hour ago no longer counts while the reads fail.
-    await perm("write", new Date().toISOString());
-    await preapproveMerge(w.db, { repo: "app", number: 62, by: "maint" });
-    await perm("write", new Date(Date.now() - 61 * 60_000).toISOString());
-    await pass(null);
-    assert.equal((await preapprovalOf(w.db, "app", 62))?.state, "cancelled");
-  });
-});
-

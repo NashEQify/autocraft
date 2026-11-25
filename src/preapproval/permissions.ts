@@ -74,11 +74,13 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
 /**
  * Whether what `login` approved or asked for on `repo` counts, with write access confirmed now, for a write the pipeline makes on it without
  * the user lane (an integration batch's merge, a queued card press). A write permission older than PERM_READ_TTL is read through the GitHub App
- * (`read`, which writes repo_permissions). "unknown" when GitHub could not answer: the caller waits.
+ * (`read`, which writes repo_permissions). "unknown" when GitHub could not answer: the caller waits. `accepted`: what they did was accepted under the act rule, so
+ * the instance's identity is not asked again.
  */
-export async function settlesLive(db: Db, login: string, repo: string, read: RefreshDeps["permission"] = (d, l, r) => appPermission(d, l, r)): Promise<Standing> {
-  const [facts, identity] = await db.together(() => Promise.all([loadActFacts(db, [{ login, repo }]), githubIdentity(db)]));
-  const f = facts.get(permKey(login, repo));
+export async function settlesLive(db: Db, login: string, repo: string, read: RefreshDeps["permission"] = (d, l, r) => appPermission(d, l, r), o: { accepted?: boolean } = {}): Promise<Standing> {
+  const load = async () => (await loadActFacts(db, [{ login, repo }])).get(permKey(login, repo));
+  const identity = o.accepted ? "app" : await githubIdentity(db);
+  const f = await load();
   if (standing(f && { ...f, perm: null }, identity) === "no") return "no";
   const age = f?.perm ? Date.now() - Date.parse(f.perm.checkedAt) : NaN;
   if (!(age < PERM_READ_TTL)) {
@@ -86,5 +88,5 @@ export async function settlesLive(db: Db, login: string, repo: string, read: Ref
     try { r = await read(db, login, repo); } catch (e) { r = { kind: "error", why: (e as Error).message }; }
     if (r.kind !== "ok") return "unknown";
   }
-  return await settlesNow(db, login, repo);
+  return standing(await load(), identity);
 }

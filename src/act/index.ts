@@ -97,13 +97,13 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
   if (!dryRun) {
     // Queued card presses run first, from the same shared daily count: they were pressed before this run, and each is held to the presser's current access.
     const { drainQueuedCards } = await import("../conversations/act.ts");
-    const drained = await drainQueuedCards(db, { now: deps?.now, querier: deps?.querier }, params.limit === undefined ? {} : { writes: params.limit });
+    const drained = await drainQueuedCards(db, { now: deps?.now, querier: deps?.querier, permission: deps?.permission }, params.limit === undefined ? {} : { writes: params.limit });
     cardWrites = drained.writes;
     summary.cards = drained.ran;
     if (drained.ran) log(`act: ${drained.ran} queued card press${drained.ran === 1 ? "" : "es"} carried out`);
     // Issues the cards held until the PR merged: filed once it merged, dropped once it closed or its merge path ended. Before the approval check: each guards the repo it opens in.
     const { fileHeldFollowups } = await import("../conversations/held.ts");
-    const held = await fileHeldFollowups(db, repo, { now: deps?.now, exec: deps?.exec }, params.limit === undefined ? {} : { writes: Math.max(0, params.limit - cardWrites) });
+    const held = await fileHeldFollowups(db, repo, { now: deps?.now, exec: deps?.exec, permission: deps?.permission }, params.limit === undefined ? {} : { writes: Math.max(0, params.limit - cardWrites) });
     cardWrites += held.writes;
     summary.held = held.filed + held.dropped;
     summary.failed.push(...held.failed);

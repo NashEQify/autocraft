@@ -44,7 +44,7 @@ before(async () => {
     const view = {
       gh: "OPEN", scope: true, next: n === 2 ? "Fix-up MARK-NEXT" : "Merge", status: { phase: "Merge", waiting: wait, next: "Merge", since: now },
       queue: { author: "alice", tier: "not", head: `h${n}`, size: "S", label: "bug", verdict: "take", reason: "MARK-REVIEW-REASON", fixes: 0, ci: "success", mergeable: "MERGEABLE",
-        path: null, eligible: false, decisionId: null, answer: null, refusedReason: "MARK-REFUSED", reviewedAt: now, held: false, blockedLive: false, noCi: false, runsWaiting: 0, runsBlocked: null,
+        path: null, eligible: false, refusedReason: "MARK-REFUSED", reviewedAt: now, held: false, blockedLive: false, noCi: false, runsWaiting: 0, runsBlocked: null,
         verify: { state: "failed", kind: "build", summary: "MARK-VERIFY-SUMMARY", note: "MARK-VERIFY-NOTE" } },
     };
     await plan.run(repo, n, `h${n}`, wait, JSON.stringify(['conflicts with vault#9: "MARK-OWNER-NOTE" (MARK-MODEL-REASON)', "verification failed: MARK-VERIFY-SUMMARY"]), JSON.stringify(view), now);

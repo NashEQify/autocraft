@@ -2,19 +2,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classify, computeLiveness, refreshLiveness, storedLiveness, type ItemFlags, type PlanRowLike } from "../src/liveness.ts";
-import { fixStoppedWait } from "../src/core/decide-item.ts";
 import { withConfig } from "../src/data/control/index.ts";
 import { loadLivenessInputs } from "../src/data/planner/index.ts";
 import { testDatabase } from "./test-db.ts";
 
 const row = (o: Partial<PlanRowLike>): PlanRowLike => ({ kind: "pr", state: "opus-hold", itemState: "classified", phase: "Held", wait: null, waitKind: null, actions: 0, since: "2026-11-01T00:00:00Z", ...o });
-const none: ItemFlags = { question: false, stopped: false };
+const none: ItemFlags = { question: false };
 const cause = (o: Partial<PlanRowLike>, f: Partial<ItemFlags> = {}) => { const v = classify(row(o), { ...none, ...f }); return `${v.live ? "live" : "stuck"}:${v.cause}`; };
 
 test("an item is live when work is due, a person is asked or the wait has an external clearing event", () => {
   assert.equal(cause({ actions: 1 }), "live:planned");
   assert.equal(cause({}, { question: true }), "live:question");
-  assert.equal(cause({}, { stopped: true }), "live:stopped");
+  assert.equal(cause({ state: "not-started", wait: "a maintainer to start it", waitKind: "person" }), "live:parked");
   assert.equal(cause({ state: "waiting-ci", wait: "CI or GitHub's mergeable state", waitKind: "system" }), "live:external");
   assert.equal(cause({ state: "conflict", wait: "the author", waitKind: "contributor" }), "live:contributor");
   assert.equal(cause({ state: "backlog" }), "live:parked");
@@ -24,10 +23,9 @@ test("an item is live when work is due, a person is asked or the wait has an ext
 
 test("an item nobody will move or answer is stuck", () => {
   assert.equal(cause({}), "stuck:no-plan");
-  assert.equal(cause({ state: "needs-decision", wait: "an operator's Merge? answer", waitKind: "person" }), "stuck:person-wait-without-question");
-  assert.equal(cause({ state: "duplicate", wait: "a Duplicate? answer", waitKind: "person" }), "stuck:duplicate-without-question");
+  assert.equal(cause({ state: "needs-decision", wait: "a maintainer's answer", waitKind: "person" }), "stuck:person-wait-without-question");
   assert.equal(cause({ state: "not-reviewed", wait: "the label referee", waitKind: "system" }), "stuck:internal-wait");
-  assert.equal(cause({ state: "needs-decision", wait: "an operator's Merge? answer", waitKind: "person" }, { question: true }), "live:question");
+  assert.equal(cause({ state: "needs-decision", wait: "a maintainer's answer", waitKind: "person" }, { question: true }), "live:question");
 });
 
 test("a review wait names its blockers, whose questions keep the item live", async () => {
@@ -50,11 +48,11 @@ test("the stored plans give each open item's flags and verdict; a refresh stores
       repo: "app", number, kind: kinds.get(number)!, state, actions, wait, reasons: "[]", planned_at: T,
       ...(phase ? { view: JSON.stringify({ status: { phase, since: T }, waitKind: "person" }) } : {}),
     }));
-    await plan(1, "needs-decision", "an operator's Merge? answer");
-    await plan(2, "needs-decision", "an operator's Merge? answer");
-    await plan(3, "needs-decision", "an operator's Merge? answer");
-    await plan(4, "classified", fixStoppedWait("failed"));
-    await plan(5, "ready", "an operator's Merge? answer", '[{"kind":"merge"}]');
+    await plan(1, "needs-decision", "a maintainer's answer");
+    await plan(2, "needs-decision", "a maintainer's answer");
+    await plan(3, "needs-decision", "a maintainer's answer");
+    await plan(4, "classified", "an open request for a person to pick up");
+    await plan(5, "ready", "a maintainer's answer", '[{"kind":"merge"}]');
     await plan(6, "ready", null);
     await plan(7, "merged", null, "[]", "Merged");
     await plan(8, "ready", null);

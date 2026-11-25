@@ -428,7 +428,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       // A PR waiting out the minimum time between reviews, the conflict merge cap or the backoff of an unsent comment is planned again when it ends.
       for (const p of (await plansOf(db, ctx)).prs) {
         const f = p.facts;
-        for (const t of [f.reviewHold?.until, f.conflict?.until, f.fixup?.unsent, f.cifix?.unsent, ...f.carry.map((c) => c.unsent)]) {
+        for (const t of [f.reviewHold?.until, f.conflict?.until, f.fixup?.unsent, f.cifix?.unsent]) {
           const at = typeof t === "object" ? t.until : t;
           if (typeof at === "number") ctx.wake?.push(at);
         }

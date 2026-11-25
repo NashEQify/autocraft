@@ -235,7 +235,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
     handOver: null, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
-    fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
+    fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legHead: legHeadOf(operator?.legs, wfRow) }), ownHeads: head ? ownHeads(head) : [],
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
@@ -387,7 +387,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   }
   if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(latest!.fixes)).length, attempts: attemptsIn(patch.fixups), ...fixupAtHead(patch.fixups, qh, now) };
-  for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source !== "operator") base.lint.push(l);
+  for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source === "review" || l.source === "premerge") base.lint.push({ ...l, source: l.source });
   if (base.lint.length) base.inFlight = true;
   if (base.ci === "failure" || base.brokeByUs || base.gateRed) {
     const cfHead = base.brokeByUs || base.gateRed || (head && head !== qh) ? head : qh;

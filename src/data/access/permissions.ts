@@ -183,12 +183,12 @@ export function decideAct(facts: ActFacts, write: "yes" | "no" | "unknown" | "ca
  * Whether an approval a person gave, or work they started, still counts for the repo: the act rule (an operator's or maintainer's AutoCraft
  * role, write access, the app identity) over what GitHub last answered. The write permission is the pipeline's to keep fresh
  * (src/preapproval/permissions.ts). "unknown" when GitHub has not confirmed it within HOLD_MAX, or never answered: the caller keeps the
- * state, carries nothing out and waits for the read. "no" only on the role, the identity, or GitHub's own answer within PERM_READ_TTL.
+ * state, carries nothing out and waits for the read; also while writes go out as the box account, which the act rule lets nobody use. "no"
+ * only on the role or on GitHub's own answer within PERM_READ_TTL.
  */
 export function standing(facts: ActFacts | undefined, identity: ActIdentity, now: number = Date.now()): Standing {
-  if (!facts) return "no";
-  const v = decideAct(facts, "yes", identity);
-  if (!v.ok) return "no";
+  if (!facts || !decideAct(facts, "yes", "app").ok) return "no";
+  if (identity !== "app") return "unknown";
   const age = facts.perm ? now - Date.parse(facts.perm.checkedAt) : NaN;
   if (isWrite(facts.perm?.permission)) return age < HOLD_MAX ? "yes" : "unknown";
   return age < PERM_READ_TTL ? "no" : "unknown";
