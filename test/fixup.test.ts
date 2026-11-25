@@ -11,8 +11,10 @@ import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { viewFile } from "../src/fixup/excerpt.ts";
 import { validatePatch, type FixupPr } from "../src/fixup/patch.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 import * as kx from "../src/db/kx.ts";
@@ -32,7 +34,7 @@ function git(cwd: string, ...args: string[]): string {
 
 type Opts = { canModify?: boolean; approved?: boolean; mergeable?: string; verdict?: string; reviewHead?: string };
 
-/** One take-fix PR (#7) at `head`. */
+/** One take-fix PR (#7) at `head`, started with fix-up. */
 async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
@@ -40,6 +42,8 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   await db.run(db.k.insertInto("pr_checks").values({ repo: "app", number: 7, head_oid: head, state: "OPEN", is_draft: 0, overall: "success", checks: "[]", mergeable: o.mergeable ?? "MERGEABLE", maintainer_can_modify: o.canModify === false ? 0 : 1, fetched_at: T1 }));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   if (o.approved !== false) await setPushApproval(db, "op", "app", true);
+  await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await reportingTaskRunner(db);
   return db;
 }
 

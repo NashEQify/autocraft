@@ -11,6 +11,8 @@ import type { StatementVec, StatementView, StatementWork, Statement } from "./ty
 /** Statements shorter than this ("LGTM", "thanks") say nothing worth remembering. */
 export const STATEMENT_MIN_CHARS = 15;
 export const STATEMENT_MAX_CHARS = 2000;
+/** How long before a comment exists its audit row may be written: the row is written when the post starts, and a paced post waits. */
+const POST_LEAD_MS = 24 * 3_600_000;
 /** Statements embedded per batch. */
 export const STATEMENT_BATCH = 32;
 
@@ -74,7 +76,7 @@ const newSources = (db: Db) => {
 
 /**
  * Adds the sources that have no statement yet and returns how many. The comments AutoCraft wrote itself (from the audit rows of its writes,
- * `control.loadPostedCommentIds`, read only back to the oldest uncollected comment) are stored as `ignored` rows so they are not candidates
+ * `control.loadPostedCommentIds`, read only back to a day before the oldest uncollected comment) are stored as `ignored` rows so they are not candidates
  * again. 3 statements: candidates, posted ids (only when a comment is a candidate), the insert.
  */
 export async function collectStatements(db: Db, _o?: { now: Date }): Promise<number> {
@@ -84,7 +86,7 @@ export async function collectStatements(db: Db, _o?: { now: Date }): Promise<num
     if (!rows.length) return 0;
     const comments = rows.filter((r) => r.kind === "comment");
     const own = comments.length
-      ? await control.loadPostedCommentIds(db, { since: comments.map((r) => r.at).reduce((a, b) => (a < b ? a : b)).slice(0, 19) })
+      ? await control.loadPostedCommentIds(db, { since: new Date(Date.parse(comments.map((r) => r.at).reduce((a, b) => (a < b ? a : b))) - POST_LEAD_MS).toISOString() })
       : { numbers: new Set<string>(), nodes: new Set<string>() };
     const isOwn = (r: { kind: string; sid: string }): boolean => {
       if (r.kind !== "comment") return false;

@@ -13,6 +13,7 @@ import { take } from "../src/runner/leases.ts";
 import { validating } from "./gql.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -50,6 +51,7 @@ async function setup(calls = 2) {
     await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Rename", author: "someone", additions: 5, deletions: 0, head_oid: heads[n]!, created_at: T0, updated_at: T0 }));
     await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(n, heads[n]);
     await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at) VALUES ('app', ?, ?, 'OPEN', 0, 'failure', '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', 1, '${T1}')`).run(n, heads[n]);
+    await insertWorkflow(db, { repo: "app", number: n, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
   }
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);

@@ -19,7 +19,9 @@ import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { validating } from "./gql.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 import { rowid } from "../src/db/kx.ts";
@@ -40,7 +42,7 @@ function git(cwd: string, ...args: string[]): string {
 
 type Opts = { canModify?: boolean; push?: boolean; comment?: boolean; ci?: boolean; verdict?: string; overall?: string; head?: string };
 
-/** One PR (#7) at `head` whose gate check failed. */
+/** One PR (#7) at `head`, started with fix-up, whose gate check failed. */
 async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Rename a to b", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
@@ -50,6 +52,8 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   if (o.push !== false) await setPushApproval(db, "op", "app", true);
   if (o.comment) await setCommentApproval(db, "op", "app", true);
   if (o.ci) await setCiApproval(db, "op", "app", true);
+  await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await reportingTaskRunner(db);
   return db;
 }
 
@@ -355,11 +359,13 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     assert.deepEqual(await states(), ["linting", "comment-unsent"], "the stored patch keeps its row, a try");
 
     mock.timers.setTime(at + 5 * 60_000);
+    await reportingTaskRunner(db);
     await run();
     assert.equal(comments(), 1, "not before the backoff ends");
     assert.deepEqual(await states(), ["linting", "comment-unsent"]);
 
     mock.timers.setTime(at + 11 * 60_000);
+    await reportingTaskRunner(db);
     opts.commentUnsent = false;
     await run();
     assert.equal(comments(), 2);
