@@ -68,7 +68,7 @@ test("an issue is unassigned when its implementation waits on a person, kept whi
   assert.equal(unassigns(decideItem(itemFacts({ assignment: ours, implement: queued("implementing") }))), false);
   assert.equal(unassigns(decideItem(itemFacts({ assignment: { login: "bot", assignees: ["bot", "alice"], ours: true }, implement: queued("stuck") }))), false);
   // An issue whose implement workflow an operator started is planned for Implement once the repo's switch is on; it is not assigned: only a stage starting work does that.
-  const w = await (await (await world()).repo()).issue(5, { impact: "P2" });
+  const w = await (await (await (await world()).repo()).acting()).issue(5, { impact: "P2" });
   await insertWorkflow(w.db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-11-04T08:00:00.000Z", startedVia: "dashboard" });
   const plan = async () => (await w.plan()).items.find((i) => i.facts.number === 5)!.plan;
   const implement = async () => (await plan()).actions.filter((a) => a.kind === "implement" || a.kind === "unassign").map((a) => [a.kind, a.params?.bucket]);

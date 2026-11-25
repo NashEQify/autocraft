@@ -109,6 +109,18 @@ describe("api", () => {
     assert.equal((await c.req("POST", "/api/commands", { body: { text: "review" }, csrf: "x" })).status, 401);
   });
 
+  test("the live board answers JSON on its own path while /api/live streams events", async () => {
+    const boss = await signedIn("boss");
+    const board = await boss.req("GET", "/api/live-board");
+    assert.equal(board.status, 200);
+    assert.match(board.headers.get("content-type") ?? "", /application\/json/);
+    assert.ok(Array.isArray((await board.json() as { lanes: unknown[] }).lanes));
+    const ctl = new AbortController();
+    const stream = await fetch(new URL("/api/live", base), { headers: { cookie: [...boss.jar].map(([k, v]) => `${k}=${v}`).join("; "), accept: "text/event-stream" }, signal: ctl.signal });
+    assert.match(stream.headers.get("content-type") ?? "", /text\/event-stream/);
+    ctl.abort();
+  });
+
   test("me and reads: role, write repos, item, search and progress", async () => {
     const boss = await signedIn("boss");
     const me = await boss.get<User>("/api/me");

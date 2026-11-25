@@ -251,7 +251,7 @@ describe("Do it", () => {
   test("a card of the retired decision system refuses and runs nothing", async () => {
     const db = await fresh();
     const old = Number((await db.get(db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: 1, kind: "answer", params: JSON.stringify({ kind: "answer", decision: "app#1:scope", option: "take" }), description: "answer" }).returning("id")))!.id);
-    await assert.rejects(() => doCard(db, old, "op"), /retired decision system/);
+    await assert.rejects(() => doCard(db, old, "op"), /question that no longer exists/);
     assert.equal((await conv.cardView(db, (await cardOf(db, old))!, { login: "op", role: "operator" })).canSettle, false);
   });
 

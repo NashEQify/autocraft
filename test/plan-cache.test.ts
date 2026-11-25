@@ -69,7 +69,7 @@ describe("Plan cache", async () => {
   test("with the pipeline off a wake time that has passed makes one pass due, not every tick", async () => {
     await setEnabled(db, false, "op");
     await planDue(db);
-    await db.run(db.k.insertInto("settings").values({ key: "pipeline_wake_at", value: new Date(Date.now() - 60_000).toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await db.run(db.k.insertInto("lane_state").values({ kind: "mark", step: "wake_at", repo: "", value: new Date(Date.now() - 60_000).toISOString(), at: new Date().toISOString() }).onConflict((oc) => oc.columns(["kind", "step", "repo"]).doUpdateSet(excluded(["value", "at"]))));
     assert.equal(await planDue(db), true);
     assert.equal(await planDue(db), false);
   });

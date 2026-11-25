@@ -16,7 +16,7 @@ const TONE: Record<HealthProblem["tone"], { Icon: typeof WarningIcon; text: stri
 };
 
 /** Problems keep one place in the list whatever order they arrive in. */
-const AREAS: HealthProblem["area"][] = ["pipeline", "runner", "workers", "sync", "breaker", "limit", "account", "jev", "main-ci", "jobs", "deadline", "liveness"];
+const AREAS: HealthProblem["area"][] = ["pipeline", "runner", "workers", "sync", "breaker", "limit", "account", "jev", "main-ci", "jobs", "deadline", "liveness", "database"];
 const place = (p: HealthProblem) => AREAS.indexOf(p.area);
 
 /** A problem's link: a dashboard page through the router, or a server page (an authorization flow) that comes back to this page. */

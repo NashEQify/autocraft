@@ -552,7 +552,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/security/scans/:id/continue", security.continueScan),
     get("/api/security/findings/:repo/:n", security.finding),
     post("/api/security/findings/:repo/:n", security.actOnFinding),
-    scoped(get("/api/live", live)),
+    scoped(get("/api/live-board", live)),
     get("/api/health", health),
     heavy(get("/api/similar/:repo/:n", async (db, req) => sim.similar(db, req, vectors))),
     get("/api/security/findings", securityPage.securityFindings),

@@ -17,7 +17,7 @@ export function Composer({ repo, number, talk, withdrawable, exists, pending, fl
   repo: RepoName;
   number: number;
   talk: boolean;
-  /** A maintainer's message waits for Opus and the viewer may withdraw it. */
+  /** A maintainer's message waits for the model and the viewer may withdraw it. */
   withdrawable?: boolean;
   exists: boolean;
   pending: boolean;
@@ -63,14 +63,14 @@ export function Composer({ repo, number, talk, withdrawable, exists, pending, fl
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send(true);
             }}
             rows={2}
-            placeholder={exists ? "Reply to Opus" : "Ask Opus about this item"}
-            aria-label="Message to Opus"
+            placeholder={exists ? "Reply to the model" : "Ask the model about this item"}
+            aria-label="Message to the model"
             className="max-h-40 resize-y"
           />
           <div className="flex flex-wrap items-center justify-end gap-2">
             {withdraw}
             <Button variant="secondary" className="max-md:h-11" disabled={!draft.trim() || busy} onClick={() => void send(false)}>
-              Post without Opus
+              Post without the model
             </Button>
             <Button variant="primary" className="max-md:h-11" icon={PaperPlaneRightIcon} loading={busy} disabled={!draft.trim() || pending} onClick={() => void send(true)}>
               Send

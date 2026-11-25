@@ -24,10 +24,11 @@ test("a CI fix whose comment failed, or did not reach GitHub after the last retr
   }
 });
 
-test("a PR whose label gets no review names what it waits on", () => {
+test("a PR with a documentation label is planned for a review and does not wait on a person", () => {
   const p = decidePr(prFacts({ review: null, label: "documentation" }));
-  assert.equal(p.state, "label-not-reviewed");
-  assert.equal(p.waitKind, "person");
+  assert.equal(p.state, "not-reviewed");
+  assert.deepEqual(p.actions.map((a) => a.kind), ["review"]);
+  assert.equal(p.waitKind, null);
 });
 
 test("a failed or errored verification blocks the merge with the failure as the reason", () => {
