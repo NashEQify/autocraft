@@ -1013,9 +1013,9 @@ async function stepStatus(db: Db, step: string, why: string | undefined): Promis
 }
 
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
-  const steps = await loadSteps();
-  const [reads, why, active] = await db.together(() => Promise.all([loadReads(db, Date.now()), stageStatus(db), loadTrips(db, { active: true })]));
-  return await withPassReads(db, { reads }, async () => {
+  const steps = await loadSteps(), ms = Date.now();
+  const [reads, why, active, act] = await db.together(() => Promise.all([loadReads(db, ms), stageStatus(db), loadTrips(db, { active: true }), actUsedToday(db, ms)]));
+  return await withPassReads(db, { reads, act: new Map([[dayStart(ms), act]]) }, async () => {
     const trips = [...active.values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
     return await Promise.all(LIMIT_STEPS.map(async (step) => {
       const [l, usedToday, pausedReason, status] = await Promise.all([limitRow(db, step), usageToday(db, step), pauseReason(db, step), stepStatus(db, step, why[step])]);

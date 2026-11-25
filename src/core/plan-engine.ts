@@ -224,7 +224,7 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       const add = (k: string, n: number, ms = 0, dbs = { statements: 0, roundTrips: 0, ms: 0 }): void => {
         const c = rec.counts.get(k) ?? { kind: k, passes: 0, refs: 0, at, ms: 0, maxMs: 0, dbStatements: 0, dbRoundTrips: 0, dbMs: 0, hour };
         // A count carried over from an earlier hour keeps that hour's bucket.
-        rec.counts.set(k, { ...c, passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms), dbStatements: c.dbStatements + dbs.statements, dbRoundTrips: c.dbRoundTrips + dbs.roundTrips, dbMs: c.dbMs + Math.round(dbs.ms) });
+        rec.counts.set(k, { ...c, passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms), dbStatements: c.dbStatements + dbs.statements, dbRoundTrips: c.dbRoundTrips + dbs.roundTrips, dbMs: c.dbMs + dbs.ms });
       };
       add(kind, refs, Math.round(passMs), stats);
       if (shadowRan) add(diffs.length ? "shadow:different" : "shadow:same", diffs.length);
