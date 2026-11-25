@@ -17,7 +17,7 @@ export type FixupRow = Rowbase & {
   attempt: number; lintTask: number | null; lintState: "pending" | "requeued" | null; operatorFix: number | null;
 };
 export type CifixRow = Rowbase & {
-  head: string; toHead: string | null; kind: "format" | "code" | "infra"; state: string; reason: string | null;
+  head: string; toHead: string | null; kind: "format" | "code" | "infra"; state: string; reason: string | null; files: string[];
   attempt: number; taskId: number | null; lintTask: number | null; runs: number[] | null;
 };
 export type ConflictRow = Rowbase & {
@@ -62,22 +62,33 @@ export type ModelCheckRow = {
 export type ModelCheckStart = Omit<ModelCheckRow, "id" | "outcome" | "endedAt" | "taskId">;
 export type CheckShape = { command: ModelCheckCommand; crate?: string; testName?: string };
 
-export type CifixFacts = { state: string; reason: string | null; attempt: number; formatterEnded: boolean; at: string | null; recorded: string[] };
-export type FixupAtHead = { recorded: string[]; unsent?: { count: number; retryAt: string | null } };
+/** Where a head's unsent ask comments leave the next ask: `until` (ms) or final. Absent when it is due. */
+export type UnsentAsk = { until: number } | "final";
+/** The planner's CI fix facts at one head; the caller adds `checksAt` (when the checks were fetched). */
+export type CifixFacts = {
+  states: string[]; tries: number; rerunAt: string | null; infraRuns: number[] | null; formattingTask: number | null; formatterEnded: boolean;
+  totalPushes: number; totalTries: number; skipReason: string | null; unsent?: UnsentAsk;
+};
+export type FixupAtHead = { recorded: string[]; unsent?: UnsentAsk };
+export type ConflictBucket = "merge" | "ask" | "ask-retry" | "asked" | "held" | "unapproved" | "linting" | "capped" | "done";
 export type LintFactOf = { step: PatchKind; source: FixupSource | "carry"; ended: boolean };
-export type MadeBy = { kind: PatchKind; from: string; id: number; source: FixupSource | null };
+export type MadeBy = { kind: PatchKind; from: string; id: number; source: FixupSource | null; reason: string | null; ciKind: string | null };
 export type OutcomeRow = { kind: PatchKind; state: string; reason: string | null; createdAt: string; unsent: number };
 export type TaskStates = ReadonlyMap<number, { state: TaskState; step: string; endedAt: string | null }>;
 
 export type PatchTimelineRow = {
-  kind: PatchKind; id: number; head: string; toHead: string | null; state: string; reason: string | null; files: string[];
+  kind: PatchKind; ciKind: string | null; id: number; head: string; toHead: string | null; state: string; reason: string | null; files: string[];
   attempt: number; taskId: number | null; source: FixupSource | null; createdAt: string;
 };
 export type PatchEventRow = PatchTimelineRow & { repo: string; number: number };
 export type ModelCheckEventRow = ModelCheckRow;
 export type PatchCheckEventRow = PatchCheckRow;
-export type PatchSignature = { fixups: string; cifixes: string; conflicts: string; modelChecks: number; patchChecks: number; running: boolean };
-export type PatchEventFilter = { repo?: string; since?: string; afterId?: number; limit: number };
+export type PatchSignature = { fixups: string; cifixes: string; conflicts: string; modelChecks: string; patchChecks: string; running: boolean };
+/**
+ * `repos` limits the rows to those repos (the viewer's visible ones), `since` keeps rows created at or after it, `before` rows at or
+ * before it, `afterId` rows with a larger id; the newest `limit` rows come back, newest first.
+ */
+export type PatchEventFilter = { repo?: string; repos?: string[]; since?: string; before?: string; afterId?: number; limit: number };
 
 export type CifixRerunRow = { repo: string; number: number; head: string; runs: number[]; at: string };
 export type SessionRow = { kind: PatchKind | "main"; id: number; state: string; session: string };
