@@ -210,7 +210,7 @@ export function PipelineView({ params }: ViewProps) {
 
 const INLINE_JOB_ITEMS = 5;
 
-/** The items a job handled, one per line with what happened to each and the decision it asked; more than five fold behind "+N more". */
+/** The items a job handled, one per line with what happened to each; more than five fold behind "+N more". */
 function JobItems({ items }: { items: JobItem[] }) {
   const [open, setOpen] = useState(false);
   const shown = open ? items : items.slice(0, INLINE_JOB_ITEMS);

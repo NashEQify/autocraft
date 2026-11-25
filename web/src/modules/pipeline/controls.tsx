@@ -35,7 +35,7 @@ function ConfirmOn({ limits, open, busy, onCancel, onConfirm }: { limits: StageL
     <dialog ref={ref} onClose={onCancel} aria-labelledby="pipeline-on-title" className="w-[min(32rem,calc(100vw-2rem))] rounded-md border border-line bg-raised p-5 text-ink backdrop:bg-black/40">
       <h2 id="pipeline-on-title" className="text-base font-semibold">Turn the pipeline on?</h2>
       <p className="mt-2 text-sm text-ink/70">
-        The pipeline then watches all issues and pull requests and runs every stage on its own: classifying, asking decisions, reviewing, labelling approved repos and merging by the merge rule. Model stages use quota.
+        The pipeline then watches all issues and pull requests and runs every stage on its own: classifying, reviewing, labelling approved repos and merging by the merge rule. Model stages use quota.
       </p>
       <p className="mt-2 text-sm text-ink/70">Each stage stops at its daily limit until {dayResetLocal()}. {limitSummary(limits)}</p>
       <div className="mt-4 flex justify-end gap-2">
