@@ -108,6 +108,25 @@ test("a blocked item, and one whose person is gone, keep their bookkeeping and n
   assert.equal(permit(issue("blocked", { standing: { merge: null, work: standing("no") } }), { kind: "label" }).ok, true);
 });
 
+test("started work whose person lost access gets no review, push or merge at the write", async () => {
+  const w = await (await (await world()).repo([])).acting();
+  try {
+    await (await w.pr(1, { mergeable: "CONFLICTING" })).review(1);
+    await w.pr(2);
+    await (await (await (await w.pr(3)).review(3)).verified(3)).premerge(3, "clean");
+    for (const n of [1, 2, 3]) await w.workflow(n);
+    await w.handedOver(3);
+    await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }));
+    const live: Live = async (_, n) => ({ state: "OPEN", head: `sha${n}`, draft: false, mergeable: n === 1 ? "CONFLICTING" : "MERGEABLE" });
+    const wants = [[1, { kind: "conflict", bucket: "merge" }], [2, { kind: "review" }], [3, { kind: "merge" }]] as const;
+    const refused = async () => await Promise.all(wants.map(async ([n, a]) => (await guard(w.db, { repo: "app", number: n }, { ...a, head: `sha${n}` }, CLI_BY, live) as { refused?: string }).refused ?? null));
+    assert.deepEqual(await refused(), [null, null, null]);
+    await w.db.run(w.db.k.updateTable("repo_permissions").set({ permission: "read", checked_at: new Date().toISOString() }));
+    for (const why of await refused()) assert.match(why ?? "", /can no longer act on app/);
+    for (const [n, a] of wants) assert.equal((await w.prPlan(n)).actions.find((x) => x.kind === a.kind)?.permission?.ok, false, a.kind);
+  } finally { w.close(); }
+});
+
 test("a blocked workflow gets no push at the write, and gets it again once a person answered", async () => {
   const w = await (await (await (await (await (await world()).repo([])).acting()).pr(1, { mergeable: "CONFLICTING" })).review(1)).workflow(1);
   try {

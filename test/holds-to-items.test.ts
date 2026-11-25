@@ -42,20 +42,31 @@ async function move(run: Run, convert: () => Promise<void>): Promise<void> {
   assert.deepEqual(await read(), after);
 }
 
-test("merge holds become held items once (sqlite)", async () => {
-  const db = connect(":memory:");
-  await move(async (sql) => (/^SELECT/.test(sql) ? db.prepare(sql).all() as Record<string, unknown>[] : (db.exec(sql), [])), async () => holdsToItemsSqlite(db, AT));
-});
+/** Without the table, as a later release leaves the database: nothing is converted, and nothing says it was. */
+async function missing(run: Run, convert: () => Promise<void>): Promise<void> {
+  await run(`DELETE FROM settings WHERE key = '${HOLDS_TO_ITEMS_DONE}'`);
+  await run("DROP TABLE merge_holds");
+  await convert();
+  assert.deepEqual(await run(`SELECT key FROM settings WHERE key = '${HOLDS_TO_ITEMS_DONE}'`), []);
+  assert.deepEqual(await run("SELECT number FROM item_workflows"), []);
+}
 
-test("merge holds become held items once (postgres)", { skip: needsPg }, async () => {
-  const t = await testDatabase("", "postgres");
-  await t.open({ app: true });
-  const client = new pg.Client({ connectionString: t.target });
-  await client.connect();
-  try {
-    await move(async (sql) => (await client.query(sql)).rows as Record<string, unknown>[], () => holdsToItemsPg(client, AT));
-  } finally {
-    await client.end();
-    await t.close();
-  }
-});
+for (const [name, check] of [["merge holds become held items once", move], ["a database without merge holds is left as it is", missing]] as const) {
+  test(`${name} (sqlite)`, async () => {
+    const db = connect(":memory:");
+    await check(async (sql) => (/^SELECT/.test(sql) ? db.prepare(sql).all() as Record<string, unknown>[] : (db.exec(sql), [])), async () => holdsToItemsSqlite(db, AT));
+  });
+
+  test(`${name} (postgres)`, { skip: needsPg }, async () => {
+    const t = await testDatabase("", "postgres");
+    await t.open({ app: true });
+    const client = new pg.Client({ connectionString: t.target });
+    await client.connect();
+    try {
+      await check(async (sql) => (await client.query(sql)).rows as Record<string, unknown>[], () => holdsToItemsPg(client, AT));
+    } finally {
+      await client.end();
+      await t.close();
+    }
+  });
+}
