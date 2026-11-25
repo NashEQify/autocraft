@@ -2,7 +2,6 @@
 // over it, the composition of a chosen core and ticked extras into one resolution card, and the `decision_choices` store.
 // Only Opus's drafts and pick are stored; the offered cores are computed whenever they are read.
 import { randomUUID } from "node:crypto";
-import { writeEffect } from "../act/index.ts";
 import { applicableSteps } from "./choices-parse.ts";
 import { getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import {
@@ -13,6 +12,9 @@ import {
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+
+// No decision answer writes to GitHub.
+const writeEffect = (_kind: string, _option: string): string | null => null;
 
 /** Most cores Opus may add on top of the offered ones. */
 export { MAX_ADDED_CORES };

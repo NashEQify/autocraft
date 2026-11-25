@@ -311,7 +311,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   const item = items.get(key);
   const cmd = params.kind === "command" ? params.command : null;
   if (dependsOnCode(params) && item && prChanged(item, c.seen)) throw new ConversationError(409, "the PR changed since this was proposed");
-  if (cmd?.parts && (live.at(-1)?.recAt ?? null) !== cmd.parts.recAt) throw new ConversationError(409, "the plan changed since this was proposed");
+  if (cmd && isRegistry(cmd) && cmd.parts && (live.at(-1)?.recAt ?? null) !== cmd.parts.recAt) throw new ConversationError(409, "the plan changed since this was proposed");
   const note = deps.note?.trim() || undefined;
   if (note && note.length > NOTE_MAX) throw new ConversationError(400, `the note is longer than ${NOTE_MAX} characters`);
   // A card drafted before the PR became quiet (a security fix not yet published) must not post model-written text any more.

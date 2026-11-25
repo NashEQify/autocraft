@@ -4,12 +4,14 @@
 import { BACKLOG, getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import { audit } from "../dash/audit.ts";
 import { settledBy, settledByExpr } from "../settlers.ts";
-import { writeEffect } from "../act/index.ts";
 import { queuePlace } from "../conversations/queue.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
+
+// No decision answer writes to GitHub.
+const writeEffect = (_kind: string, _option: string): string | null => null;
 
 export const SETTLING = "settling";
 export const DISPUTED = "disputed";
