@@ -181,7 +181,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       close: closeOf(d, ref),
       openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null,
       implement: {
-        queuedBy: q?.by ?? null, standing: q ? standing(act, cfg.githubIdentity, now) : "no", featureOn: cfg.repo(r.repo).buildFeature("implement"),
+        queuedBy: q?.by ?? null, standing: q ? standing(act, cfg.githubIdentity, now) : "no", ...(cfg.githubIdentity !== "app" ? { boxIdentity: true } : {}), featureOn: cfg.repo(r.repo).buildFeature("implement"),
         row: a ? {
           state: a.attempt.state, attempt: a.attempt.attempt,
           textChanged: textHash(text?.title ?? "", text?.body ?? "") !== a.attempt.textHash,

@@ -28,7 +28,8 @@ export type PaceKey = { action: string; identity: string; owner: string };
 
 export type PushOutcomeRow = Selectable<DB["push_outcomes"]>;
 export type NewPush = { action: string; repo: string; number: number | null; from: string | null; to: string; base?: string | null; at?: string };
-export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; brokeHead: string | null };
+/** `moves`: the recorded pushes that moved the head, from the head each was made on. */
+export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; moves: { from: string; to: string }[]; brokeHead: string | null };
 export type TripStageKey = "outside-surge" | string;
 
 export type SettingType = "bool" | "int" | "float" | "text" | "json";

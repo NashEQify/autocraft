@@ -6,7 +6,7 @@
 //
 // A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end.
-import { withConfig } from "../data/control/index.ts";
+import { loadPushOutcomeEdges, withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -15,6 +15,7 @@ import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, recordEvent
 import type { Db } from "../db/index.ts";
 import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
+import { chainsOwn, type OwnPush } from "../core/may.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
@@ -49,8 +50,8 @@ type Pass = {
   reviews: Map<string, ReviewRow[]>;
   patches: Map<string, PatchFacts>;
   fixes: Map<string, { fromHead: string; createdAt: string; lines: number; files: string[] }>;
-  /** Autorepin pushes per PR, `from` head to `to` head. */
-  repins: Map<string, { from: string; to: string }[]>;
+  /** Our own pushes per PR: fix-ups, CI fixes, base merges, implementation revisions, autorepins. */
+  moves: Map<string, OwnPush[]>;
   facts: Map<string, PrFacts>;
   thresholds: BlockerFacts["thresholds"];
 };
@@ -59,17 +60,8 @@ type Writes = { workflows: { id: number; patch: WorkflowPatch; at: string }[]; e
 
 const key = (repo: string, n: number): string => `${repo}#${n}`;
 
-/** Whether our own pushes (fix-up, CI fix, base merge, implementation revision, autorepin) lead from `from` to `to`. */
-function ownChain(pass: Pass, ref: string, from: string, to: string): boolean {
-  const edges = [...(pass.patches.get(ref)?.pushes ?? []), ...(pass.repins.get(ref) ?? [])];
-  let cur = from;
-  for (let i = 0; i < 20 && cur !== to; i++) {
-    const next = edges.find((e) => e.from === cur)?.to ?? null;
-    if (!next || next === cur) return false;
-    cur = next;
-  }
-  return cur === to;
-}
+/** Whether our own pushes lead from `from` to `to`: the merge rule's own check (src/core/may.ts). */
+const ownChain = (pass: Pass, ref: string, from: string, to: string): boolean => chainsOwn(pass.moves.get(ref) ?? [], from, to);
 
 type Review = { at: string; verdict: string; sure: boolean; fixes: ReviewRow["fixes"]; workflow: ReviewRow["workflow"] };
 const reviewAt = (pass: Pass, ref: string, head: string): Review | null => pass.reviews.get(ref)?.find((r) => r.head === head) ?? null;
@@ -134,6 +126,19 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
   return null;
 }
 
+/**
+ * Whether the head of an issue's implementation PR is one the workflow may go on with: a commit of ours on the branch we opened, or
+ * our own pushes on top of a head a person was shown (`base_head`) or a merge leg was at (a leg starts at one of these or where a
+ * person answered, and follows our own pushes only). "later": its facts are at another head, as for a moment after a push.
+ */
+function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours" | "theirs" | "later" | "unread" {
+  const f = pass.facts.get(ref);
+  const bases = [w.baseHead, ...(pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).flatMap((l) => [l.from_head, l.head])];
+  if (bases.some((b) => b !== null && ownChain(pass, ref, b, head))) return "ours";
+  if (!f?.may) return "unread";
+  return f.head !== head ? "later" : f.may.ownHead ? "ours" : "theirs";
+}
+
 /** The PR a workflow works on: its own item, or an implement workflow's implementation PR; null while an issue has none. */
 function prOf(pass: Pass, w: ItemWorkflow): Target | null {
   if (w.kind === "pr") return { number: w.number };
@@ -160,14 +165,18 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const targets = new Map(live.map((w) => [w.id, prOf(pre as Pass, w)]));
     const prRefs = [...new Map(live.flatMap((w) => { const t = targets.get(w.id); return t ? [[key(w.repo, t.number), { repo: w.repo, number: t.number }] as const] : []; })).values()];
     const itemRefs = [...new Map([...live.map((w) => ({ repo: w.repo, number: w.number })), ...prRefs].map((r) => [key(r.repo, r.number), r])).values()];
-    const [items, legs, reviews, patches, fixes, repins] = await db.together(() => Promise.all([
+    const [items, legs, reviews, patches, fixes, outcomes, repins] = await db.together(() => Promise.all([
       loadItems(db, itemRefs, "pr"), loadLegs(db, prRefs), loadReviewRows(db, prRefs), loadPatchFacts(db, prRefs), loadLatestFixPushes(db, prRefs),
+      loadPushOutcomeEdges(db, prRefs),
       loadRepins(db, prRefs, { states: ["pushed"] }),
     ]));
     const facts = new Map((prRefs.length ? await loadPrFacts(db, { refs: prRefs.map((r) => key(r.repo, r.number)) }) : []).map((f) => [key(f.repo, f.number), f]));
     const pass: Pass = {
       items, implement, goOn, legs, reviews, patches, fixes, facts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
-      repins: new Map([...repins].map(([k, rows]) => [k, rows.flatMap((r) => (r.head && r.to_head ? [{ from: r.head, to: r.to_head }] : []))])),
+      moves: new Map(prRefs.map((r) => key(r.repo, r.number)).map((k) => [k, [
+        ...(patches.get(k)?.pushes ?? []), ...(outcomes.get(k) ?? []),
+        ...(repins.get(k) ?? []).flatMap((r) => (r.head && r.to_head ? [{ from: r.head, to: r.to_head }] : [])),
+      ]])),
     };
     const writes: Writes = { workflows: [], events: [], adopt: [] };
     const moved: Moved[] = [];
@@ -300,6 +309,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
     else authorPush = { from: baseHead, to: head };
   }
 
+  const impl = w.kind === "issue" ? implHead(pass, w, ref, head) : null;
+  if (impl === "theirs") authorPush = { from: w.baseHead ?? (pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).at(-1)?.head ?? "", to: head };
+
   // The numbered plan follows the latest review at the head; a merge-queue entry has no review.
   const review = w.entry === "merge" ? null : reviewAt(pass, ref, head);
   const plan: PlanPart[] = review ? planOf(review.fixes, w.plan) : w.plan;
@@ -360,7 +372,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
       blockPlan = [...plan, ...extra];
       found.params.premerge = extra.map((p) => p.n);
     }
-    if (found.blocker === "beyond-agreed" && beyond?.length) patch.baseHead = head;
+    if ((found.blocker === "beyond-agreed" && beyond?.length) || impl === "theirs") patch.baseHead = head;
     return write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, view, blockPlan), recAt: at, recHead: head }, "blocked");
   }
 
@@ -375,7 +387,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
       }
       return write({ ...patch, state: "recommending", rec, recAt: at, recHead: head });
     }
-  } else {
+  } else if (impl !== "later") {
     const refused = await ensureLeg(db, pass, writes, w, w.repo, target.number, head);
     if (refused) {
       const stop: Found = { blocker: "other", params: { reason: refused } };

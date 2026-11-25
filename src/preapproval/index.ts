@@ -17,7 +17,7 @@ import { systemBlock } from "../conversations/store.ts";
 import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
-import { mayMerge, mayPush, type WorkflowGate } from "../core/may.ts";
+import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
 import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
@@ -99,7 +99,7 @@ async function move(db: Db, p: Row, to: LegState, o: { head?: string | null; rea
 const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): boolean => !!head && m.attempts.get(`${refOf(repo, n)}@${head}`)?.outcome === "merged";
 
 /**
- * Whether the merge leg may merge at `head` (mayMerge, src/core/may.ts): with a live workflow, as the person who approved it; a leg is
+ * Whether the merge leg may work towards a merge at `head` (mergeApproved, src/core/may.ts): with a live workflow, as the person who approved it; a leg is
  * itself that person's approval (the merge command and the approval start it before the workflow row records the approval), so
  * `by` stands in until the row has it. With no live workflow, the repo's merge approval. The leg's own head rules decide which heads it
  * may merge (a push that is not ours cancels it), and the workflow stops its leg at a blocker, so the gate takes `head` as the base
@@ -108,9 +108,9 @@ const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): 
 function mergeGate(approval: StepApproval | null, wf: WorkflowFact | null, head: string, by: string): { ok: true } | { ok: false; why: string } {
   const workflow: WorkflowGate | null = wf ? {
     live: true, entry: wf.entry as WorkflowGate["entry"], state: wf.state, startedBy: wf.startedBy, approvedBy: wf.approvedBy ?? by, approvedAt: null,
-    blocker: null, baseHead: head, fixupAsked: false,
+    blocker: null, baseHead: head, fixupAsked: false, leg: null,
   } : null;
-  const r = mayMerge({ repoApproval: approval, workflow, head, ownHeads: new Set([head]) });
+  const r = mergeApproved({ repoApproval: approval, workflow, ended: null, head, pushes: [] });
   return r.ok ? { ok: true } : { ok: false, why: r.why };
 }
 

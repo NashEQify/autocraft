@@ -2,7 +2,7 @@
 // again until they sign in, and the item's state line names them.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { setStepApproval } from "../src/data/control/index.ts";
+import { addOwnCommits, setStepApproval } from "../src/data/control/index.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { loadActions } from "../src/data/workflow/index.ts";
 import { planned } from "../src/core/select.ts";
@@ -38,6 +38,7 @@ async function startWork(w: World, kind: "pr" | "issue"): Promise<number> {
   await run("implement and merge", 7);
   const im = (await startAttempt(db, { repo: "app", number: 7, queuedBy: APPROVER, textHash: "h" }))!;
   await w.pr(1, { label: "feature", author: "craft-bot" });
+  await addOwnCommits(db, [{ repo: "app", sha: "sha1", action: "implement-push" }]);
   await recordSteps(db, [{ id: im.id, to: "pr-opened", patch: { branch: "fix-1", prNumber: 1, prUrl: "https://example.invalid/1" } }]);
   await advanceWorkflows(db);
   return 7;

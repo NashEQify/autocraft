@@ -223,10 +223,11 @@ export async function loadPushFacts(db: Db, keys: { repo: string; number: number
     .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome"]).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
-    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), brokeHead: null }).get(ref)!;
+    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null }).get(ref)!;
     f.pushed.add(r.to_oid);
     if (r.from_oid !== null) {
       f.pushed.add(r.from_oid);
+      f.moves.push({ from: r.from_oid, to: r.to_oid });
       if (r.to_oid !== r.from_oid && r.at > (f.movedOffAt.get(r.from_oid) ?? "")) f.movedOffAt.set(r.from_oid, r.at);
     }
     if (r.outcome === "broke") f.brokeHead = r.to_oid;
@@ -234,16 +235,16 @@ export async function loadPushFacts(db: Db, keys: { repo: string; number: number
   return out;
 }
 
-/** Latest `to_oid` per `(ref, from_oid)`: the push-outcome half of the own-push chain walk. */
-export async function loadPushOutcomeEdges(db: Db, keys: { repo: string; number: number }[] | KeySource): Promise<Map<RefKey, Map<string, string>>> {
-  const out = new Map<RefKey, Map<string, string>>();
+/** The recorded pushes of each PR that name the head they were made on, oldest first: the push-outcome part of the own-push chain. */
+export async function loadPushOutcomeEdges(db: Db, keys: { repo: string; number: number }[] | KeySource): Promise<Map<RefKey, { from: string; to: string }[]>> {
+  const out = new Map<RefKey, { from: string; to: string }[]>();
   if (isEmptyKeys(keys)) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.push_outcomes as p").innerJoin(keysJoin(db, keys), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
     .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid"]).where("p.from_oid", "is not", null).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
-    (out.get(ref) ?? out.set(ref, new Map()).get(ref)!).set(r.from_oid!, r.to_oid);
+    (out.get(ref) ?? out.set(ref, []).get(ref)!).push({ from: r.from_oid!, to: r.to_oid });
   }
   return out;
 }

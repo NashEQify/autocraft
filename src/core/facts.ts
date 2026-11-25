@@ -30,7 +30,7 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import { legHeadOf, mergeWaits, workflowGate } from "./may.ts";
+import { mergeWaits, workflowGate } from "./may.ts";
 import { loadPrPass, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
@@ -215,8 +215,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const wfFact = workflowFactOf(d, ref);
   const wfRow = wfFact ? d.workflowRows.get(wfFact.id) : undefined;
   const operator = d.workflow.operator.get(ref);
-  const ownHeads = (h: string): string[] => pushChainOf(patch.pushes, h).filter((x) => d.ownCommits.has(`${repo}@${x}`));
-  const ownHead = (h: string): boolean => ownHeads(h).length > 0;
+  const moves = [...patch.pushes, ...(push?.moves ?? [])].map(({ from, to }) => ({ from, to }));
+  // A commit we pushed to a branch of our own, or our later pushes on top of one. Our commit on someone else's has a recorded parent that is neither.
+  const ownHead = (h: string): boolean => pushChainOf(moves, h).some((x) => d.ownCommits.has(`${repo}@${x}`) && !moves.some((m) => m.to === x && m.from !== x));
   const assignment = assignmentIn(d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null, d.assignments.get(ref), i.assignees);
   const trips: Record<string, string> = {};
   for (const [stage, t] of d.control.trips) if (t.active) trips[stage] = t.reason;
@@ -236,7 +237,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     handOver: null, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
     fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
-    may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legHead: legHeadOf(operator?.legs, wfRow) }), ownHeads: head ? ownHeads(head) : [],
+    may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legs: operator?.legs ?? [] }), ended: d.workflow.ended.get(ref) ?? null, pushes: moves, ownHead: !!head && ownHead(head),
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);

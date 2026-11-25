@@ -5,7 +5,7 @@ export type MayApproval = { by: string; at: string };
 /** A live workflow as src/core/may.ts reads it (its WorkflowGate). */
 export type MayWorkflow = {
   live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
-  blocker: string | null; baseHead: string | null; fixupAsked: boolean;
+  blocker: string | null; baseHead: string | null; fixupAsked: boolean; leg: { state: string; head: string | null } | null;
 };
 
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
@@ -296,10 +296,10 @@ export type PrFacts = {
   gateFailureNote: string | null;
   /**
    * What the merge and push approval checks (src/core/may.ts) read: the repo's merge and push approvals, the live workflow's
-   * approval inputs, and the heads of the push chain that are our own commits. Absent on facts built by hand: the repo approvals
-   * in `repoFacts` stand alone.
+   * approval inputs, how the latest workflow ended when none is live, and our recorded pushes to the PR. Absent on facts built by
+   * hand: the repo approvals in `repoFacts` stand alone.
    */
-  may?: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ownHeads: string[]; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };
+  may?: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ended: EndedWorkflow | null; pushes: { from: string; to: string }[]; /** The head is a commit we pushed to a branch of our own, or our later pushes on top of one. */ ownHead: boolean; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };
   /** For a PR outside the pipeline's scope (no other review facts are loaded): what its stored rows say, enough for the Work page to name the step it waits on. */
   outside?: { review: string | null; verify: string | null; ci: string | null };
 };
@@ -406,6 +406,8 @@ export type ItemFacts = {
     queuedBy: string | null;
     /** Whether queuedBy still counts on the repo (data/access standing); "unknown" while GitHub has not answered on their write access. */
     standing: "yes" | "no" | "unknown";
+    /** GitHub writes go out as the box account, so nobody's started work counts: `standing` is "unknown" until that changes. */
+    boxIdentity?: boolean;
     /** The repo's `implement` build feature is on (src/build/features.ts). */
     featureOn: boolean;
     /** The issue's current attempt, else its newest ended one; null when it has none. */

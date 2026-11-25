@@ -58,8 +58,30 @@ const factOf = (w: ItemWorkflow, own: boolean): WorkflowFact => ({
 const loginIn = (db: Db, eb: kx.AnyEb, col: string, logins: string[], alias: string) =>
   eb.exists(kx.schemaEb(eb).selectFrom(kx.jsonEach(db, kx.json(logins), alias)).select(one(eb)).where(kx.ciEq(db, col, `${alias}.value`)));
 
+type EndedRow = { repo: string; number: number | string; state: string };
+
+/** The newest workflow of each item of `keys`, or of the issue a PR of `keys` was opened for, whichever is newer, when it has ended. */
+const endedQuery = (db: Db, keys: KeySource) => {
+  const k = queryDb(db).k as any;
+  const on = (alias: string, repo: string, number: string) => (j: any) => j.onRef(`${alias}.repo`, "=", repo).onRef(`${alias}.number`, "=", number);
+  const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ke"), on("ke", "w.repo", "w.number")).select(["w.repo as repo", "w.number as number", "w.state as state", "w.id as id"]);
+  const ofPr = k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, keys, "kf"), on("kf", "i.repo", "i.pr_number"))
+    .innerJoin("main.item_workflows as w", on("w", "i.repo", "i.number")).where("w.entry", "=", "implement")
+    .select(["i.repo as repo", "i.pr_number as number", "w.state as state", "w.id as id"]);
+  const ranked = k.selectFrom(own.union(ofPr).as("u"))
+    .select((e: any) => ["u.repo", "u.number", "u.state", e.fn.agg("row_number").over((o: any) => o.partitionBy(["u.repo", "u.number"]).orderBy("u.id", "desc")).as("rn")]);
+  return k.selectFrom(ranked.as("x")).select(["x.repo", "x.number", "x.state"]).where("x.rn", "=", 1).where("x.state", "not in", LIVE_STATES).orderBy("x.repo").orderBy("x.number");
+};
+const endedOf = (rows: EndedRow[]): Map<RefKey, EndedWorkflow> => new Map(rows.map((r) => [refKey(r.repo, Number(r.number)), r.state as EndedWorkflow]));
+
+/** How the newest workflow of each item, or of the issue a PR was opened for, ended; items whose newest is live, or that have none, are left out. One statement. */
+export async function loadEndedWorkflows(db: Db, keys: KeySource): Promise<Map<RefKey, EndedWorkflow>> {
+  if (isEmpty(keys)) return new Map();
+  return endedOf(await queryDb(db).all(endedQuery(db, keys)) as EndedRow[]);
+}
+
 /**
- * The planner pass's set loader: live workflows with their implementation PR, latest ended state per item, merge holds, queued requests and
+ * The planner pass's set loader: live workflows with their implementation PR, latest ended state per item (a PR's own or its issue's), merge holds, queued requests and
  * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`, a
  * write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
  */
@@ -84,13 +106,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
     .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("i.pr_number", "is not", null), keyed("kp2", "w.repo", "i.pr_number")(eb)])]))
     .orderBy("w.id");
 
-  const latest = k.selectFrom("main.item_workflows as w")
-    .innerJoin(resolveKeys(db, keys, "ke"), (j: any) => j.onRef("ke.repo", "=", "w.repo").onRef("ke.number", "=", "w.number"))
-    .select((e: any) => ["w.repo", "w.number", "w.state", e.fn.agg("row_number").over((o: any) => o.partitionBy(["w.repo", "w.number"]).orderBy("w.id", "desc")).as("rn")])
-    .where("w.state", "not in", LIVE_STATES);
-  const endedQ = k.selectFrom(latest.as("x")).select(["x.repo", "x.number", "x.state"]).where("x.rn", "=", 1)
-    .where((eb: any) => eb.not(eb.exists(k.selectFrom("main.item_workflows as lw").select(one(eb)).whereRef("lw.repo", "=", "x.repo").whereRef("lw.number", "=", "x.number").where("lw.state", "in", LIVE_STATES))))
-    .orderBy("x.repo").orderBy("x.number");
+  const endedQ = endedQuery(db, keys);
 
   const holdsQ = k.selectFrom("main.merge_holds as h").innerJoin(resolveKeys(db, keys, "kh"), (j: any) => j.onRef("kh.repo", "=", "h.repo").onRef("kh.number", "=", "h.number")).select(["h.repo", "h.number"]);
 
@@ -111,7 +127,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
     if (flag(r.own)) out.live.set(refKey(w.repo, w.number), factOf(w, true));
     if (flag(r.pr_hit) && w.entry === "implement" && r.pr !== null) out.ofPr.set(refKey(w.repo, Number(r.pr)), factOf(w, false));
   }
-  for (const r of ended) out.ended.set(refKey(r.repo, Number(r.number)), r.state as EndedWorkflow);
+  for (const [key, state] of endedOf(ended)) out.ended.set(key, state);
   for (const r of holds) out.holds.add(refKey(r.repo, Number(r.number)));
   const work = (repo: string, number: number): OperatorWork => {
     const key = refKey(repo, Number(number));

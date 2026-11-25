@@ -1,6 +1,22 @@
 import type { StepApproval } from "../data/control/types.ts";
-import type { ActionState, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
+import type { ActionState, EndedWorkflow, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
+
+/** A push of ours that moved a PR's head: the head it was made on and its commit. */
+export type OwnPush = { from: string; to: string };
+
+/**
+ * Whether `head` is `base`, or is reached from it through our own pushes alone, step by step. A head whose parent is not recorded,
+ * or whose chain passes through a commit we did not push, is not: someone else's commits are under it.
+ */
+export function chainsOwn(pushes: readonly OwnPush[], base: string, head: string): boolean {
+  const reached = new Set([head]);
+  for (const h of reached) {
+    if (h === base) return true;
+    for (const p of pushes) if (p.to === h) reached.add(p.from);
+  }
+  return false;
+}
 
 export type WorkflowGate = {
   live: boolean;
@@ -12,25 +28,25 @@ export type WorkflowGate = {
   blocker: string | null;
   baseHead: string | null;
   fixupAsked: boolean;
+  /** Its merge leg on the PR while the leg is active; null before it starts and once it ended (cancelled, failed). */
+  leg: { state: string; head: string | null } | null;
 };
 
 /**
- * What `mayMerge` and `mayPush` read of a live workflow row; null without a live one. `legHead`: the head its active merge leg is at.
+ * What `mayMerge` and `mayPush` read of a live workflow row; null without a live one. `legs`: the PR's active merge legs, newest last.
  * An issue's workflow has no head of its own to accept (its base_head only says which implementation head its files were shown at),
- * so its implementation PR may merge at the head its leg accepted: a push that is not ours cancels the leg, and a new one starts at
- * the head a person answered or approved.
+ * so its implementation PR's base is the head its leg is at: the leg starts at a head of ours or one a person answered at, and
+ * follows our own pushes only.
  */
-export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legHead?: string | null } = {}): WorkflowGate | null {
+export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "head">[] } = {}): WorkflowGate | null {
   if (!w) return null;
+  const leg = o.legs?.findLast((l) => l.workflow_id === w.id);
   return {
     live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
-    blocker: w.blocker, baseHead: w.kind === "issue" ? o.legHead ?? null : w.baseHead, fixupAsked: o.fixupAsked ?? false,
+    blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, fixupAsked: o.fixupAsked ?? false,
+    leg: leg ? { state: leg.state, head: leg.head } : null,
   };
 }
-
-/** The head the workflow's active merge leg is at, of the PR's active legs (newest last). */
-export const legHeadOf = (legs: readonly Pick<Preapproval, "workflow_id" | "head">[] | undefined, w: Pick<ItemWorkflow, "id"> | null | undefined): string | null =>
-  (w ? legs?.findLast((l) => l.workflow_id === w.id)?.head : null) ?? null;
 
 export type MayResult = { ok: true; as: "person" | "repo"; by: string } | { ok: false; why: string };
 
@@ -39,15 +55,47 @@ const refuse = (why: string): MayResult => ({ ok: false, why });
 const REPO_OFF = "An operator, or a maintainer of the repo, turns it on on the Repos page.";
 const ENDS_WITH_RECOMMENDATION = "Nobody approved this yet; the workflow ends with a recommendation.";
 
-export function mayMerge(f: { repoApproval: StepApproval | null; workflow: WorkflowGate | null; head: string; ownHeads: ReadonlySet<string> }): MayResult {
+/** Workflow ends by which a person took the item out of the pipeline: nothing merges it until someone starts it again. */
+const ENDED_WHY: Partial<Record<EndedWorkflow, string>> = {
+  stopped: "Someone stopped the work on this; it merges once someone starts it again.",
+  backlog: "Someone sent this to the backlog; it merges once someone starts it again.",
+  closed: "The work on this ended with a close; it merges once someone starts it again.",
+};
+
+export type MergeInputs = {
+  repoApproval: StepApproval | null;
+  workflow: WorkflowGate | null;
+  /** Without a live workflow: how the latest one of the PR, or of the issue it implements, ended. */
+  ended: EndedWorkflow | null;
+  head: string;
+  /** Our recorded pushes to the PR. An autorepin's is none of them: the workflow's base head moves over it (src/workflow/advance.ts). */
+  pushes: readonly OwnPush[];
+};
+
+/** Whether the merge of the PR at `head` is approved, by a person or by the repo. A started PR merges only once handed over (`mayMerge`). */
+export function mergeApproved(f: MergeInputs): MayResult {
   const w = f.workflow;
   if (w?.live) {
     if (w.blocker) return refuse(`The workflow asks again: ${w.blocker}`);
-    if (w.baseHead === null || (f.head !== w.baseHead && !f.ownHeads.has(f.head))) return refuse("The author pushed commits after the workflow started; the workflow asks again before merging.");
+    if (w.baseHead === null || !chainsOwn(f.pushes, w.baseHead, f.head)) return refuse("The author pushed commits after the workflow started; the workflow asks again before merging.");
     if (w.approvedBy === null && w.entry !== "merge") return refuse(ENDS_WITH_RECOMMENDATION);
     return person(w.approvedBy ?? w.startedBy);
   }
+  const ended = f.ended && ENDED_WHY[f.ended];
+  if (ended) return refuse(ended);
   return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse(REPO_OFF);
+}
+
+/**
+ * Whether the PR may be merged at `head`. A live workflow's merge is made only through its leg, once the leg handed the PR over at
+ * that head: while the leg works, before it starts, and after it ended until the workflow moves on, nothing merges.
+ */
+export function mayMerge(f: MergeInputs): MayResult {
+  const r = mergeApproved(f);
+  const w = f.workflow;
+  if (!r.ok || !w?.live) return r;
+  if (w.leg?.state === "queued" && w.leg.head === f.head) return r;
+  return refuse(w.leg ? "The merge waits for the workflow's steps to hand it over." : "The workflow's merge is not under way; it merges once the workflow hands it over.");
 }
 
 export function mayPush(f: {

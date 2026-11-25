@@ -30,6 +30,8 @@ import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
+import { loadPrWorkflows } from "../data/workflow/index.ts";
+import type { ItemWorkflow } from "../workflow/types.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
@@ -131,16 +133,27 @@ export type PreparedOpus =
   | { kind: "ready"; input: OpusPr; snap: Snapshot; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** A maintainer's entry was left out of the discussion for length. */ maintDropped?: boolean };
 
 /**
+ * The person's decision that the change belongs in the app: they approved its merge, or started it at an entry that works towards
+ * one. A review entry that is not approved asks the review for that as well.
+ */
+export function scopeSettled(w: ItemWorkflow | undefined): { scope_settled?: NonNullable<OpusPr["scope_settled"]> } {
+  if (!w || (w.approvedBy === null && w.entry === "review")) return {};
+  return { scope_settled: w.approvedBy !== null ? { answer: "merge approved", by: w.approvedBy, note: null } : { answer: `started at ${w.entry === "fixup" ? "fix-up" : w.entry}`, by: w.startedBy, note: null } };
+}
+
+/**
  * Builds the Opus prompt input of a candidate: diff (full, or the delta since the last Opus review),
  * size cap and discussion. `independent`: the whole diff with no earlier review, discussion or unapplied fixes, for a
  * review that must not be anchored on the first one (the pre-merge review); the snapshot then marks the time of the read.
  */
 export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean } = {}): Promise<PreparedOpus> {
   const ref = refOf(c);
-  const [items, rows, repos] = await db.together(() => Promise.all([
+  const [items, rows, repos, workflows] = await db.together(() => Promise.all([
     loadItems(db, [{ repo, number: c.number }], "pr"), loadReviewRows(db, [{ repo, number: c.number }]), loadRepos(db, { names: [repo] }),
+    loadPrWorkflows(db, [{ repo, number: c.number }]),
   ]));
   const liveBase = items.get(ref)?.base_ref;
+  const scope = scopeSettled(workflows.get(ref));
   const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff, liveBase);
   if (!d.ok) return d.tooLarge ? { kind: "large", mode: "full", base: null, baseRef: liveBase ?? null } : { kind: "no-diff", error: d.error };
   const baseRef = d.base ?? liveBase ?? null;
@@ -158,7 +171,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
       mode: "full", earlier_opus: null, diff: cd.text,
       related_open: await relatedOpen(db, repo, c.number, cd.files), review_history: await latestReview(db, repo, c.number, c.head_oid),
     };
-    return { kind: "ready", input: { ...input, statements: await relatedStatements(db, repo, c.number) }, snap: { seen: now(), hash: null }, mode: "full", base: null, baseRef };
+    return { kind: "ready", input: { ...input, statements: await relatedStatements(db, repo, c.number), ...scope }, snap: { seen: now(), hash: null }, mode: "full", base: null, baseRef };
   }
   let mode: "full" | "delta" = "full", diff = cd.text, base: string | null = null;
   // A delta stands on the earlier review only when that review read the PR against the same base branch; after a retarget the whole diff is reviewed.
@@ -197,7 +210,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
     ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
     mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}), ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
     related_open: await relatedOpen(db, repo, c.number, cd.files),
-    statements: await relatedStatements(db, repo, c.number),
+    statements: await relatedStatements(db, repo, c.number), ...scope,
   };
   return { kind: "ready", input, snap, mode, base, baseRef, ...(maintDropped ? { maintDropped } : {}) };
 }

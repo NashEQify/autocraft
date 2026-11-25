@@ -1,11 +1,11 @@
 // Merge approval. A repo's `merge` step approval lets the pipeline merge PRs nobody approved one by one (the automatic
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
 // approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
-import { loadOwnCommits, loadStepApprovals, loadTrackedRepos, repoStepApproval, setStepApproval } from "../data/control/index.ts";
+import { loadPushOutcomeEdges, loadStepApprovals, loadTrackedRepos, repoStepApproval, setStepApproval } from "../data/control/index.ts";
 import type { StepApproval } from "../data/control/types.ts";
 import { loadPushEdges } from "../data/changes/index.ts";
-import { loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
-import { legHeadOf, mayMerge, workflowGate, type MayResult } from "../core/may.ts";
+import { loadEndedWorkflows, loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
+import { mayMerge, workflowGate, type MayResult } from "../core/may.ts";
 import type { Db } from "../db/index.ts";
 
 export type MergeApproval = StepApproval;
@@ -21,25 +21,27 @@ export async function setMergeApproval(db: Db, by: string, repo: string, approve
 
 /**
  * Whether each PR of the repo may merge at the given head: the repo's approval, the live workflow that works on it (its own, or its
- * issue's), that workflow's merge leg and the heads we pushed, in one load.
+ * issue's) or how the latest one ended, that workflow's merge leg and our pushes to the PR, in one load.
  */
 export async function mergeVerdicts(db: Db, repo: string, items: { number: number; head: string }[]): Promise<Map<number, MayResult>> {
   const out = new Map<number, MayResult>();
   if (!items.length) return out;
   const refs = items.map((i) => ({ repo, number: i.number }));
-  const [approvals, workflows, legs, edges, own] = await db.together(() => Promise.all([
+  const [approvals, workflows, ended, legs, edges, outcomes] = await db.together(() => Promise.all([
     loadStepApprovals(db, [repo], ["merge"]),
     loadPrWorkflows(db, refs),
+    loadEndedWorkflows(db, refs),
     loadLegs(db, refs, { activeOnly: true }),
     loadPushEdges(db, refs),
-    loadOwnCommits(db, items.map((i) => ({ repo, sha: i.head }))),
+    loadPushOutcomeEdges(db, refs),
   ]));
   const repoApproval = approvals.get(repo)?.merge ?? null;
   for (const i of items) {
-    const ownHeads = new Set((edges.get(`${repo}#${i.number}`) ?? []).map((e) => e.to));
-    if (own.has(`${repo}@${i.head}`)) ownHeads.add(i.head);
-    const w = workflows.get(`${repo}#${i.number}`);
-    out.set(i.number, mayMerge({ repoApproval, workflow: workflowGate(w, { legHead: legHeadOf(legs.get(`${repo}#${i.number}`), w) }), head: i.head, ownHeads }));
+    const key = `${repo}#${i.number}`;
+    out.set(i.number, mayMerge({
+      repoApproval, workflow: workflowGate(workflows.get(key), { legs: legs.get(key) ?? [] }), ended: ended.get(key) ?? null, head: i.head,
+      pushes: [...(edges.get(key) ?? []), ...(outcomes.get(key) ?? [])],
+    }));
   }
   return out;
 }

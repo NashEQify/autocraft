@@ -1,7 +1,7 @@
 // The decision table for the triage steps of open items (issues and PRs): facts overrides in, state and due actions out.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideAll, decideItem } from "../src/core/decide-item.ts";
+import { BOX_IDENTITY_WAIT, decideAll, decideItem } from "../src/core/decide-item.ts";
 import { TYPE_LABEL_NAMES } from "../src/core/item-rules.ts";
 import type { ItemPlan } from "../src/core/plan.ts";
 import { TYPE_LABELS } from "../src/labels/set.ts";
@@ -92,6 +92,7 @@ const rows: Row[] = [
   { name: "Implement off for the repo: the queued issue waits on it", facts: queued({ implement: { featureOn: false } }), expect: { state: "classified", actions: [], wait: "Implement is off for app" } },
   { name: "queued by someone who no longer settles", facts: queued({ implement: { standing: "no" } }), expect: { state: "classified", actions: [], wait: "an open request for a person to pick up" } },
   { name: "GitHub has not answered on who queued it: nothing runs, nobody is asked", facts: queued({ implement: { standing: "unknown", row: attempt("planned") } }), expect: { state: "classified", actions: [], wait: "GitHub's answer on maint's access to app" } },
+  { name: "under the box identity the wait names it", facts: queued({ implement: { standing: "unknown", boxIdentity: true, row: attempt("planned") } }), expect: { state: "classified", actions: [], wait: BOX_IDENTITY_WAIT } },
   { name: "a queued PR is not implemented", facts: queued({ kind: "pr" }), expect: { state: "classified", actions: [] } },
   { name: "the repo's live implementations are full", facts: queued({ implement: { liveInRepo: 2 } }), expect: { state: "classified", actions: [], wait: "2 implementations already running in app" } },
   { name: "an open PR closes the queued issue", facts: queued({ openPr: { number: 7, closes: true } }), expect: { state: "classified", actions: [], wait: "open PR #7" } },
@@ -130,7 +131,7 @@ for (const r of rows) {
 }
 
 test("a PR's triage actions and its review-to-merge actions are both due", () => {
-  const v = decideAll(itemFacts({ kind: "pr", labels: { existing: [] } }), prFacts());
+  const v = decideAll(itemFacts({ kind: "pr", labels: { existing: [] } }), prFacts({ workflow: null }));
   assert.deepEqual(v.actions.map((a) => a.kind), ["label", "merge"]);
   assert.equal(v.pr?.state, "ready");
   assert.equal(v.next, "Merge queue");
