@@ -117,7 +117,6 @@ Claude calls run on Task Runners, never on this host (see [Model calls on mainta
 ```sh
 autocraft-server inference jev 4        # parallel Jev calls
 autocraft-server inference jev off      # Haiku does Jev's work; `on` switches Jev back on
-autocraft-server inference pause        # the usage levels at which a Task Runner stops taking calls
 ```
 
 See [Agent runs](docs/pipeline.md#agent-runs).

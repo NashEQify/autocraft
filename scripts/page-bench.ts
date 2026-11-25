@@ -120,7 +120,7 @@ const ROUTES: [string, Record<string, string>, string?][] = [
   ["/api/maintain/home", {}], ["/api/maintain/items", {}], ["/api/maintain/items/:repo/:n", { repo: "repo1", n: "1" }], ["/api/maintain/queue", {}], ["/api/maintain/repos", {}],
   ["/api/items/:repo/:n/page", { repo: "repo1", n: "1" }], ["/api/items/:repo/:n", { repo: "repo1", n: "1" }],
   ["/api/items/:repo/:n/trace", { repo: "repo1", n: "1" }],
-  ["/api/repos/all", {}], ["/api/repos/pipeline", {}], ["/api/envs", {}], ["/api/tasks", {}], ["/api/stuck", {}],
+  ["/api/repos/all", {}], ["/api/envs", {}], ["/api/tasks", {}], ["/api/stuck", {}],
 ];
 
 const name = `pagebench_${randomBytes(3).toString("hex")}`;
