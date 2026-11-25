@@ -5,27 +5,27 @@ import { loadTasks } from "../build/tasks-load.ts";
 import type { TaskRecord } from "../build/types.ts";
 import { listAudit, loadAuditActions } from "../control/audit.ts";
 import type { AuditRow, HiddenRepos } from "../control/types.ts";
-import { loadChecks, loadItems, loadOpenPrLinks, openItemKeys } from "../mirror/index.ts";
-import type { ItemOf, OpenPrRow, PrChecksView } from "../mirror/types.ts";
+import { loadChecks, loadItems, openItemKeys } from "../mirror/index.ts";
+import type { ItemOf, PrChecksView } from "../mirror/types.ts";
 import { listBatchPage, loadBatchPage } from "../merge/batches.ts";
 import type { BatchListRow, BatchPageView } from "../merge/types.ts";
-import { loadRankScores, loadRanks } from "../triage/rank.ts";
+import { loadRanks } from "../triage/rank.ts";
 import type { RankRow } from "../triage/types.ts";
 import { loadHolds } from "../workflow/holds.ts";
 import { loadLegPass } from "../workflow/legs.ts";
 import { loadQueuePositions, loadWorkScores } from "../workflow/rows.ts";
 import type { Preapproval, QueuePosition } from "../workflow/types.ts";
-import { loadMergeQueue, loadPipelineScope, type CachedEntry } from "./merge-queue.ts";
-import { loadRankedOpen, type WorkListRow } from "./work.ts";
+import { LEG_STATES, loadMergeQueue, loadPipelineScope, loadQueueRanks, type CachedEntry } from "./merge-queue.ts";
+import { loadRankedOpen, type WorkList, type WorkListFilter } from "./work.ts";
 
 export type QueuePageFacts = {
-  /** The open items in the pipeline's scope; null unless that scope is asked for. */
+  /** Of the items the merge tab can show, those in the pipeline's scope; null unless that scope is asked for. */
   scope: Set<string> | null;
   holds: Set<string>;
   positions: Map<string, QueuePosition>;
   entries: CachedEntry[];
-  ranked: WorkListRow[];
-  /** Open PRs and the issues they close, by `repo#number` of the PR. */
+  work: WorkList;
+  /** The issues the queued PRs close, by `repo#number` of the PR. */
   closes: Map<string, number[]>;
   /** Active pre-approved merge legs. */
   legs: Preapproval[];
@@ -37,13 +37,13 @@ export type QueuePageFacts = {
   batches: BatchListRow[];
   scores: Map<string, number>;
   /** Work scores of started open items in the visible repos. */
-  work: Map<string, number>;
+  workScores: Map<string, number>;
 };
 
 const refOf = (repo: string, number: number): string => `${repo}#${number}`;
 
-/** The issues each open PR closes by `repo#number`; PRs without any are left out. */
-export function closingOf(links: OpenPrRow[]): Map<string, number[]> {
+/** The issues each PR closes by `repo#number`; PRs without any are left out. */
+export function closingOf(links: { repo: string; number: number; closing_issues: string | null }[]): Map<string, number[]> {
   const out = new Map<string, number[]>();
   for (const r of links) {
     if (!r.closing_issues) continue;
@@ -58,29 +58,28 @@ export function closingOf(links: OpenPrRow[]): Map<string, number[]> {
 }
 
 /** Wave 1 reads the page's own sets; wave 2 the items, ranks and audit rows of the pre-approved PRs. */
-export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: boolean; visible: string[]; hidden: HiddenRepos }): Promise<QueuePageFacts> {
-  const [scope, holds, positions, entries, ranked, legPass, links, page, scores, work] = await db.together(() => Promise.all([
+export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: boolean; visible: string[]; hidden: HiddenRepos; list: WorkListFilter }): Promise<QueuePageFacts> {
+  const [scope, holds, positions, entries, work, legPass, queued, page, workScores] = await db.together(() => Promise.all([
     o.pipelineScope ? loadPipelineScope(db) : null,
     loadHolds(db),
     loadQueuePositions(db),
     loadMergeQueue(db, { merged: "exclude" }),
-    loadRankedOpen(db),
+    loadRankedOpen(db, o.list),
     loadLegPass(db),
-    loadOpenPrLinks(db),
+    loadQueueRanks(db),
     o.merge ? listBatchPage(db, { hidden: o.hidden, limit: 100 }) : null,
-    o.merge ? loadRankScores(db, { repos: o.visible }) : new Map<string, number>(),
     loadWorkScores(db, openItemKeys({ repos: o.visible })),
   ]));
   const legs = legPass.rows;
-  const refs = [...new Map(legs.filter((l) => l.state === "fixup" || l.state === "review" || l.state === "ci").map((l) => [refOf(l.repo, l.number), { repo: l.repo, number: l.number }])).values()];
+  const refs = [...new Map(legs.filter((l) => (LEG_STATES as readonly string[]).includes(l.state)).map((l) => [refOf(l.repo, l.number), { repo: l.repo, number: l.number }])).values()];
   const [pending, ranks, carried] = await db.together(() => Promise.all([
     loadItems(db, refs, "card"),
     loadRanks(db, refs),
     legs.length ? loadAuditActions(db, [...new Set(legs.map((l) => refOf(l.repo, l.number)))], ["preapproval"]) : new Map<string, AuditRow[]>(),
   ]));
   return {
-    scope, holds: new Set(holds.keys()), positions, entries, ranked, closes: closingOf(links), legs, pending, ranks, carried,
-    batches: page?.batches ?? [], scores, work,
+    scope, holds: new Set(holds.keys()), positions, entries, work, closes: closingOf(queued), legs, pending, ranks, carried,
+    batches: page?.batches ?? [], scores: new Map(queued.flatMap((r) => (r.score === null ? [] : [[refOf(r.repo, r.number), r.score] as const]))), workScores,
   };
 }
 

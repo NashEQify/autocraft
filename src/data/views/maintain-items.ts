@@ -18,7 +18,7 @@ import { hasNoArea, inAreas, isDuplicateClose, rankJoin, settledJoin } from "../
 import * as triage from "../triage/index.ts";
 import { LIVE_STATES, notArchived } from "../workflow/fragments.ts";
 import * as workflow from "../workflow/index.ts";
-import type { ItemBase, ItemRowFacts, ItemsFilter, Scope } from "./types.ts";
+import type { ItemBase, ItemRowFacts, ItemsBase, ItemsFilter, Scope } from "./types.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import { textHit } from "./items.ts";
 
@@ -33,12 +33,17 @@ const as = (e: Expression<SqlBool>, name: string) => (e as AliasableExpression<S
 /** When GitHub merged the item, or our merge step did while the mirror has not read it. */
 const mergeTime = (eb: kx.Eb) => eb.fn.coalesce("i.merged_at", mergedAt(eb, "i.repo", "i.number"));
 
+/** What decides an open item's group, and nothing else of it. */
+const PLACE = ["wf_state", "has_rec", "last_event", "plan_state", "plan_item_state", "phase"] as const;
+
 /**
- * The open items (or one page of closed ones, or of the pull requests AutoCraft merged, newest merge first) of `scope.repos` that pass the filter, with plan, rank and live workflow columns and the kind of
- * the item's latest workflow event. `closedTotal` counts the closed or merged items the filter matches, whatever `limit` cuts.
+ * The open items of `scope.repos` that pass the filter, or one page of the closed ones or of the pull requests AutoCraft merged (newest merge first),
+ * with plan, rank and live workflow columns and the kind of the item's latest workflow event. Open items that agree in what decides their group (workflow
+ * state and recommendation, last event, plan state and phase) are placed together: `places` has one of each with its count, and `rows` the first
+ * `limit` of each in the asked order. `closedTotal` counts the closed or merged items the filter matches, whatever `limit` cuts.
  */
-export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden">, f: ItemsFilter): Promise<{ rows: ItemBase[]; closedTotal: number | null }> {
-  if (!scope.repos.length) return { rows: [], closedTotal: null };
+export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden">, f: ItemsFilter): Promise<ItemsBase> {
+  if (!scope.repos.length) return { rows: [], places: [], closedTotal: null };
   // The settled table of the classification run is built (a write) before the read.
   const run = f.filters.includes("security") ? await triage.currentRunReady(db) : null;
   const q = queryDb(db);
@@ -64,37 +69,55 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
     c.push(hiddenRepos(db, "i.repo", scope.hidden));
     return c;
   };
-  const base = () => rankJoin(q.k.selectFrom("main.items as i")
+  // A live workflow is unique per item. All open items are read, so their newest events come as one set; the closed page probes the few it shows.
+  const newestEvents = q.k.selectFrom("main.workflow_events as le").select((e) => ["le.repo", "le.number", e.fn.max<number>("le.id").as("id")]).where((w) => notArchived(w, "le.kind")).groupBy(["le.repo", "le.number"]);
+  const joined = () => rankJoin(q.k.selectFrom("main.items as i")
     .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number")))
-    .leftJoin("main.item_workflows as w", (j: any) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number").on("w.state", "in", LIVE_STATES)
-      .on("w.id", "=", (eb: kx.AnyEb) => eb.selectFrom("main.item_workflows as lw").select((e) => e.fn.max<number>("lw.id").as("m"))
-        .whereRef("lw.repo", "=", "i.repo").whereRef("lw.number", "=", "i.number").where("lw.state", "in", LIVE_STATES)))
-    .leftJoin("main.workflow_events as ev", (j: any) => j.onRef("ev.repo", "=", "i.repo").onRef("ev.number", "=", "i.number").on((eb: kx.AnyEb) => notArchived(eb, "ev.kind"))
+    .leftJoin("main.item_workflows as w", (j: any) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number").on("w.state", "in", LIVE_STATES));
+  const base = () => (closed
+    ? joined().leftJoin("main.workflow_events as ev", (j: any) => j.onRef("ev.repo", "=", "i.repo").onRef("ev.number", "=", "i.number").on((eb: kx.AnyEb) => notArchived(eb, "ev.kind"))
       .on("ev.id", "=", (eb: kx.AnyEb) => eb.selectFrom("main.workflow_events as le").select((e) => e.fn.max<number>("le.id").as("m"))
-        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number").where((w) => notArchived(w, "le.kind"))));
+        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number").where((w) => notArchived(w, "le.kind"))))
+    : joined().leftJoin(newestEvents.as("ne"), (j: any) => j.onRef("ne.repo", "=", "i.repo").onRef("ne.number", "=", "i.number")).leftJoin("main.workflow_events as ev", "ev.id", "ne.id")) as ReturnType<typeof joined>;
+  const ITEM = ["kind", "state", "title", "author", "merged_at", "closed_at"] as const;
   const cols = (b: ReturnType<typeof base>) => b.select((eb: kx.Eb) => [
-    "i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.updated_at", "i.merged_at", "i.closed_at", eb.ref("r.score").as("score"),
-    "p.state as plan_state", "p.item_state as plan_item_state", phaseOf(db, eb).as("phase"),
+    "i.repo", "i.number", "i.updated_at", eb.ref("r.score").as("score"),
+    "p.state as plan_state", "p.item_state as plan_item_state", kx.bytewise<string>(db, phaseOf(db, eb)).as("phase"),
     ...(merged ? [mergeTime(eb).as("merge_time"), as(mergedByUs(eb, "i.repo", "i.number"), "own_merge"), as(mergedOnApproval(eb, "i.repo", "i.number"), "approved")] : []),
-    "w.weight as weight", "w.state as wf_state", "w.rec as wf_rec", "w.started_by", "w.approved_by", "w.stopped_by", "ev.kind as last_event",
+    "w.weight as weight", "w.state as wf_state", eb.case().when("w.rec", "is", null).then(0).else(1).end().as("has_rec"), "w.started_by", "w.approved_by", "w.stopped_by", "ev.kind as last_event",
   ]);
   const where = <B extends { where: (...a: any[]) => any }>(b: B): B => b.where((eb: kx.AnyEb) => eb.and(conds(eb))) as B;
+  // One text to partition by: the sort compares six columns for every pair otherwise.
+  const place = (eb: any) => kx.bytewise<string>(db, PLACE.map((c) => (c === "has_rec" ? eb.case().when(`x.${c}`, "=", 1).then("y").else("n").end() : eb.fn.coalesce(`x.${c}`, eb.val("-")))).reduce((a, b) => eb(eb(a, "||", eb.val("|")), "||", b)));
+  const keyed = () => q.k.selectFrom(where(cols(base())).as("x") as never).selectAll("x" as never).select((eb: any) => place(eb).as("place"));
+  const first = () => (q.k.selectFrom(keyed().as("k") as never) as any).selectAll("k").select((eb: any) => [
+    eb.fn.countAll().over((o: any) => o.partitionBy("k.place")).as("n"),
+    // `rank`, not `row_number`: items that tie all come, and the caller orders them.
+    eb.fn.agg("rank").over((o: any) => {
+      const p = o.partitionBy("k.place");
+      const b = f.sort === "updated" ? p : p.orderBy(eb.fn.coalesce("k.weight", eb.lit(f.normalWeight)), "desc").orderBy(eb.fn.coalesce("k.score", eb.lit(-1)), "desc");
+      return b.orderBy(eb.fn.coalesce("k.updated_at", eb.val("")), "desc");
+    }).as("place_rank"),
+  ]);
   const [rows, total] = await db.together(() => Promise.all([
     closed
-      ? q.all(where(cols(base())).orderBy((eb: kx.Eb) => eb.fn.coalesce(merged ? mergeTime(eb) : "i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit))
-      : q.all(where(cols(base()))),
-    closed ? q.get(where(base().select((eb: kx.Eb) => eb.fn.countAll<number>().as("n")))) : Promise.resolve(null),
+      ? q.all(where(cols(base())).select(ITEM.map((c) => `i.${c}` as const)).orderBy((eb: kx.Eb) => eb.fn.coalesce(merged ? mergeTime(eb) : "i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit))
+      : q.all((q.k.selectFrom(first().as("y") as never) as any).innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "y.repo").onRef("i.number", "=", "y.number"))
+        .selectAll("y").select(ITEM.map((c) => `i.${c}`)).where("y.place_rank", "<=", f.limit)),
+    closed ? q.get(where(q.k.selectFrom("main.items as i").select((eb) => eb.fn.countAll<number>().as("n")))) : Promise.resolve(null),
   ]));
-  return {
-    rows: (rows as Record<string, any>[]).map((r): ItemBase => ({
-      repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", author: r.author, state: r.state, updatedAt: r.updated_at ?? "",
-      mergedAt: r.merged_at, closedAt: r.closed_at, planState: r.plan_state, itemState: r.plan_item_state, phase: r.phase, score: r.score === null ? null : Number(r.score),
-      weight: r.weight === null ? null : Number(r.weight), workflowState: r.wf_state, hasRecommendation: r.wf_rec !== null, startedBy: r.started_by, approvedBy: r.approved_by,
-      stoppedBy: r.stopped_by, lastEvent: r.last_event,
-      ...(merged && { merged: { at: r.merge_time ?? "", how: !Number(r.own_merge) ? "batch" as const : Number(r.approved) ? "approval" as const : "rule" as const } }),
-    })),
-    closedTotal: total ? Number((total as { n: number }).n) : null,
-  };
+  const of = (r: Record<string, any>): ItemBase => ({
+    repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", author: r.author, state: r.state, updatedAt: r.updated_at ?? "",
+    mergedAt: r.merged_at, closedAt: r.closed_at, planState: r.plan_state, itemState: r.plan_item_state, phase: r.phase, score: r.score === null ? null : Number(r.score),
+    weight: r.weight === null ? null : Number(r.weight), workflowState: r.wf_state, hasRecommendation: Number(r.has_rec) === 1, startedBy: r.started_by, approvedBy: r.approved_by,
+    stoppedBy: r.stopped_by, lastEvent: r.last_event,
+    ...(merged && { merged: { at: r.merge_time ?? "", how: !Number(r.own_merge) ? "batch" as const : Number(r.approved) ? "approval" as const : "rule" as const } }),
+  });
+  const places = new Map<string, { item: ItemBase; count: number }>();
+  if (!closed) for (const r of rows as Record<string, any>[]) {
+    if (!places.has(r.place)) places.set(r.place, { item: of(r), count: Number(r.n) });
+  }
+  return { rows: (rows as Record<string, any>[]).map(of), places: [...places.values()], closedTotal: total ? Number((total as { n: number }).n) : null };
 }
 
 /** Plan views, holds, stuck marks, duplicate closes, areas and live workflows of the page's refs, in one wave. */

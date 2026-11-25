@@ -5,6 +5,7 @@ import { connectDb } from "./helpers/raw-db.ts";
 import { loadMaintainRepos } from "../src/data/views/maintain.ts";
 import { loadItemsBase } from "../src/data/views/maintain-items.ts";
 import { loadMaintainStats } from "../src/data/views/stats.ts";
+import { loadRankedOpen } from "../src/data/views/work.ts";
 import { loadQuickSearch } from "../src/data/views/items.ts";
 import { visibleNames } from "../src/data/views/visibility.ts";
 
@@ -21,7 +22,7 @@ test("the lists leave out repos the viewer may not see, filter by hold and count
     ]));
     await db.run(db.k.insertInto("main.outside_holds").values({ repo: "app", number: 2, author: "eve", kind: "issue", reason: "limit" }));
     const scope = { repos: ["app"], hidden: Object.assign(["secret"], { visible: ["app"] }) };
-    const f = { show: "open" as const, filters: [], areas: [], text: null, refs: [], limit: 50 };
+    const f = { show: "open" as const, filters: [], areas: [], text: null, refs: [], sort: "priority" as const, normalWeight: 5, limit: 50 };
 
     assert.deepEqual((await loadItemsBase(db, scope, f)).rows.map((r) => r.number).sort(), [1, 2]);
     assert.deepEqual((await loadItemsBase(db, scope, { ...f, filters: ["outside"] })).rows.map((r) => r.number), [2]);
@@ -52,4 +53,60 @@ test("a viewer sees public repos and those with a cached permission; an operator
   };
   assert.deepEqual(visibleNames(inputs, "viewer", new Map([["c", "read" as const]])), ["a", "c"]);
   assert.deepEqual(visibleNames(inputs, "operator", new Map()), ["a", "b", "c"]);
+});
+
+test("the work list counts every next step, cuts each in work order and finds the asked item's place", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    const n = 40, next = (i: number) => (i % 5 === 0 ? null : `step${i % 3}`);
+    const items = Array.from({ length: n }, (_, i) => ({ repo: i % 2 ? "a" : "b", number: i + 1, kind: "pr", state: i % 13 === 12 ? "CLOSED" : "OPEN", title: `t${i}` }));
+    await db.run(db.k.insertInto("main.items").values(items));
+    await db.run(db.k.insertInto("main.item_rank").values(items.map((x, i) => ({ repo: x.repo, number: x.number, score: i % 7, breakdown: JSON.stringify({ level: "P1" }), computed_at: NOW }))));
+    await db.run(db.k.insertInto("main.item_plans").values(items.map((x, i) => ({
+      repo: x.repo, number: x.number, kind: "pr", state: "s", actions: "[]", reasons: "[]", planned_at: NOW, view: JSON.stringify({ ...(next(i) ? { next: next(i) } : {}), ...(i % 4 ? { scope: true } : {}) }),
+    }))));
+    const wf = (repo: string, number: number, weight: number, entry = "review") => ({ repo, number, kind: "pr", entry, weight, state: "running", started_by: "op", started_at: NOW, started_via: "cli", updated_at: NOW });
+    await db.run(db.k.insertInto("main.item_workflows").values([wf("a", 10, 5), wf("b", 3, 8), wf("a", 900, 9, "implement")]));
+    await db.run(db.k.insertInto("main.implementations").values({ repo: "a", number: 900, queued_by: "op", state: "in-review", attempt: 1, text_hash: "x", pr_number: 22, created_at: NOW, updated_at: NOW }));
+    const started = ["a#22", "b#3", "a#10"];
+    for (const scope of [false, true]) {
+      const listed = items.map((x, i) => ({ ...x, i, ref: `${x.repo}#${x.number}` })).filter((x) => x.state === "OPEN" && (!scope || x.i % 4))
+        .sort((x, y) => (started.includes(x.ref) ? started.indexOf(x.ref) : 9) - (started.includes(y.ref) ? started.indexOf(y.ref) : 9) || (y.i % 7) - (x.i % 7) || (x.repo < y.repo ? -1 : x.repo > y.repo ? 1 : 0) || x.number - y.number);
+      const item = { repo: "a", number: 18 };
+      const got = await loadRankedOpen(db, { repos: ["a", "b"], scope, top: 3, item });
+      const at = listed.findIndex((x) => x.ref === "a#18");
+      for (const s of got.steps) {
+        const mine = listed.filter((x) => next(x.i) === s.next);
+        assert.deepEqual([s.count, s.hasItem, s.before], [mine.length, mine.some((x) => x.ref === "a#18"), mine.filter((x) => listed.indexOf(x) < at).length]);
+        assert.deepEqual(got.rows.filter((r) => r.next === s.next).map((r) => `${r.repo}#${r.number}`), mine.slice(0, 3).map((x) => x.ref));
+      }
+      assert.equal(got.steps.length, 4);
+      const all = await loadRankedOpen(db, { repos: ["a", "b"], scope, top: n });
+      assert.deepEqual(all.rows.map((r) => `${r.repo}#${r.number}`), listed.map((x) => x.ref));
+      assert.deepEqual((await loadRankedOpen(db, { repos: ["a"], scope, top: 1, item: { repo: "a", number: 999 } })).steps.map((s) => s.before), got.steps.map(() => null));
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test("the Items base cuts each kind of place in the asked order and counts all of it", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    const at = (i: number) => `2026-11-10T12:00:${String(i).padStart(2, "0")}Z`;
+    await db.run(db.k.insertInto("main.items").values(Array.from({ length: 20 }, (_, i) => ({ repo: "app", number: i + 1, kind: "issue", state: "OPEN", title: `t${i}`, updated_at: at(i) }))));
+    await db.run(db.k.insertInto("main.item_rank").values(Array.from({ length: 10 }, (_, i) => ({ repo: "app", number: i + 1, score: i, breakdown: "{}", computed_at: NOW }))));
+    await db.run(db.k.insertInto("main.item_plans").values(Array.from({ length: 8 }, (_, i) => ({ repo: "app", number: i + 1, kind: "issue", state: "backlog", actions: "[]", reasons: "[]", planned_at: NOW, view: "{}" }))));
+    const f = { show: "open" as const, filters: [], areas: [], text: null, refs: [], sort: "priority" as const, normalWeight: 5, limit: 2 };
+    const base = async (sort: "priority" | "updated") => {
+      const b = await loadItemsBase(db, { repos: ["app"], hidden: [] }, { ...f, sort });
+      const of = (state: string | null) => b.rows.filter((r) => r.planState === state).map((r) => r.number).sort((x, y) => x - y);
+      assert.deepEqual(b.places.map((p) => [p.item.planState, p.count]).sort(), [["backlog", 8], [null, 12]].sort());
+      return [of("backlog"), of(null)];
+    };
+    assert.deepEqual(await base("priority"), [[7, 8], [9, 10]], "the highest rank first, then the unranked");
+    assert.deepEqual(await base("updated"), [[7, 8], [19, 20]]);
+  } finally {
+    await db.close();
+  }
 });

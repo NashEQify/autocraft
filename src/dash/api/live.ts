@@ -5,7 +5,7 @@
 import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker } from "../../../web/src/api/types.ts";
 import { STATUS_FRESH_MS } from "../../data/runners/index.ts";
 import type { HiddenRepos } from "../../data/control/index.ts";
-import type { RunRow } from "../../data/inference/index.ts";
+import type { JobCall, RunRow } from "../../data/inference/index.ts";
 import type { TaskCard } from "../../data/build/index.ts";
 import type { RunnerRow } from "../../data/runners/index.ts";
 import { loadLiveView, type LiveView } from "../../data/views/live.ts";
@@ -61,8 +61,8 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const taskEstimate = (repo: string, step: string) => estimateOf(v.taskDurations.get(`${repo}|${step}`) ?? []);
 
   // The owner of a Private Task Runner is named nowhere on the board, except to themselves.
-  const ownerShown = (c: RunRow): boolean => c.provider !== "jev" && req.user.role === "operator" && !!c.userLogin && v.runnerBoard !== null && !privateTo(req, v.runnerBoard.private)(c.userLogin);
-  const callOp = (c: RunRow): LiveOp => ({
+  const ownerShown = (c: JobCall): boolean => c.provider !== "jev" && req.user.role === "operator" && !!c.userLogin && v.runnerBoard !== null && !privateTo(req, v.runnerBoard.private)(c.userLogin);
+  const callOp = (c: JobCall): LiveOp => ({
     kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: ownerShown(c) ? `${stepTitle(c.step)} on ${c.userLogin}` : stepTitle(c.step),
     start: c.startedAt, end: c.endedAt, estimate: c.state === "running" ? callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
   });

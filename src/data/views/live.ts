@@ -5,7 +5,7 @@ import type { HiddenRepos } from "../control/types.ts";
 import { loadOpenTaskDurations, loadStandaloneTasks, loadTaskCards } from "../build/tasks-views.ts";
 import type { TaskCard } from "../build/types.ts";
 import { loadCallDurations, loadJobRuns, loadLooseRuns, loadWorkerRuns } from "../inference/views.ts";
-import type { RunRow } from "../inference/types.ts";
+import type { JobCall, RunRow } from "../inference/types.ts";
 import { loadLiveBoard, loadStepDurations } from "../jobs/views.ts";
 import type { LiveBoard } from "../jobs/types.ts";
 import { listActiveBatches } from "../merge/batches.ts";
@@ -25,7 +25,7 @@ export type LiveView = {
   stepDurations: Map<string, number[]>;
   workerRuns: RunRow[] | null;
   runnerBoard: { leases: Map<number, number>; helpers: RunnerRow[]; private: Set<string> } | null;
-  jobRuns: Map<number, RunRow[]>;
+  jobRuns: Map<number, JobCall[]>;
   jobTasks: Map<number, TaskCard[]>;
   /** The combined-tree tasks of the open batches, by task id. */
   batchTasks: Map<number, TaskCard>;

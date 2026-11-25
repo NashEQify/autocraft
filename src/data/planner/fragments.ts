@@ -63,6 +63,14 @@ export function queuedPlan(db: Db, eb: Eb, alias: string): Expression<SqlBool> {
 export const planGh = (db: Db, p: string) => kx.jsonText(db, `${p}.view`, "$.gh");
 /** `view.scope` of the plan row aliased `p`. */
 export const planScope = (db: Db, p: string) => kx.jsonBool(db, `${p}.view`, "$.scope");
+/**
+ * `view.scope` of the plan row aliased `p` is set, as a test of the text: JSON.stringify wrote the view, and no string in it can hold these quotes
+ * unescaped. Parsing every view is the cost of the reads that filter on it, and its estimate (one row in 200) makes Postgres nest loops over all of them.
+ */
+export const inPlanScope = (eb: Eb, p: string): Expression<SqlBool> => eb(eb.fn<number>("instr", [`${p}.view`, eb.val('"scope":true')]), ">", 0);
+/** `view.cifix` of the plan row aliased `p` is `bucket`; the text test first, since parsing every view is the cost of the read. */
+export const planCifixIs = (db: Db, eb: Eb, p: string, bucket: string): Expression<SqlBool> =>
+  eb.and([eb(eb.fn<number>("instr", [`${p}.view`, eb.val(`"${bucket}"`)]), ">", 0), eb(kx.jsonText(db, `${p}.view`, "$.cifix"), "=", bucket)]);
 /** `view.fixup` of the plan row aliased `p`. */
 export const planFixup = (db: Db, p: string) => kx.jsonText(db, `${p}.view`, "$.fixup");
 /** `view.waitKind` of the plan row aliased `p`. */

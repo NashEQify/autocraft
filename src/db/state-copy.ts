@@ -291,6 +291,12 @@ export function spans(t: Task, bounds: Row | undefined): [number, number][] {
 
 const doneSql = (p: string): string => `SELECT 1 AS done FROM ${p}settings WHERE key = '${STATE_COPY_DONE}'`;
 
+/** Indexes of a table the copy rewrites, which it would otherwise write row by row: both engines build them after it. */
+export const AFTER_COPY_INDEXES: readonly string[] = ["agent_runs_ended", "agent_runs_first"];
+/** The name of the index `create` makes. */
+const indexName = (create: string): string | undefined => /^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (?:main\.)?(\w+)/.exec(create)?.[1];
+export const builtAfterCopy = (create: string): boolean => AFTER_COPY_INDEXES.includes(indexName(create) ?? "");
+
 export function copyStateSqlite(db: DatabaseSync, now: string = new Date().toISOString()): void {
   if (db.prepare(doneSql("main.")).get()) return;
   for (const t of tasks("main.", now)) {

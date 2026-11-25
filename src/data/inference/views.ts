@@ -1,12 +1,11 @@
 // Run reads for pages, the live board, MCP and Discord. Reads that take `vis` apply the hidden-repo test `fragments.runVisible`.
-// A run written by an old pod has no `first_repo` and `first_number`; the loaders then find the run's lowest item as the code did before.
 import type { SelectQueryBuilder } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import { filtered, runVisible } from "./fragments.ts";
-import type { ItemRun, PromptSpend, Ref, ReviewRunKeys, RunDetail, RunFilter, RunRow, RunVisibility, ToolView } from "./types.ts";
+import { filtered, runFirst, runVisible } from "./fragments.ts";
+import type { ItemRun, JobCall, PromptSpend, Ref, ReviewRunKeys, RunDetail, RunFilter, RunRow, RunVisibility, ToolView } from "./types.ts";
 import { MAX_ITEM_REFS } from "./types.ts";
 
 type Raw = {
@@ -21,12 +20,8 @@ const RUN_COLS = [
   "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "summary", "error", "progress", "user_login", "harness", "reported_model",
 ] as const;
 
-/** The run's lowest item by repo and number: the column, or for a row without it the item rows. */
-const firstOf = (eb: kx.Eb, col: "repo" | "number", alias = "r") =>
-  eb.fn.coalesce(`${alias}.first_${col}`, kx.schemaEb(eb).selectFrom("agent_run_items as fi").select(`fi.${col}`).where("fi.run_id", "=", eb.ref(`${alias}.id`)).orderBy("fi.repo").orderBy("fi.number").limit(1) as never);
-
 /** The select list of a `RunRow` over `agent_runs` aliased `alias`. */
-const runSelect = (alias = "r") => (eb: kx.Eb) => [...RUN_COLS.map((c) => `${alias}.${c}`), firstOf(eb, "repo", alias).as("first_repo"), firstOf(eb, "number", alias).as("first_number")] as never;
+const runSelect = (alias = "r") => (eb: kx.Eb) => [...RUN_COLS.map((c) => `${alias}.${c}`), runFirst(eb, "repo", alias).as("first_repo"), runFirst(eb, "number", alias).as("first_number")] as never;
 
 const refsOf = (s: string): { repo: string; number: number }[] => {
   try {
@@ -151,14 +146,20 @@ export async function loadItemRuns(db: Db, refs: Ref[], vis: RunVisibility, o?: 
   return out;
 }
 
+const CALL_COLS = ["id", "job_id", "step", "provider", "model", "state", "started_at", "ended_at", "user_login"] as const;
+
 /** Calls per job lane of the live board, in run id order. 1 statement. */
-export async function loadJobRuns(db: Db, jobIds: number[], vis: RunVisibility): Promise<Map<number, RunRow[]>> {
-  const out = new Map<number, RunRow[]>();
+export async function loadJobRuns(db: Db, jobIds: number[], vis: RunVisibility): Promise<Map<number, JobCall[]>> {
+  const out = new Map<number, JobCall[]>();
   if (jobIds.length === 0) return out;
   const q = queryDb(db);
   for (const part of kx.chunks(jobIds)) {
-    const rows = (await q.all(visibleOnly(q.k.selectFrom("main.agent_runs as r").select(runSelect()).where(kx.inList(db, "r.job_id", part, "bigint")), vis).orderBy("r.id"))) as unknown as Raw[];
-    for (const [id, g] of group(rows, (r) => Number(r.job_id))) out.set(id, g.map(toRun));
+    const rows = (await q.all(visibleOnly(q.k.selectFrom("main.agent_runs as r").select(CALL_COLS.map((c) => `r.${c}` as const)).where(kx.inList(db, "r.job_id", part, "bigint")), vis).orderBy("r.id"))) as unknown as Pick<Raw, (typeof CALL_COLS)[number]>[];
+    for (const [id, g] of group(rows, (r) => Number(r.job_id))) {
+      out.set(id, g.map((r): JobCall => ({
+        id: Number(r.id), step: r.step, provider: r.provider === "jev" ? "jev" : "claude", model: r.model, state: r.state as JobCall["state"], startedAt: r.started_at, endedAt: r.ended_at, userLogin: r.user_login,
+      })));
+    }
   }
   return out;
 }
@@ -187,8 +188,8 @@ export async function listRunEvents(db: Db, f: { before?: string; limit: number;
   const before = f.before ? `${f.before.slice(0, 19)}Z` : null;
   const rows = (await q.all(visibleOnly(q.k.selectFrom("main.agent_runs as r").select(runSelect())
     .where((eb) => eb.and([
-      eb(firstOf(eb, "repo"), "is not", null),
-      ...(f.repo ? [eb(firstOf(eb, "repo"), "=", f.repo)] : []),
+      eb(runFirst(eb, "repo"), "is not", null),
+      ...(f.repo ? [eb(runFirst(eb, "repo"), "=", f.repo)] : []),
       ...(before ? [eb("r.started_at", "<=", before)] : []),
     ])), f.vis).orderBy("r.started_at", "desc").orderBy("r.id", "desc").limit(f.limit))) as unknown as Raw[];
   if (rows.length === 0) return [];
@@ -203,15 +204,17 @@ export async function loadCallDurations(db: Db, keys: { step: string; model: str
   const q = queryDb(db);
   const { k } = q;
   for (const part of keys === "running" ? [keys] : kx.chunks(keys)) {
-    const rows = await q.all(k.selectFrom(k.selectFrom("main.agent_runs").select(["step", "model", "started_at", "ended_at", "id",
-      (eb) => eb.fn.agg<number>("row_number").over((w) => w.partitionBy(["step", "model"]).orderBy("id", "desc")).as("rn")])
-      .where("state", "=", "done").where("ended_at", "is not", null)
-      .where((eb) => part === "running" ? eb(eb.refTuple("step", "model"), "in", k.selectFrom("main.agent_runs as now").select(["now.step", "now.model"]).where("now.state", "=", "running").$asTuple("step", "model"))
-        : kx.tupleIn(db, ["step", "model"], part.map((x) => [x.step, x.model]), ["text", "text"])).as("t"))
-      .select(["t.step", "t.model", "t.started_at", "t.ended_at"]).where("t.rn", "<=", samples).orderBy("t.step").orderBy("t.model").orderBy("t.id", "desc"));
+    const pairs = part === "running" ? k.selectFrom("main.agent_runs as now").select(["now.step", "now.model"]).distinct().where("now.state", "=", "running").as("p")
+      : kx.valuesTable(db, [...new Map(part.map((x) => [`${x.step}:${x.model}`, x])).values()].map((x) => ({ step: x.step, model: x.model })), { step: "text", model: "text" }, "p");
+    // In descending order of the index on (step, model, id), so the limit ends each pair's read; a pair with fewer runs is followed by other pairs' rows, dropped outside.
+    const newest = (eb: kx.Eb) => k.selectFrom("main.agent_runs as r").select(["r.step", "r.model", "r.id", "r.started_at", "r.ended_at"])
+      .where((w) => w(w.refTuple("r.step", "r.model", "r.id"), "<=", w.tuple(eb.ref("p.step"), eb.ref("p.model"), w.lit(Number.MAX_SAFE_INTEGER)) as never))
+      .where("r.state", "=", "done").where("r.ended_at", "is not", null).orderBy("r.step", "desc").orderBy("r.model", "desc").orderBy("r.id", "desc").limit(samples).as("t");
+    const rows = await q.all((k.selectFrom(pairs as never) as any).select((eb: kx.Eb) => ["p.step", "p.model",
+      kx.jsonRows(db, k.selectFrom(newest(eb)).select(["t.started_at", "t.ended_at"]).where("t.step", "=", eb.ref("p.step") as never).where("t.model", "=", eb.ref("p.model") as never).orderBy("t.id", "desc")).as("runs")])) as { step: string; model: string; runs: string }[];
     for (const r of rows) {
-      const key = `${r.step}:${r.model}`;
-      (out.get(key) ?? out.set(key, []).get(key)!).push({ startedAt: r.started_at, endedAt: r.ended_at! });
+      const runs = kx.parseJsonRows<{ started_at: string; ended_at: string }>(r.runs);
+      if (runs.length) out.set(`${r.step}:${r.model}`, runs.map((x) => ({ startedAt: x.started_at, endedAt: x.ended_at })));
     }
   }
   return out;

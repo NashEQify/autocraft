@@ -8,7 +8,7 @@ import { canActExpr } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { LIVE_STATES, notArchived } from "./fragments.ts";
+import { LIVE_STATES, notArchived, workScore } from "./fragments.ts";
 import type {
   Blocker, EndedWorkflow, Entry, FixupRequest, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
@@ -365,8 +365,6 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
   });
 }
 
-const score = (eb: any) => eb(eb(eb.lit(1e15), "+", eb("w.weight", "*", eb.lit(1e12))), "-", eb.ref("w.id"));
-
 /**
  * `1e15 + weight * 1e12 - workflow.id` for every item of `keys` with a live workflow and for the implementation PR of a live implement
  * workflow (the maximum when both apply). One statement.
@@ -377,10 +375,10 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
   const q = queryDb(db);
   const k = q.k as any;
   const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ks"), (j: any) => j.onRef("ks.repo", "=", "w.repo").onRef("ks.number", "=", "w.number"))
-    .select((eb: any) => ["w.repo as repo", "w.number as number", score(eb).as("s")]).where("w.state", "in", LIVE_STATES);
+    .select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
   const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
     .innerJoin(resolveKeys(db, keys, "kt"), (j: any) => j.onRef("kt.repo", "=", "i.repo").onRef("kt.number", "=", "i.pr_number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", score(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
   for (const r of await q.all(own.unionAll(viaPr)) as { repo: string; number: number; s: number | string }[]) {
     const key = refKey(r.repo, Number(r.number)), s = Number(r.s), old = out.get(key);
     if (old === undefined || s > old) out.set(key, s);

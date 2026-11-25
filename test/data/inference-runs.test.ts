@@ -8,6 +8,7 @@ import {
   loadRunsAfter, loadRunsById, loadRunningCounts, loadStepSpend, loadWorkerRuns, openRun, recordTexts, removeRunTexts, runWatermark, saveTools, setReportedModel, setRunProgress,
   type RunVisibility,
 } from "../../src/data/inference/index.ts";
+import { loadActivityRound } from "../../src/data/views/activity.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import type { Db } from "../../src/db/index.ts";
 import { expectFlat } from "../helpers/query-count.ts";
@@ -174,4 +175,31 @@ test("run reads and writers: statements do not grow with the number of runs, ite
       };
     }, 2, 12);
   }
+});
+
+both("the activity feed's model calls: one row per run at its first item, newest first, of one repo, without hidden repos' runs, and before a cursor", async ({ db }) => {
+  const q = queryDb(db);
+  const at = (i: number) => `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`;
+  const runs: number[] = [];
+  for (let i = 0; i < 9; i++) {
+    const id = await start(db, i === 4 ? [] : [{ repo: i % 2 ? "o/a" : "o/b", number: i + 1 }, ...(i === 5 ? [{ repo: "o/hidden", number: 1 }] : [])]);
+    await q.run(q.k.updateTable("main.agent_runs").set({ started_at: at(i), ...(i === 3 ? { first_repo: null, first_number: null } : {}) }).where("id", "=", id));
+    runs.push(id);
+  }
+  await saveTools(db, [{ runId: runs[7]!, seq: 1, tool: "Read", args: "{}", resultBytes: 1, isError: false, startedAt: null, endedAt: null, checkId: null }]);
+  const feed = async (o: { repo?: string; limit?: number; before?: number; hidden?: string[]; repos?: string[] }) => {
+    const r = await loadActivityRound(db, { staff: true, operator: true, hidden: o.hidden ?? [], own: new Set(), repos: o.repos ?? ["o/a", "o/b"] },
+      { kinds: new Set(["model-call"]), only: false, repo: o.repo ?? null, limit: o.limit ?? 50, before: o.before === undefined ? null : { at: at(o.before), id: "x" }, writeActions: null });
+    return r.bySource[0]!.rows;
+  };
+  const order = async (o: Parameters<typeof feed>[0]) => (await feed(o)).map((r) => runs.indexOf(Number(r.id)));
+  assert.deepEqual(await order({}), [8, 7, 6, 5, 3, 2, 1, 0], "a run with no items is left out");
+  assert.deepEqual(await order({ limit: 3 }), [8, 7, 6]);
+  assert.deepEqual(await order({ repo: "o/a" }), [7, 5, 3, 1], "a run without a stored first item counts");
+  assert.deepEqual(await order({ repo: "o/a", limit: 2, before: 5 }), [5, 3]);
+  assert.deepEqual(await order({ repo: "o/a", hidden: ["o/hidden"], limit: 2 }), [7, 3]);
+  assert.deepEqual(await order({ repos: ["o/b"], limit: 2 }), [8, 6]);
+  assert.deepEqual(await order({ repo: "o/a", repos: ["o/b"] }), []);
+  const [row] = await feed({ repo: "o/a" });
+  assert.deepEqual([row!.repo, Number(row!.number), Number(row!.tools)], ["o/a", 8, 1]);
 });

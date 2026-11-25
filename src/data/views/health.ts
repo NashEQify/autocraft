@@ -55,7 +55,7 @@ export type HealthFacts = {
 export type HealthOptions = {
   thresholds: HealthThresholds; leaderStaleMs: number; taskQueuedMs: number; foreignWarnMs: number;
   /** Whether Discord is configured: the Interactive taker rows are read only then. */
-  discord: boolean; stepWindow: number; stepDays: number;
+  discord: boolean; stepWindow: number; stepDays: number; stepLast: number;
 };
 
 /** Operators' Task Runner tokens with their helper status and Interactive slots, for the Discord taker check. */
@@ -92,7 +92,7 @@ export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): 
     control.loadTrackedRepos(db),
     mirror.loadRepoErrors(db),
     jobs.loadDeadlineStops(db),
-    jobs.loadStepRuns(db, { requestedBy: "pipeline", sinceDays: o.stepDays, window: o.stepWindow }),
+    jobs.loadStepRuns(db, { requestedBy: "pipeline", sinceDays: o.stepDays, window: o.stepWindow, last: o.stepLast }),
     planner.loadLiveness(db),
     q.all(q.k.selectFrom("user_tokens").innerJoin("access", "access.login", "user_tokens.login")
       .select(["user_tokens.login", "user_tokens.updated_at"]).where("user_tokens.status", "=", "refresh-failed")

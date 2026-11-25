@@ -11,7 +11,7 @@ import { autocraftTexts } from "../mainfix/status.ts";
 import { classify, derive, type Culprit, type HeadRow, type MainCheck, type MainCiState } from "./classify.ts";
 import { ownerOf } from "../owners.ts";
 import type { HiddenRepos } from "../hidden-sql.ts";
-import { loadMainCi, loadRepos, loadSyncState, saveMainHeads, saveSyncState, type MainHeadSummary } from "../data/mirror/index.ts";
+import { loadDecidingHeads, loadRepos, loadSyncState, saveMainHeads, saveSyncState, type MainHeadSummary } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { warmPass } from "../build/warm-queue.ts";
@@ -21,7 +21,7 @@ export const MAIN_FIX_BRANCH_PREFIX = "autocraft/main-ci-";
 
 /** Repos whose current default-branch head is red. */
 export async function redMainRepos(db: Db): Promise<Set<string>> {
-  return new Set([...await loadMainCi(db, {})].filter(([, heads]) => currentHead(heads)?.cur.state === "red").map(([repo]) => repo));
+  return new Set([...await loadDecidingHeads(db, [])].filter(([, heads]) => currentHead(heads)?.cur.state === "red").map(([repo]) => repo));
 }
 
 /** The repo's current head among its stored ones, and what derive() says of them; null when they name none. */
@@ -137,7 +137,7 @@ export type MainCiRepoRow = {
 
 /** One entry per repo with stored heads, red first, then by name. `hidden` repos are left out. */
 export async function mainCiRepos(db: Db, hidden: HiddenRepos = []): Promise<MainCiRepoRow[]> {
-  const by = await loadMainCi(db, { hiddenOk: hidden });
+  const by = await loadDecidingHeads(db, hidden);
   const out: MainCiRepoRow[] = [];
   for (const [repo, heads] of by) {
     const at = currentHead(heads);

@@ -1,4 +1,5 @@
 // Read models for dashboards, health and rates (M07 jobs).
+import type { Expression } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
@@ -18,7 +19,7 @@ const DURATION_SAMPLES = 60;
 const STOP_WINDOW = 5000;
 
 const isHidden = (h: HiddenRepos, repo: string): boolean => (h.visible ? !h.visible.includes(repo) : h.includes(repo));
-const jobCols = () => kx.cols("jobs");
+const jobCols = (alias?: string) => kx.cols("jobs", alias) as never as ReturnType<typeof kx.cols<"jobs">>;
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
 const pairsOf = (refs: Ref[]): [string, number][] => refs.map((r): [string, number] => [r.repo, r.number]);
 
@@ -55,7 +56,7 @@ export async function loadLiveBoard(db: Db, o: { quietSteps: string[]; recentMs:
   const [running, queued, recent, itemRows] = await db.together(() => Promise.all([
     q.all(runningQ() as ReturnType<typeof shown>), q.all(queuedQ() as ReturnType<typeof shown>), q.all(recentQ() as ReturnType<typeof shown>),
     q.all(q.k.selectFrom("job_items").select(["id", "job_id", "repo", "number", "outcome", "at"])
-      .where((eb) => eb.or([eb("job_id", "in", ids(runningQ)), eb("job_id", "in", ids(queuedQ)), eb("job_id", "in", ids(recentQ))]))
+      .where("job_id", "in", q.k.selectFrom(ids(runningQ).as("a")).select("a.id").unionAll(q.k.selectFrom(ids(queuedQ).as("b")).select("b.id")).unionAll(q.k.selectFrom(ids(recentQ).as("c")).select("c.id")))
       .$if(hasFilter(o.hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", o.hidden!))).orderBy("id")),
   ]));
   const items = new Map<number, JobItemRow[]>();
@@ -63,17 +64,26 @@ export async function loadLiveBoard(db: Db, o: { quietSteps: string[]; recentMs:
   return { running, queued, recent, items };
 }
 
+/**
+ * Jobs `n` from the newest one of `step` on, in descending order of the index on (step, id): with a limit it stops there, where an equality on the step
+ * lets Postgres walk all jobs by id to find a step that has few. The rows of earlier steps follow; the caller keeps `step`'s own.
+ */
+const newestOfStep = (db: Db, step: Expression<string>) =>
+  queryDb(db).k.selectFrom("jobs as n").select(["n.id", "n.step"]).where((eb) => eb(eb.refTuple("n.step", "n.id"), "<=", eb.tuple(step, eb.lit(Number.MAX_SAFE_INTEGER)) as never))
+    .orderBy("n.step", "desc").orderBy("n.id", "desc");
+
 /** Recent run durations (ms) per step, newest first: the last 60 done jobs of each step. */
 export async function loadStepDurations(db: Db, steps: string[]): Promise<Map<string, number[]>> {
   const out = new Map<string, number[]>();
   if (!steps.length) return out;
   const q = queryDb(db);
-  const ranked = q.k.selectFrom("jobs").select((eb) => ["step", "started_at", "ended_at", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
-    .where(kx.inList(db, "step", steps)).where("state", "=", "done").where("started_at", "is not", null).where("ended_at", "is not", null);
-  for (const r of await q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.started_at", "r.ended_at", "r.rn"]).where("r.rn", "<=", DURATION_SAMPLES).orderBy("r.step").orderBy("r.rn"))) {
-    const ms = Date.parse(r.ended_at!) - Date.parse(r.started_at!);
-    const l = out.get(r.step);
-    if (l) l.push(ms); else out.set(r.step, [ms]);
+  const rows = await q.all(q.k.selectFrom(kx.jsonEach(db, kx.json([...new Set(steps)]), "s")).select((eb) => ["s.value as step",
+    kx.jsonRows(db, q.k.selectFrom(newestOfStep(db, eb.ref("s.value")).select(["n.started_at", "n.ended_at"]).where("n.state", "=", "done")
+      .where("n.started_at", "is not", null).where("n.ended_at", "is not", null).limit(DURATION_SAMPLES).as("t")).select(["t.started_at", "t.ended_at"])
+      .where("t.step", "=", eb.ref("s.value")).orderBy("t.id", "desc")).as("runs")]));
+  for (const r of rows) {
+    const runs = kx.parseJsonRows<{ started_at: string; ended_at: string }>(r.runs).map((x) => Date.parse(x.ended_at) - Date.parse(x.started_at));
+    if (runs.length) out.set(r.step, runs);
   }
   return out;
 }
@@ -83,10 +93,10 @@ export async function loadLastJobPerStep(db: Db, steps: string[], hidden?: Hidde
   const out = new Map<string, JobRow>();
   if (!steps.length) return out;
   const q = queryDb(db);
-  const ranked = q.k.selectFrom("jobs").select((eb) => [...jobCols(), eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
-    .where(kx.inList(db, "step", steps)).$if(hasFilter(hidden), (b) => b.where((eb) => repoVisible(db, eb, "repo", hidden!)));
-  const rows = await q.all(q.k.selectFrom(ranked.as("r")).selectAll("r").where("r.rn", "=", 1));
-  for (const { rn: _rn, ...r } of rows) out.set(r.step, r as unknown as JobRow);
+  const rows = await q.all(q.k.selectFrom(kx.jsonEach(db, kx.json([...new Set(steps)]), "s")).innerJoin("jobs as j", (b) => b.onRef("j.step", "=", "s.value").on("j.id", "=", (eb: any) =>
+    newestOfStep(db, eb.ref("s.value")).clearSelect().select("n.id").$if(hasFilter(hidden), (x) => x.where((e) => repoVisible(db, e, "n.repo", hidden!))).limit(1)))
+    .select(jobCols("j")));
+  for (const r of rows) out.set(r.step, r as unknown as JobRow);
   return out;
 }
 
@@ -99,8 +109,9 @@ export async function loadStageStates(db: Db, stages: { n: number; steps: string
   const [active, last] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>(eb.case().when("state", "=", "running").then(eb.lit(1)).else(eb.lit(0)).end()).as("running")])
       .where(kx.inList(db, "step", steps)).where("state", "in", ["running", "queued"]).groupBy("step")),
-    q.all(q.k.selectFrom(q.k.selectFrom("jobs").select((eb) => ["id", "step", "state", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
-      .where(kx.inList(db, "step", steps)).where("state", "in", ["done", "failed"]).as("r")).select(["r.id", "r.step", "r.state"]).where("r.rn", "=", 1)),
+    q.all(q.k.selectFrom(kx.jsonEach(db, kx.json(steps), "s")).innerJoin("jobs as j", (b) => b.onRef("j.step", "=", "s.value").on("j.id", "=", (eb: any) =>
+      newestOfStep(db, eb.ref("s.value")).clearSelect().select("n.id").where("n.state", "in", ["done", "failed"]).limit(1)))
+      .select(["j.id", "j.step", "j.state"])),
   ]));
   const running = new Map(active.map((r) => [r.step, Number(r.running) === 1]));
   for (const s of stages) {
@@ -191,14 +202,21 @@ export async function loadJobStamp(db: Db, repo: string, refs?: Ref[]): Promise<
   return { count: Number(agg?.n ?? 0), newestId: agg?.newest ?? null, states: agg?.states ?? "", positions: new Map(pos.map((r) => [r.id, Number(r.pos)])) };
 }
 
-/** Finished runs of the jobs `requestedBy` started: those of the newest `window` job ids that ended in the last `sinceDays` days, a runner restart's left out, newest first. */
-export async function loadStepRuns(db: Db, o: { requestedBy: string; sinceDays: number; window: number }): Promise<StepRun[]> {
+/**
+ * Finished runs of the jobs `requestedBy` started, among the newest `window` job ids, ended in the last `sinceDays` days, a runner restart's left out,
+ * newest first: the newest `last` of each step, and of a step whose newest `last` all failed every done one.
+ */
+export async function loadStepRuns(db: Db, o: { requestedBy: string; sinceDays: number; window: number; last: number }): Promise<StepRun[]> {
   const q = queryDb(db);
   const since = new Date(Date.now() - o.sinceDays * 86_400_000).toISOString();
-  return await q.all(q.k.selectFrom("jobs").select(["id", "step", "state", "error", "started_at", "ended_at", "requested_by", "items"]).$narrowType<{ state: JobState }>()
+  const runs = q.k.selectFrom("jobs").select((eb) => ["id", "step", "state", "error", "ended_at", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
     .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", o.window))
     .where("requested_by", "=", o.requestedBy).where("state", "in", ["done", "failed"]).where("ended_at", ">", since)
-    .where((eb) => eb.or([eb("error", "is", null), eb("error", "<>", RUNNER_STOPPED)])).orderBy("id", "desc"));
+    .where((eb) => eb.or([eb("error", "is", null), eb("error", "<>", RUNNER_STOPPED)]));
+  const counted = q.k.selectFrom(runs.as("r")).selectAll("r")
+    .select((eb) => eb.fn.sum<number>(eb.case().when(eb.and([eb("r.rn", "<=", o.last), eb("r.state", "=", "failed")])).then(1).else(0).end()).over((w) => w.partitionBy("r.step")).as("failed"));
+  return await q.all(q.k.selectFrom(counted.as("c")).select(["c.id", "c.step", "c.state", "c.error", "c.ended_at"]).$narrowType<{ state: JobState }>()
+    .where((eb) => eb.or([eb("c.rn", "<=", o.last), eb.and([eb("c.failed", "=", o.last), eb("c.state", "=", "done")])])).orderBy("c.id", "desc"));
 }
 
 /**

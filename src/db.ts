@@ -20,7 +20,7 @@ import { SIM_THRESHOLD } from "./dupes/scan.ts";
 import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
-import { ACTIVE_LEG_INDEX, ACTIVE_LEG_STATES, copyStateSqlite, oneActiveLegSqlite } from "./db/state-copy.ts";
+import { ACTIVE_LEG_INDEX, ACTIVE_LEG_STATES, builtAfterCopy, copyStateSqlite, oneActiveLegSqlite } from "./db/state-copy.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
 
@@ -434,6 +434,11 @@ const STATE_INDEXES = [
   "CREATE INDEX IF NOT EXISTS main.fixups_operator_fix ON fixups(operator_fix) WHERE operator_fix IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS main.ci_fixes_lint_task ON ci_fixes(lint_task) WHERE lint_task IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS main.conflict_merges_lint_task ON conflict_merges(lint_task) WHERE lint_task IS NOT NULL",
+  // The calls that ended lately (the live board's workers), and a repo's newest calls (the activity feed of one repo).
+  "CREATE INDEX IF NOT EXISTS main.agent_runs_ended ON agent_runs(ended_at)",
+  "CREATE INDEX IF NOT EXISTS main.agent_runs_first ON agent_runs(first_repo, started_at)",
+  // The implementation a PR belongs to.
+  "CREATE INDEX IF NOT EXISTS main.implementations_pr ON implementations(repo, pr_number) WHERE pr_number IS NOT NULL",
   // One active pre-approved merge leg per PR: a second one is refused by the insert. Built after oneActiveLeg (src/db/state-copy.ts).
   `CREATE UNIQUE INDEX IF NOT EXISTS main.${ACTIVE_LEG_INDEX} ON preapprovals(repo, number) WHERE state IN (${ACTIVE_LEG_STATES.map((s) => `'${s}'`).join(", ")})`,
 ];
@@ -895,7 +900,7 @@ function open(path: string): DatabaseSync {
   addColumns(db);
   dropColumns(db);
   oneActiveLegSqlite(db);
-  for (const ix of ADDED_INDEXES) db.exec(ix);
+  for (const ix of ADDED_INDEXES) if (!builtAfterCopy(ix)) db.exec(ix);
   // The triggers are dropped and created again in one transaction: no write lands between, and a second process that
   // finished migrating first leaves them as they are.
   db.exec("BEGIN IMMEDIATE");
@@ -912,6 +917,7 @@ function open(path: string): DatabaseSync {
   migrateValues(db);
   backfill(db);
   copyStateSqlite(db);
+  for (const ix of ADDED_INDEXES) if (builtAfterCopy(ix)) db.exec(ix);
   buildSearchIndex(db);
   buildHashes(db);
   buildTextRefs(db);

@@ -22,7 +22,7 @@ import { splitStageTripsPg, TRIP_SPLIT_VERSION } from "./trip-split.ts";
 import { featuresRepoOnlyPg, FEATURES_REPO_ONLY_VERSION } from "./feature-repo-only.ts";
 import { retireFixAttemptsPg } from "./fix-retire.ts";
 import { PG_SCHEMA_GENERATION } from "./pg-generation.ts";
-import { copyStatePg, oneActiveLegPg } from "./state-copy.ts";
+import { builtAfterCopy, copyStatePg, oneActiveLegPg } from "./state-copy.ts";
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 type Op = (typeof OPS)[number];
@@ -226,7 +226,9 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     // The schema adds a unique index over the active pre-approved merge legs, which needs one active leg per PR first.
     await m.step({ label: "preapprovals: one active leg", table: "preapprovals", run: () => oneActiveLegPg(client) });
     // Columns are only ever added, which the views over the tables allow, so the views are replaced after the schema.
-    await m.ddl(pgSchemaSql(), "schema");
+    // Each index of the schema file is one line.
+    const schema = pgSchemaSql().split("\n");
+    await m.ddl(schema.filter((l) => !builtAfterCopy(l)).join("\n"), "schema");
     const parts = pgTriggerParts(pgColumns(await rows(PG_COLUMNS_SQL) as { t: string; c: string }[]));
     await m.ddl(parts.ddl, "live tables");
     await m.step({ label: "trigger functions", sql: [...parts.functions, PIN_SEARCH_PATH] });
@@ -251,6 +253,7 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     await m.step({ label: "fix attempts", run: () => retireFixAttemptsPg(client) });
     await m.step({ label: "features", run: () => featuresRepoOnlyPg(client) });
     await copyStatePg(client, m);
+    await m.ddl(schema.filter(builtAfterCopy).join("\n"), "after the copy");
     await m.step({ label: "stamp", run: async () => void (await client.query(`INSERT INTO settings (key, value) VALUES ('schema_stamp', $1), ('schema_generation', $2)
       ON CONFLICT (key) DO UPDATE SET value = excluded.value`, [stamp, String(PG_SCHEMA_GENERATION.generation)])) });
   }, opts);
