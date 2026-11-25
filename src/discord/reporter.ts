@@ -68,15 +68,16 @@ async function obtain(db: Db, box: TokenBox, provider: Provider, reporter: strin
     await failReporter(db, reporter, row.version, now);
     return { ok: false, signIn: true };
   }
-  let next: Tokens | null;
+  let next: Tokens;
   try {
-    next = await provider.refresh(t.refresh);
+    const r = await provider.refresh(t.refresh);
+    if ("refused" in r) {
+      await failReporter(db, reporter, row.version, now);
+      return { ok: false, signIn: true };
+    }
+    next = r;
   } catch {
     return { ok: false, signIn: false };
-  }
-  if (!next) {
-    await failReporter(db, reporter, row.version, now);
-    return { ok: false, signIn: true };
   }
   const swapped = Number((await db.run(db.k.updateTable("reporter_tokens")
     .set((eb) => ({ token_enc: box.seal(JSON.stringify(next), aad(reporter)), version: eb("version", "+", 1), updated_at: new Date(now).toISOString(), status: "ok" }))

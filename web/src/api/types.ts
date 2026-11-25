@@ -2521,7 +2521,7 @@ export interface NextPage {
 // ---- Now page (GET /api/now) ---------------------------------------------------
 
 /** A thing that needs attention; `to` is the page where it is fixed. `info` problems do not break "all healthy". */
-export type NowProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install" };
+export type NowProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install"; /** `to` is a server page (an authorization flow), opened with a full page load that returns here. */ fullPage?: true };
 export type NowHealth = {
   pipeline: { enabled: boolean; by: string | null; at: string | null };
   problems: NowProblem[];

@@ -334,6 +334,14 @@ async function appIdentityChecks({ db, probe }: CheckCtx): Promise<Check[]> {
   return [ok("app-keys", "/admin/github-app"), { id: "app-coverage", state: "warn", text, brief: "The GitHub App does not cover every tracked repo", since: null, count: uncovered.length, to: "/admin/github-app" }];
 }
 
+/** Logins whose stored GitHub App user token can no longer be refreshed: AutoCraft cannot act as them until they authorize again. */
+async function userTokensCheck({ db }: CheckCtx): Promise<Check[]> {
+  const rows = await db.all(db.k.selectFrom("user_tokens").select(["login", "updated_at"]).where("status", "=", "refresh-failed").orderBy("updated_at"));
+  if (!rows.length) return [ok("user-tokens", "/admin/github-app")];
+  const text = `AutoCraft can no longer act on GitHub as ${clip(rows.map((r) => r.login).join(", "), 120)} until ${rows.length === 1 ? "they authorize" : "each authorizes"} it again`;
+  return [{ id: "user-tokens", state: "warn", text, brief: "AutoCraft can no longer act as some people on GitHub", since: rows[0]!.updated_at, count: rows.length, to: "/admin/github-app" }];
+}
+
 /** The GitHub App was uninstalled from an account that is not an allowed owner (src/github/allowed-owners.ts): a warning for 24 hours, or until an operator acknowledges it. */
 async function foreignInstallCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
   const removed = await unackedRemovals(db, nowMs);
@@ -485,7 +493,7 @@ async function interactiveNoTakerCheck({ db, nowMs, mode }: CheckCtx): Promise<C
 }
 
 /** Every check, in the order the lists show them. */
-const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, rateCheck, deadlineChecks, stepStalledChecks, livenessCheck, appIdentityChecks, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
+const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, rateCheck, deadlineChecks, stepStalledChecks, livenessCheck, appIdentityChecks, userTokensCheck, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
 
 export async function computeChecks(db: Db, nowMs: number = Date.now(), probe = false): Promise<Check[]> {
   const mode = await inferenceMode(db);

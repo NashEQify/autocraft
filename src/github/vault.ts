@@ -1,22 +1,18 @@
 // The user-token vault: a usable GitHub App access token for a login, for the dashboard and the runner process alike
 // (both open the same database and derive the same TokenBox from the secrets file's session_key).
 //
-// Refresh protocol. GitHub refresh tokens are single use, and the token set lives in several copies: the login's
-// user_tokens row and each session from the same sign-in. Any process may refresh:
-//  1. read the row and its `version`; a fresh access token is returned as is;
-//  2. otherwise call the refresh endpoint with the row's refresh token;
-//  3. store the new pair only if `version` is unchanged (compare-and-swap), then copy it into every other stored
-//     copy of the old refresh token (sessions keep running, see shareRefresh);
-//  4. a refresh the endpoint rejects may mean another process used the token first: reread a few times, and only
-//     when the row stays unchanged mark it `refresh-failed`, also by compare-and-swap.
-// There is never a fallback to another identity: a final failure answers "needs sign-in".
+// Refreshes run through refreshShared (src/dash/server/token-refresh.ts): one at a time per login across every process,
+// with the row and the login's sessions written together, and a newer copy healing a refused one. There is never a
+// fallback to another identity: a final failure answers "needs sign-in".
 import { envVar } from "../env.ts";
 import { TokenBox } from "../dash/server/crypto.ts";
 import { resealLegacyValues } from "../dash/server/reseal.ts";
 import { readSecrets } from "../dash/server/config.ts";
 import { openAppKeys } from "./app-keys.ts";
 import { GitHubProvider, RevokeRefused, type Provider, type Tokens } from "../dash/server/provider.ts";
-import { failUserTokens, readUserTokens, revocationAad, shareRefresh, swapUserTokens } from "../dash/server/user-tokens.ts";
+import { readUserTokens, revocationAad } from "../dash/server/user-tokens.ts";
+import { refreshShared, usableAccess } from "../dash/server/token-refresh.ts";
+import { githubIdentity } from "./identity.ts";
 import type { Db } from "../db/index.ts";
 
 export type NeedsSignIn = { ok: false; needsSignIn: true; why: "no-token" | "refresh-failed" | "expired" };
@@ -25,7 +21,6 @@ export type Unavailable = { ok: false; needsSignIn: false };
 export type UserTokenResult = { ok: true; access: string } | NeedsSignIn | Unavailable;
 
 const EXPIRY_MARGIN = 60_000;
-const REREADS = 4;
 const MAX_REVOKE_ATTEMPTS = 5;
 
 export class Vault {
@@ -35,8 +30,6 @@ export class Vault {
   get #provider(): Provider { return this.#providerOf(); }
   #sweeping = false;
   #inflight = new Map<string, Promise<UserTokenResult>>();
-  /** Pause between rereads after a rejected refresh; tests set it to 0. */
-  waitMs = 300;
 
   /** `provider` may be a function, read at each use, so the GitHub App's registration can change while the vault lives. */
   constructor(db: Db, box: TokenBox, provider: Provider | (() => Provider)) {
@@ -58,39 +51,17 @@ export class Vault {
   }
 
   async #obtain(login: string, rejected: string | undefined): Promise<UserTokenResult> {
-    for (let attempt = 0; attempt < REREADS; attempt++) {
-      const row = await readUserTokens(this.#db, this.#box, login);
-      if (!row?.tokens) return { ok: false, needsSignIn: true, why: "no-token" };
-      if (row.status !== "ok") return { ok: false, needsSignIn: true, why: "refresh-failed" };
-      const t = row.tokens;
-      if (t.access !== rejected && (t.expiresAt === null || t.expiresAt - EXPIRY_MARGIN > Date.now())) return { ok: true, access: t.access };
-      if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) {
-        await failUserTokens(this.#db, login, row.version);
-        return { ok: false, needsSignIn: true, why: "expired" };
-      }
-      let next: Tokens | null;
-      try {
-        next = await this.#provider.refresh(t.refresh);
-      } catch (e) {
-        console.error(`user token refresh: ${(e as Error).message}`);
-        return { ok: false, needsSignIn: false };
-      }
-      if (next) {
-        if (await swapUserTokens(this.#db, this.#box, login, row.version, next)) {
-          await shareRefresh(this.#db, this.#box, login, t.refresh, next);
-          return { ok: true, access: next.access };
-        }
-        // Another writer stored a pair first; its pair is the one to use.
-        continue;
-      }
-      // Rejected: either the refresh token is dead, or another process just used it and is about to store the new pair.
-      if (this.waitMs) await new Promise((r) => setTimeout(r, this.waitMs));
-      const again = await readUserTokens(this.#db, this.#box, login);
-      if (again && again.version !== row.version) continue;
-      if (attempt < REREADS - 1 && this.waitMs) continue;
-      if (await failUserTokens(this.#db, login, row.version)) return { ok: false, needsSignIn: true, why: "refresh-failed" };
+    const row = await readUserTokens(this.#db, this.#box, login);
+    if (!row?.tokens) return { ok: false, needsSignIn: true, why: "no-token" };
+    if (row.status === "ok" && usableAccess(row.tokens, rejected)) return { ok: true, access: row.tokens.access };
+    // Under the app identity the sessions hold tokens of the same app, so they share refreshes with the row and may heal it.
+    const heal = await githubIdentity(this.#db) === "app";
+    if (row.status !== "ok" && (!heal || !await this.#db.get(this.#db.k.selectFrom("sessions").select("id_hash").where("login", "=", login).where("token_enc", "is not", null)))) {
+      return { ok: false, needsSignIn: true, why: "refresh-failed" };
     }
-    return { ok: false, needsSignIn: true, why: "refresh-failed" };
+    const r = await refreshShared(this.#db, this.#box, this.#provider, login, { kind: "user" }, { rejected, heal });
+    if (r.ok) return { ok: true, access: r.tokens.access };
+    return r.transient ? { ok: false, needsSignIn: false } : { ok: false, needsSignIn: true, why: r.why };
   }
 
   /**
@@ -143,7 +114,8 @@ export class Vault {
     const sameSignIn = !!own?.tokens && (own.tokens.access === t.access || (!!t.refresh && own.tokens.refresh === t.refresh));
     const refreshed = async (): Promise<string | null> => {
       if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) return null;
-      return (await this.#provider.refresh(t.refresh))?.access ?? null;
+      const next = await this.#provider.refresh(t.refresh);
+      return "refused" in next ? null : next.access;
     };
     let ok = false;
     const expired = t.expiresAt !== null && t.expiresAt - EXPIRY_MARGIN <= Date.now();
