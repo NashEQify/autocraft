@@ -136,6 +136,23 @@ test("the activity pass skips a missing item, retries a failed one later and goe
   assert.deepEqual(state, { error: null, retry_at: null }, "a successful read clears the earlier failure");
 });
 
+test("an item whose activity cannot be stored is a failed attempt and the others of the pass are stored", async () => {
+  const db = await connectDb(":memory:");
+  await db.run(db.k.insertInto("items").values([1, 2, 3].map((n) => ({
+    repo: "photocraft", number: n, kind: "issue", state: "OPEN", author: "dev", created_at: "2026-01-01T00:00:00Z", updated_at: `2026-01-0${n}T00:00:00Z`, head_oid: null,
+  }))));
+  const client = { spent: 0, remaining: 5000, async query(_q: string, v: { number: number }) {
+    // Item 2's event has no time, which the table refuses.
+    return { repository: { issueOrPullRequest: { __typename: "Issue", issueTimeline: { nodes: [{ __typename: "LabeledEvent", id: `E${v.number}`, createdAt: v.number === 2 ? null : "2026-01-01T00:00:00Z" }] } } } };
+  } };
+  const now = new Date("2026-01-10T00:00:00Z");
+  assert.equal(await syncActivity(db, client, now), 3);
+  assert.deepEqual((await db.all(db.k.selectFrom("item_activity").select("id").orderBy("id"))).map((r) => r.id), ["E1", "E3"]);
+  const synced = await db.all(db.k.selectFrom("activity_sync").select(["number", "error", "retry_at"]).orderBy("number"));
+  assert.deepEqual(synced.map((r) => [Number(r.number), r.error !== null, r.retry_at !== null]), [[1, false, false], [2, true, true], [3, false, false]]);
+  assert.equal(await syncActivity(db, client, now), 0, "it waits for its retry time");
+});
+
 test("decision_items follows a decision that changes or goes away", async () => {
   const db = await connectDb(":memory:");
   await db.run(db.k.insertInto("decisions").values({ id: "d", kind: "merge", repo: "photocraft", number: null, items: null, question: "q", options: "[]", asked_at: "2026-01-01T00:00:00Z" }));

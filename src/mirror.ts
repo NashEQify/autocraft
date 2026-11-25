@@ -513,6 +513,29 @@ const settledTimes = (nodes: readonly { updatedAt: string }[], before: string): 
 /** `mark`: how far pages without items settled the window past the last mark recorded; the caller records it. */
 export type SearchResult = { count: number; newest: string | null; slices: number; fallbacks: number; mark: string | null };
 
+/**
+ * Writes the items in one transaction. When it fails for another reason than the fence, they are written one by one, so every item that
+ * can be stored is, and the first error is thrown after.
+ */
+async function writeEach(db: Db, items: NodeWrite[], o: { readAt?: string; inside?: () => Promise<void> } = {}): Promise<void> {
+  try {
+    await writeNodes(db, items, o);
+  } catch (e) {
+    if (isFenced(e) || items.length < 2) throw e;
+    console.warn(`  ${items.length} items failed to write in one transaction (${(e as Error).message}): writing them one by one`);
+    let first: unknown = null;
+    for (const w of items) {
+      try { await writeNodes(db, [w], { readAt: o.readAt }); } catch (e1) {
+        if (isFenced(e1)) throw e1;
+        first ??= e1;
+        console.warn(`  ${w.repo}#${w.n.number}: not stored: ${(e1 as Error).message}`);
+      }
+    }
+    if (first) throw first;
+    if (o.inside) await db.write(o.inside);
+  }
+}
+
 // Everything updated from `since` to `until`, oldest slice first, each slice in updatedAt order. `newest` is the largest
 // updatedAt returned (tracked repos or not), the next sync's starting point; null when nothing matched.
 // `progress(t)` runs in the write transaction of a page once every item updated before `t` is stored (see pageMark), so
@@ -542,8 +565,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
     }
   }
 
-  // One write transaction per page. When it fails for another reason than the fence, the items are written one by one,
-  // so every item that can be stored is, and the run then fails with the first error, the page's mark unrecorded.
+  // One write transaction per page; when an item cannot be stored the run fails with the page's mark unrecorded (writeEach).
   async function write(nodes: Node[], mark: string | null): Promise<void> {
     const items: NodeWrite[] = [];
     for (const n of nodes) {
@@ -558,22 +580,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
     if (!items.length) return;
     out.mark = null;
     const inside = settled && progress ? () => progress(settled) : undefined;
-    try {
-      await writeNodes(db, items, { readAt: startedAt, inside });
-    } catch (e) {
-      if (isFenced(e) || items.length < 2) throw e;
-      console.warn(`  a page of ${items.length} items failed to write (${(e as Error).message}): writing them one by one`);
-      let first: unknown = null;
-      for (const w of items) {
-        try { await writeNodes(db, [w], { readAt: startedAt }); } catch (e1) {
-          if (isFenced(e1)) throw e1;
-          first ??= e1;
-          console.warn(`  ${w.repo}#${w.n.number}: not stored: ${(e1 as Error).message}`);
-        }
-      }
-      if (first) throw first;
-      if (inside) await db.write(inside);
-    }
+    await writeEach(db, items, { readAt: startedAt, inside });
     out.count += items.length;
     for (const w of items) if (w.n.updatedAt > (repoNewest.get(w.repo) ?? "")) repoNewest.set(w.repo, w.n.updatedAt);
   }
@@ -871,19 +878,30 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
   const goneRefs: string[] = [];
   // Every item is stored with the time its own request was sent; a page's worth shares one write.
   const read: (NodeWrite & { readAt: string })[] = [];
-  const store = async (): Promise<void> => { if (read.length) await writeNodes(db, read.splice(0)); };
-  for (const r of stale) {
-    const sentAt = iso(new Date());
-    const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
-    if (n && n.repository?.name === name && ownedBy(n, name)) {
-      read.push({ repo: name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n, readAt: sentAt });
-      updated++;
-      if (read.length >= FULL_PAGE) await store();
-    } else goneRefs.push(`${name}#${r.number}`);
-  }
-  await store();
+  const store = async (): Promise<void> => { if (read.length) await writeEach(db, read.splice(0)); };
+  let failed: unknown = null;
+  const attempt = async (f: () => Promise<void>): Promise<void> => {
+    try { await f(); } catch (e) {
+      if (isFenced(e)) throw e;
+      failed ??= e;
+    }
+  };
+  // A read that fails ends the reading; what the reads before it found is stored all the same, and the caller then gets the first failure.
+  await attempt(async () => {
+    for (const r of stale) {
+      const sentAt = iso(new Date());
+      const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
+      if (n && n.repository?.name === name && ownedBy(n, name)) {
+        read.push({ repo: name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n, readAt: sentAt });
+        updated++;
+        if (read.length >= FULL_PAGE) await attempt(store);
+      } else goneRefs.push(`${name}#${r.number}`);
+    }
+  });
+  await attempt(store);
   // Deleted or transferred items are marked CLOSED (no consumer reads a state other than OPEN, CLOSED and MERGED) and audited.
   const gone = await closeGoneItems(db, goneRefs, iso(now));
+  if (failed) throw failed;
   await markReposReconciled(db, [{ name, at: iso(now) }]);
   return { open: listed.size, updated, gone };
 }

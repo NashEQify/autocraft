@@ -74,6 +74,9 @@ export function activityRead(repo: string, number: number, node: Node, item: { h
   return read;
 }
 
+/** Items stored in one write. */
+const STORE_EVERY = 20;
+
 /**
  * Reads the items whose head or update time moved since their last read, newest update first, and the ones whose read failed once their
  * retry time passed. A failed or missing item does not stop the pass. Returns how many it read.
@@ -83,8 +86,23 @@ export async function syncActivity(db: Db, client: Querier, now: Date = new Date
   const due = await listActivityDue(db, { since, now: now.toISOString(), limit: ACTIVITY_PER_PASS });
   const started = Date.now();
   const at = now.toISOString();
-  const reads: ActivityRead[] = [];
-  const attempts: ActivityAttempt[] = [];
+  let reads: ActivityRead[] = [], attempts: ActivityAttempt[] = [];
+  const retryAt = new Date(now.getTime() + RETRY_AFTER_MS).toISOString();
+  // What was read is stored as the pass goes. When a write fails its items are stored one by one, so an item the database rejects is
+  // recorded as a failed attempt and the rest of the pass is kept.
+  const store = async (): Promise<void> => {
+    const part = { reads, attempts };
+    reads = []; attempts = [];
+    try { await saveActivity(db, part); } catch (e) {
+      if (part.reads.length === 0) throw e;
+      await saveActivity(db, { reads: [], attempts: part.attempts });
+      for (const r of part.reads) {
+        try { await saveActivity(db, { reads: [r], attempts: [] }); } catch (one) {
+          await saveActivity(db, { reads: [], attempts: [{ repo: r.repo, number: r.number, head: r.head, updatedAt: r.updatedAt, at, error: String((one as Error)?.message ?? one).slice(0, 200), retryAt }] });
+        }
+      }
+    }
+  };
   let read = 0;
   let limited: unknown = null;
   for (const it of due) {
@@ -100,11 +118,12 @@ export async function syncActivity(db: Db, client: Querier, now: Date = new Date
       const msg = String((e as Error)?.message ?? e);
       // The limit applies to every item; the caller logs it and the next pass starts again.
       if (/rate limit/i.test(msg)) { limited = e; break; }
-      attempts.push({ ...base, at, error: msg.slice(0, 200), retryAt: new Date(now.getTime() + RETRY_AFTER_MS).toISOString() });
+      attempts.push({ ...base, at, error: msg.slice(0, 200), retryAt });
     }
     read++;
+    if (reads.length + attempts.length >= STORE_EVERY) await store();
   }
-  await saveActivity(db, { reads, attempts });
+  await store();
   if (limited) throw limited;
   return read;
 }

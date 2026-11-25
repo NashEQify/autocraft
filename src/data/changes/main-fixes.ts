@@ -2,7 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { openItem } from "../mirror/fragments.ts";
+import { itemNotMirrored, openItem } from "../mirror/fragments.ts";
 import { num, push, refKey, rowsOf } from "./rows.ts";
 import type { MainFixRow, MainFixVerdict, RefKey } from "./types.ts";
 
@@ -75,14 +75,14 @@ export async function loadMainFixPrs(db: Db, repos?: string[]): Promise<Set<RefK
 
 /**
  * The lowest number of our own fix PR for the repo that is still open and was updated at or after `since`, or null. A PR the
- * mirror has no row of does not count as open.
+ * mirror has no row of counts as open: it was just opened.
  */
 export async function loadOpenFixPr(db: Db, repo: string, since: string): Promise<number | null> {
   const k = queryDb(db).k as any;
   const r = (await rowsOf<any>(db, k.selectFrom("main.main_fixes as f").select((eb: any) => eb.fn.min("f.pr_number").as("n"))
     .where("f.repo", "=", repo).where("f.state", "=", "pr-opened").where("f.pr_number", "is not", null).where("f.updated_at", ">=", since)
     // reads: mirror.items (open item fragment)
-    .where((eb: any) => openItem(eb, "f.repo", "f.pr_number"))))[0];
+    .where((eb: any) => eb.or([openItem(eb, "f.repo", "f.pr_number"), itemNotMirrored(eb, "f.repo", "f.pr_number")]))))[0];
   return r?.n === null || r?.n === undefined ? null : Number(r.n);
 }
 

@@ -6,7 +6,7 @@ import type { Db, Dialect } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import {
   attemptsIn, cifixAt, clearSessions, countMainFixes, failuresSince, finishInfraRerun, finishPatch, fixupAtHead, loadFixupVerdicts, loadLatestFixPushes, loadLatestFixupAt, loadLintingRows,
-  loadMainFixDue, loadMainFixes, loadMainFixStates, loadOperatorFixResults, loadPatchFacts, loadPatchSignature, loadPatchTimeline, loadPushEdges, loadSessionRows, loadStoredPatches,
+  loadMainFixDue, loadMainFixes, loadMainFixStates, loadOpenFixPr, loadOperatorFixResults, loadPatchFacts, loadPatchSignature, loadPatchTimeline, loadPushEdges, loadSessionRows, loadStoredPatches,
   lintOf, madeBy, outcomeRows, pushChainOf, recordPatchChecks, recordPushing, saveMainFixes, setOwnDiff, startInfraRerun, storePatch, supersedePatches,
 } from "../../src/data/changes/index.ts";
 import type { MainFixRow } from "../../src/data/changes/index.ts";
@@ -154,6 +154,9 @@ both("main fix rows upsert in one call, keep their creation time, and answer the
   assert.equal(row!.state, "pr-opened");
   assert.equal(row!.createdAt, T0, "created_at is not rewritten");
   assert.equal(row!.updatedAt, T1);
+  assert.equal(await loadOpenFixPr(db, "app", T0), 7, "a PR the sync has not read yet was just opened");
+  await queryDb(db).run(queryDb(db).k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "CLOSED", created_at: T0, updated_at: T0 } as never));
+  assert.equal(await loadOpenFixPr(db, "app", T0), null);
   const due = (await loadMainFixDue(db, [{ repo: "app", headSha: "red", running: false }, { repo: "app", headSha: "new", running: true }]));
   assert.deepEqual(due.get("app@red")!.rows.map((r) => r.check), ["build", "lint"]);
   assert.equal(due.get("app@red")!.staleNeedsFix, true, "an older head still holds a needs-fix row");

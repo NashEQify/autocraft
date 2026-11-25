@@ -263,15 +263,16 @@ export async function saveVerdicts(db: Db, rows: VerdictInput[]): Promise<Set<Re
   return stored;
 }
 
-/** One transaction for a Jev chunk's verdict rows and `classify_state` rows. */
-export async function saveJevChunk(db: Db, c: { verdicts: VerdictInput[]; failed: JevFailed[] }): Promise<Set<RefKey>> {
-  const r = await db.write(async () => {
+/**
+ * One transaction for a Jev chunk's verdict rows and `classify_state` rows. A verdict that cannot be stored is left out and its error
+ * returned, not thrown: the caller throws it once the transaction it wraps this in has committed the rest.
+ */
+export async function saveJevChunk(db: Db, c: { verdicts: VerdictInput[]; failed: JevFailed[] }): Promise<{ stored: Set<RefKey>; error?: unknown }> {
+  return await db.write(async () => {
     const res = await storeVerdicts(db, c.verdicts);
     await markJevFailed(db, c.failed);
     return res;
   });
-  if (r.error !== undefined) throw r.error;
-  return r.stored;
 }
 
 /** Sets `input_hash` on the run's haiku rows and deletes the item's superseded jev rows; two statements per 500 items. */
