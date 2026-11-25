@@ -8,22 +8,20 @@
 // so; a helper that stopped without a word stops counting once its last claim and heartbeats are old. The helpers of a Manual
 // only user (manual-only.ts) take only the user's own picks and follow-ups, so they are no room. For work its user started or
 // approved (started.ts) a helper is room whatever its Manual only, My repos, tasks and items.
-import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
-import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { ownLaneLeasesOfToken, leasedBy, queueSnapshot, runnerTakes } from "./calls.ts";
 import { claimClass } from "./claim-class.ts";
+import { leasedIn } from "./calls.ts";
+import { orderedOf, type Ordered } from "./cands.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
-import { manualExpr } from "./manual-only.ts";
-import { userMaxCalls } from "./max-calls.ts";
-import { claimRepos } from "./my-repos.ts";
-import { TASK_CHOICES, taskOfStep, userSkips } from "./my-tasks.ts";
-import { itemFilter, type ItemFilter } from "./task-items.ts";
+import { claimReposOf } from "./my-repos.ts";
+import { TASK_CHOICES, skipsIn, taskOfStep } from "./my-tasks.ts";
+import type { ItemFilter } from "./task-items.ts";
 import { scaled } from "./time-scale.ts";
-import { readStartedCalls, type StartedCalls } from "./started.ts";
+import { startedOf } from "./started.ts";
+import { runnerTakes } from "./rules.ts";
 import { HEARTBEAT_S } from "./protocol.ts";
-import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { inList } from "../db/kx.ts";
+import { loadQueue, type RunnerRow } from "../data/runners/index.ts";
+import { canWriteOf, itemFilterIn, loadView, settingsOf, type RemoteView } from "./view.ts";
 
 /** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
 export const IDLE_FRESH_MS = scaled(45_000);
@@ -49,55 +47,48 @@ const LIVE_LEASE_MS = 3 * scaled(HEARTBEAT_S * 1000);
  * (`idle_repos`) narrowed by the user's current My repos.
  */
 export async function remoteRoom(db: Db, cls: number, nowMs: number = Date.now(), repos?: readonly string[], step?: string): Promise<number> {
-  return await roomOf(db, await roomState(db, nowMs), cls, nowMs, repos, step);
+  return roomOf(await roomState(db, nowMs), cls, repos, step);
 }
 
-/**
- * Whether each of `logins` counts as able to write to a repo for the room: true unless a non-write permission confirmed within
- * PERM_READ_TTL is cached. One query for every login.
- */
-export async function roomCanWrite(db: Db, logins: readonly string[], nowMs: number): Promise<(login: string, repo: string) => boolean> {
-  const denied = new Set<string>();
-  for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", [...new Set(logins)], "citext"))))
-    if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
-  return (login, repo) => !denied.has(`${login.toLowerCase()}\n${repo}`);
-}
-
-type Helper = { token_id: number; login: string; role: string | null; idle_claim_at: number | null; idle_repos: string | null; slots: number; leased: number; beat: number | null };
+type Helper = RunnerRow;
 type Taker = { h: Helper; active: boolean; r: { login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter } };
 /**
- * What the room reads of the helpers, once for any number of room questions at one moment: the fresh, ready helpers that are
- * not Manual only and whose users take some task and some item (`ready`; with no task ticked, or only fast-tracked items and none
- * open, a user takes only picks, as Manual only), those of them that are active, and on first use their permissions, repos and users' caps.
+ * What the room reads, once for any number of room questions at one moment: the runner snapshot and the queue; of the runners,
+ * the fresh, ready ones that are not Manual only and whose users take some task and some item (`ready`; with no task ticked, or
+ * only started items and none open, a user takes only picks, as Manual only), and those of them that are active.
  */
 export type RoomState = {
-  ready: Helper[]; active: Helper[]; takers?: { list: Taker[]; canWrite: (login: string, repo: string) => boolean }; left: Map<string, number>;
+  v: RemoteView; queue: Ordered; ready: Helper[]; active: Helper[]; takers?: { list: Taker[]; canWrite: (login: string, repo: string) => boolean }; left: Map<string, number>;
   /** Every fresh, ready helper, Manual only and without tasks too: room for the work its user started or approved (started.ts). */
   fresh: Helper[];
-  /** Read on first use: whose started work is whose. */
-  started?: StartedCalls;
 };
 
 export async function roomState(db: Db, nowMs: number = Date.now()): Promise<RoomState> {
-  const fresh = await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
-    .select((eb) => ["t.id as token_id", "t.login", "a.role", manualExpr(db, eb, "t.login").as("manual"), "t.idle_claim_at", "t.idle_repos", eb.fn.coalesce("h.slots", eb.lit(1)).as("slots"),
-      eb.selectFrom("main.remote_calls as c").select((e) => e(e.fn.countAll<number>(), "-", ownLaneLeasesOfToken(db, "t.id")).as("n")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("leased"),
-      eb.selectFrom("main.remote_calls as c").select((e) => e.fn.max<number | null>("c.heartbeat_at").as("m")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("beat")]).$narrowType<{ leased: number }>()
-    .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.readiness", "=", "ready").where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS));
-  const rows = await filterSeq(fresh, async (h) => !h.manual && (await userSkips(db, h.login)).size < TASK_CHOICES.length && ((await itemFilter(db, h.login))?.refs.size ?? 1) > 0);
-  return { ready: rows, active: rows.filter((h) => isActive(h, nowMs)), left: new Map(), fresh };
+  const [v, queue] = await db.together(() => Promise.all([loadView(db, nowMs), loadQueue(db, nowMs)]));
+  return roomStateOf(v, orderedOf(queue, nowMs));
+}
+
+/** RoomState over a reading already made. */
+export function roomStateOf(v: RemoteView, queue: Ordered): RoomState {
+  const s = v.snapshot, nowMs = v.now;
+  const fresh = s.runners.filter((r) => r.readiness === "ready" && r.reportedAt !== null && r.reportedAt >= nowMs - STATUS_FRESH_MS);
+  const rows = fresh.filter((h) => {
+    const set = settingsOf(s, h.login);
+    return !set.manualOnly && skipsIn(set.skipTasks).size < TASK_CHOICES.length && (itemFilterIn(s, h.login)?.refs.size ?? 1) > 0;
+  });
+  return { v, queue, ready: rows, active: rows.filter((h) => isActive(h, nowMs)), left: new Map(), fresh };
 }
 
 const isActive = (h: Helper, nowMs: number): boolean =>
-  (h.beat !== null && Number(h.beat) >= nowMs - LIVE_LEASE_MS) || (h.idle_claim_at !== null && Number(h.idle_claim_at) >= nowMs - IDLE_FRESH_MS);
+  (h.beatAt !== null && h.beatAt >= nowMs - LIVE_LEASE_MS) || (h.idleClaimAt !== null && h.idleClaimAt >= nowMs - IDLE_FRESH_MS);
 
-async function takersOf(db: Db, st: RoomState, nowMs: number): Promise<NonNullable<RoomState["takers"]>> {
+function takersOf(st: RoomState): NonNullable<RoomState["takers"]> {
+  const s = st.v.snapshot;
   return st.takers ??= {
-    canWrite: await roomCanWrite(db, st.ready.map((h) => h.login), nowMs),
-    list: await mapSeq(st.ready, async (h) => {
-      let own: string[] | undefined;
-      try { own = h.idle_repos ? JSON.parse(h.idle_repos) as string[] : undefined; } catch { /* every repo */ }
-      return { h, active: isActive(h, nowMs), r: { login: h.login, role: h.role ?? "", repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login) } };
+    canWrite: canWriteOf(s),
+    list: st.ready.map((h) => {
+      const set = settingsOf(s, h.login);
+      return { h, active: isActive(h, st.v.now), r: { login: h.login, role: h.role ?? "", repos: claimReposOf(set.repos, h.idleRepos ?? undefined), skip: skipsIn(set.skipTasks), items: itemFilterIn(s, h.login) } };
     }),
   };
 }
@@ -110,12 +101,13 @@ async function takersOf(db: Db, st: RoomState, nowMs: number): Promise<NonNullab
  * The calls ahead that only runners taking every item may take use up those runners' slots alone, so a call on a chosen item
  * finds the filtered runners' slots free while the others are busy with calls they alone take.
  */
-export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, repos?: readonly string[], step?: string, refs?: readonly { repo: string; number: number }[]): Promise<number> {
+export function roomOf(st: RoomState, cls: number, repos?: readonly string[], step?: string, refs?: readonly { repo: string; number: number }[]): number {
+  const nowMs = st.v.now;
   let takers: { h: Helper; filtered: boolean }[] = st.active.map((h) => ({ h, filtered: false }));
   let takes: (c: { prompt_id: string; repos: readonly string[]; step?: string; refs?: readonly { repo: string; number: number }[] }) => boolean = () => true;
   let filteredTake: typeof takes = () => false;
   if ((repos !== undefined || step !== undefined || refs !== undefined) && st.active.length) {
-    const t = await takersOf(db, st, nowMs);
+    const t = takersOf(st);
     const task = step === undefined ? undefined : taskOfStep(step);
     const on = repos ?? (refs ? [...new Set(refs.map((x) => x.repo))] : undefined);
     const fit = t.list.filter(({ active, r }) => active && (on === undefined ? !(task !== undefined && r.skip.has(task)) && (r.items === null || [...r.items.repos].some((x) => runnerTakes(r, { prompt_id: "", repos: [x], step }, t.canWrite))) : runnerTakes(r, { prompt_id: "", repos: on, step, refs }, t.canWrite)));
@@ -127,10 +119,10 @@ export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, 
   // repos, tasks and items, as runners that take only some items; the calls ahead they take are those of their own started work.
   const on = repos ?? (refs ? [...new Set(refs.map((x) => x.repo))] : undefined);
   if (on?.length) {
-    const sw = st.started ??= await readStartedCalls(db, nowMs);
+    const sw = startedOf(st.v);
     const owners = sw.ownersFor({ repos: on, ...(refs && { refs }), ...(step !== undefined && { step }) });
-    const counted = new Set(takers.map((x) => x.h.token_id));
-    const extra = owners.size ? st.fresh.filter((h) => isActive(h, nowMs) && !counted.has(h.token_id) && owners.has(h.login.toLowerCase())
+    const counted = new Set(takers.map((x) => x.h.tokenId));
+    const extra = owners.size ? st.fresh.filter((h) => isActive(h, nowMs) && !counted.has(h.tokenId) && owners.has(h.login.toLowerCase())
       && sw.canTake(h.login, { prompt_id: "", repos: on })) : [];
     if (extra.length) {
       const logins = new Set(extra.map((h) => h.login.toLowerCase()));
@@ -146,15 +138,16 @@ export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, 
   const free = new Map<string, { n: number; filtered: boolean }>();
   for (const { h, filtered } of takers) {
     const key = h.login.toLowerCase();
-    const slots = Number(h.slots) - (Number(h.slots) >= 2 ? 1 : 0);
-    free.set(key, { n: (free.get(key)?.n ?? 0) + Math.max(0, slots - Number(h.leased)), filtered });
+    const all = h.slots ?? 1;
+    const slots = all - (all >= 2 ? 1 : 0);
+    free.set(key, { n: (free.get(key)?.n ?? 0) + Math.max(0, slots - h.leased), filtered });
   }
   let all = 0, some = 0;
   for (const [login, { n, filtered }] of free) {
     let left = st.left.get(login);
     if (left === undefined) {
-      const max = await userMaxCalls(db, login);
-      left = max === null ? Infinity : Math.max(0, max - await leasedBy(db, login));
+      const max = settingsOf(st.v.snapshot, login).maxCalls;
+      left = max === null ? Infinity : Math.max(0, max - leasedIn(st.v.snapshot, login));
       st.left.set(login, left);
     }
     if (filtered) some += Math.min(n, left);
@@ -162,7 +155,7 @@ export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, 
   }
   if (all + some === 0) return 0;
   let aheadAll = 0, aheadSome = 0;
-  for (const r of await queueSnapshot(db, nowMs)) {
+  for (const r of st.queue.all) {
     if (r.seen_at < nowMs - CALLER_STALE_MS || claimClass(r, nowMs) < cls || !takes(r)) continue;
     if (some > 0 && filteredTake(r)) aheadSome++;
     else aheadAll++;

@@ -21,16 +21,14 @@ import { DiscordKeys } from "../src/discord/keys.ts";
 import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } from "../src/discord/rest.ts";
 import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-issue-"));
 const db = await connectDb(join(dir, "d.db"));
 const keys = new DiscordKeys("k".repeat(40));
-await useTestAccount(db);
 after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const VOCAB = ["webp", "export", "quality", "dark", "mode", "layers"];

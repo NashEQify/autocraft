@@ -4,7 +4,9 @@
 import type { Embedder } from "../embed/model.ts";
 import type { VectorIndex } from "../embed/vectors.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
-import { hiddenExpr, isPublicRepo, publicRepoNames } from "../public/status.ts";
+import { isPublicRepo, publicRepoNames } from "../public/status.ts";
+import { loadRepos, loadItems } from "../data/mirror/index.ts";
+import { loadPublicItems } from "../data/views/public-status.ts";
 import type { Db } from "../db/index.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
@@ -35,6 +37,8 @@ export type SearchDeps = {
   db: Db; embedder: Embedder; index: VectorIndex; log: (line: string) => void;
   now?: () => number;
 };
+
+type Fact = { repo: string; number: number; kind: string; state: string; title: string | null; body: string | null; url: string; state_reason: string | null; closed_at: string | null; merged_at: string | null; updated_at: string | null; comments_count: number | null; reactions_count: number | null };
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -90,14 +94,16 @@ export class Search {
     const isPublic = new Set(await publicRepoNames(db));
     const hits = (await index.nearest(db, vec, SCAN, undefined, only)).filter((h) => isPublic.has(h.repo));
     if (!hits.length) return out;
-    const rows = await db.all(db.k.selectFrom("main.items as i").innerJoin("main.repos as r", "r.name", "i.repo")
-      .select((eb) => ["i.repo", "i.number", "i.title", "i.body", "i.kind", "i.state", "i.state_reason", "i.closed_at", "i.merged_at", "i.updated_at", "i.comments_count", "i.reactions_count",
-        eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.case().when("i.kind", "=", "pr").then(eb.val("/pull/")).else(eb.val("/issues/")).end()),
-          "||", eb.cast<string>("i.number", "text"))).as("url")])
-      .where((eb) => eb(eb.refTuple("i.repo", "i.number"), "in", hits.map((h) => eb.tuple(h.repo, h.number))))
-      .where("i.kind", "in", ["issue", "pr"])
-      .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels"))));
-    const facts = new Map(rows.map((x) => [`${x.repo}#${x.number}`, x]));
+    const refs = hits.map((h) => ({ repo: h.repo, number: h.number }));
+    const [items, visible, repos] = await db.together(() => Promise.all([
+      loadItems(db, refs, "full"), loadPublicItems(db, refs), loadRepos(db, { all: true, names: [...new Set(hits.map((h) => h.repo))] }),
+    ]));
+    const facts = new Map<string, Fact>();
+    for (const [key, x] of items) {
+      if ((x.kind !== "issue" && x.kind !== "pr") || !visible.has(key)) continue;
+      const owner = repos.get(x.repo)?.owner ?? DEFAULT_OWNER;
+      facts.set(key, { ...x, url: x.url ?? `https://github.com/${owner}/${x.repo}/${x.kind === "pr" ? "pull" : "issues"}/${x.number}` });
+    }
     for (const h of hits) {
       const r = facts.get(`${h.repo}#${h.number}`);
       if (!r) continue;

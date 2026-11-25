@@ -10,7 +10,7 @@ import { RepoSelect } from "../../ui/molecules/RepoSelect";
 import { TraceFilters } from "../../ui/molecules/TraceFilters";
 import { Page } from "../../ui/organisms/Page";
 import { useScrollAnchor } from "../../lib/useScrollAnchor";
-import { TraceEventBody } from "../item/TraceEventBody";
+import { TraceEventBody } from "./TraceEventBody";
 import { usePageProject, withProject } from "../../api/scope";
 
 const PAGE = 50;

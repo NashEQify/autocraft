@@ -7,16 +7,14 @@ import { test } from "node:test";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { claimCall, enqueueCall } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
 test("a claim limited by its login's refresh leases the short call, leaves the long one and is no idle helper", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-claim-timeout-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const tokenId = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, tokenId, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
@@ -27,7 +25,7 @@ test("a claim limited by its login's refresh leases the short call, leaves the l
   let n = 0;
   const claim = async (extra: Partial<Claim>) => await claimCall(db, { tokenId, login: "olga", role: "operator" },
     { requestId: `timeout-claim-${++n}`, protocol: PROTOCOL_VERSION, helperVersion: "1.4.2", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" }, ...extra }, async () => true);
-  const idleAt = async () => (await db.get(db.k.selectFrom("mcp_tokens").select("idle_claim_at").where("id", "=", tokenId)))!.idle_claim_at;
+  const idleAt = async () => (await db.get(db.k.selectFrom("remote_helpers").select("idle_claim_at").where("token_id", "=", tokenId)))!.idle_claim_at;
 
   const first = await claim({ maxTimeoutSeconds: 600 });
   assert.equal(first.lease?.id, short, "the call that fits, although the long one is ahead of it");

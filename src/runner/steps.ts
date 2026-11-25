@@ -16,6 +16,7 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { IMPLEMENT_BUCKETS } from "../implement/types.ts";
 import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
+import { findingKey, loadFindings, loadScans } from "../data/security/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** `cliOnly`: set from the command line only; the dashboard's run-step form does not offer it and refuses it. */
@@ -43,7 +44,7 @@ export type StepContext = {
   usageRun(runId: string): void;
   /** Items this job has handled so far (units attempted, such as items sent to a model), counted against the stage's daily limit. Pass the running total as work goes: it is saved at once, so a failed or stopped job keeps its count. */
   handled(n: number): void;
-  /** Progress that is not an item: a batch started, opened or advanced, a decision asked. A job with no items and no acted is recorded as having done nothing, and the autopilot does not queue it again until its input changes. */
+  /** Progress that is not an item: a batch started, opened or advanced. A job with no items and no acted is recorded as having done nothing, and the autopilot does not queue it again until its input changes. */
   acted(n: number): void;
   /** Set when a cancel was requested; long loops should stop between units of work. */
   cancelled(): Promise<boolean>;
@@ -88,7 +89,7 @@ export type StepDef = {
 /** Labelling writes to GitHub only for repos in the pipeline scope that an operator approved on the Repos page. */
 async function checkApproved(db: Db, p: Params): Promise<string | null> {
   const { approvalOf } = await import("../labels/approval.ts");
-  const { scopeRepos } = await import("../pilot.ts");
+  const { scopeRepos } = await import("./scope.ts");
   if (!(await scopeRepos(db)).has(String(p.repo))) return `${p.repo} is not in the pipeline scope`;
   return await approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
 }
@@ -98,14 +99,8 @@ export function modelsOf(step: StepDef | undefined, params: Params): string[] {
   return typeof m === "function" ? m(params) : (m ?? []);
 }
 
-/** Models served through a Claude account (everything but Jev, which has none). */
+/** Models that run on a Task Runner (everything but Jev). */
 export const usesClaude = (models: string[]): boolean => models.some((m) => m !== "jev");
-
-/** Merging is opt-in per repo: tracked repos include ones we do not maintain. */
-async function checkMergeApproved(db: Db, p: Params): Promise<string | null> {
-  const { mergeApprovalOf } = await import("../merge/approval.ts");
-  return await mergeApprovalOf(db, String(p.repo)) ? null : `merging in ${p.repo} is not approved`;
-}
 
 /** Approving workflow runs of outside contributors' PRs is opt-in per repo. */
 async function checkCiApproved(db: Db, p: Params): Promise<string | null> {
@@ -130,17 +125,10 @@ async function checkCommentApproved(db: Db, p: Params): Promise<string | null> {
   return await commentApprovalOf(db, String(p.repo)) ? null : `commenting in ${p.repo} is not approved`;
 }
 
-/** Pushing to contributors' branches and commenting the fixes are each opt-in per repo; the fix-up step needs either. */
-async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
-  const { pushApprovalOf } = await import("../fixup/approval.ts");
-  const { commentApprovalOf } = await import("../act/approval.ts");
-  return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
-}
-
 /** The `implement` buckets this build carries out. */
 const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build", "revise"]);
 
-/** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
+/** An implementation needs the repo's Implement switch and someone its live workflow acts for who settles on the repo. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
   const { implementRefusal } = await import("../implement/gate.ts");
   const bucket = String(p.bucket ?? "plan");
@@ -158,7 +146,8 @@ const SECURITY_FINDING_PARAMS: ParamDef[] = [
 
 /** The finding exists and is in a state the step works on. */
 async function securityFindingCheck(db: Db, p: Params, states: string[]): Promise<string | null> {
-  const row = await db.get(db.k.selectFrom("security_findings").select("state").where("repo", "=", String(p.repo)).where("number", "=", Number(p.number)));
+  const key = findingKey(String(p.repo), Number(p.number));
+  const row = (await loadFindings(db, [key], { internal: true })).get(key);
   if (!row) return "no such finding";
   return states.includes(row.state) ? null : `the finding is ${row.state}`;
 }
@@ -253,8 +242,8 @@ export const STEPS: StepDef[] = [
       const repo = String(ctx.params.repo);
       const refused = await checkApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      const { latestRun } = await import("../classify/settled.ts");
-      const runId = await latestRun(ctx.db);
+      const { classifyRun } = await import("../data/triage/index.ts");
+      const runId = await classifyRun(ctx.db);
       if (!runId) throw new Error("there is no classification run yet");
       const { applyLabels, ensureLabels } = await import("../labels/github.ts");
       const { Client } = await import("../mirror.ts");
@@ -265,29 +254,6 @@ export const STEPS: StepDef[] = [
       const stopAt = Date.parse(ctx.job.startedAt) + (stepDeadlineMin("labels-apply", limit) - 5) * 60_000;
       const r = await applyLabels(ctx.db, new Client(500), repo, { runId, limit, stopAt: Number.isNaN(stopAt) ? undefined : stopAt, apply: true, login: ctx.job.requestedBy, by: byOfJob(ctx.job.requestedBy), log: ctx.log, onLabeled: ctx.handled });
       return `${repo}: labelled ${r.labeled} of ${r.planned} items in ${r.batches} batches, ${r.failed.length} failed${r.stopped ? "; stopped before the time limit, the rest go in the next job" : ""}${r.paced ? "; paused for the GitHub write budget, the rest go in the next job" : ""}`;
-    },
-  },
-  {
-    name: "decide",
-    priority: 1,
-    title: "Ask decisions",
-    description: "Turns items that need a decision, and items where Jev and Haiku disagree between scope labels, into decisions on the dashboard, then prepares every open decision: one call of the judgement model writes the summary, the pick and drafted answers from what stopped the pipeline. Each prepare call counts as an item.",
-    stage: runStage("decide"),
-    requires: "operator",
-    models: () => ["opus"],
-    params: [
-      { name: "repo", label: "Repo", kind: "repo", help: "every tracked repo when empty" },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 50, help: "decisions to ask in this job; also the most prepare calls" },
-    ],
-    run: async (ctx) => {
-      const { runDecide } = await import("../decide/index.ts");
-      const r = await runDecide(ctx.db, {
-        repos: ctx.params.repo ? [String(ctx.params.repo)] : undefined,
-        limit: Number(ctx.params.limit),
-        onSent: ctx.handled,
-      }, ctx.log);
-      if (r.usageRun) ctx.usageRun(r.usageRun);
-      return `asked ${r.asked} decisions; ${r.prepared} prepared`;
     },
   },
   {
@@ -330,64 +296,44 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to start or merge in this job" },
     ],
-    check: checkMergeApproved,
+    // No repo check: whether a PR may merge is its own (src/core/may.ts), applied by the step to each PR.
     run: async (ctx) => {
       const { runMerge } = await import("../merge/index.ts");
       const { runBatches } = await import("../merge/batch.ts");
       const { runSingles } = await import("../merge/single.ts");
-      const refused = await checkMergeApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo), limit = Number(ctx.params.limit);
       const singly = await runSingles(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       if (singly) {
-        ctx.acted(singly.merged.length + singly.asked.length);
-        return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused, ${singly.asked.length} decisions asked`;
+        ctx.acted(singly.merged.length);
+        return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused`;
       }
       const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(b.runId);
-      let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[], asked: [] as string[] };
+      let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[] };
       if (limit > b.merged.length) {
         single = await runMerge(ctx.db, { repo, limit: limit - b.merged.length, dryRun: false, singleOnly: true, onMerged: (n) => ctx.handled(b.merged.length + n), by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       }
-      ctx.acted(b.started.length + b.published.length + b.split.length + b.superseded.length + b.failed.length + single.merged.length + single.asked.length + b.merged.length);
-      return `${repo}: ${b.merged.length} merged in batches (${b.started.length} started, ${b.published.length} opened, ${b.split.length} split), ${single.merged.length} merged singly, ${single.asked.length} decisions asked`;
-    },
-  },
-  {
-    name: "merge-ask",
-    title: "Ask Merge? decisions",
-    description: "Asks a \"Merge this PR?\" decision for every taken pull request the merge rule does not cover once its verification is in, in all tracked repos, whether or not merging is approved there. Calls no model and writes nothing to GitHub.",
-    stage: runStage("merge-ask"),
-    requires: "operator",
-    models: [],
-    params: [],
-    run: async (ctx) => {
-      const { askMergeDecisions } = await import("../merge/index.ts");
-      const { trackedNames } = await import("../repos.ts");
-      const ids = await askMergeDecisions(ctx.db, { repos: await trackedNames(ctx.db), log: ctx.log });
-      ctx.handled(ids.length);
-      return `Asked Merge? on ${ids.length} PR${ids.length === 1 ? "" : "s"}`;
+      ctx.acted(b.started.length + b.published.length + b.split.length + b.superseded.length + b.failed.length + single.merged.length + b.merged.length);
+      return `${repo}: ${b.merged.length} merged in batches (${b.started.length} started, ${b.published.length} opened, ${b.split.length} split), ${single.merged.length} merged singly`;
     },
   },
   {
     name: "act",
     title: "Comment and close",
-    description: "Posts one short comment and closes the items an operator answered Out of scope or Close, and asks a \"Close this PR?\" decision for each PR whose review says close. Skips an item that already closed or whose PR head moved. Also carries out queued card presses and opens the follow-up issues cards held until their PR merged. Calls no model.",
+    description: "Posts one short comment on each item a maintainer told AutoCraft to close and closes it as that maintainer. Skips an item that already closed or whose PR head moved; waits for a maintainer who has to sign in. Also carries out queued card presses and opens the follow-up issues cards held until their PR merged. Calls no model.",
     stage: runStage("act"),
     requires: "operator",
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 20, help: "items to act on in this job" },
     ],
-    check: checkCommentApproved,
+    // No repo check: a close is a person's command, and every card press and held issue is guarded by itself.
     run: async (ctx) => {
       const { runAct } = await import("../act/index.ts");
-      const refused = await checkCommentApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runAct(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.done.length + r.skipped.length + r.failed.length + r.asked.length + (r.cards ?? 0) + (r.held ?? 0));
-      const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed, ${r.asked.length} decisions asked${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
-      // A failed target ends the job as failed, so the registered failure backoff spaces its next tries (a target stops after ACT_MAX_ATTEMPTS).
+      ctx.acted(r.done.length + r.skipped.length + r.failed.length + (r.cards ?? 0) + (r.held ?? 0));
+      const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
+      // A failed close ends the job as failed, so the registered failure backoff spaces its next tries (a close stops after ACT_MAX_ATTEMPTS).
       if (r.failed.length) throw new Error(`${line}; ${r.failed[0]!.ref}: ${r.failed[0]!.reason}`);
       // Starts with the pacing message, so the failure backoff skips it like any paced job and the next pass runs it again.
       if (r.paced) throw new Error(`${r.paced}; ${line}`);
@@ -406,11 +352,9 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to fix up in this job" },
     ],
-    check: checkPushApproved,
+    // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runFixup } = await import("../fixup/index.ts");
-      const refused = await checkPushApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runFixup(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.pushed.length + r.asked.length + r.failed.length + r.held.length);
       return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} asked, ${r.failed.length} failed or refused, ${r.held.length} held`;
@@ -486,7 +430,7 @@ export const STEPS: StepDef[] = [
   {
     name: "dupes",
     title: "Find duplicates",
-    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. Each confirmed duplicate becomes a \"Close as a duplicate?\" decision; the act step closes only on an operator's answer. Writes nothing to GitHub.",
+    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. A confirmed duplicate is a signal on both items; it closes nothing and holds back only a pull request nobody started. Writes nothing to GitHub.",
     stage: runStage("dupes"),
     requires: "operator",
     exclusive: "dupes",
@@ -494,17 +438,17 @@ export const STEPS: StepDef[] = [
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 5000, default: 2000, help: "pairs to check in this job" }],
     run: async (ctx) => {
       const { runDupes } = await import("../dupes/index.ts");
-      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
+      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, progress: ctx.progress, cancelled: ctx.cancelled, timeUp: ctx.timeUp }, ctx.log);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
-      ctx.acted(r.scanned + r.pairsAdded + r.asked.length + r.answersApplied);
-      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}; ${r.asked.length} decisions asked, ${r.answersApplied} answers applied`;
+      ctx.acted(r.scanned + r.pairsAdded);
+      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}${r.left ? `, ${r.left} left for a later job` : ""}`;
     },
   },
   {
     name: "implement",
     priority: 1,
     title: "Implement issues",
-    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue.",
+    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue",
     stage: runStage("implement"),
     requires: "operator",
     models: ["opus"],
@@ -519,6 +463,7 @@ export const STEPS: StepDef[] = [
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo), number = Number(ctx.params.number);
+      if (ctx.params.mode !== "dry") await (await import("../implement/gate.ts")).moveTurns(ctx.db, repo, number);
       // The item page and the Now feed find the job by its item: its outcome, or its failure, is the job item.
       const { jobItem } = await import("./job-items.ts");
       try {
@@ -583,7 +528,7 @@ export const STEPS: StepDef[] = [
       { name: "scan", label: "Scan", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the scan row the API created" },
     ],
     check: async (db, p) => {
-      const row = await db.get(db.k.selectFrom("security_scans").select(["repo", "state"]).where("id", "=", Number(p.scan)));
+      const row = (await loadScans(db, [Number(p.scan)])).get(Number(p.scan));
       if (!row || row.repo !== p.repo) return "no such scan";
       return ["modeling", "scanning", "verifying"].includes(row.state) ? null : `the scan already ended (${row.state})`;
     },
@@ -686,16 +631,16 @@ export const STEPS: StepDef[] = [
   {
     name: "referee",
     title: "Referee label disagreements",
-    description: "Sonnet settles items where Jev and Haiku chose different type labels and at least one is not a scope label (scope disagreements go to Decide). A sure answer settles the type. When Sonnet is unsure, Opus answers; its label settles the item either way, and an unsure Opus also flags a scope decision for an operator.",
+    description: "Sonnet settles items where Jev and Haiku chose different type labels. A sure answer settles the type. When Sonnet is unsure, Opus answers; its label settles the item either way, and an unsure Opus keeps the item off the automatic merge path.",
     stage: runStage("referee"),
     requires: "operator",
     models: ["sonnet", "opus"],
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 100, help: "items sent to the referee models in this job" }],
     run: async (ctx) => {
-      const { latestRun } = await import("../classify/settled.ts");
+      const { classifyRun } = await import("../data/triage/index.ts");
       const { refereeItems } = await import("../classify/referee.ts");
       const { itemOf, plannedItems } = await import("../core/select-items.ts");
-      const run = await latestRun(ctx.db);
+      const run = await classifyRun(ctx.db);
       if (!run) throw new Error("There is no classification run yet; start a classification pass first.");
       const { takersFirst } = await import("../agents/call.ts");
       const due = (await takersFirst(ctx.db, await plannedItems(ctx.db, "referee", { run }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, Number(ctx.params.limit));
@@ -728,7 +673,7 @@ export const STEPS: StepDef[] = [
       const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
       ctx.usageRun(r.runId);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
-      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.missing.length} without an answer`;
+      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.off.length} off the automatic path, ${r.missing.length} without an answer`;
     },
   },
   {
@@ -779,7 +724,7 @@ export const STEPS: StepDef[] = [
       const { runPremerge } = await import("../premerge/review.ts");
       const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
       ctx.usageRun(r.runId);
-      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.moved.length} moved`;
+      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
     },
   },
   {
@@ -816,14 +761,17 @@ export const STEPS: StepDef[] = [
       const refused = await checkCommentApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runPostmergeFile(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.filed.length + r.failed.length + r.unknown.length);
-      return `${r.repo}: ${r.filed.length} issues filed, ${r.limited} over the limit, ${r.failed.length} failed${r.unknown.length ? `, ${r.unknown.length} with an unknown outcome (check GitHub)` : ""}`;
+      ctx.acted(r.filed.length + r.failed.length + r.unknown.length + r.settled);
+      const line = `${r.repo}: ${r.filed.length} issues filed, ${r.limited} over the limit, ${r.failed.length} failed${r.unknown.length ? `, ${r.unknown.length} with an unknown outcome (check GitHub)` : ""}${r.settled ? `, ${r.settled} stopped filings settled` : ""}`;
+      // As in Act: the failure backoff spaces the next try, and skips the write pacing's message.
+      if (r.later) throw new Error(`${r.later}; ${line}`);
+      return line;
     },
   },
   {
     name: "dupes-compare",
     title: "Compare duplicate groups",
-    description: "Compares each group of duplicates in one pass: Opus, with read-only tools on the base checkout, for the pull requests of a group (diffs, titles, bodies and linked issues; CI and review state as background), Sonnet for its issues. It picks the best item to keep, lists what the others do better or add, and asks one decision per group. A closed or merged member wins without a call; a failed call falls back to the older-wins rule. A group is compared again only when a member's state, head or text changes. Writes nothing to GitHub.",
+    description: "Compares each group of duplicates in one pass: Opus, with read-only tools on the base checkout, for the pull requests of a group (diffs, titles, bodies and linked issues; CI and review state as background), Sonnet for its issues. It picks the best item to keep, and lists what the others do better or add. A closed or merged member wins without a call; a failed call falls back to the older-wins rule. A group is compared again only when a member's state, head or text changes. Writes nothing to GitHub.",
     stage: runStage("dupes-compare"),
     requires: "operator",
     exclusive: "dupes",
@@ -832,14 +780,14 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runDupeCompare } = await import("../dupes/compare.ts");
       const r = await runDupeCompare(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
-      return `${r.due} due: ${r.compared} compared by a model, ${r.byRule} by rule, ${r.closedWins} won by a closed member, ${r.single} single, ${r.dropped} dropped; ${r.asked.length} decisions asked`;
+      return `${r.due} due: ${r.compared} compared by a model, ${r.byRule} by rule, ${r.closedWins} won by a closed member, ${r.single} single, ${r.dropped} dropped`;
     },
   },
   {
     name: "conversation",
     priority: 1,
     title: "Answer conversations",
-    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
+    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that a person runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
     stage: runStage("conversation"),
     requires: "operator",
     models: ["opus"],
@@ -997,14 +945,16 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to work on in this job" },
     ],
-    check: checkPushApproved,
+    // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runCifix } = await import("../cifix/index.ts");
-      const refused = await checkPushApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length);
-      return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length} failed or refused, ${r.held.length} held`;
+      const acted = r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length;
+      ctx.acted(acted + r.unasked.length);
+      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held`;
+      // Asks that failed are all this job had: the failure backoff spaces their next try (and skips the write pacing's message).
+      if (r.unasked.length && !acted) throw new Error(`${r.unasked[0]!.reason}; ${r.unasked[0]!.ref} not asked; ${line}`);
+      return line;
     },
   },
   {
@@ -1030,7 +980,7 @@ export const STEPS: StepDef[] = [
     name: "main-fix",
     priority: 1,
     title: "Handle a red default branch",
-    description: "For a repo approved for it whose default branch is red, reads the failed gate checks' logs and has Haiku sort each: a flaky failure gets its failed jobs rerun once, an infrastructure failure becomes an operator decision about opening an upstream issue, and a code failure is recorded as needing a fix and gets a fix PR (the CI fix patch path against the default branch head: Sonnet patch, Opus check, pushed to the pipeline account's fork) unless main is green again or an open PR already covers it. Opens the issue only on an operator's answer.",
+    description: "For a repo approved for it whose default branch is red, reads the failed gate checks' logs and has Haiku sort each: a flaky failure gets its failed jobs rerun once, an infrastructure failure opens an issue in the repo, and a code failure is recorded as needing a fix and gets a fix PR (the CI fix patch path against the default branch head: Sonnet patch, Opus check, pushed to the pipeline account's fork) unless main is green again or an open PR already covers it.",
     stage: runStage("main-fix"),
     requires: "operator",
     models: ["haiku", "sonnet", "opus"],
@@ -1041,14 +991,14 @@ export const STEPS: StepDef[] = [
       const refused = await checkMainFixApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runMainFix(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.reran + r.asked + r.needsFix + r.issues + r.prs);
-      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, asked ${r.asked}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened`;
+      ctx.acted(r.reran + r.needsFix + r.issues + r.prs);
+      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened`;
     },
   },
   {
     name: "nightly",
     title: "Nightly checks",
-    description: "For a repo with the Nightly checks build feature on, queues its selected checks (dependency audit, cross builds, Miri, benchmarks) once a day as low-priority sandbox tasks at the default branch head, and collects the results of finished ones. A check that fails two nights in a row becomes an operator decision about opening an issue. Calls no model.",
+    description: "For a repo with the Nightly checks build feature on, queues its selected checks (dependency audit, cross builds, Miri, benchmarks) once a day as low-priority sandbox tasks at the default branch head, and collects the results of finished ones. A check that fails two nights in a row is shown on the Nightly page, where a person opens an issue for it. Calls no model.",
     stage: runStage("nightly"),
     requires: "operator",
     params: [{ name: "repo", label: "Repo", kind: "repo", required: true }],
@@ -1058,8 +1008,8 @@ export const STEPS: StepDef[] = [
       const refused = await checkNightlyOn(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runNightly(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.queued + r.issues);
-      return `${r.repo}: queued ${r.queued}, skipped ${r.skipped}, collected ${r.collected}, asked ${r.asked}, ${r.issues} issues opened`;
+      ctx.acted(r.queued);
+      return `${r.repo}: queued ${r.queued}, skipped ${r.skipped}, collected ${r.collected}`;
     },
   },
 ];

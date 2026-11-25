@@ -1,5 +1,5 @@
 // Constants and pure helpers of the merge rule, shared by the old modules (which re-export them) and by decide.ts. No imports,
-// so the web client can use them; their query forms are in rule-queries.ts.
+// so the web client can use them.
 
 /** Type labels whose PRs may merge without asking. */
 export const RULE_LABELS = ["bugfix", "infra"];
@@ -10,14 +10,14 @@ export type Tier = "whitelisted" | "not" | "allow" | "deny";
 export const RULE_TIERS: Tier[] = ["whitelisted", "allow"];
 
 /**
- * In a repo on the maintainer workflow, the PRs that go through review, fix-up and merge with nobody starting them: small and
- * medium bug fixes (and infra) from whitelisted authors, the merge rule's own criteria, with a label no unsure referee settled
- * and no needs-decision flag.
+ * The PRs that go through review, fix-up and merge with nobody starting them: small and
+ * medium bug fixes (and infra) from whitelisted authors, the merge rule's own criteria, with a label no unsure referee settled,
+ * no needs-decision flag and no duplicate among the repo's open and merged PRs.
  */
-export const autoEligible = (p: { label: string | null; size: string; tier: string; labelUnsure?: boolean; needsDecisionFlag: boolean }): boolean =>
-  !!p.label && RULE_LABELS.includes(p.label) && RULE_SIZES.includes(p.size) && (RULE_TIERS as string[]).includes(p.tier) && !p.labelUnsure && !p.needsDecisionFlag;
+export const autoEligible = (p: { label: string | null; size: string; tier: string; labelUnsure?: boolean; needsDecisionFlag: boolean; duplicates?: unknown }): boolean =>
+  !p.duplicates && !!p.label && RULE_LABELS.includes(p.label) && RULE_SIZES.includes(p.size) && (RULE_TIERS as string[]).includes(p.tier) && !p.labelUnsure && !p.needsDecisionFlag;
 
-/** Why an unsure Opus take is asked about instead of merged by the rule. */
+/** Why an unsure Opus take waits for a person instead of merging by the rule. */
 export const UNSURE_REASON = "Opus was unsure";
 export const PREMERGE_UNSURE_REASON = "the pre-merge review could not verify a claim of the description";
 export const PREMERGE_DEFECT_REASON = "the pre-merge review found a defect";
@@ -26,9 +26,9 @@ export const PREMERGE_FAILED_REASON = "the pre-merge review failed";
 /** Verification states that let a PR merge. */
 export const VERIFY_OK = ["passed", "ci-enough"];
 export const verifyOk = (state: string | null | undefined): boolean => !!state && VERIFY_OK.includes(state);
-/** A PR in a repo Verify cannot build is merged only on an operator's answer, which says "not verified". */
+/** A PR in a repo Verify cannot build is merged only on a person's approval, which says "not verified". */
 export const VERIFY_UNAVAILABLE = "unavailable";
-/** A failed or errored verification is asked about in the Merge? question; an operator's Merge answer given after the result stands (`override`, src/merge/verify-override.ts). */
+/** A failed or errored verification stops the merge; an approval given after the result stands over it (`override`). */
 export const verifyAllows = (path: "rule" | "operator" | "maintainer" | null, state: string | null | undefined, override = false): boolean =>
   verifyOk(state) || (path === "operator" && (state === VERIFY_UNAVAILABLE || (override && (state === "failed" || state === "error"))));
 
@@ -44,24 +44,17 @@ export const ciAllows = (path: "rule" | "operator" | "maintainer" | null, ci: st
   ci === "success" || (path === "operator" && ci === "none" && noCi);
 
 export type Size = "S" | "M" | "L";
+
+/**
+ * The PR's head commit as best known: the checks table's when it was fetched after the mirror last saw the PR change, else the mirror's.
+ */
+export function headOf(r: { head_oid: string | null; updated_at: string | null; c_head: string | null; c_at: string | null }): string | null {
+  if (r.c_head && r.c_at && (!r.updated_at || r.c_at > r.updated_at)) return r.c_head;
+  return r.head_oid ?? r.c_head;
+}
 /** Same S and M bounds as the dashboard's size column; its L and XL are both L here. */
 export function sizeOf(linesChanged: number): Size {
   return linesChanged <= 50 ? "S" : linesChanged <= 300 ? "M" : "L";
-}
-
-/** Type labels whose PRs get a code review; plugin candidates do not. */
-export const REVIEW_LABELS = ["bugfix", "performance", "missing feature", "small extra", "infra"];
-/** Scope answers that keep a PR in core (the keys of SCOPE_OPTIONS.take and ["small-extra"]). */
-export const KEEP_IN_CORE: string[] = ["take", "small-extra"];
-
-/**
- * A PR's type label once a person answered its scope question: the answer settles a label the classifiers left open
- * (a disagreement between two scope labels has no referee) or chose against it. Other answers leave the label as it is.
- */
-export function labelWithScopeAnswer(label: string | null, answer: string | null): string | null {
-  if (answer === "small-extra") return "small extra";
-  if (answer === "take") return label && REVIEW_LABELS.includes(label) ? label : "missing feature";
-  return label;
 }
 
 /** Approval attempts per CI run before the PR is left to a person. */
@@ -121,37 +114,8 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   return until > nowMs ? { until } : null;
 }
 
-// ---- merge decisions and their SQL ----
-
-/** The PR has an unanswered Merge? question at any head. */
-export const OPEN_QUESTION_SQL = "SELECT 1 FROM decisions WHERE repo = ? AND number = ? AND kind = 'merge' AND answer IS NULL AND id NOT LIKE '%~replaced-%' LIMIT 1";
-
-export const UNSURE_AT_SQL = `SELECT 1 FROM opus_review_history WHERE repo = ?1 AND number = ?2 AND head_oid = ?3 AND verdict IN ('take', 'take-fix') AND sure = 0
-  UNION ALL SELECT 1 FROM opus_reviews WHERE repo = ?1 AND number = ?2 AND head_oid = ?3 AND verdict IN ('take', 'take-fix') AND sure = 0 LIMIT 1`;
-
-/** SQL condition on `g` (a decisions row): a duplicate group decision that is unanswered or answered "keep #N instead" with the new roles not applied yet. */
-export const OPEN_GROUP_SQL = `(g.kind = 'duplicate' AND g.id LIKE '%:dupegroup:%' AND (g.answer IS NULL
-  OR (g.answer LIKE 'keep:%' AND COALESCE((SELECT dg.applied_answer FROM dupe_groups dg WHERE dg.decision_id = g.id), '') <> g.answer)))`;
-
-/** Option keys of a "Merge this PR?" decision. Only an operator's answer counts. */
-export const MERGE_OPTIONS = {
-  merge: { key: "merge", label: "Merge", hint: "Merge once CI is green at this head commit." },
-  hold: { key: "hold", label: "Hold", hint: "Keep it open and out of the merge queue." },
-  close: { key: "close", label: "Close", hint: "Not wanted as it is; post a short comment and close the PR." },
-} as const;
-
-/** Options of the "Hold" question asked for a PR whose Opus review says hold. Review again, and a fix-up first, are offered as cores (src/decide/choices.ts). */
-export const HOLD_OPTIONS = {
-  wait: { key: "wait", label: "Wait for the author", hint: "Keep it open and leave it to the author; asked again after a new commit or review." },
-  close: { key: "close", label: "Close", hint: "Not wanted as it is; post a short comment and close the PR." },
-} as const;
-
-/** One Hold question per PR head. */
-export const holdDecisionId = (repo: string, number: number, head: string): string => `${repo}#${number}:hold@${head}`;
-
-/** One open decision per PR head: a push gets a new one. */
+/** The audit target of a merge at one head (an operator's Retry after a refusal names it). */
 export const mergeDecisionId = (repo: string, number: number, head: string): string => `${repo}#${number}:merge@${head}`;
-export const HEAD_FACT = "head commit ";
 
 /** Setting that holds the pipeline account's login, recorded wherever the pipeline pushes as that account. */
 export const PIPELINE_LOGIN_KEY = "pipeline_login";

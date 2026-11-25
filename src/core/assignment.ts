@@ -3,7 +3,7 @@
 import type { Action, AssignFacts } from "./plan.ts";
 
 /** Plan states that wait on a person: work of ours in them is no longer in flight. */
-export const WAITS_ON_PERSON: ReadonlySet<string> = new Set(["needs-decision", "declined", "changes-requested", "held-duplicate", "held-backlog", "backlog", "duplicate", "opus-hold"]);
+export const WAITS_ON_PERSON: ReadonlySet<string> = new Set(["needs-decision", "changes-requested", "held-backlog", "backlog", "opus-hold"]);
 
 /** AutoCraft's own work on the item that is still moving: not closed, not held, not waiting on a person's answer. */
 export const inFlightNow = (f: { inFlight?: boolean; mergeHeld?: boolean }, state: string): boolean => !!f.inFlight && !f.mergeHeld && !WAITS_ON_PERSON.has(state);

@@ -1,19 +1,16 @@
 // What the fix-up step works on (the PRs come from their Plans, fixup/select.ts): candidate shapes, fix lists and tries.
-import { FORMAT_REASONS, safePath } from "./patch.ts";
+import { safePath } from "./patch.ts";
+import { attemptsIn, loadPatchFacts } from "../data/changes/index.ts";
 import type { ConflictCandidate } from "./conflict-state.ts";
 import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 
 /** Fix-up tries per PR (pushed, failed, refused or rejected) before the step leaves it to a person. */
 export const MAX_ATTEMPTS = FIXUP_MAX_ATTEMPTS;
 
 export type Fix = { file: string; change: string };
-/** Parts of PRs closed as duplicates that a duplicate group's kept PR should take over (src/act/dupe-groups.ts queues them). */
-export type Carry = { decisionId: string; /** The suggestion comment stored with the answer, posted as it is when the branch can't be pushed to. */ suggestion: string | null; sources: { number: number; head: string | null; points: string[] }[] };
-/** `carry` set: the candidate is a carry-over job; its fixes are worked out from the source PRs' diffs when it runs. */
-/** `model` wrote the text the ask comment carries: the Opus review's fix list, or the stored suggestion of a carry-over. */
-export type FixCandidate = { repo: string; number: number; head: string; reason: string; fixes: Fix[]; attempt: number; model: string | null; carry?: Carry;
+/** `model` wrote the text the ask comment carries: the Opus review's fix list. */
+export type FixCandidate = { repo: string; number: number; head: string; reason: string; fixes: Fix[]; attempt: number; model: string | null;
   /** `premerge`: the fixes are the pre-merge review's defect fixes; the PR's one pre-merge round, apart from the take-fix tries. */
   source?: "premerge" | "operator";
   /** An operator's fix-up (source `operator`): the instructions replace the fix list; the files are the PR's own changed files. */
@@ -23,7 +20,7 @@ export type FixCandidate = { repo: string; number: number; head: string; reason:
 /** The fixups row of a stored patch: `lint_state` is `pending` (first task) or `requeued` (the lost task was queued once more). */
 export type LintWork = { rowid: number; round: number; task: number | null; state: string; patch: string; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null; /** An operator fix-up model's list of what the patch changes. */ changes: string[] };
 export type FixSelection = {
-  /** Take-fix PRs we may push to, in a repo with push approval. */
+  /** Take-fix PRs we may push to, with our push approved. */
   fix: FixCandidate[];
   /** Take-fix PRs we can't push to that have no hold row at this head yet. */
   cannotPush: FixCandidate[];
@@ -47,18 +44,9 @@ export function parseFixes(s: string | null): Fix[] {
 export const FIXUP_STATES = ["pushing", "pushed", "failed", "refused", "rejected", "cannot-push", "too-large", "asked", "comment-failed", "comment-unsent", "push-denied", "superseded"] as const;
 export type FixupState = (typeof FIXUP_STATES)[number];
 
-/** States that count as a try; the other three are recorded once per head and end the step's work on that head. */
-const ATTEMPT_STATES: FixupState[] = ["pushing", "pushed", "failed", "refused", "rejected"];
+export { attemptsIn } from "../data/changes/index.ts";
 
 /** Refusals for a wrong hunk header count (fixed by recounting since) are not tries. Pre-merge rounds have their own budget. */
 export async function attemptsOf(db: Db, repo: string, number: number): Promise<number> {
-  return (await db.get(db.k.selectFrom("fixups").select((eb) => eb.fn.countAll<number>().as("n"))
-    .where("repo", "=", repo).where("number", "=", number).where("source", "is", null).where("state", "in", ATTEMPT_STATES)
-    .where((eb) => eb.not(eb.and([eb("state", "=", "refused"), eb.or(FORMAT_REASONS.map((r) => kx.like(db, eb.fn.coalesce("reason", eb.val("")), eb.val(`${r}%`))))])))))!.n;
-}
-
-/** attemptsOf() from the PR's fixups rows. `LIKE 'reason%'` ignores ASCII case. */
-export function attemptsIn(rows: readonly { source: string | null; state: string; reason: string | null }[]): number {
-  return rows.filter((r) => r.source === null && (ATTEMPT_STATES as string[]).includes(r.state)
-    && !(r.state === "refused" && FORMAT_REASONS.some((f) => (r.reason ?? "").toLowerCase().startsWith(f.toLowerCase())))).length;
+  return attemptsIn((await loadPatchFacts(db, [{ repo, number }])).get(`${repo}#${number}`)?.fixups ?? []);
 }

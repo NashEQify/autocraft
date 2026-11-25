@@ -7,7 +7,7 @@ import { phaseOf, statusFromItem, statusOf, type StatusInput } from "../src/core
 import { writePlanCache, type PlanView } from "../src/core/plan-cache.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 const input = (p: Partial<StatusInput>): StatusInput => ({ state: null, itemState: null, wait: null, next: null, ...p });
 
@@ -19,15 +19,12 @@ describe("item status", () => {
     assert.equal(phaseOf(input({ state: "not-reviewed", wait: "an answer from the author" })), "Waiting for a person", "an untyped wait falls back to its wording");
     assert.equal(phaseOf(input({ state: "not-reviewed" })), "Review");
     assert.equal(phaseOf(input({ state: "review-stale", reviewBlocked: true })), "Held");
-    assert.equal(phaseOf(input({ state: "label-not-reviewed" })), "Held");
     assert.equal(phaseOf(input({ state: "opus-hold", reviewBlocked: true })), "Held", "a hold blocked by other items is parked");
     assert.equal(phaseOf(input({ state: "opus-hold" })), "Held", "a hold review waits for the author's changes");
     assert.equal(phaseOf(input({ state: "out-of-scope" })), "Pipeline off");
     assert.equal(phaseOf(input({ itemState: "classified", inPipeline: false })), "Pipeline off", "an issue in a repo with the pipeline off");
     assert.equal(phaseOf(input({ gh: "MERGED", inPipeline: false })), "Merged");
     assert.deepEqual(statusOf(input({ state: "out-of-scope", wait: "not in scope", next: "Classify" })), { phase: "Pipeline off", waiting: null, next: null });
-    assert.equal(phaseOf(input({ state: "scope", scopeAnswered: true })), "Out of scope", "an answer that keeps it out of core asks nobody");
-    assert.equal(phaseOf(input({ state: "scope" })), "Waiting for a person");
     assert.equal(phaseOf(input({ state: "opus-close" })), "Out of scope");
     assert.equal(phaseOf(input({ state: "ci-failed" })), "Fixing");
     assert.equal(phaseOf(input({ state: "waiting-verify" })), "Verifying");
@@ -38,8 +35,7 @@ describe("item status", () => {
     assert.equal(phaseOf(input({ state: "needs-fix-up", wait: "the contributor's fixes", waitKind: "contributor" })), "Held");
     assert.equal(phaseOf(input({ state: "needs-fix-up", wait: "the review's fixes to be applied", waitKind: "system" })), "Fixing");
     assert.equal(phaseOf(input({ state: "waiting-ci", wait: "an answer-like CI wording", waitKind: "system" })), "In queue", "a typed system wait ignores the wording");
-    assert.equal(phaseOf(input({ state: "not-reviewed", itemState: "held-duplicate" })), "Held", "a triage hold beats the PR state");
-    assert.equal(phaseOf(input({ itemState: "scope-open" })), "Waiting for a person");
+    assert.equal(phaseOf(input({ state: "not-reviewed", itemState: "held-backlog" })), "Held", "a triage hold beats the PR state");
     assert.equal(phaseOf(input({ itemState: "classified", next: "Fix: in progress" })), "Fixing");
     assert.equal(phaseOf(input({ itemState: "classified", next: "Fix" })), "Triage");
     assert.deepEqual(statusFromItem({ merged_at: "x" }, "t"), { phase: "Merged", waiting: null, next: null, since: "t" });

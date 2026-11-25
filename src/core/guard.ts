@@ -4,23 +4,15 @@
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { decidePr } from "./decide.ts";
-import { pipelineWrites, verifyAllows } from "./rules.ts";
+import { verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
-import { commentApprovalOf } from "../act/approval.ts";
-import { fixIssueApprovalOf } from "../implement/approval.ts";
-import { pushApprovalOf } from "../fixup/approval.ts";
-import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
-import { mainFixApprovalOf } from "../mainfix/approval.ts";
-import { mergeApprovalOf } from "../merge/approval.ts";
-import { ciApprovalOf } from "../merge/ci-approval.ts";
-import { statusApprovalOf } from "../prstatus/approval.ts";
+import { loadRepoGuards } from "../data/control/index.ts";
 import { decideItem } from "./decide-item.ts";
-import { gateRepo, gates, type By, type RepoNeed, type Want } from "./gates.ts";
+import { approvalOf, gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
 import { loadItemFact } from "./issue-facts.ts";
 import type { ActionKind, PrFacts } from "./plan.ts";
-import { identityOfDecision, type Identity } from "../github/identity.ts";
-import { disputeOn } from "../answers/hold.ts";
-import { freshSettings, setting } from "../settings-read.ts";
+import type { MayResult } from "./may.ts";
+import type { Identity } from "../github/identity.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
 
@@ -37,10 +29,10 @@ export type GuardedFiling = { readonly [guarded]: true; readonly scope: "filing"
 /** What an item or repo write accepts. A PR grant is left out: no caller writes with one, and a merge or CI grant must not type-check there. */
 export type Grant = GuardedItem | GuardedRepo;
 export type Refused = { refused: string };
-/** An item action to guard: the Plan must hold the kind with the bucket, decision and source given. */
-export type ItemWant = Want & { decisionId?: string; source?: string };
+/** An item action to guard: the Plan must hold the kind with the bucket, person action and source given. */
+export type ItemWant = Want & { id?: number; source?: string };
 /** The action to guard: `head` is the head the caller reviewed or worked on. `batch`: a member of a merge batch, which is in its batch state, not ready. */
-export type Ask<K extends ActionKind = ActionKind> = Want<K> & { head: string; batch?: boolean; /** Fix-up: the Plan action's source (review, premerge or carry). */ source?: string; /** The answered decision this merge or push carries out: the answering operator is the identity. */ decisionId?: string };
+export type Ask<K extends ActionKind = ActionKind> = Want<K> & { head: string; batch?: boolean; /** Fix-up: the Plan action's source (review, premerge or carry). */ source?: string };
 export type Ref = { repo: string; number: number };
 
 export type LiveRead = { state: "OPEN" | "MERGED" | "CLOSED"; head: string; draft: boolean; mergeable: string };
@@ -66,7 +58,6 @@ const make = <K extends ActionKind>(ref: Ref, a: Want<K>, head: string, as: Iden
 
 async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f: PrFacts } | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
   let read: LiveRead | null = null;
   if (needsLive(a)) {
     if (!live) return { refused: `${name}: no live read of the PR before the write` };
@@ -85,6 +76,7 @@ async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f
   const why = gates(f, a, by);
   if (why) return { refused: `${name}: ${why}` };
   if (a.batch && f.mergeHeld) return { refused: `${name}: merge held by an operator` };
+  if (a.batch && f.draft) return { refused: `${name}: it is a draft` };
   const plan = decidePr(f, loadPass());
   const holds = plan.head === a.head && (plan.actions.some((x) => x.kind === a.kind && x.head === a.head && (a.bucket === undefined || x.params?.bucket === a.bucket) && (a.source === undefined || x.params?.source === a.source))
     // A batch member is in its batch state, not ready; it must still pass what a single merge needs apart from CI and mergeable.
@@ -100,7 +92,9 @@ async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f
 export async function guard<K extends ActionKind>(db: Db, ref: Ref, action: Ask<K>, by: By, live?: Live): Promise<Guarded<K> | Refused> {
   const r = await check(db, ref, action, by, live);
   if ("refused" in r) return r;
-  return make(ref, action, action.head, await identityOfDecision(db, action.decisionId));
+  // A merge a person approved is made as them (src/core/may.ts); a merge on the repo's approval as the app.
+  const m = action.kind === "merge" ? mergeMay(r.f) : null;
+  return make(ref, action, action.head, m?.ok && m.as === "person" ? `user:${m.by}` : "app");
 }
 
 /**
@@ -125,10 +119,8 @@ export async function guardBatchMerge(db: Db, batch: Ref & { head: string }, mem
   return make(batch, { kind: "merge" }, batch.head);
 }
 
-/** Lets an issue or PR write of the item steps through while decideItem still has the action for the item. No GitHub read: the caller reads what it needs. */
-export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDecision?: string): Promise<GuardedItem | Refused> {
+export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, login?: string): Promise<GuardedItem | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
   const f = await loadItemFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
   const why = gates(f, action, by);
@@ -136,32 +128,43 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDe
   const plan = decideItem(f);
   const holds = plan.actions.some((x) => x.kind === action.kind
     && (action.bucket === undefined || x.params?.bucket === action.bucket)
-    && (action.decisionId === undefined || x.params?.decisionId === action.decisionId)
+    && (action.id === undefined || x.params?.id === action.id)
     && (action.source === undefined || x.params?.source === action.source));
   if (!holds) {
     const now = plan.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none";
     return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, actions: ${now})` };
   }
-  return { scope: "item", action, repo: ref.repo, number: ref.number, as: await identityOfDecision(db, asDecision ?? action.decisionId) } as unknown as GuardedItem;
+  return { scope: "item", action, repo: ref.repo, number: ref.number, as: login ? `user:${login}` : "app" } as unknown as GuardedItem;
 }
 
-/** The approvals of a repo and the global switch, read now. */
-export const repoApprovals = (db: Db, repo: string): Promise<Parameters<typeof gateRepo>[0]> => freshSettings(() => repoApprovalsNow(db, repo));
-
-async function repoApprovalsNow(db: Db, repo: string): Promise<Parameters<typeof gateRepo>[0]> {
-  const on = pipelineWrites(await setting(db, "pipeline_enabled"));
+/** The approvals of a repo and the global switch, read now (never from a settings snapshot). */
+export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals> {
+  const g = (await loadRepoGuards(db, [repo])).get(repo);
+  const a = g?.approvals ?? {};
   return {
-    merge: !!await mergeApprovalOf(db, repo), push: await pushApprovalOf(db, repo) !== null, comment: await commentApprovalOf(db, repo) !== null, ci: await ciApprovalOf(db, repo) !== null,
-    labels: await labelsApprovalOf(db, repo) !== null, "fix-issue": await fixIssueApprovalOf(db, repo) !== null, "main-fix": await mainFixApprovalOf(db, repo) !== null,
-    status: await statusApprovalOf(db, repo) !== null, pipelineOn: on,
+    merge: !!a.merge, push: !!a.push, comment: !!a.comment, ci: !!a.ci, labels: !!a.labels, "fix-issue": !!a.fixissue, "main-fix": !!a.mainfix, status: !!a.prstatus,
+    pipelineOn: g?.pipelineOn ?? false,
   };
 }
 
-/** Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch. */
-export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string): Promise<GuardedRepo | Refused> {
-  const why = gateRepo(await repoApprovals(db, repo), need, by, repo);
-  // `login`: the operator pressing the button right now (a conversation card), who acts as themselves with no answered decision yet.
-  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : await identityOfDecision(db, decisionId) } as unknown as GuardedRepo);
+/**
+ * Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch.
+ * `members`: the verdicts of the items the write serves: the merge rule's (src/core/may.ts) of the PRs a batch carries, or the
+ * implementation's. A "merge" or "fix-issue" write passes without the repo's approval when every one of them passes, so a batch of PRs
+ * people approved one by one, or an issue a person queued, needs no repo switch.
+ */
+export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, login?: string, o: { members?: readonly MayResult[] } = {}): Promise<GuardedRepo | Refused> {
+  const approved = (need === "merge" || need === "fix-issue") && !!o.members?.length && o.members.every((m) => m.ok);
+  const why = gateRepo(await repoApprovals(db, repo), approved ? null : need, by, repo);
+  // `login`: the person pressing the button right now (a conversation card), who acts as themselves.
+  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : "app" } as unknown as GuardedRepo);
+}
+
+/** Lets a stage that starts work on a PR take it (the pipeline's account is assigned): the PR must pass the gates of the action the work ends in. */
+export async function guardClaim(db: Db, ref: Ref, action: Want, by: By): Promise<GuardedRepo | Refused> {
+  const f = await loadPrFact(db, ref.repo, ref.number);
+  const why = f ? gates(f, action, by) : "not an open PR the pipeline tracks";
+  return why ? { refused: `${ref.repo}#${ref.number}: ${why}` } : ({ scope: "repo", need: approvalOf(f!, action), repo: ref.repo, as: "app" } as unknown as GuardedRepo);
 }
 
 /**

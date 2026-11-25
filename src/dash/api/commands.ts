@@ -1,7 +1,7 @@
 // The dashboard's command box and controls: the same text and the same command core as GitHub, Discord and the agent
 // (src/workflow/apply.ts). Every reply is the lines every surface shows; a refused or unclear command is a line, not an error.
 //
-//   POST /api/items/:repo/:n/command  { text }            a command written on one item
+//   POST /api/items/:repo/:n/command  { text, asked? }    a command written on one item
 //   POST /api/commands                { text, items? }    a command for a list: the list after a colon in the text, or `items`
 //   POST /api/controls                { control, ... }    a registered control (hold or release a merge, resume a breaker, ...)
 import type { Db } from "../../db/index.ts";
@@ -46,6 +46,9 @@ function itemOf(v: unknown): ItemRef {
   throw new HttpError(400, "each item is repo#number");
 }
 
+/** When the question the page showed was asked (`asked` of the item or row it read); null from a page that does not say. */
+const timeOf = (v: unknown): string | null => (typeof v === "string" && !Number.isNaN(Date.parse(v)) ? v : null);
+
 export async function itemCommand(db: Db, req: Req): Promise<CommandResult> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
@@ -53,7 +56,8 @@ export async function itemCommand(db: Db, req: Req): Promise<CommandResult> {
   await needVisible(db, req, repo);
   const parsed = parse(textOf(req), { repo });
   if (parsed.kind !== "ambiguous" && (parsed.items?.length ?? 0) > ITEMS_MAX) throw new HttpError(400, `at most ${ITEMS_MAX} items in one command`);
-  return await runCommand(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible: await visibleFn(db, req) });
+  const asked = obj(req.json).asked;
+  return await runCommand(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible: await visibleFn(db, req), asked: ({ ref }) => (ref === `${repo}#${n}` ? timeOf(asked) : null) });
 }
 
 export async function listCommand(db: Db, req: Req): Promise<CommandResult> {
@@ -62,7 +66,8 @@ export async function listCommand(db: Db, req: Req): Promise<CommandResult> {
   const items = (raw ?? []).map(itemOf);
   const parsed = parse(textOf(req));
   if (Math.max(items.length, parsed.kind !== "ambiguous" ? parsed.items?.length ?? 0 : 0) > ITEMS_MAX) throw new HttpError(400, `at most ${ITEMS_MAX} items in one command`);
-  return await runCommand(db, actorOf(req), "dashboard", { parsed, items, visible: await visibleFn(db, req) });
+  const asked = obj(obj(req.json).asked);
+  return await runCommand(db, actorOf(req), "dashboard", { parsed, items, visible: await visibleFn(db, req), asked: ({ ref }) => timeOf(Object.hasOwn(asked, ref) ? asked[ref] : null) });
 }
 
 export async function control(db: Db, req: Req): Promise<{ ok: boolean; line: string }> {

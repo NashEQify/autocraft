@@ -1,18 +1,16 @@
 // autocraft-server runner serve | exec | enqueue | jobs | cancel | steps; autocraft-server pipeline on | off | status | limit
 import { readSecrets } from "../dash/server/config.ts";
-import { writeSetting } from "../settings-read.ts";
-import { resumeStage, TripError } from "../push-outcomes.ts";
+import { resumeStage, saveSettings, TripError } from "../data/control/index.ts";
+import { loadPassReport } from "../data/planner/index.ts";
 import { DEFAULT_WORKER_LISTEN, startWorkerServer } from "../build/worker-api.ts";
 import { startPodLauncher } from "../build/launcher.ts";
 import { acquireLock } from "../mirror.ts";
 import { audit } from "../dash/audit.ts";
 import { scopeToTracked } from "../repos.ts";
-import { convertOpenDecisionsOnce } from "../decide/choices-convert.ts";
 import { linkRepeatedFindings } from "../security/scan.ts";
 import { autoFixConfirmed } from "../security/actions.ts";
 import { execJob } from "./exec.ts";
-import { isDraining, isEnabled, LimitError, pipelineState, resetLimitCount, setEnabled, setLimit } from "./autopilot.ts";
-import { PilotError, pilotItems, setPilot } from "../pilot.ts";
+import { DEFAULT_PER_DAY, isDraining, isEnabled, LimitError, pipelineState, resetLimitCount, setEnabled, setLimit } from "./autopilot.ts";
 import { enqueue, JobError, listJobs, requestCancel } from "./jobs.ts";
 import { MIN_INTERVAL_KEY, reviewMinInterval, setReviewMinInterval } from "../review/gate.ts";
 import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.ts";
@@ -26,6 +24,8 @@ import { startDiscord } from "../discord/index.ts";
 import { closeDb, openDb, setDbRole } from "../db/open.ts";
 import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
 import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
+import { dropRetired } from "../db/retired.ts";
+import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
 import { keepSnapshot } from "../itemtools/keeper.ts";
@@ -97,10 +97,11 @@ async function serve(): Promise<void> {
   if (lease.epoch) setFence({ role: "runner", epoch: lease.epoch });
   leading = true;
 
-  // Once per database: open decisions' proposed cards become choices. Here rather than in db.ts migrations, which cannot import the decision modules.
-  const conv = await convertOpenDecisionsOnce(db);
-  if (conv) console.log(`runner: converted ${conv.converted} open decisions to choices (${conv.skipped} skipped, ${conv.stale} stale cards, ${conv.unconverted} cards matching no choice)`);
-  for (const note of conv?.notes ?? []) console.log(`runner: choices conversion: ${note}`);
+  // The switch may take a while: the probes answer meanwhile. What fails here stops the runner, and the next start completes it.
+  standbyProbes ??= startHealthServer(workerListen, async () => false, state).catch((e: Error) => (console.error(`runner: startup probes not started: ${e.message}`), null));
+  await switchOver(db, { perDay: DEFAULT_PER_DAY, log: (l) => console.log(`runner: ${l}`) });
+  const gone = await dropRetired(db);
+  if (gone.length) console.log(`runner: dropped ${gone.join(", ")}`);
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);
@@ -117,7 +118,7 @@ async function serve(): Promise<void> {
   if (lease.lost.aborted) fenced();
   lease.lost.addEventListener("abort", fenced, { once: true });
   console.log(`runner: started on ${(await loadSteps()).size} steps`);
-  // The session key signs the dashboard's requests for the runner's files (build artifacts, Claude accounts).
+  // The session key signs the dashboard's requests for the runner's files (build artifacts).
   let internalKey: string | null = null;
   try { internalKey = readSecrets(envVar("SECRETS_FILE")).sessionKey; } catch { /* logged at the first dashboard request, when a split install makes it matter */ }
   const fenceGuard = async () => {
@@ -256,16 +257,12 @@ export const commands = {
 async function planLog(args: string[]): Promise<void> {
   const db = await openDb();
   if (args[0] === "status") {
-    console.log(JSON.stringify({
-      logged: (await db.get(db.k.selectFrom("main.item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
-      passes: await db.all(db.k.selectFrom("main.plan_pass_stats").select(["kind", "passes", "refs", "ms", "max_ms", "last_at"]).orderBy("kind")),
-      fullCauses: await db.all(db.k.selectFrom("main.plan_full_causes").select(["source", "n"]).orderBy("n", "desc").limit(10)),
-      shadowDiffs: (await db.get(db.k.selectFrom("main.plan_shadow_diffs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
-    }, null, 2));
+    const r = await loadPassReport(db);
+    console.log(JSON.stringify({ logged: r.logged, passes: r.passes, fullCauses: r.fullCauses, shadowDiffs: r.shadowDiffs }, null, 2));
     return;
   }
   if (args[0] === "shadow" && (args[1] === "on" || args[1] === "off")) {
-    await writeSetting(db, "plan_shadow", args[1]);
+    await saveSettings(db, [{ key: "plan_shadow", value: args[1] }], "cli");
     console.log(`plan shadow ${args[1]}`);
     return;
   }
@@ -282,8 +279,7 @@ const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | of
        autocraft-server pipeline parallel [<N|none>]
        autocraft-server pipeline review-interval [<minutes>]
        autocraft-server pipeline pick-minutes [<minutes>]
-       autocraft-server pipeline resume <fixup|cifix|implement|merge>[:<repo>] | outside-surge
-       autocraft-server pipeline pilot set <repo#number>... | show | clear`;
+       autocraft-server pipeline resume <fixup|cifix|implement|merge>[:<repo>] | outside-surge`;
 
 // Recorded as `cli`: only someone with a shell on the host can run this.
 async function pipeline(args: string[]): Promise<void> {
@@ -356,20 +352,6 @@ async function pipeline(args: string[]): Promise<void> {
       if (e instanceof LimitError) die(e.message);
       throw e;
     }
-  } else if (sub === "pilot") {
-    const [action, ...refs] = rest;
-    if (action === "set" && refs.length) {
-      try {
-        await setPilot(db, "cli", refs);
-      } catch (e) {
-        if (e instanceof PilotError) die(e.message);
-        throw e;
-      }
-    } else if (action === "clear") await setPilot(db, "cli", []);
-    else if (action !== "show") die(PIPELINE_USAGE);
-    const p = await pilotItems(db);
-    console.log(p.length ? `pilot: ${p.length} items: ${p.join(" ")}` : "no pilot");
-    return;
   } else if (sub !== "status") die(PIPELINE_USAGE);
   const s = await pipelineState(db);
   console.log(`pipeline ${s.enabled ? "ON" : s.draining ? "DRAINING" : "OFF"}${s.changedAt ? ` (set by ${s.changedBy} at ${s.changedAt.slice(0, 16)})` : ""}`);

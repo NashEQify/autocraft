@@ -26,8 +26,8 @@ export type PlanPart = {
   files?: string[];
   /** An implement question's option this part is (its key in the question): naming the part picks it. */
   option?: string;
-  /** The question (decision id) whose option the part is. */
-  question?: string;
+  /** The question whose option the part is. */
+  question?: QuestionRef;
   major?: boolean;
   state: "planned" | "dropped" | "fixed";
 };
@@ -42,11 +42,29 @@ export type Recommendation = {
   close?: boolean;
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
-  /** A yes answers this question of the legacy machinery as the person (a stuck implementation's Try again). */
-  answer?: { decision: string; option: string; label?: string };
-  /** The open question of the legacy machinery the recommendation stands for: once it is answered or set aside, the recommendation goes. */
-  question?: string;
+  /** The PR conflicts with its base branch, and this one has to resolve it: a yes approves the merge, and nothing is fixed or merged before. */
+  waits?: "contributor" | "person";
+  /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
+  answer?: QuestionAnswer;
+  /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
+  question?: QuestionRef;
 };
+
+/** A question an implementation attempt asked: the attempt and the round that asked it (answers are recorded on that attempt). */
+export type QuestionRef = { implementation: number; round: number };
+/** An option picked as the answer to an implementation's question. */
+export type QuestionAnswer = { question: QuestionRef; option: string; label?: string };
+
+/** Both name the same question; a stored value of another shape names none. */
+export const sameQuestion = (a: QuestionRef | null | undefined, b: QuestionRef | null | undefined): boolean =>
+  typeof a === "object" && a !== null && typeof b === "object" && b !== null && a.implementation === b.implementation && a.round === b.round;
+
+/** States in which an item has come back to a person: its recommendation is open, whether its steps are done or a blocker stopped it. */
+export const ASKING_STATES = ["recommending", "blocked"] as const satisfies readonly WorkflowState[];
+
+/** The recommendation that waits for an answer, which every surface shows; null when none is open. */
+export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | null): Recommendation | null =>
+  (wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) ? wf.rec : null);
 
 export type ItemWorkflow = {
   id: number;
@@ -69,10 +87,13 @@ export type ItemWorkflow = {
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;
   recAt: string | null;
+  /** The PR's head the recommendation was made at; an answer accepts it and our own pushes on it. Kept while a question the author pushed past is made again. */
   recHead: string | null;
   plan: PlanPart[];
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */
   step: string | null;
+  /** A merge entry: a person asked for a model review of the head, made after this time. Null: it merges without one (core/evidence.ts neededReview). */
+  reviewAskedAt: string | null;
   legacyPreapprovalId: number | null;
   updatedAt: string;
 };
@@ -80,9 +101,13 @@ export type ItemWorkflow = {
 /** An item as written in a command: `repo` is `owner/name` or a bare name, resolved against the tracked repos by the caller. */
 export type ItemRef = { repo: string; number: number };
 
+/** Why a close command closes the item. `of`: the item it duplicates; a null repo is the closed item's own. */
+export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate"; of: { repo: string | null; number: number } };
+
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
-  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "close" | "stop" | "autorepin"; args?: string }
+  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "stop" | "autorepin"; args?: string }
+  | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string }
   | { word: "weight"; weight: number };
 

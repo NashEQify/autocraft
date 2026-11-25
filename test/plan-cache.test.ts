@@ -3,17 +3,21 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { planHistory, prunePlanHistory, refreshPlanCache } from "../src/core/plan-cache.ts";
+import { prunePlanHistory, refreshPlanCache } from "../src/core/plan-cache.ts";
+import { loadPlanHistory } from "../src/data/planner/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { detectAutopilot, planDue, setEnabled } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
 import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-cache-"));
 const T0 = "2026-01-01T00:00:00Z";
+
+/** An item's plan history, oldest first. */
+const planHistory = async (db: Db, repo: string, number: number) => (await loadPlanHistory(db, [`${repo}#${number}`])).get(`${repo}#${number}`)?.reverse() ?? [];
 
 describe("Plan cache", async () => {
   const db = await connectDb(join(dir, "t.db"));
@@ -65,7 +69,7 @@ describe("Plan cache", async () => {
   test("with the pipeline off a wake time that has passed makes one pass due, not every tick", async () => {
     await setEnabled(db, false, "op");
     await planDue(db);
-    await db.run(db.k.insertInto("settings").values({ key: "pipeline_wake_at", value: new Date(Date.now() - 60_000).toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await db.run(db.k.insertInto("lane_state").values({ kind: "mark", step: "wake_at", repo: "", value: new Date(Date.now() - 60_000).toISOString(), at: new Date().toISOString() }).onConflict((oc) => oc.columns(["kind", "step", "repo"]).doUpdateSet(excluded(["value", "at"]))));
     assert.equal(await planDue(db), true);
     assert.equal(await planDue(db), false);
   });

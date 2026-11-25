@@ -7,14 +7,14 @@ import { handleMcp, type McpEnv } from "../src/dash/mcp/index.ts";
 import type { Role } from "../src/dash/types.ts";
 import { userReserve } from "../src/remote/reserve.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mcp-settings-")), "t.db"));
 
 const env = (login: string, role: Role): McpEnv => ({
-  db, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0,
+  db, baseUrl: null, canAnswer: false, expensive: () => 0,
   user: async () => ({ login, role, canWrite: async () => true, canRead: async () => true }) as never,
 });
 const call = (e: McpEnv, name: string, args: unknown) => handleMcp(e, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) as Promise<{ result: { isError?: boolean; content: { text: string }[] } }>;

@@ -29,7 +29,8 @@ import { maybeScreenshot, type ScreenshotDeps } from "./screenshots.ts";
 import { regressionName, type Crate, type VerifyPlanInput } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { slugOf } from "../owners.ts";
-import { excluded } from "../db/kx.ts";
+import { saveVerifications as saveMerged, type SavedVerification, type VerificationState } from "../data/merge/index.ts";
+import { loadRepos } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -79,29 +80,35 @@ export type VerifySummary = {
 const now = () => new Date().toISOString();
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 
-type Saved = { kind: string; reason: string; plan: unknown; model: string | null; headTask: number | null; baseTask: number | null; baseSha: string | null; state: string; summary: string | null };
+type Saved = { kind: string; reason: string; plan: unknown; model: string | null; headTask: number | null; baseTask: number | null; baseSha: string | null; state: VerificationState; summary: string | null };
 
-/** Stores the verification of a PR head and its stages row. */
-export async function saveVerification(db: Db, c: { repo: string; number: number; head_oid: string }, v: Saved): Promise<void> {
-  const at = now();
-  // Every column is written: a new verification of a head clears the note of the earlier one.
-  const row = {
-    repo: c.repo, number: c.number, head_sha: c.head_oid, base_sha: v.baseSha, kind: v.kind, reason: v.reason, plan: v.plan === null ? null : JSON.stringify(v.plan),
-    model: v.model, head_task_id: v.headTask, base_task_id: v.baseTask, state: v.state, summary: v.summary, note: null, created_at: at,
-    finished_at: v.state === "ci-enough" || v.state === "error" || v.state === "unavailable" ? at : null,
-  };
-  await db.run(db.k.insertInto("verifications").values(row)
-    .onConflict((oc) => oc.columns(["repo", "number", "head_sha"]).doUpdateSet(excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"]))));
+/** The verification row of a PR head and its stage event, as the module stores them. Every column is written: a new verification of a head clears the note of the earlier one. */
+function savedRow(c: { repo: string; number: number; head_oid: string }, v: Saved, at: string): SavedVerification {
   const stage = v.state === "planned" ? "verify-planned" : v.state === "ci-enough" ? "verify-ci-enough" : v.state === "unavailable" ? "verify-unavailable" : "verify-error";
-  await db.run(db.k.insertInto("main.stages")
-    .values({ repo: c.repo, number: c.number, stage, at, actor: "verify", note: `${v.kind} at ${c.head_oid.slice(0, 7)}: ${v.summary ?? v.reason}`.slice(0, 300) }));
-  await jobItem(db, c.repo, c.number, `${stage}: ${v.kind} at ${c.head_oid.slice(0, 7)}`, () => {});   // the caller logs the outcome itself
+  return {
+    repo: c.repo, number: c.number, headSha: c.head_oid, baseSha: v.baseSha, kind: v.kind, reason: v.reason, plan: v.plan, model: v.model,
+    headTaskId: v.headTask, baseTaskId: v.baseTask, state: v.state, summary: v.summary, note: null, at,
+    finishedAt: v.state === "ci-enough" || v.state === "error" || v.state === "unavailable" ? at : null,
+    stage: { repo: c.repo, number: c.number, stage, at, actor: "verify", note: `${v.kind} at ${c.head_oid.slice(0, 7)}: ${v.summary ?? v.reason}`.slice(0, 300) },
+  };
+}
+
+/** Stores the verifications of PR heads with their stage events; each head also gets its job item. */
+export async function saveVerifications(db: Db, rows: { c: { repo: string; number: number; head_oid: string }; v: Saved }[]): Promise<void> {
+  const at = now();
+  await saveMerged(db, rows.map((r) => savedRow(r.c, r.v, at)));
+  for (const { c, v } of rows) await jobItem(db, c.repo, c.number, `${savedRow(c, v, at).stage!.stage}: ${v.kind} at ${c.head_oid.slice(0, 7)}`, () => {});   // the caller logs the outcome itself
+}
+
+/** Stores the verification of a PR head and its stage event. */
+export async function saveVerification(db: Db, c: { repo: string; number: number; head_oid: string }, v: Saved): Promise<void> {
+  await saveVerifications(db, [{ c, v }]);
 }
 
 /** The plan as stored: the patch is in the task row, so the plan column keeps its size. */
 const storedPlan = (p: VerifyPlan): unknown => (p.kind === "regression" ? { kind: p.kind, crate: p.crate, dir: p.dir, test_lines: p.patch.split("\n").length - 6 } : p);
 
-/** Verify cannot build this PR's repo: the Merge? decision says "not verified" and an operator decides. */
+/** Verify cannot build this PR's repo: the merge needs a person's approval, which says "not verified". */
 const unavailableRow = (reason: string): Saved => ({ kind: "unavailable", reason, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "unavailable", summary: reason });
 
 const errorRow = (reason: string): Saved => ({ kind: "error", reason, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "error", summary: reason });
@@ -121,14 +128,15 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
     return summary;
   }
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
-  // Nothing to build for these: recorded at once so the PR goes on to the Merge? decision.
-  for (const u of await unavailableCandidates(db, repo)) {
-    await saveVerification(db, u.c, unavailableRow(u.reason));
+  // Nothing to build for these: recorded at once so the PR goes on to its merge approval.
+  const unavailable = await unavailableCandidates(db, repo);
+  await saveVerifications(db, unavailable.map((u) => ({ c: u.c, v: unavailableRow(u.reason) })));
+  for (const u of unavailable) {
     log(`  ${refOf(u.c)}: verification unavailable: ${u.reason}`);
     summary.handled++;
     params.onHandled?.(summary.handled);
   }
-  const branch = (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
+  const branch = (await loadRepos(db, { names: [repo] })).get(repo)?.default_branch ?? "main";
   let queued = false;
   const ci = !await repoHasNoCi(db, repo);
 
@@ -181,7 +189,6 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
       const input = planInput(c, cr.crates, cd, ci);
       const checkout = (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
       if (checkout) input.repo_dir = REPO_PATH;
-      const start = now();
       const planned = await runModelStep(db, VERIFY_PLAN, input, {
         model: deps.model, checkout, ctx: { ref, crates: cr.crates, label: c.label, ci },
         usage: { run: runId, agent: `verify-${c.number}`, stage: "verify", items: (ok) => (ok ? 1 : 0) },

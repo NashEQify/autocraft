@@ -5,18 +5,17 @@ import { useMemo, useState } from "react";
 import { ChatTextIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
 import { useQuery } from "../../../api/client";
-import type { ItemKind, MaintainEvent, TraceEvent, TraceKind } from "../../../api/types";
+import type { ItemKind, MaintainEvent, TraceKind } from "../../../api/types";
+import { historyRows } from "../../../lib/history";
 import { TRACE_KIND, eventCost } from "../../../lib/trace";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { TimeAgo } from "../../../ui/atoms/TimeAgo";
 import { Segmented } from "../../../ui/molecules/Segmented";
 import { TimelineEvent } from "../../../ui/molecules/TimelineEvent";
-import { TraceEventBody } from "../../item/TraceEventBody";
+import { TraceEventBody } from "../../activity/TraceEventBody";
 
 const MAIN: ReadonlySet<TraceKind> = new Set(["github", "review", "decision", "write", "conversation"]);
 const VIA: Record<MaintainEvent["via"], string> = { github: "GitHub", discord: "Discord", agent: "agent", dashboard: "AutoCraft", cli: "CLI" };
-
-type Row = { t: "said"; at: string; e: MaintainEvent } | { t: "trace"; at: string; e: TraceEvent };
 
 function Said({ e }: { e: MaintainEvent }) {
   return (
@@ -46,8 +45,7 @@ export function History({ repo, number, kind, said }: { repo: string; number: nu
   });
   const rows = useMemo(() => {
     const trace = (data?.events ?? []).filter((e) => all === "all" || MAIN.has(e.kind) || e.actor.type === "person");
-    const out: Row[] = [...said.map((e) => ({ t: "said" as const, at: e.at, e })), ...trace.map((e) => ({ t: "trace" as const, at: e.at, e }))];
-    return out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    return historyRows(said, trace);
   }, [data, said, all]);
   const toggle = (id: string) => setOpen((s) => {
     const n = new Set(s);
@@ -56,7 +54,7 @@ export function History({ repo, number, kind, said }: { repo: string; number: nu
     return n;
   });
   return (
-    <div className="flex flex-col gap-2 px-4 pb-4">
+    <div className="flex flex-col gap-2 p-4">
       <Segmented
         label={t("History shows")}
         value={all}

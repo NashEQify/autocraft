@@ -7,11 +7,11 @@ import { setPushApproval } from "../src/fixup/approval.ts";
 import type { Exec, ExecResult } from "../src/fixup/git.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { CancelledError, StoppedError } from "../src/agents/call.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { validating } from "./gql.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixup-pool-"));
@@ -22,14 +22,14 @@ const head = (n: number) => String(n).repeat(40);
 
 async function setup(prs: number): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await useTestAccount(db);
-  await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 8 }));
+  await reportingTaskRunner(db);
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   for (let n = 1; n <= prs; n++) {
     await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head(n), head_ref: "fix", head_repo: "contrib/app", base_ref: "main",
       maintainer_can_modify: 1, mergeable: "MERGEABLE", created_at: T0, updated_at: T0 }));
     await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: n, head_oid: head(n), run_id: "rv", at: T0, model: "m", verdict: "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
+    await insertWorkflow(db, { repo: "app", number: n, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
   }
   return db;
 }

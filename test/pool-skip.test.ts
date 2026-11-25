@@ -12,16 +12,14 @@ import { PRIORITY } from "../src/agents/steps.ts";
 import { setJevEnabled } from "../src/agents/jev.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
 test("a pool skips a unit nobody may take and runs the later ones", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
@@ -42,18 +40,15 @@ test("a pool skips a unit nobody may take and runs the later ones", async () => 
   assert.equal(t.alone.size + t.haiku.size, 0, "a skipped item is not one Haiku decided alone");
 });
 
-test("user-local batches hold one repo's items in the order of their first item; server-account batches mix repos", async () => {
+test("batches hold one repo's items in the order of their first item", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
   const items = ["deck:1", "photo:1", "deck:2", "deck:3", "photo:2", "deck:4", "design:1"].map((x) => ({ repo: x.split(":")[0]!, id: x }));
   const ids = async () => (await repoBatches(db, items, 2, (x) => x.repo, (x) => [{ repo: x.repo, number: Number(x.id.split(":")[1]) }])).map((b) => b.map((x) => x.id));
-  assert.deepEqual(await ids(), [["deck:1", "photo:1"], ["deck:2", "deck:3"], ["photo:2", "deck:4"], ["design:1"]]);
-  await setInferenceMode(db, "user-local", "test");
   assert.deepEqual(await ids(), [["deck:1", "deck:2"], ["photo:1", "photo:2"], ["deck:3", "deck:4"], ["design:1"]]);
 });
 
 test("a limited selection takes the items with a taker before the ones nobody may take", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
@@ -67,7 +62,6 @@ test("a limited selection takes the items with a taker before the ones nobody ma
 
 test("an unsure Jev answer whose Haiku batch nobody may take is not asked of Jev again while the item is unchanged", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await setJevEnabled(db, true, "test");
   let asked = 0;
   const restore = setRunner(async () => {

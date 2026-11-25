@@ -7,16 +7,12 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "../db/index.ts";
 import { dbEnv, dbTarget } from "../db/open.ts";
+import { loadLastSyncEnd } from "../data/mirror/index.ts";
 import { snapshotFile } from "./snapshot.ts";
 
 const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 const CHECK_MS = 10_000;
 const TAIL = 2000;
-
-/** The end time of the newest sync run that succeeded, null when there is none. */
-async function lastSync(db: Db): Promise<string | null> {
-  return (await db.get(db.k.selectFrom("sync_runs").select((eb) => eb.fn.max<string | null>("ended_at").as("t")).where("error", "is", null)))?.t ?? null;
-}
 
 /** One build by `autocraft-server item-tools snapshot`; resolves with its summary line, rejects with its output's end. */
 function buildChild(signal: AbortSignal): Promise<string> {
@@ -53,7 +49,7 @@ export function keepSnapshot(db: Db, signal: AbortSignal, log: (line: string) =>
     if (busy || signal.aborted) return;
     busy = true;
     try {
-      const t = await lastSync(db);
+      const t = await loadLastSyncEnd(db);
       // A journal left by a refresh that was killed keeps read-only readers out until a build rolls it back.
       if (seen !== undefined && t === seen && !existsSync(`${snapshotFile()}-journal`)) return;
       seen = t;

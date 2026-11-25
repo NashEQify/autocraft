@@ -7,7 +7,7 @@ import { DiscordKeys } from "../src/discord/keys.ts";
 import { CODE_TTL_MS, createLinkCode, forgetLink, loginOf, redeemLinkCode } from "../src/discord/links.ts";
 import { publicStats, publicStatus } from "../src/public/status.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { cols } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -71,8 +71,8 @@ describe("public status", async () => {
     const st = (await publicStats(db))!;
     assert.equal(st.queueLength, 2);
     assert.equal(st.openPrs, 2);
-    // The Queue page's order: a fast-tracked PR goes first whatever its rank.
-    await db.run(db.k.insertInto("fast_track").values({ repo: "openrepo", number: 1, added_by: "x", added_at: "x" }));
+    // The Queue page's order: a PR with a started workflow goes first whatever its rank.
+    await db.run(db.k.insertInto("item_workflows").values({ repo: "openrepo", number: 1, kind: "pr", entry: "merge", weight: 8, state: "running", started_by: "x", started_at: "2026-11-01T00:00:00Z", started_via: "test", updated_at: "2026-11-01T00:00:00Z" }));
     assert.deepEqual((await publicStatus(db, "openrepo", 1))!.queue, { position: 1, of: 2 });
   });
 });

@@ -9,23 +9,15 @@
 // it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts.
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
-import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
-import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { inList } from "../db/kx.ts";
-import { LIVE_STATES } from "../workflow/store.ts";
 import type { Entry } from "../workflow/types.ts";
-import { judges, roleFits } from "./calls.ts";
-import { STATUS_FRESH_MS } from "./helpers.ts";
-import { acceptedModels, familyOf, isTier } from "./mode.ts";
+import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
 import { scaled } from "./time-scale.ts";
+import { canWriteOf, freshReady, loadView, tiersOf, type RemoteView } from "./view.ts";
 
 /** How long other users' runners pass a started call over for its owner, from its queueing. */
 export const STARTED_HOLD_MS = scaled(10 * 60_000);
-/** How long claims reuse one reading (calls.ts QUEUE_CACHE_MS). */
-const CACHE_MS = 2_000;
-
 /** The attempts that are not current, as the implementations_current index leaves them out. */
 export const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 
@@ -66,20 +58,21 @@ const NONE: ReadonlySet<never> = new Set();
 
 /** Reads the live workflows' starters and approvers and the runners that may take their calls. */
 export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCalls> {
-  const [live, prs, runners, tokens, accepted] = await Promise.all([
-    db.all(db.k.selectFrom("main.item_workflows as w").innerJoin("main.tracked_repos as r", "r.name", "w.repo")
-      .select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("r.workflow", "=", "new").where("w.state", "in", LIVE_STATES)),
-    db.all(db.k.selectFrom("main.implementations as i").innerJoin("main.item_workflows as w", (j) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number"))
-      .innerJoin("main.tracked_repos as r", "r.name", "w.repo")
-      .select(["i.repo", "i.pr_number", "w.started_by", "w.approved_by"]).where("i.pr_number", "is not", null).where("i.state", "not in", ENDED_ATTEMPTS).where("w.entry", "=", "implement")
-      .where("r.workflow", "=", "new").where("w.state", "in", LIVE_STATES)),
-    db.all(db.k.selectFrom("main.remote_helpers as h").innerJoin("main.mcp_tokens as t", "t.id", "h.token_id").leftJoin("main.access as a", "a.login", "t.login").select(["t.id", "h.login", "h.models", "a.role"])
-      .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS).where("h.readiness", "=", "ready")
-      .where((eb) => eb.not(eb.exists(eb.selectFrom("main.remote_cooloffs as co").select(eb.lit(1).as("one")).whereRef("co.login", "=", "t.login").where("co.until", ">", nowMs))))),
-    db.all(db.k.selectFrom("main.mcp_tokens as t").leftJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login").select(["t.login", "h.models", "a.role"])
-      .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString())),
-    acceptedModels(db),
-  ]);
+  return startedOf(await loadView(db, nowMs));
+}
+
+const startedCache = new WeakMap<RemoteView, StartedCalls>();
+
+/** StartedCalls over one reading of the runners (memoised per reading). */
+export function startedOf(v: RemoteView): StartedCalls {
+  let s = startedCache.get(v);
+  if (!s) startedCache.set(v, (s = buildStarted(v)));
+  return s;
+}
+
+function buildStarted(v: RemoteView): StartedCalls {
+  const { snapshot, accepted, now: nowMs } = v;
+  const { live, prs } = snapshot.started;
   const byItem = new Map<string, Set<string>>();
   const add = (repo: string, number: number, logins: (string | null)[]) => {
     const key = `${repo}#${number}`;
@@ -88,33 +81,27 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
     for (const l of logins) if (l) s.add(l.toLowerCase());
   };
   for (const w of live) add(w.repo, w.number, [w.started_by, w.approved_by]);
-  for (const p of prs) add(p.repo, p.pr_number!, [p.started_by, p.approved_by]);
-  const tiersIn = (json: string): Set<Tier> => {
-    let models: Record<string, unknown> = {};
-    try { models = JSON.parse(json) as Record<string, unknown>; } catch { /* no models */ }
-    return new Set(Object.entries(models).flatMap(([t, m]) => (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null ? [t] : [])));
-  };
+  for (const p of prs) add(p.repo, p.prNumber, [p.started_by, p.approved_by]);
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
-  for (const r of runners) {
+  for (const r of snapshot.runners) {
+    if (r.role === null || !freshReady(snapshot, r, nowMs)) continue;
     const login = r.login.toLowerCase();
-    const u = runnersOf.get(login) ?? { role: r.role ?? "", tokens: new Map<number, Set<Tier>>() };
-    u.tokens.set(Number(r.id), tiersIn(r.models));
+    const u = runnersOf.get(login) ?? { role: r.role, tokens: new Map<number, Set<Tier>>() };
+    u.tokens.set(r.tokenId, tiersOf(r.models, accepted));
     runnersOf.set(login, u);
   }
   const runnerLogins = [...runnersOf.keys()];
   // Every runner token, by login: its tiers as last reported, null before its first report.
   const tokensOf = new Map<string, { role: string; tiers: (Set<Tier> | null)[] }>();
-  for (const r of tokens) {
+  for (const r of snapshot.runners) {
     const login = r.login.toLowerCase();
     const u = tokensOf.get(login) ?? { role: r.role ?? "", tiers: [] };
-    u.tiers.push(r.models === null ? null : tiersIn(r.models));
+    u.tiers.push(r.reportedAt === null ? null : tiersOf(r.models, accepted));
     tokensOf.set(login, u);
   }
   const tokenLogins = [...tokensOf.keys()];
-  // The room's write rule (room.ts roomCanWrite): only a non-write permission confirmed within PERM_READ_TTL leaves a login out.
-  const denied = new Set<string>();
-  if (tokenLogins.length) for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", tokenLogins, "citext"))))
-    if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
+  // The room's write rule: only a non-write permission confirmed within the cache's lifetime leaves a login out.
+  const canWrite = canWriteOf(snapshot);
   const owners = (refs: readonly ItemRef[]): ReadonlySet<string> => {
     if (!refs.length || !byItem.size) return NONE;
     const [first, ...rest] = refs.map((r) => byItem.get(`${r.repo}#${r.number}`));
@@ -129,7 +116,7 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
     return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && [w.started_by, w.approved_by].some((b) => b?.toLowerCase() === l)))));
   };
-  const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => denied.has(`${login.toLowerCase()}\n${x}`));
+  const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => !canWrite(login, x));
   return {
     owners, runnerLogins,
     tiersOf: (login) => new Set([...runnersOf.get(login.toLowerCase())?.tokens.values() ?? []].flatMap((t) => [...t])),
@@ -145,20 +132,6 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
     })),
   };
 }
-
-const caches = new WeakMap<Db, { at: number; v: Promise<StartedCalls> }>();
-/** readStartedCalls for claims, read at most once per CACHE_MS. */
-export function startedCallsCached(db: Db, nowMs: number): Promise<StartedCalls> {
-  const hit = caches.get(db);
-  if (hit && nowMs >= hit.at && nowMs - hit.at < CACHE_MS) return hit.v;
-  const v = readStartedCalls(db, nowMs);
-  caches.set(db, { at: nowMs, v });
-  // The caller awaits v; this only drops a failed reading from the cache.
-  void v.catch(() => { if (caches.get(db)?.v === v) caches.delete(db); });
-  return v;
-}
-/** Drops the cached reading (with the queue cache, calls.ts dropQueueCache). */
-export const dropStartedCache = (db: Db): void => void caches.delete(db);
 
 /**
  * Whether a queued call is held for an owner other than `login` (null: anyone): within STARTED_HOLD_MS of its queueing, an

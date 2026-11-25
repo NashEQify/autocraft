@@ -1,20 +1,20 @@
 // The six blockers of the maintainer workflow: when AutoCraft stops an item and comes back to a person even though the merge is
 // approved. Pure: advance.ts reads the facts and records what this returns; the merge approval stays on the workflow row.
 //
-// Every detector looks only at what happened after `since`, the last time a person started, approved or answered the item: what
-// they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
+// Every detector looks only at what happened after `since`, up to when the person who last started or answered the item has seen it (an
+// answer: when its question was asked): what they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
 import type { Blocker, Entry } from "./types.ts";
 
 export type BlockerFacts = {
   entry: Entry;
   approved: boolean;
   /** A push that is not ours moved the PR's head off the head the workflow last accepted (`base_head`). */
-  authorPush: { from: string; to: string } | null;
+  authorPush: { from: string | null; to: string } | null;
   /** The review at the current head, when it was made after `since`. `majors`: numbers of the parts it marks major. */
   review: { verdict: string; sure: boolean; majors: number[]; outsideLines: number } | null;
   /** Steps whose tries failed since `since`, with how many failed. */
   failures: readonly { step: string; count: number }[];
-  /** Our latest fix push since `since` (a fix-up), with its changed lines and files. */
+  /** Our pushes since `since`: the changed lines of all of them together, and the files of the latest fix-up. */
   fix: { lines: number; files: readonly string[] } | null;
   /** The files the planned parts name; empty when none names one. */
   plannedFiles: readonly string[];

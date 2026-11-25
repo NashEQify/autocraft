@@ -1,19 +1,19 @@
-// `workflow flip <repo> [--dry-run] [--legacy]` and `workflow status [repo]`.
+// `workflow status [repo]`: the live workflows, per tracked repo.
+import { loadTrackedRepos } from "../data/control/index.ts";
+import { listWorkflows } from "../data/workflow/index.ts";
 import { openDb } from "../db/open.ts";
-import { FlipRefused, flipLines, flipRepo } from "./flip.ts";
-import { liveWorkflows, repoWorkflows } from "./store.ts";
 
-const USAGE = "usage: workflow flip <repo> [--dry-run] [--legacy] | workflow status [repo]";
+const USAGE = "usage: workflow status [repo]";
 
 async function status(repo: string | undefined): Promise<void> {
   const db = await openDb();
-  const live = await liveWorkflows(db, repo);
-  const repos = (await repoWorkflows(db)).filter((r) => !repo || r.repo === repo);
-  if (repo && !repos.length) throw new FlipRefused(`${repo} is not tracked`);
+  const [tracked, live] = await db.together(() => Promise.all([loadTrackedRepos(db), listWorkflows(db, { live: true, ...(repo ? { repos: [repo] } : {}) })]));
+  const repos = [...tracked.keys()].filter((r) => !repo || r === repo).sort();
+  if (repo && !repos.length) throw new Error(`${repo} is not tracked`);
   for (const r of repos) {
-    const mine = live.filter((w) => w.repo === r.repo);
-    if (!repo && r.workflow === "legacy" && !mine.length) continue;
-    console.log(`${r.repo}: ${r.workflow}, ${mine.length} live workflow${mine.length === 1 ? "" : "s"}`);
+    const mine = live.filter((w) => w.repo === r);
+    if (!repo && !mine.length) continue;
+    console.log(`${r}: ${mine.length} live workflow${mine.length === 1 ? "" : "s"}`);
     if (!repo) continue;
     for (const w of mine) {
       const approved = w.approvedBy ? `approved by ${w.approvedBy}` : "not approved";
@@ -21,26 +21,22 @@ async function status(repo: string | undefined): Promise<void> {
       console.log(`  #${w.number} ${w.kind} entry ${w.entry} ${w.state} weight ${w.weight}, started by ${w.startedBy}, ${approved}${blocker}`);
     }
   }
-  if (!repo && !repos.some((r) => r.workflow === "new") && !live.length) console.log("every tracked repo runs legacy");
+  if (!repo && !live.length) console.log("no live workflows");
 }
 
 export const commands = {
   workflow: {
-    summary: "workflow flip <repo> [--dry-run] [--legacy] | status [repo]: move a repo to the maintainer workflow (its open Merge?, Hold and scope questions withdrawn, its PR status comment, merging and pushing approved) or back, or list it",
+    summary: "workflow status [repo]: the live workflows of each tracked repo",
     async run(args: string[]): Promise<void> {
       const [sub, ...rest] = args;
+      if (sub !== "status" || rest.length > 1) {
+        console.error(USAGE);
+        process.exit(1);
+      }
       try {
-        if (sub === "status" && rest.length <= 1) return await status(rest[0]);
-        const repo = rest.find((a) => !a.startsWith("--"));
-        const flags = rest.filter((a) => a.startsWith("--"));
-        if (sub !== "flip" || !repo || rest.length - flags.length !== 1 || flags.some((f) => f !== "--dry-run" && f !== "--legacy")) throw new FlipRefused(USAGE);
-        const db = await openDb();
-        const r = await flipRepo(db, repo, { to: flags.includes("--legacy") ? "legacy" : "new", by: "cli", apply: !flags.includes("--dry-run") });
-        for (const line of flipLines(r)) console.log(line);
-        if (r.refused) process.exit(1);
+        await status(rest[0]);
       } catch (e) {
-        if (!(e instanceof FlipRefused)) throw e;
-        console.error(e.message);
+        console.error((e as Error).message);
         process.exit(1);
       }
     },

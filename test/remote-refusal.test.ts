@@ -11,9 +11,8 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { claimCall, REFUSED_PREFIX, submitCall, type Caller } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION } from "../src/remote/protocol.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -21,7 +20,6 @@ mkdirSync(SCRATCH, { recursive: true });
 test("a refused call is retried once on another Task Runner, then fails the step as refused", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-refusal-")), "t.db"));
   allocation.pollMs = 10;
-  await setInferenceMode(db, "user-local", "test");
   const T0 = new Date().toISOString();
   await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 1287, kind: "pr", state: "OPEN", title: "t", author: "alice", created_at: T0, updated_at: T0 }));
   const callers: Record<string, Caller> = {};
@@ -64,7 +62,6 @@ test("a refused call is retried once on another Task Runner, then fails the step
 test("a judging call refused with no other Task Runner fails as refused instead of moving to the mid tier", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-refusal-")), "t.db"));
   allocation.pollMs = 10;
-  await setInferenceMode(db, "user-local", "test");
   const T0 = new Date().toISOString();
   await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 1287, kind: "pr", state: "OPEN", title: "t", author: "alice", created_at: T0, updated_at: T0 }));
   await db.run(db.k.insertInto("access").values({ login: "bob", role: "maintainer" }));

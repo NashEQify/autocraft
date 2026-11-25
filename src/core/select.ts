@@ -1,8 +1,8 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
 import { decidePr } from "./decide.ts";
-import { loadPass, loadPrFacts } from "./facts.ts";
-import { latestRun } from "../classify/settled.ts";
-import { dueCandidates } from "./plan-read.ts";
+import { loadPass, loadPrFact, loadPrFacts } from "./facts.ts";
+import { loadPassBase } from "./pass-load.ts";
+import { loadDueRefs } from "../data/planner/index.ts";
 import type { PlanSet } from "./plan-set.ts";
 import { WAITS_ON_PERSON, inFlightNow } from "./assignment.ts";
 import type { Action, ActionKind, Plan, PrFacts } from "./plan.ts";
@@ -28,9 +28,22 @@ export type PlannedOptions = {
 
 export { WAITS_ON_PERSON, inFlightNow };
 
+/** The PR decided on facts read now; null when the pass no longer holds it. */
+export async function planNow(db: Db, repo: string, number: number, now?: number): Promise<{ facts: PrFacts; plan: Plan } | null> {
+  const facts = await loadPrFact(db, repo, number, now !== undefined ? { now } : {});
+  return facts && { facts, plan: decidePr(facts, loadPass(now)) };
+}
+
+/** Why a plan has no action of `kind` at the head any more; null when it has. */
+export function notDue(p: { plan: Plan } | null, kind: ActionKind, head: string): string | null {
+  if (!p) return "no longer an open PR";
+  if (p.plan.actions.some((a) => a.kind === kind && a.head === head)) return null;
+  return [...p.plan.reasons, ...(p.plan.wait ? [p.plan.wait] : [])].join(", ") || `now ${p.plan.state}`;
+}
+
 /**
- * The PRs with an action of `kind` due, in selection order: fast-track or rank score descending (unranked last), then repo and number.
- * Our own broken pushes come first, then work in flight, then fast-track or rank score. Facts are loaded once for all of them.
+ * The PRs with an action of `kind` due, in selection order: rank score descending (unranked last), then repo and number.
+ * Our own broken pushes come first, then work in flight, then rank score. Facts are loaded once for all of them.
  */
 export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {}): Promise<Planned[]> {
   const { bucket, onPlan, plans, ...load } = opts;
@@ -41,10 +54,12 @@ export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {
     source = plans.prs.filter((p) => (!load.repo || p.facts.repo === load.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
   } else {
     const pass = loadPass(load.now);
-    // Without refs, a step decides only the PRs that can be due (plan-read.ts dueCandidates), unless it asks for another time or
+    // Without refs, a step decides only the PRs that can be due (planner.loadDueRefs), unless it asks for another time or
     // run than the stored Plans', or for every PR's Plan (onPlan).
-    const stored = load.refs || onPlan || load.now !== undefined || (typeof load.run === "string" && load.run !== await latestRun(db)) ? null : await dueCandidates(db, kind, "pr", load.repo);
-    source = stored && !stored.length ? [] : (await loadPrFacts(db, stored ? { ...load, refs: stored } : load)).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
+    const [current, due] = load.refs || onPlan || load.now !== undefined ? [null, null] : await db.together(() => Promise.all([loadPassBase(db), loadDueRefs(db, kind, "pr", load.repo)]));
+    const stored = current && typeof load.run === "string" && load.run !== current.run ? null : due;
+    const base = current && load.run !== undefined ? { ...current, run: load.run } : current;
+    source = stored && !stored.length ? [] : (await loadPrFacts(db, { ...load, ...(stored ? { refs: stored } : {}), ...(base ? { base } : {}) })).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
   }
   for (const { facts, plan } of source) {
     onPlan?.(facts, plan);

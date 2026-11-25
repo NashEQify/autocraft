@@ -7,7 +7,10 @@ import { runModelStep } from "../agents/step.ts";
 import { REFUSED_PREFIX } from "../remote/calls.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
-import { planned } from "../core/select.ts";
+import { workflowOf } from "../core/decide.ts";
+import { mergeAllowed } from "../core/gates.ts";
+import { notDue, planned, planNow } from "../core/select.ts";
+import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -24,7 +27,8 @@ import { opusCandidateOf, type OpusCandidate } from "../review/opus-candidates.t
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
 import { type PremergeReview } from "./parse.ts";
-import { savePremerge } from "./store.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { savePremerge as saveReviews } from "../data/review/index.ts";
 import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 
@@ -40,7 +44,7 @@ export type PremergeParams = {
   onHandled?: (n: number) => void;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
-export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[] };
+export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
 
 export function defaultPremergeDeps(): PremergeDeps {
   const d = defaultOpusDeps();
@@ -61,7 +65,7 @@ export async function premergeCandidates(db: Db, opts: { repo?: string; at?: num
     ...rest, ...(at !== undefined ? { now: at } : {}),
     onPlan: wake ? (f, plan) => {
       const pm = f.premerge;
-      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && f.repoFacts.mergeApproved && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
+      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergeAllowed(f) && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
       if (f.diffPending) {
         const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, pace);
         if (t > f.now) wake.push(t);
@@ -82,7 +86,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
   let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now() });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
-  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [] };
+  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);
   if (params.dryRun || !cands.length) {
     log(`premerge ${repo}: ${s.candidates.length} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);
@@ -90,13 +94,14 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   }
   const opusDeps: OpusDeps = { ...deps, fetchDelta: async () => ({ ok: false, tooLarge: false, error: "not used" }) };
   let handled = 0;
+  const bases = await loadItems(db, cands.filter((e) => e.facts.diffPending).map((e) => ({ repo, number: e.number })), "pr");
   // Read once per pass, before the first re-read.
   let rateLowP: Promise<boolean> | undefined;
   await pool(cands.map((e) => async () => {
-    const start = now(), ref = refOf(e), head = e.head;
+    const ref = refOf(e), head = e.head;
     const fail = async (error: string, final = false) => {
       await jobItem(db, repo, e.number, error, log);
-      await savePremerge(db, { repo, number: e.number, head, at: now(), runId, model: deps.model, error, final });
+      await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: deps.model, error, final }]);
       s.failed.push(ref);
     };
     // A diff that waits for what the merge rule reads beside it is read again, with no model call, within the hour's re-reads
@@ -113,15 +118,23 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         params.onHandled?.(++handled);
         return;
       }
-      const liveBase = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", e.number)))?.base_ref;
+      const liveBase = bases.get(ref)?.base_ref;
       const d = await rereadDiff(db, repo, e.number, head, deps.fetchDiff, liveBase, deps.now?.() ?? Date.now());
       if (d.ok && d.base && liveBase !== undefined && d.base !== liveBase) await recordLiveBase(db, repo, e.number, head, d.base, { by: "premerge", keepDiff: true });
       await jobItem(db, repo, e.number, d.ok ? "diff read again for the merge rule" : `diff not read again: ${d.error}`, log);
       params.onHandled?.(++handled);
       return;
     }
-    const p = await prepareOpusInput(db, repo, await candidateOf(db, e), opusDeps, log, { independent: true });
-    if (p.kind === "no-diff") await fail(`retry: no diff: ${p.error}`);
+    // A person's approval does not read the diff's facts: only the merge rule's own merges wait for what they read beside the diff.
+    const off = async (): Promise<string | null> => {
+      const p = await planNow(db, repo, e.number, deps.now?.());
+      return notDue(p, "premerge", head) ?? (p!.facts.diffPending && !workflowOf(p!.facts) ? EXTRAS_PENDING_REASON : null);
+    };
+    const p = await prepareOpusInput(db, repo, await candidateOf(db, e), opusDeps, log, { independent: true, off });
+    if (p.kind === "off") {
+      await jobItem(db, repo, e.number, `no pre-merge review: ${p.why}`, log);
+      s.off.push(ref);
+    } else if (p.kind === "no-diff") await fail(`retry: no diff: ${p.error}`);
     else if (p.kind === "large") await fail("too large to review automatically", true);
     else if (p.kind === "no-threads") await fail(`retry: ${p.error}`);
     else {
@@ -141,13 +154,13 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         await jobItem(db, repo, e.number, "the head moved during the review; not stored", log);
         s.moved.push(ref);
       } else if (got) {
-        await savePremerge(db, { repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef });
+        await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef }]);
         await jobItem(db, repo, e.number, `pre-merge review: ${got.findings.length} findings`, log);
         s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect").length;
       } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
     }
     params.onHandled?.(++handled);
   }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
-  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.moved.length} moved`);
+  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
   return s;
 }

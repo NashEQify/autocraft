@@ -6,13 +6,14 @@
 //
 // - Answers cannot be read (JEV_UNREADABLE_LIMIT in a row, counted from the recorded Jev runs): same hourly retry; one readable answer ends it.
 //
-// The state is one settings row, settings.jev_unavailable, shown on the Accounts page.
+// The state is one settings row, settings.jev_unavailable, shown to operators.
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { jevCloudflareConfig } from "./jev-cloudflare.ts";
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
-import { deleteSetting, setting, writeSetting } from "../settings-read.ts";
+import { loadRecentJevSummaries } from "../data/inference/index.ts";
+import { deleteSetting, setting, writeSetting } from "../data/control/index.ts";
 
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
@@ -25,7 +26,7 @@ export const JEV_UNREADABLE_SUMMARY = "unreadable answer";
 
 export type JevOutage = { kind: "off" | "missing" | "account" | "format"; reason: string; since: string; at: string };
 
-// Through settings-read, so a planner pass reads them from its snapshot.
+// Through the control module, so a planner pass reads them from its snapshot.
 const get = setting;
 const put = writeSetting;
 
@@ -110,9 +111,8 @@ export async function markJevWorking(db: Db, startedMs: number): Promise<void> {
  * Call after the run is recorded. Returns whether it marked.
  */
 export async function markJevUnreadable(db: Db, nowMs: number = Date.now()): Promise<boolean> {
-  const rows = await db.all(db.k.selectFrom("agent_runs").select("summary").where("provider", "=", "jev").where("state", "!=", "running")
-    .orderBy("id", "desc").limit(JEV_UNREADABLE_LIMIT));
-  if (rows.length < JEV_UNREADABLE_LIMIT || rows.some((r) => r.summary !== JEV_UNREADABLE_SUMMARY)) return false;
+  const rows = await loadRecentJevSummaries(db, JEV_UNREADABLE_LIMIT);
+  if (rows.length < JEV_UNREADABLE_LIMIT || rows.some((summary) => summary !== JEV_UNREADABLE_SUMMARY)) return false;
   await markJevUnavailable(db, "format", `Jev answers could not be read (${JEV_UNREADABLE_LIMIT} in a row)`, nowMs);
   return true;
 }

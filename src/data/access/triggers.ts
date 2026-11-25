@@ -1,0 +1,29 @@
+// The live topics this module's tables feed (src/db/live.ts).
+import { registerTriggerSource } from "../../db/live.ts";
+import { permissionMoved } from "../../db/plan-inputs.ts";
+import { PERM_READ_TTL } from "./permissions.ts";
+
+registerTriggerSource("items",
+  { table: "whitelist_overrides" },
+);
+
+registerTriggerSource("discord-links",
+  { table: "discord_links" },
+);
+
+// Sessions change on every request (last_seen); only sign-ins and revocations matter.
+registerTriggerSource("access",
+  { table: "access" },
+  { table: "sessions", ops: ["INSERT","DELETE"] },
+);
+
+// Planner input no other input topic reports (src/db/plan-inputs.ts). A permission's refresh while it is fresh, the app's keys and sessions are not.
+const permission = permissionMoved(PERM_READ_TTL);
+registerTriggerSource("plan-inputs",
+  { table: "access", ops: ["INSERT", "DELETE"] },
+  { table: "access", ops: ["UPDATE"], when: "old.login IS NOT new.login OR old.role IS NOT new.role OR old.github_id IS NOT new.github_id" },
+  { table: "repo_permissions", ops: ["INSERT", "DELETE"] },
+  { table: "repo_permissions", ops: ["UPDATE"], when: permission.sqlite, pg: permission.pg },
+  { table: "github_app", ops: ["INSERT", "DELETE"] },
+  { table: "github_app", ops: ["UPDATE"], when: "old.slug IS NOT new.slug" },
+);

@@ -7,7 +7,7 @@ import { drainSyncRequests, handleDelivery, signatureOf } from "../src/github/we
 import { writeItemNode } from "../src/mirror.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 const SECRET = "hook-secret";
 async function scratch() {

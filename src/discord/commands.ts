@@ -1,6 +1,7 @@
 // `/autocraft link`, `unlink`, `stats` and `status`. Replies are visible to the caller only. Everything they say about
 // items and counts comes from the public status layer (src/public/status.ts).
-import { audit } from "../dash/audit.ts";
+import { addSentAlerts, loadShownQuestions } from "../data/discord/index.ts";
+import { audit } from "./audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
@@ -52,7 +53,7 @@ export const HELP = [
   ...doHelp(),
   "`/autocraft stats` shows counts for the public repos.",
   "`/autocraft link` and `unlink` connect this Discord account to your AutoCraft login and remove the link (the code is under Link Discord in the dashboard menu).",
-  "`/autocraft alerts on|off` turns on direct messages about decisions you can settle, once linked.",
+  "`/autocraft alerts on|off` turns on direct messages about workflows that need your answer, once linked.",
   "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues.",
   "Right-click a message, then Apps › Find issue, to search with that message's text.",
   "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
@@ -80,7 +81,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     options: [
       { type: 1, name: "link", description: "Link this Discord account to your dashboard login", options: [{ type: 3, name: "code", description: "The code from Link Discord in the dashboard menu", required: true, max_length: 20 }] },
       { type: 1, name: "unlink", description: "Remove the link between this Discord account and your dashboard login" },
-      { type: 1, name: "alerts", description: "Direct messages about new decisions you can settle", options: [{ type: 3, name: "state", description: "on or off", required: true, choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }] }] },
+      { type: 1, name: "alerts", description: "Direct messages about workflows that need your answer", options: [{ type: 3, name: "state", description: "on or off", required: true, choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }] }] },
       { type: 1, name: "stats", description: "Counts for the public repos", options: [{ type: 3, name: "repo", description: "One repo; all public repos when left out", autocomplete: true }] },
       { type: 1, name: "status", description: "Where an issue or pull request is in AutoCraft", options: [{ type: 3, name: "item", description: "For example photocraft#123", required: true, max_length: 100 }] },
       { type: 1, name: "do", description: "Send a command to AutoCraft, for example: merge: photocraft#123", options: [{ type: 3, name: "text", description: "The command, then a colon and the items: review, urgent: photocraft#123 photocraft#456", required: true, max_length: 1000 }] },
@@ -117,7 +118,12 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
     const parsed = parse(call.option("text") ?? "");
     // Discord has no item the text was written on, so the items come from the list in the text.
-    const result = await runCommand(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [] });
+    const userHash = keys.hash("author", call.userId);
+    const shown = await loadShownQuestions(db, userHash);
+    const result = await runCommand(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) });
+    // The reply shows the question that took the answered one's place, as an alert does.
+    const sentAt = new Date().toISOString();
+    await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {

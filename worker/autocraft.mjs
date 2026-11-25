@@ -19,7 +19,7 @@
 //   autocraft update                  replaces this file with the server's current runner
 //   autocraft service install | uninstall | status  runs `work` as a systemd user unit or launchd agent
 //   autocraft runner status | logs | pause | resume | reserve  readiness and plan usage, the service log, pausing, the usage reserve
-//   autocraft inbox | queue | calls | settings | repos | fixups ...  the server's tools as commands (MCP over HTTP); `call <tool>` reaches any tool
+//   autocraft queue | calls | settings | repos | fixups ...  the server's tools as commands (MCP over HTTP); `call <tool>` reaches any tool
 //   autocraft work [--parallel N] [--no-auto-update]  claims, runs and submits in a loop; updates itself when the server has a newer runner
 //   autocraft claim                   claims one call; prints its lease id
 //   autocraft run [--detach] [<lease>]  runs a claimed lease (claims one when none is given)
@@ -3833,7 +3833,11 @@ async function cmdWork(argv) {
   /** @type {Promise<void>[]} */
   const interactiveRuns = [];
   /** @param {number} want */
-  const startInteractive = (want) => { while (interactiveLoops < want) { interactiveLoops++; interactiveRuns.push(loop(false, false, true).then(() => {})); } };
+  const startInteractive = (want) => { while (interactiveLoops < want) { interactiveLoops++; interactiveRuns.push(loop(false, false, true).catch((e) => {
+    // The server's next reply starts another.
+    interactiveLoops--;
+    console.log(`an interactive lane ended: ${msg(e)}`);
+  })); } };
   /** @param {number | undefined} slot @param {boolean} fastLane @param {boolean} ownLane @param {boolean} [interactiveLane] */
   const claimLoop = async (slot, fastLane, ownLane, interactiveLane = false) => {
     let claimId = newClaimId();
@@ -4865,7 +4869,7 @@ function migrateAtStart() {
 }
 
 // ---------------------------------------------------------------------------
-// Server commands: the server's MCP tools (/mcp, Streamable HTTP, JSON-RPC) behind command groups (inbox, queue, calls, ...),
+// Server commands: the server's MCP tools (/mcp, Streamable HTTP, JSON-RPC) behind command groups (queue, calls, ...),
 // with the runner's own credential. CLI_COMMANDS maps each command to its tool; `call` reaches any tool by its name.
 // Arguments are typed by the tool's inputSchema.
 
@@ -4873,14 +4877,8 @@ function migrateAtStart() {
 class UsageError extends Error {}
 
 /** @param {Set<string>} has */
-const answerWhy = (has) => (has.has("set_weight")
-  ? "this Task Runner cannot approve merges: tick \"Can answer decisions and approve merges\" for it on the Connect page (the server must offer answering)"
-  : "only operators, and maintainers who answer decisions (an answering Task Runner while maintainer writes are on), approve merges");
-/** Withdrawing an approved merge stays with operators, also where a maintainer may approve one. @param {Set<string>} has */
-const cancelWhy = (has) => (has.has("set_weight") ? answerWhy(has) : "only operators withdraw an approved merge");
-/** @param {Set<string>} has */
 const commandWhy = (has) => (has.has("my_items")
-  ? "this Task Runner cannot send commands: tick \"Can answer decisions and approve merges\" for it on the Connect page (the server must offer answering), and use a maintainer or operator login"
+  ? "this Task Runner cannot send commands: allow commands for it on the Connect page, and use a maintainer or operator login"
   : "the server did not offer it");
 const LOCAL_WHY = "model calls run on the server's accounts here: the server is not in the user-local inference mode";
 /** @param {Set<string>} has */
@@ -4893,13 +4891,7 @@ const pickWhy = (has) => (has.has("list_model_calls") ? "only maintainers and op
  */
 /** @type {readonly CliCommand[]} */
 export const CLI_COMMANDS = [
-  { path: ["inbox"], tool: "list_inbox", usage: "[--repo R] [--kind K] [--limit N] [--cursor C]", summary: "open decisions, oldest first" },
-  { path: ["inbox", "show"], tool: "get_inbox_item", args: ["id"], usage: "<id>", summary: "one decision: question, options, summary, item text, feedback" },
-  { path: ["inbox", "feedback"], tool: "send_feedback", args: ["id"], flags: { pick: "option", note: "text" }, usage: "<id> --pick <key> --note \"...\"", summary: "your pick of one option and/or a note; an operator answers" },
   { path: ["queue"], tool: "list_merge_queue", usage: "[--repo R] [--limit N] [--cursor C]", summary: "each PR's state, weight and what it waits for" },
-  { path: ["queue", "add"], tool: "queue_pr", args: ["item"], usage: "<pr> [--weight N]", summary: "approve a PR's merge ahead and fast-track it", why: answerWhy },
-  { path: ["queue", "weight"], tool: "set_weight", args: ["item", "weight"], usage: "<item> <N>", summary: "set an item's fast-track weight; --remove takes it off", why: () => "only operators steer the merge queue" },
-  { path: ["queue", "remove"], tool: "cancel_queued", args: ["item"], usage: "<pr>", summary: "withdraw a PR's approved merge", why: cancelWhy },
   { path: ["calls"], tool: "list_model_calls", usage: "", summary: "model calls waiting for a Task Runner, and why each waits", why: () => LOCAL_WHY },
   { path: ["calls", "pick"], tool: "pick_model_call", args: ["id"], usage: "<id>", summary: "reserve a call for your own Task Runners", why: pickWhy },
   { path: ["calls", "unpick"], tool: "unpick_model_call", args: ["id"], usage: "<id>", summary: "end a pick", why: pickWhy },
@@ -4910,15 +4902,15 @@ export const CLI_COMMANDS = [
   { path: ["item"], tool: "get_item", args: ["item"], usage: "<item>", summary: "an item's workflow: state, open recommendation, who started and approved it" },
   { path: ["items"], tool: "my_items", usage: "", summary: "items waiting for your answer, and the ones you started or approved" },
   { path: ["commands"], tool: "help", usage: "", summary: "the commands AutoCraft takes, what each does and when it comes back to you" },
-  { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their open decisions and fix-ups" },
+  { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their fix-ups waiting" },
   { path: ["fixups"], tool: "list_fixups", usage: "[--repo R] [--limit N]", summary: "PRs whose review fixes the pipeline could not apply" },
 ];
 
 /**
- * Server tools without a command: the task tools tell an MCP agent to run this runner's own commands, and answering is
- * the operator's call on the dashboard until it opens to agents. `autocraft call <tool>` still reaches each one.
+ * Server tools without a command: the task tools tell an MCP agent to run this runner's own commands.
+ * `autocraft call <tool>` still reaches each one.
  */
-export const MCP_ONLY = ["next_task", "task_status", "answer_decision", "undo_answer"];
+export const MCP_ONLY = ["next_task", "task_status"];
 
 const SERVER_GROUPS = new Set(CLI_COMMANDS.map((c) => c.path[0]));
 
@@ -5162,7 +5154,7 @@ function printResult(r, json) {
   return r?.isError ? 1 : 0;
 }
 
-/** `inbox`, `queue`, `calls`, `repos`, `fixups` and their subcommands. @param {string} group @param {string[]} argv */
+/** `queue`, `calls`, `repos`, `fixups` and their subcommands. @param {string} group @param {string[]} argv */
 async function cmdServer(group, argv) {
   if (argv.includes("--help") || argv.includes("-h")) { console.log(groupHelp(group)); return 0; }
   const sub = CLI_COMMANDS.find((c) => c.path[0] === group && c.path[1] !== undefined && c.path[1] === argv[0]);
@@ -5279,7 +5271,7 @@ const TASK_HELP = [
   ["autocraft config reserve <5h> <weekly> | off", "runner reserve"],
 ];
 
-const GROUP_TITLES = /** @type {const} */ ({ inbox: "Inbox", queue: "Merge queue", calls: "Model calls", settings: "Settings" });
+const GROUP_TITLES = /** @type {const} */ ({ queue: "Merge queue", calls: "Model calls", settings: "Settings" });
 
 /** The workflow commands: send a command, read an item, list your items, list the commands. */
 const ITEM_GROUPS = ["do", "item", "items", "commands"];
@@ -5311,18 +5303,18 @@ const section = (title, lines) => [title, ...lines.map(([c, s]) => {
   return c.length < HELP_COLUMN ? `  ${c.padEnd(HELP_COLUMN)}${text}` : `  ${c}${pad}${text}`;
 })].join("\n");
 
-const SERVER_NOTE = `Inbox, merge queue, model call and other server commands need Agent access for this Task Runner (the dashboard's Connect page).
+const SERVER_NOTE = `Item, merge queue, model call and other server commands need Agent access for this Task Runner (the dashboard's Connect page).
 Options of a command's tool that are not shown pass through as --<argument>; \`autocraft call <tool> --help\` lists them.
 Add --json for the raw result. Exit 0 done, 1 refused or failed, 2 wrong command line.`;
 
 /** `help [--all]`: the groups and two lines; `--all` adds the task commands and the details. @param {boolean} all */
 function helpText(all) {
   const intro = `autocraft ${HELPER_VERSION}: the AutoCraft Task Runner runs AutoCraft model calls under your own harness subscription,
-and gives you AutoCraft's inbox, merge queue and model calls on the command line.`;
+and gives you AutoCraft's merge queue and model calls on the command line.`;
   const sections = helpSections(all).map(([t, l]) => section(t, l));
   if (!all) return [intro, ...sections, "Server commands need Agent access for this Task Runner (Connect page).\n--json prints the raw result; `autocraft help --all` lists everything."].join("\n\n");
   return [intro, ...sections,
-    `login --answer also asks to answer decisions and approve merges; --no-agent asks for no agent access.
+    `login --answer also asks to send commands; --no-agent asks for no agent access.
 ${SERVER_NOTE}`,
     `The runner claims only while every plan window keeps more than the reserve free (set per user on the
 dashboard, default 20%), and holds whenever it cannot read the usage.

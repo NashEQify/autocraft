@@ -5,24 +5,22 @@
 // always agree. A blocker the review cannot speak for (author commits, a failing step, a large fix, files beyond the plan, a merge
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
+import { byHand, type ConflictPath } from "../core/decide.ts";
+import { asSentence } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
 import type { PlanPart, Recommendation } from "./types.ts";
-
-const TITLE_CHARS = 80;
-
-/** A part's title: the review's own, else the start of its change. */
-const titleOf = (f: ReviewFix): string => f.title ?? (f.change.replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS) || f.file);
+import { droppedTitles, partTitle } from "./work.ts";
 
 /**
  * The plan of a review's fixes, numbered from 1 in the review's order. A part a person dropped from the plan before (same title)
  * stays dropped; a part with no fix (the review asks for nothing) is no part.
  */
 export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[]): PlanPart[] {
-  const dropped = new Set(before.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase()));
+  const dropped = new Set(droppedTitles(before));
   return fixes.map((f, i) => {
-    const title = titleOf(f);
+    const title = partTitle(f);
     return { n: i + 1, title, source: "review" as const, file: f.file, ...(f.major ? { major: true } : {}), state: dropped.has(title.toLowerCase()) ? "dropped" as const : "planned" as const };
   });
 }
@@ -45,12 +43,52 @@ function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; 
   return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
 }
 
+const STOPS = {
+  conflict: (text: string) => t("It conflicts with its base branch. {text}", { text }),
+  ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),
+};
+
+/** A conflict with the base branch, and who settles it once the merge is approved (src/core/decide.ts conflictPath). */
+export type Conflict = { path: ConflictPath | null };
+
+const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => string> = {
+  tomorrow: (text) => t("It conflicts with its base branch, and today's merges of that branch into it are used up, so this goes on tomorrow. {text}", { text }),
+  contributor: (text) => t("It conflicts with its base branch, which the contributor has to resolve first. {text}", { text }),
+  person: (text) => t("It conflicts with its base branch, which AutoCraft cannot resolve: someone has to do that on its branch first. {text}", { text }),
+};
+
+/**
+ * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge. Where the pipeline merges the
+ * base in, a yes approves the merge and the fixes follow that merge. Where a person has to resolve the conflict, a yes approves the
+ * merge and waits for them: it runs nothing that could ask the same again. A PR with no review to go on from is reviewed again.
+ */
+export function onConflict(rec: Recommendation, conflict: Conflict | null): Recommendation {
+  if (!conflict || rec.close || rec.answer) return rec;
+  const { path } = conflict, fixes = rec.parts.fix.length > 0 || rec.again === "fixup";
+  if (path === null) return fixes ? { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" } : rec;
+  if (!fixes && !rec.merges) return rec;
+  if (byHand(path)) {
+    if (!fixes) return { ...rec, text: ON_CONFLICT[path](rec.text), waits: path };
+    return { text: ON_CONFLICT[path](t("Wait for that with the merge approved.")), parts: { fix: [], drop: rec.parts.drop }, merges: true, waits: path };
+  }
+  const out = rec.merges ? rec : { ...rec, merges: true, text: textFor({ fix: rec.parts.fix, merges: true }) };
+  return path === "merge" ? out : { ...out, text: ON_CONFLICT[path](out.text) };
+}
+
 /**
  * What the item comes back with when its steps are done and the merge is not approved: the review's recommendation when it gave
  * one (without the parts a person dropped; its sentence written again when the parts changed), else one built from its verdict: fix
- * the planned parts then merge, merge, close, or review again. A yes always runs something.
+ * the planned parts then merge, merge, close, or review again. A yes always runs something. `stop`: what the PR ran into besides the
+ * review (unapprovedStop), which the sentence names.
  */
-export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
+export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
+  const rec = onConflict(recommended(review, plan), conflict);
+  // Where the sentence is already about the conflict and who settles it, it is not said twice.
+  const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
+  return stop && !rec.close && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
+}
+
+function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
   const drop = droppedOf(plan);
   const rec = review?.rec;
   if (rec) {
@@ -70,14 +108,18 @@ export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[])
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
 }
 
+/** A question that takes the place of one the author pushed past. */
+export const afterPush = (rec: Recommendation): Recommendation => ({ ...rec, text: t("The author pushed commits after the last question. {text}", { text: rec.text }) });
+
 /**
  * What an item stopped at a blocker comes back with. A yes resumes the plan with the merge still approved:
- * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix, a stuck implementation's Try again);
+ * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix; a stuck implementation comes back through question.ts);
  * - findings of the pre-merge review (`params.premerge`: their plan parts) are fixed first, never merged as they are;
  * - a major finding or a change outside the purpose takes the review's own recommendation when it gave one;
+ * - the author's commits on a PR that merges without a review (`mergeEntry`) are reviewed; on any other they are anyway;
  * - for the rest, what the blocker was about is accepted as it is.
  */
-export function atBlocker(found: Found, review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
+export function atBlocker(found: Found, review: ReviewView | null, plan: readonly PlanPart[], mergeEntry = false): Recommendation {
   const drop = droppedOf(plan);
   const go = (text: string, extra: Partial<Recommendation> = {}): Recommendation => ({ text, parts: { fix: [], drop }, merges: true, ...extra });
   const p = found.params;
@@ -87,10 +129,8 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
-    case "author-commits": return go(t("Review the new commits, then merge."));
+    case "author-commits": return go(t("Review the new commits, then merge."), mergeEntry ? { again: "review" } : {});
     case "failed-twice": {
-      const answer = p.answer as Recommendation["answer"] | undefined;
-      if (answer) return go(t("Start the implementation again, then merge."), { answer });
       if (p.step === "fix-up") {
         const fix = planned(plan);
         return fix.length ? { text: t("Try the fix-up of {parts} again, then merge.", { parts: listText(fix) }), parts: { fix, drop }, merges: true } : go(t("Try the fix-up again, then merge."), { again: "fixup" });
@@ -106,6 +146,10 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       if (fix.length) return { text: fixText(fix, true), parts: { fix, drop }, merges: true };
       return found.blocker === "outside-purpose" ? go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) })) : go(t("Merge it as it is."));
     }
-    case "other": return go(p.reason ? t("Go on with the merge after this stop: {reason}.", { reason: String(p.reason) }) : t("Go on with the merge."));
+    case "other": {
+      const reason = String(p.reason ?? "");
+      if (!reason) return go(t("Go on with the merge."));
+      return go(t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }));
+    }
   }
 }

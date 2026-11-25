@@ -1,13 +1,15 @@
 // The gates on writes: the repo approvals each action needs and the global pipeline switch. Pure. The planner and the
 // guard (guard.ts) both use it; decide() does not (it shows what would run, approved or not).
+import { ownImplementation } from "./implementation.ts";
 import type { ActionKind, ItemFacts, PrFacts } from "./plan.ts";
+import { mayMerge, mayPush, mergeApproved, type MayResult, type MergeInputs } from "./may.ts";
 import { tripStageOf } from "./push-outcome.ts";
 
 /** Who asks for a write: the pipeline itself (the autopilot), or an operator (a job they requested, or a command they ran). */
 export type By = "pipeline" | { operator: string };
 
 /** An action as the gates and the guard see it: its kind, and the bucket where the kind has several (fix-up: fix | ask, ...). */
-export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string };
+export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string; /** Fix-up: the plan action's source (`operator`: a person's fix-up request). */ source?: string };
 
 /** The repo approvals a write can need. */
 export type Approval = "merge" | "push" | "comment" | "ci" | "labels" | "fix-issue" | "main-fix" | "status";
@@ -29,8 +31,7 @@ export function gateRepo(a: RepoApprovals, need: RepoNeed, by: By, repo: string)
 /** The approval an action's GitHub write needs, or null for an action that writes nothing there. */
 export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null {
   switch (a.kind) {
-    // Item actions. Closing and commenting need the comment approval: an answered close always comments first (a
-    // security-scan question is in scope for it whatever the pilot says; decideItem already covers that).
+    // Item actions, for work nobody commanded (commandedBy). Closing and commenting need the comment approval: a close comments first.
     case "label": return "labels";
     case "act": return "comment";
     case "implement": return "fix-issue";
@@ -55,6 +56,12 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
 const endsAttempt = (f: PrFacts | ItemFacts): boolean =>
   "ghState" in f ? f.ghState !== "OPEN" : f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
 
+/** Who the implementation (and with it its PR's revisions) runs for, or who commanded the close; null for other work. Their command is the approval, in any repo. */
+function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
+  if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
+  return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
+}
+
 /** Why the write is refused, or null. */
 export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (by === "pipeline" && !f.pipelineOn) return "The pipeline is off";
@@ -66,10 +73,51 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (tripped) return `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`;
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;
-  const r = f.repoFacts as Partial<Record<"mergeApproved" | "pushApproved" | "commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
-  const ok = { merge: r.mergeApproved, push: r.pushApproved, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
+  if (commandedBy(f, a) !== null) return null;
+  if ("may" in f && (need === "merge" || need === "push")) {
+    const may = need === "merge" ? mergeMay(f) : pushMay(f, a);
+    return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
+  }
+  const r = f.repoFacts as Partial<Record<"commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
+  // An item (no PR facts) has no merge and no push of its own.
+  const ok = { merge: undefined, push: undefined, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
   return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
 }
+
+const mergeInputs = (f: PrFacts): MergeInputs =>
+  ({ repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, duplicates: f.duplicates?.of.map((n) => `${f.repo}#${n}`), head: f.head ?? "", pushes: f.may.pushes });
+
+/** Whether the PR may be merged at its head (src/core/may.ts). */
+export const mergeMay = (f: PrFacts): MayResult => mayMerge(mergeInputs(f));
+
+/** `mergeMay` as a yes or no. */
+export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f).ok;
+
+/** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts). */
+export const mergeAllowed = (f: PrFacts): boolean => mergeApproved(mergeInputs(f)).ok;
+
+type PushKind = "fixup" | "cifix" | "conflict";
+
+/** The push kind `mayPush` judges for an action that pushes. */
+function pushKind(a: Want): PushKind {
+  if (a.kind === "cifix" || (a.kind === "lint" && a.bucket === "cifix")) return "cifix";
+  if (a.kind === "conflict" || (a.kind === "lint" && a.bucket === "conflict")) return "conflict";
+  return "fixup";
+}
+
+/** Whether a push of `kind` is approved (src/core/may.ts). `operatorFix`: a person's fix-up request. */
+const pushMayOf = (f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult =>
+  mayPush({ kind, repoApproval: f.may.repoPush, workflow: f.may.workflow, operatorFix, ...(operatorFix && f.may.fixupBy ? { by: f.may.fixupBy } : {}) });
+const pushMay = (f: PrFacts, a: Want): MayResult => pushMayOf(f, pushKind(a), a.source === "operator");
+
+/** Why a push of `kind` is not approved; null when it is. */
+export function pushRefusal(f: PrFacts, kind: PushKind, operatorFix = false): string | null {
+  const m = pushMayOf(f, kind, operatorFix);
+  return m.ok ? null : m.why;
+}
+
+/** The push approval as a yes or no. */
+export const pushAllowed = (f: PrFacts, kind: PushKind, operatorFix = false): boolean => pushRefusal(f, kind, operatorFix) === null;
 
 /** Writes from the command line are an operator's. */
 export const CLI_BY: By = { operator: "cli" };

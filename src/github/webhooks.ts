@@ -8,7 +8,8 @@ import { queueCommand } from "./commands.ts";
 import { ONE_QUERY, Transient, writeItemNode, type Querier } from "../mirror.ts";
 import { ownerOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
+import { listItems, loadSyncRequests, queueSyncRequests, removeSyncRequests } from "../data/mirror/index.ts";
+import { loadTrackedRepos } from "../data/control/index.ts";
 
 export const WEBHOOK_PATH = "/webhooks/github";
 export const WEBHOOK_BODY_LIMIT = 1024 * 1024;
@@ -31,7 +32,7 @@ async function trackedName(db: Db, payload: Obj): Promise<string | null> {
   if (i < 1) return null;
   const owner = full.slice(0, i);
   const name = full.slice(i + 1);
-  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", name))) return null;
+  if (!(await loadTrackedRepos(db, [name])).has(name)) return null;
   return ownerOf(name).toLowerCase() === owner.toLowerCase() ? name : null;
 }
 
@@ -56,8 +57,7 @@ export async function itemNumbers(db: Db, repo: string, event: string, payload: 
       if (own.length || listed.length) return own;
       const sha = body.head_sha;
       if (typeof sha !== "string" || !sha) return [];
-      return (await db.all(db.k.selectFrom("main.items").select("number").where("repo", "=", repo).where("kind", "=", "pr")
-        .where("state", "=", "OPEN").where("head_oid", "=", sha))).map((r) => r.number);
+      return (await listItems(db, { repos: [repo], kind: "pr", states: ["OPEN"], headOid: sha }, "ref")).map((r) => r.number);
     }
     default: return [];
   }
@@ -77,10 +77,7 @@ export async function queueDelivery(db: Db, event: string, payload: unknown, now
   const numbers = await itemNumbers(db, repo, event, p);
   if (!numbers.length) return 0;
   const at = now.toISOString().replace(/\.\d+Z$/, "Z");
-  for (const n of numbers) {
-    await db.run(db.k.insertInto("main.sync_requests").values({ repo, number: n, event, requested_at: at })
-      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["event", "requested_at"]))));
-  }
+  await queueSyncRequests(db, numbers.map((n) => ({ repo, number: n, event, requestedAt: at })), { replace: true });
   return numbers.length;
 }
 
@@ -116,12 +113,11 @@ const ABANDON_MS = 6 * 3600_000;
  */
 export async function drainSyncRequests(db: Db, client: Querier, opts: { limit?: number; reserve?: number; now?: Date; log?: (l: string) => void } = {}): Promise<number> {
   const now = opts.now ?? new Date();
-  const rows = await db.all(db.k.selectFrom("main.sync_requests").select(["repo", "number", "requested_at"])
-    .orderBy("requested_at").limit(opts.limit ?? 20));
+  const rows = await loadSyncRequests(db, opts.limit ?? 20);
   let done = 0;
   for (const r of rows) {
     // Arrived after this row was read: left for the next drain.
-    const gone = async (): Promise<void> => void await db.run(db.k.deleteFrom("main.sync_requests").where("repo", "=", r.repo).where("number", "=", r.number).where("requested_at", "=", r.requested_at));
+    const gone = async (): Promise<void> => await removeSyncRequests(db, [{ repo: r.repo, number: r.number, requestedAt: r.requested_at }]);
     if (now.getTime() - Date.parse(r.requested_at) > ABANDON_MS) { await gone(); continue; }
     // Never wait out a rate limit here; the poll has its own handling.
     if (client.remaining !== null && client.remaining < (opts.reserve ?? 1000)) break;

@@ -6,13 +6,14 @@ import { t } from "../../../../../src/i18n/index.ts";
 import { useQuery } from "../../../api/client";
 import { usePageProject } from "../../../api/scope";
 import type { HomeProblem, MaintainRow, MaintainRunnerLine } from "../../../api/types";
+import { causeText } from "../../../lib/stuck";
 import { itemPath } from "../../../lib/links";
 import { useUser } from "../../../shell/UserContext";
 import { Badge } from "../../../ui/atoms/Badge";
 import { ItemIcon } from "../../../ui/atoms/ItemIcon";
 import { Pending } from "../../../ui/atoms/Pending";
 import { cn } from "../../../ui/cn";
-import { LiveBoard } from "../../home/LiveBoard";
+import { LiveBoard } from "./LiveBoard";
 import type { ViewProps } from "../../../registry/types";
 
 const calls = (n: number) => (n === 1 ? t("1 call running") : t("{n} calls running", { n }));
@@ -156,7 +157,7 @@ function Stuck() {
                 <span className="code">
                   {i.repo}#{i.number}
                 </span>{" "}
-                · {i.cause}
+                · {causeText(i.cause)}
               </div>
             </div>
           </li>
@@ -191,7 +192,7 @@ export function HomeView(_: ViewProps) {
           </>
         )}
         <div className="mt-4">
-          <LiveBoard to="/now" />
+          <LiveBoard />
         </div>
       </div>
     </div>

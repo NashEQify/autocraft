@@ -15,16 +15,16 @@ import { fixupDir, GIT_ENV, gitDirEnv, HARDENING } from "../fixup/git.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
 import { callTool as itemTool, openDb, TOOLS as ITEM_TOOLS, type ToolResult } from "../itemtools/server/tools.ts";
 import { snapshotFile } from "../itemtools/snapshot.ts";
-import { MAX_AROUND, MAX_RESULTS, referenceAround, referenceSearch, type Passage, type SearchOptions } from "../reference-search.ts";
+import { MAX_AROUND, MAX_RESULTS, referenceAround, referenceSearch, type Passage, type SearchOptions } from "../data/external/index.ts";
 import { diffCacheDir } from "../review/diff.ts";
 import { REFERENCE_SERVER } from "./bundle.ts";
-import { liveLease } from "./calls.ts";
 import { relayCheck } from "./check-relay.ts";
 import { relayWorkspaceCall } from "../build/workspace-relay.ts";
 import { WORKSPACE_SERVER, WORKSPACE_TOOLS, type WorkspaceToolResult } from "../build/workspace-tools.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
 import type { DatabaseSync } from "node:sqlite";
 import type { Db } from "../db/index.ts";
+import { addPassages, loadLeaseBundle, loadLiveLease, loadPassageCount } from "../data/runners/index.ts";
 import { envVar } from "../env.ts";
 
 export type { ToolResult };
@@ -67,11 +67,10 @@ export type TaskLease = { id: number; runId: number | null; login: string; serve
 
 /** The live lease of a secret with what its tools need from the call, or null. */
 export async function taskLease(db: Db, secret: string | undefined): Promise<TaskLease | null> {
-  const l = await liveLease(db, secret);
-  if (!l) return null;
-  const r = (await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "reference_repo"]).where("id", "=", l.id)))!;
-  const b = JSON.parse(r.bundle) as Omit<TaskBundle, "callId">;
-  return { id: l.id, runId: l.runId, login: l.login, servers: b.mcpServers, mounts: b.mounts, referenceRepo: r.reference_repo };
+  const f = secret ? await loadLeaseBundle(db, secret, Date.now()) : null;
+  if (!f) return null;
+  const b = JSON.parse(f.bundle) as Omit<TaskBundle, "callId">;
+  return { id: f.lease.id, runId: f.lease.runId, login: f.lease.login, servers: b.mcpServers, mounts: b.mounts, referenceRepo: f.referenceRepo };
 }
 
 class BadArgs extends Error {}
@@ -99,8 +98,7 @@ const reserved = new Map<string, number>();
 async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): Promise<ToolResult> {
   const repo = lease.referenceRepo;
   if (!repo) return { text: "this call has no reference documentation", isError: true };
-  const used = (await db.get(db.k.selectFrom("main.remote_passages").select((eb) => eb.fn.countAll<number>().as("n")).where("call_id", "=", lease.id)
-    .where("run_id", "is not distinct from", lease.runId)))!.n;
+  const used = await loadPassageCount(db, lease.id, lease.runId);
   const key = `${lease.id}:${lease.runId}`;
   const left = PASSAGES_PER_LEASE - Number(used) - (reserved.get(key) ?? 0);
   if (left <= 0) return { text: `refused: the ${PASSAGES_PER_LEASE} reference passages of this call are used up; answer with what you know`, isError: true };
@@ -120,7 +118,7 @@ async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): 
     }
     served = found.slice(0, left);
     const now = Date.now();
-    for (const p of served) await db.run(db.k.insertInto("main.remote_passages").values({ call_id: lease.id, run_id: lease.runId, user_login: lease.login, repo, passage_id: p.id, page: p.page, at: now }));
+    await addPassages(db, served.map((p) => ({ callId: lease.id, runId: lease.runId, login: lease.login, repo, passageId: p.id, page: p.page, at: now })));
   } finally {
     const rest = (reserved.get(key) ?? 0) - left;
     if (rest > 0) reserved.set(key, rest);
@@ -196,7 +194,7 @@ export async function callTaskTool(db: Db, lease: TaskLease, secret: string, ser
     if (runner && (server === ITEM_SERVER || server === REFERENCE_SERVER)) return await runnerTool(runner, secret, server, name, raw, opts.signal);
     if (server === ITEM_SERVER) return await items(name, raw);
     if (server === REFERENCE_SERVER) return await reference(db, lease, name, raw);
-    const live = async (): Promise<boolean> => (await db.fresh(() => liveLease(db, secret)))?.id === lease.id;
+    const live = async (): Promise<boolean> => (await db.fresh(() => loadLiveLease(db, secret, Date.now())))?.id === lease.id;
     if (server === WORKSPACE_SERVER) return await relayWorkspaceCall(db, { id: lease.id, runId: lease.runId }, name, raw, { live, ...opts });
     return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live, ...opts });
   } catch (e) {
@@ -317,6 +315,9 @@ export async function archiveOf(lease: TaskLease, repo: string, sha: string, opt
         try { renameSync(tmp, file); pruneArchives(dir, name); } catch { rmSync(tmp, { force: true }); }
       });
     });
-  })();
+  })().catch((e: unknown) => {
+    release();
+    out.destroy(e as Error);
+  });
   return out;
 }

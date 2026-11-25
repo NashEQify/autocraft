@@ -105,9 +105,9 @@ export function listText(ns: readonly (number | string)[]): string {
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on (waits.ts legWait). */
+/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts legWait). */
 export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null): string {
-  if (wait && (wf.state === "running" || wf.state === "waiting")) return wait;
+  if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed")) return wait;
   switch (wf.state) {
     case "running": return current ? t("Running: {step}", { step: stepLabel(current) }) : t("Running");
     case "waiting": return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");
@@ -133,6 +133,7 @@ export function yesClause(rec: Recommendation): string | null {
     const what = rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   }
+  if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
   const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
@@ -180,11 +181,16 @@ function byText(how: Run["how"], login: string, time: string): string {
 /**
  * The one-line confirmation of an accepted command, the same on every surface:
  * "Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply stop to halt."
+ * `waits`: who has to resolve the PR's conflict with its base branch before anything is fixed or merged.
  */
-export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock): string {
+export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock, waits: Recommendation["waits"] | null = null): string {
   const who = byText(r.how, by, clock(at));
   if (r.end === "stop") return t("Stopped {by}. Nothing more runs.", { by: who });
-  if (r.end === "close") return t("Closing {by}.", { by: who });
+  if (r.end === "close") {
+    if (!r.close) return t("Closing {by}.", { by: who });
+    if (r.close.as === "duplicate") return t("Closing as a duplicate of {ref} {by}.", { ref: `${r.close.of.repo ?? ""}#${r.close.of.number}`, by: who });
+    return r.close.as === "completed" ? t("Closing as completed {by}.", { by: who }) : t("Closing as not planned {by}.", { by: who });
+  }
   if (r.end === "backlog") return t("In the backlog: open, no work planned {by}. Any command starts it again.", { by: who });
   if (r.autorepin !== null) {
     return r.autorepin.toLowerCase() === "off"
@@ -197,18 +203,20 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "fixup") did.push(t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
-  else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
-  if (r.decision) did.push(r.decision.label ? t("going on with “{option}”", { option: r.decision.label }) : t("going on with the implementation"));
+  else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
-  if (!did.length && !r.start && !r.approve && !r.answers) {
+  if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {
     // A weight alone.
     const shown = r.weight === null ? null : weightWord(r.weight)?.startsWith("weight ") ? String(r.weight) : weight;
     return t("Weight {weight} {by}.", { weight: shown ?? t("normal"), by: who });
   }
   const end = r.start === "merge"
     ? t("updating from main, then merging in the next batch when CI is green")
+    : waits
+      ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
     : r.merges
-      ? did.length || r.answers ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
+      ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
   const what = cap(did.length ? t("{done}, then {end}", { done: did.join(", "), end }) : end);
   return t("{what}{weight} {by}. Reply stop to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
@@ -224,7 +232,7 @@ const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|lat
 
 /** The one start-or-approve command a leftover text names, or null when it names none, several, or is hedged. */
 function singleCommand(rest: string): string | null {
-  if (MEANING_WORDS.test(rest)) return null;
+  if (MEANING_WORDS.test(rest) || /(?<![\w-])duplicate(?![\w-])/i.test(rest)) return null;
   const found = COMMANDS.filter((c) => !c.answer && c.word !== "autorepin" && [c.word, ...c.aliases].some((w) => new RegExp(`(?<![\\w-])${w.replace(/[- ]/g, "[-\\s]?")}(?![\\w-])`, "i").test(rest)));
   return found.length === 1 ? found[0]!.word : null;
 }

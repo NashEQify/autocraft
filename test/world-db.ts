@@ -1,5 +1,5 @@
 // The shared database builder for journeys: a temp database filled through the same writes sync and the stages make, a fake
-// GitHub that answers live reads and records writes, and a model runner with canned replies.
+// GitHub that answers live reads and records writes, and a fake Task Runner with canned replies.
 //
 //   const w = world().repo().pr(1).review(1).verified(1).premerge(1, "clean");
 //   w.gh.writes            // what reached GitHub: { kind, number, head?, ... }
@@ -7,18 +7,18 @@
 //   w.models((input) => reply | undefined)
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { syncAccounts } from "../src/agents/accounts.ts";
-import { setRunner } from "../src/classify/run.ts";
+import { fakeTaskRunner } from "./fake-runner.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
-import { ask } from "../src/decisions.ts";
+import { savePermissions } from "../src/data/access/index.ts";
 import type { ActDeps } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { setFixIssueApproval } from "../src/implement/approval.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { setMergeApproval } from "../src/merge/approval.ts";
+import { listWorkflows, startWorkflows } from "../src/data/workflow/index.ts";
+import { checkFixup } from "../src/preapproval/index.ts";
 import { setCiApproval } from "../src/merge/ci-approval.ts";
-import { MERGE_OPTIONS, mergeDecisionId, HEAD_FACT } from "../src/core/rules.ts";
 import type { BatchDeps } from "../src/merge/batch.ts";
 import type { CommandResult, MergeDeps } from "../src/merge/index.ts";
 import type { Querier } from "../src/mirror.ts";
@@ -26,18 +26,39 @@ import { savePremerge } from "../src/premerge/store.ts";
 import type { PremergeFinding } from "../src/premerge/types.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 export const T0 = "2026-01-01T00:00:00Z";
 export const T1 = "2026-01-02T00:00:00Z";
+/** Before T0: a workflow started then has seen nothing the stages wrote. */
+const BEFORE = "2025-12-31T00:00:00Z";
 export const OPERATOR = "op";
 /** The one CI check of every PR. */
 export const CHECK = "gate / test";
 
 /** What reached GitHub. `head` is the head the write was for, where the write names one. */
 export type Write = { kind: "merge" | "assign" | "comment" | "close" | "pr" | "push"; number: number; head?: string; detail?: string };
-type Live = { head: string; state: string; mergeable: string; ci: string; authors: string[]; assignees: string[] };
+type Live = { head: string; state: string; draft?: boolean; mergeable: string; ci: string; authors: string[]; assignees: string[] };
+
+/**
+ * Runs `passes` in turn, up to `most` rounds, until each has run and written nothing since the last write: a pass reads the
+ * database and the clock, so it would decide the same again. It does not wait for the permission reads advancePreapprovals starts and
+ * leaves running (refreshSettlers): without an injected `permission` there is no app token and they write nothing; a test that injects
+ * one waits for its answer itself.
+ */
+export async function untilQuiet(db: Db, passes: (() => Promise<unknown>)[], most: number): Promise<void> {
+  let wrote = false;
+  const stop = db.observe((e) => { wrote ||= e.kind === "write-lock" || /\binsert\b|\breplace\s+into\b|\bupdate\b|\bdelete\s+from\b/i.test(e.sql); });
+  try {
+    for (let i = 0, quiet = 0; i < most * passes.length && quiet < passes.length; i++) {
+      wrote = false;
+      await passes[i % passes.length]!();
+      quiet = wrote ? 0 : quiet + 1;
+    }
+  } finally {
+    stop();
+  }
+}
 
 mkdirSync(SCRATCH, { recursive: true });
 export const tmpdir = (name: string): string => mkdtempSync(join(SCRATCH, `${name}-`));
@@ -51,6 +72,7 @@ export type IssueOpts = { label?: string; flags?: string[]; title?: string; body
 
 export async function world() {
   const db: Db = await connectDb(join(tmpdir("world"), "t.db"));
+  process.env.AUTOCRAFT_ARTIFACT_DIR = tmpdir("artifacts");
   const restore: (() => void)[] = [];
   const live = new Map<number, Live>();
   const writes: Write[] = [];
@@ -88,7 +110,7 @@ export async function world() {
         const l = live.get(x)!;
         const done = l.ci !== "pending";
         return [`pr${x}`, {
-          number: x, state: l.state, isDraft: false, headRefOid: l.head, mergeable: l.mergeable, maintainerCanModify: true,
+          number: x, state: l.state, isDraft: l.draft ?? false, headRefOid: l.head, mergeable: l.mergeable, maintainerCanModify: true,
           commits: { nodes: [{ commit: { oid: l.head, statusCheckRollup: { contexts: { nodes: [{ __typename: "CheckRun", name: CHECK, status: done ? "COMPLETED" : "IN_PROGRESS", conclusion: done ? l.ci.toUpperCase() : null }] } } } }] },
         }];
       })) };
@@ -109,7 +131,11 @@ export async function world() {
       /** GitHub's own state of a PR (its head, mergeable state, CI), which the database learns only from a fetch. */
       live: (n: number, patch: Partial<Live> = {}) => { Object.assign(live.get(n)!, patch); return w; },
       mergeDeps: (): MergeDeps => ({ querier, run: runMergeCommand, now: () => new Date(T1), mergeCommand: "safe-merge" }),
-      actDeps: (): ActDeps => ({ querier, now: () => new Date(T1) }),
+      /** Everyone has write access, as far as this GitHub is asked. */
+      actDeps: (): ActDeps => ({ querier, now: () => new Date(T1), permission: async (d, login, repo) => {
+        await savePermissions(d, [{ login, repo, permission: "write", checkedAt: new Date().toISOString() }]);
+        return { kind: "ok", permission: "write" };
+      } }),
       /** Deps of the batch stage over a fake git: a batch branch is "pushed", its PR is #900 and merges with the merge command. */
       batchDeps: (o: { ci?: () => string } = {}): BatchDeps => {
         const MAIN = "a".repeat(40);
@@ -163,6 +189,36 @@ export async function world() {
       await setCiApproval(db, OPERATOR, "app", on("ci"));
       await setFixIssueApproval(db, OPERATOR, "app", on("fixissue"));
       return await w.pipeline(true);
+    },
+    /** The app identity, and the people who may act on the repo: write permission on it, read just now. */
+    async acting(...logins: string[]) {
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+      const at = new Date().toISOString();
+      for (const login of logins.length ? logins : [OPERATOR]) {
+        await db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'maintainer')").run(login);
+        await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'app', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = 'write', checked_at = excluded.checked_at").run(login, at);
+      }
+      return w;
+    },
+    /** A running workflow of the PR, started (and by default approved for merge) before anything the stages write (T0). */
+    async workflow(n: number, o: { entry?: "review" | "fixup" | "merge"; by?: string; approved?: boolean } = {}) {
+      const by = o.by ?? OPERATOR;
+      await startWorkflows(db, [{ repo: "app", number: n, kind: "pr", entry: o.entry ?? "review", weight: 5, startedBy: by, startedVia: "dashboard", baseHead: await headOf(n), at: BEFORE, ...(o.approved === false ? {} : { approvedBy: by, approvedVia: "dashboard" as const }) }]);
+      return w;
+    },
+    /** The merge leg of the PR's live workflow, handed over to the merge queue at its head after anything the stages wrote. */
+    async handedOver(n: number) {
+      const wf = (await listWorkflows(db, { live: true, refs: [{ repo: "app", number: n }] }))[0]!;
+      await db.run(db.k.insertInto("preapprovals").values({ repo: "app", number: n, by: wf.startedBy, at: T1, instructions: "", state: "queued", from_head: await headOf(n), head: await headOf(n), updated_at: T1, workflow_id: wf.id }));
+      return w;
+    },
+    /** The operator's fix-up of the PR's head ("rename a to b"), with the merge leg of its live workflow unless `merge` is false. */
+    async fixup(n: number, merge = true) {
+      const step = await checkFixup(db, { repo: "app", number: n, by: OPERATOR, instructions: "rename a to b", merge });
+      const id = (await listWorkflows(db, { live: true, refs: [{ repo: "app", number: n }] }))[0]?.id;
+      if (merge && id === undefined) throw new Error(`app#${n} has no live workflow`);
+      await db.write(() => step.write(id ?? 0));
+      return w;
     },
     /** The global pipeline switch. */
     async pipeline(on: boolean) {
@@ -226,38 +282,11 @@ export async function world() {
       await recordDiffFacts(db, "app", n, await headOf(n));
       return w;
     },
-    /** The operator's answer to the PR's Merge? question at its head (asks it first when nobody did). */
-    async answer(n: number, key: "merge" | "hold" | "close") {
-      const id = mergeDecisionId("app", n, await headOf(n));
-      await ask(db, [{
-        id, kind: "merge", repo: "app", number: n, question: "Merge this PR?", facts: [`${HEAD_FACT}${await headOf(n)}`],
-        options: Object.values(MERGE_OPTIONS).map((x) => ({ ...x })), asked_by: "merge", asked_at: T0,
-      }]);
-      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
-      return w;
-    },
-    /** An operator's answer to a decision asked earlier (by id). */
-    async answerDecision(id: string, key: string) {
-      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
-      return w;
-    },
-
     // ---- models ----
-    /** Installs a model runner: it gets each prompt's text and returns the reply text, or undefined for "no reply". One enabled Claude account is set up. */
+    /** Starts a fake Task Runner (test/fake-runner.ts): it gets each call's prompt text and returns the reply text, or undefined for "no reply". */
     async models(reply: (input: string) => string | undefined) {
-      const dir = tmpdir("box");
-      mkdirSync(join(dir, "usage"));
-      writeFileSync(join(dir, "accounts.json"), JSON.stringify([{ id: "t", configDir: join(dir, "config-t") }]));
-      process.env.AUTOCRAFT_ACCOUNTS = join(dir, "accounts.json");
-      process.env.AUTOCRAFT_USAGE_DIR = join(dir, "usage");
-      await syncAccounts(db);
-      await db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
-      restore.push(setRunner(async (_cmd, _args, input) => {
-        const text = reply(input);
-        return text === undefined
-          ? { code: 1, stdout: "", stderr: "no reply" }
-          : { code: 0, stdout: JSON.stringify({ type: "result", result: text, usage: { input_tokens: 100, output_tokens: 10 } }), stderr: "" };
-      }));
+      const runner = await fakeTaskRunner(db, (c) => reply(c.stdin));
+      restore.push(() => void runner.stop());
       return w;
     },
 

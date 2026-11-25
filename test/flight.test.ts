@@ -6,10 +6,13 @@ import { tmpdir } from "./world-db.ts";
 import { decidePr } from "../src/core/decide.ts";
 import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
-import { carriedReview } from "../src/review/carry.ts";
+import { carriedReviews } from "../src/review/carry.ts";
+import type { Db } from "../src/db/index.ts";
 import { prFacts } from "./world.ts";
-import { connectDb, dbFor } from "../src/db/open.ts";
+import { connectDb, dbFor } from "./helpers/raw-db.ts";
 import { sqliteOnly } from "./test-db.ts";
+
+const carriedReview = async (db: Db, c: { repo: string; number: number; head_oid: string }, stale?: Set<string>) => (await carriedReviews(db, [c], stale)).get(`${c.repo}#${c.number}`) ?? null;
 
 test("selection order: our broken push, then work in flight, then score", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const mk = (n: number, over: Parameters<typeof prFacts>[0]) => { const facts = prFacts({ number: n, review: { head: "old" }, head: "h", ...over }); return { facts, plan: decidePr(facts) }; };
@@ -50,9 +53,9 @@ test("a carried verdict is not carried again after new discussion or at a head t
   assert.equal(await carriedReview(db, c), null, "a head with a review is reviewed, not carried, again");
 });
 
-test("with Claude paused, the carry step carries a review to our checked fix-up and the review step leaves the head alone", async () => {
+test("with no Task Runner, the carry step carries a review to our checked fix-up and the review step leaves the head alone", async () => {
   const { world } = await import("./world-db.ts");
-  const { pauseReason } = await import("../src/runner/autopilot.ts");
+  const { untakenTest } = await import("../src/runner/concurrency.ts");
   const { runCarry } = await import("../src/review/carry-step.ts");
   const { selectOpusCandidates } = await import("../src/review/opus-candidates.ts");
   const w = await (await world()).repo();
@@ -62,8 +65,9 @@ test("with Claude paused, the carry step carries a review to our checked fix-up 
     await w.db.run(w.db.k.updateTable("opus_reviews").set({ seen_at: at }).where("repo", "=", "app").where("number", "=", 1));
     await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: "H", state: "pushed", attempt: 1, created_at: at }));
     await w.db.run(w.db.k.insertInto("patch_checks").values({ kind: "fixup", repo: "app", number: 1, subject: "sha1", patch_hash: "x", round: 1, verdict: "approve", reasons: "", problems: "[]", model: "m", created_at: at }));
-    assert.ok(await pauseReason(w.db, "opus-review"), "models are paused");
-    assert.equal(await pauseReason(w.db, "review-carry"), null);
+    const untaken = await untakenTest(w.db);
+    assert.ok(await untaken({ step: "opus-review", repo: "app" }), "no Task Runner takes the review");
+    assert.equal(await untaken({ step: "review-carry", repo: "app" }), null);
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind).filter((k) => k === "review" || k === "carry"), ["carry"]);
     assert.deepEqual(await selectOpusCandidates(w.db, "app"), []);
     assert.equal(await runCarry(w.db, "app", () => {}), 1);

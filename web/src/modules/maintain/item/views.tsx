@@ -1,7 +1,6 @@
-// The new item page (ui_v2): a header, then "In AutoCraft" beside "On GitHub" (a segmented control on phones). The AutoCraft side
-// holds the status (steps, numbered parts, the recommendation), the command box and the controls, then signals, security,
-// implementation and screenshots, the conversation with the model and the history. Items of a repo still on the decision
-// pipeline get the classic page: commands are refused there and their questions are answered through its forms.
+// The item page: a header, then "In AutoCraft" beside "On GitHub" (a segmented control on phones). The AutoCraft side holds the
+// status (steps, numbered parts, the recommendation), the command box and the controls, then signals, security, implementation
+// and screenshots, the conversation with the model and the history.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeftIcon, ArrowSquareOutIcon, CheckCircleIcon, CircleNotchIcon, ClockIcon, XCircleIcon } from "@phosphor-icons/react";
@@ -11,7 +10,6 @@ import type { ItemPageData, MaintainItem, MaintainItemStatus, MaintainReply, Mai
 import type { ViewProps } from "../../../registry/types";
 import { useIsPhone } from "../../../shell/useMedia";
 import { useUser } from "../../../shell/UserContext";
-import { canComment } from "../../../registry/permissions";
 import { Badge } from "../../../ui/atoms/Badge";
 import { Button } from "../../../ui/atoms/Button";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
@@ -24,17 +22,17 @@ import { ItemRef } from "../../../ui/molecules/ItemRef";
 import { Markdown } from "../../../ui/molecules/Markdown";
 import { Segmented } from "../../../ui/molecules/Segmented";
 import { safeHref } from "../../../ui/safeHref";
-import { Composer } from "../../item/Composer";
-import { GithubSide } from "../../item/page/GithubSide";
-import { ImplementationPanel } from "../../item/page/ImplementationPanel";
-import { ItemPageView } from "../../item/page/ItemPage";
-import { ScreenshotCard } from "../../item/page/ScreenshotCard";
+import { TurnCards } from "./Cards";
 import { CommandBox } from "./CommandBox";
+import { Composer } from "./Composer";
+import { GithubSide } from "./GithubSide";
 import { History } from "./History";
+import { ImplementationPanel } from "./ImplementationPanel";
+import { ScreenshotCard } from "./ScreenshotCard";
 
 type Side = "autocraft" | "github";
 
-/** The classic page read: header facts, the GitHub side, screenshots and the implementation. A matching `since` costs one small reply. */
+/** The page read: header facts, the GitHub side, screenshots and the implementation. A matching `since` costs one small reply. */
 function usePage(repo: string, number: number) {
   const key = `item-page:v2:${repo}#${number}`;
   const last = useRef<{ key: string; page: ItemPageData } | null>(null);
@@ -53,7 +51,6 @@ export function ItemView(props: ViewProps) {
   const number = Number(props.params.number);
   const { data: m, error } = useQuery(`maintain-item:${repo}#${number}`, (a) => a.maintainItem.get(repo, number));
   if (!m || m.repo !== repo || m.number !== number) return <Pending error={error} />;
-  if (!m.workflowRepo) return <ItemPageView {...props} />;
   return <WorkflowPage m={m} />;
 }
 
@@ -65,7 +62,7 @@ function WorkflowPage({ m }: { m: MaintainItem }) {
   useEffect(() => setSide(user.role === "viewer" ? "github" : "autocraft"), [m.repo, m.number, user.role]);
   if (!d || d.repo !== m.repo || d.number !== m.number) return <Pending error={error} />;
   const auto = <AutoCraftSide m={m} d={d} />;
-  const gh = <GithubSide d={d} flash={null} />;
+  const gh = <GithubSide d={d} />;
   return (
     <div className="h-full min-h-0 overflow-y-auto">
       <article className="w-full pb-12 md:pb-16">
@@ -220,7 +217,7 @@ function StatusCard({ m, d }: { m: MaintainItem; d: ItemPageData }) {
       )}
       {s?.rec && <p className="rounded border border-accent/60 bg-accent/10 px-3 py-2 text-lg font-semibold leading-snug">{s.rec}</p>}
       {s?.confirm && s.live && !s.rec && !s.unclear && <p className="text-sm text-ink/80">{s.confirm}</p>}
-      {m.canAct && open && <CommandBox repo={m.repo} number={m.number} placeholder={examples(m)} />}
+      {m.canAct && open && <CommandBox repo={m.repo} number={m.number} placeholder={examples(m)} asked={s?.asked ?? null} />}
       <Controls m={m} />
     </section>
   );
@@ -282,43 +279,20 @@ function Controls({ m }: { m: MaintainItem }) {
 }
 
 function Signals({ m }: { m: MaintainItem }) {
-  if (!m.duplicates.length && !m.withdrawn.length) return null;
-  const summary = [
-    m.duplicates.length ? (m.duplicates.length === 1 ? t("1 duplicate") : t("{n} duplicates", { n: m.duplicates.length })) : null,
-    m.withdrawn.length ? (m.withdrawn.length === 1 ? t("1 withdrawn question") : t("{n} withdrawn questions", { n: m.withdrawn.length })) : null,
-  ].filter(Boolean).join(" · ");
+  if (!m.duplicates.length) return null;
   return (
-    <DisclosurePanel title={t("Signals")} summary={summary} defaultOpen>
-      <div className="flex flex-col gap-4 px-4 pb-4">
-        {m.duplicates.length > 0 && (
-          <section aria-label={t("Duplicates")} className="flex flex-col gap-1.5">
-            <h3 className="text-xs font-semibold text-ink/70">{t("Duplicates")}</h3>
-            <ul className="flex flex-col gap-2">
-              {m.duplicates.map((x) => (
-                <li key={x.number} className="relative flex flex-col gap-0.5 text-sm">
-                  <ItemRef repo={x.repo} number={x.number} kind={x.kind} state={x.state} title={x.title} stretch />
-                  {x.canonical && <span className="pl-6 text-xs text-ink/70">{t("kept as the main item")}</span>}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        {m.withdrawn.length > 0 && (
-          <section aria-label={t("Withdrawn questions")} className="flex flex-col gap-1.5">
-            <h3 className="text-xs font-semibold text-ink/70">{t("Withdrawn when the repo moved to commands")}</h3>
-            <ul className="flex flex-col gap-2 text-sm">
-              {m.withdrawn.map((w) => (
-                <li key={w.id} className="flex flex-col gap-0.5">
-                  <Link to={`/needs/decisions/${encodeURIComponent(w.id)}`} className="font-medium text-accent-ink hover:underline">
-                    {w.question}
-                  </Link>
-                  {w.summary && <span className="text-ink/80">{w.summary}</span>}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-      </div>
+    <DisclosurePanel title={t("Signals")} summary={m.duplicates.length === 1 ? t("1 duplicate") : t("{n} duplicates", { n: m.duplicates.length })} defaultOpen>
+      <section aria-label={t("Duplicates")} className="flex flex-col gap-1.5 p-4">
+        <h3 className="text-xs font-semibold text-ink/70">{t("Duplicates")}</h3>
+        <ul className="flex flex-col gap-2">
+          {m.duplicates.map((x) => (
+            <li key={x.number} className="relative flex flex-col gap-0.5 text-sm">
+              <ItemRef repo={x.repo} number={x.number} kind={x.kind} state={x.state} title={x.title} stretch />
+              {x.canonical && <span className="pl-6 text-xs text-ink/70">{t("kept as the main item")}</span>}
+            </li>
+          ))}
+        </ul>
+      </section>
     </DisclosurePanel>
   );
 }
@@ -329,7 +303,7 @@ function Security({ m }: { m: MaintainItem }) {
   if (!m.security.length) return null;
   return (
     <DisclosurePanel title={t("Security")} summary={String(m.security.length)}>
-      <ul className="flex flex-col gap-2 px-4 pb-4 text-sm">
+      <ul className="flex flex-col gap-2 p-4 text-sm">
         {m.security.map((f) => (
           <li key={f.number} className="flex flex-wrap items-baseline gap-x-1.5">
             <Badge tone={SEVERITY_TONE[f.severity]}>{f.severity}</Badge>
@@ -345,14 +319,13 @@ function Security({ m }: { m: MaintainItem }) {
 }
 
 function Conversation({ m }: { m: MaintainItem }) {
-  const user = useUser();
   const { data: conv, error } = useQuery(`conversation:${m.repo}#${m.number}`, (a) => a.conversations.get(m.repo, m.number), { pollMs: (x) => (x?.pending ? 4000 : false) });
   if (!conv) return error ? <ErrorLine error={error.message} /> : null;
   if (!conv.exists && !conv.canTalk) return null;
   const turns = conv.turns.filter((x) => x.kind !== "system");
   return (
     <DisclosurePanel title={t("Conversation with the model")} summary={conv.pending ? t("The model is replying") : turns.length === 1 ? t("1 message") : t("{n} messages", { n: turns.length })}>
-      <div className="flex flex-col gap-3 px-4 pb-4">
+      <div className="flex flex-col gap-3 p-4">
         {turns.map((x) => (
           <div key={x.id} className={cn("rounded-md border px-3 py-2", x.kind === "opus" ? "border-accent/40 bg-accent/[0.04]" : "border-line bg-panel")}>
             <div className="mb-1 flex flex-wrap items-center gap-x-2 text-xs text-ink/70">
@@ -361,10 +334,17 @@ function Conversation({ m }: { m: MaintainItem }) {
               {x.status === "failed" && <span className="text-bad">{t("no reply")}</span>}
             </div>
             <Markdown source={x.body} />
+            <TurnCards cards={x.actions} />
+            {x.notes.map((n) => (
+              <p key={n} className="mt-1 text-xs text-ink/70">
+                {n}
+              </p>
+            ))}
+            {x.status === "failed" && x.error && <p className="mt-1 text-xs text-bad">{x.error}</p>}
           </div>
         ))}
         {conv.progress && conv.pending && <p className="text-sm text-ink/70" role="status">{conv.progress[conv.progress.length - 1]}</p>}
-        <Composer flush repo={m.repo} number={m.number} talk={conv.canTalk} withdrawable={conv.canWithdraw} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} />
+        <Composer flush repo={m.repo} number={m.number} talk={conv.canTalk} withdrawable={conv.canWithdraw} exists={conv.exists} pending={conv.pending} />
       </div>
     </DisclosurePanel>
   );

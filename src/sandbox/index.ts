@@ -1,7 +1,7 @@
 // Sandboxed tool access for model calls: what a call needs to run claude with
 // read-only file tools on a checkout, and the default way to get a checkout of
 // a pull request's head commit from the cached bare clone.
-import { accessSync, constants, existsSync, readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { exec, fixupDir, Git } from "../fixup/git.ts";
 import { SHARED_NAME } from "./command.ts";
@@ -30,23 +30,6 @@ export function resolveClaudeBin(): string | null {
 /** Whether tool mode can run on this machine: bubblewrap and the claude binary are present. */
 export function sandboxAvailable(): boolean {
   return envVar("NO_SANDBOX") !== "1" && existsSync("/usr/bin/bwrap") && resolveClaudeBin() !== null;
-}
-
-/** A sandboxed call needs at least this much token lifetime left, because the sandbox never refreshes; the call waits for an account that has it. */
-export const TOKEN_MARGIN_MS = 30 * 60_000;
-
-/**
- * True when the access token in the credentials file at `file` expires within
- * the margin or its expiry can't be read. Reads only the expiry field; nothing
- * else of the file is kept, logged or put in an error.
- */
-export function tokenNearExpiry(file: string, now = Date.now(), marginMs = TOKEN_MARGIN_MS): boolean {
-  try {
-    const exp = (JSON.parse(readFileSync(file, "utf8")) as { claudeAiOauth?: { expiresAt?: unknown } }).claudeAiOauth?.expiresAt;
-    return typeof exp !== "number" || !Number.isFinite(exp) || exp - now < marginMs;
-  } catch {
-    return true;
-  }
 }
 
 /**

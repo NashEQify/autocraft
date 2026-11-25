@@ -28,7 +28,7 @@ const EXCLUSIVE_LOCKS = 0x61636578; // "acex"
 
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 /** A transaction whose client sends nothing for this long is ended by the server, so a dead process cannot keep the writer lock. */
-const DEFAULT_IDLE_IN_TRANSACTION_MS = 60_000;
+const DEFAULT_IDLE_IN_TRANSACTION_MS = 10_000;
 
 /**
  * Server-side TCP settings of every connection: the server drops a client that went silent (a lost node) after about
@@ -121,7 +121,8 @@ const LOCAL_HOSTS = new Set(["", "localhost", "[::1]"]);
  */
 export function pgConnectionString(url: string): string {
   const u = new URL(url);
-  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || u.searchParams.get("sslmode") === "disable") return url;
+  // A host that is a path (%2F...) names a Unix socket's directory.
+  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || /^%2f/i.test(u.hostname) || u.searchParams.get("sslmode") === "disable") return url;
   u.searchParams.set("sslmode", "verify-full");
   // libpq's "use the system CAs"; pg would read it as a file name. Node verifies against the system CAs by default.
   if (u.searchParams.get("sslrootcert") === "system") u.searchParams.delete("sslrootcert");
@@ -155,19 +156,28 @@ export function writesRows(text: string): boolean {
 /** `s` as an SQL string literal (standard_conforming_strings, the default: only quotes are doubled). */
 const quoteLiteral = (s: string): string => `'${s.replaceAll("'", "''")}'`;
 
-/** Emits a query event for every round trip on `client` while someone observes. */
+/** Counts every round trip on `client` in the current meter, and emits a query event for it while someone observes. */
 function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
   const query = client.query.bind(client) as (...a: unknown[]) => unknown;
   (client as { query: unknown }).query = (...a: unknown[]): unknown => {
     const text = a[0];
-    if (!ctx.observed() || typeof text !== "string" || typeof a.at(-1) === "function") return query(...a);
-    const site = callSite(siteError());
+    const m = ctx.meter();
+    if (m) m.roundTrips++;
+    const observed = ctx.observed();
+    if ((!m && !observed) || typeof text !== "string" || typeof a.at(-1) === "function") return query(...a);
+    const site = observed ? (ctx.site() ?? callSite(siteError())) : "";
     const t0 = performance.now();
     return (query(...a) as Promise<Pg.QueryResult | Pg.QueryResult[]>).then((r) => {
+      const ms = performance.now() - t0;
+      if (m) m.ms += ms;
+      if (!observed) return r;
       // A script with several statements answers with one result per statement.
       const rows = (Array.isArray(r) ? r : [r]).flatMap((x) => x.rows ?? []);
-      ctx.emit({ kind: "query", sql: text, rows: rows.length, bytes: rows.length ? Buffer.byteLength(JSON.stringify(rows)) : 0, ms: performance.now() - t0, site });
+      ctx.emit({ kind: "query", sql: text, rows: rows.length, bytes: rows.length ? Buffer.byteLength(JSON.stringify(rows)) : 0, ms, site });
       return r;
+    }, (e: unknown) => {
+      if (m) m.ms += performance.now() - t0;
+      throw e;
     });
   };
 }
@@ -175,22 +185,21 @@ function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
 /**
  * Kysely's counterpart of the `main.`/`temp.` rewrite raw statements get (src/db/params.ts rewriteForPostgres): table
  * names `main.x` and `temp.x` (typed in src/db/types.ts for code that reads past the scoped views or writes a shadowed
- * table) lose the schema, or with `mainSchema` (a scoped handle) `main.x` names `<mainSchema>.x`, past the views.
+ * table) lose the schema, or with `mainSchema` (a scoped handle) `main.x` names `<mainSchema>.x`, past the views. Done
+ * while compiling: a plugin would copy every query's tree.
  */
-function schemaPlugin(k: typeof K, mainSchema: string | undefined): K.KyselyPlugin {
-  class Transformer extends k.OperationNodeTransformer {
-    protected override transformSchemableIdentifier(node: K.SchemableIdentifierNode, queryId?: K.QueryId): K.SchemableIdentifierNode {
-      const t = super.transformSchemableIdentifier(node, queryId);
-      const schema = t.schema?.name.toLowerCase();
-      if (schema !== "main" && schema !== "temp") return t;
-      return { ...t, schema: schema === "main" && mainSchema ? k.IdentifierNode.create(mainSchema) : undefined };
+function schemaCompiler(k: typeof K, mainSchema: string | undefined): K.QueryCompiler {
+  class Compiler extends k.PostgresQueryCompiler {
+    protected override visitSchemableIdentifier(node: K.SchemableIdentifierNode): void {
+      const schema = node.schema?.name.toLowerCase();
+      if (schema !== "main" && schema !== "temp") return super.visitSchemableIdentifier(node);
+      if (schema === "main" && mainSchema) {
+        this.append(`"${this.sanitizeIdentifier(mainSchema)}".`);
+      }
+      this.visitNode(node.identifier);
     }
   }
-  const transformer = new Transformer();
-  return {
-    transformQuery: (args) => transformer.transformNode(args.node, args.queryId),
-    transformResult: async (args) => args.result,
-  };
+  return new Compiler();
 }
 
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
@@ -289,9 +298,13 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     override createDriver(): K.Driver {
       return new Driver({ pool, onCreateConnection: prepareConnection });
     }
+
+    override createQueryCompiler(): K.QueryCompiler {
+      return schemaCompiler(k, opts.scope);
+    }
   }
 
-  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }), plugins: [schemaPlugin(k, opts.scope)] });
+  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }) });
   const parsed = new Map<string, ParsedParams>();
   const parse = (text: string): ParsedParams => {
     let p = parsed.get(text);
@@ -346,6 +359,12 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       return withoutInsertId(Number(r.numAffectedRows ?? 0n));
     },
     script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text, opts.scope))))),
+    // Each read becomes `(select coalesce(json_agg(agg), '[]') from (<read>) as agg) AS qN`, as Kysely's jsonArrayFrom
+    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL.
+    fuse: (kysely, nodes) => {
+      const parts = nodes.map((n, i) => k.sql`(select coalesce(json_agg(agg), '[]') from ${{ toOperationNode: () => n }} as agg) as ${k.sql.ref(`q${i}`)}`);
+      return k.sql<Row>`select ${k.sql.join(parts)}`.compile(kysely);
+    },
     configure: (b, mode) => (mode === "read" ? b.setIsolationLevel("repeatable read").setAccessMode("read only") : b.setIsolationLevel("read committed")),
     // A pool of its own: the search path is a startup parameter of each connection, never a session SET.
     scope: async () => {

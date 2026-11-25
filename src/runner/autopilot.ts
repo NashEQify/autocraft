@@ -10,74 +10,68 @@
 //
 // The planner reads the database, writes only its Plan cache (item_plans) and queues jobs; the runner starts them.
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
-import { RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { REFEREE_RETRY_MS } from "../core/item-rules.ts";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
-import { readSeqs, TOPICS } from "../live.ts";
+import { TOPICS } from "../db/live.ts";
 import { pendingConversations } from "../conversations/store.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { loadPlanSet, type PlanSet } from "../core/plan-set.ts";
-import { gates, type Want } from "../core/gates.ts";
+import { gates, mergeAllowed, type Want } from "../core/gates.ts";
 import type { Action, ActionKind } from "../core/plan.ts";
-import { writePlanCache } from "../core/plan-cache.ts";
+import { planCacheDiff, writePlanDiff } from "../core/plan-cache.ts";
 import { refreshLiveness } from "../liveness.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { jevUsable } from "../agents/jev.ts";
-import { PACE_MAX_WAIT_MS, pipelineWriteWait } from "../github/write.ts";
+import { PACE_MAX_WAIT_MS, pipelineWriteWaits } from "../github/write.ts";
 import { embedDue } from "../embed/store.ts";
-import { commentApprovalOf } from "../act/approval.ts";
 import { selectFixups } from "../fixup/select.ts";
-import { needsWork } from "../merge/ci-approval.ts";
+import { ciApproveRepos } from "../merge/ci-approval.ts";
 import { batchesDue } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
 import { inFlightNow, planned, type Planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
 import { isWork } from "../core/assignment.ts";
-import { postCandidates } from "../review/post.ts";
 import { collectDue } from "../verify/results.ts";
 import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
-import { prBuildDue, reposWithQueuedBuilds } from "../prbuild/index.ts";
+import { prBuildsDue } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
-import { compareKeys, targetKeys } from "../act/order.ts";
-import { audit } from "../dash/audit.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
-import { applyUsedAnswers } from "../decisions-used.ts";
 import { premergeCandidates } from "../premerge/review.ts";
-import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
-import { mainFixDue } from "../mainfix/index.ts";
-import { statusApprovalOf } from "../prstatus/approval.ts";
-import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
-import { latestRun } from "../classify/settled.ts";
+import { pendingDefects, postmergeRepos, stuckFilings } from "../postmerge/select.ts";
+import { mainFixDueRepos } from "../mainfix/index.ts";
+import { statusDueIn, statusRetriesAt, statusRetriesDue } from "../prstatus/index.ts";
+import { waitsForHaiku } from "../priority/index.ts";
+import { loadOwnLogins } from "../data/access/index.ts";
+import { loadLivenessState, loadStoredPlans } from "../data/planner/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
-import { DEADLINE_ERROR, enqueue, JobError, now, requestCancel, RUNNER_STOPPED } from "./jobs.ts";
-import { claudePauseReason } from "../agents/accounts.ts";
-import { inferenceMode } from "../remote/mode.ts";
-import { takerSignature } from "../remote/takers.ts";
-import { activeTripRows, activeTrips, tripReasonIn, tripReasonOfStep } from "../push-outcomes.ts";
-import { STEP_STAGE } from "../core/push-outcome.ts";
+import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
-import { knownStep, loadSteps, STEPS, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
-import { pilotItems, scopeRepos } from "../pilot.ts";
+import { loadSteps, type Params, type StepDef } from "./steps.ts";
+import { scopeRepos } from "./scope.ts";
 import { refreshOutsideHolds } from "../outside.ts";
-import { JUDGEMENT_MODELS, judgementModel } from "../decide/judgement.ts";
-import { FAST_FLOOR, fastFirst, fastScores } from "../fasttrack.ts";
-import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
-import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
+import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
+import { dropJobCalls } from "./lifecycle.ts";
+import { enqueueJobs, loadDeadlineStops, loadLaneInputs, loadLaneState, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { loadTakerSignature } from "../data/runners/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { loadRefereeFailureTimes } from "../data/triage/index.ts";
+import { countMainFixes } from "../data/changes/index.ts";
+import { failureDelayMs } from "../core/backoff.ts";
+import { STEP_STAGE, tripKey, tripOf, type TripStage } from "../core/push-outcome.ts";
+import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
 /** An incremental planner (the runner's) loads every item's facts again at least this often: the bound on a change the log missed. */
 export const PLAN_FULL_EVERY_MS = 30 * 60_000;
-/** Failed jobs of a step are retried after 1, 2, 4, 8, 16 minutes, then every 30. */
-export const FAIL_BACKOFF_MS = 60_000;
-export const FAIL_BACKOFF_MAX_MS = 30 * 60_000;
 /** Checks younger than this count as current for the review that follows. */
 export const CHECKS_FRESH_MS = 5 * 60_000;
 /** How often the CI and mergeable state of a repo with PRs waiting for CI (or an open batch PR) is read again. */
@@ -87,14 +81,8 @@ export const AUTOPILOT_USER = "pipeline";
 export const KEY_ENABLED = "pipeline_enabled";
 /** Who changed the pipeline switch last, and when. */
 export const KEY_BY = "pipeline_changed_by", KEY_AT = "pipeline_changed_at";
-const KEY_PLANNED_AT = "pipeline_planned_at", KEY_SEQS_SEEN = "pipeline_seqs_seen", KEY_WAKE_AT = "pipeline_wake_at", KEY_STATUS = "pipeline_status";
-const KEY_CURSOR = "pipeline_review_cursor";
-const KEY_VERIFY_CURSOR = "pipeline_verify_cursor";
-const KEY_RESET = "limit_reset_at:";
-
-const getSetting = async (db: Db, key: string): Promise<string | null> =>
-  await setting(db, key) ?? null;
-const setSetting = writeSetting;
+/** Names of the planner marks in lane_state. */
+const MARK_PLANNED_AT = "planned_at", MARK_SEQS_SEEN = "seqs_seen", MARK_WAKE_AT = "wake_at", MARK_STATUS = "status";
 
 // ---- lanes ---------------------------------------------------------------------
 
@@ -135,7 +123,7 @@ export type Lane = {
   anyTracked?: boolean;
   /** The change topics the lane's input lives in (default: INPUT_TOPICS). A job that handled nothing is not queued again while these and `extra` are unchanged. */
   topics?: string[];
-  /** Input that no topic reports, e.g. the state of sandbox tasks. */
+  /** Input that no topic reports, e.g. the room under a daily limit. */
   extra?: (db: Db) => Promise<string>;
   /** Least time between two of the lane's jobs: for cheap recomputes whose input moves in bursts (a sync writes in several transactions) and that no stage waits on. */
   minGapMs?: number;
@@ -157,42 +145,42 @@ export type PlanCtx = {
   notes?: Record<string, string>;
   /** The pass's reading of the Task Runners (untakenTest); a lane run without it reads them on first use. */
   untaken?: UntakenTest;
-  /** The fast-track scores of the pass (fastScores), read on first use. */
-  fast?: Map<string, number>;
+  /** The planner marks and round-robin cursors (lane_state), as the pass read them. */
+  marks?: Map<string, string>;
   /** The repos in scope (scopeRepos) as the pass read them. */
   scope?: Set<string>;
+  /** Every tracked repo, in scope or not. */
+  names?: string[];
+  /** The topic counters the pass read with the change log, so a change after them is new input to the next pass. */
+  seqs?: Record<string, number>;
   /** The planner pass's candidates of each lane, by lane name: the Next lists reuse what the pass detected. */
   detected?: Map<string, Promise<Candidate[]>>;
   /** The incremental pass that built `plans`, when the planner keeps facts between passes. */
   pass?: PlanPass;
 };
 
-/** Only the repos in scope (pipeline on, narrowed by the pilot) are planned for; a job for another repo is never proposed. */
-export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => {
-  // The outside-author holds first: the facts below read them through the pilot condition (src/outside.ts).
+/** Only the repos in scope (pipeline on, or with started work) are planned for; a job for another repo is never proposed. */
+export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<string>): Promise<PlanCtx> => {
+  // The outside-author holds first: the facts below read them through the scope condition (src/outside.ts).
   const wake: number[] = [];
   try {
-    const outside = await refreshOutsideHolds(db);
+    const outside = await refreshOutsideHolds(db, Date.now(), own);
     if (outside.wakeAt !== null) wake.push(outside.wakeAt);
   } catch (e) {
     console.error(`autopilot: outside-author holds: ${(e as Error).message}`);
   }
   if (incremental) {
-    // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
-    return await inReadSnapshot(db, async () => {
-      await rereadSettingsSnapshot(db);
-      const scope = await scopeRepos(db);
-      const run = await latestRun(db);
-      const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
-      wakeAtRefresh(pass.plans, wake);
-      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
-    });
+    // The pass reads the settings, the change log and every load in one transaction, so a write in between is either all seen or left for the next pass.
+    let scope = new Set<string>(), names: string[] = [], seqs: Record<string, number> = {};
+    const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
+    const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
+    wakeAtRefresh(pass.plans, wake);
+    return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
   }
-  const scope = await scopeRepos(db);
-  const run = await latestRun(db);
-  const plans = await loadPlanSet(db, { run });
+  const [scope, names, seqs] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db), db.seqs()]));
+  const plans = await loadPlanSet(db);
   wakeAtRefresh(plans, wake);
-  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
+  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope, names, seqs };
 };
 
 /**
@@ -243,113 +231,118 @@ async function servable(db: Db, ctx: PlanCtx, kind: ActionKind, step: string, fr
   return out;
 }
 
-/** The pass's fast-track scores, keyed by `repo#number`. */
-const fastOf = async (db: Db, ctx: PlanCtx): Promise<Map<string, number>> => (ctx.fast ??= await fastScores(db));
+/** The round-robin cursor of a lane: the repo its last job took. */
+const cursorOf = async (db: Db, ctx: PlanCtx, name: "review" | "verify"): Promise<string | null> =>
+  (ctx.marks ??= new Map([...(await loadLaneState(db, ["cursor"])).values()].map((r) => [r.step, r.value]))).get(name) ?? null;
 
-/** Whether the guard would let the pipeline make the write an action stands for: the global switch and the repo's approval. */
-const wantOf = (a: Action): Want => ({ kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}) });
-const allowed = <T extends { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }>(ps: T[]): T[] =>
-  ps.filter((p) => gates(p.facts, wantOf(p.action), "pipeline") === null);
-/** The same test for a write that needs no per-item fact, judged on the repo's own facts. */
+const wantOf = (a: Action): Want => ({
+  kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}), ...(typeof a.params?.source === "string" ? { source: a.params.source } : {}),
+});
+/** Whether the guard would let the pipeline make the write an action stands for: the global switch, the breaker and the item's own approval rule. */
+const passes = (p: { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }): boolean => gates(p.facts, wantOf(p.action), "pipeline") === null;
+const allowed = <T extends { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }>(ps: T[]): T[] => ps.filter(passes);
+/** The same test for a write whose approval is the repo's alone (no per-item rule): every item of the repo carries the same answer. */
 function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
   const f = plans.prs.find((p) => p.facts.repo === repo)?.facts ?? plans.items.find((p) => p.facts.repo === repo)?.facts;
   return !f || gates(f, want, "pipeline") === null;
 }
 
-/** Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries the item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs", "workflow-events"].includes(t));
+/**
+ * Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries, the
+ * item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. `plan-inputs` covers what
+ * the plan facts read in tables of the other topics or of none; a table of theirs without a topic says why (noTopic in src/db/plan-inputs.ts).
+ */
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs", "workflow-events", "job-ends", "task-ends"].includes(t));
 
-/** User-local mode: the Task Runners that could take calls (takerSignature). Work a pool left for want of a taker waits on it. */
-const takersOf = async (db: Db): Promise<string> => {
+/**
+ * Topics that make the planner due. Ended jobs and returned leases let held-back work start, but are no new input to a lane whose job
+ * handled nothing; nor is a build feature's switch, which is planned at once. A sync run's own rows make nothing due: what a sync
+ * changed moves the topics of the tables it wrote.
+ */
+export const DUE_TOPICS = [...INPUT_TOPICS.filter((t) => t !== "sync"), "job-ends", "task-ends", "build-features"];
+
+/** The topics of lanes that also read the results of sandbox tasks. */
+const TASK_TOPICS = [...INPUT_TOPICS, "task-ends"];
+
+/** The Task Runners that could take calls (loadTakerSignature). Work a pool left for want of a taker waits on it. */
+const takersOf = async (db: Db): Promise<string> => passOf(db)?.takers ?? await loadTakerSignature(db, Date.now());
+
+/** The lane's input that no topic reports, read once per pass (several lanes share a reading). */
+const extraOf = async (db: Db, extra: Lane["extra"]): Promise<string> => {
   const pass = passOf(db);
-  if (pass?.takers !== undefined) return pass.takers;
-  const s = await inferenceMode(db) === "user-local" ? await takerSignature(db) : "";
-  if (pass) pass.takers = s;
-  return s;
+  if (!extra || !pass) return await extra?.(db) ?? "";
+  let r = pass.extras.get(extra);
+  if (!r) {
+    pass.extras.set(extra, (r = extra(db)));
+    void r.catch(() => pass.extras.delete(extra));
+  }
+  return await r;
 };
 
-/** Sandbox tasks that ended, for lanes that read their results. */
-const tasksSig = async (db: Db): Promise<string> => String((await db.get(endedTasks(db)))!.n);
-const endedTasks = (db: Db) => db.k.selectFrom("main.build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["done", "failed", "cancelled", "lost"]);
-
-/** Daily limits are not a topic of their own (they share `jobs`). */
-const limitsSig = async (db: Db): Promise<string> => {
-  const [limits, resets] = await Promise.all(limitRows(db).map((q) => db.get(q)));
-  return String(limits!.s ?? "") + String(resets!.s ?? "");
-};
-const limitRows = (db: Db) => [
-  db.k.selectFrom("stage_limits")
-    .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s")),
-  db.k.selectFrom("settings")
-    .select((eb) => kx.groupConcat(db, eb(eb("key", "||", eb.val("=")), "||", eb.ref("value")), ",", "key").as("s"))
-    .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")])),
-] as const;
-
-const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
+const repoOf = (c: { params: Params }): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
 type JobEnd = { id: number; endedAt: string; state: string; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null };
 
-/** Job and limit reads of one planner pass, loaded on first use. Other connections may start or end jobs meanwhile; applyProposals re-checks blocks and limits with fresh reads. */
+/** Job, limit, breaker and release reads of one planner pass, loaded once. Other connections may start or end jobs meanwhile; applyProposals re-checks blocks and limits with fresh reads. */
+type Reads = {
+  inputs: LaneInputs; limits: Map<string, LimitRow>;
+  /** Push-breaker trips active now, by key (`<stage>:<repo>`, or `<stage>` on every repo), with their reasons. */
+  trips: Record<string, string>;
+  /** The newest operator release per action (RELEASE_STEPS). */
+  released: Map<string, string>;
+};
 type PassReads = {
-  db: Db; limits?: Map<string, LimitRow>; started?: { day: string; rows: { step: string; started_at: string; items: number | null }[] }; ends?: (JobEnd & { step: string; repo: string | null; requested_by: string | null })[];
-  /** Queued and running jobs of every step. */
-  live?: { step: string; params: string; items: number | null; state: string; repo: string | null }[];
+  db: Db; reads: Reads;
   /** The Task Runner signature (takersOf). */
   takers?: string;
+  /** The lanes' `extra` readings, by function. */
+  extras: Map<NonNullable<Lane["extra"]>, Promise<string>>;
   /** Act's usage per UTC day start. */
-  act?: Map<string, number>;
-  /** Push-breaker trips active now, by key (`<stage>:<repo>`, or `<stage>` on every repo), with their reasons. */
-  trips?: Record<string, string>;
+  act: Map<string, number>;
 };
-let passReads: PassReads | null = null;
-const passOf = (db: Db): PassReads | null => (passReads?.db === db ? passReads : null);
+const passScope = new AsyncLocalStorage<PassReads>();
+const passOf = (db: Db): PassReads | null => { const p = passScope.getStore(); return p?.db === db ? p : null; };
 
-async function withPassReads<T>(db: Db, fn: () => Promise<T>): Promise<T> {
-  if (passReads) return await fn();
-  passReads = { db };
-  try { return await fn(); } finally { passReads = null; }
+async function loadReads(db: Db, ms: number): Promise<Reads> {
+  const [inputs, limits, tripRows, released] = await db.together(() => Promise.all([
+    loadLaneInputs(db, ms), loadStageLimits(db, DEFAULT_PER_DAY), loadTrips(db, { active: true }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  ]));
+  const trips: Record<string, string> = {};
+  for (const t of tripRows.values()) if (tripOf(t.stage)) trips[t.stage] = t.reason;
+  return { inputs, limits, trips, released };
+}
+
+/** The pass's reads, or a fresh load for a caller outside a pass. */
+const readsOf = async (db: Db, ms: number = Date.now()): Promise<Reads> => passOf(db)?.reads ?? await loadReads(db, ms);
+
+async function withPassReads<T>(db: Db, r: Pick<PassReads, "reads"> & Partial<PassReads>, fn: () => Promise<T>): Promise<T> {
+  if (passOf(db)) return await fn();
+  return await passScope.run({ extras: new Map(), act: new Map(), ...r, db }, fn);
 }
 
 async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy?: string): Promise<JobEnd | undefined> {
-  const pass = passOf(db);
-  if (pass) {
-    // The newest ended job of each step, repo and requester; the answer is the newest of those that match.
-    pass.ends ??= await db.all(db.k.selectFrom("jobs")
-      .select(["id", "step", "repo", "requested_by", "ended_at as endedAt", "state", "items", "acted", "lease_skips", "lease_skip_keys"])
-      .where("id", "in", (eb) => eb.selectFrom("jobs").select((e) => e.fn.max<number>("id").as("m"))
-        .where((e) => e.and([e("ended_at", "is not", null), e(e.fn.coalesce("error", e.val("")), "<>", RUNNER_STOPPED)])).groupBy(["step", "repo", "requested_by"]))
-      .$narrowType<{ endedAt: string }>());
-    let best: NonNullable<PassReads["ends"]>[number] | undefined;
-    for (const e of pass.ends) if (e.step === step && (repo === null || e.repo === repo) && (requestedBy === undefined || e.requested_by === requestedBy) && (!best || e.id > best.id)) best = e;
-    if (!best) return undefined;
-    const { step: _s, repo: _r, requested_by: _b, ...end } = best;
-    return end;
-  }
-  return await db.get(db.k.selectFrom("jobs").select(["id", "ended_at as endedAt", "state", "items", "acted", "lease_skips", "lease_skip_keys"])
-    .where("step", "=", step).$if(repo !== null, (q) => q.where("repo", "=", repo!))
-    .where("ended_at", "is not", null).$if(requestedBy !== undefined, (q) => q.where("requested_by", "=", requestedBy!))
-    .where((eb) => eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED)).orderBy("id", "desc").limit(1).$narrowType<{ endedAt: string }>());
+  // The newest ended job of each step, repo and requester; the answer is the newest of those that match.
+  let best: EndedJob | undefined;
+  for (const e of (await readsOf(db)).inputs.ends) if (e.step === step && (repo === null || e.repo === repo) && (requestedBy === undefined || e.requested_by === requestedBy) && (!best || e.id > best.id)) best = e;
+  return best && { id: best.id, endedAt: best.ended_at!, state: best.state, items: best.items, acted: best.acted, lease_skips: best.lease_skips, lease_skip_keys: best.lease_skip_keys };
 }
 
-/** A job that changed nothing: it handled no items and made no other progress (a batch advanced, a PR opened, a decision asked). */
+/** A job that changed nothing: it handled no items and made no other progress (a batch advanced, a PR opened). */
 const wasIdle = (j: { items: number | null; acted: number | null }): boolean => !j.items && !j.acted;
 
 // ---- fingerprints ----------------------------------------------------------------
 
-type FpRecord = { job: number; fp: string };
-const fpKey = (step: string, repo: string | null): string => `pipeline_fp:${step}|${repo ?? ""}`;
+type FpRecord = { job: number | null; fp: string };
 
 /** What the lane's input looked like: the step, its repo, and the counters of the topics it reads. */
 export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
-  if (seqs === undefined) seqs = await readSeqs(db);
+  if (seqs === undefined) seqs = await db.seqs();
   const topics = lane.topics ?? INPUT_TOPICS;
-  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await lane.extra?.(db) ?? "", await takersOf(db)].join("|");
+  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await extraOf(db, lane.extra), await takersOf(db)].join("|");
 }
 
 async function fpRecord(db: Db, step: string, repo: string | null): Promise<FpRecord | null> {
-  const v = await getSetting(db, fpKey(step, repo));
-  if (!v) return null;
-  try { return JSON.parse(v) as FpRecord; } catch { return null; }
+  return (await readsOf(db)).inputs.fps.get(`${step}|${repo ?? ""}`) ?? null;
 }
 
 /** Tracked repos after `cursor` first, wrapping round. */
@@ -362,15 +355,34 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
 /** The issue an implement job works on, its bucket and the planned item's work score. */
 type ImplementJob = { number: number; bucket: string; score: number | null };
 
+/** implementWork of a planner pass's Plans, made on first use and kept with them. */
+const passImplementWork = new WeakMap<PlanSet, Promise<Map<string, ImplementJob>>>();
+
 /**
  * Per repo, the queued issue its next implement job works on. The revisions of our implementation PRs (planned on the PR,
- * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score).
+ * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score). With several, the first
+ * whose job may run now (implementRefusals): one that may not keeps no other work of the repo back.
  */
 async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
-  const repos = new Set(tracked), out = new Map<string, ImplementJob>();
-  const add = (repo: string, j: ImplementJob) => { if (repos.has(repo) && !out.has(repo)) out.set(repo, j); };
-  for (const p of allowed(await planned(db, "implement", { plans }))) add(p.facts.repo, { number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
-  for (const p of allowed(await plannedItems(db, "implement", { plans }))) add(p.facts.repo, { number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  let work = passImplementWork.get(plans);
+  if (!work) {
+    passImplementWork.set(plans, (work = findImplementWork(db, tracked, plans)));
+    void work.catch(() => passImplementWork.delete(plans));
+  }
+  return await work;
+}
+
+async function findImplementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
+  const found = new Map<string, ImplementJob[]>(tracked.map((repo) => [repo, []]));
+  for (const p of allowed(await planned(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
+  for (const p of allowed(await plannedItems(db, "implement", { plans }))) found.get(p.facts.repo)?.push({ number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
+  const choices = [...found].flatMap(([repo, jobs]) => (jobs.length > 1 ? jobs.map((j) => ({ repo, number: j.number })) : []));
+  const refused = choices.length ? await (await import("../implement/gate.ts")).implementRefusals(db, choices) : new Map<string, string | null>();
+  const out = new Map<string, ImplementJob>();
+  for (const [repo, jobs] of found) {
+    const next = jobs.find((j) => (refused.get(`${repo}#${j.number}`) ?? null) === null) ?? jobs[0];
+    if (next) out.set(repo, next);
+  }
   return out;
 }
 
@@ -392,7 +404,7 @@ export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<str
   return lanes.map((l) => (tops.has(l.name) ? sorted[k++]! : l));
 }
 
-/** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch). */
+/** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch; ask: a comment; capped: a note on the item). */
 async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<string[]> {
   const repos = new Set(ctx.tracked);
   const due = allowed(await planned(db, "cifix", { plans: await plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
@@ -410,11 +422,13 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Items without a priority at their current text hash; the scores of the others are refreshed by the same job.
+    // Items without a priority at their current text hash; the scores of the others are refreshed by the same job. Jev rates without a Task
+    // Runner; an item Jev was unsure of waits for one that takes Haiku's call.
     name: "priority",
     detect: async (db, ctx) => {
       const jev = await jevUsable(db);
-      return (await servable(db, ctx, "prioritize", "prioritize", () => jev)).length ? [{ step: "prioritize", params: {} }] : [];
+      const haiku = jev ? await waitsForHaiku(db, await plannedItems(db, "prioritize", { plans: await plansOf(db, ctx) })) : null;
+      return (await servable(db, ctx, "prioritize", "prioritize", (p) => !!haiku && !haiku.has(`${p.facts.repo}#${p.facts.number}`))).length ? [{ step: "prioritize", params: {} }] : [];
     },
   },
   {
@@ -430,30 +444,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
   },
   {
-    // Before Decide: items held as duplicates wait out the later stages.
+    // Scans (local vectors) need no model; a pair check needs a Task Runner, also for its Jev half.
     name: "dupes",
-    detect: async (db, ctx) => {
-      const plans = await plansOf(db, ctx);
-      // Scans (local vectors), group questions and answers need no model; a pair check needs a Task Runner, also for its Jev half.
-      return (await servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan || !!p.action.params?.group)).length || (await plannedItems(db, "dupe-answer", { plans })).length ? [{ step: "dupes", params: {} }] : [];
-    },
+    detect: async (db, ctx) => ((await servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan)).length ? [{ step: "dupes", params: {} }] : []),
   },
   {
-    // Each duplicate group is compared once its pairs are checked; the comparison asks the group decision.
+    // Each duplicate group is compared once its pairs are checked.
     name: "dupes-compare",
     // A set settled by rule (a closed member, a lone member) needs no model; the others need a Task Runner.
     detect: async (db, ctx) => ((await servable(db, ctx, "dupes-compare", "dupes-compare", (p) => p.facts.inCompareSet === "rule")).length ? [{ step: "dupes-compare", params: {} }] : []),
-  },
-  {
-    name: "decide",
-    // Open scope decisions without a recommendation (asked before recommendations existed) also need a job; an answered-null one has recommended_by set.
-    detect: async (db, ctx) => {
-      // A recommendation that failed is tried again once its backoff ends.
-      for (const r of await db.all(db.k.selectFrom("decisions").select("recommend_failed_at as at").where("answer", "is", null)
-        .where("recommend_failed_at", ">", new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()).$narrowType<{ at: string }>())) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
-      // A new scope decision is asked without a model; the prepare calls Opus.
-      return (await servable(db, ctx, "decide", "decide", (p) => p.action.params?.source === "new")).length ? [{ step: "decide", params: {} }] : [];
-    },
   },
   {
     // One repo per job, round robin; the repo's checks come before its review.
@@ -465,14 +464,14 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       // A PR waiting out the minimum time between reviews, the conflict merge cap or the backoff of an unsent comment is planned again when it ends.
       for (const p of (await plansOf(db, ctx)).prs) {
         const f = p.facts;
-        for (const t of [f.reviewHold?.until, f.conflict?.until, f.fixup?.unsent, f.cifix?.unsent, ...f.carry.map((c) => c.unsent)]) {
+        for (const t of [f.reviewHold?.until, f.conflict?.until, f.fixup?.unsent, f.cifix?.unsent]) {
           const at = typeof t === "object" ? t.until : t;
           if (typeof at === "number") ctx.wake?.push(at);
         }
       }
       // No other stage re-reads the checks of a head that was stored as running or red: a PR whose review waits for CI has its repo's checks read again, at most once per WAITING_CI_RECHECK_MS.
       const ciWait = new Set((await plansOf(db, ctx)).prs.filter((p) => p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red && p.plan.wait === p.facts.reviewHold.wait).map((p) => p.facts.repo));
-      for (const repo of flightFirst(await plansOf(db, ctx), await fastFirst(db, roundRobin(ctx.tracked, await getSetting(db, KEY_CURSOR)), (r) => top.get(r)?.facts.number, await fastOf(db, ctx)))) {
+      for (const repo of flightFirst(await plansOf(db, ctx), roundRobin(ctx.tracked, await cursorOf(db, ctx, "review")))) {
         if (!top.has(repo)) continue;
         const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
@@ -481,9 +480,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       }
       // A repo whose waiting heads have all been pending for more than an hour is read every 5 minutes instead.
       const waiting = (await plansOf(db, ctx)).prs.filter((p) => ciWait.has(p.facts.repo) && p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red);
-      const updated = new Map(waiting.length ? (await db.all(db.k.selectFrom("items as i")
-        .innerJoin(kx.refPairs(db, waiting.map((p): [string, number] => [p.facts.repo, p.facts.number]), "j"), (jn) => jn.onRef("i.repo", "=", "j.repo").onRef("i.number", "=", "j.number"))
-        .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", eb.cast<string>("i.number", "text")).as("k"), "i.updated_at"]))).map((r) => [r.k, r.updated_at]) : []);
+      const updated = new Map([...(waiting.length ? await loadItems(db, waiting.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), "pr") : new Map()).values()].map((r) => [`${r.repo}#${r.number}`, r.updated_at] as const));
       const young = new Set(waiting.filter((p) => { const u = updated.get(`${p.facts.repo}#${p.facts.number}`); return !!u && Date.now() - Date.parse(u) <= 3600_000; })
         .map((p) => p.facts.repo));
       for (const repo of [...ciWait].sort()) {
@@ -503,7 +500,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       return bestScore(ctx.tracked.map((repo) => top.get(repo)?.facts.score));
     },
     chosen: async (db, c) => {
-      if (c.step === "opus-review") await setSetting(db, KEY_CURSOR, String(c.params.repo));
+      if (c.step === "opus-review") await saveLaneState(db, [{ kind: "cursor", step: "review", value: String(c.params.repo) }]);
     },
   },
   {
@@ -514,33 +511,26 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const repos = new Set(allowed(await plannedItems(db, "label", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       // A repo whose GitHub write budget is used up would label nothing (the writes are refused as paced): it waits for the window to move.
       const now = Date.now();
-      return (await filterSeq(ctx.tracked, async (repo) => {
-        if (!repos.has(repo)) return false;
-        const wait = await pipelineWriteWait(db, "labels-apply", repo, now);
+      const waits = await pipelineWriteWaits(db, "labels-apply", ctx.tracked.filter((r) => repos.has(r)), now);
+      return ctx.tracked.filter((repo) => {
+        const wait = waits.get(repo);
+        if (wait === undefined) return false;
         if (wait <= PACE_MAX_WAIT_MS) return true;
         ctx.wake?.push(now + wait);
         if (ctx.notes) ctx.notes["labels-apply"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
         return false;
-      })).map((repo) => ({ step: "labels-apply", params: { repo } }));
-    },
-  },
-  {
-    // Needs no merge approval: asking writes only decisions.
-    name: "merge-ask",
-    detect: async (db, ctx) => {
-      const repos = new Set(ctx.tracked);
-      return allowed(await planned(db, "ask-merge", { plans: await plansOf(db, ctx) })).some((p) => repos.has(p.facts.repo)) ? [{ step: "merge-ask", params: {} }] : [];
+      }).map((repo) => ({ step: "labels-apply", params: { repo } }));
     },
   },
   {
     // Batches in flight and PRs waiting for CI are external waits: they are read again every WAITING_CI_RECHECK_MS, on unchanged inputs too.
     name: "merge",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
-      // The merge queue: PRs with a queue state (merged ones too), in repos approved for merging.
-      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && p.facts.repoFacts.mergeApproved)
+      // The merge queue: PRs with a queue state (merged ones too) whose merge is approved, by a person or by the repo.
+      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && mergeAllowed(p.facts))
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
       const due = new Set(allowed(await planned(db, "merge", { plans })).map((p) => p.facts.repo));
       const batches = new Set(await batchesDue(db));
@@ -556,10 +546,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         }
         return false;
       };
-      // The repo whose eligible PR is fast-tracked first goes first.
-      const fast = await fastOf(db, ctx);
-      const topEligible = (r: string): number | undefined => queue.filter((e) => e.repo === r && e.eligible).sort((a, b) => (fast.get(`${r}#${b.number}`) ?? -1) - (fast.get(`${r}#${a.number}`) ?? -1))[0]?.number;
-      for (const repo of flightFirst(plans, await fastFirst(db, [...new Set([...due, ...batches])].sort(), topEligible, fast))) {
+      for (const repo of flightFirst(plans, [...new Set([...due, ...batches])].sort())) {
         const poll = batches.has(repo);
         if (poll && await later("merge", repo)) continue;
         out.push({ step: "merge", params: { repo }, ...(poll ? { poll } : {}) });
@@ -571,66 +558,75 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Comments and closes after operator answers, and Close? decisions for reviewed PRs.
+    // The closes people asked for, queued card presses and held follow-up issues.
     name: "act",
     perRepo: true,
     // Queued card presses: the drain runs when the first press fits under the daily limit, so the room (and the limit) is part of the input.
     extra: async (db) => {
-      const h = await queueHead(db);
-      const held = (await heldDue(db)).sig;
-      return [h ? `queue:${h.fits ? 1 : 0}:${await actLimit(db) ?? "n"}` : "", held ? `${held}:${await actLimit(db) ?? "n"}` : ""].filter(Boolean).join("|");
+      const [h, { sig: held }, limit] = await db.together(() => Promise.all([queueHead(db), heldDue(db), actLimit(db)]));
+      return [h ? `queue:${h.fits ? 1 : 0}:${limit ?? "n"}` : "", held ? `${held}:${limit ?? "n"}` : ""].filter(Boolean).join("|");
     },
     detect: async (db, ctx) => {
-      // Repos in the order of their best target: item priority level, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest answer.
-      const best = new Map<string, { band: number; at: string }>();
-      const targets = allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) })).flatMap((p) => (typeof p.action.params?.decisionId === "string" ? [{ decisionId: p.action.params.decisionId, repo: p.facts.repo, number: p.facts.number }] : []));
-      const keys = await targetKeys(db, targets);
-      for (const t of targets) {
-        const k = keys.get(t.decisionId);
-        if (k && (!best.has(t.repo) || compareKeys(k, best.get(t.repo)) < 0)) best.set(t.repo, k);
+      // Repos in the order of their best close: workflow weight, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest command.
+      const best = new Map<string, { weight: number; at: string }>();
+      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) {
+        const c = p.facts.close, b = best.get(p.facts.repo);
+        if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
-      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) if (!best.has(p.facts.repo)) best.set(p.facts.repo, { band: 0, at: "" });
+      const first = { weight: Infinity, at: "" };
+      const [approved, head, wakes, held] = await db.together(() => Promise.all([loadStepApprovals(db, ctx.tracked, ["comment"]), queueHead(db), filingWakes(db), heldDue(db)]));
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
-      const head = await queueHead(db);
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-      else if (head && ctx.tracked.includes(head.repo) && await commentApprovalOf(db, head.repo)) best.set(head.repo, { band: 5, at: "" });
+      else if (head && approved.has(head.repo)) best.set(head.repo, first);
       // Follow-up issues held until a PR merged: filed by the job of the PR's repo once it merged, dropped once it closed or its merge path ended.
       // A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
-      ctx.wake?.push(...await filingWakes(db));
-      for (const [repo, fits] of (await heldDue(db)).repos) {
+      ctx.wake?.push(...wakes);
+      for (const [repo, fits] of held.repos) {
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-        else if (ctx.tracked.includes(repo) && await commentApprovalOf(db, repo)) best.set(repo, { band: 5, at: "" });
+        else if (approved.has(repo)) best.set(repo, first);
       }
       const served = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
-      return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => best.get(b)!.band - best.get(a)!.band || (served.get(a)! < served.get(b)! ? -1 : served.get(a)! > served.get(b)! ? 1 : 0) || compareKeys(best.get(a), best.get(b)) || a.localeCompare(b)).map((repo) => ({ step: "act", params: { repo } }));
+      const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
+      return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => {
+        const x = best.get(a)!, y = best.get(b)!;
+        return (x.weight === y.weight ? 0 : x.weight > y.weight ? -1 : 1) || cmp(served.get(a)!, served.get(b)!) || cmp(x.at, y.at) || a.localeCompare(b);
+      }).map((repo) => ({ step: "act", params: { repo } }));
     },
   },
   {
     name: "fixup",
     perRepo: true,
     // A stored patch is collected when its lint task ends.
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
-      const sels = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, await selectFixups(db, repo, ctx.run, plans)]));
-      const repos = ctx.tracked.filter((repo) => {
-        const sel = sels.get(repo)!;
-        const push = repoAllows(plans, repo, { kind: "fixup", bucket: "fix" }), ask = repoAllows(plans, repo, { kind: "fixup", bucket: "ask" });
-        return (push && (sel.fix.length > 0 || sel.lint.length > 0 || sel.conflictMerge.length > 0)) || (ask && (sel.ask.length > 0 || sel.conflictAsk.length > 0));
-      });
-      return flightFirst(plans, await fastFirst(db, repos.sort(), (r) => { const sel = sels.get(r)!; return (sel.lint[0] ?? sel.fix[0] ?? sel.ask[0] ?? sel.conflictMerge[0] ?? sel.conflictAsk[0])?.number; }, await fastOf(db, ctx))).map((repo) => ({ step: "fixup", params: { repo } }));
+      // Each planned action is judged on its own PR: a person's fix-up runs whatever the repo approves.
+      const repos: string[] = [], failed: unknown[] = [];
+      for (const repo of ctx.tracked) {
+        try {
+          const sel = await selectFixups(db, repo, ctx.run, plans, passes);
+          if ([sel.fix, sel.lint, sel.conflictMerge, sel.ask, sel.conflictAsk].some((l) => l.length > 0)) repos.push(repo);
+        } catch (e) {
+          // A repo whose selection fails leaves the lane to the others; a failure of every repo is the lane's own.
+          failed.push(e);
+          if (failed.length === ctx.tracked.length) throw e;
+          console.error(`autopilot: fixup: ${repo}: ${(e as Error).message}`);
+          (ctx.notes ??= {}).fixup ??= `the fix-ups of ${repo} could not be selected: ${(e as Error).message}`;
+        }
+      }
+      return flightFirst(plans, repos.sort()).map((repo) => ({ step: "fixup", params: { repo } }));
     },
   },
   {
     // One repo per job, round robin; the repo's checks come before its planning.
     name: "verify",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const out: Candidate[] = [];
       const plans = await plansOf(db, ctx);
       const top = firstByRepo([...await planned(db, "verify", { plans, bucket: "plan" }), ...await planned(db, "verify", { plans, bucket: "unavailable" })]);
-      for (const repo of flightFirst(plans, await fastFirst(db, roundRobin(ctx.tracked, await getSetting(db, KEY_VERIFY_CURSOR)), (r) => top.get(r)?.facts.number, await fastOf(db, ctx)))) {
+      for (const repo of flightFirst(plans, roundRobin(ctx.tracked, await cursorOf(db, ctx, "verify")))) {
         if (!top.has(repo)) continue;
         const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
@@ -640,22 +636,21 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       return out;
     },
     chosen: async (db, c) => {
-      if (c.step === "verify") await setSetting(db, KEY_VERIFY_CURSOR, String(c.params.repo));
+      if (c.step === "verify") await saveLaneState(db, [{ kind: "cursor", step: "verify", value: String(c.params.repo) }]);
     },
   },
   {
     name: "verify-collect",
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db) => (await collectDue(db) ? [{ step: "verify-collect", params: {} }] : []),
   },
   {
     // Our own build of PR heads (pr-builds feature): queues new builds and collects finished ones, no model call. Off: no repo is detected.
     name: "pr-build",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
-      const queued = new Set(await reposWithQueuedBuilds(db));
-      return (await filterSeq([...new Set([...ctx.tracked, ...queued])], async (repo) => await prBuildDue(db, repo, queued))).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
+      return (await prBuildsDue(db, ctx.tracked)).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
     },
   },
   {
@@ -664,7 +659,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx), work = await implementWork(db, ctx.tracked, plans);
-      return flightFirst(plans, await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.number, await fastOf(db, ctx)))
+      return flightFirst(plans, [...work.keys()].sort())
         .map((repo) => { const j = work.get(repo)!; return { step: "implement", params: { repo, number: j.number, bucket: j.bucket } }; });
     },
     topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((j) => j.score)),
@@ -674,8 +669,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "referee",
     detect: async (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
-      if (ctx.run) for (const r of await db.all(db.k.selectFrom("classifications").select(kx.jsonText(db, "probs", "$.opusFailedAt").as("at")).where("classifier", "=", "sonnet").where("run_id", "=", ctx.run)
-        .where(kx.bytewise(db, kx.jsonText(db, "probs", "$.opusFailedAt")), ">", new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()).$narrowType<{ at: string }>())) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      if (ctx.run) for (const at of await loadRefereeFailureTimes(db, ctx.run, new Date(Date.now() - REFEREE_RETRY_MS).toISOString())) ctx.wake?.push(Date.parse(at) + REFEREE_RETRY_MS);
       return ctx.run && (await servable(db, ctx, "referee", "referee")).length ? [{ step: "referee", params: {} }] : [];
     },
   },
@@ -712,7 +706,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => {
       const waiting = await pendingConversations(db, undefined, "maintainer");
       const logins = [...new Set(waiting.map((c) => c.login.toLowerCase()))].sort();
-      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leaseTurnover(db, l)}`)).join(",")}`;
+      return `${waiting.map((c) => c.turnId).join(",")}|${(await Promise.all(logins.map(async (l) => `${l}:${await leaseTurnover(db, l)}`))).join(",")}`;
     },
     detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },
@@ -720,17 +714,20 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Runs GitHub holds for approval on reviewed outside PRs; the checks job records them, the step approves.
     name: "ci-approve",
     perRepo: true,
-    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => repoAllows(await plansOf(db, ctx), repo, { kind: "approve-ci" }) && (await needsWork(db, repo, ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "ci-approve", params: { repo } })),
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx), due = await ciApproveRepos(db, plans, ctx.run);
+      return ctx.tracked.filter((repo) => due.has(repo) && repoAllows(plans, repo, { kind: "approve-ci" })).sort().map((repo) => ({ step: "ci-approve", params: { repo } }));
+    },
   },
   {
     // Failing gate checks of wanted PRs: the log is read, a formatter run is queued or collected, or a patch is written and pushed.
     name: "cifix",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
       const lint = allowed(await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
-      return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
+      return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect", "ask", "capped"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
     },
   },
   {
@@ -753,18 +750,19 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      return (await filterSeq(await trackedNames(db), async (repo) => {
-        if (!await statusApprovalOf(db, repo)) return false;
-        const retry = await statusRetryAt(db, repo, now);
-        if (retry !== null) ctx.wake?.push(retry);
-        if (!(await statusDue(db, repo, now)).length) return false;
+      const [tracked, approved] = await db.together(() => Promise.all([ctx.names ?? trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
+      const repos = tracked.filter((repo) => approved.has(repo));
+      const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
+      for (const at of retries.values()) ctx.wake?.push(at);
+      return repos.filter((repo) => {
+        if (!dueIn.get(repo)?.length) return false;
         // A repo whose GitHub write budget is used up would write nothing (the writes are refused as paced): it waits for the window to move.
-        const wait = await pipelineWriteWait(db, "pr-status-comment", repo, now);
+        const wait = waits.get(repo)!;
         if (wait <= PACE_MAX_WAIT_MS) return true;
         ctx.wake?.push(now + wait);
         if (ctx.notes) ctx.notes["pr-status"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
         return false;
-      })).sort().map((repo) => ({ step: "pr-status", params: { repo } }));
+      }).sort().map((repo) => ({ step: "pr-status", params: { repo } }));
     },
   },
   {
@@ -786,27 +784,32 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Opus reviews what each pipeline merge landed; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
-    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => (await selectPostmerge(db, repo, Date.now(), ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "postmerge", params: { repo } })),
-  },
-  {
-    // The defects of those reviews become issues in repos approved for comments.
-    name: "postmerge-file",
-    perRepo: true,
-    detect: async (db, { tracked }) => {
-      const pending = new Set((await pendingDefects(db)).map((d) => d.repo));
-      return (await filterSeq(tracked, async (repo) => await commentApprovalOf(db, repo) && pending.has(repo))).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
+    detect: async (db, ctx) => {
+      const due = new Set(await postmergeRepos(db, await plansOf(db, ctx), Date.now(), ctx.run));
+      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
     },
   },
   {
-    // A red default branch in a repo approved for it: flaky failures are rerun once, infrastructure failures become a decision, code failures are recorded.
+    // The defects of those reviews become issues in repos approved for comments. A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
+    name: "postmerge-file",
+    perRepo: true,
+    detect: async (db, { tracked, wake }) => {
+      const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), loadStepApprovals(db, tracked, ["comment"])]));
+      wake?.push(...stuck.wakes);
+      const pending = new Set([...defects.map((d) => d.repo), ...stuck.due.map((x) => x.row.repo)]);
+      return tracked.filter((repo) => approved.has(repo) && pending.has(repo)).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
+    },
+  },
+  {
+    // A red default branch in a repo approved for it: flaky failures are rerun once, code failures are recorded.
     name: "main-fix",
     perRepo: true,
     // A rerun waits for the next reading of the head or a time limit; the clock moves with no change in the data.
     extra: async (db) => {
-      const n = (await db.get(db.k.selectFrom("main.main_fixes").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "rerun-requested")))!.n;
+      const n = await countMainFixes(db, { state: "rerun-requested" });
       return n ? `${n}:${Math.floor(Date.now() / 300_000)}` : "";
     },
-    detect: async (db, { tracked }) => (await filterSeq(tracked, async (repo) => await mainFixDue(db, repo))).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
+    detect: async (db, { tracked }) => (await mainFixDueRepos(db, tracked)).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
   },
   {
     // The nightly checks of repos with the build feature on: queued once a day per repo (in data, from the last run's time), collected when their tasks end.
@@ -834,35 +837,24 @@ export function buildLanes(code: Omit<Lane, "steps">[]): Lane[] {
 
 export const dayStart = (ms: number = Date.now()): string => `${new Date(ms).toISOString().slice(0, 10)}T00:00:00.000Z`;
 
-type LimitRow = { step: string; per_day: number | null; updated_by: string | null; updated_at: string | null };
+type LimitRow = { step: string; perDay: number | null };
 
 /** Daily limits that apply until an operator sets one. */
 export const DEFAULT_PER_DAY: Record<string, number> = defaultPerDay();
 
-export const limitRow = async (db: Db, step: string): Promise<LimitRow> => {
-  const pass = passOf(db);
-  const row = pass ? (pass.limits ??= new Map((await db.all(db.k.selectFrom("stage_limits").select(kx.cols("stage_limits")))).map((r) => [r.step, r]))).get(step)
-    : await db.get(db.k.selectFrom("stage_limits").select(kx.cols("stage_limits")).where("step", "=", step));
-  return row ?? { step, per_day: DEFAULT_PER_DAY[step] ?? null, updated_by: null, updated_at: null };
-};
+export const limitRow = async (db: Db, step: string): Promise<LimitRow> =>
+  (await readsOf(db)).limits.get(step) ?? { step, perDay: DEFAULT_PER_DAY[step] ?? null };
 
 /** Items handled by the step's jobs that started today (UTC) and after the operator's last reset of its count; for Act, also the GitHub writes of conversation cards. */
 export async function usageToday(db: Db, step: string, ms: number = Date.now()): Promise<number> {
-  const pass = passOf(db);
   if (step === "act") {
+    const pass = passOf(db);
     if (!pass) return await actUsedToday(db, ms);
-    const day = dayStart(ms), act = (pass.act ??= new Map());
-    if (!act.has(day)) act.set(day, await actUsedToday(db, ms));
-    return act.get(day)!;
+    const day = dayStart(ms);
+    if (!pass.act.has(day)) pass.act.set(day, await actUsedToday(db, ms));
+    return pass.act.get(day)!;
   }
-  const day = dayStart(ms), reset = await getSetting(db, KEY_RESET + step);
-  if (pass) {
-    // The jobs started since the start of the day, read once; a reset only moves the start later.
-    if (pass.started?.day !== day) pass.started = { day, rows: await db.all(db.k.selectFrom("jobs").select(["step", "started_at", "items"]).where("started_at", ">=", day).$narrowType<{ started_at: string }>()) };
-    const from = reset && reset > day ? reset : day;
-    return pass.started.rows.reduce((n, j) => n + (j.step === step && j.started_at >= from ? j.items ?? 0 : 0), 0);
-  }
-  return (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("items"), eb.lit(0)).as("n")).where("step", "=", step).where("started_at", ">=", reset && reset > day ? reset : day)))!.n;
+  return (await readsOf(db, ms)).inputs.usedToday.get(step) ?? 0;
 }
 
 /**
@@ -870,12 +862,9 @@ export async function usageToday(db: Db, step: string, ms: number = Date.now()):
  * A queued job that waits for a Task Runner (untakenTest) keeps none.
  */
 export async function reservedByJobs(db: Db, step: string, untaken?: UntakenTest): Promise<number> {
-  const pass = passOf(db);
-  // In a pass the queued and running jobs of every step are read once.
-  const rows = pass ? (pass.live ??= await db.all(db.k.selectFrom("jobs").select(["step", "params", "items", "state", "repo"]).where("state", "in", ["queued", "running"]))).filter((r) => r.step === step)
-    : await db.all(db.k.selectFrom("jobs").select(["params", "items", "state", "repo"]).where("step", "=", step).where("state", "in", ["queued", "running"]));
   let n = 0;
-  for (const r of rows) {
+  for (const r of (await readsOf(db)).inputs.live) {
+    if (r.step !== step) continue;
     if (r.state === "queued" && await (untaken ??= await untakenTest(db))({ step, repo: r.repo, params: r.params })) continue;
     let limit: unknown;
     try { limit = (JSON.parse(r.params) as { limit?: unknown }).limit; } catch { continue; }
@@ -888,7 +877,7 @@ export async function reservedByJobs(db: Db, step: string, untaken?: UntakenTest
 export async function jobLimit(db: Db, step: StepDef, ms: number = Date.now(), wanted?: number, untaken?: UntakenTest): Promise<{ limit?: number } | null> {
   const lp = step.params.find((p) => p.name === "limit" && p.kind === "int");
   if (!lp || lp.kind !== "int") return {};
-  const perDay = (await limitRow(db, step.name)).per_day;
+  const perDay = (await limitRow(db, step.name)).perDay;
   const limit = Math.min(wanted ?? lp.default ?? lp.max, lp.max, perDay === null ? Infinity : perDay - await usageToday(db, step.name, ms) - await reservedByJobs(db, step.name, untaken));
   return limit < lp.min ? null : { limit };
 }
@@ -911,16 +900,13 @@ const RELEASE_STEPS: Record<string, string[]> = {
 
 /** When an operator last released work for the step, or null. */
 async function releasedAt(db: Db, step: string): Promise<string | null> {
-  const actions = Object.keys(RELEASE_STEPS).filter((a) => RELEASE_STEPS[a]!.includes(step));
-  if (!actions.length) return null;
-  return (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.max<string | null>("at").as("at")).where("action", "in", actions)))!.at;
+  const released = (await readsOf(db)).released;
+  const times = Object.keys(RELEASE_STEPS).filter((a) => RELEASE_STEPS[a]!.includes(step)).flatMap((a) => released.get(a) ?? []);
+  return times.length ? times.reduce((m, t) => (t > m ? t : m)) : null;
 }
 
 /** The least wait after a job stopped for running past its deadline. */
 export const DEADLINE_BACKOFF_MS = 3600_000;
-
-/** Minutes-long wait after `failures` failed jobs in a row: 1, 2, 4, 8, 16 minutes, then 30. */
-export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOFF_MAX_MS, FAIL_BACKOFF_MS * 2 ** Math.max(0, failures - 1));
 
 /**
  * Failed autopilot jobs of the step (of the repo, when given) since its last success: when it may run again, else null.
@@ -929,10 +915,8 @@ export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOF
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
  */
 export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string } = {}): Promise<{ until: number; failures: number } | null> {
-  const rows = await db.all(db.k.selectFrom("jobs").select(["id", "state", "ended_at", "error"]).where("step", "=", step).$if(o.repo != null, (q) => q.where("repo", "=", o.repo!))
-    .where("requested_by", "=", AUTOPILOT_USER).where("state", "in", ["done", "failed"])
-    .where((eb) => eb.and([eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]))
-    .orderBy("id", "desc").limit(12));
+  // The pipeline jobs of the step (of the repo, when given), newest first, back to the first success, at most 12.
+  const rows = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step && (o.repo == null || r.repo === o.repo)).sort((a, b) => b.id - a.id).slice(0, 12);
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
   if (!failures || !rows[0]!.ended_at) return null;
@@ -950,10 +934,17 @@ export async function failureBackoff(db: Db, step: string, ms: number = Date.now
 
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
+const tripReason = (reason: string, wide: boolean): string =>
+  `tripped: ${reason}; ${wide ? "an operator resumes it" : "an operator, or a maintainer with write access to the repo, resumes it"}`;
+
 /** Why the step cannot start because its push stage tripped on every repo, or (with `repo`) a job of it cannot work that repo because it tripped there; null when neither. */
 async function tripOfStep(db: Db, step: string, repo: string | null): Promise<string | null> {
-  const pass = passOf(db);
-  return pass ? tripReasonIn(pass.trips ??= await activeTrips(db), step, repo) : await tripReasonOfStep(db, step, repo);
+  const stage = STEP_STAGE[step];
+  if (!stage) return null;
+  const trips = (await readsOf(db)).trips;
+  if (trips[stage] !== undefined) return tripReason(trips[stage], true);
+  const reason = repo ? trips[tripKey(stage as TripStage, repo)] : undefined;
+  return reason === undefined ? null : tripReason(reason, false);
 }
 
 /**
@@ -964,16 +955,10 @@ export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: 
   const l = await limitRow(db, step), used = await usageToday(db, step, ms);
   const tripped = await tripOfStep(db, step, o.repo ?? null);
   if (tripped) return { why: tripped, wakeAt: null };
-  if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
-  if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
+  if (l.perDay === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
+  if (l.perDay !== null && used >= l.perDay) return { why: `daily limit of ${l.perDay} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
   const b = o.backoff === false ? null : await failureBackoff(db, step, ms);
   if (b !== null) return { why: `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`, wakeAt: b.until };
-  // Steps that call Claude (decide, opus-review, the Haiku part of classify-new) wait for an account with headroom.
-  // In the user-local mode no account is used: calls wait for helpers instead.
-  if (usesClaude(modelsOf(knownStep(step), {})) && await inferenceMode(db) === "server") {
-    const why = await claudePauseReason(db, ms);
-    return why === null ? null : { why, wakeAt: ms + 60_000 };
-  }
   return null;
 }
 
@@ -983,53 +968,33 @@ export const pauseReason = async (db: Db, step: string, ms: number = Date.now(),
 // ---- state ---------------------------------------------------------------------
 
 /** On: the planner queues jobs and the runner starts them. Draining and off are both not enabled. */
-export const isEnabled = async (db: Db): Promise<boolean> => await getSetting(db, KEY_ENABLED) === "1";
+export const isEnabled = async (db: Db): Promise<boolean> => (await freshConfig(db, [KEY_ENABLED])).pipelineEnabled;
 /** Draining: like off for new work, but the writes of jobs already running go through. */
-export const isDraining = async (db: Db): Promise<boolean> => await getSetting(db, KEY_ENABLED) === PIPELINE_DRAIN;
+export const isDraining = async (db: Db): Promise<boolean> => (await freshConfig(db, [KEY_ENABLED])).pipelineDraining;
 
 export async function setEnabled(db: Db, enabled: boolean, by: string, mode: "off" | "drain" = "off"): Promise<void> {
-  await setSetting(db, KEY_ENABLED, enabled ? "1" : mode === "drain" ? PIPELINE_DRAIN : "0");
-  await setSetting(db, KEY_BY, by);
-  await setSetting(db, KEY_AT, now());
-  // Automatic jobs still waiting are dropped; running ones finish.
-  if (!enabled) {
-    const waiting = await db.all(db.k.selectFrom("jobs").select(["id", "step"]).where("state", "=", "queued").where("requested_by", "=", AUTOPILOT_USER));
-    for (const j of waiting) {
-      await requestCancel(db, j.id, by);
-      await audit(db, by, "job-cancel", `job:${j.id}`, { step: j.step, state: "queued", reason: "pipeline switched off" });
+  await db.write(async () => {
+    await saveSettings(db, [{ key: KEY_ENABLED, value: enabled ? "1" : mode === "drain" ? PIPELINE_DRAIN : "0" }, { key: KEY_BY, value: by }, { key: KEY_AT, value: now() }], by);
+    // Automatic jobs still waiting are dropped; running ones finish.
+    if (!enabled) {
+      const waiting = await markCancelQueued(db, { pipelineOnly: true }, by);
+      const resuming = waiting.filter((j) => Number(j.resumes) > 0).map((j) => j.id);
+      if (resuming.length) await dropJobCalls(db, "The job was cancelled.", resuming);
+      await addAudit(db, waiting.map((j) => ({ login: by, action: "job-cancel", target: `job:${j.id}`, details: { step: j.step, state: "queued", reason: "pipeline switched off" } })));
     }
-  }
-  // Turning on plans at once; the sync that already happened is not new.
-  if (enabled) await deleteSetting(db, KEY_PLANNED_AT);
+    // Turning on plans at once; the sync that already happened is not new.
+    if (enabled) await removeLaneState(db, [{ kind: "mark", step: MARK_PLANNED_AT }]);
+  });
 }
 
-/** How many of the newest jobs deadlineStops looks at. */
-const STOP_WINDOW = 5000;
-
 /** Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has beaten. */
-export async function deadlineStops(db: Db): Promise<{ step: string; jobId: number; error: string; endedAt: string | null; count: number }[]> {
-  const floor = Number((await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m"))))!.m ?? 0) - STOP_WINDOW;
-  const rows = await db.all(db.k.selectFrom("jobs").select(["step", "id", "error", "ended_at as endedAt"]).where("id", ">", floor).where("state", "=", "failed")
-    .where((eb) => eb.or([kx.like(db, "error", eb.val("stopped: ran past %")), kx.like(db, "error", eb.val("stopped: no progress for %"))])).orderBy("id", "desc").$narrowType<{ error: string }>());
-  const lastDone = (step: string) => db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m")).where("step", "=", step).where("state", "=", "done"));
-  // The acknowledgement is an audit row, which the header's query refetches on and the planner does not.
-  const acked = (target: string) => db.get(db.k.selectFrom("audit").select((eb) => eb.fn.max<string | null>("at").as("at")).where("action", "=", "deadline-ack").where("target", "=", target));
-  const out: { step: string; jobId: number; error: string; endedAt: string | null; count: number }[] = [];
-  const steps = [...new Set(rows.map((r) => r.step))];
-  for (const step of steps) {
-    const mine = rows.filter((r) => r.step === step), latest = mine[0]!;
-    const done = Number((await lastDone(step))!.m ?? 0);
-    if (done > latest.id) continue;
-    const ack = (await acked(`step:${step}`))!.at;
-    if (ack && latest.endedAt !== null && ack >= latest.endedAt) continue;
-    out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt, count: mine.filter((r) => r.id > done).length });
-  }
-  return out;
+export async function deadlineStops(db: Db): Promise<DeadlineStop[]> {
+  return await loadDeadlineStops(db);
 }
 
 /** An operator acknowledges the deadline stops of a step: they leave the warnings until the next one. */
 export async function ackDeadline(db: Db, step: string, by: string): Promise<void> {
-  await audit(db, by, "deadline-ack", `step:${step}`, {});
+  await ackDeadlines(db, [step], by);
 }
 
 /** Steps that have a row in stage_limits, in pipeline order. */
@@ -1051,9 +1016,7 @@ export async function setLimit(db: Db, step: unknown, input: unknown, by: string
   if (perDay === undefined) throw new LimitError("perDay is required (null means no limit)");
   if (ZERO_ONLY.includes(step) && perDay !== null && perDay !== 0) throw new LimitError(`${step} cannot be sized by a daily limit: use none, or 0 to pause it`);
   if (perDay !== null && (typeof perDay !== "number" || !Number.isInteger(perDay) || perDay < 0 || perDay > 100_000)) throw new LimitError("perDay must be null or a whole number from 0 to 100000");
-  await db.run(db.k.insertInto("stage_limits").values({ step, per_day: perDay, updated_by: by, updated_at: now() })
-    .onConflict((oc) => oc.column("step").doUpdateSet(kx.excluded(["per_day", "updated_by", "updated_at"]))));
-  await audit(db, by, "stage-limit", `step:${step}`, { perDay });
+  await setStageLimit(db, step, perDay, by);
   return { perDay };
 }
 
@@ -1061,37 +1024,36 @@ export async function setLimit(db: Db, step: unknown, input: unknown, by: string
 export async function resetLimitCount(db: Db, step: unknown, by: string): Promise<{ steps: string[] }> {
   const steps = step === "all" ? LIMIT_STEPS : typeof step === "string" && LIMIT_STEPS.includes(step) ? [step] : null;
   if (!steps) throw Object.assign(new LimitError("no such stage"), { status: 404 });
-  const at = now();
-  for (const st of steps) await setSetting(db, KEY_RESET + st, at);
-  await audit(db, by, "limit-reset", step === "all" ? "step:all" : `step:${step}`, { steps });
+  await resetLimitCounts(db, steps, now(), DEFAULT_PER_DAY, by);
   return { steps };
 }
 
 /** What a stage is doing now: running, queued, or why it is not (the planner's last reading); null when unknown. */
 async function stepStatus(db: Db, step: string, why: string | undefined): Promise<string | null> {
-  const j = await db.get(db.k.selectFrom("jobs").select("state").where("step", "=", step).where("state", "in", ["running", "queued"])
-    .orderBy((eb) => eb.case().when("state", "=", "running").then(1).else(0).end(), "desc").limit(1));
-  if (j) return j.state;
-  return why ?? null;
+  const jobs = (await readsOf(db)).inputs.live.filter((j) => j.step === step);
+  const j = jobs.find((x) => x.state === "running") ?? jobs[0];
+  return j ? j.state : why ?? null;
 }
 
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
-  const steps = await loadSteps();
-  const why = await stageStatus(db);
-  const trips = await activeTripRows(db);
-  return await mapSeq(LIMIT_STEPS, async (step) => {
-    const l = await limitRow(db, step);
-    // canResume is the viewer's: the dashboard API sets it per request.
-    const mine = trips.filter((t) => t.tripStage === STEP_STAGE[step]).map((t) => ({ key: t.stage, repo: t.repo, reason: t.reason, since: t.tripped_at, canResume: false }));
-    return { step, title: steps.get(step)?.title ?? step, perDay: l.per_day, usedToday: await usageToday(db, step), pausedReason: await pauseReason(db, step), ...(mine.length ? { trips: mine } : {}), status: await stepStatus(db, step, why[step]) };
+  const steps = await loadSteps(), ms = Date.now();
+  const [reads, why, active, act] = await db.together(() => Promise.all([loadReads(db, ms), stageStatus(db), loadTrips(db, { active: true }), actUsedToday(db, ms)]));
+  return await withPassReads(db, { reads, act: new Map([[dayStart(ms), act]]) }, async () => {
+    const trips = [...active.values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
+    return await Promise.all(LIMIT_STEPS.map(async (step) => {
+      const [l, usedToday, pausedReason, status] = await Promise.all([limitRow(db, step), usageToday(db, step), pauseReason(db, step), stepStatus(db, step, why[step])]);
+      // canResume is the viewer's: the dashboard API sets it per request.
+      const mine = trips.filter((t) => t.tripStage === STEP_STAGE[step]).map((t) => ({ key: t.stage, repo: t.repo, reason: t.reason, since: t.trippedAt, canResume: false }));
+      return { step, title: steps.get(step)?.title ?? step, perDay: l.perDay, usedToday, pausedReason, ...(mine.length ? { trips: mine } : {}), status };
+    }));
   });
 }
 
 export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside" | "blockers">> {
+  const [live, marks, limits] = await db.together(() => Promise.all([loadLiveConfig(db), loadLaneState(db, ["mark"]), stageLimits(db)]));
   return {
-    judgementModel: await judgementModel(db), judgementModels: [...JUDGEMENT_MODELS],
-    enabled: await isEnabled(db), draining: await isDraining(db), changedBy: await getSetting(db, KEY_BY), changedAt: await getSetting(db, KEY_AT),
-    heartbeat: await getSetting(db, "runner_heartbeat"), limits: await stageLimits(db), pilot: await pilotItems(db),
+    enabled: live.pipelineEnabled, draining: live.drain, changedBy: live.changedBy, changedAt: live.changedAt,
+    heartbeat: marks.get("mark|heartbeat|")?.value ?? null, limits,
   };
 }
 
@@ -1127,32 +1089,35 @@ const nextUtcMidnight = (ms: number): number => Date.parse(dayStart(ms)) + 86_40
  * unchanged input, minimum gap.
  */
 export async function detectAutopilot(db: Db, opts: PlanOptions = {}): Promise<Detected> {
-  const steps = await loadSteps();
-  // The rest of the pass is synchronous, so its settings come from one reading of the table.
-  return await withSettingsSnapshot(db, async () => await withPassReads(db, async () => await detectPass(db, opts, steps)));
+  const steps = await loadSteps(), ms = opts.nowMs ?? Date.now();
+  // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
+  const untaken = await untakenTest(db, steps, ms);
+  const [settings, reads, cap, takers, act, own] = await db.together(() => Promise.all([
+    readSettingsSnapshot(db), loadReads(db, ms), stepParallel(db), loadTakerSignature(db, Date.now()), actUsedToday(db, ms), loadOwnLogins(db), untaken.load?.(),
+  ]));
+  // Every setting the pass reads comes from that reading of the table (planCtx reads it again in its snapshot).
+  return await withSettingsSnapshot(db, async () => await withPassReads(db, { reads, takers, act: new Map([[dayStart(ms), act]]) }, async () => await detectPass(db, opts, steps, { untaken, cap, own })), Promise.resolve(settings));
 }
 
-async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>): Promise<Detected> {
+async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>, read: { untaken: UntakenTest; cap: number; own: ReadonlySet<string> }): Promise<Detected> {
   const lanes = opts.lanes ?? LANES, ms = opts.nowMs ?? Date.now();
   const logs: string[] = [];
   const log = (l: string) => { logs.push(l); opts.log?.(l); };
   const proposals: Proposal[] = [];
   const t0 = performance.now();
-  const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
+  const { untaken, cap } = read;
+  const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw", read.own);
   ctx.detected = new Map();
-  // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
-  const untaken = (ctx.untaken = await untakenTest(db, steps, ms));
+  ctx.untaken = untaken;
   const loadMs = performance.now() - t0;
   const scope = ctx.scope ?? await scopeRepos(db);
-  const seqs = await readSeqs(db);
+  const seqs = ctx.seqs ?? await db.seqs();
   const status: Record<string, string> = {};
-  // activeJobs, read with the items the daily limits reserve (reservedByJobs): one read of the queued and running jobs for the pass.
-  const live = await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "repo", kx.jsonNum(db, "params", "$.number").as("number"), "params", "items"])
-    .where("state", "in", ["queued", "running"]));
-  const active: Active[] = live.map(({ items: _, ...a }) => a);
-  const reads = passOf(db);
-  if (reads) reads.live = live;
-  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(await stepParallel(db), 16));
+  // The queued and running jobs, read with the pass's other job reads.
+  const live = (await readsOf(db, ms)).inputs.live;
+  const active: Active[] = live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  ctx.marks = (await readsOf(db, ms)).inputs.marks;
+  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(cap, 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();
   const limitLeft = new Map<string, { limit?: number } | null>();
@@ -1177,7 +1142,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (!step) return null;
     const pending: Active[] = proposals.filter((p) => p.step === stepName).map((p) => ({ id: 0, step: p.step, state: "proposed", repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }));
     const repo0 = typeof params.repo === "string" ? params.repo : null;
-    if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
+    if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active, cap })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
     // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row (pausedWhy covers a trip on every repo).
@@ -1206,6 +1171,22 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     return limitLeft.get(stepName)!;
   };
 
+  // A lane whose steps cannot start is not worth detecting, but the Next lists still name its items.
+  const closed = new Set<string>();
+  for (const lane of lanes) {
+    try {
+      if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) closed.add(lane.name);
+    } catch (e) { closed.add(lane.name); log(`autopilot: ${lane.name}: ${(e as Error).message}`); }
+  }
+  // The lanes' reads and what the writes below compare with go out together. A read that fails here runs again by itself where it is used.
+  const ahead = async <T>(p: Promise<T>): Promise<T | undefined> => { try { return await p; } catch { return undefined; } };
+  const [storedLanes, storedPlans, liveness] = await db.together(() => Promise.all([
+    opts.lanes ? undefined : ahead(loadLanes(db)), ahead(loadStoredPlans(db)), ahead(loadLivenessState(db)),
+    ...lanes.filter((l) => !closed.has(l.name) || (!opts.lanes && LANE_KINDS[l.name])).map(async (l) => {
+      await Promise.all([ahead(detectOf(db, ctx, l)), closed.has(l.name) ? undefined : ahead(extraOf(db, l.extra))]);
+    }),
+  ] as const));
+
   const tops = new Map<string, number | null>();
   for (const lane of lanes) {
     if (!lane.topScore) continue;
@@ -1213,8 +1194,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   }
   for (const lane of orderLanes(lanes, tops)) {
     try {
-      // A lane whose steps cannot start is not worth detecting.
-      if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) continue;
+      if (closed.has(lane.name)) continue;
       const candidates = await detectOf(db, ctx, lane);
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
@@ -1233,24 +1213,27 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     }
   }
   // The lists the Next page shows come from the same pass, so the page needs no Plans of its own.
+  let laneRows: LaneRow[] = [];
   if (!opts.lanes) {
-    try { await storeLaneItems(db, lanes, ctx); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
+    try { laneRows = await changedLanes(db, lanes, ctx, storedLanes); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
   }
   const lanesMs = performance.now() - t0 - loadMs;
-  // The Plan cache: the planner's output for the dashboard.
+  // The Plan cache: the planner's output for the dashboard. It is written with the Next lists and the pass's records in one transaction.
   let cache = { written: 0, deleted: 0 };
   const t1 = performance.now();
-  let cached = false;
   try {
-    cache = await writePlanCache(db, ctx.plans!);
-    cached = true;
+    const diff = await planCacheDiff(db, ctx.plans!, storedPlans);
+    const write = async (): Promise<void> => {
+      await saveLanes(db, laneRows, true);
+      cache = await writePlanDiff(db, diff);
+      await ctx.pass?.finish(performance.now() - t0);
+    };
+    if (laneRows.length || diff.changed || ctx.pass?.logged) await db.write(write);
+    else await write();
   } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
   const cacheMs = performance.now() - t1;
-  if (cached) {
-    try { await ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
-  }
   // The liveness check follows the plan cache and stores its own result at most every few minutes.
-  try { await refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
+  try { await refreshLiveness(db, Date.now(), false, liveness); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
   const passKind = ctx.pass ? `${ctx.pass.kind}, ${ctx.pass.refs} loaded${ctx.pass.diffs.length ? `, ${ctx.pass.diffs.length} shadow differences` : ""}` : undefined;
   if (ctx.pass?.diffs.length) log(`autopilot: plan shadow: ${ctx.pass.diffs.length} differences (plan_shadow_diffs)`);
   if (loadMs + lanesMs + cacheMs > 2000) log(`autopilot: pass took ${Math.round(loadMs + lanesMs + cacheMs)} ms${passKind ? ` (${passKind})` : ""}: plans ${Math.round(loadMs)}, lanes ${Math.round(lanesMs)}, cache ${Math.round(cacheMs)} (${cache.written} rows written, ${cache.deleted} deleted)`);
@@ -1269,8 +1252,8 @@ function leaseSkipKeys(keys: string | null): string[] | null {
 
 /** True when a running job holds a lease on one of the keys a job skipped (a job from before the keys were recorded: on any lease). */
 async function skippedLeaseHeld(db: Db, keys: string[] | null): Promise<boolean> {
-  return !!await db.get(db.k.selectFrom("work_leases as l").innerJoin("jobs as j", "j.id", "l.job_id").select((eb) => eb.lit(1).as("one")).where("j.state", "=", "running")
-    .$if(keys !== null, (q) => q.where(kx.inList(db, "l.key", keys!))).limit(1));
+  const held = (await readsOf(db)).inputs.heldLeaseKeys;
+  return keys === null ? held.size > 0 : keys.some((k) => held.has(k));
 }
 
 /** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
@@ -1288,50 +1271,84 @@ async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp:
 
 const warned = new Set<string>();
 
-/** Queues the proposals: per lane and repo the first one that is accepted. Returns the queued job ids. */
+/**
+ * Queues the proposals: per lane and repo the first one that is accepted. Returns the queued job ids. One reading decides them all,
+ * and one transaction queues the jobs and writes the planner's marks.
+ */
 export async function applyProposals(db: Db, proposals: Proposal[], opts: PlanOptions & { wakeAt?: number | null; status?: Record<string, string> } = {}): Promise<number[]> {
   const lanes = opts.lanes ?? LANES, log = opts.log ?? (() => {});
-  const queued: number[] = [];
+  const accepted = proposals.length ? await acceptProposals(db, proposals, log) : [];
+  // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
+  const marks: LaneStatePut[] = [
+    ...(opts.wakeAt ? [{ kind: "mark" as const, step: MARK_WAKE_AT, value: new Date(opts.wakeAt).toISOString() }] : []),
+    ...(opts.status ? [{ kind: "mark" as const, step: MARK_STATUS, value: JSON.stringify(opts.status) }] : []),
+  ];
+  const ids = await db.write(async () => {
+    const { queued } = await enqueueJobs(db, accepted.map(({ p, params }) => ({ step: p.step, params, repo: repoOf(p), by: AUTOPILOT_USER })));
+    const fps = accepted.flatMap(({ p }, i): LaneStatePut[] => (p.fp !== undefined && queued.has(i) ? [{ kind: "fp", step: p.step, repo: repoOf(p) ?? "", value: p.fp, job_id: queued.get(i)! }] : []));
+    await saveLaneState(db, [...marks, ...fps]);
+    if (!opts.wakeAt) await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
+    for (const [i, { p }] of accepted.entries()) {
+      const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
+      if (queued.has(i)) await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
+    }
+    return queued;
+  });
+  for (const [i, { p, params }] of accepted.entries()) {
+    log(ids.has(i) ? `autopilot: job ${ids.get(i)}: ${p.step} ${JSON.stringify(params)}` : `autopilot: ${p.step}: not queued: ${p.step} with these settings is already queued`);
+  }
+  return accepted.flatMap((_, i) => (ids.has(i) ? [ids.get(i)!] : []));
+}
+
+/** The proposals to queue, with their params. The detection ran a moment ago: a job of the same step and repo may have been queued since. */
+async function acceptProposals(db: Db, proposals: Proposal[], log: (line: string) => void): Promise<{ p: Proposal; params: Params }[]> {
+  const steps = await loadSteps(), ms = Date.now();
+  const untaken = await untakenTest(db, steps);
+  const [loaded, cap, names] = await db.together(() => Promise.all([loadReads(db, ms), stepParallel(db), trackedNames(db), untaken.load?.()]));
+  const active: Active[] = loaded.inputs.live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  // The jobs accepted here count against the limits of the next ones.
+  const reads: Reads = { ...loaded, inputs: { ...loaded.inputs, live: [...loaded.inputs.live] } };
+  const out: { p: Proposal; params: Params }[] = [];
   const done = new Set<string>();
-  // Jobs queued in this pass and the steps their proposals gate: they hold a repo of the step, so with step_parallel 1 no other repo takes it.
+  // Jobs accepted in this pass and the steps their proposals gate: they hold a repo of the step, so with step_parallel 1 no other repo takes it.
   const reserved: Active[] = [];
   const asActive = (step: string, params: Params, state: string): Active => ({ id: 0, step, state, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null });
-  const steps = await loadSteps();
-  const untaken = await untakenTest(db, steps);
-  try { await applyUsedAnswers(db); } catch (e) { log(`autopilot: answers: ${(e as Error).message}`); }
-  // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
-  if (opts.wakeAt) await setSetting(db, KEY_WAKE_AT, new Date(opts.wakeAt).toISOString());
-  else await deleteSetting(db, KEY_WAKE_AT);
-  if (opts.status) await setSetting(db, KEY_STATUS, JSON.stringify(opts.status));
-  for (const p of proposals) {
-    const slot = `${p.lane}\0${typeof p.params.repo === "string" ? p.params.repo : ""}`;
-    if (done.has(slot)) continue;
-    try {
-      // The detection ran a moment ago: a job of the same step and repo may have been queued since.
-      if (await jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken })) continue;
-      if (p.gate && await jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken })) continue;
-      // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
-      const job = await enqueue(db, p.step, p.params, AUTOPILOT_USER, async (step, params) => {
-        if (typeof params.limit !== "number") return params;
-        const lim = await jobLimit(db, step, Date.now(), params.limit, untaken);
-        return lim ? { ...params, ...lim } : null;
-      });
-      queued.push(job.id);
-      reserved.push(asActive(p.step, p.params, "queued"));
-      if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
-      done.add(slot);
-      if (p.fp !== undefined) await setSetting(db, fpKey(p.step, typeof p.params.repo === "string" ? p.params.repo : null), JSON.stringify({ job: job.id, fp: p.fp } satisfies FpRecord));
-      const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
-      await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
-      log(`autopilot: job ${job.id}: ${p.step} ${JSON.stringify(job.params)}`);
-    } catch (e) {
-      if (!(e instanceof JobError)) {
-        log(`autopilot: ${p.lane}: ${(e as Error).message}`);
+  const blocked = (step: string, params: Params): Promise<string | null> => jobBlock(db, steps, { step, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { reserved, untaken, active, cap });
+  // The checks of the requests go out together; a refusal is told when its proposal's turn comes.
+  const checks = new Map<Proposal, Promise<Awaited<ReturnType<typeof checkRequest>>>>();
+  await db.together(async () => {
+    for (const p of proposals) checks.set(p, checkRequest(db, p.step, p.params, names));
+    await Promise.allSettled(checks.values());
+  });
+  await withPassReads(db, { reads }, async () => {
+    for (const p of proposals) {
+      const slot = `${p.lane}\0${repoOf(p) ?? ""}`;
+      if (done.has(slot)) continue;
+      try {
+        if (await blocked(p.step, p.params) || (p.gate && await blocked(p.gate.step, p.gate.params))) continue;
+        // A failed read of one check fails its whole wave: the check then runs by itself.
+        const { step, params: checked } = await checks.get(p)!.catch((e: unknown) => { if (e instanceof JobError) throw e; return checkRequest(db, p.step, p.params, names); });
+        let params: Params = checked;
+        // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
+        if (typeof params.limit === "number") {
+          const lim = await jobLimit(db, step, ms, params.limit, untaken);
+          if (!lim) throw new JobError(409, `the daily limit of ${step.name} leaves too little for a job`);
+          params = { ...params, ...lim };
+        }
+        out.push({ p, params });
+        reserved.push(asActive(p.step, p.params, "queued"));
+        reads.inputs.live.push({ ...asActive(p.step, p.params, "queued"), params: JSON.stringify(params), items: null } as Reads["inputs"]["live"][number]);
+        if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
         done.add(slot);
-      } else log(`autopilot: ${p.step}: not queued: ${e.message}`);
+      } catch (e) {
+        if (!(e instanceof JobError)) {
+          log(`autopilot: ${p.lane}: ${(e as Error).message}`);
+          done.add(slot);
+        } else log(`autopilot: ${p.step}: not queued: ${e.message}`);
+      }
     }
-  }
-  return queued;
+  });
+  return out;
 }
 
 /** Detection and queueing in one go, on one connection. */
@@ -1340,53 +1357,57 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
   return applyProposals(db, found.proposals, { ...opts, wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) });
 }
 
-/** What the planner's marks say about the content stages read and the limits that apply to them, from its parts read. */
-const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string): string =>
-  [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers].join(",");
+/**
+ * What the planner's marks say about the content stages read, the limits that apply to them and the operators' releases, from its
+ * parts read. The releases' times are compared as values: on Postgres a release can commit after a planner mark later than its time.
+ */
+const inputSignature = (seqs: Record<string, number>, limits: string, takers: string, released: Map<string, string>): string =>
+  [...DUE_TOPICS.map((t) => seqs[t] ?? 0), limits, takers, ...[...released].sort().flat()].join(",");
+
+type PlanDueReads = Awaited<ReturnType<typeof loadPlanDue>>;
+
+/** What planDue reads, in one wave. */
+export async function loadPlanDue(db: Db, nowMs: number) {
+  return await db.together(() => Promise.all([
+    loadLaneState(db, ["mark"]), limitsSignature(db), db.seqs(), loadTakerSignature(db, nowMs), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  ]));
+}
 
 /**
- * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, an autopilot job finished, an operator released
- * work, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
+ * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, a job or sandbox task
+ * ended, a lease was given back, a limit changed, an operator released work, the Task Runners that may take calls changed, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
  * it is, so the caller must then plan.
  */
-export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
+export async function planDue(db: Db, nowMs: number = Date.now(), read?: PlanDueReads): Promise<boolean> {
   const t = nowMs;
-  // The single-row reads in one statement, with the change markers, the mode and the takers (read in every mode, used in user-local) at the same time.
-  const mark = (key: string) => db.k.selectFrom("main.settings").select("value").where("key", "=", key);
-  const since = (eb: kx.Eb) => eb.fn.coalesce(mark(KEY_PLANNED_AT), eb.val(""));
-  const [v, seqs, mode, takers] = await Promise.all([
-    kx.rowValues(db, [...limitRows(db), endedTasks(db), mark(KEY_SEQS_SEEN), mark(KEY_PLANNED_AT), mark(KEY_WAKE_AT),
-      db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where((eb) => eb("ended_at", ">", since(eb))).limit(1),
-      db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where((eb) => eb("at", ">", since(eb))).limit(1)]),
-    readSeqs(db), inferenceMode(db), takerSignature(db),
-  ]);
-  const text = (r: unknown[] | undefined): string | null => (typeof r?.[0] === "string" ? r[0] : null);
-  const sig = inputSignature(seqs, (text(v[0]) ?? "") + (text(v[1]) ?? ""), String(Number(v[2]![0])), mode === "user-local" ? takers : "");
-  const [seen, plannedAt, wake] = [text(v[3]), text(v[4]), text(v[5])];
+  const [marks, limits, seqs, takers, released] = read ?? await loadPlanDue(db, t);
+  const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
+  const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];
+  const sig = inputSignature(seqs, limits, takers, released);
   const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
-  const finished = v[6]!.length > 0, released = v[7]!.length > 0;
   const woken = wake !== null && Date.parse(wake) <= t;
-  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !released && !woken) return false;
-  await setSetting(db, KEY_SEQS_SEEN, sig);
-  await setSetting(db, KEY_PLANNED_AT, new Date(t).toISOString());
+  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !woken) return false;
   // The pass about to run sets the next wake time when it is applied. With the switch off nothing is applied, so a
   // wake time that has passed would stay and make every tick plan again.
-  if (woken) await deleteSetting(db, KEY_WAKE_AT);
+  await db.write(async () => {
+    await saveLaneState(db, [{ kind: "mark", step: MARK_SEQS_SEEN, value: sig }, { kind: "mark", step: MARK_PLANNED_AT, value: new Date(t).toISOString() }]);
+    if (woken) await removeLaneState(db, [{ kind: "mark", step: MARK_WAKE_AT }]);
+  });
   return true;
 }
 
 /** Why each stage is not starting, as the last planner pass saw it; keyed by step. */
 export async function stageStatus(db: Db): Promise<Record<string, string>> {
-  try { return JSON.parse(await getSetting(db, KEY_STATUS) ?? "{}") as Record<string, string>; } catch { return {}; }
+  try { return JSON.parse((await loadLaneState(db, ["mark"])).get(`mark|${MARK_STATUS}|`)?.value ?? "{}") as Record<string, string>; } catch { return {}; }
 }
 
 // ---- what each lane will take next ----------------------------------------------
 
 /** The plan actions whose items a lane's job works on, in the order the lane's own selection lists them. Lanes without items are absent. */
 export const LANE_KINDS: Record<string, ActionKind[]> = {
-  classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes", "dupe-answer"], "dupes-compare": ["dupes-compare"], decide: ["decide"],
-  review: ["review"], labels: ["label"], "merge-ask": ["ask-merge"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
+  classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes"], "dupes-compare": ["dupes-compare"],
+  review: ["review"], labels: ["label"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
   implement: ["implement"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
   "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"],
 };
@@ -1396,13 +1417,11 @@ export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversatio
 
 export type LaneItem = {
   repo: string; number: number; kind: "pr" | "issue"; action: string; bucket: string | null;
-  fast: boolean; rank: number | null; inFlight: boolean;
+  rank: number | null; inFlight: boolean;
   /** The next job of the lane covers this item's repo. */
   next: boolean;
   /** Why the guard would refuse the item's write, or why no job of the lane will take its repo now (no Task Runner takes it), or null. */
   blocked: string | null;
-  /** The decision the item's action carries out, when its params name one. */
-  decisionId?: string;
 };
 
 /**
@@ -1432,11 +1451,9 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     seen.add(ref);
     const refused = gates(f, wantOf(a), "pipeline");
     const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? await waits(f.repo);
-    const fast = ((await fastOf(db, ctx)).get(ref) ?? 0) >= FAST_FLOOR;
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
-      fast, rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
-      ...(typeof a.params?.decisionId === "string" ? { decisionId: a.params.decisionId } : {}),
+      rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
     });
   };
   for (const k of kinds) {
@@ -1459,59 +1476,30 @@ const plain = (why: string): string => { const t = why.replace(/^(paused|tripped
 const NEXT_PER_LANE = 500;
 export type StoredLaneItems = Record<string, { total: number; items: LaneItem[] }>;
 
-/** Writes each lane's items as this pass sees them: only the lanes that changed. The table belongs to the `plans` topic, which the planner does not take as input. */
-async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void> {
-  const old = new Map((await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]))).map((r) => [r.lane, r]));
+type LaneRow = { lane: string; total: number; items: unknown[]; at: string };
+
+/** Each lane's items as this pass sees them: only the lanes that differ from the stored lists. The table belongs to the `plans` topic, which the planner does not take as input. */
+async function changedLanes(db: Db, lanes: Lane[], ctx: PlanCtx, stored?: Awaited<ReturnType<typeof loadLanes>>): Promise<LaneRow[]> {
+  const old = new Map(stored ?? await loadLanes(db));
   const at = new Date().toISOString();
+  const changed: LaneRow[] = [];
   for (const lane of lanes) {
     const all = await laneItems(db, ctx, lane);
     const prev = old.get(lane.name);
     old.delete(lane.name);
-    if (!all.length) { if (prev) await db.run(db.k.deleteFrom("lane_next").where("lane", "=", lane.name)); continue; }
-    const items = JSON.stringify(all.slice(0, NEXT_PER_LANE));
-    if (!prev || prev.total !== all.length || prev.items !== items) await db.run(db.k.insertInto("lane_next").values({ lane: lane.name, total: all.length, items, at }).onConflict((oc) => oc.column("lane").doUpdateSet(kx.excluded(["total", "items", "at"]))));
+    if (!all.length) { if (prev) changed.push({ lane: lane.name, total: 0, items: [], at }); continue; }
+    const items = all.slice(0, NEXT_PER_LANE);
+    if (!prev || prev.total !== all.length || JSON.stringify(prev.items) !== JSON.stringify(items)) changed.push({ lane: lane.name, total: all.length, items, at });
   }
-  for (const lane of old.keys()) await db.run(db.k.deleteFrom("lane_next").where("lane", "=", lane));
+  for (const lane of old.keys()) changed.push({ lane, total: 0, items: [], at });
+  return changed;
 }
 
 /** The lane lists of the planner's last pass, keyed by lane name. */
 export async function storedLaneItems(db: Db): Promise<StoredLaneItems> {
   const out: StoredLaneItems = {};
-  for (const r of await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]))) out[r.lane] = { total: r.total, items: JSON.parse(r.items) as LaneItem[] };
+  for (const [lane, r] of await loadLanes(db)) out[lane] = { total: r.total, items: r.items as LaneItem[] };
   return out;
-}
-
-/** The lanes that carry out the write of an answered decision: close and comment, merge, label, fix-up and implementation. */
-const HELD_LANES = ["act", "merge", "labels", "fixup", "implement"];
-
-export type Held = { reason: string; approval: boolean };
-/** Reads the stored lane lists once; call it once per request and ask per decision. */
-export async function heldLookup(db: Db): Promise<(repo: string, number: number, decisionId?: string) => Promise<Held | null>> {
-  const rows = new Map((await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]).where("lane", "in", HELD_LANES))).map((r) => [r.lane, r]));
-  const parsed = new Map<string, LaneItem[]>();
-  const gateOf = new Map<string, Held | null>();
-  const laneHold = async (name: string): Promise<Held | null> => {
-    if (!gateOf.has(name)) {
-      const lane = LANES.find((l) => l.name === name);
-      const g = lane ? await laneGate(db, lane, new Map(STEPS.map((x) => [x.name, x]))) : null;
-      gateOf.set(name, g && !g.canRun && g.kind !== "running" && g.why ? { reason: plain(g.why), approval: false } : null);
-    }
-    return gateOf.get(name)!;
-  };
-  return async (repo, number, decisionId) => {
-    for (const [name, row] of rows) {
-      if (!parsed.has(name)) parsed.set(name, JSON.parse(row.items) as LaneItem[]);
-      const items = parsed.get(name)!;
-      const item = items.find((i) => i.repo === repo && i.number === number && (!i.decisionId || !decisionId || i.decisionId === decisionId));
-      if (item) {
-        if (item.blocked) return { reason: plain(item.blocked), approval: /not approved$/.test(item.blocked) };
-        return await laneHold(name);
-      }
-      // The stored list is capped: an item beyond it is judged by the lane's own gate alone.
-      if (row.total > items.length && name === "act") { const h = await laneHold(name); if (h) return h; }
-    }
-    return null;
-  };
 }
 
 /**
@@ -1522,25 +1510,34 @@ export async function heldLookup(db: Db): Promise<(repo: string, number: number,
 export async function actBlockedReason(db: Db, repo: string): Promise<string | null> {
   if (!await isEnabled(db)) return await isDraining(db) ? "the pipeline is draining" : "the pipeline is off";
   if (!(await scopeRepos(db)).has(repo)) return `the pipeline is off for ${repo}`;
-  if ((await limitRow(db, "act")).per_day === 0) return "the daily limit of Act is 0";
+  if ((await limitRow(db, "act")).perDay === 0) return "the daily limit of Act is 0";
   return null;
 }
 
-export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "account" | "backoff"; why: string | null };
+export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "backoff"; why: string | null };
 
-/** Whether a job of the lane can start now, from the same checks the planner's gate() makes. */
-export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<LaneGate> {
-  if (!await isEnabled(db)) return { canRun: false, kind: "off", why: await isDraining(db) ? "The pipeline is draining" : "The pipeline is off" };
-  const steps = lane.steps ?? [];
-  let blocked: LaneGate | null = null;
-  for (const s of steps) {
-    // Blocked only when no repo can start: the step already works its most repos.
-    const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true });
-    if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
-    const why = await pauseReason(db, s, ms);
-    if (!why) return { canRun: true, kind: "ok", why: null };
-    const kind = /^tripped/.test(why) ? "breaker" : /daily limit/.test(why) ? "limit" : /^failed/.test(why) ? "backoff" : "account";
-    blocked ??= { canRun: false, kind, why: plain(why) };
-  }
-  return blocked ?? { canRun: true, kind: "ok", why: null };
+/** Whether a job of each lane can start now, from the same checks the planner's gate() makes; one reading serves them all. */
+export async function laneGates(db: Db, lanes: readonly Pick<Lane, "name" | "steps">[], allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<Map<string, LaneGate>> {
+  const untaken = await untakenTest(db, allSteps, ms);
+  const [cfg, reads, cap, act] = await db.together(() => Promise.all([freshConfig(db, [KEY_ENABLED]), loadReads(db, ms), stepParallel(db), actUsedToday(db, ms), untaken.load?.()]));
+  const off: LaneGate | null = cfg.pipelineEnabled ? null : { canRun: false, kind: "off", why: cfg.pipelineDraining ? "The pipeline is draining" : "The pipeline is off" };
+  const active: Active[] = reads.inputs.live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  const gateOf = async (lane: Pick<Lane, "steps">): Promise<LaneGate> => {
+    let blocked: LaneGate | null = null;
+    for (const s of lane.steps ?? []) {
+      // Blocked only when no repo can start: the step already works its most repos.
+      const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true, untaken, active, cap });
+      if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
+      const why = await pauseReason(db, s, ms);
+      if (!why) return { canRun: true, kind: "ok", why: null };
+      const kind = /^tripped/.test(why) ? "breaker" : /^failed/.test(why) ? "backoff" : "limit";
+      blocked ??= { canRun: false, kind, why: plain(why) };
+    }
+    return blocked ?? { canRun: true, kind: "ok", why: null };
+  };
+  return await withPassReads(db, { reads, act: new Map([[dayStart(ms), act]]) }, async () => {
+    const out = new Map<string, LaneGate>();
+    for (const l of lanes) out.set(l.name, off ?? await gateOf(l));
+    return out;
+  });
 }
