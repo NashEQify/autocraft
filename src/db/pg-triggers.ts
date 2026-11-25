@@ -1,4 +1,4 @@
-// The live topics (src/live.ts) and the planner's change log (src/core/plan-changes.ts) on Postgres: one plpgsql function per
+// The live topics (src/db/live.ts) and the planner's change log (src/db/plan-triggers.ts) on Postgres: one plpgsql function per
 // table and operation (AFTER ROW) evaluates every topic and change-log trigger SQLite has for that table and operation.
 //
 // Counter rows move once per transaction, at commit. A row trigger only records what it touched in transaction-local settings
@@ -6,13 +6,14 @@
 // insert queues a deferred constraint trigger, which runs at commit: it locks the touched change_seq rows in sorted order, then
 // plan_full, then the plan_full_causes rows in sorted order, and bumps each once. Every transaction locks counters in that one
 // order, so two cannot deadlock on them, and the bump commits with the data (a sequence would show before the commit).
+// A topic in NOTIFY_TOPICS also sends a notification on its channel at that flush, for `Db.listen`.
 // A rolled-back savepoint undoes its settings, its live_flush row and the queued trigger together.
 //
-// item_changes rows are inserted by the row triggers themselves; the planner consumes them by key (src/core/plan-changes.ts).
+// item_changes rows are inserted by the row triggers themselves; the planner consumes them by key (src/data/planner/changes.ts).
 // The bulk marker is the transaction-local setting `ac.bulk` (PG_BULK).
 import { createHash } from "node:crypto";
-import { BOOKKEEPING_COLUMNS, CHANGE_SEQ_TABLE, liveTriggers, TOPICS } from "../live.ts";
-import { blockerFill, blockerSync, PG_BULK, PLAN_TABLES, planTriggers } from "../core/plan-changes.ts";
+import { BOOKKEEPING_COLUMNS, CHANGE_SEQ_TABLE, liveTriggers, NOTIFY_TOPICS, TOPICS } from "./live.ts";
+import { blockerFill, blockerSync, PG_BULK, PLAN_TABLES, planTriggers } from "./plan-triggers.ts";
 import { pgExpr } from "../core/pg-expr.ts";
 import { PIN_SEARCH_PATH, pgSchemaSql, pgSchemaStamp, withMigrationLock, type MigrationOpts, type PgClient } from "./pg-migrate.ts";
 import { translateSqlite } from "./pg-schema.ts";
@@ -66,6 +67,7 @@ BEGIN
   IF cardinality(topics) > 0 THEN
     PERFORM 1 FROM change_seq WHERE topic = ANY (topics) ORDER BY topic FOR UPDATE;
     UPDATE change_seq SET seq = seq + 1 WHERE topic = ANY (topics);
+${NOTIFY_TOPICS.map((t) => `    IF '${t}' = ANY (topics) THEN PERFORM pg_notify('${t}', ''); END IF;`).join("\n")}
   END IF;
   IF cardinality(causes) > 0 THEN
     INSERT INTO plan_full (id, seq) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;

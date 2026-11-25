@@ -43,10 +43,10 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.deepEqual([c.refs, c.full], [[], false]);
   assert.deepEqual(c.cursor, seq);
 
-  // A bookkeeping column the Plan reads (jev_failed_hash) logs its item, with no full pass.
+  // A classify failure row (classify_state jev_failed) logs its item, with no full pass.
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 20, kind: "issue", state: "OPEN", title: "t", body: "b", author: "someone", created_at: T, updated_at: T }));
   seq = (await since(seq)).cursor;
-  await db.run(db.k.updateTable("items").set({ jev_failed_hash: "h" }).where("repo", "=", "app").where("number", "=", 20));
+  await db.run(db.k.insertInto("classify_state").values({ kind: "jev_failed", repo: "app", number: 20, value: "h", at: T }));
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#20"], false]);
   seq = c.cursor;

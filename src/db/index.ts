@@ -216,6 +216,11 @@ export interface Db {
    */
   notify(channel: string, payload: string): Promise<void>;
   /**
+   * The change counters (src/db/live.ts) of `topics`, or of every topic. One statement; inside `together` it joins the wave.
+   * A topic with no row has no entry.
+   */
+  seqs(topics?: readonly string[]): Promise<Record<string, number>>;
+  /**
    * Postgres: calls `fn` with the payload of each notification on `channel` until `off()`, on the handle's one listening
    * connection, which opens in the background; with null after that connection was lost and opened again, when some may
    * have been missed. `listening()` is false until the LISTEN is in effect and while the connection is down: poll at the

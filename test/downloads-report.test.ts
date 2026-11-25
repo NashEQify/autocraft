@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pollReleases, type GhRelease, type RepoReleases } from "../src/downloads/poll.ts";
-import { readSeqs } from "../src/live.ts";
 import { downloadsReport } from "../src/downloads/report.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -112,9 +111,9 @@ test("a poll with no new counts does not move the settings topic the planner lis
   const { db, poll, set } = await setup();
   set({ stars: 1, releases: [release(1, "v1.0.0", "2026-10-01T00:00:00Z", [asset(11, "photocraft-1.0.0-windows-x64.msi", 5)])] });
   await poll(T0);
-  const before = await readSeqs(db);
+  const before = await db.seqs();
   await poll(T0 + 20 * 60_000);
-  const after = await readSeqs(db);
+  const after = await db.seqs();
   assert.equal(after.settings, before.settings);
   assert.equal(after.steps, before.steps);
 });

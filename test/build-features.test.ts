@@ -7,7 +7,6 @@ import { createEnv, hello } from "../src/build/envs.ts";
 import { FEATURES_REPO_ONLY_DONE, featuresRepoOnlySqlite } from "../src/db/feature-repo-only.ts";
 import { connect } from "../src/db.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
-import { readSeqs } from "../src/live.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb, dbFor } from "../src/db/open.ts";
 import { rowid } from "../src/db/kx.ts";
@@ -55,18 +54,18 @@ test("Screenshots and Nightly checks show only while an enabled environment can 
 test("a switch change is not planner input", async () => {
   const db = await fresh();
   assert.ok(!INPUT_TOPICS.includes("build-features" as never));
-  const before = await readSeqs(db);
+  const before = await db.seqs();
   await setFeature(db, "nightly", true, "op", "app");
-  const after = await readSeqs(db);
+  const after = await db.seqs();
   assert.equal(after["build-features"], (before["build-features"] ?? 0) + 1);
   assert.equal(after.settings, before.settings);
 });
 
 test("the Implement switch is planner input", async () => {
   const db = await fresh();
-  const before = await readSeqs(db);
+  const before = await db.seqs();
   await setFeature(db, "implement", true, "op", "app");
-  const after = await readSeqs(db);
+  const after = await db.seqs();
   const woke = INPUT_TOPICS.filter((t) => after[t] !== before[t]);
   assert.ok(woke.length > 0, "no planner input topic moved");
   assert.equal(after.settings, before.settings, "the settings topic keeps its own trigger");

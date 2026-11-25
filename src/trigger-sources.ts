@@ -1,0 +1,25 @@
+// Loads everything that registers a live topic source or a planner input, so the trigger generators (src/db/live.ts,
+// src/db/plan-triggers.ts) see them all. src/db imports nothing from src/data; the entry points that generate triggers
+// (src/db.ts, scripts/gen-pg-schema.ts) import this file.
+import "./data/mirror/triggers.ts";
+import "./data/access/triggers.ts";
+import "./data/control/triggers.ts";
+import "./data/triage/triggers.ts";
+import "./data/planner/triggers.ts";
+import "./data/merge/triggers.ts";
+import "./data/changes/triggers.ts";
+import "./data/review/triggers.ts";
+import "./data/workflow/triggers.ts";
+import "./data/intake/triggers.ts";
+import "./data/jobs/triggers.ts";
+import "./data/inference/triggers.ts";
+import "./data/build/triggers.ts";
+import "./data/conversations/triggers.ts";
+import "./data/implement/triggers.ts";
+import "./data/discord/triggers.ts";
+import "./data/security/triggers.ts";
+import "./data/runners/triggers.ts";
+import { registerPlanInputs } from "./db/plan-triggers.ts";
+import { PLAN_INPUTS } from "./core/plan-inputs.ts";
+
+registerPlanInputs(PLAN_INPUTS);

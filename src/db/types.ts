@@ -962,6 +962,8 @@ export interface HeldFollowups {
   reason: string | null;
   attempts: Generated<number>;
   updated_at: string;
+  workflow_id: number | null;
+  approved_at: string | null;
 }
 
 export interface ImplementationRounds {
@@ -3022,7 +3024,7 @@ export const COLUMNS = {
   github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch", "parsed"],
   github_link_nudges: ["login", "at"],
   github_setup_links: ["id", "org", "created_by", "hash", "created_at", "expires_at", "revoked_at", "used_at", "used_by", "installation_id"],
-  held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at"],
+  held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at", "workflow_id", "approved_at"],
   implementation_rounds: ["id", "implementation_id", "kind", "call_id", "result", "at"],
   implementations: ["id", "repo", "number", "queued_by", "state", "attempt", "text_hash", "base_sha", "workspace_id", "plan_json", "plan_md", "plan_call_id", "session_call_id", "report_json", "diff_hash", "diff_stat", "branch", "pr_number", "pr_url", "decision_id", "reason", "created_at", "updated_at"],
   item_activity: ["repo", "number", "id", "kind", "at", "actor", "label", "before_oid", "after_oid"],

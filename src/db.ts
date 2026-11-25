@@ -6,8 +6,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fillHashesSync, fillTextRefs, bulkWritesSync } from "./db/sqlite-backfill.ts";
-import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
-import { planChangesSql } from "./core/plan-changes.ts";
+import "./trigger-sources.ts";
+import { BOOKKEEPING_COLUMNS, liveSql } from "./db/live.ts";
+import { planChangesSql } from "./db/plan-triggers.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
@@ -342,6 +343,9 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["item_workflows", "step", "TEXT"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],
+  // The workflow a held follow-up issue belongs to and its merge approval when it was held (src/data/conversations/held.ts).
+  ["held_followups", "workflow_id", "INTEGER"],
+  ["held_followups", "approved_at", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
