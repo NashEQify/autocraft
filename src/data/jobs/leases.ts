@@ -15,7 +15,7 @@ export async function takeLeases(db: Db, keys: string[], job: { id: number; step
   const at = nowIso();
   const v = kx.valuesTable(db, unique.map((key) => ({ key })), { key: "text" }, "v");
   const rows = await q.all(q.k.insertInto("work_leases").columns(["key", "job_id", "step", "taken_at"])
-    .expression((eb) => eb.selectFrom(v).select(["v.key", eb.val(job.id).as("job_id"), eb.val(job.step).as("step"), eb.val(at).as("taken_at")]).where(eb.lit(true)))
+    .expression((eb) => eb.selectFrom(v).select(["v.key", eb.cast<number>(eb.val(job.id), "integer").as("job_id"), eb.val(job.step).as("step"), eb.val(at).as("taken_at")]).where(eb.lit(true)))
     .onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["job_id", "step", "taken_at"]))
       .where((eb) => eb.or([eb("work_leases.job_id", "=", eb.ref("excluded.job_id")),
         eb.not(eb.exists(eb.selectFrom("jobs as lj").select(eb.lit(1).as("one")).whereRef("lj.id", "=", "work_leases.job_id").where("lj.state", "=", "running")))])))

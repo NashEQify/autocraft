@@ -92,7 +92,7 @@ export async function loadRunnerTick(db: Db, nowMs: number, callerStaleMs: numbe
   const [running, queued, chunks] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("jobs").select((eb) => ["jobs.id", "jobs.cancel_requested_at", "jobs.error", "jobs.started_at",
       remoteQueuedOf(eb, "jobs.id", nowMs, callerStaleMs).as("remote_queued"), lastLeaseOf(eb, "jobs.id").as("last_lease")]).where("jobs.state", "=", "running").orderBy("jobs.id")),
-    q.all(q.k.selectFrom("jobs").select(["id", "step", "repo", "params", numberOf(db).as("limit_param"), "requested_by", "resumes"]).where("state", "=", "queued").orderBy("id")),
+    q.all(q.k.selectFrom("jobs").select(["id", "step", "repo", "params", "requested_by", "resumes"]).where("state", "=", "queued").orderBy("id")),
     q.all(q.k.selectFrom("job_log_chunks").select(["job_id", "seq", "next_start", octets(db, "chunk").as("bytes")])
       .where("job_id", "in", resumingJobs(db)).orderBy("job_id").orderBy("seq")),
   ]));

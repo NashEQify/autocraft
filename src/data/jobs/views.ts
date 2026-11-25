@@ -98,7 +98,7 @@ export async function loadStageStates(db: Db, stages: { n: number; steps: string
   if (!steps.length) { for (const s of stages) out.set(s.n, "idle"); return out; }
   const q = queryDb(db);
   const [active, last] = await db.together(() => Promise.all([
-    q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>(eb.case().when("state", "=", "running").then(1).else(0).end()).as("running")])
+    q.all(q.k.selectFrom("jobs").select((eb) => ["step", eb.fn.max<number>(eb.case().when("state", "=", "running").then(eb.lit(1)).else(eb.lit(0)).end()).as("running")])
       .where(kx.inList(db, "step", steps)).where("state", "in", ["running", "queued"]).groupBy("step")),
     q.all(q.k.selectFrom(q.k.selectFrom("jobs").select((eb) => ["id", "step", "state", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
       .where(kx.inList(db, "step", steps)).where("state", "in", ["done", "failed"]).as("r")).select(["r.id", "r.step", "r.state"]).where("r.rn", "=", 1)),
