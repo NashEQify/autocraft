@@ -55,7 +55,7 @@ both("spoken comments leave out bots, named logins and empty text; heads, newer 
   assert.deepEqual([await edge("first"), await edge("last")], [["c0", "c1"], ["c4", "c1"]]);
   const asked = ["c1", "c4", "gone", null].map((after) => ({ repo: "app", number: 1, after }));
   const newer = await loadNewerComments(db, asked, { not });
-  assert.deepEqual(asked.map((a) => newer.get(newerKey(a))?.map((c) => c.id).sort() ?? null), [["c4"], [], null, ["c0", "c1", "c4"]]);
+  assert.deepEqual(asked.map((a) => newer.get(newerKey(a))?.map((c) => c.id) ?? null), [["c4"], [], null, ["c0", "c1", "c4"]]);
   assert.deepEqual([...await loadAuthoredIn(db, "app", ["ann", "bob"], ["MEMBER"])], ["ann"]);
   return [...heads];
 });

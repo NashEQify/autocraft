@@ -142,6 +142,6 @@ export async function loadAuthorHistory(db: Db, o: { logins?: string[]; repo?: s
       kx.groupConcat(db, o.repo ? eb.case().when("t.repo", "=", o.repo).then(eb.ref("t.repo")).end() : eb.ref("t.repo"), ",", "t.repo").as("repos")])
     .groupBy(["t.author", "t.author_id"])
     .$if(!!o.repo, (b) => b.having((eb) => eb.fn.sum(eb.case().when("t.repo", "=", o.repo!).then(eb.lit(1)).else(eb.lit(0)).end()), ">", 0))
-    .orderBy("t.author").orderBy("t.author_id"));
+    .orderBy("t.author").orderBy("t.author_id", (x) => x.asc().nullsFirst()));
   return rows.map((r) => ({ login: r.login!, author_id: r.author_id === null ? null : Number(r.author_id), merged: Number(r.merged), closed: Number(r.closed), open: Number(r.open), lastMerge: r.last_merge, repos: r.repos ? String(r.repos).split(",") : [] }));
 }

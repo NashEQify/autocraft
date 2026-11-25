@@ -6,8 +6,8 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  addArtifact, appendTaskLogs, claimRun, claimTasks, createTasks, finishTask, loadArtifactFiles, loadArtifacts, loadEndedTaskSignature, loadEnvPass, loadLogTails, loadOpenTasks,
-  loadQueuedStats, loadTasks, loadTaskStates, loseTasks, MAX_QUEUED, QueueFullError, reapStaleTasks, releaseClaims, savePodRuns, TaskAccessError,
+  addArtifact, appendTaskLogs, claimRun, claimTasks, createTasks, finishTask, hasWarmBuild, loadArtifactFiles, loadArtifacts, loadEndedTaskSignature, loadEnvPass, loadLogTails, loadOpenTasks,
+  loadQueuedStats, loadStandaloneTasks, loadTasks, loadTaskStates, loseTasks, MAX_QUEUED, QueueFullError, reapStaleTasks, releaseClaims, savePodRuns, TaskAccessError,
 } from "../../src/data/build/index.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -195,6 +195,33 @@ both("loadEndedTaskSignature changes when a task ends and loadOpenTasks lists on
   const open = await loadOpenTasks(db, [{ repo: "app", number: 1 }, { repo: "app", number: 2 }]);
   assert.deepEqual([...open.keys()], ["app#2"]);
   return open.get("app#2")!.length;
+});
+
+both("loadStandaloneTasks lists tasks without a job by state, or the named tasks, with the step of the newest log chunk", async (db) => {
+  await env(db, "w1", "remote");
+  const ids = await createTasks(db, [newTask(1), newTask(2, { repo: "hidden" }), newTask(3, { step: "fix-check" }), newTask(4), newTask(5)]);
+  const [job] = await queryDb(db).all(k(db).insertInto("jobs").values({ step: "verify", params: "{}", requested_by: "pipeline", requested_at: T0, state: "running" }).returning("id")) as { id: number }[];
+  await queryDb(db).run(k(db).updateTable("build_tasks").set({ job_id: job!.id }).where("id", "=", ids[3]!));
+  await claimTasks(db, "w1", [{ id: ids[0]! }], T0);
+  await appendTaskLogs(db, "w1", ids[0]!, "test", ["a\n"]);
+  await appendTaskLogs(db, "w1", ids[0]!, "build", ["b\n"]);
+  const scope = { hiddenRepos: ["hidden"], staff: true };
+  const open = await loadStandaloneTasks(db, { states: ["queued", "claimed", "running"] }, scope);
+  assert.deepEqual(open.map((t) => t.id), [ids[0], ids[2], ids[4]]);
+  assert.equal(open[0]!.logStep, "build");
+  assert.deepEqual((await loadStandaloneTasks(db, { ids }, { hiddenRepos: [], staff: false })).map((t) => t.id), [ids[0], ids[1], ids[3], ids[4]], "a private step is for staff");
+  assert.deepEqual((await loadStandaloneTasks(db, { ids: [ids[3]!, ids[1]!] }, scope)).map((t) => [t.id, t.jobId]), [[ids[1], null], [ids[3], job!.id]]);
+  assert.deepEqual(await loadStandaloneTasks(db, { states: ["done"] }, scope), []);
+  return open.map((t) => [t.id, t.state, t.repo, t.number, t.step, t.logStep, t.results, t.summary]);
+});
+
+both("hasWarmBuild finds a warm producer of the head or one queued since, and no task that only uses the warm key", async (db) => {
+  const [old] = await createTasks(db, [newTask(1, { warm: { key: "w", role: "build" } }), newTask(2, { headSha: "b".repeat(40), warm: { key: "w", role: "use" } })]);
+  await queryDb(db).run(k(db).updateTable("build_tasks").set({ queued_at: T0 }).where("id", "=", old!));
+  const later = "2026-01-02T00:00:00.000Z";
+  const got = [await hasWarmBuild(db, "app", SHA, later), await hasWarmBuild(db, "app", "b".repeat(40), later), await hasWarmBuild(db, "app", "b".repeat(40), "2025-12-31T00:00:00.000Z"), await hasWarmBuild(db, "other", SHA, later)];
+  assert.deepEqual(got, [true, false, true, false]);
+  return got;
 });
 
 test("statement counts of the loaders and writers do not grow with the number of tasks", async () => {

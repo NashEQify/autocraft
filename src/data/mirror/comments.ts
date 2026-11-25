@@ -152,7 +152,7 @@ export async function loadNewerComments(db: Db, entries: { repo: string; number:
     .leftJoin("comments as m", (j: any) => j.onRef("m.repo", "=", "v.repo").onRef("m.number", "=", "v.number").onRef("m.id", "=", "v.after"))
     .leftJoin("comments as c", (j: any) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number").on((eb: kx.AnyEb) => eb.and([spoken(db, eb, "c", o.not ?? []), eb.or([
       eb("v.after", "is", null), eb("c.created_at", ">", eb.ref("m.created_at")), eb.and([eb("c.created_at", "=", eb.ref("m.created_at")), eb("c.id", ">", eb.ref("m.id"))])])])))
-    .select(["v.k", "v.after", "m.id as mark", "c.id", "c.author", "c.body"]).orderBy("c.created_at").orderBy("c.id"), { label: "mirror.loadNewerComments" });
+    .select(["v.k", "v.after", "m.id as mark", "c.id", "c.author", "c.body"]).orderBy("c.created_at", (x: any) => x.asc().nullsFirst()).orderBy("c.id"), { label: "mirror.loadNewerComments" });
   for (const e of unique) out.set(newerKey(e), []);
   for (const r of rows as unknown as { k: string; after: string | null; mark: string | null; id: string | null; author: string | null; body: string }[]) {
     if (r.after !== null && r.mark === null) out.set(r.k, null);

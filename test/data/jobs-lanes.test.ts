@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
-import { claimMark, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, loadLanes, removeLaneState, saveLaneState, saveLanes, takeLeases } from "../../src/data/jobs/index.ts";
+import { claimMark, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, loadLanes, loadPipelineEndedSince, removeLaneState, saveLaneState, saveLanes, takeLeases } from "../../src/data/jobs/index.ts";
 import type { StreakRow } from "../../src/data/jobs/index.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import { both, flat, seedJobs } from "./jobs-fixture.ts";
@@ -88,5 +88,19 @@ both("claimMark lets one caller win per interval, and lane state rows upsert and
   assert.equal(await removeLaneState(db, [{ kind: "fp", step: "s", repo: "r" }, { kind: "reset", step: "s" }]), 2);
   assert.equal((await loadLaneState(db, ["fp", "reset"])).size, 0);
   assert.equal((await loadHeldLeaseKeys(db)).size, 0);
+  return null;
+});
+
+both("loadPipelineEndedSince compares with a time or with a stored mark, and a mark that is not set counts as the beginning of time", async (db) => {
+  assert.equal(await loadPipelineEndedSince(db, { mark: "planned_at" }), false);
+  await seedJobs(db, [{ state: "done", ended_at: "2026-01-02T00:00:00.000Z" }, { state: "done", requested_by: "someone", ended_at: "2026-01-09T00:00:00.000Z" }, { state: "running" }]);
+  assert.equal(await loadPipelineEndedSince(db, { mark: "planned_at" }), true);
+  const at = async (value: string) => {
+    await saveLaneState(db, [{ kind: "mark", step: "planned_at", value }]);
+    const got = await db.together(() => Promise.all([loadPipelineEndedSince(db, { mark: "planned_at" }), loadPipelineEndedSince(db, value)]));
+    assert.equal(got[0], got[1]);
+    return got[0];
+  };
+  assert.deepEqual([await at("2026-01-01T00:00:00.000Z"), await at("2026-01-02T00:00:00.000Z"), await at("2026-01-03T00:00:00.000Z")], [true, false, false]);
   return null;
 });

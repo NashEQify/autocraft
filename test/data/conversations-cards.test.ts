@@ -70,7 +70,7 @@ both("markHeld moves only rows still in the state it expects, with a different p
 
 both("collectStatements keeps operators' conversation messages once and answers 'due' and embedding work", async ({ db }) => {
   const q = queryDb(db);
-  await q.run(q.k.insertInto("main.access").values({ login: "op", role: "operator" }));
+  await q.run(q.k.insertInto("main.access").values({ login: "Op", role: "operator" }));
   await q.run(q.k.insertInto("main.items").values({ repo: "o/a", number: 1, kind: "pr", state: "OPEN", title: "The PR" }));
   await saveConversations(db, [conv("o/a", 1)]);
   await addTurns(db, [person("o/a#1", "we never take generated code here", "operator"), person("o/a#1", "short", "operator"), person("o/a#1", "a maintainer says something long enough", "maintainer")]);

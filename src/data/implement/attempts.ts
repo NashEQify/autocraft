@@ -15,13 +15,13 @@ async function insertAttempts(db: Db, rows: StartAttempt[], at: string): Promise
   const k = q.k as any;
   const out: Implementation[] = [];
   for (const chunk of kx.chunks(rows)) {
-    const v = kx.valuesTable(db, chunk.map((r) => ({ repo: r.repo, number: r.number, queued_by: r.queuedBy, text_hash: r.textHash, base_sha: r.baseSha ?? null })),
-      { repo: "text", number: "bigint", queued_by: "text", text_hash: "text", base_sha: "text" }, "v");
+    const v = kx.valuesTable(db, chunk.map((r, ord) => ({ ord, repo: r.repo, number: r.number, queued_by: r.queuedBy, text_hash: r.textHash, base_sha: r.baseSha ?? null })),
+      { ord: "bigint", repo: "text", number: "bigint", queued_by: "text", text_hash: "text", base_sha: "text" }, "v");
     const sel = k.selectFrom(v).select((eb: any) => [
       "v.repo as repo", "v.number as number", "v.queued_by as queued_by", eb.val("planning").as("state"),
       eb(eb.fn.coalesce(eb.selectFrom("main.implementations as p").select((e: any) => e.fn.max("p.attempt").as("n")).whereRef("p.repo", "=", "v.repo").whereRef("p.number", "=", "v.number"), eb.lit(0)), "+", eb.lit(1)).as("attempt"),
       "v.text_hash as text_hash", "v.base_sha as base_sha", eb.val(at).as("created_at"), eb.val(at).as("updated_at"),
-    ]).where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.implementations as c").select(eb.lit(1).as("one")).whereRef("c.repo", "=", "v.repo").whereRef("c.number", "=", "v.number").where("c.state", "not in", ENDED))));
+    ]).where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.implementations as c").select(eb.lit(1).as("one")).whereRef("c.repo", "=", "v.repo").whereRef("c.number", "=", "v.number").where("c.state", "not in", ENDED)))).orderBy("v.ord");
     out.push(...((await q.all(k.insertInto("main.implementations").columns(["repo", "number", "queued_by", "state", "attempt", "text_hash", "base_sha", "created_at", "updated_at"]).expression(sel).returning([...IMPL_COLS]))) as ImplRow[]).map(ofRow));
   }
   return out;

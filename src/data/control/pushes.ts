@@ -80,12 +80,13 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
   });
   const q = queryDb(db);
   for (const part of kx.batches(rows)) {
-    const v = kx.valuesTable(db, part, { at: "text", stage: "text", action: "text", repo: "text", number: "bigint", from_oid: "text", to_oid: "text", before_res: "text" }, "v");
+    const v = kx.valuesTable(db, part.map((r, ord) => ({ ...r, ord })), { ord: "bigint", at: "text", stage: "text", action: "text", repo: "text", number: "bigint", from_oid: "text", to_oid: "text", before_res: "text" }, "v");
     await q.run((q.k as any).insertInto("main.push_outcomes").columns(["at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res"])
       .expression((q.k as any).selectFrom(v).select(["v.at", "v.stage", "v.action", "v.repo", "v.number", "v.from_oid", "v.to_oid", "v.before_res"])
         .where((eb: kx.AnyEb) => eb.not(eb.exists(eb.selectFrom("main.push_outcomes as o").select(eb.lit(1).as("one"))
           .whereRef("o.repo", "=", "v.repo").where((ie) => ie("o.number", "is not distinct from", ie.ref("v.number")))
-          .whereRef("o.to_oid", "=", "v.to_oid").whereRef("o.action", "=", "v.action"))))));
+          .whereRef("o.to_oid", "=", "v.to_oid").whereRef("o.action", "=", "v.action"))))
+        .orderBy("v.ord")));
   }
 }
 

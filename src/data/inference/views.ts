@@ -99,15 +99,15 @@ export async function listRuns(db: Db, f: RunFilter, vis: RunVisibility): Promis
 }
 
 /**
- * Run detail; null when the run is missing or hidden from `vis`. Texts only when `vis.staff`, tool arguments likewise. 3 statements in one wave
- * (2 for a viewer who is not staff); the caller joins `changes.loadModelChecksOfRun` to the tools.
+ * Run detail; null when the run is missing or hidden from `vis`. Texts only when `vis.staff`, tool arguments likewise. 3 statements in one wave, the
+ * texts (bytes) read `alone` (2 for a viewer who is not staff); the caller joins `changes.loadModelChecksOfRun` to the tools.
  */
 export async function loadRun(db: Db, id: number, vis: RunVisibility): Promise<RunDetail | null> {
   const q = queryDb(db);
   const { k } = q;
   const [run, texts, tools] = await db.together(() => Promise.all([
     q.get(visibleOnly(k.selectFrom("main.agent_runs as r").select(runSelect()).where("r.id", "=", id), vis)),
-    vis.staff ? q.get(k.selectFrom("main.agent_run_texts").select(["prompt", "output"]).where("run_id", "=", id)) : Promise.resolve(undefined),
+    vis.staff ? q.get(k.selectFrom("main.agent_run_texts").select(["prompt", "output"]).where("run_id", "=", id), { alone: true }) : Promise.resolve(undefined),
     q.all(k.selectFrom("main.agent_run_tools").select(["seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"]).where("run_id", "=", id).orderBy("seq")),
   ]));
   if (!run) return null;
