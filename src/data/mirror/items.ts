@@ -165,6 +165,21 @@ export async function searchItems(db: Db, search: string, opts: { repos?: string
 }
 
 /**
+ * Items of `repo`, open or closed (else updated) since `since`, whose title or body contains one of `texts` as written (ASCII case
+ * aside), by number. An exact-text scan of the repo: the text index knows words, and Postgres keeps a URL or a path as one word, so
+ * it does not find a path inside one. One statement.
+ */
+export async function listMentioning(db: Db, repo: string, texts: string[], opts: { since: string }): Promise<ItemOf<"text">[]> {
+  if (!texts.length) return [];
+  const q = queryDb(db);
+  const rows = select(q.k.selectFrom("items as i") as AnyQ, qualified("i", presetColumns("text"))).where("i.repo", "=", repo)
+    .where((eb) => eb.or([eb("i.state", "=", "OPEN"), eb(eb.fn.coalesce("i.closed_at", "i.merged_at", "i.updated_at"), ">=", opts.since)]))
+    .where((eb) => eb.or(texts.flatMap((t) => { const pattern = eb.val(`%${kx.likeEscape(t)}%`); return [kx.like(db, "i.title", pattern, "\\"), kx.like(db, "i.body", pattern, "\\")]; })))
+    .orderBy("i.number");
+  return (await q.all(rows, { label: "mirror.listMentioning" })) as ItemOf<"text">[];
+}
+
+/**
  * The `card` columns and the stored text hashes (embedding text, classifier input and its scheme) of each key: the planner's item
  * pass reads these without the bodies. One statement (one per 10,000 refs for a list).
  */

@@ -1,7 +1,7 @@
 // The related items and earlier reviews of a PR that the post-merge, review and pre-merge prompts show.
 import type { PostmergeReviewRow, RelatedItem } from "./parse.ts";
 import type { Db } from "../db/index.ts";
-import { loadItems, searchItems } from "../data/mirror/index.ts";
+import { listMentioning } from "../data/mirror/index.ts";
 import { loadReviewHistory } from "../data/review/index.ts";
 
 /** Our earlier Opus reviews of the PR, oldest first. */
@@ -32,14 +32,9 @@ export const RELATED_CLOSED_DAYS = 30;
 export async function relatedOpen(db: Db, repo: string, number: number, files: string[], at = Date.now()): Promise<RelatedItem[]> {
   const needles = [`#${number}`, ...files.slice(0, 30)];
   const since = new Date(at - RELATED_CLOSED_DAYS * 86400_000).toISOString();
-  // The text index finds the candidates; the checks below decide, as the exact-text test always did.
-  const hits = await db.together(() => Promise.all(needles.map((n) => searchItems(db, `"${n.replace(/"/g, " ")}"`, { repos: [repo], limit: 200 }))));
-  const refs = [...new Set(hits.flat().map((h) => h.ref))].map((ref) => ({ repo, number: Number(ref.slice(ref.lastIndexOf("#") + 1)) })).filter((r) => r.number !== number);
-  const rows = [...(await loadItems(db, refs, "text")).values()]
-    .filter((i) => i.state === "OPEN" || (i.closed_at ?? i.merged_at ?? i.updated_at ?? "") >= since)
-    .sort((x, y) => x.number - y.number).slice(0, 60);
+  const rows = await listMentioning(db, repo, needles, { since });
   const byNumber = new RegExp(String.raw`(?<![\w/])#${number}(?!\d)`);
   return rows
-    .filter((r) => { const text = `${r.title ?? ""}\n${r.body ?? ""}`; return byNumber.test(text) || files.some((f) => text.includes(f)); })
+    .filter((r) => { if (r.number === number) return false; const text = `${r.title ?? ""}\n${r.body ?? ""}`; return byNumber.test(text) || files.some((f) => text.includes(f)); })
     .slice(0, 40).map((r) => ({ number: r.number, kind: r.kind as RelatedItem["kind"], state: r.state === "OPEN" ? "open" as const : "closed" as const, title: (r.title ?? "").slice(0, 160) }));
 }

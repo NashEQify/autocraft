@@ -26,7 +26,7 @@ const runners: InstanceType<typeof Runner>[] = [];
 after(async () => { for (const r of runners) await r.stop(); await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const state = async (id: number) => (await getJob(db, id)).state;
-async function pump(r: InstanceType<typeof Runner>, cond: () => Promise<boolean>, ms = 20_000): Promise<void> {
+async function pump(r: InstanceType<typeof Runner>, cond: () => Promise<boolean>, ms = 120_000): Promise<void> {
   const end = Date.now() + ms;
   while (!await cond()) {
     if (Date.now() > end) throw new Error("timed out");

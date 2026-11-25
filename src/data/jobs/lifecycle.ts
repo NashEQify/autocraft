@@ -101,7 +101,7 @@ export async function pulseJob(db: Db, id: number, patch: JobPatch): Promise<Job
   return row ?? { cancel_requested_at: null, error: null, started_at: null };
 }
 
-/** The final writes of `exec.ts` as one update; stats add to the four count columns so resumed runs accumulate. */
+/** The final writes of `exec.ts` as one update; stats add to the four count columns (integers: Postgres refuses a fraction) so resumed runs accumulate. */
 export async function recordResult(db: Db, id: number, r: JobResult): Promise<void> {
   const q = queryDb(db);
   const s = r.stats;
@@ -114,7 +114,7 @@ export async function recordResult(db: Db, id: number, r: JobResult): Promise<vo
   if (s) {
     set.db_statements = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_statements", eb.lit(0)), "+", s.statements);
     set.db_round_trips = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_round_trips", eb.lit(0)), "+", s.roundTrips);
-    set.db_ms = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_ms", eb.lit(0)), "+", s.ms);
+    set.db_ms = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_ms", eb.lit(0)), "+", Math.round(s.ms));
     set.effects = (eb: kx.AnyEb) => eb(eb.fn.coalesce("effects", eb.lit(0)), "+", s.effects);
   }
   if (!Object.keys(set).length) return;

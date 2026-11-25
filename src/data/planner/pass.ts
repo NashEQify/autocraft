@@ -11,7 +11,7 @@ const DETAIL_MAX = 2000;
 
 /**
  * One multi-row upsert of the counts into `plan_pass_hours` (counts of the same kind and hour are summed first, which a
- * multi-row upsert needs), one insert of the diffs, then the trim of `plan_shadow_diffs` and of old hourly rows. Joins the pass's
+ * multi-row upsert needs; durations are rounded, since Postgres refuses a fraction in an integer column), one insert of the diffs, then the trim of `plan_shadow_diffs` and of old hourly rows. Joins the pass's
  * transaction. The stats of the pass's own write are not in its counts.
  */
 export async function recordPass(db: Db, counts: PassCount[], diffs: ShadowDiff[]): Promise<void> {
@@ -30,7 +30,7 @@ export async function recordPass(db: Db, counts: PassCount[], diffs: ShadowDiff[
   await db.write(async () => {
     for (const part of kx.batches([...merged.values()])) {
       await q.run(k.insertInto("main.plan_pass_hours")
-        .values(part.map((c) => ({ kind: c.kind, hour: c.hour, passes: c.passes, refs: c.refs, last_at: c.at, ms: c.ms, max_ms: c.maxMs, db_statements: c.dbStatements, db_round_trips: c.dbRoundTrips, db_ms: c.dbMs })))
+        .values(part.map((c) => ({ kind: c.kind, hour: c.hour, passes: c.passes, refs: c.refs, last_at: c.at, ms: c.ms, max_ms: c.maxMs, db_statements: c.dbStatements, db_round_trips: c.dbRoundTrips, db_ms: Math.round(c.dbMs) })))
         .onConflict((oc) => oc.columns(["kind", "hour"]).doUpdateSet((eb) => ({
           passes: eb("main.plan_pass_hours.passes", "+", eb.ref("excluded.passes")), refs: eb("main.plan_pass_hours.refs", "+", eb.ref("excluded.refs")), last_at: eb.ref("excluded.last_at"),
           ms: eb("main.plan_pass_hours.ms", "+", eb.ref("excluded.ms")),
