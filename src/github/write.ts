@@ -27,7 +27,7 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits, loadTakenWrites, loadWriteTries } from "../data/control/index.ts";
+import { abandonWrites, addOwnCommits, addOwnPush, addPushOutcomes, beginWrite, finishWrite, landOwnPush, loadMadeBefore, loadPaceWaits, loadTakenWrites, loadWriteTries } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
 import { effect } from "../db/effects.ts";
 
@@ -944,15 +944,22 @@ async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, acti
   if (!asBox) git = await laneGit(w, g, git, o.remote.toLowerCase() === slugOf(g.repo).toLowerCase() ? undefined : { wide: true });
   // A box-account push (an advisory's private fork) is audited as legacy whatever the repo's identity.
   const identity = asBox ? "legacy" : idOf(w, g);
+  const own = typeof details.from === "string" && pr.number !== null
+    ? { repo: pr.repo, number: pr.number, from: details.from, to: o.sha, action, lines: typeof details.changed === "number" ? details.changed : null } : null;
   const r = await recorded(w, identity, action, target, { ...details, branch: o.branch, remote: o.remote, commit: o.sha },
-    () => git.git(["push", "--quiet", lease, `https://github.com/${o.remote}.git`, `${o.sha}:refs/heads/${o.branch}`]),
+    async () => {
+      // Without this row the new head would look like someone else's push, so a push that cannot be recorded is not made.
+      if (own) try { await addOwnPush(w.db, own); } catch (e) { throw markUnsent(e); }
+      return await git.git(["push", "--quiet", lease, `https://github.com/${o.remote}.git`, `${o.sha}:refs/heads/${o.branch}`]);
+    },
     undefined,
     (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`),
     { key: onceKey(o.remote, o.branch, o.sha), replay: () => ({ code: 0, stdout: "", stderr: "" }) });
   // Also for a push the job's earlier run made: that run may have stopped before recording it (a push is recorded once).
   if (r.code === 0) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
-    try { await addPushOutcomes(w.db, [{ action, ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null, lines: typeof details.changed === "number" ? details.changed : null }]); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    if (own) try { await landOwnPush(w.db, own); } catch (e) { console.error(`push not recorded as done: ${oneLine(String((e as Error).message ?? e))}`); }
+    try { await addPushOutcomes(w.db, [{ action, ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }]); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
   }
   return r;
 }

@@ -109,6 +109,7 @@ function world(opts: { check?: string | null; reply?: string | null; moveBranch?
   writeFileSync(join(work, "src/lib.rs"), opts.lib ?? "fn a() {}\nfn main() { a(); }\n");
   writeFileSync(join(work, "src/other.rs"), "fn z() {}\n");
   writeFileSync(join(work, "ROADMAP.md"), "# Plan\n- one\n");
+  writeFileSync(join(work, "GUIDE.md"), "# Plan\n- one\n");
   git(work, "add", "-A");
   git(work, "commit", "-q", "-m", "contributor");
   const head = git(work, "rev-parse", "HEAD");
@@ -182,6 +183,16 @@ describe("fixup step", () => {
 
 
 
+
+  test("a push that another one overtook is no try of the fix-up", async () => {
+    const file = "GUIDE.md";
+    const w = world({ pushError: "! [rejected] fix -> fix (stale info)", reply: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1,2 +1,2 @@\n # Plan\n-- one\n+- two\n`, diff: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1,2 +1,2 @@\n # Plan\n-- zero\n+- one\n` });
+    const db = await fresh(w.head);
+    await db.run(db.k.updateTable("opus_reviews").set({ fixes: JSON.stringify([{ file, change: "say two" }]) }));
+    await runFixup(db, { repo: "app", dryRun: false }, () => {}, w.deps);
+    assert.deepEqual((await fixupRows(db)).map((r) => r.state), ["superseded"]);
+    assert.deepEqual(await db.all(db.k.selectFrom("own_pushes").select(["from_oid", "action", "landed_at"])), [{ from_oid: w.head, action: "fixup-push", landed_at: null }]);
+  });
 
   test("a file over the size limit is held without a checkout and listed by path alone with one", async () => {
     const lib = Array.from({ length: 6000 }, (_, i) => `fn f${i}() {}`).join("\n") + "\n";

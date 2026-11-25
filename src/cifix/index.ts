@@ -400,7 +400,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   /** Applies a validated patch to the PR head: pushed to the branch, or posted as a comment where the branch is closed to us. */
   const deliver = async (c: CifixCandidate, kind: "format" | "code", pr: PrNode, v: Fix, checkName: string, check?: (patch: string) => Promise<string | null>, shown: CifixPr["files"] = [], folded: string | null = null, ses: SessionAsk = {}): Promise<void> => {
     const ref = refOf(c);
-    const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
+    const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
       const reason = scrubReason(raw, d.root);
       await rec.set(c, kind, state, reason, { files: v.files });
       summary.failed.push({ ref, reason });
@@ -510,7 +510,9 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     const push = await pushBranch(gw, git, "cifix-push", g, { remote: pr.headRepository!.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: runId, from: head, to: commit, files: v.files, changed: v.changed, kind });
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
-      if (/stale info|rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the checks ran");
+      // Another push came first: the try says nothing about the fix, and the new head gets its own.
+      if (/stale info/i.test(err)) await fail("superseded", "the branch moved before the push");
+      else if (/rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the checks ran");
       else if (/denied|403|permission|not allowed|protected branch|declined|GH013/i.test(err)) {
         await rec.set(c, kind, "push-denied", HOLD_CANNOT_PUSH, { files: v.files });
         summary.held.push({ ref, reason: HOLD_CANNOT_PUSH });

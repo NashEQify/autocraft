@@ -28,10 +28,11 @@ export type WritePace = { identity: string; owner: string; bulk: boolean };
 export type PaceKey = { action: string; identity: string; owner: string };
 
 export type PushOutcomeRow = Selectable<DB["push_outcomes"]>;
-/** `lines`: how many lines of the pull request the push changed. */
-export type NewPush = { action: string; repo: string; number: number | null; from: string | null; to: string; base?: string | null; lines?: number | null; at?: string };
+export type NewPush = { action: string; repo: string; number: number | null; from: string | null; to: string; base?: string | null; at?: string };
 /** `moves`: the recorded pushes that moved the head, from the head each was made on. */
 export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; moves: OutcomePush[]; brokeHead: string | null };
+/** A push about to be made to a pull request. `lines`: how many of its lines it changes. */
+export type NewOwnPush = { repo: string; number: number; from: string; to: string; action: string; lines: number | null };
 export type TripStageKey = "outside-surge" | string;
 
 export type SettingType = "bool" | "int" | "float" | "text" | "json";

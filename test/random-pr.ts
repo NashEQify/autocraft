@@ -245,7 +245,7 @@ export function factsOf(w: PrRows): PrFacts {
   const outEdge = w.pushedOff ? [{ from: head, to: "next" }] : [];
   // Revisions of our implementation are recorded with the push outcomes, autorepins with their requests, the other pushes by their patch rows.
   const made = (by: CommitBy) => w.commits.flatMap((c, i) => (i > 0 && c.by === by ? [{ from: w.commits[i - 1]!.sha, to: c.sha, at: c.at ?? at("08:00") }] : []));
-  const ours = ownPushes(w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push", lines: null })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50"), lines: null }))], made("repin"));
+  const ours = ownPushes([], w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push" })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50") }))], made("repin"));
   const moves = ours.map(({ from, to }) => ({ from, to }));
   const owed = open && live?.entry === "merge" && reviewOwed(ours, head, at("09:00"));
   const ownCommit = (h: string): boolean => w.commits.some((c) => c.sha === h && isOurs(c));

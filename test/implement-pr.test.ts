@@ -123,6 +123,18 @@ test("an implement grant opens the pipeline's own PR: the push is audited and co
   assert.equal(rows.length, 2);
   assert.ok(rows.every((r) => JSON.parse(r.details!).state === "done"));
 
+  // A revision of the open PR is recorded right before git runs, and as done once it has: a push that failed stays recorded, not done.
+  const pr = { scope: "pr", action: { kind: "implement", bucket: "revise" }, repo: "app", number: 8, head: "c".repeat(40), as: "app" } as unknown as GuardedItem;
+  const made = () => db.all(db.k.selectFrom("own_pushes").select(["number", "from_oid", "to_oid", "action", "lines", "landed_at"]).orderBy("to_oid"));
+  const edge = { number: 8, from_oid: "c".repeat(40), action: "implement-push", lines: 4 };
+  for (const [oid, code] of [["d".repeat(40), 0], ["e".repeat(40), 1]] as const) {
+    const seen: unknown[] = [];
+    const g2 = { git: async () => { seen.push(...(await made()).filter((r) => r.to_oid === oid)); return { code, stdout: "", stderr: code ? "stale info" : "" }; } };
+    await pushOwnBranch(w, pr, g2 as never, "implement-push", { repo: "app", number: 7, remote: "bot/app", branch: "autocraft/impl-7-x", sha: oid }, { from: "c".repeat(40), changed: 4 });
+    assert.deepEqual(seen, [{ ...edge, to_oid: oid, landed_at: null }]);
+  }
+  assert.deepEqual((await made()).map((r) => [r.to_oid.slice(0, 1), r.landed_at !== null]), [["d", true], ["e", false]]);
+
   // Other item grants still cannot push to a new branch.
   assert.throws(() => pushOwnBranch(w, grant("act"), git as never, "implement-push", { repo: "app", number: 7, remote: "bot/app", branch: "b", sha }), /does not allow a push/);
 });

@@ -1592,6 +1592,17 @@ export interface OwnCommits {
   at: string;
 }
 
+export interface OwnPushes {
+  repo: string;
+  number: number;
+  from_oid: string;
+  to_oid: string;
+  action: string;
+  at: string;
+  lines: number | null;
+  landed_at: string | null;
+}
+
 export interface OwnerStatements {
   id: Generated<number>;
   source_kind: string;
@@ -1818,7 +1829,6 @@ export interface PushOutcomes {
   after_res: string | null;
   outcome: string | null;
   resolved_at: string | null;
-  lines: number | null;
 }
 
 export interface ReleaseApps {
@@ -2666,6 +2676,7 @@ export interface DB {
   outside_holds: OutsideHolds;
   outside_released: OutsideReleased;
   own_commits: OwnCommits;
+  own_pushes: OwnPushes;
   owner_statements: OwnerStatements;
   patch_checks: PatchChecks;
   plan_bulk: PlanBulk;
@@ -2872,6 +2883,7 @@ export interface DB {
   "main.outside_holds": OutsideHolds;
   "main.outside_released": OutsideReleased;
   "main.own_commits": OwnCommits;
+  "main.own_pushes": OwnPushes;
   "main.owner_statements": OwnerStatements;
   "main.patch_checks": PatchChecks;
   "main.plan_bulk": PlanBulk;
@@ -3082,6 +3094,7 @@ export const COLUMNS = {
   outside_holds: ["repo", "number", "author", "kind", "reason"],
   outside_released: ["repo", "number", "by", "at"],
   own_commits: ["repo", "sha", "action", "at"],
+  own_pushes: ["repo", "number", "from_oid", "to_oid", "action", "at", "lines", "landed_at"],
   owner_statements: ["id", "source_kind", "source_id", "repo", "number", "item_title", "author", "text", "at", "embedding", "model", "ignored"],
   patch_checks: ["id", "kind", "repo", "number", "subject", "patch_hash", "round", "verdict", "reasons", "problems", "model", "created_at"],
   plan_bulk: ["id"],
@@ -3100,7 +3113,7 @@ export const COLUMNS = {
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
-  push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at", "lines"],
+  push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
   remote_call_items: ["call_id", "pos", "repo", "number"],
