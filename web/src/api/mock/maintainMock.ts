@@ -99,19 +99,18 @@ function commandFor(me: User, text: string): MaintainCommandResult {
 }
 
 const REPOS: MaintainRepo[] = [
-  { name: "photocraft", workflow: "new", automatic: true, canRun: false, open: 186, started: 9, waiting: 3, mergedWeek: 31, trips: [{ key: "cifix:photocraft", text: "CI fixes paused on photocraft: failed 5 times in an hour", since: ago(95), canResume: false }] },
-  { name: "designcraft", workflow: "new", automatic: true, canRun: false, open: 94, started: 3, waiting: 1, mergedWeek: 12, trips: [] },
-  { name: "wordcraft", workflow: "legacy", automatic: false, canRun: false, open: 41, started: 0, waiting: 0, mergedWeek: 6, trips: [] },
-  { name: "deckcraft", workflow: "legacy", automatic: false, canRun: false, open: 32, started: 1, waiting: 0, mergedWeek: 3, trips: [] },
+  { name: "photocraft", automatic: true, canRun: false, open: 186, started: 9, waiting: 3, mergedWeek: 31, trips: [{ key: "cifix:photocraft", text: "CI fixes paused on photocraft: failed 5 times in an hour", since: ago(95), canResume: false }] },
+  { name: "designcraft", automatic: true, canRun: false, open: 94, started: 3, waiting: 1, mergedWeek: 12, trips: [] },
+  { name: "wordcraft", automatic: false, canRun: false, open: 41, started: 0, waiting: 0, mergedWeek: 6, trips: [] },
+  { name: "deckcraft", automatic: false, canRun: false, open: 32, started: 1, waiting: 0, mergedWeek: 3, trips: [] },
 ];
 
 export function createMaintainMock(me: User): Pick<Api, "maintain"> {
   const repos = structuredClone(REPOS);
   return {
     maintain: {
-      // designcraft is on the new workflow in the mock; the other repos use the classic routes.
       async queue() {
-        return { newRepos: ["designcraft"], approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" } };
+        return { approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" } };
       },
       async stats(period): Promise<MaintainStats> {
         const n = period === "30d" ? 30 : 7;

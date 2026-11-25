@@ -465,8 +465,6 @@ export interface ItemPremerge {
 }
 
 export type FixupState = "pushed" | "failed" | "refused" | "cannot-push" | "too-large" | "asked" | "rejected" | "push-denied" | "superseded" | "infra" | "rerun" | "rerunning" | "formatting" | "pushing" | "skipped" | "capped" | "comment-failed" | "comment-unsent";
-/** The operator releases of an item: the last path segment of POST /api/items/:repo/:n/<action>. */
-export type ReleaseAction = "review-again" | "verify-again" | "batch-again";
 
 /** Operator releases that apply to an item right now. */
 export interface ItemReleases {
@@ -747,26 +745,8 @@ export interface User {
 export type InferenceMode = "server" | "user-local";
 export type InferenceTier = "top" | "mid" | "small";
 export type InferenceEffort = "low" | "medium" | "high" | "xhigh" | "max";
-export type InferenceSettings = { mode: InferenceMode; /** Accepted model families per tier. */ models: Record<InferenceTier, string[]>; /** The lowest effort a helper may declare per tier; a tier without one takes any. */ minEffort: Partial<Record<InferenceTier, InferenceEffort>> };
+export type InferenceSettings = { /** Accepted model families per tier. */ models: Record<InferenceTier, string[]>; /** The lowest effort a helper may declare per tier; a tier without one takes any. */ minEffort: Partial<Record<InferenceTier, InferenceEffort>> };
 
-export interface DecisionFilter {
-  repo?: RepoName[];
-  kind?: DecisionKind[];
-  /** minimum age in days */
-  minAge?: number;
-  /** Every open question, not only the ones the person can settle (and the disputes they resolve). */
-  all?: boolean;
-  /** with exactly one `repo`: only decisions about this item (its own, or a group that lists it) */
-  number?: number;
-  /** "opinions": open decisions that have at least one opinion */
-  /** "open" leaves out snoozed decisions; "snoozed" lists only them. */
-  status?: "open" | "opinions" | "answered" | "backlog" | "snoozed";
-  /** page size (server default 100, at most 500); `total` counts every match */
-  limit?: number;
-  /** the `next` of the previous page */
-  after?: string;
-  offset?: number;
-}
 
 export interface DecisionList {
   decisions: Decision[];
@@ -783,14 +763,6 @@ export interface OpenDecisionCounts {
   byRepo: Record<string, number>;
 }
 
-export interface AnswerInput {
-  /** An option key, or "handled" (operators; `note` required): closes the question with the note and writes nothing to GitHub. */
-  answer: string;
-  note?: string;
-  exceptions?: (ItemRef & { answer: string })[];
-  /** Group decisions: the hash of the shown comments for this answer. */
-  textsHash?: string;
-}
 
 // ---- Contributors, Repos and Access (docs/dashboard-spec.md, Pages) ----
 
@@ -1737,7 +1709,6 @@ export type AccountLogin = { state: AccountLoginState; url: string | null; messa
 export type UsagePause = { fiveHour: number; weekly: number };
 /** Whether Jev is in use; `unavailable` says why not (Haiku then does its work) and since when. */
 export type JevStatus = { enabled: boolean; unavailable: { reason: string; since: string } | null };
-export type AccountInput = { label?: string; enabled?: boolean; maxConcurrent?: number };
 
 export type AgentRunState = "running" | "done" | "failed";
 export type AgentRun = {
@@ -2271,14 +2242,6 @@ export interface DecisionChoices {
   after?: string;
 }
 
-/** Body of `conversations.doChoice`. */
-export interface DoChoiceBody {
-  core: CoreKey;
-  params?: { reason?: string; instructions?: string };
-  /** Ticked extras only, with the user's own text edits. */
-  extras: { id: string; text?: string; title?: string; body?: string }[];
-  note?: string;
-}
 
 export interface ConversationTurn {
   id: number;
@@ -2770,9 +2733,9 @@ export type { HelperInfo as RemoteHelper, Readiness as HelperReadiness, UsageWin
  * `runnerPrivate`: the Live board shows the runners' calls to others under one "Private Task Runner" row, without the user's login,
  * the runners' labels, slots or models.
  */
-export type TaskItems = "all" | "fast" | "mine";
-export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
-export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
+export type TaskItems = "all" | "started" | "mine";
+export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean; };
+export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
 export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
@@ -3152,7 +3115,6 @@ export interface ItemPeek {
 }
 /** A PR's merge checks as the merge queue shows them. */
 export type ItemChecks = Pick<QueueRow, "verdict" | "ci" | "mergeable" | "verify" | "size" | "prBuild">;
-export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Area names, `none` for the items without one. */ area?: string[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
 /** `byPhase` and `total` count every row that matches the filter except `phase`; `nextCursor` is null on the last page. */
 export interface ItemStatusList { rows: ItemStatusRow[]; byPhase: Record<ItemPhase, number>; total: number; nextCursor: string | null }
 

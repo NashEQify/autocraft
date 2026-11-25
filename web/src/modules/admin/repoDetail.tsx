@@ -1,5 +1,4 @@
-import { Link } from "react-router-dom";
-import { useApi, useQuery } from "../../api/client";
+import { useApi } from "../../api/client";
 import type { TrackedRepo } from "../../api/types";
 import { Badge } from "../../ui/atoms/Badge";
 import { num } from "../../lib/format";
@@ -7,8 +6,6 @@ import { useUser } from "../../shell/UserContext";
 import { Block } from "../../ui/molecules/Block";
 import { Switch } from "../../ui/atoms/Switch";
 import { OptionalChecks, WRITES, approvalPatch, type Write, type WriteKind } from "./repoParts";
-import { MainCiBadge } from "../../ui/atoms/MainCiBadge";
-import { FailingChecks } from "../mainci/parts";
 import { SecuritySection } from "./securityParts";
 import { BuildFeatures } from "./buildFeatureParts";
 

@@ -1,5 +1,5 @@
 // Readable URLs for items, batches, scans and findings. No framework imports: the server and the tests load this file directly.
-import type { Decision, ItemKind } from "../api/types.ts";
+import type { ItemKind } from "../api/types.ts";
 
 /** The owner of repos the API does not list as owned by someone else. */
 export const GITHUB_ORG = "storytold";
@@ -39,7 +39,7 @@ export function decisionItem(id: string): { repo: string; number: number } | nul
   return m ? { repo: m[1]!, number: Number(m[2]) } : null;
 }
 
-type DecisionRef = Pick<Decision, "id" | "repo" | "number"> & { items?: { repo: string; number: number }[] };
+type DecisionRef = { repo: string; number: number | null; items?: { repo: string; number: number }[] };
 
 /** The page of a decision's item (its first one for a batch), or Home for a decision without any. */
 export function decisionPath(d: DecisionRef | undefined): string {
@@ -48,7 +48,7 @@ export function decisionPath(d: DecisionRef | undefined): string {
 }
 
 /** The decision a readable link opens: the first open one, oldest first, else the most recently asked. */
-export function pickDecision<T extends Pick<Decision, "kind" | "answer" | "askedAt">>(ds: T[]): T | undefined {
+export function pickDecision<T extends { answer: string | null; askedAt: string }>(ds: T[]): T | undefined {
   const open = ds.filter((d) => !d.answer).sort((a, b) => a.askedAt.localeCompare(b.askedAt));
   return open[0] ?? [...ds].sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
 }

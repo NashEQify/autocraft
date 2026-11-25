@@ -1,5 +1,5 @@
 import type { Api } from "../client";
-import type { InferenceSettings, McpToken, ModelQueue, ModelQueueCall, MySettings, PendingRunnerLogin, RunnerInfo, User } from "../types";
+import type { InferenceSettings, JevStatus, McpToken, ModelQueue, ModelQueueCall, MySettings, PendingRunnerLogin, RunnerInfo, User } from "../types";
 import { NOW } from "./fixtures";
 
 const DAY = 86_400_000;
@@ -22,8 +22,9 @@ const TASKS = [
 ];
 
 export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | "inference" | "runners" | "modelQueue"> & { meSettings: Api["me"]["settings"] } {
+  let jev: JevStatus = { enabled: true, unavailable: null };
   let inference: InferenceSettings = { mode: me.inference, models: { top: ["opus", "astra"], mid: ["sonnet"], small: ["haiku"] }, minEffort: { top: "high" } };
-  let settings: MySettings = { reserve: { fiveHour: 20, weekly: 10 }, maxCalls: null, interactiveSlots: 1, manualOnly: false, tasks: TASKS.map((t) => t.id), taskChoices: TASKS, taskItems: "all", runnerPrivate: false, uiV2: false, repos: ["designcraft", "photocraft", "textcraft"], repoChoices: ["designcraft", "fontcraft", "gridcraft", "iconcraft", "pdfcraft", "photocraft", "Sheetcraft", "wordcraft"] };
+  let settings: MySettings = { reserve: { fiveHour: 20, weekly: 10 }, maxCalls: null, interactiveSlots: 1, manualOnly: false, tasks: TASKS.map((t) => t.id), taskChoices: TASKS, taskItems: "all", runnerPrivate: false, repos: ["designcraft", "photocraft", "textcraft"], repoChoices: ["designcraft", "fontcraft", "gridcraft", "iconcraft", "pdfcraft", "photocraft", "Sheetcraft", "wordcraft"] };
   const at = (ms: number) => new Date(NOW + ms).toISOString();
   const wait = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(v), 60));
 
@@ -104,16 +105,22 @@ export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | 
     inference: {
       get: () => wait(structuredClone(inference)),
       async put(body) {
-        if (me.role !== "operator") throw new Error("only operators change the inference mode");
+        if (me.role !== "operator") throw new Error("only operators change the accepted models");
         const minEffort = { ...inference.minEffort };
         for (const [t, e] of Object.entries(body.minEffort ?? {})) {
           if (e === null) delete minEffort[t as keyof typeof minEffort];
           else minEffort[t as keyof typeof minEffort] = e;
         }
-        inference = { mode: body.mode ?? inference.mode, models: body.models ?? inference.models, minEffort };
-        me.inference = inference.mode;
+        inference = { models: body.models ?? inference.models, minEffort };
         changed();
         return wait(structuredClone(inference));
+      },
+      jev: () => wait(structuredClone(jev)),
+      async setJev(enabled) {
+        if (me.role !== "operator") throw new Error("only operators switch Jev");
+        jev = { enabled, unavailable: enabled ? null : { reason: "switched off", since: new Date(NOW).toISOString() } };
+        changed();
+        return wait(structuredClone(jev));
       },
     },
     meSettings: {

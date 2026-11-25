@@ -122,7 +122,7 @@ function seedRows(): ItemStatusRow[] {
 /** A plain header for mock pages: open, nothing queued or held. */
 export function mockHeader(kind: ItemKind, labels: string[] = []): ItemPageHeader {
   return {
-    labels, assignees: [], autocraftAssigned: false, pipelineOn: true, discord: null, queue: null, fastTracked: false, held: false, preapproval: null,
+    labels, assignees: [], autocraftAssigned: false, pipelineOn: true, discord: null, queue: null, held: false, preapproval: null,
     releases: { reviewAgain: false, verifyAgain: false, batchAgain: false }, tier: "not", size: kind === "pr" ? "S" : null,
     backlog: { held: false, canSettle: true },
   };
@@ -273,7 +273,7 @@ const IMPL_2214: ItemImplementation = {
   diffStat: "2 files changed, 61 insertions(+), 3 deletions(-)",
   pr: { repo: "wordcraft", number: 2231, kind: "pr", state: "open", title: "Keep the hyperlink run when exporting the last paragraph", url: "https://github.com/storytold/wordcraft/pull/2231" },
   shots: [{ n: 1, what: "Exported PDF with the trailing link selected", url: "/api/implementations/41/shots/0123456789abcdef0123456789abcdef.png", width: 640, height: 400 }],
-  decision: null, costUsd: 2.97,
+  costUsd: 2.97,
 };
 const GITHUB_2214: GithubSide = {
   syncedAt: at(1),
@@ -295,7 +295,7 @@ const HISTORY_9970: HistoryEntry[] = [
   hist("h4", 95, "Post-merge review", "No issues found", "Opus", 0.6, "model"),
 ];
 const tl = (id: string, minAgo: number, kind: TimelineEntry["kind"], actor: string, icon: TimelineEntry["icon"], text: string, o: Partial<TimelineEntry> = {}): TimelineEntry => ({
-  id, at: at(minAgo), kind, actor, icon, text, tone: "neutral", costUsd: null, major: true, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [], feedback: null, ...o,
+  id, at: at(minAgo), kind, actor, icon, text, tone: "neutral", costUsd: null, major: true, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [], ...o,
 });
 /** Two follow-up issues held until the merge: one dropped when its Merge answer was taken back, one opened after the merge. */
 const HELD_9970: TimelineEntry[] = [
