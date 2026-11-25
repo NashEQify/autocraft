@@ -8,6 +8,7 @@ import { blockerRefsOf } from "../planner/fragments.ts";
 import { discussionAgg, discussionBodies, premergeBase } from "./cross.ts";
 import { headRef, headTuples, latestRows, noKeys, parseReview, pushTo, refKey, refsOf, reviewWindow } from "./rows.ts";
 import { loadPosts } from "./reviews.ts";
+import { unsureHeadsQuery } from "./unsure.ts";
 import type { DiscussionStat, HeadKey, ReviewFacts, ReviewMarks, Verdict } from "./types.ts";
 
 /**
@@ -24,10 +25,6 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
   const q = queryDb(db);
   const keyed = <T extends string>(alias: T) => resolveKeys(db, keys, alias);
 
-  const unsure = (table: "main.opus_review_history" | "main.opus_reviews") => q.k.selectFrom(`${table} as u` as "main.opus_reviews as u")
-    .innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "u.repo").onRef("kk.number", "=", "u.number"))
-    .select(["u.repo", "u.number", "u.head_oid"]).where("u.verdict", "in", ["take", "take-fix"]).where("u.sure", "=", 0);
-
   const latestHead = q.k.selectFrom(reviewWindow(db, keys).as("t")).select(["t.repo", "t.number", "t.head_oid"]).where("t.rn", "=", 1);
   const blockerWin = q.k.selectFrom("main.opus_reviews as b")
     .innerJoin(blockerRefsOf(db, keys).as("bk"), (j) => j.onRef("bk.repo", "=", "b.repo").onRef("bk.number", "=", "b.number"))
@@ -36,7 +33,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
 
   const [latest, unsureRows, todays, carried, posts, premerge, postmerge, marks, agg, bodies, blockers] = await db.together(() => Promise.all([
     latestRows(db, keys),
-    q.all(unsure("main.opus_review_history").unionAll(unsure("main.opus_reviews"))),
+    q.all(unsureHeadsQuery(db, keys)),
     q.all(q.k.selectFrom("main.opus_review_history as h").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "h.repo").onRef("kk.number", "=", "h.number"))
       .select((eb) => ["h.repo", "h.number", eb.fn.count<number>(eb.case().when("h.at", ">=", today).then(1).end()).as("n"), eb.fn.max<string | null>("h.at").as("last")])
       .where("h.model", "is not", null).where("h.model", "<>", "carried").where((eb) => eb(eb.fn.coalesce("h.mode", eb.val("")), "<>", "carried"))

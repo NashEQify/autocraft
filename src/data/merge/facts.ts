@@ -4,6 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
+import { finalTakeAtLatestHead } from "../review/fragments.ts";
 import { batchViews, headOf, holdsMembers, mergedInfoOf, refOf, toBatchView } from "./read.ts";
 import { ACTIVE_BATCH } from "./types.ts";
 import type { BatchMembership, BatchOfPr, MergeAttempt, MergeFacts, RefKey, RunApproval, UnknownState, VerificationFact, VerificationState, WaitingRun } from "./types.ts";
@@ -14,7 +15,8 @@ const parse = <T>(text: string | null | undefined, fallback: T): T => {
 
 /**
  * Every merge fact the planner needs for `keys`: attempts, merged history, verifications, run approvals, unknown state, batch
- * membership. 7 statements in one `together` wave whatever the key count.
+ * membership. 7 statements in one `together` wave whatever the key count. An integration PR's `membersReviewed` is true while every member
+ * has a final take or take-fix review at its batched head.
  */
 export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFacts> {
   const q = queryDb(db);
@@ -36,7 +38,10 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     q.all(k.selectFrom("merge_state as s").innerJoin(resolveKeys(db, keys, "kk"), onKey("s"))
       .select(["s.repo", "s.number", "s.head", "s.since", "s.reads", "s.rereads", "s.stuck"])) as Promise<any[]>,
     // Batches whose PR or any member is in the keys. A member's repo is its batch's repo.
-    q.all(batchViews(db).where("b.state", "in", [...ACTIVE_BATCH, "failed"]).where((eb: any) => eb.or([
+    q.all(batchViews(db)
+      .select((eb) => eb.case().when(eb.not(eb.exists(eb.selectFrom("merge_batch_prs as mr").select(eb.lit(1).as("one")).whereRef("mr.batch_id", "=", "b.id")
+        .where((w) => w.not(finalTakeAtLatestHead(w, "b.repo", "mr.number", "mr.head_oid")))))).then(1).else(0).end().as("members_reviewed"))
+      .where("b.state", "in", [...ACTIVE_BATCH, "failed"]).where((eb: any) => eb.or([
       eb.exists(eb.selectFrom("merge_batch_prs as bp").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "bp.number"))
         .select(eb.lit(1).as("one")).whereRef("bp.batch_id", "=", "b.id")),
       eb.exists(eb.selectFrom(resolveKeys(db, keys, "kk")).select(eb.lit(1).as("one")).whereRef("kk.repo", "=", "b.repo").whereRef("kk.number", "=", "b.pr_number")),
@@ -78,7 +83,8 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     if (active && b.pr_number !== null) {
       const ref = refOf(b.repo, b.pr_number);
       if ((!Array.isArray(keys) || wanted.has(ref)) && !facts.integration.has(ref)) {
-        facts.integration.set(ref, { id: b.id, repo: b.repo, branch: b.branch, state: b.state, commitSha: b.commit_sha, prNumber: b.pr_number, members: b.members } satisfies BatchOfPr);
+        const membersReviewed = Number((raw as { members_reviewed: unknown }).members_reviewed) === 1;
+        facts.integration.set(ref, { id: b.id, repo: b.repo, branch: b.branch, state: b.state, commitSha: b.commit_sha, prNumber: b.pr_number, members: b.members, membersReviewed } satisfies BatchOfPr);
       }
     }
   }

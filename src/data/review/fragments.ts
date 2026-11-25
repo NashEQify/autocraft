@@ -9,3 +9,12 @@ export const followupParentOf = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expr
 /** The PR has an Opus review with a take or take-fix verdict. */
 export const hasTakeReview = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.opus_reviews as tr").select(eb.lit(1).as("one")).where("tr.repo", "=", kx.exprOf(eb, repo)).where("tr.number", "=", kx.exprOf(eb, number)).where("tr.verdict", "in", ["take", "take-fix"]));
+
+/** The PR's final review at `head` is a take or take-fix, and `head` is the head of its newest Opus review with a verdict. */
+export const finalTakeAtLatestHead = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.Ex): AliasableExpression<SqlBool> => {
+  const s = kx.schemaEb(eb);
+  return eb.exists(s.selectFrom("main.final_reviews as fl").select(eb.lit(1).as("one"))
+    .where("fl.repo", "=", kx.exprOf(eb, repo)).where("fl.number", "=", kx.exprOf(eb, number)).where("fl.head_oid", "=", kx.exprOf(eb, head)).where("fl.verdict", "in", ["take", "take-fix"])
+    .where((x) => x("fl.head_oid", "=", kx.schemaEb(x).selectFrom("main.opus_reviews as fr").select("fr.head_oid").whereRef("fr.repo", "=", "fl.repo").whereRef("fr.number", "=", "fl.number")
+      .where("fr.verdict", "is not", null).orderBy("fr.at", "desc").orderBy(kx.rowid("main.opus_reviews", "fr"), "desc").limit(1))));
+};
