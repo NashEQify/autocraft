@@ -2,7 +2,7 @@
 // Plain rows only: the item page API maps them to its own shapes.
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { loadGithubWrites } from "../../data/views/github-writes.ts";
-import { ownLogins } from "../../github/identity.ts";
+import { isOwnLogin, ownLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
 import type { WriteLogRow } from "../../data/control/types.ts";
 
@@ -57,12 +57,12 @@ export function matchWrites(audit: WriteLogRow[], comments: CommentRow[], ours: 
   // inside the window that no write of this item claimed and that the account the write used wrote.
   for (const row of out) {
     if (row.comment || row.state === "failed" || row.action.endsWith("-edit") || !/comment|review-post/.test(row.action)) continue;
-    const by = row.identity?.startsWith("user:") ? new Set([row.identity.slice(5)]) : ours;
+    const by = row.identity?.startsWith("user:") ? new Set([row.identity.slice(5).toLowerCase()]) : ours;
     const kind = row.action === "review-post" ? "review" : "comment";
     const t = Date.parse(row.at);
     let best: CommentRow | null = null;
     for (const c of comments) {
-      if (taken.has(c.id) || c.kind !== kind || !c.author || !by.has(c.author)) continue;
+      if (taken.has(c.id) || c.kind !== kind || !isOwnLogin(by, c.author)) continue;
       const dt = Math.abs(timeOf(c.created_at) - t);
       if (dt <= MATCH_WINDOW_MS && (!best || dt < Math.abs(timeOf(best.created_at) - t))) best = c;
     }

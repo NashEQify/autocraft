@@ -1,10 +1,12 @@
 // The Nightly page: per repo, the catalogue's checks with their last 14 nights and the benchmark series. Repos the
-// viewer cannot see are left out (a bench or selection request for one is a 404). Operators and maintainers with write access to the repo change a selection.
+// viewer cannot see are left out (a bench or selection request for one is a 404). Operators and maintainers with write access to the repo change a
+// selection and open the issue of a failing check.
 import { mayRunRepo } from "../repo-access.ts";
 import type { NightlyBench, NightlyCell, NightlyCheckRow, NightlyGrid, NightlyRepo, NightlySeries } from "../../../web/src/api/types.ts";
 import { featureOn } from "../../build/features.ts";
 import { audit } from "../audit.ts";
-import { BENCH_MIN_HISTORY, BENCH_WINDOW, NIGHTLY_CHECKS, checkOf } from "../../nightly/index.ts";
+import { IssueError } from "../../github/write.ts";
+import { BENCH_MIN_HISTORY, BENCH_WINDOW, NIGHTLY_CHECKS, NightlyRefused, checkOf, failingStreak, issueOf, mayOpenIssue, openNightlyIssue, type NightlyDeps } from "../../nightly/index.ts";
 import { loadBenchSeries, loadNightlyGrid, setSelection, type NightlyGridRow } from "../../data/inference/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -46,7 +48,8 @@ function repoOf(repo: string, canSelect: boolean, g: NightlyGridRow | undefined,
       const r = u.results.find((x) => x.checkId === c.id);
       return r ? { state: r.state, taskId: r.taskId, summary: r.summary, issueNumber: r.issueNumber } : null;
     });
-    return { id: c.id, label: c.label, enabled: s?.enabled ?? false, experimental: !!c.experimental, needs: c.needs ?? null, takes: takesOf(c.id), crates: s?.crates ?? [], targets: s?.targets ?? [], cells };
+    const streak = failingStreak(runs, c.id);
+    return { id: c.id, label: c.label, enabled: s?.enabled ?? false, experimental: !!c.experimental, needs: c.needs ?? null, takes: takesOf(c.id), crates: s?.crates ?? [], targets: s?.targets ?? [], cells, issue: issueOf(streak), canOpenIssue: canSelect && mayOpenIssue(c, streak) };
   });
   return { repo, canSelect, on, nights: runs.map((u) => ({ runId: u.id, startedAt: u.startedAt, sha: u.sha })), checks, benches: benchesOf(g) };
 }
@@ -86,5 +89,21 @@ export const select = async (db: Db, req: Req): Promise<NightlyGrid> => {
   const targets = names(b.targets, "targets");
   await setSelection(db, { repo, checkId: b.check, enabled: b.enabled, crates, targets });
   await audit(db, req.user.login, "nightly-select", repo, { check: b.check, enabled: b.enabled, crates: crates ?? null, targets: targets ?? null });
+  return grid(db, req);
+};
+
+/** Opens the issue of a failing check, as the app; the presser is audited. */
+export const openIssue = async (db: Db, req: Req, deps?: NightlyDeps): Promise<NightlyGrid> => {
+  const b = (req.json ?? {}) as { repo?: unknown; check?: unknown };
+  const repo = await visible(db, req, b.repo);
+  if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, opens an issue for its nightly checks");
+  if (typeof b.check !== "string" || !checkOf(b.check)) throw new HttpError(400, `check must be one of ${NIGHTLY_CHECKS.map((c) => c.id).join(", ")}`);
+  try {
+    await openNightlyIssue(db, { repo, checkId: b.check, by: req.user.login }, deps);
+  } catch (e) {
+    if (e instanceof NightlyRefused) throw new HttpError(409, e.message);
+    if (e instanceof IssueError) throw new HttpError(e.clear ? 409 : 502, e.clear ? `The issue was not opened: ${e.message}` : `GitHub's answer was lost, so the issue may exist. Press again to look for it: ${e.message}`);
+    throw e;
+  }
   return grid(db, req);
 };

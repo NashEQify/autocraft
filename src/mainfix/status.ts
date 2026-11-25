@@ -4,7 +4,7 @@ import type { Db } from "../db/index.ts";
 import { loadMainFixStates } from "../data/changes/index.ts";
 
 /** Shown first when a head has rows in several states: what needs a person comes before what is running. */
-const ORDER = ["fix-failed", "needs-fix", "linting", "pr-opened", "rerun-requested", "issue-opened", "issue-failed", "declined", "nothing-to-do", "rerun-passed"] as const;
+const ORDER = ["fix-failed", "needs-fix", "linting", "pr-opened", "rerun-requested", "issue-opening", "issue-opened", "issue-failed", "declined", "nothing-to-do", "rerun-passed"] as const;
 
 const TEXT: Record<(typeof ORDER)[number], string> = {
   "fix-failed": "needs a person",
@@ -12,6 +12,7 @@ const TEXT: Record<(typeof ORDER)[number], string> = {
   "needs-fix": "needs a fix",
   linting: "checking a fix",
   "rerun-requested": "rerunning failed jobs",
+  "issue-opening": "opening an issue",
   "issue-opened": "opened an issue",
   "issue-failed": "could not open an issue",
   declined: "nothing to do: infra",

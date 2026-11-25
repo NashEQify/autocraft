@@ -56,11 +56,11 @@ export async function loadDueHeld(db: Db, o: { repo?: string; now: Date }): Prom
   if (!rows.length) return out;
   const refs = [...new Set(rows.map((r) => `${r.repo}#${r.number}`))].map((k) => ({ repo: k.slice(0, k.lastIndexOf("#")), number: Number(k.slice(k.lastIndexOf("#") + 1)) }));
   const bound = rows.filter((r) => r.workflow_id !== null && r.approved_at !== null).map((r) => ({ workflowId: r.workflow_id!, approvedAt: r.approved_at! }));
-  const filing = rows.filter((r) => r.state === "filing").map((r) => r.id);
+  const filing = rows.filter((r) => r.state === "filing").map((r) => ({ id: r.id, since: r.updated_at }));
   const [items, ends, audits] = await db.together(() => Promise.all([
     mirror.loadItems(db, refs, "card"),
     bound.length ? workflow.loadPathEnds(db, bound) : Promise.resolve(new Map<number, "merged" | "closed" | "stopped" | null>()),
-    filing.length ? control.loadHeldIssueAudits(db, filing) : Promise.resolve(new Map<number, { number: number; url: string }>()),
+    filing.length ? control.loadHeldIssueAudits(db, filing) : Promise.resolve(new Map<number, { issue: { number: number; url: string } | null }>()),
   ]));
   for (const r of rows) {
     const it = items.get(`${r.repo}#${r.number}`);

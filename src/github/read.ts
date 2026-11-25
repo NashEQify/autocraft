@@ -8,7 +8,7 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
-import type { Db } from "../db/index.ts";
+import type { Db, Subscription } from "../db/index.ts";
 import { dbFor, dbTarget, isPgUrl, openDb } from "../db/open.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { noteIdentity, readsUseApp as accessReadsUseApp, watchIdentity } from "../data/access/index.ts";
@@ -52,12 +52,14 @@ async function openShared(path: string): Promise<Db> {
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
-/** The handle the identity cache is watching; set when a read with no handle starts watching the shared one. */
-let watching: Db | null = null;
+/** The one handle the identity cache is watching, and its subscription. */
+let watching: { db: Db; sub: Subscription } | null = null;
+/** Watches `db`, unless another handle already does: on Postgres a process's handles are all on the instance database, so one that listens serves them all. */
 const watch = (db: Db): void => {
-  if (watching === db) return;
-  watching = db;
-  watchIdentity(db);
+  if (watching?.db === db) return;
+  if (watching && db.dialect === "postgres" && watching.db.dialect === "postgres" && watching.sub.listening()) return;
+  watching?.sub.off();
+  watching = { db, sub: watchIdentity(db) };
 };
 
 /** Brings the held identity of a process that reads through `db` up to date (the cache listens for switches; this reads it now when it is stale). */

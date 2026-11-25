@@ -1576,6 +1576,10 @@ export type NightlyCheckRow = {
   /** Which selection inputs the check takes. */
   takes: "crates" | "targets" | null;
   crates: string[]; targets: string[]; cells: (NightlyCell | null)[];
+  /** The issue opened for the failing streak the check is in. */
+  issue: number | null;
+  /** The caller may open an issue for the failing streak. */
+  canOpenIssue: boolean;
 };
 export type NightlyBench = { name: string; unit: string; latest: number; /** Latest against the median of the 7 nights before it, in percent (positive = slower); null with too little history. */ deltaPct: number | null; points: number[]; at: string };
 export type NightlyRepo = { repo: string; on: boolean; /** The caller may change the repo's nightly checks. */ canSelect: boolean; nights: { runId: number; startedAt: string; sha: string }[]; checks: NightlyCheckRow[]; benches: NightlyBench[] };

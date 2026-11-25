@@ -54,8 +54,19 @@ both("saveVerdicts replaces a key's row with a new rowid and keeps the others", 
   assert.equal(rows.get("o/a#1")![0]!.type_label, "performance", "the last row of one key counts");
 });
 
+both("a verdict a Jev chunk cannot store leaves what is written with the chunk, and its error is returned for after the commit", async ({ db }) => {
+  const r = await db.write(async () => {
+    await markJevFailed(db, [{ repo: "o/a", number: 9, hash: "h" }]);
+    return await saveJevChunk(db, { verdicts: [verdict("o/a", 1, "jev"), verdict("o/a", 2, "jev", { at: null as unknown as string })], failed: [] });
+  });
+  assert.deepEqual([...r.stored], ["o/a#1"]);
+  assert.ok(r.error);
+  assert.equal((await loadVerdicts(db, refs("o/a", 2), RUN)).size, 1);
+  assert.equal((await loadJevFailed(db, [{ repo: "o/a", number: 9 }])).get("o/a#9"), "h");
+});
+
 both("saveJevChunk stores verdicts and failed marks together, and a failed mark is replaced by a later one", async ({ db }) => {
-  const stored = await saveJevChunk(db, { verdicts: [verdict("o/a", 1, "jev")], failed: [{ repo: "o/a", number: 2, hash: "h1" }, { repo: "o/a", number: 3, hash: "h2" }] });
+  const { stored } = await saveJevChunk(db, { verdicts: [verdict("o/a", 1, "jev")], failed: [{ repo: "o/a", number: 2, hash: "h1" }, { repo: "o/a", number: 3, hash: "h2" }] });
   assert.deepEqual([...stored], ["o/a#1"]);
   assert.deepEqual([...(await loadJevFailed(db, refs("o/a", 3)))], [["o/a#2", "h1"], ["o/a#3", "h2"]]);
   assert.equal(await markJevFailed(db, [{ repo: "o/a", number: 2, hash: "h3" }]), 1);

@@ -35,7 +35,7 @@ type Def = {
 };
 type Ctx = ActivityScope & { db: QueryDb; only: boolean; repo: string | null; limit: number; before: ActivityQuery["before"]; writeActions: string[] | null };
 
-const byOwn = (col: string): Def["only"] => (c) => (c.own.size ? () => kx.inList(c.db, col, [...c.own]) : null);
+const byOwn = (col: string): Def["only"] => (c) => (c.own.size ? (eb) => kx.inList(c.db, eb.fn("lower", [col]), [...c.own]) : null);
 
 const item = (id: string, time: "created_at" | "merged_at" | "closed_at", where: (eb: any) => Expression<SqlBool>): Def => ({
   id, kinds: ["github"], table: "items", time, only: () => null,

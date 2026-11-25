@@ -41,7 +41,7 @@ export type ActRoom = { limit: number | null; used: number; running: RunningCard
 export type NewHeld = { card_id: number; workflow_id: number | null; approved_at: string | null; repo: string; number: number; issue_repo: string; title: string; body: string; by: string; at: string };
 export type HeldPatch = Partial<Pick<HeldRow, "state" | "issue_number" | "url" | "reason" | "attempts" | "updated_at">>;
 export type PathEnd = "merged" | "closed" | "stopped" | null;
-export type HeldInput = HeldRow & { item: { state: string; merged_at: string | null } | null; path: PathEnd; filingAudit: { number: number; url: string } | null };
+export type HeldInput = HeldRow & { item: { state: string; merged_at: string | null } | null; path: PathEnd; /** The create its filing recorded (null: none was begun); `issue` once that create is known to have opened one. */ filingAudit: { issue: { number: number; url: string } | null } | null };
 export type DueHeld = { rows: HeldInput[]; byRepo: Map<string, HeldInput[]> };
 
 export type Statement = { id: number; repo: string; number: number | null; text: string };

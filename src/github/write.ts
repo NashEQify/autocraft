@@ -5,7 +5,7 @@
 // guard ran right before. Transports (querier, exec, git, merge command) stay
 // injected so tests fake them and assert the rows.
 import type { Grant, Guarded, GuardedFiling, GuardedItem, GuardedRepo } from "../core/guard.ts";
-import { auditIdentity, githubIdentity, identityFor, type WriteKind } from "./identity.ts";
+import { auditIdentity, githubIdentity, identityFor, isOwnLogin, type WriteKind } from "./identity.ts";
 
 /** The PR steps that push to a contributor's branch or ask on the PR where it is closed to us (`lint`: the collect step of a stored patch). */
 export type AskKind = "fixup" | "conflict" | "cifix" | "lint";
@@ -15,6 +15,7 @@ import type { Exec, ExecResult, Git } from "../fixup/git.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstallationError, type TokenScope } from "./install-token.ts";
 import { type Note, withNote } from "./note.ts";
+import { advisoryMade, commentMade, issueMade, nodeCommentMade, reviewMade, type GhRead } from "./made.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { AppError, appJwt, call, GITHUB_API } from "./app.ts";
@@ -25,7 +26,7 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits } from "../data/control/index.ts";
+import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits, loadWriteTries } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
 import { effect } from "../db/effects.ts";
 
@@ -287,17 +288,26 @@ async function finish(w: Writer, id: number, details: Details, error?: string, o
 }
 
 /**
- * A creating write is made once per job, even when the job resumed after a restart (src/runner/resuming.ts): `key` tells
- * this write from the job's other writes of the same action on the same target (a hash of the text, a run id, a commit),
- * and `replay` rebuilds the result from the row of the write the job's earlier run made.
+ * A creating write is made once, also when the job resumed after a restart (src/runner/resuming.ts) or a later run tries it again: `key`
+ * tells this write from the other writes of the same action on the same target (a hash of the text, a run id, a commit), and `replay`
+ * rebuilds the result from the row of the earlier write. `lasting`: the key names one write for good (it holds the id of the card,
+ * command or call the write carries out), so an earlier done row of any run is that write; without it only a done row of this job's own
+ * earlier run is. `find` looks on GitHub for a write begun at `since` whose outcome was never learned, whichever run began it; its details
+ * complete that row. Without `find` GitHub itself refuses a repeat (one open PR per head, a push over a moved branch) or the repeat does
+ * no harm (a rerun).
  */
-type Once<T> = { key: string; also?: string[]; replay: (d: Details) => T };
+type Once<T> = { key: string; also?: string[]; lasting?: boolean; replay: (d: Details) => T; find?: (since: string) => Promise<Details | null> };
 
-/** The key of a write made once per job: a hash of what tells it apart. */
+/** An earlier write's outcome is unknown and GitHub could not be read to settle it: the write was not made again. */
+export class UnsettledError extends Error {}
+
+/** The key of a write made once: a hash of what tells it apart. */
 const onceKey = (...parts: unknown[]): string => createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
 
-/** What tells two comments of one job with the same text apart: the decision, card, comment or command they answer. */
-const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command"].map((k) => d[k] ?? null);
+/** What tells two comments with the same text apart: the decision, card, comment, command, action, call or repin they answer. */
+const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command", "action", "call", "repin"].map((k) => d[k] ?? null);
+/** Whether the details name by id what the comment answers: a comment with the same text and id is then the same one. */
+const answersOne = (d: Details): boolean => ["decision", "card", "comment", "action", "call", "repin"].some((k) => d[k] !== undefined && d[k] !== null);
 
 const earlier = new WeakMap<Db, Map<string, Promise<Awaited<ReturnType<typeof loadMadeBefore>>>>>();
 /** A resumed job's rows from before its run started: they cannot change while it runs, so every write of the run shares one read. */
@@ -307,37 +317,69 @@ const earlierWrites = (db: Db, job: number, before: string): Promise<Awaited<Ret
   return byJob.get(key) ?? byJob.set(key, loadMadeBefore(db, job, before).catch((e) => { byJob.delete(key); throw e; })).get(key)!;
 };
 
+type Tried = { id: number; at: string; details: Details };
+/** Whether the row leaves open if the write was made: it was never finished, or failed without GitHub refusing it. */
+const unclear = (r: Tried): boolean => r.details.state === "started" || (r.details.state === "failed" && !REFUSED.test(String(r.details.error ?? "")) && !RATE_LIMITED.test(String(r.details.error ?? "")));
+/** GitHub's rate limits refuse the request before anything is made. */
+const RATE_LIMITED = /rate limit|abuse detection/i;
+
 /**
- * In a resumed job: the details of the successful write its earlier run made with this action, target and one of `keys`,
- * or null. A write the earlier run began and never finished (it was stopped before recording the outcome) is made again,
- * and the new row names the unknown one (`repeats`).
+ * The details of the write when an earlier run made it, or the row of a try whose outcome is unknown (the run was stopped before
+ * recording it, or recorded a failure that GitHub's own refusal does not explain) with the time of the earliest such try. Null when there is neither.
  */
-async function madeBefore(w: Writer, action: string, target: string, keys: string[]): Promise<{ done: Details } | { unknown: number } | null> {
+async function madeBefore(w: Writer, action: string, target: string, once: Pick<Once<unknown>, "key" | "also" | "lasting" | "find">): Promise<{ done: Details } | { unknown: Tried } | null> {
+  const keys = [once.key, ...once.also ?? []];
+  const open = (rows: Tried[]): { unknown: Tried } | null => {
+    const list = rows.filter(unclear);
+    const row = list.find((r) => r.details.state === "started") ?? list[0];
+    return row ? { unknown: { ...row, at: list[list.length - 1]!.at } } : null;
+  };
   const job = currentJobId();
-  if (job === null) return null;
-  const run = await resumedRun(w.db, job);
-  if (!run) return null;
-  const rows = (await earlierWrites(w.db, job, run.startedAt)).get(`${action}\t${target}`)?.filter((r) => typeof r.details.writeKey === "string" && keys.includes(r.details.writeKey)) ?? [];
-  const done = rows.find((r) => r.details.state === "done");
-  if (done) return { done: done.details };
-  return rows.length ? { unknown: rows[0]!.id } : null;
+  const run = job === null ? null : await resumedRun(w.db, job);
+  const mine = job !== null && run ? (await earlierWrites(w.db, job, run.startedAt)).get(`${action}\t${target}`)?.filter((r) => typeof r.details.writeKey === "string" && keys.includes(r.details.writeKey)) ?? [] : [];
+  const made = mine.find((r) => r.details.state === "done");
+  if (made) return { done: made.details };
+  if (once.find) {
+    const tries = await loadWriteTries(w.db, { action, target, keys });
+    const at = tries.findIndex((r) => r.details.state === "done");
+    if (once.lasting && at >= 0) return { done: tries[at]!.details };
+    // A try older than a done one was settled by it: the same text may be posted again later.
+    const left = open(at < 0 ? tries : tries.slice(0, at));
+    if (left) return left;
+  }
+  return open(mine);
 }
 
 /**
  * Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error.
- * With `once`, a write the job's earlier run made is not made again: its recorded result is returned.
+ * With `once`, a write the job's earlier run made is not made again: its recorded result, or what GitHub shows of it, is returned.
  */
 async function recorded<T>(w: Writer, identity: string, action: string, target: string, details0: Details, f: () => Promise<T>, view?: (r: T) => Details, failure?: (r: T) => string | null, once?: Once<T>, /** The pacing key's owner when the target's repo has no `repos` row. */ owner?: string): Promise<T> {
   let repeats: number | undefined;
   if (once) {
-    const before = await madeBefore(w, action, target, [once.key, ...once.also ?? []]);
+    const before = await madeBefore(w, action, target, once);
     if (before && "done" in before) {
-      console.log(`${action} on ${target}: made by this job before the restart, not made again`);
+      console.log(`${action} on ${target}: made by an earlier run, not made again`);
       return once.replay(before.done);
     }
-    if (before) {
-      repeats = before.unknown;
-      console.log(`${action} on ${target}: this job began it before the restart with an unknown outcome (audit row ${repeats}); made again`);
+    if (before && once.find) {
+      let found: Details | null;
+      try {
+        found = await once.find(before.unknown.at);
+      } catch (e) {
+        throw new UnsettledError(`${action} on ${target} may have been made by an earlier run and GitHub could not be read: ${oneLine(String((e as Error).message ?? e))}`);
+      }
+      if (found) {
+        const { error: _, ...was } = before.unknown.details;
+        const d = { ...was, ...found, state: "done" };
+        await finishWrite(w.db, before.unknown.id, d);
+        console.log(`${action} on ${target}: made by an earlier run (found on GitHub), not made again`);
+        return once.replay(d);
+      }
+    }
+    if (before && before.unknown.details.state === "started") {
+      repeats = before.unknown.id;
+      console.log(`${action} on ${target}: an earlier run began it with an unknown outcome (audit row ${repeats}); made again`);
     }
   }
   const details = { ...details0, identity, ...jobOf(), ...(once && { writeKey: once.key }), ...(repeats !== undefined && { repeats }) };
@@ -404,7 +446,8 @@ export async function commentOn(w: Writer, g: Grant, q: Querier, action: string,
   const r = await recorded(w, await idOf(w, g), action, refOf(item.repo, item.number), { ...details, text: body },
     () => q.query(ADD_COMMENT, { id: item.id, body }) as Promise<{ addComment?: { commentEdge?: { node?: { url?: string } } } }>,
     (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }), undefined,
-    { key: onceKey(body, ...answered(details)), replay: (d) => ({ addComment: { commentEdge: { node: { url: typeof d.url === "string" ? d.url : "" } } } }) });
+    { key: onceKey(body, ...answered(details)), lasting: answersOne(details), replay: (d) => ({ addComment: { commentEdge: { node: { url: typeof d.url === "string" ? d.url : "" } } } }),
+      find: async (since) => { const url = await nodeCommentMade(q, { id: item.id, body, since }); return url === null ? null : { url }; } });
   return r.addComment?.commentEdge?.node?.url ?? "";
 }
 
@@ -493,7 +536,8 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
     () => q.query(ADD_REVIEW, { pr: nodeId, oid: g.head, body }) as Promise<{ addPullRequestReview?: { pullRequestReview?: { id?: string } | null } | null }>,
     (x) => ({ review: x.addPullRequestReview?.pullRequestReview?.id ?? undefined }),
     (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"),
-    { key: onceKey(g.head, body), replay: (d) => ({ addPullRequestReview: { pullRequestReview: { id: typeof d.review === "string" ? d.review : undefined } } }) });
+    { key: onceKey(g.head, body), replay: (d) => ({ addPullRequestReview: { pullRequestReview: { id: typeof d.review === "string" ? d.review : undefined } } }),
+      find: async (since) => { const review = await reviewMade(q, { id: nodeId, head: g.head, body, since }); return review === null ? null : { review }; } });
   return r.addPullRequestReview?.pullRequestReview?.id ?? null;
 }
 
@@ -562,8 +606,15 @@ const GH_URL = /https:\/\/github\.com\/\S+/;
 /** The result of a gh write the job made before it resumed: success, with the URL gh printed. */
 const ghReplay = (d: Details): ExecResult => ({ code: 0, stdout: typeof d.url === "string" ? `${d.url}\n` : "", stderr: "" });
 
-/** `once`: the key of a creating write, made once per job (Once), with other keys the earlier run may have made it under. */
-async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string, once?: string | { key: string; also: string[] }): Promise<ExecResult> {
+/** `gh` as a read that throws when it fails. */
+const ghRead = (exec: Exec): GhRead => async (args) => {
+  const r = await exec("gh", args);
+  if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
+  return r.stdout;
+};
+
+/** `once`: the key of a creating write, made once per job (Once), with other keys the earlier run may have made it under, or how to find it on GitHub. */
+async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string, once?: string | Pick<Once<ExecResult>, "key" | "also" | "lasting" | "find">): Promise<ExecResult> {
   return recorded(w, identity, action, target, details, () => exec("gh", args, input === undefined && identity !== "legacy" ? undefined : { ...(input === undefined ? {} : { input }), ...(identity === "legacy" ? { inherit: true } : {}) }),
     (r) => ({ url: r.stdout.match(GH_URL)?.[0] }),
     (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
@@ -581,7 +632,8 @@ export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: 
   exec = await laneExec(w, g, exec);
   const body = posted(note, text);
   return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
-    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body, onceKey(body, ...answered(details)));
+    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body,
+    { key: onceKey(body, ...answered(details)), lasting: answersOne(details), find: async (since) => { const url = await commentMade(ghRead(exec), { repo: o.repo, number: o.number, body, since }); return url === null ? null : { url }; } });
 }
 
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
@@ -595,7 +647,7 @@ export async function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, acti
 
 /**
  * Deletes a comment of ours (`commentId` is the number in its `#issuecomment-` URL). The comment's author must be one of
- * `logins` (the box account and the app's bot names); a comment that is already gone counts as done (the audit row carries `gone: true`).
+ * `logins` (the box account and the app's bot names, lower case); a comment that is already gone counts as done (the audit row carries `gone: true`).
  */
 export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string; logins: ReadonlySet<string> }, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
@@ -608,7 +660,7 @@ export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, ac
       const author = await exec("gh", ["api", path, "--jq", ".user.login"]);
       if (gone(author)) return goneResult;
       if (author.code !== 0) return author;
-      if (!o.logins.has(author.stdout.trim())) return { code: 1, stdout: "", stderr: "the comment is not ours" };
+      if (!isOwnLogin(o.logins, author.stdout.trim())) return { code: 1, stdout: "", stderr: "the comment is not ours" };
       const del = await exec("gh", ["api", "-X", "DELETE", path]);
       return gone(del) ? goneResult : del;
     },
@@ -669,10 +721,11 @@ export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: st
   let r: ExecResult;
   try {
     r = await viaGh(w, await idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
-      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, scrub(o.title), body));
+      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body,
+      { key: onceKey(o.repo, scrub(o.title), body), find: async (since) => { const made = await issueMade(ghRead(exec), { repo: o.repo, title: scrub(o.title), body, since }); return made === null ? null : { url: made.url }; } });
   } catch (e) {
     // exec rejects only when the command could not be started; the pacing rejects before anything is sent.
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError), e instanceof WritePacedError);
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
   // A failed app-token mint never sent the request (`sent: false`).
@@ -691,9 +744,10 @@ export async function createReporterIssue(w: Writer, exec: Exec, o: { repo: stri
   try {
     r = await recorded(w, `user:${w.login}`, "discord-issue-open", o.repo, {}, () => exec("gh", ["issue", "create", "--repo", slugOf(o.repo), "--title", o.title, "--body-file", "-"], { input: o.body }),
       (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
-      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`));
+      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`),
+      { key: onceKey(o.repo, w.login, o.title, o.body), replay: ghReplay, find: async (since) => await issueMade(ghRead(exec), { repo: o.repo, title: o.title, body: o.body, since }) });
   } catch (e) {
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), true);
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError));
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
   if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, REFUSED.test(m)); }
@@ -733,9 +787,10 @@ export async function createBotIssue(w: Writer, g: GuardedFiling, exec: Exec, o:
   try {
     r = await recorded(w, await idOf(w, g), "discord-issue-bot", o.repo, {}, () => asBot(w, g, exec, ["issue", "create", "--repo", `${g.owner}/${g.repo}`, "--title", title, "--body-file", "-"], body),
       (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
-      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`), undefined, g.owner);
+      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`),
+      { key: onceKey(o.repo, title, body), replay: ghReplay, find: async (since) => await issueMade(ghRead((_cmd, args) => asBot(w, g, exec, args)), { repo: o.repo, title, body, since }) }, g.owner);
   } catch (e) {
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError, { unsent: true, noAccess: e instanceof AppNoAccessError });
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError), e instanceof WritePacedError, { unsent: !(e instanceof UnsettledError), noAccess: e instanceof AppNoAccessError });
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
   if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m), false, { unsent: r.sent === false }); }
@@ -903,7 +958,8 @@ export async function ghAdvisoryCreate(w: Writer, g: Grant, exec: Exec, o: { rep
     (r) => ({ ghsa: r.stdout.trim() || undefined }),
     (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
     // One draft advisory per finding.
-    { key: onceKey(o.repo), replay: (d) => ({ code: 0, stdout: typeof d.ghsa === "string" ? d.ghsa : "", stderr: "" }) });
+    { key: onceKey(o.repo), lasting: true, replay: (d) => ({ code: 0, stdout: typeof d.ghsa === "string" ? d.ghsa : "", stderr: "" }),
+      find: async (since) => { const ghsa = await advisoryMade(ghRead((cmd, args) => exec(cmd, args, { inherit: true })), { repo: o.repo, summary: o.summary, description: o.description, since }); return ghsa === null ? null : { ghsa }; } });
   return { ghsa: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 

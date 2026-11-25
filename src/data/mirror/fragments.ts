@@ -17,6 +17,12 @@ export function openItem(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, o: { kind?: "
   return eb.exists(q);
 }
 
+/** The mirror holds no row of the item `repo#number` (one just opened, before the sync read it). */
+export function itemNotMirrored(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
+  const q = kx.schemaEb(eb).selectFrom("main.items as nm").select(one(eb)).where("nm.repo", "=", kx.exprOf(eb, repo)).where("nm.number", "=", kx.exprOf(eb, number));
+  return eb.not(eb.exists(q));
+}
+
 /** The item is open (`alias` names a row of items). */
 export const itemIsOpen = (eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> => eb(kx.exprOf(eb, `${alias}.state`), "=", "OPEN");
 

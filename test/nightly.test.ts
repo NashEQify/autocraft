@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { setFeature } from "../src/build/features.ts";
 import { LANES } from "../src/runner/autopilot.ts";
 import { nightlyDue, nightlyRepos, openNightlyIssue, runNightly, setSelection, recentRuns, benchSeries, parseBench, pruneBench, type NightlyDeps } from "../src/nightly/index.ts";
+import { IssueError } from "../src/github/write.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { like } from "../src/db/kx.ts";
@@ -33,6 +34,7 @@ async function setup(repos: string[] = ["a"]) {
     toolchains: async () => f.have,
     readArtifact: async (_db, id, name) => f.artifacts.get(`${id}:${name}`) ?? null,
     openIssue: async (_db, o) => { f.issues.push({ repo: o.repo, title: o.title, body: o.body }); return { number: 100 + f.issues.length, url: `https://github.com/x/${o.repo}/issues/${100 + f.issues.length}` }; },
+    read: async () => { throw new Error("no network"); },
   };
   return { db, f };
 }
@@ -98,7 +100,7 @@ test("Open issue opens one issue for a failing check and no second one until a g
     await runNightly(db, { repo: "a" }, quiet, f.deps); // collect
     f.t += DAY + 60_000;
   };
-  const by = { operator: "op" };
+  const by = "op";
   await night(true, '{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-2024-0001","description":"secret details"}}]}}');
   await night(true);
   assert.equal(f.issues.length, 0, "nothing opens an issue unasked");
@@ -114,6 +116,44 @@ test("Open issue opens one issue for a failing check and no second one until a g
   await night(true); await night(true);
   await openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps);
   assert.equal(f.issues.length, 2, "a new streak after a green night can open another");
+});
+
+test("two presses at once open one issue, a refusal gives the claim back, and a lost answer is looked up on GitHub before another create", async () => {
+  const { db, f } = await setup();
+  await setFeature(db, "nightly", true, "op", "a");
+  await setSelection(db, "a", "audit", true);
+  const nights = async (n: number) => {
+    for (let k = 0; k < n; k++) {
+      await runNightly(db, { repo: "a" }, quiet, f.deps);
+      await finishTasks(db, f, ["audit"]);
+      await runNightly(db, { repo: "a" }, quiet, f.deps);
+      f.t += DAY + 60_000;
+    }
+  };
+  await nights(2);
+  const open = (deps = f.deps) => openNightlyIssue(db, { repo: "a", checkId: "audit", by: "op" }, deps);
+  const failing = (e: Error): NightlyDeps => ({ ...f.deps, openIssue: async () => { throw e; } });
+  await assert.rejects(open(failing(new IssueError("HTTP 403", true))), /403/);
+
+  let release = (): void => {};
+  const slow: NightlyDeps = { ...f.deps, openIssue: async () => { await new Promise<void>((r) => { release = r; }); throw new IssueError("timeout", false); } };
+  const first = open(slow);
+  while (String(release) === "() => {}" || (await count(db, "nightly_results")) === 0) await new Promise((r) => setTimeout(r, 10));
+  await assert.rejects(open(), /being opened/);
+  release();
+  await assert.rejects(first, /not known/);
+  assert.equal(f.issues.length, 0);
+
+  // The create's audit row, as write.ts leaves it, and GitHub's answer to the next press.
+  await db.run(db.k.insertInto("audit").values({ at: new Date(f.t).toISOString(), login: "op", action: "postmerge-file", target: "a:nightly", details: JSON.stringify({ check: "audit", title: "T", text: "B", state: "failed", error: "timeout" }) }));
+  await assert.rejects(open(), /not known/, "GitHub cannot be read: nothing is created");
+  const seen = JSON.stringify({ number: 77, url: "https://github.com/x/a/issues/77", title: "T", body: "B", at: new Date(f.t).toISOString() });
+  assert.equal((await open({ ...f.deps, read: async () => seen })).number, 77);
+  assert.equal(f.issues.length, 0);
+  await nights(1);
+  const numbers = (await db.all(db.k.selectFrom("nightly_results").select("issue_number").where("check_id", "=", "audit"))).map((r) => Number(r.issue_number));
+  assert.deepEqual(numbers, [77, 77, 77], "a later failing night of the streak carries the number");
+  assert.equal((await db.all(db.k.selectFrom("audit").select("login").where("action", "=", "nightly-issue").where("login", "=", "op"))).length > 0, true);
 });
 
 test("an audit failure lists advisory ids only; experimental checks ask nothing", async () => {
@@ -132,6 +172,7 @@ test("an audit failure lists advisory ids only; experimental checks ask nothing"
   await finishTasks(db, f, ["asan test"]);
   await runNightly(db, { repo: "a" }, quiet, f.deps);
   assert.equal(await count(db, "decisions"), 0);
+  await assert.rejects(openNightlyIssue(db, { repo: "a", checkId: "asan", by: "op" }, f.deps), /experimental/);
 });
 
 test("a bench 15% above the median of the last 7 nights is a warn with the trend stored; old points are pruned", async () => {

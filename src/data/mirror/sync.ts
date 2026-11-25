@@ -125,11 +125,12 @@ export async function hasSyncRequests(db: Db): Promise<boolean> {
 }
 
 /**
- * Returns the refs with no read, or a read that started at or before `after`, and queues a request for each of them that has none.
- * The read times and the existing requests come in one wave; the insert is one statement. The caller stamps `tried_at` of its command.
+ * The refs with no read, or a read that started at or before `after` (`stale`), and those of them that had no request, which are queued
+ * one (`asked`). The read times and the existing requests come in one wave; the insert is one statement. The caller stamps `tried_at`
+ * of the command it asked for.
  */
-export async function requestReadsAfter(db: Db, wants: { ref: RefKey; after: string }[], now: string): Promise<RefKey[]> {
-  if (!wants.length) return [];
+export async function requestReadsAfter(db: Db, wants: { ref: RefKey; after: string }[], now: string): Promise<{ stale: RefKey[]; asked: RefKey[] }> {
+  if (!wants.length) return { stale: [], asked: [] };
   const after = new Map(wants.map((w) => [w.ref, w.after]));
   const refs = [...after.keys()];
   const q = queryDb(db);
@@ -151,7 +152,7 @@ export async function requestReadsAfter(db: Db, wants: { ref: RefKey; after: str
       for (const part of kx.batches(rows)) await q.run(q.k.insertInto("main.sync_requests").values(part).onConflict((oc) => oc.columns(["repo", "number"]).doNothing()));
     });
   }
-  return stale;
+  return { stale, asked: ask };
 }
 
 /** Upsert keeping `since` while the kind is unchanged; one row per repo in a statement (the later row of the call wins). */

@@ -8,6 +8,7 @@ import type { AskFailedRound, AnswerRound, Implementation, ImplementationRound, 
 import { loadItemImplementation, type ImplementationFacts } from "../../data/views/item-implementation.ts";
 import type { CommentOut } from "../../data/mirror/types.ts";
 import { clip, type Ctx } from "./trace.ts";
+import { isOwnLogin } from "../../github/identity.ts";
 
 type Run = { id: number; cost_usd: number | null; model: string; user_login: string | null; harness: string | null; reported_model: string | null };
 
@@ -89,7 +90,7 @@ function questionsOf(c: Ctx, d: ImplementationData): ImplementationQuestion[] {
       const text = given.a.text ? (label ? `${label}: ${given.a.text}` : given.a.text) : label;
       answer = { by: given.a.by ?? "someone", at: given.a.at ?? given.at, text };
     } else if (audience === "author") {
-      const reply = comments.find((m) => m.created_at! > at && !!m.author && !c.own.has(m.author) && !/\[bot\]$/.test(m.author));
+      const reply = comments.find((m) => m.created_at! > at && !!m.author && !isOwnLogin(c.own, m.author) && !/\[bot\]$/.test(m.author));
       if (reply) answer = { by: reply.author!, at: reply.created_at!, text: clip(reply.body ?? "", 600) };
     }
     return { at, audience, text: q!.text!, answer };

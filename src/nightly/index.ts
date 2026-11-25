@@ -1,7 +1,7 @@
 // Nightly checks per repo (build feature "nightly"): once a day a repo's selected checks run as sandbox tasks at the
 // default branch head, below all PR work. A later run of the step reads the finished tasks (pass or fail from the exit
 // codes, never from a model), stores one result per check and parses benchmark lines. An operator opens an issue for a
-// failing check from the Nightly page (openNightlyIssue). Nothing is read, written or queued while the switch is off.
+// failing check from the Nightly page (openNightlyIssue), one per failing streak. Nothing is read, written or queued while the switch is off.
 import { readFileSync } from "node:fs";
 import type { BuildTask } from "../../web/src/api/types.ts";
 import { absolute } from "../build/artifacts.ts";
@@ -11,7 +11,9 @@ import { createTask, getTask, TERMINAL } from "../build/tasks.ts";
 import { BuildError } from "../build/envs.ts";
 import type { By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
-import { createIssue, IssueError } from "../github/write.ts";
+import { issueMade, type GhRead } from "../github/made.ts";
+import { createIssue, IssueError, PACE_MAX_WAIT_MS } from "../github/write.ts";
+import { ghExec } from "../merge/safe-merge.ts";
 import { exec } from "../fixup/git.ts";
 import { cleanLine } from "../review/post-template.ts";
 import { scrub } from "../runner/scrub.ts";
@@ -19,6 +21,7 @@ import { outcomeOf } from "../verify/results.ts";
 import { checkOf, NIGHTLY_CHECKS, type CheckOpts, type NightlyCheck } from "./checks.ts";
 import { filterSeq } from "../async-seq.ts";
 import { loadArtifactFiles, loadTaskStates } from "../data/build/index.ts";
+import { addAudit, listAudit } from "../data/control/index.ts";
 import * as inference from "../data/inference/index.ts";
 import type { BenchPoint, NightlyResult, NightlyRun, NightlySelection, ResultState } from "../data/inference/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
@@ -48,8 +51,10 @@ export type NightlyDeps = {
   toolchains: (db: Db) => Promise<Set<string>>;
   /** The text of a finished task's artifact, or null. */
   readArtifact: (db: Db, taskId: number, name: string) => Promise<string | null>;
-  /** Opens the issue the operator asked for; throws IssueError. The default checks the repo's comment approval first. */
-  openIssue: (db: Db, o: { repo: string; title: string; body: string; by: By }) => Promise<{ number: number; url: string }>;
+  /** Opens the issue `by` asked for; throws IssueError. The default checks the repo's comment approval first. */
+  openIssue: (db: Db, o: { repo: string; checkId: string; title: string; body: string; by: string }) => Promise<{ number: number; url: string }>;
+  /** Reads GitHub, to look for an issue whose create lost its answer. */
+  read: GhRead;
 };
 
 export type NightlySummary = { repo: string; queued: number; skipped: number; collected: number; note: string | null };
@@ -128,10 +133,11 @@ export function defaultDeps(): NightlyDeps {
       try { return readFileSync(path, "utf8"); } catch { return null; }
     },
     openIssue: async (db, o) => {
-      const g = await guardRepo(db, o.repo, "comment", o.by, typeof o.by === "object" ? o.by.operator : undefined);
+      const g = await guardRepo(db, o.repo, "comment", { operator: o.by }, o.by);
       if ("refused" in g) throw new IssueError(g.refused, true);
-      return createIssue({ db, login: ACTOR }, g, exec, { repo: o.repo, target: `${o.repo}:nightly`, title: o.title, body: o.body }, { by: "operator", model: "haiku" });
+      return createIssue({ db, login: o.by }, g, exec, { repo: o.repo, target: issueTarget(o.repo), title: o.title, body: o.body }, { by: "fixed-operator" }, { check: o.checkId });
     },
+    read: ghExec,
   };
 }
 
@@ -209,33 +215,106 @@ export function nightlyIssueBody(c: NightlyCheck, sha: string, summary: string |
 }
 const issueTitle = (c: NightlyCheck): string => `Nightly check fails: ${cleanLine(c.label, 80)}`;
 
+const issueTarget = (repo: string): string => `${repo}:nightly`;
+
 /** Failing nights in a row before an issue can be opened. */
 export const STREAK_TO_OPEN = 2;
 /** The nights the Open issue control looks back over. */
 const ISSUE_NIGHTS = 30;
+/** A create that was claimed longer ago than this is not running any more (a create takes seconds; the write pacing waits at most PACE_MAX_WAIT_MS). */
+const CLAIM_MS = Math.max(10 * 60_000, 4 * PACE_MAX_WAIT_MS);
+
+type Night = { run: NightlyRun; result: NightlyResult };
+
+/** The check's failing streak: the consecutive failed nights up to the newest (a skipped, queued or errored night says nothing; a pass or warn ends it), newest first. */
+export function failingStreak(runs: (NightlyRun & { results: NightlyResult[] })[], checkId: string): Night[] {
+  const nights = runs.flatMap((run): Night[] => { const result = run.results.find((x) => x.checkId === checkId); return result && !["error", "skipped", "queued"].includes(result.state) ? [{ run, result }] : []; });
+  const end = nights.findIndex((m) => m.result.state !== "fail");
+  return end < 0 ? nights : nights.slice(0, end);
+}
+
+/** The issue opened for the streak, or null. */
+export const issueOf = (streak: Night[]): number | null => streak.find((m) => m.result.issueNumber !== null)?.result.issueNumber ?? null;
+
+/** Whether a person may open an issue for the streak of check `c`. */
+export const mayOpenIssue = (c: NightlyCheck, streak: Night[]): boolean => !c.experimental && streak.length >= STREAK_TO_OPEN && issueOf(streak) === null;
+
+/** The Open issue control refused: the message is the presser's answer. */
+export class NightlyRefused extends Error {}
+
+const streakNow = async (db: Db, repo: string, checkId: string): Promise<Night[]> =>
+  failingStreak((await inference.loadNightlyGrid(db, [repo], { nights: ISSUE_NIGHTS, sparkPoints: 0, window: 0 })).get(repo)?.runs ?? [], checkId);
 
 /**
- * The Open issue control: opens one issue for a check that is failing, naming the check and the failure. The failing streak is the
- * consecutive failed nights up to the newest (a skipped or errored night says nothing; a pass or warn ends it). Refused when the
- * streak is shorter than STREAK_TO_OPEN, or when an issue was already opened for the streak; its number then marks the streak's results.
+ * The Open issue control: opens one issue for a check that is failing, naming the check and the failure. Refused for an experimental
+ * check, a streak shorter than STREAK_TO_OPEN, and a streak that has its issue, or one being opened. The streak's results are claimed
+ * (with the presser's audit row) before the create, and then carry the issue's number. A claim whose create stopped, or whose outcome was not
+ * known, is settled by the next press: from the create's audit row, else by looking for the issue on GitHub, and only an issue that is not
+ * there is opened again.
  */
-export async function openNightlyIssue(db: Db, o: { repo: string; checkId: string; by: By }, deps: NightlyDeps = defaultDeps()): Promise<{ number: number; url: string }> {
+export async function openNightlyIssue(db: Db, o: { repo: string; checkId: string; by: string }, deps: NightlyDeps = defaultDeps()): Promise<{ number: number; url: string }> {
   const c = checkOf(o.checkId);
-  if (!c) throw new Error(`unknown nightly check ${o.checkId}`);
-  const runs = (await inference.loadNightlyGrid(db, [o.repo], { nights: ISSUE_NIGHTS, sparkPoints: 0, window: 0 })).get(o.repo)?.runs ?? [];
-  const mine = runs.flatMap((u) => { const r = u.results.find((x) => x.checkId === o.checkId); return r ? [{ run: u, result: r }] : []; });
-  const streak: typeof mine = [];
-  for (const m of mine) {
-    if (m.result.state === "error" || m.result.state === "skipped" || m.result.state === "queued") continue;
-    if (m.result.state !== "fail") break;
-    streak.push(m);
+  if (!c) throw new NightlyRefused(`unknown nightly check ${o.checkId}`);
+  if (c.experimental) throw new NightlyRefused(`no issue is opened for the experimental check ${c.id}`);
+  const press = async (state: "opening" | "unknown", why?: string) =>
+    await addAudit(db, [{ login: o.by, action: "nightly-issue", target: o.repo, at: deps.now().toISOString(), details: { check: c.id, state, ...(why && { error: why }) } }]);
+  const { streak, claimedBefore } = await db.write(async () => {
+    const streak = await streakNow(db, o.repo, c.id);
+    if (streak.length < STREAK_TO_OPEN) throw new NightlyRefused(`the nightly check ${c.id} is not failing ${STREAK_TO_OPEN} nights in a row on ${o.repo}`);
+    const had = issueOf(streak);
+    if (had !== null) throw new NightlyRefused(`issue #${had} is already open for the nightly check ${c.id} on ${o.repo}`);
+    const claimedBefore = streak.some((m) => m.result.issueClaimed);
+    if (claimedBefore) {
+      const last = (await listAudit(db, { actions: ["nightly-issue"], targets: [o.repo], order: "desc" })).find((a) => a.details?.check === c.id);
+      if (last && last.details?.state === "opening" && deps.now().getTime() - Date.parse(last.at) < CLAIM_MS) throw new NightlyRefused(`an issue for the nightly check ${c.id} on ${o.repo} is being opened`);
+    }
+    await inference.claimIssue(db, { repo: o.repo, checkId: c.id, runIds: streak.map((m) => m.run.id) });
+    await press("opening");
+    return { streak, claimedBefore };
+  });
+  const mark = async (made: { number: number; url: string }): Promise<{ number: number; url: string }> => {
+    await inference.markIssue(db, { repo: o.repo, checkId: c.id, runIds: streak.map((m) => m.run.id), issue: made.number });
+    return made;
+  };
+  const lost = async (e: unknown): Promise<never> => {
+    const why = one(String((e as Error).message ?? e));
+    await press("unknown", why);
+    throw new IssueError(`whether the issue was opened is not known: ${why}`, false);
+  };
+  if (claimedBefore) {
+    const since = streak[streak.length - 1]!.run.startedAt;
+    const began = (await listAudit(db, { actions: ["postmerge-file"], targets: [issueTarget(o.repo)], since, order: "desc" })).filter((a) => a.details?.check === c.id);
+    for (const a of began) {
+      const url = a.details?.state === "done" ? String(a.details.url ?? "") : "";
+      const m = /\/issues\/(\d+)$/.exec(url);
+      if (m) return await mark({ number: Number(m[1]), url });
+    }
+    for (const a of began) {
+      let made: { number: number; url: string } | null;
+      try { made = await issueMade(deps.read, { repo: o.repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at }); } catch (e) { return await lost(e); }
+      if (made) return await mark(made);
+    }
   }
-  if (streak.length < STREAK_TO_OPEN || streak[0] !== mine.find((m) => !["error", "skipped", "queued"].includes(m.result.state))) throw new Error(`the nightly check ${c.id} is not failing ${STREAK_TO_OPEN} nights in a row on ${o.repo}`);
-  if (streak.some((m) => m.result.issueNumber !== null)) throw new Error(`an issue is already open for the nightly check ${c.id} on ${o.repo}`);
   const last = streak[0]!;
-  const made = await deps.openIssue(db, { repo: o.repo, title: issueTitle(c), body: nightlyIssueBody(c, last.run.sha, last.result.summary), by: o.by });
-  await inference.markIssue(db, { repo: o.repo, checkId: c.id, runIds: streak.map((m) => m.run.id), issue: made.number });
-  return made;
+  let made: { number: number; url: string };
+  try {
+    made = await deps.openIssue(db, { repo: o.repo, checkId: c.id, title: issueTitle(c), body: nightlyIssueBody(c, last.run.sha, last.result.summary), by: o.by });
+  } catch (e) {
+    if (!(e instanceof IssueError) || !e.clear) return await lost(e);
+    await inference.releaseIssue(db, { repo: o.repo, checkId: c.id });
+    throw e;
+  }
+  return await mark(made);
+}
+
+/** A night that goes on a streak with an issue carries its number, so the streak keeps it however long it lasts. */
+async function carryIssues(db: Db, repo: string, checkIds: string[]): Promise<void> {
+  if (!checkIds.length) return;
+  const runs = (await inference.loadNightlyGrid(db, [repo], { nights: ISSUE_NIGHTS, sparkPoints: 0, window: 0 })).get(repo)?.runs ?? [];
+  for (const checkId of new Set(checkIds)) {
+    const streak = failingStreak(runs, checkId), issue = issueOf(streak);
+    if (issue !== null) await inference.markIssue(db, { repo, checkId, runIds: streak.filter((m) => m.result.issueNumber === null).map((m) => m.run.id), issue });
+  }
 }
 
 async function collect(db: Db, repo: string, deps: NightlyDeps, s: NightlySummary): Promise<void> {
@@ -261,6 +340,7 @@ async function collect(db: Db, repo: string, deps: NightlyDeps, s: NightlySummar
   await db.write(async () => {
     await inference.setResults(db, set);
     await inference.closeRuns(db, runs.map((u) => u.id));
+    await carryIssues(db, repo, set.filter((r) => r.state === "fail").map((r) => r.checkId));
   });
 }
 

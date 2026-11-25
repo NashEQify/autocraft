@@ -400,6 +400,8 @@ export interface Api {
     grid(): Promise<NightlyGrid>;
     series(repo: string, bench: string): Promise<NightlySeries>;
     select(input: NightlySelectInput): Promise<NightlyGrid>;
+    /** Opens the issue of a failing check. */
+    openIssue(input: { repo: string; check: string }): Promise<NightlyGrid>;
   };
   /** The per-repo screenshot setup. Anyone who sees internals reads; operators write. */
   screenshotSetup: {

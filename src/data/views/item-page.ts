@@ -28,7 +28,7 @@ export type ItemPageFacts = {
   trace: ItemTraceRows; writeLog: WriteLogRow[]; tracked: TrackedRepo | null; legs: Preapproval[]; workflow: ItemWorkflow[];
   failedJobs: FailedJob[]; activeJobs: ActiveJob[]; positions: Map<number, number>;
   prBuild: PrBuildView | null; screenshots: ScreenshotRun[]; screenshotArtifacts: Map<number, ArtifactRow[]>;
-  thread: Thread | null; held: HeldRow[]; heldAudits: Map<number, { number: number; url: string }>;
+  thread: Thread | null; held: HeldRow[]; heldAudits: Map<number, { issue: { number: number; url: string } | null }>;
   implementation: ImplementationFacts | null; implementationPr: ItemShown | null;
 };
 
@@ -48,7 +48,7 @@ export async function loadItemPage(db: Db, scope: TraceScope, ref: { repo: strin
   const heldRows = held.get(key) ?? [];
   const shotTasks = [...new Set([newestShot?.baseTaskId, newestShot?.headTaskId].filter((x): x is number => typeof x === "number"))];
   const [heldAudits, artifacts, implementation, implementationPr] = await db.together(() => Promise.all([
-    loadHeldIssueAudits(db, heldRows.filter((h) => h.state === "filing").map((h) => h.id)),
+    loadHeldIssueAudits(db, heldRows.filter((h) => h.state === "filing").map((h) => ({ id: h.id, since: h.updated_at }))),
     loadArtifacts(db, shotTasks, { contentType: "image/png" }),
     view ? completeImplementation(db, ref, view, trace.detail.comments) : Promise.resolve(null),
     view?.impl.prNumber != null ? loadShown(db, [{ repo: ref.repo, number: view.impl.prNumber }]) : Promise.resolve(new Map<string, ItemShown>()),

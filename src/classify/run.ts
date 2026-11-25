@@ -646,11 +646,14 @@ export async function runJev(db: Db, runId: string, items: Item[], width?: numbe
     }), width);
   } finally {
     // The Plan stops holding the prioritize step for the failed items until their input changes (src/core/decide-item.ts).
-    out.saved = await db.write(async () => {
+    const kept = await db.write(async () => {
       if (o.keepEarlier) await keepEarlierUsage(db, runId, sinkUsage.map((r) => r.agent));
       await recordUsage(db, sinkUsage);
       return await saveJevChunk(db, { verdicts: verdictRows("jev", runId, verdicts), failed });
     });
+    out.saved = kept.stored;
+    // Thrown after the commit, so one verdict that cannot be stored costs neither the others nor the usage of calls already paid for.
+    if (kept.error !== undefined) throw kept.error;
   }
   return out;
 }

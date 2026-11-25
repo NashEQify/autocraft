@@ -23,7 +23,7 @@ test("incremental sync stops at the first old item and requests no further page"
 // ---- search-based incremental sync ----
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { runSync } from "../src/mirror.ts";
+import { reconcileRepo, runSync } from "../src/mirror.ts";
 import { itemText, textHash } from "../src/embed/text.ts";
 import { inputHash } from "../src/runner/classify.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -170,6 +170,22 @@ test("sync stores the text hashes the planner compares", async () => {
 
 
 
+
+test("a reconcile keeps what it read before a read that fails, and a re-read item the mirror refuses costs no other", async () => {
+  const { db } = await scratch();
+  await db.run(db.k.insertInto("items").values([1, 2, 3, 4].map((number) => ({ repo: "a", number, kind: "issue", state: "OPEN", title: "t", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }))));
+  const reads: number[] = [];
+  const run = (read: (n: number) => unknown) => reconcileRepo(db, { spent: 0, remaining: 4000, async query(q: string, v: Record<string, unknown>) {
+    if (q.includes("issueOrPullRequest")) { reads.push(v.number as number); return { repository: { issueOrPullRequest: read(v.number as number) } }; }
+    return { repository: { items: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }, issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }, pullRequests: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+  } }, "a");
+  const states = async () => (await db.all(db.k.selectFrom("items").select(["number", "state"]).where("repo", "=", "a").orderBy("number"))).map((r) => r.state);
+  await assert.rejects(run((n) => { if (n === 3) throw new Error("boom"); return n === 1 ? null : node("a", n, "CLOSED"); }), /boom/);
+  assert.deepEqual(reads, [1, 2, 3]);
+  assert.deepEqual(await states(), ["CLOSED", "CLOSED", "OPEN", "OPEN"], "the gone item and the closed one before the failure are stored");
+  await assert.rejects(run((n) => ({ ...node("a", n, "CLOSED"), ...(n === 3 && { createdAt: null, updatedAt: null, state: null }) })));
+  assert.deepEqual(await states(), ["CLOSED", "CLOSED", "OPEN", "CLOSED"]);
+});
 
 test("a deleted item reads as null; a missing repository still fails", async () => {
   const c = new Client(0);

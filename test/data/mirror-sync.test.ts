@@ -109,10 +109,10 @@ both("sync requests: queue keeps the first unless replaced, removal skips a requ
 
   const q = queryDb(db);
   await q.run(q.k.insertInto("main.item_reads").values([{ repo: "a", number: 2, synced_at: T1 }, { repo: "a", number: 3, synced_at: T0 }]));
-  const stale = await requestReadsAfter(db, [{ ref: "a#2", after: T0 }, { ref: "a#3", after: T1 }, { ref: "a#4", after: T0 }], T2);
-  assert.deepEqual(stale.sort(), ["a#3", "a#4"]);
+  const { stale, asked } = await requestReadsAfter(db, [{ ref: "a#2", after: T0 }, { ref: "a#3", after: T1 }, { ref: "a#4", after: T0 }], T2);
+  assert.deepEqual([stale.sort(), asked.sort()], [["a#3", "a#4"], ["a#3", "a#4"]]);
   assert.deepEqual((await loadSyncRequests(db, 10)).map((r) => r.number), [3, 4]);
-  assert.deepEqual((await requestReadsAfter(db, [{ ref: "a#3", after: T1 }], T2)), ["a#3"]);
+  assert.deepEqual(await requestReadsAfter(db, [{ ref: "a#3", after: T1 }], T2), { stale: ["a#3"], asked: [] });
   assert.equal((await loadSyncRequests(db, 10)).length, 2, "a ref with a request is not queued again");
 });
 

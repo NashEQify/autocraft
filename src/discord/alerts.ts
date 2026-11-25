@@ -199,26 +199,26 @@ export class Alerts {
       const facts: ReceiveFacts = { app, perms };
       const have = new Set(state.sent.map((s) => `${s.userHash}|${s.workflowId}|${s.recAt}`));
       const hourAgo = new Date(now - HOUR_MS).toISOString();
-      const sent: { userHash: string; workflowId: number; recAt: string; sentAt: string }[] = [];
       for (const p of people) {
         const fresh = rows.filter((w) => w.recAt! >= p.createdAt && !have.has(`${p.userHash}|${w.id}|${w.recAt}`) && mayReceive(facts, p.login, p.role, [w.repo], now, this.#kept));
         let room = (this.#d.perHour ?? PER_HOUR) - state.sent.filter((s) => s.userHash === p.userHash && s.sentAt > hourAgo).length;
         for (const w of fresh) {
           if (room <= 0) break;
+          let closed = false;
           const row = { userHash: p.userHash, workflowId: w.id, recAt: w.recAt!, sentAt: new Date(now).toISOString() };
           try {
             await rest.createMessage(p.channelId, { content: buildWorkflowMessage(w, shown.get(`${w.repo}#${w.number}`)?.title ?? "", this.#d.baseUrl), allowed_mentions: { parse: [] } });
-            sent.push(row);
-            room--;
           } catch (e) {
             log(`discord: workflow alert not sent: ${(e as Error).message}`);
             // Direct messages that are closed will stay closed; anything else is tried again on the next change.
-            if (e instanceof RestError && e.status === 403) sent.push(row);
-            else break;
+            if (!(e instanceof RestError && e.status === 403)) break;
+            closed = true;
           }
+          // Recorded message by message: a pass that is interrupted does not send again what it sent.
+          await addSentAlerts(db, [row]);
+          if (!closed) room--;
         }
       }
-      if (sent.length) await addSentAlerts(db, sent);
     }
     await pruneSentAlerts(db, new Date(now - (WORKFLOW_ALERT_DAYS + 1) * DAY_MS).toISOString());
   }

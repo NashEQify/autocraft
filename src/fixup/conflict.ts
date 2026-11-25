@@ -9,7 +9,7 @@ import { REPO_PATH } from "../sandbox/command.ts";
 import { audit } from "../dash/audit.ts";
 import type { By } from "../core/gates.ts";
 import { guard, liveOf } from "../core/guard.ts";
-import { ownLogins } from "../github/identity.ts";
+import { isOwnLogin, ownLogins } from "../github/identity.ts";
 import type { Note } from "../github/note.ts";
 import { ghAskComment, ghComment, ghEditComment, pushBranch, type Writer } from "../github/write.ts";
 import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
@@ -117,7 +117,7 @@ const NEWEST_QUERY = `query($owner: String!, $name: String!, $n: Int!) {
 }`;
 
 /**
- * Our own comment (author in `logins`: the box login, the bare app slug and `<slug>[bot]`) when it is the newest comment on the PR and no review came after it, read live in
+ * Our own comment (author in `logins`: the box login, the bare app slug and `<slug>[bot]`, lower case) when it is the newest comment on the PR and no review came after it, read live in
  * one call; null otherwise, and when the read fails.
  */
 export async function newestOwnComment(querier: { query(q: string, v: object): Promise<unknown> }, logins: ReadonlySet<string>, repo: string, number: number): Promise<{ id: string; body: string } | null> {
@@ -128,7 +128,7 @@ export async function newestOwnComment(querier: { query(q: string, v: object): P
     } | null } };
     const pr = r.repository?.pullRequest;
     const last = pr?.comments?.nodes?.[0];
-    if (!pr || !last || !last.author || !logins.has(last.author.login)) return null;
+    if (!pr || !last || !last.author || !isOwnLogin(logins, last.author.login)) return null;
     const posted = last.createdAt;
     const review = pr.reviews?.nodes?.[0]?.submittedAt;
     if (review && (!posted || review > posted)) return null;
@@ -139,7 +139,7 @@ export async function newestOwnComment(querier: { query(q: string, v: object): P
 /** Our own conflict note when it is the newest comment on the PR and no review came after it: its comment id and the number of merges it reports. */
 export async function newestConflictNote(x: ConflictRun, c: ConflictCandidate, db?: Db): Promise<{ id: string; count: number } | null> {
   try {
-    const last = await newestOwnComment(x.d.querier, new Set([(await x.who()).login, ...(db ? await ownLogins(db, x.repo) : [])]), x.repo, c.number);
+    const last = await newestOwnComment(x.d.querier, new Set([(await x.who()).login.toLowerCase(), ...(db ? await ownLogins(db, x.repo) : [])]), x.repo, c.number);
     if (!last) return null;
     const count = conflictCommentCount(last.body, c.base);
     return count === null ? null : { id: last.id, count };

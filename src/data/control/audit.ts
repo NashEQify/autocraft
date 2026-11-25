@@ -164,22 +164,31 @@ export async function loadPaceWaits(db: Db, keys: PaceKey[], now: number): Promi
 }
 
 /** A resumed job's earlier successful and unfinished write rows (those with a `writeKey`), newest first, by `action\ttarget`. */
-export async function loadMadeBefore(db: Db, jobId: number, before: string): Promise<Map<string, { id: number; details: Details }[]>> {
+export async function loadMadeBefore(db: Db, jobId: number, before: string): Promise<Map<string, { id: number; at: string; details: Details }[]>> {
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "action", "target", "details"]).$narrowType<{ details: string }>()
+  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "at", "action", "target", "details"]).$narrowType<{ details: string }>()
     .where("at", "<", before).where("target", "is not", null)
     .where((eb) => eb.and([
       eb(kx.jsonNum(db, valid(db, eb), "$.jobId"), "=", jobId),
       eb(kx.jsonText(db, valid(db, eb), "$.writeKey"), "is not", null),
-      eb(kx.jsonText(db, valid(db, eb), "$.state"), "in", ["done", "started"]),
+      eb(kx.jsonText(db, valid(db, eb), "$.state"), "in", ["done", "started", "failed"]),
     ]))
     .orderBy(kx.rowid(AUDIT), "desc"));
-  const out = new Map<string, { id: number; details: Details }[]>();
+  const out = new Map<string, { id: number; at: string; details: Details }[]>();
   for (const r of rows) {
     const key = `${r.action}\t${r.target}`;
-    (out.get(key) ?? out.set(key, []).get(key)!).push({ id: Number(r.id), details: parseDetails(r.details) ?? {} });
+    (out.get(key) ?? out.set(key, []).get(key)!).push({ id: Number(r.id), at: r.at, details: parseDetails(r.details) ?? {} });
   }
   return out;
+}
+
+/** The rows of earlier tries of a write (its action, target and one of its write keys), newest first, the latest 20. Keyed by the target. */
+export async function loadWriteTries(db: Db, w: { action: string; target: string; keys: string[] }): Promise<{ id: number; at: string; details: Details }[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "at", "details"]).$narrowType<{ details: string }>()
+    .where("target", "=", w.target).where("action", "=", w.action).where((eb) => kx.inList(db, kx.jsonText(db, valid(db, eb), "$.writeKey"), w.keys))
+    .orderBy(kx.rowid(AUDIT), "desc").limit(20));
+  return rows.map((r) => ({ id: Number(r.id), at: r.at, details: parseDetails(r.details) ?? {} }));
 }
 
 // ---- readers ---------------------------------------------------------------------------------------------------------
@@ -262,22 +271,23 @@ export async function loadAssignments(db: Db, scope: { repo?: string } | { refs:
   return out;
 }
 
-/** Filing outcomes of held follow-ups: the latest `act-open-issue` row of each held id, when it finished with an issue URL. */
-export async function loadHeldIssueAudits(db: Db, heldIds: number[]): Promise<Map<number, { number: number; url: string }>> {
-  const out = new Map<number, { number: number; url: string }>();
-  if (!heldIds.length) return out;
+/**
+ * The create each held follow-up's filing recorded: the latest `act-open-issue` row of its id no older than `since` (when the filing
+ * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun.
+ */
+export async function loadHeldIssueAudits(db: Db, held: { id: number; since: string }[]): Promise<Map<number, { issue: { number: number; url: string } | null }>> {
+  const out = new Map<number, { issue: { number: number; url: string } | null }>();
+  if (!held.length) return out;
+  const since = new Map(held.map((h) => [h.id, h.since]));
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom(AUDIT).select(["details"]).$narrowType<{ details: string }>()
-    .where("action", "=", "act-open-issue").where((eb) => kx.inList(db, kx.jsonNum(db, valid(db, eb), "$.held"), heldIds, "bigint"))
+  const rows = await q.all(q.k.selectFrom(AUDIT).select(["at", "details"]).$narrowType<{ details: string }>()
+    .where("action", "=", "act-open-issue").where((eb) => kx.inList(db, kx.jsonNum(db, valid(db, eb), "$.held"), [...since.keys()], "bigint"))
     .orderBy(kx.rowid(AUDIT)));
-  const latest = new Map<number, Details>();
   for (const r of rows) {
     const d = parseDetails(r.details);
-    if (d && typeof d.held === "number") latest.set(d.held, d);
-  }
-  for (const [id, d] of latest) {
+    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)!) continue;
     const m = d.state === "done" ? /\/issues\/(\d+)/.exec(String(d.url ?? "")) : null;
-    if (m) out.set(id, { number: Number(m[1]), url: String(d.url) });
+    out.set(d.held, { issue: m ? { number: Number(m[1]), url: String(d.url) } : null });
   }
   return out;
 }
