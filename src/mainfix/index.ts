@@ -286,7 +286,7 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   } catch (e) {
     const why = oneLine(String((e as Error).message ?? e));
     log(`  ${repo}: issue for ${check} not opened: ${why}`);
-    if (e instanceof IssueError && e.paced) return why;
+    if (e instanceof IssueError && e.later) return why;
     if (!(e instanceof IssueError) || !e.clear) return `${repo}: whether the issue for ${check} was opened is not known: ${why}`;
     return await end("issue-failed", {}, `issue not opened: ${why}`.slice(0, 200));
   }

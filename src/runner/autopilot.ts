@@ -41,7 +41,7 @@ import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
 import { premergeCandidates } from "../premerge/review.ts";
-import { pendingDefects, postmergeRepos } from "../postmerge/select.ts";
+import { pendingDefects, postmergeRepos, stuckFilings } from "../postmerge/select.ts";
 import { mainFixDueRepos } from "../mainfix/index.ts";
 import { statusDueIn, statusRetriesAt, statusRetriesDue } from "../prstatus/index.ts";
 import { waitsForHaiku } from "../priority/index.ts";
@@ -792,12 +792,13 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // The defects of those reviews become issues in repos approved for comments.
+    // The defects of those reviews become issues in repos approved for comments. A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
     name: "postmerge-file",
     perRepo: true,
-    detect: async (db, { tracked }) => {
-      const pending = new Set((await pendingDefects(db)).map((d) => d.repo));
-      const approved = await loadStepApprovals(db, tracked, ["comment"]);
+    detect: async (db, { tracked, wake }) => {
+      const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), loadStepApprovals(db, tracked, ["comment"])]));
+      wake?.push(...stuck.wakes);
+      const pending = new Set([...defects.map((d) => d.repo), ...stuck.due.map((x) => x.row.repo)]);
       return tracked.filter((repo) => approved.has(repo) && pending.has(repo)).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
     },
   },

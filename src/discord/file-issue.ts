@@ -8,7 +8,7 @@ import { TokenBox } from "../dash/server/crypto.ts";
 import { readSecrets } from "../dash/server/config.ts";
 import { GitHubProvider, type Provider } from "../dash/server/provider.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
-import { createBotIssue, createReporterIssue, IssueError, labelBotIssue, labelReporterIssue, type Note } from "../github/write.ts";
+import { createBotIssue, createReporterIssue, IssueError, labelBotIssue, labelReporterIssue, type FiledIssue, type Note } from "../github/write.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { guardBotFiling } from "../core/guard.ts";
 import { botRepo } from "./filing-repos.ts";
@@ -20,7 +20,7 @@ import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-as
 import { failReporter, forgetReporterRow, newReporterState, reporterToken } from "./reporter.ts";
 import type { Db } from "../db/index.ts";
 import { countAudit } from "../data/control/index.ts";
-import { filingRefusal, loadFilingCounts, releaseFiling, reserveFiling, setFiledNumber } from "../data/discord/index.ts";
+import { filingRefusal, loadFilingCounts, releaseFiling, reserveFiling, setFiledNumber, setFoundNumber } from "../data/discord/index.ts";
 import { removeRunTexts } from "../data/inference/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
@@ -124,6 +124,10 @@ async function secretsOf(db: Db, env = process.env): Promise<{ box: TokenBox; pr
   }
 }
 
+/** An issue an earlier press made takes one slot, that press's. */
+const recordFiled = async (db: Db, s: { slot: number; repo: string; login: string; reporter: string }, made: FiledIssue): Promise<void> =>
+  made.found === undefined ? await setFiledNumber(db, s.slot, made.number) : await setFoundNumber(db, { ...s, since: made.found, number: made.number });
+
 export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHooks = {}): Promise<FileResult> {
   const { db, log } = deps;
   const now = (hooks.now ?? Date.now)();
@@ -164,7 +168,7 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
     const env = appChildEnv(tok.access);
     const asUser: Exec = (cmd, args, opts) => run(cmd, args, { ...opts, env, replaceEnv: true });
     const w = { db, login: tok.login, now: () => now };
-    let made: { number: number; url: string };
+    let made: FiledIssue;
     try {
       made = await createReporterIssue(w, asUser, { repo: req.repo, title, body: `${body}\n\n${FOOTER}` });
     } catch (e) {
@@ -179,7 +183,7 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;
-    await setFiledNumber(db, slot, made.number);
+    await recordFiled(db, { slot, repo: req.repo, login: tok.login, reporter: req.reporter }, made);
     // A label is a courtesy: GitHub refuses it when the repo has no such label or the account may not set labels.
     await labelReporterIssue(w, asUser, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
     return { status: "filed", number: made.number, url: made.url, login: tok.login };
@@ -253,7 +257,7 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
     const w = { db, login: "discord", now: () => now, ...(hooks.mint && { mint: hooks.mint }) };
     const note: Note = req.drafted ? { by: "model", kind: "issue", model: "haiku" } : { by: "fixed" };
     const extra = req.attach ? (await req.attach()).trim() : "";
-    let made: { number: number; url: string };
+    let made: FiledIssue;
     try {
       made = await createBotIssue(w, g, run, { repo: req.repo, title, body: `${body}${extra ? `\n\n${extra}` : ""}\n\n${botFooter(req.reporterName)}` }, note);
     } catch (e) {
@@ -268,7 +272,7 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;
-    await setFiledNumber(db, slot, made.number);
+    await recordFiled(db, { slot, repo: req.repo, login: BOT_LOGIN, reporter: req.reporter }, made);
     await labelBotIssue(w, g, run, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
     return { status: "filed", number: made.number, url: made.url };
   } finally {

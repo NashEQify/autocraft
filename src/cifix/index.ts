@@ -144,6 +144,8 @@ export type CifixSummary = {
   runId: string; repo: string; dryRun: boolean;
   pushed: string[]; asked: string[]; queued: string[]; infra: string[]; skipped: string[];
   failed: { ref: string; reason: string }[]; held: { ref: string; reason: string }[];
+  /** Asks that threw: nothing is stored for them, so the next job tries them again. */
+  unasked: { ref: string; reason: string }[];
 };
 
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
@@ -362,7 +364,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const at = () => (deps?.now() ?? new Date()).toISOString();
   const runId = `cifix-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
-  const summary: CifixSummary = { runId, repo, dryRun, pushed: [], asked: [], queued: [], infra: [], skipped: [], failed: [], held: [] };
+  const summary: CifixSummary = { runId, repo, dryRun, pushed: [], asked: [], queued: [], infra: [], skipped: [], failed: [], held: [], unasked: [] };
   const sel = await selectCifix(db, repo);
   const collect = params.limit === undefined ? sel.collect : sel.collect.slice(0, params.limit);
   const work = await takersCut(db, sel.work, params.limit === undefined ? undefined : params.limit - collect.length, repo, (c) => c.number);
@@ -758,7 +760,10 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       summary.asked.push(ref);
       log(`  ${ref}: asked the contributor about the failing CI at ${short(c.head)}`);
     } catch (e) {
-      log(`  ${ref}: not asked: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`);
+      if (isHalt(e)) throw e;
+      const reason = scrubReason(oneLine(String((e as Error).message ?? e)), d.root);
+      summary.unasked.push({ ref, reason });
+      log(`  ${ref}: not asked: ${reason}`);
     } finally { await release(); }
   }
   await each(collect, (x) => x.c.number, async (x) => {
@@ -780,7 +785,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     }
   });
   await each(work, (c) => c.number, workOne);
-  log(`cifix ${repo}: ${summary.pushed.length} pushed, ${summary.asked.length} commented, ${summary.queued.length} formatter runs queued, ${summary.infra.length} infra, ${summary.skipped.length} skipped, ${summary.failed.length} failed, ${summary.held.length} held; run ${runId}`);
+  log(`cifix ${repo}: ${summary.pushed.length} pushed, ${summary.asked.length} commented, ${summary.queued.length} formatter runs queued, ${summary.infra.length} infra, ${summary.skipped.length} skipped, ${summary.failed.length + summary.unasked.length} failed, ${summary.held.length} held; run ${runId}`);
   return summary;
 }
 
