@@ -9,8 +9,9 @@ import { plannedItems } from "../src/core/select-items.ts";
 import { selectCifix } from "../src/cifix/select.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { selectFixups } from "../src/fixup/select.ts";
+import { resumeTrips } from "../src/data/control/index.ts";
 import { setApproval } from "../src/labels/approval.ts";
-import { detectAutopilot, LANE_KINDS, LANES, type PlanCtx } from "../src/runner/autopilot.ts";
+import { detectAutopilot, LANE_KINDS, LANES, planDue, type PlanCtx } from "../src/runner/autopilot.ts";
 import { factsOf, prng, randomPrRows, rnd } from "./random-pr.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -82,6 +83,11 @@ describe("a tripped stage pushes and merges nothing and still does what writes n
       assert.deepEqual([numbers(sel.fix), numbers(sel.lint), numbers(sel.ask), sel.listed.length], [[], [], [3], 1]);
       await runFixup(w.db, { repo: "app", dryRun: false, limit: 0 }, () => {}, { now: () => new Date(), querier: w.gh.querier, root: SCRATCH } as unknown as FixupDeps);
       assert.equal((await w.rows("SELECT state FROM fixups WHERE number = 2"))[0]!.state, "linting");
+      await planDue(w.db);
+      assert.equal(await planDue(w.db), false);
+      await resumeTrips(w.db, [key], "op");
+      assert.ok(await planDue(w.db), "the resume lets the pushes go on");
+      assert.ok(numbers((await selectFixups(w.db, "app")).fix).includes(1));
     } finally { w.close(); }
   });
 

@@ -16,7 +16,7 @@ export type CifixCandidate = {
   route: "branch" | "comment";
   /** Our push to the PR is approved (pushPermission). */
   mayPush: boolean;
-  /** The repo allows comments. */
+  /** A comment on the PR may go out instead. */
   mayComment: boolean;
   /** The one rerun of this head was done; the failure is read again as something to fix. */
   rerun: boolean;

@@ -878,9 +878,9 @@ export async function cliGate(db: Db, step: { name: string }, steps: Map<string,
   return await pauseReason(db, step.name, ms, { backoff: false });
 }
 
-/** The steps an operator release (operator-actions.ts) hands new work to. */
+/** The steps an operator release (operator-actions.ts) or a resumed breaker, by its audit action, hands new work to. */
 const RELEASE_STEPS: Record<string, string[]> = {
-  "batch-again": ["merge"], "review-again": ["opus-review"], "verify-again": ["verify"],
+  "batch-again": ["merge"], "review-again": ["opus-review"], "verify-again": ["verify"], "stage-resume": Object.keys(STEP_STAGE),
 };
 
 /** When an operator last released work for the step, or null. */
