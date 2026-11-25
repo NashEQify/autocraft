@@ -33,9 +33,10 @@ export const workflowOf = (f: Pick<PrFacts, "workflow">): WorkflowFact | null =>
 /**
  * An unstarted PR that the workflow takes up by itself: a small or medium bug fix on the merge rule's criteria.
  * Not once its workflow (an implementation PR's: its issue's) ended: stopped, sent to the backlog, closed or done with an answer that
- * runs nothing, it means hands off until someone starts it.
+ * runs nothing, it means hands off until someone starts it. A question of the rule's that nobody answered before the author pushed
+ * (`superseded`) gives the PR back to the rule.
  */
-export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && !f.endedWorkflow && autoEligible(f);
+export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && (!f.endedWorkflow || f.endedWorkflow === "superseded") && autoEligible(f);
 /** A draft: no work and no merge until it is marked ready for review. */
 export const isDraft = (f: Pick<PrFacts, "draft" | "gone">): boolean => f.draft && !f.gone;
 /** The head has no review that stands, so one is due once nothing holds it: a person who started the PR chose it, and the auto path chose by label and flags; a merge entry is never reviewed. */

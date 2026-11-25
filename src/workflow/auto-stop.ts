@@ -5,13 +5,16 @@
 //
 // Only waits that need judgement make a row: the end of the steps (`answer`: an unsure or hold review, a pre-merge defect, a statement
 // conflict, sensitive files), a failed verification and a screenshot regression. Waits that clear by themselves (CI, GitHub's
-// mergeable state, a check that has not read the diff yet) make none. One row per PR: a PR that ever had a workflow gets none, so an
-// ended one is never started again.
+// mergeable state, a check that has not read the diff yet) make none. Nothing is started while the pipeline is off.
+//
+// One live rule row per PR. A row nobody answered ends as `superseded` when the author pushes (advance.ts), and the rule takes the PR
+// back: a later stop may start a new row. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
 import type { WaitCode } from "../core/codes.ts";
 import { conflictPath, decidePr, onAutoPath } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { Plan, PlanState, PrFacts } from "../core/plan.ts";
 import { EXTRAS_PENDING_REASON, UNCHECKED_REASON } from "../core/sensitive.ts";
+import { readConfig, SETTINGS } from "../data/control/index.ts";
 import { listPlans } from "../data/planner/index.ts";
 import { loadReviewRows, type ReviewRow } from "../data/review/index.ts";
 import { loadStartedRefs, recordEvents, saveWorkflows, startWorkflows } from "../data/workflow/index.ts";
@@ -26,9 +29,8 @@ export const JUDGEMENT_WAITS: readonly WaitCode[] = ["answer", "verification-fai
 const PASSING: ReadonlySet<string> = new Set([EXTRAS_PENDING_REASON, UNCHECKED_REASON]);
 /** The plan states those waits come from; a stored plan keeps its state while other work on the item is due, unlike its wait. */
 const JUDGEMENT_STATES: readonly PlanState[] = ["needs-decision", "opus-hold", "opus-close", "verify-failed", "verify-error"];
-/** Stored reasons that keep a PR off the auto path (core/decide.ts queueEntry): its facts are not loaded. */
-const OFF_RULE = /^(size |label |no settled label$|author not on the whitelist$|author unknown$)/;
-const EVERY_STATE: WorkflowState[] = ["running", "waiting", "blocked", "recommending", "done", "stopped", "closed", "backlog"];
+/** Every workflow state but a rule row's that the rule took back: a PR with a row in one of these gets no rule row. */
+const KEEPS_OFF: WorkflowState[] = ["running", "waiting", "blocked", "recommending", "done", "stopped", "closed", "backlog"];
 
 export type AutoStop = { repo: string; number: number; head: string; code: WaitCode; plan: PlanPart[]; rec: Recommendation };
 
@@ -45,12 +47,15 @@ export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[]): Au
   return q ? { repo: f.repo, number: f.number, head: f.head, code, plan, rec: ruleStopped(q.rec, p.reasons) } : null;
 }
 
-/** The judgement stops of open auto-path PRs that never had a workflow: candidates from the stored plans, decided on fresh facts. Reads only. */
+/**
+ * The judgement stops of open auto-path PRs that the rule may start a row for: candidates from the stored plans (on the auto path as the
+ * planner stored them, in a judgement state), decided on fresh facts. Reads only.
+ */
 export async function findAutoStops(db: Db, o: { repos?: string[] } = {}): Promise<AutoStop[]> {
-  const plans = await listPlans(db, { kind: "pr", open: true, states: [...JUDGEMENT_STATES], ...(o.repos ? { repos: o.repos } : {}) });
+  const plans = await listPlans(db, { kind: "pr", open: true, auto: true, states: [...JUDGEMENT_STATES], ...(o.repos ? { repos: o.repos } : {}) });
   if (!plans.length) return [];
-  const started = await loadStartedRefs(db, { states: EVERY_STATE, refs: plans });
-  const refs = plans.filter((p) => !started.has(`${p.repo}#${p.number}`) && !p.reasons.some((r) => OFF_RULE.test(r))).map((p) => ({ repo: p.repo, number: p.number }));
+  const started = await loadStartedRefs(db, { states: KEEPS_OFF, refs: plans });
+  const refs = plans.filter((p) => !started.has(`${p.repo}#${p.number}`)).map((p) => ({ repo: p.repo, number: p.number }));
   if (!refs.length) return [];
   const facts = await loadPrFacts(db, { refs: refs.map((r) => `${r.repo}#${r.number}`) });
   const reviews = await loadReviewRows(db, refs);
@@ -62,6 +67,7 @@ export async function findAutoStops(db: Db, o: { repos?: string[] } = {}): Promi
  * question and their events in one write, a few statements whatever their number. A PR someone started meanwhile keeps their workflow.
  */
 export async function startAutoStops(db: Db, at: string = new Date().toISOString()): Promise<number> {
+  if (!(await readConfig(db, [SETTINGS.pipelineEnabled.name])).pipelineEnabled) return 0;
   const stops = await findAutoStops(db);
   if (!stops.length) return 0;
   return await db.write(async () => {

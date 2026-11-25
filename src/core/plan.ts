@@ -113,7 +113,7 @@ export type WorkflowFact = {
 };
 
 /** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Each means hands off (done: an open PR whose workflow ended with an answer that runs nothing): not even the auto path takes the item up again until someone starts it. */
-export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
+export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog" | "superseded";
 
 export const isQueueState = (s: PlanState): s is QueueState => (QUEUE_STATES as readonly string[]).includes(s);
 

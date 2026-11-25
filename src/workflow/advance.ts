@@ -39,7 +39,7 @@ import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./rec
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { listText, stepsFor, type StepName } from "./status.ts";
-import type { Blocker, ItemWorkflow, PlanPart, Recommendation } from "./types.ts";
+import { RULE_STARTER, type Blocker, type ItemWorkflow, type PlanPart, type Recommendation } from "./types.ts";
 import { candidatePr, workOf } from "./work.ts";
 
 const ACTOR = "pipeline";
@@ -466,6 +466,10 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (impl === "theirs") authorPush = { from: w.acceptedHead ?? w.baseHead ?? (pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).at(-1)?.head ?? "", to: head };
   // Past a question nobody answered, nothing but an accepted head goes on by itself.
   if (repushed && !authorPush && !accepted(pass, w, ref, head)) authorPush = { from: w.recHead, to: head };
+  // The automatic merge rule's question that nobody answered is about commits that are gone: the rule takes the PR back (auto-stop.ts).
+  if (authorPush && w.startedBy === RULE_STARTER && w.approvedBy === null && said <= w.startedAt && resumed === null) {
+    return write({ state: "superseded", rec: null, recAt: null, blocker: null, blockerParams: null });
+  }
 
   // The numbered plan follows the latest review at the head; a merge-queue entry has none, unless it owes one.
   const gone = { entry: w.entry, startedAt: w.startedAt, since, reviewAskedAt: w.reviewAskedAt };

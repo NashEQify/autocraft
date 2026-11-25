@@ -1,6 +1,6 @@
 import type { StepApproval } from "../data/control/types.ts";
 import type { ActionState, EndedWorkflow, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
-import type { ItemWorkflow } from "../workflow/types.ts";
+import { RULE_STARTER, type ItemWorkflow } from "../workflow/types.ts";
 import type { RefusalCode } from "./codes.ts";
 import { acceptedHeads, chainsOwn, type OwnPush } from "./evidence.ts";
 
@@ -104,7 +104,7 @@ export function mayPush(f: {
 }): MayResult {
   const w = f.workflow;
   if (f.operatorFix) {
-    const by = f.by ?? w?.approvedBy ?? w?.startedBy;
+    const by = f.by ?? w?.approvedBy ?? (w?.startedBy === RULE_STARTER ? undefined : w?.startedBy);
     return by ? person(by) : refuse("request-unnamed", "The fix-up command does not name who asked for it.");
   }
   if (w?.live) {

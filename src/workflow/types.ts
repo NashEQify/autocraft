@@ -4,7 +4,7 @@
 
 export type ItemKind = "pr" | "issue";
 export type Entry = "review" | "fixup" | "implement" | "merge";
-export type WorkflowState = "running" | "waiting" | "blocked" | "recommending" | "done" | "stopped" | "closed" | "backlog";
+export type WorkflowState = "running" | "waiting" | "blocked" | "recommending" | "done" | "stopped" | "closed" | "backlog" | "superseded";
 export type Surface = "github" | "discord" | "agent" | "dashboard" | "cli";
 
 /**
