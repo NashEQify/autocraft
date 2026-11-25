@@ -89,7 +89,13 @@ test("an item nobody started: its hold's comment shows no steps, and says once t
     const bodies: string[] = [];
     const exec: Exec = async (_cmd, _args, opts) => { bodies.push(opts?.input ?? ""); return { code: 0, stdout: "https://github.com/o/app/issues/7#issuecomment-1001\n", stderr: "" }; };
     const querier: Querier = { spent: 0, remaining: 5000, query: async () => ({ repository: { issue: { comments: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [] } } } }) as never };
-    const say = async (text: string) => assert.equal((await runCommand(w.db, { login: OPERATOR, canWrite: async () => true }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 7 }] })).items[0]!.outcome, "run");
+    // Commands act under the app identity; the comments are written by the box account, since no app is registered to mint a token with.
+    const identity = (value: string) => w.db.prepare("UPDATE settings SET value = ? WHERE key = 'github_identity'").run(value);
+    const say = async (text: string) => {
+      await identity("app");
+      assert.equal((await runCommand(w.db, { login: OPERATOR, canWrite: async () => true }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 7 }] })).items[0]!.outcome, "run");
+      await identity("box");
+    };
     const run = async () => await runPrStatus(w.db, { repo: "app", by: "pipeline", runId: "t", limit: 10, exec, querier, base: null });
     await say("hold");
     assert.deepEqual((await run()).posted, ["app#7"]);

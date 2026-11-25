@@ -14,7 +14,6 @@ import { runCommand, type Actor, type CommandInput } from "../src/workflow/apply
 import { holdBatched, stopBatch } from "../src/workflow/batch.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow, workflowHistory } from "../src/workflow/store.ts";
-import type { Exec } from "../src/fixup/git.ts";
 import { T0, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
@@ -231,17 +230,15 @@ test("a batch that could not be ended says so, and the same control ends it when
   const w = await fresh();
   await run(w, "merge");
   await settle(w);
-  let code = 1;
-  const exec: Exec = async () => ({ code, stdout: "", stderr: code ? "HTTP 502" : "" });
   for (const id of [5, 6]) {
     await w.db.run(w.db.k.insertInto("merge_batches").values({ id, repo: "app", branch: `integration-app-${id}`, state: "open", base_sha: "b", commit_sha: "t", pr_number: 50 + id, created_at: T0, updated_at: T0 }));
     await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: id, number: 1, head_oid: "sha1", position: 1 }));
-    const send1 = async () => (id === 5 ? await holdBatched(w.db, as(MAINT), "dashboard", "app", 1, exec) : await stopBatch(w.db, as(MAINT), "dashboard", id, exec));
+    const send1 = async () => (id === 5 ? await holdBatched(w.db, as(MAINT), "dashboard", "app", 1) : await stopBatch(w.db, as(MAINT), "dashboard", id));
     const state = async () => (await w.rows(`SELECT state FROM merge_batches WHERE id = ${id}`))[0]!.state;
-    code = 1;
+    // No app is registered to close its PR with; then there is none to close.
     await assert.rejects(send1(), /could not be closed/);
     assert.deepEqual([await state(), (await workflowHistory(w.db, "app", 1)).at(-1)!.state], ["open", "stopped"]);
-    code = 0;
+    await w.db.run(w.db.k.updateTable("merge_batches").set({ pr_number: null }).where("id", "=", id));
     await send1();
     assert.equal(await state(), "superseded");
     if (id === 5) { await tick(); await run(w, "resume"); await settle(w); }

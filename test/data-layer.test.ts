@@ -72,8 +72,9 @@ test("the scan flags query calls, SQL text and imports of query internals, and p
 });
 
 test("one place maps pull requests to workflows: nothing else joins implementations to item_workflows or reads the attempt rule", () => {
-  // The change log names the PRs of an issue's attempts, linked or not; the switch-over converts rows once.
-  const allowed = new Set(["src/data/workflow/link.ts", "src/data/workflow/fragments.ts", "src/db/plan-inputs.ts", "src/db/switch-over.ts"]);
+  // The change log names the PRs of an issue's attempts, linked or not; the switch-over converts rows once, and
+  // the conversion of merge holds runs inside a migration, on workflows that no release has linked.
+  const allowed = new Set(["src/data/workflow/link.ts", "src/data/workflow/fragments.ts", "src/db/plan-inputs.ts", "src/db/switch-over.ts", "src/db/holds-to-items.ts"]);
   const names = (text: string, table: string) => new RegExp(`(?:From|[jJ]oin)\\(\\s*["'](?:main\\.)?${table}\\b|\\b(?:FROM|JOIN)\\s+(?:main\\.)?${table}\\b`).test(text);
   const found: string[] = [];
   const walk = (dir: string) => {
