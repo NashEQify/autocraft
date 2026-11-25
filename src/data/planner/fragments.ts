@@ -26,7 +26,7 @@ const QUEUE_STATES = [
  * The mirror's item rows (alias `ir`) of `repos` (every repo when absent), narrowed to the pass universe: open PRs, merged PRs with a
  * take review or merged by us, PRs of a current implementation attempt, and open issues of tracked repos.
  */
-const passUniverse = (db: Db, repos?: readonly string[]) =>
+const passUniverse = (db: Db, repos?: readonly string[], prsOnly = false) =>
   itemsOfRepos(db, repos).clearSelect().select(["ir.repo as repo", "ir.number as number"])
     .where((eb: any) => eb.or([
       eb.and([eb("ir.kind", "=", "pr"), eb.or([
@@ -35,12 +35,14 @@ const passUniverse = (db: Db, repos?: readonly string[]) =>
         mergedByUs(eb, "ir.repo", "ir.number"),
         attemptOfPr(eb, eb.ref("ir.repo"), eb.ref("ir.number"), { current: true }),
       ])]),
-      eb.and([eb("ir.kind", "=", "issue"), eb("ir.state", "=", "OPEN"), trackedRepo(eb, "ir.repo")]),
+      ...(prsOnly ? [] : [eb.and([eb("ir.kind", "=", "issue"), eb("ir.state", "=", "OPEN"), trackedRepo(eb, "ir.repo")])]),
     ])) as unknown as SelectQueryBuilder<any, any, KeyRow>;
 
 registerKeySource<undefined>(PASS_SOURCES.full, (db) => passUniverse(db));
 /** The pass universe of one repo (planner.repoPass). */
 registerKeySource<{ repo: string }>("planner.repoPass", (db, args) => passUniverse(db, [args.repo]));
+/** The PRs of the pass universe, of every repo or one (planner.prPass). */
+registerKeySource<{ repo?: string }>("planner.prPass", (db, args) => passUniverse(db, args.repo === undefined ? undefined : [args.repo], true));
 
 registerKeySource<{ due: Ref[]; seen: number }>(PASS_SOURCES.changed, (db, args) => {
   const k = queryDb(db).k;

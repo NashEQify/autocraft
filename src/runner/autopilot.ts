@@ -34,7 +34,7 @@ import { isWork } from "../core/assignment.ts";
 import { collectDue } from "../verify/results.ts";
 import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
-import { prBuildsDue, reposWithQueuedBuilds } from "../prbuild/index.ts";
+import { prBuildsDue } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
@@ -151,6 +151,8 @@ export type PlanCtx = {
   marks?: Map<string, string>;
   /** The repos in scope (scopeRepos) as the pass read them. */
   scope?: Set<string>;
+  /** Every tracked repo, in scope or not. */
+  names?: string[];
   /** The topic counters the pass read with the change log, so a change after them is new input to the next pass. */
   seqs?: Record<string, number>;
   /** The planner pass's candidates of each lane, by lane name: the Next lists reuse what the pass detected. */
@@ -176,13 +178,13 @@ export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<str
       const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
       const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
       wakeAtRefresh(pass.plans, wake);
-      return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, seqs };
+      return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
     });
   }
   const [scope, names, seqs] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db), db.seqs()]));
   const plans = await loadPlanSet(db);
   wakeAtRefresh(plans, wake);
-  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope, seqs };
+  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope, names, seqs };
 };
 
 /**
@@ -613,8 +615,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     extra: tasksSig,
     detect: async (db, ctx) => {
-      const queued = new Set(await reposWithQueuedBuilds(db));
-      return (await prBuildsDue(db, [...new Set([...ctx.tracked, ...queued])])).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
+      return (await prBuildsDue(db, ctx.tracked)).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
     },
   },
   {
@@ -714,8 +715,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      const tracked = await trackedNames(db);
-      const approved = await loadStepApprovals(db, tracked, ["prstatus"]);
+      const [tracked, approved] = await db.together(() => Promise.all([ctx.names ?? trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
       const repos = tracked.filter((repo) => approved.has(repo));
       const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
       for (const at of retries.values()) ctx.wake?.push(at);

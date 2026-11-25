@@ -5,7 +5,7 @@ import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
-import { fullPass, repoPass } from "../data/planner/index.ts";
+import { prPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { pushable, sameRepo } from "../fixup/pushable.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
@@ -38,7 +38,7 @@ export type LoadOptions = {
   repo?: string;
   /** Only these PRs, as "repo#number". */
   refs?: Iterable<string>;
-  /** The pass keys (planner.fullPass / changedPass); default: `refs`, else every item of the pass universe. */
+  /** The pass keys (planner.prPass / changedPass); default: `refs`, else every PR of the pass universe. */
   keys?: KeySource;
   /** Decision time in ms (default: the clock). */
   now?: number;
@@ -122,7 +122,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
 export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase }, endWave: EndWave): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
-  const keys: KeySource = opts.keys ?? (refs ? [...refs].map(asRef) : opts.repo ? repoPass(opts.repo) : fullPass());
+  const keys: KeySource = opts.keys ?? (refs ? [...refs].map(asRef) : prPass(opts.repo));
   const mergeEntryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;

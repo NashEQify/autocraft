@@ -3,7 +3,7 @@
 import { loadHolds, isOutsideAuthor, loadInsiders } from "../data/intake/index.ts";
 import { config, saveSettings, withConfig } from "../data/control/index.ts";
 import { loadPrBuildStates } from "../data/merge/index.ts";
-import { listItems, loadRepos } from "../data/mirror/index.ts";
+import { listItems, loadRepos, openItemKeys } from "../data/mirror/index.ts";
 import { cachedRust, type RustCheck } from "../verify/candidates.ts";
 import type { Db } from "../db/index.ts";
 
@@ -46,13 +46,13 @@ export async function selectPrBuildsIn(db: Db, repos: readonly string[], o: { ru
     const all = (repo: string): boolean => config(db).repo(repo).prBuildsScope === "all";
     const building = repos.filter((r) => rows.get(r)?.visibility === "public" && roomOf(r) > 0);
     if (!building.length) return out;
-    const [items, insiders] = await db.together(() => Promise.all([
+    const [items, held, insiders] = await db.together(() => Promise.all([
       listItems(db, { repos: building, kind: "pr", states: ["OPEN"], inScope: true }, "text"),
+      loadHolds(db, openItemKeys({ repos: building, kind: "pr" })),
       building.every(all) ? Promise.resolve(new Set<string>()) : loadInsiders(db),
     ]));
     const open = items.filter((i) => !i.is_draft && i.head_oid && !states.get(i.repo)?.have.has(`${i.number}@${i.head_oid}`))
       .sort((a, b) => (a.created_at === b.created_at ? 0 : a.created_at === null ? -1 : b.created_at === null ? 1 : a.created_at < b.created_at ? -1 : 1) || a.number - b.number);
-    const held = await loadHolds(db, open.map((i) => ({ repo: i.repo, number: i.number })));
     const rust = o.rust ?? cachedRust;
     for (const r of open) {
       const repo = r.repo, list = out.get(repo) ?? out.set(repo, []).get(repo)!;

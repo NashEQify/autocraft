@@ -3,7 +3,7 @@
 // it never reads a real database.
 //
 //   AUTOCRAFT_TEST_PG_URL=<postgres admin url> node --no-warnings --import ./test/pg-suite-preload.ts scripts/planner-bench.ts
-//       [--delay MS] [--only NAME] [--sites N] [--sql] [--trace] [--width N] [--dump FILE]
+//       [--delay MS] [--only NAME] [--sites N] [--sql] [--trace] [--unfused] [--width N] [--dump FILE]
 //
 // --sites N lists the N call sites with the most statements of each unit, --sql its statements, --trace its statements in order; --dump FILE freezes the clock and
 // writes what the passes decided (proposals, stored Plans, lane lists), to compare two versions. `scripts/pg-test.sh start`
@@ -16,9 +16,11 @@ import { connectDb } from "../src/db/open.ts";
 import { queryDb } from "../src/db/query-db.ts";
 import { COLUMNS } from "../src/db/types.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
+import { loadPlanSet } from "../src/core/plan-set.ts";
 import { dropPlanState } from "../src/core/plan-engine.ts";
 import { enqueueCall } from "../src/remote/calls.ts";
 import { applyProposals, detectAutopilot, planDue } from "../src/runner/autopilot.ts";
+import { SCHEME_ID } from "../src/itemhash.ts";
 import { world } from "../test/world-db.ts";
 import { startLatencyProxy } from "./latency-proxy.ts";
 
@@ -55,6 +57,7 @@ for (let n = 1; n <= PRS; n++) {
   if (n !== 2) await w.workflow(n, { entry: n === 1 ? "merge" : "review" });
 }
 for (let n = 101; n <= 100 + ISSUES; n++) await w.issue(n, { label: n % 2 ? "bugfix" : "feature", ...(n % 3 ? { impact: "medium" } : {}) });
+await direct.run(direct.k.updateTable("items").set({ embed_hash: "e", class_hash: "c", class_scheme: SCHEME_ID, text_refs: "[[],[]]" }).where("repo", "=", "app"));
 for (const step of ["labels", "prstatus"]) await direct.run(direct.k.insertInto("repo_step_approvals").values({ repo: "app", step, by: "op", at: iso(600) } as never));
 for (let i = 0; i < 25; i += 2) await direct.run(direct.k.insertInto("settings").values({ key: `build_feature:pr-builds:${i ? `app${i}` : "app"}`, value: "on" }));
 for (let n = 1; n <= 4; n++) await direct.run((direct.k as any).insertInto("item_stage").values({ repo: "app", number: n, stage: "reviewed", at: iso(90), reviewed: 1 }));
@@ -97,6 +100,8 @@ url.host = `127.0.0.1:${proxy.port}`;
 url.pathname = `/${name}`;
 const db: Db = await connectDb(url.toString(), { role: "runner", migrate: false });
 
+// --unfused sends every read by itself, so the trace shows what each costs on the server.
+if (args.includes("--unfused")) (db as { together: Db["together"] }).together = (fn) => fn();
 const decided: Record<string, unknown> = {};
 async function unit<T>(label: string, fn: () => Promise<T>): Promise<T> {
   const texts = new Map<string, number>();
@@ -126,9 +131,9 @@ const pass = async (label: string) => {
   const found = await unit(label, () => detectAutopilot(db, { incremental: true, log: (l) => { if (/took|:/.test(l)) console.log(`    log: ${l}`); } }));
   if (!only || label.includes(only)) console.log(`    ${found.timing?.pass}: plans ${Math.round(found.timing!.loadMs)} ms, lanes ${Math.round(found.timing!.lanesMs)} ms, cache ${Math.round(found.timing!.cacheMs)} ms, ${found.proposals.length} proposals`);
   if (dump) decided[label] = {
-    proposals: found.proposals, wakeAt: found.wakeAt, status: found.status,
+    proposals: found.proposals, wakeAt: found.wakeAt, status: found.status, facts: await loadPlanSet(db),
     plans: await direct.all(direct.k.selectFrom("item_plans").selectAll().orderBy("repo").orderBy("number")),
-    lanes: await direct.all((direct.k as any).selectFrom("lane_items").selectAll().orderBy("lane")),
+    lanes: await direct.all((direct.k as any).selectFrom("lane_next").selectAll().orderBy("lane")),
   };
   return found;
 };

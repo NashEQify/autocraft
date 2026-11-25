@@ -3,10 +3,11 @@
 // A build that fails where CI passed is noted on the item (stage row `pr-build-disagree`) and nothing more: our build
 // lacks CI's gate inputs and toolchain targets, so such failures are often false.
 import { BuildError } from "../build/envs.ts";
-import { featureOn, featureRepos } from "../build/features.ts";
+import { featureOn } from "../build/features.ts";
 import { warmKeyOf } from "../build/tasks.ts";
 import { QueueFullError, TERMINAL, cancelTasks, cloneTasks, loadTasks } from "../data/build/index.ts";
-import { listReposWithQueuedBuilds, loadLateDisagreements, loadPendingPrBuilds, queuePrBuilds, restartPrBuilds, savePrBuildErrors, settlePrBuilds, type NewPrBuild } from "../data/merge/index.ts";
+import { loadLateDisagreements, loadPendingPrBuilds, queuePrBuilds, restartPrBuilds, savePrBuildErrors, settlePrBuilds, type NewPrBuild } from "../data/merge/index.ts";
+import { config, withConfig } from "../data/control/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadInScope } from "../data/workflow/index.ts";
 import { leaseItem } from "../runner/leases.ts";
@@ -26,29 +27,25 @@ const headKey = (repo: string, number: number, head: string): string => `${repo}
 
 export type PrBuildDeps = { fetchCrates: CratesFetcher; /** The PR's base commit, or null when GitHub did not answer. Default: GitHub. */ baseOf?: (repo: string, number: number) => Promise<string | null> };
 
-/** Repos with queued builds: they need a collect run (stale heads, a switch turned off, a repo that left scope) whatever the switch says. */
-export async function reposWithQueuedBuilds(db: Db): Promise<string[]> {
-  return await listReposWithQueuedBuilds(db);
-}
-
 /**
- * The repos of `repos` with work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only.
+ * The repos of `repos`, and of those with a queued build, with work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only.
  */
 export async function prBuildsDue(db: Db, repos: readonly string[]): Promise<string[]> {
-  const on = new Set((await featureRepos(db, "pr-builds")).filter((r) => repos.includes(r)));
-  const [selected, late, all] = await db.together(() => Promise.all([selectPrBuildsIn(db, [...on]), on.size ? loadLateDisagreements(db) : [], loadPendingPrBuilds(db)]));
-  const pending = all.filter((p) => repos.includes(p.repo));
-  const open = pending.filter((p) => on.has(p.repo)).map((p) => ({ repo: p.repo, number: p.number }));
-  const inScope = await loadInScope(db, open);
-  const due = new Set([...late.map((d) => d.repo).filter((r) => on.has(r)), ...[...selected].filter(([, cs]) => cs.some((c) => c.rust !== false)).map(([r]) => r)]);
-  for (const p of pending) {
-    if (!on.has(p.repo) || p.itemState !== "OPEN" || p.currentHead !== p.headSha || p.taskId === null || !inScope.has(`${p.repo}#${p.number}`)
-      || (p.taskState !== null && (TERMINAL as readonly string[]).includes(p.taskState))) due.add(p.repo);
-  }
-  return repos.filter((r) => due.has(r));
+  return await withConfig(db, async () => {
+    const onIn = (r: string): boolean => config(db).repo(r).buildFeature("pr-builds");
+    const on = new Set(repos.filter(onIn));
+    const [selected, late, pending] = await db.together(() => Promise.all([selectPrBuildsIn(db, [...on]), on.size ? loadLateDisagreements(db) : [], loadPendingPrBuilds(db)]));
+    const inScope = await loadInScope(db, pending.filter((p) => onIn(p.repo)).map((p) => ({ repo: p.repo, number: p.number })));
+    const due = new Set([...late.map((d) => d.repo).filter((r) => on.has(r)), ...[...selected].filter(([, cs]) => cs.some((c) => c.rust !== false)).map(([r]) => r)]);
+    for (const p of pending) {
+      if (!onIn(p.repo) || p.itemState !== "OPEN" || p.currentHead !== p.headSha || p.taskId === null || !inScope.has(`${p.repo}#${p.number}`)
+        || (p.taskState !== null && (TERMINAL as readonly string[]).includes(p.taskState))) due.add(p.repo);
+    }
+    return [...due];
+  });
 }
 
-export const prBuildDue = async (db: Db, repo: string): Promise<boolean> => (await prBuildsDue(db, [repo])).length > 0;
+export const prBuildDue = async (db: Db, repo: string): Promise<boolean> => (await prBuildsDue(db, [repo])).includes(repo);
 
 export type PrBuildSummary = { queued: number; passed: number; failed: number; errors: number; stale: number; retried: number; disagreements: number };
 
