@@ -53,7 +53,7 @@ async function merges(w: World, head = "sha1"): Promise<boolean[]> {
   return [planned, verdict, !("refused" in g)];
 }
 const ALL = [true, true, true], NONE = [false, false, false];
-const refusedBy = async (w: World, head = "sha1") => { const v = (await mergeVerdicts(w.db, "app", [{ number: 1, head }])).get(1)!; return v.ok ? null : v.why; };
+const refusedBy = async (w: World, head = "sha1") => { const v = (await mergeVerdicts(w.db, "app", [{ number: 1, head }])).get(1)!; return v.ok ? null : v.why.text; };
 
 test("an approved PR merges only through its handed-over leg, also where the repo's merge rule would merge it", async () => {
   const w = await (await ready()).workflow(1, { by: MAINT });

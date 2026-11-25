@@ -15,7 +15,7 @@ const dir = mkdtempSync(join(SCRATCH, "base-binding-"));
 process.env.AUTOCRAFT_DIFF_CACHE = join(dir, "diffs");
 const HEAD = "a".repeat(40);
 
-test("a merge is refused when the base is not the one the review read", async () => {
+test("a merge goes only into the default branch, when the review read the diff against it", async () => {
   const db = await connectDb(join(dir, "t.db"));
   await db.run(db.k.insertInto("repos").values({ name: "app", default_branch: "main" }));
   await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: HEAD, at: "t", mode: "full", verdict: "take", base_ref: "main" }));
@@ -25,6 +25,8 @@ test("a merge is refused when the base is not the one the review read", async ()
   await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 8, head_oid: HEAD, at: "t", mode: "full", verdict: "take" }));
   assert.equal(await baseRefusal(db, "app", HEAD, 8, "main"), null);
   assert.ok(await baseRefusal(db, "app", HEAD, 8, "release"));
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 9, head_oid: HEAD, at: "t", mode: "full", verdict: "take", base_ref: "release" }));
+  for (const base of ["main", "release"]) assert.match((await baseRefusal(db, "app", HEAD, 9, base))!, /release.*main|main.*release/);
 });
 
 test("a diff is stored only for the head it was fetched at, and read again for another base", async () => {

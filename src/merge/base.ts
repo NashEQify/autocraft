@@ -20,11 +20,12 @@ async function basesOf(db: Db, repo: string, number: number, head: string): Prom
 }
 
 /**
- * Why a PR may not merge into its current base, or null: the merge goes into the branch the review read the diff against.
- * A review that recorded none (stored earlier) allows only the default branch.
+ * Why a PR may not merge into its current base, or null: it merges into the default branch only, and only when that is the branch the
+ * review read the diff against. A review that recorded none (stored earlier), or a PR that merges without one, counts as read against it.
  */
 export async function baseRefusal(db: Db, repo: string, head: string, number: number, liveBase: string): Promise<string | null> {
   const b = await basesOf(db, repo, number, head);
+  if (b.main && liveBase !== b.main) return `the base branch is ${liveBase}, not the default branch ${b.main}`;
   const reviewed = b.reviewed ?? b.main;
   if (!reviewed) return null;
   return liveBase === reviewed ? null : `the base branch is ${liveBase}, but the review read the diff against ${reviewed}`;
