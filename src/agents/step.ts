@@ -31,7 +31,7 @@ export type ParseCtx = {
 /** `value` is what the reply answered; `rest` is the part of the input without a valid answer, asked again on the next attempt (absent: done). */
 export type Parsed<I, V> = { value: V; rest?: I };
 
-type StepBase<I, V> = {
+type StepBase<I, _V> = {
   /** Items in an input, for the usage row's item count; default: its length for a list, else 1. */
   size?: (input: I) => number;
   /** Attempts per call; default: the prompt's registered `limits.attempts`. */

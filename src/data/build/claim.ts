@@ -69,7 +69,7 @@ export async function loadEnvPass(db: Db, kind: "kubernetes" | "workspace"): Pro
   for (const e of envs as EnvDbRow[]) byEnv.set(e.id, { runs: [], tasks: [] });
   for (const r of runs as PodRun[]) byEnv.get(r.env_id)?.runs.push(r);
   const taskById = new Map<number, TaskRecord>(records.map((t) => [t.id, t]));
-  for (const [id, e] of byEnv) e.tasks = e.runs.flatMap((r) => taskById.get(r.task_id) ?? []);
+  for (const [, e] of byEnv) e.tasks = e.runs.flatMap((r) => taskById.get(r.task_id) ?? []);
   for (const t of records) {
     if (t.envId && (t.state === "claimed" || t.state === "running")) {
       const row: RunningRow = { id: t.id, env_id: t.envId, step: t.step, repo: t.repo, number: t.number, plan: JSON.stringify(t.plan), results: JSON.stringify(t.results), started_at: t.startedAt, claimed_at: t.claimedAt };

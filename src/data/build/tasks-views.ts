@@ -12,7 +12,7 @@ import { loadArtifacts, loadLogTails } from "./artifacts.ts";
 import { privateStepExpr } from "./fragments.ts";
 import { byteLen, hasPatchExpr, idsIn, lastLogSteps, parseJson, refKey, TASK_COLUMNS, toTask, type TaskDbRow } from "./rows.ts";
 import { loadConfidentialReadyAt } from "./tasks-load.ts";
-import { CONFIDENTIAL_WAIT, LOG_TAIL_BYTES, PRIVATE_STEPS, StatusError, TERMINAL } from "./types.ts";
+import { CONFIDENTIAL_WAIT, LOG_TAIL_BYTES, PRIVATE_STEPS, StatusError } from "./types.ts";
 import type {
   BuildSummary, BuildTask, BuildTaskDetail, EnvTasks, IdSource, ItemShown, MemRow, PodRun, RefSource, Requires, SandboxEnv, TaskCard, TaskEvent, TaskFilter, TaskHistoryStat, TaskPage, TaskResult,
   TaskState, TaskStep, ViewScope,

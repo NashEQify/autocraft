@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inPilot } from "../src/pilot.ts";
+import { inScopeExpr } from "../src/data/workflow/fragments.ts";
 import { refreshOutsideHolds, releaseOutside, setOutsideLimits } from "../src/outside.ts";
-import { resumeStage } from "../src/push-outcomes.ts";
+import { resumeStage } from "../src/data/control/index.ts";
+import type { Db } from "../src/db/index.ts";
 import { everySeq, mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+
+/** The item is in the pipeline's scope (the workflow scope fragment), read as the planner reads it. */
+const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
+  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 
 const NOW = Date.parse("2026-11-08T12:00:00Z");
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();

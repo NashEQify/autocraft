@@ -10,7 +10,7 @@ import { loadActRoom, loadDueHeld, loadHeld, addHeld, addTurns, markHeld, type H
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { createIssue, IssueError, PACE_MAX_WAIT_MS, type Note, type Writer } from "../github/write.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { settlesNow } from "../settlers.ts";
 import { roomFor } from "./queue.ts";
 import { systemBlock } from "./store.ts";
@@ -131,7 +131,7 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
     const v = heldVerdict(h);
     if (!v) continue;
     if ("drop" in v) { if (await drop(db, h, v.drop, at)) s.dropped++; continue; }
-    if (await isQuiet(db, h.repo, h.number)) { if (await drop(db, h, "the pull request is quiet until its fix is published", at)) s.dropped++; continue; }
+    if ((await loadQuiet(db, [`${h.repo}#${h.number}`])).size > 0) { if (await drop(db, h, "the pull request is quiet until its fix is published", at)) s.dropped++; continue; }
     if (!await settlesNow(db, h.by, [h.issue_repo])) { if (await drop(db, h, `${h.by} no longer has write access to ${h.issue_repo}`, at)) s.dropped++; continue; }
     const g = await guardRepo(db, h.issue_repo, "comment", { operator: h.by }, undefined, h.by);
     if ("refused" in g) {

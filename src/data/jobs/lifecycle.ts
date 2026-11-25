@@ -6,7 +6,7 @@ import { sql } from "kysely";
 import { MAX_RESUMES, MAX_TOTAL_RESUMES } from "../../runner/resuming.ts";
 import { flushJobItems } from "./items.ts";
 import { nowIso } from "./sql.ts";
-import type { JobFlags, JobPatch, JobPulse, JobResult, JobRow, JobState, PulseRow } from "./types.ts";
+import type { JobFlags, JobPatch, JobPulse, JobResult, PulseRow } from "./types.ts";
 
 const PIPELINE_USER = "pipeline";
 /** The error a job carries once the runner asked it to stop at its deadline or for lack of progress. */

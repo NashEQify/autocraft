@@ -8,10 +8,10 @@ import { optionsOf, getDecision, type DecisionRow, type Kind } from "../decision
 import { KEEP_IN_CORE } from "../core/rules.ts";
 import { backlogHeldExpr, notOwnIntegrationExpr } from "../dupes/held.ts";
 import { ALL_LABELS, isTypeLabel, sameLabel } from "../labels/set.ts";
-import { pilotExpr } from "../pilot.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { LOGIN } from "../access.ts";
-import { CLOSE_REASONS, COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, RESOLVE_MAX, type CardKind, type CloseReason } from "./types.ts";
+import { CLOSE_REASONS, COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, RESOLVE_MAX, type CloseReason } from "./types.ts";
 import { findSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
@@ -260,7 +260,7 @@ export async function closeRefusal(db: Db, repo: string, n: number): Promise<str
     .where("i.repo", "=", repo).where("i.number", "=", n).$if(!!cond, (q) => q.where((eb) => cond!(eb))));
   if (!await has()) return `${ref(repo, n)} is not in the mirror`;
   if (!await has((eb) => notOwnIntegrationExpr(db, eb, "i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
-  if (!await has((eb) => pilotExpr(db, eb, "i"))) return `${ref(repo, n)} is outside the pilot`;
+  if (!await has((eb) => inScopeExpr(db, eb, "i.repo", "i.number"))) return `${ref(repo, n)} is outside the pilot`;
   if (await has((eb) => backlogHeldExpr(db, eb, "i"))) return `${ref(repo, n)} is held by a Backlog answer`;
   return null;
 }
@@ -436,7 +436,7 @@ export async function applicableSteps(db: Db, repo: string, n: number): Promise<
   const f = await itemFacts(db, repo, n);
   if (!f) return [];
   const open = f.state === "OPEN", isPr = pr(f), out: string[] = ["open_issue"];
-  const quiet = await isQuiet(db, repo, n);
+  const quiet = (await loadQuiet(db, [`${repo}#${n}`])).size > 0;
   if (open) {
     out.push("comment", "label", "assign");
     if (await someSeq(ALL_LABELS, async (l) => !("note" in await unlabelStep(db, repo, n, l.name)))) out.push("unlabel");
@@ -463,7 +463,7 @@ async function settleOf(db: Db, d: DecisionRow, raw: unknown): Promise<Checked<S
       // Only an option that closes with a comment takes a reason; for any other the field is ignored.
       if (!/\bcloses\b/.test(writeEffect(d.kind as Kind, s.option) ?? "")) return { value: { kind: "answer", decision: d.id, option: s.option, stamp } };
       // The reason goes into the closing comment, which a quiet pull request never gets.
-      if (d.repo && d.number !== null && await isQuiet(db, d.repo, d.number)) return { note: "dropped a resolution: a quiet pull request's closing comment takes no reason" };
+      if (d.repo && d.number !== null && (await loadQuiet(db, [`${d.repo}#${d.number}`])).size > 0) return { note: "dropped a resolution: a quiet pull request's closing comment takes no reason" };
       const reason = cleanReason(cleanComment(s.reason));
       if (!reason) return { value: { kind: "answer", decision: d.id, option: s.option, stamp } };
       if (REFERENCE_LEAK.test(reason)) return { note: "dropped a resolution whose settle reason mentions the reference folder or its documentation" };
@@ -528,7 +528,7 @@ async function validateResolution(db: Db, repo: string, n: number, c: Record<str
     if ("note" in r) return r;
     steps.push(r.value);
   }
-  if (steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)) && await isQuiet(db, repo, n)) return { note: "dropped a resolution that posts text on a quiet pull request" };
+  if (steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)) && (await loadQuiet(db, [`${repo}#${n}`])).size > 0) return { note: "dropped a resolution that posts text on a quiet pull request" };
   const labels = steps.flatMap((x) => (x.kind === "label" ? [x.label] : []));
   if (new Set(labels).size !== labels.length) return { note: "dropped a resolution that adds the same label twice" };
   if (labels.filter(isTypeLabel).length > 1) return { note: "dropped a resolution that adds more than one type label" };

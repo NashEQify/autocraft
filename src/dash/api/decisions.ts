@@ -6,7 +6,7 @@ import { preparedEarlier, preparing, prepareStates, type PrepareState } from "..
 import { priorityOf } from "../../priority/read.ts";
 import type { Level } from "../../priority/score.ts";
 import type {
-  Claim, Classification, Decision, ExecState, ItemShown, DecisionComment, DecisionKind, DecisionList, DuplicateMember, ItemState, OpenDecisionCounts, Opinion, QueueSlot, RelatedItem, Relation,
+  Claim, Classification, Decision, ExecState, ItemShown, DecisionComment, DecisionKind, DecisionList, DuplicateMember, OpenDecisionCounts, Opinion, QueueSlot, RelatedItem, Relation,
 } from "../../../web/src/api/types.ts";
 import { resetGroupAnswer } from "../../dupes/decide.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
@@ -17,15 +17,13 @@ import { commentPreview, writeEffect } from "../../act/index.ts";
 import { optionTextsMany, optionTextsOf, textsFor, textsHash } from "../../dupes/texts.ts";
 import { audit } from "../audit.ts";
 import { mayRunRepo } from "../repo-access.ts";
-import { heldLookup, type Held } from "../../runner/autopilot.ts";
 import { queuePlace, queueReason } from "../../conversations/queue.ts";
-import { initExecState, resetActTries, retryDecision } from "../../github/user-lane.ts";
 import { inActiveBatch, mergeRunning } from "../../preapproval/index.ts";
 import { clearDispute, DISPUTED, heldOpenExpr, lockLiveExpr, isDisputed, openDispute, queuedLock, lockMessage, settlingBy } from "../../answers/hold.ts";
 import { randomToken } from "../server/crypto.ts";
 import { HttpError, type RateLimiter } from "../server/util.ts";
 import type { Req } from "../types.ts";
-import { areaNameOf } from "../../areas/store.ts";
+import { loadItemAreas } from "../../data/triage/index.ts";
 import { queueSlots } from "../../rank/position.ts";
 import { allVisibleRepos, hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { backlogHeld } from "../../dupes/held.ts";
@@ -34,7 +32,7 @@ import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
 import { canSettleCached, canSettleExpr, requireSettle, settleRefusal, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
-import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
+import { listQuietPrs, loadQuiet } from "../../data/security/index.ts";
 
 export const CLAIM_TTL = 10 * 60_000;
 const COMMENT_MAX = 4000;
@@ -53,6 +51,13 @@ import type { DB } from "../../db/types.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Eb } from "../../db/kx.ts";
+
+// Decision answers are retired (R1 deletes these routes): their lane holds, Act tries and execution state are inert.
+type Held = { reason: string; approval: boolean };
+const heldLookup = async (_db: Db): Promise<(repo: string, number: number, decisionId?: string) => Promise<Held | null>> => async () => null;
+const resetActTries = async (_db: Db, _id: string): Promise<void> => {};
+const initExecState = async (_db: Db, _id: string): Promise<void> => {};
+const retryDecision = async (_db: Db, _id: string): Promise<boolean> => false;
 
 const json = <T>(s: string | null | undefined, d: T): T => {
   if (!s) return d;
@@ -309,7 +314,7 @@ async function snoozedOf(db: Db, d: DecisionRow): Promise<{ by: string; at: stri
 
 /** True when any item the decision concerns (its own, a batch member or a duplicate-group member) is a quiet pull request. */
 export async function touchesQuiet(db: Db, d: DecisionRow, page?: DecisionPage): Promise<boolean> {
-  const quiet = async (repo: string, number: number): Promise<boolean> => (page ? page.quiet!.has(`${repo}#${number}`) : await isQuiet(db, repo, number));
+  const quiet = async (repo: string, number: number): Promise<boolean> => (page ? page.quiet!.has(`${repo}#${number}`) : (await loadQuiet(db, [`${repo}#${number}`])).size > 0);
   if (d.repo !== null && d.number !== null && await quiet(d.repo, d.number)) return true;
   if (await someSeq(itemsOf(d), async (r) => await quiet(r.repo, r.number))) return true;
   const members = page ? (page.members.get(d.id) ?? []) : (await db.all(db.k.selectFrom("dupe_group_items").select(["repo", "number"]).where("decision_id", "=", d.id)));
@@ -363,7 +368,7 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
       .where(kx.tupleIn(db, ["repo", "number", "head_oid"], heads, ["text", "bigint", "text"])).where("verdict", "is not", null)) : [],
     groupIds.length ? db.all(groupRows(db).where(kx.inList(db, "gi.decision_id", groupIds))) : [],
     groupIds.length ? optionTextsMany(db, groupIds) : undefined,
-    viewer.staff ? undefined : quietFixPrs(db),
+    viewer.staff ? undefined : listQuietPrs(db),
     viewer.staff ? [] : db.all(db.k.selectFrom("dupe_group_items").select(["decision_id", "repo", "number"]).where(kx.inList(db, "decision_id", ids))),
   ]);
   const items = new Map<string, PageItem>();
@@ -436,7 +441,7 @@ export async function toDecision(db: Db, d: DecisionRow, viewer: Viewer): Promis
     pstate ? pstate.preparedEarlier : preparedEarlier(db, d),
     one(() => relatedOf(db, d.repo!, d.number!, viewer.related, page), []),
     one(async () => (page ? latestClassifications(page.classes.get(`${d.repo}#${d.number}`) ?? []) : await classificationsOf(db, d.repo!, d.number!)), []),
-    one(async () => (page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : await areaNameOf(db, d.repo!, d.number!)), null),
+    one(async () => (page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : (await loadItemAreas(db, [{ repo: d.repo!, number: d.number! }])).get(`${d.repo}#${d.number}`)?.area ?? null), null),
     one(async () => (page ? (page.priority.get(`${d.repo}#${d.number}`) ?? null) : await priorityOf(db, d.repo!, d.number!)), null),
   ]);
   const opinions = opinionRows.map(toOpinion);

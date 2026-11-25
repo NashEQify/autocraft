@@ -6,13 +6,16 @@ import { lockLiveExpr } from "./answers/hold.ts";
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { audit } from "./dash/audit.ts";
-import { inPilot } from "./pilot.ts";
+import { inScopeExpr } from "./data/workflow/fragments.ts";
 import { filterSeq, someSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
 import * as kx from "./db/kx.ts";
 import type { AliasableExpression, Expression, Insertable, SqlBool } from "kysely";
 import type { DB } from "./db/types.ts";
 import { openDb } from "./db/open.ts";
+
+const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
+  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 
 export const KINDS = ["scope", "duplicate", "close", "merge", "hold", "split", "other", "backlog"] as const;
 export type Kind = (typeof KINDS)[number];
@@ -318,9 +321,8 @@ async function sessionDecision(db: Db, id: string, login: string): Promise<Decis
 export async function retryAsSession(db: Db, id: string, login: string): Promise<void> {
   const d = await sessionDecision(db, id, login);
   if (!d.answer || d.applied_at) throw new Error(`decision ${id} has nothing waiting to run`);
-  const { retryDecision } = await import("./github/user-lane.ts");
-  if (!await retryDecision(db, id)) throw new Error(`decision ${id} is not waiting or failed`);
-  await audit(db, login, "retry", id, { answer: d.answer, source: "cli", via: "session" });
+  // Decision answers are retired: none waits to run.
+  throw new Error(`decision ${id} is not waiting or failed`);
 }
 
 /** The repos a card writes to: its item's, and a resolution's transfer and new-issue targets. */

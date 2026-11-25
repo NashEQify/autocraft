@@ -14,7 +14,7 @@ import { guard } from "../core/guard.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { ghApproveRun, type Writer } from "../github/write.ts";
 import { trackedNames } from "../repos.ts";
-import { ghExec, type Gh } from "./safe-merge.ts";
+import type { Gh } from "./safe-merge.ts";
 import { slugOf } from "../owners.ts";
 import { repoStepApproval, setStepApproval } from "../data/control/index.ts";
 import type { StepApproval } from "../data/control/types.ts";

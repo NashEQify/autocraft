@@ -12,7 +12,7 @@
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
 import { RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
-import { readSeqs, TOPICS } from "../live.ts";
+import { TOPICS } from "../db/live.ts";
 import { pendingConversations } from "../conversations/store.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { loadPlanSet, type PlanSet } from "../core/plan-set.ts";
@@ -32,7 +32,6 @@ import { trackedNames } from "../repos.ts";
 import { inFlightNow, planned, type Planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
 import { isWork } from "../core/assignment.ts";
-import { postCandidates } from "../review/post.ts";
 import { collectDue } from "../verify/results.ts";
 import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
@@ -47,7 +46,7 @@ import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
 import { mainFixDue } from "../mainfix/index.ts";
 import { statusApprovalOf } from "../prstatus/approval.ts";
 import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
-import { latestRun } from "../classify/settled.ts";
+import { classifyRun } from "../data/triage/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { DEADLINE_ERROR, enqueue, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
@@ -174,14 +173,14 @@ export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => 
     return await inReadSnapshot(db, async () => {
       await rereadSettingsSnapshot(db);
       const scope = await scopeRepos(db);
-      const run = await latestRun(db);
+      const run = await classifyRun(db);
       const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
       wakeAtRefresh(pass.plans, wake);
       return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
     });
   }
   const scope = await scopeRepos(db);
-  const run = await latestRun(db);
+  const run = await classifyRun(db);
   const plans = await loadPlanSet(db, { run });
   wakeAtRefresh(plans, wake);
   return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
@@ -320,7 +319,7 @@ type FpRecord = { job: number | null; fp: string };
 
 /** What the lane's input looked like: the step, its repo, and the counters of the topics it reads. */
 export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
-  if (seqs === undefined) seqs = await readSeqs(db);
+  if (seqs === undefined) seqs = await db.seqs();
   const topics = lane.topics ?? INPUT_TOPICS;
   return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await lane.extra?.(db) ?? "", await takersOf(db)].join("|");
 }
@@ -1064,7 +1063,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   const untaken = (ctx.untaken = await untakenTest(db, steps, ms));
   const loadMs = performance.now() - t0;
   const scope = ctx.scope ?? await scopeRepos(db);
-  const seqs = await readSeqs(db);
+  const seqs = await db.seqs();
   const status: Record<string, string> = {};
   // The queued and running jobs, read with the pass's other job reads.
   const live = (await readsOf(db, ms)).inputs.live;
@@ -1275,7 +1274,7 @@ export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boole
   const t = nowMs;
   // NEEDS jobs.loadPipelineEndedSince(db, since): a boolean statement for "a pipeline job ended after `since`"; the ends of loadLaneInputs stand in for it.
   const [marks, limits, tasks, seqs, takers, inputs, released] = await db.together(() => Promise.all([
-    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), readSeqs(db), loadTakerSignature(db, t), loadLaneInputs(db, t), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, t), loadLaneInputs(db, t), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
   ]));
   const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
   const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];

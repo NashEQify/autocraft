@@ -6,18 +6,19 @@ import { mayRunRepo } from "../repo-access.ts";
 import type { Job, JobState, PipelineOverview, PipelineStage, PipelineState, PipelineStep, StepParam } from "../../../web/src/api/types.ts";
 import { enqueue, getJob, jobDetail, jobRow, JobError, JOB_STATES, listJobs, requestCancel, toJobs } from "../../runner/jobs.ts";
 import { ackDeadline, LimitError, pipelineState as rawPipelineState, resetLimitCount, setEnabled, setLimit } from "../../runner/autopilot.ts";
-import { HEARTBEAT_KEY } from "../../runner/runner.ts";
+import { HEARTBEAT_MARK } from "../../runner/runner.ts";
+import { loadLaneState } from "../../data/jobs/index.ts";
 import { loadSteps, type StepDef } from "../../runner/steps.ts";
 import { JUDGEMENT_MODELS, judgementModel, setJudgementModel } from "../../decide/judgement.ts";
 import { audit } from "../audit.ts";
 import { outsideState } from "../../outside.ts";
-import { mayResumeTrip, resumeStage, TripError } from "../../push-outcomes.ts";
+import { mayResumeTrip, resumeStage, TripError } from "../../data/control/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { blankIfHidden, hiddenRepos, visibleRepos } from "./visible.ts";
 import { isHiddenRepo, writeSetting, type HiddenRepos } from "../../data/control/index.ts";
 import { loadPipelineOverview } from "../../data/views/pipeline.ts";
-import { isQuiet } from "../../security/quiet.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import { SECURITY_PREFIX, SECURITY_STEP } from "../../security/rules.ts";
 import { mapSeq } from "../../async-seq.ts";
@@ -46,7 +47,7 @@ function requireOperator(req: Req, step?: StepDef): void {
 async function pipelineState(db: Db, req: Req): Promise<PipelineState> {
   const [s, hidden] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req)]);
   const limits = await mapSeq(s.limits, async ({ trips, ...l }) => {
-    const shown = await mapSeq((trips ?? []).filter((t) => t.repo === null || !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(req.user, t.key) }));
+    const shown = await mapSeq((trips ?? []).filter((t) => t.repo === null || !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(db, req.user, t.key) }));
     return { ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null, ...(shown.length ? { trips: shown } : {}) };
   });
   return { ...s, outside: await outsideState(db, hidden), limits, blockers: { largeFixLines: await largeFixLines(db), outsidePurposeMin: await outsidePurposeMin(db) } };
@@ -93,7 +94,10 @@ export async function overview(db: Db, req: Req): Promise<PipelineOverview> {
   const all = [...(await loadSteps()).values()].filter((s) => s.name !== SECURITY_STEP || canSeeInternals(req));
   const [repos, hidden] = await Promise.all([visibleRepos(db, req), hiddenRepos(db, req)]);
   const stageSteps = STAGES.map((st) => ({ n: st.n, steps: all.filter((s) => s.stage === st.n).map((s) => s.name) }));
-  const facts = await loadPipelineOverview(db, { steps: all.map((s) => s.name), stages: stageSteps, hidden, syncRuns: 10, settingKeys: ["org_high_water", HEARTBEAT_KEY] });
+  const [facts, marks] = await db.together(() => Promise.all([
+    loadPipelineOverview(db, { steps: all.map((s) => s.name), stages: stageSteps, hidden, syncRuns: 10, settingKeys: ["org_high_water"] }),
+    loadLaneState(db, ["mark"]),
+  ]));
   const lastRows = [...facts.lastJobs.values()];
   const lastJobs = new Map(lastRows.map((r, i) => [r.id, i]));
   const jobsOf = await toJobs(db, lastRows);
@@ -116,7 +120,7 @@ export async function overview(db: Db, req: Req): Promise<PipelineOverview> {
     const mode = st.automatic ? "automatic" : names.length ? "steps" : "planned";
     return { n: st.n, name: st.name, mode, steps: names, state: mode === "planned" ? "planned" : stageState(facts.stageStates.get(st.n) ?? "idle", st.automatic ? (lastSync ? lastSync.error !== null : high ? false : null) : null) };
   });
-  const beat = facts.settings.get(HEARTBEAT_KEY) ?? null;
+  const beat = marks.get(`mark|${HEARTBEAT_MARK}|`)?.value ?? null;
   return {
     stages, steps,
     runner: { lastSeen: beat, alive: beat !== null && Date.now() - Date.parse(beat) < RUNNER_ALIVE_MS },
@@ -155,7 +159,7 @@ export const job = async (db: Db, req: Req) => wrap(async () => {
   d.canCancel = req.user.role === "operator" || (!!repo && await mayRunRepo(req.user, repo));
   if (canSeeInternals(req)) return forViewer(req, hidden)(d) as typeof d;
   // An item's outcome reads "failed: <reason>" or carries notes: viewers get the leading state word, and nothing for a quiet pull request.
-  const items = await mapSeq(d.items, async (i) => ({ ...i, outcome: await isQuiet(db, i.repo, i.number) ? null : /^[A-Za-z-]+/.exec(i.outcome ?? "")?.[0] ?? null }));
+  const items = await mapSeq(d.items, async (i) => ({ ...i, outcome: (await loadQuiet(db, [`${i.repo}#${i.number}`])).size > 0 ? null : /^[A-Za-z-]+/.exec(i.outcome ?? "")?.[0] ?? null }));
   return { ...forViewer(req, hidden)(d) as typeof d, items };
 });
 
@@ -249,7 +253,7 @@ export async function putLimit(db: Db, req: Req) {
 
 /** An operator, or a maintainer with write access to the trip's repo, clears a breaker (`<stage>:<repo>`, or outside-surge). */
 export async function resumeTrip(db: Db, req: Req) {
-  if (!await mayResumeTrip(req.user, req.params.stage!)) throw new HttpError(403, "only an operator, or a maintainer with write access to the breaker's repo, resumes it");
+  if (!await mayResumeTrip(db, req.user, req.params.stage!)) throw new HttpError(403, "only an operator, or a maintainer with write access to the breaker's repo, resumes it");
   try {
     await resumeStage(db, req.params.stage, req.user.login);
   } catch (e) {

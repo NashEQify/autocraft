@@ -18,7 +18,7 @@ import { cancelItemPreapproval } from "../api/operator.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { queueAdd, queuePage } from "../api/queue-page.ts";
 import { allVisibleRepos, needVisible, visibleTo } from "../api/visible.ts";
-import { cachedQueue } from "../../core/plan-read.ts";
+import { loadMergeQueue } from "../../data/views/merge-queue.ts";
 import { addFastTrack, fastPositions, FastTrackError, parseItemRef, removeFastTrack, setFastTrackWeight, WEIGHT_DEFAULT, WEIGHT_MAX, WEIGHT_MIN, type FastRef } from "../../fasttrack.ts";
 import { callStatus, claimableCalls } from "../../remote/calls.ts";
 import { listHelpers } from "../../remote/helpers.ts";
@@ -729,7 +729,7 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   // queue row anywhere, on any page and in any repo, is left out. They are the operators' own picks, so the list covers every
   // visible repo (or the one asked for), not only the pipeline's scope the queue rows default to.
   const visible = new Set(await visibleTo(env.db, user));
-  const queued = new Set((await cachedQueue(env.db, { merged: "exclude" })).map(item));
+  const queued = new Set((await loadMergeQueue(env.db, { merged: "exclude" })).map(item));
   const pendingAll = (pendingDone ? [] : (await loadLegPass(env.db, { repos: [...visible] })).rows)
     .filter((p) => ["fixup", "review", "ci"].includes(p.state) && p.id > Number(c?.[2] ?? 0))
     .filter((p) => visible.has(p.repo) && (a.repo === undefined || p.repo === a.repo) && !queued.has(item(p)));

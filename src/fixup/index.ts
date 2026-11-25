@@ -29,7 +29,7 @@ import { loadReviewsAt } from "../data/review/index.ts";
 import { dropUnlistedPatches } from "../prepush/drop.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL } from "../security/rules.ts";
 import { cachedDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
 import { checkLine, parseCheck, recordCheck } from "../patchcheck/index.ts";
@@ -39,7 +39,7 @@ import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { dropSessions, SessionLedger, sessionAsk, storeSessions, sweepSessions, type SessionAsk } from "../prepush/resume.ts";
 import { pushApprovalOf } from "./approval.ts";
-import { MAX_ATTEMPTS, parseFixes, type FixCandidate } from "./candidates.ts";
+import { parseFixes, type FixCandidate } from "./candidates.ts";
 import { selectFixups } from "./select.ts";
 import { Git, exec, fixupDir, type Exec } from "./git.ts";
 import { scrubGitError } from "../worker/patch.ts";
@@ -264,7 +264,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       await noteLive(db, repo, c.number, pr, at());
       if (!pr || pr.state !== "OPEN" || pr.isDraft) { log(`  ${ref}: skipped: no longer an open, non-draft PR`); return; }
       if (pr.headRefOid !== c.head) { log(`  ${ref}: skipped: head moved to ${short(pr.headRefOid)} since the review`); return; }
-      if (await isQuiet(db, repo, c.number)) {
+      if ((await loadQuiet(db, [`${repo}#${c.number}`])).size > 0) {
         // The review's fix list names what the fix protects against: a quiet pull request is never asked.
         const reason = "a quiet pull request is not asked for changes";
         await rec.fixup(c, "cannot-push", reason, []);
@@ -399,7 +399,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       // With a sandbox checkout the model reads the files itself, so they are listed by path and no size limit applies.
       const checkout = (await d.checkout?.(repo, c.number, head)) ?? undefined;
       const repoDir = checkout ? { repo_dir: REPO_PATH } : {};
-      const quiet = await isQuiet(db, repo, c.number);
+      const quiet = (await loadQuiet(db, [`${repo}#${c.number}`])).size > 0;
       const shown: FixupPr["files"] = [];
       let total = 0, tooBig: string | null = null, bad: string | null = null;
       for (const path of files) {
@@ -541,7 +541,11 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     }
   };
   // Items of one PR run one after the other inside one pool item; PRs run side by side.
-  const byPr = <T extends { number: number }>(items: T[]): T[][] => [...Map.groupBy(items, (c) => c.number).values()];
+  const byPr = <T extends { number: number }>(items: T[]): T[][] => {
+    const out = new Map<number, T[]>();
+    for (const c of items) (out.get(c.number) ?? out.set(c.number, []).get(c.number)!).push(c);
+    return [...out.values()];
+  };
   const pickGroups = byPr(picks), mergeGroups = byPr(cMerges);
   await pool(pickGroups.map((group) => async () => { for (const c of group) await fixOne(c); }), poolRoom(db, () => [repo], (i) => [{ repo, number: pickGroups[i]![0]!.number }]), { max: POOL_MAX.fixup });
   await pool(mergeGroups.map((group) => async () => { for (const c of group) await leased(c, () => mergeConflict(db, conflictRun, c)); }), poolRoom(db, () => [repo], (i) => [{ repo, number: mergeGroups[i]![0]!.number }], { mayNotCall: true }), { max: POOL_MAX.fixup });

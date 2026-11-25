@@ -2,9 +2,22 @@
 import { audit } from "../dash/audit.ts";
 import { clearAskedStage } from "../decisions.ts";
 import { holdDecisionId, mergeDecisionId, type QueueEntry } from "./queue.ts";
-import { openGroupExpr } from "../core/rule-queries.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
+
+/** An open duplicate-group decision `g`: unanswered, or answered keep and not yet applied. */
+const openGroupExpr = (db: Db, eb: kx.Eb): AliasableExpression<SqlBool> => eb.and([
+  eb("g.kind", "=", "duplicate"),
+  kx.like(db, "g.id", eb.val("%:dupegroup:%")),
+  eb.or([
+    eb("g.answer", "is", null),
+    eb.and([
+      kx.like(db, "g.answer", eb.val("keep:%")),
+      eb(eb.fn.coalesce(db.k.selectFrom("dupe_groups as dg").select("dg.applied_answer").where("dg.decision_id", "=", eb.ref("g.id")), eb.val("")), "<>", eb.ref("g.answer")),
+    ]),
+  ]),
+]);
 
 /** Answer value of a question the pipeline set aside; no operator wrote it, so no later step acts on it. */
 export const WITHDRAWN = "withdrawn";

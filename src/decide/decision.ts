@@ -1,6 +1,6 @@
 // The scope decision for one candidate: question, options, recommendation and
 // facts. The summary is added by the caller.
-import { TIER_LABEL, statsExpr, tierKey, tiersOf } from "../whitelist.ts";
+import { TIER_LABEL, authorTotals, tierKey, tiersOf } from "../whitelist.ts";
 import type { Candidate } from "./select.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
@@ -63,8 +63,7 @@ const list = (s: string | null): unknown[] => {
 
 async function authorFact(db: Db, login: string | null, id: number | null): Promise<string> {
   if (!login) return "author: unknown (deleted account)";
-  const s = await db.get(statsExpr(db).where("author", "=", login).groupBy("author"));
-  const merged = s?.merged ?? 0, closed = s?.closed ?? 0;
+  const { merged, closed } = await authorTotals(db, login);
   const tier = (await tiersOf(db, [{ login, id }])).get(tierKey({ login, id })) ?? "not";
   return `author: ${login}, ${TIER_LABEL[tier]} (${merged} merged PR${merged === 1 ? "" : "s"}, ${closed} closed unmerged)`;
 }

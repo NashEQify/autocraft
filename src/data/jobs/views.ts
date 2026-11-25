@@ -6,7 +6,6 @@ import { namedKeys, type Ref } from "../keys.ts";
 import { loadAuditMax } from "../control/audit.ts";
 import { loadShown } from "../mirror/items.ts";
 import { RUNNER_STOPPED } from "./fragments.ts";
-import { loadJobItems } from "./items.ts";
 import { loadLogTail } from "./logs.ts";
 import { hasFilter, numberOf, repoVisible } from "./sql.ts";
 import type { ActiveJob, DeadlineStop, FailedJob, HiddenRepos, ItemsByBucket, JobDetail, JobItemRow, JobRow, JobState, JobStamp, LiveBoard, RefKey, StageState, StepRun } from "./types.ts";

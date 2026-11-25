@@ -21,7 +21,7 @@ import { BACKLOG, getDecision, isBatch, optionsOf, type DecisionRow } from "../s
 import { textsFor, textsHash } from "../src/dupes/texts.ts";
 import { computeLiveness, printReport, refreshLiveness } from "../src/liveness.ts";
 import type { Querier } from "../src/mirror.ts";
-import { pipelineRepos } from "../src/pilot.ts";
+import { loadTrackedRepos } from "../src/data/control/index.ts";
 import { MAINTAINER_WRITES_KEY, canSettleCached } from "../src/settlers.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -54,7 +54,7 @@ const users = [OPERATOR, ...Array.from({ length: 12 }, (_, i) => `gate-m${i + 1}
 for (const u of users) await db.prepare("INSERT OR REPLACE INTO access (login, role) VALUES (?, ?)").run(u, u === OPERATOR ? "operator" : "maintainer");
 await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')").run(MAINTAINER_WRITES_KEY);
 
-const on = [...await pipelineRepos(db)].sort();
+const on = [...(await loadTrackedRepos(db)).values()].filter((r) => r.pipeline).map((r) => r.name).sort();
 for (const r of on) { try { await setCommentApproval(db, OPERATOR, r, true); } catch { /* repo not tracked */ } }
 
 // Fake GitHub: records writes and checks the invariants at the moment of each write.

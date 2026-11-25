@@ -765,7 +765,6 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo"), l = args.indexOf("--limit");
       if (i < 0 || !args[i + 1]) throw new Error("missing --repo");
-      const { connect } = await import("../db.ts");
       await runBatches(await openDb(), { repo: args[i + 1]!, ...(l >= 0 ? { limit: Number(args[l + 1]) } : {}) });
     },
   },

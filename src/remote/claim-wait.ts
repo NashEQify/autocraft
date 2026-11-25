@@ -3,7 +3,6 @@
 // any claim waits, one timer reads the `remote-queue` topic's change counter (src/live.ts) and, when it moved, tries the
 // waiting claims one at a time, oldest first. Each claim is also tried in full every RETRY_MS and once at its deadline.
 import { isBusy } from "../db.ts";
-import { readSeqs } from "../live.ts";
 import type { ClaimReply } from "./protocol.ts";
 
 export type EmptyReply = Extract<ClaimReply, { lease: null }>;
@@ -157,7 +156,7 @@ export class ClaimWaits {
       let seq: number;
       try {
         // NEEDS db.seqs (C01): one topic's sequence; the change log's reader of every topic is used meanwhile.
-        seq = (await readSeqs(this.#db))["remote-queue"] ?? 0;
+        seq = (await this.#db.seqs(["remote-queue"]))["remote-queue"] ?? 0;
       } catch (e) {
         if (isBusy(e)) return;
         throw e;

@@ -43,7 +43,6 @@ import {
   type LegContext, type LegMove, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { readSeqs } from "../live.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
 export type PipelineStep = Extract<Step, { kind: "review" | "fixup" }>;
@@ -53,7 +52,6 @@ export const INSTRUCTIONS_MAX = 1500;
 const ACTIVE: readonly LegState[] = ["fixup", "review", "ci", "queued"];
 /** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts). */
 const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog", "duplicate", "draft", "scope"];
-const iso = () => new Date().toISOString();
 const short = (sha: string | null) => (sha ?? "").slice(0, 7);
 const oneLine = (s: string, n = 200) => s.replace(/\s+/g, " ").trim().slice(0, n);
 const refOf = (repo: string, n: number) => `${repo}#${n}`;
@@ -587,7 +585,7 @@ export type Wake = (at: number) => void;
  * markers are the ones it read before and whose wake time (`Wake`) has not come would move nothing.
  */
 export async function preapprovalInputs(db: Db): Promise<string> {
-  const seqs = await readSeqs(db);
+  const seqs = await db.seqs();
   return [...INPUT_TOPICS, "access"].map((t) => seqs[t] ?? 0).join(",");
 }
 

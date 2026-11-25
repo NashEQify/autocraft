@@ -137,7 +137,6 @@ export const commands = {
   "workspace-exclude": {
     summary: "workspace-exclude [NAME...|none]: show or set the tracked repositories left out of the read-only workspace of Opus calls (default none)",
     async run(args: string[]): Promise<void> {
-      const { connect } = await import("../db.ts");
       const db = await openDb();
       if (args.length) await setWorkspaceExcluded(db, args[0] === "none" && args.length === 1 ? [] : args, "cli");
       console.log(`left out of the workspace: ${(await workspaceExcluded(db)).join(" ") || "none"}`);

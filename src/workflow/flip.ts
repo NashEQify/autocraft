@@ -23,7 +23,10 @@ import { pushApprovalOf, setPushApproval } from "../fixup/approval.ts";
 import { mergeApprovalOf, setMergeApproval } from "../merge/approval.ts";
 import { renameDecision, WITHDRAWN } from "../merge/withdraw.ts";
 import { setStatusApproval, statusApprovalOf } from "../prstatus/approval.ts";
-import { addEvent, liveWorkflows, repoWorkflow, type RepoWorkflow } from "./store.ts";
+import { addEvent, liveWorkflows, repoWorkflow, type RepoWorkflow as StoredWorkflow } from "./store.ts";
+
+/** The models a flip moves between; the store knows only the maintainer workflow. */
+type RepoWorkflow = StoredWorkflow | "legacy";
 
 export const FLIP_WITHDRAWN_NOTE = "withdrawn when the repo moved to the maintainer workflow";
 /** The id suffix of a question a flip withdrew; `~replaced-` keeps it out of every reader of current questions. */
@@ -80,7 +83,7 @@ export async function flipRepo(db: Db, repo: string, o: { to: RepoWorkflow; by: 
   const at = o.at ?? new Date().toISOString();
   const work = async (): Promise<FlipReport> => {
     if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", repo))) throw new FlipRefused(`${repo} is not tracked`);
-    const from = await repoWorkflow(db, repo);
+    const from = await repoWorkflow(db, repo) as RepoWorkflow;
     const report: FlipReport = { repo, from, to: o.to, applied: false, refused: null, withdrawn: [], stopped: [], reasked: 0, switchesOn: [] };
     if (o.to === "new") {
       for (const k of Object.keys(SWITCHES) as RepoSwitch[]) if (await SWITCHES[k].on(db, repo) === null) report.switchesOn.push(k);

@@ -4,7 +4,7 @@
 // A step outside the planner's pass loads facts only for the items that can be due (planner.loadDueRefs) and decides them
 // again, so an item that is no longer due drops out.
 import type { Item } from "../classify/parse.ts";
-import { latestRun } from "../classify/settled.ts";
+import { classifyRun } from "../data/triage/index.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { decideItem } from "./decide-item.ts";
 import { inFlightNow } from "./select.ts";
@@ -85,7 +85,7 @@ async function planSortKeys(db: Db, plans: ItemPlans, items: { repo: string; num
 async function candidateRefs(db: Db, kind: ActionKind, opts: ItemLoadOptions): Promise<string[] | null> {
   if (opts.now !== undefined) return null;
   // A run of null reads no verdicts, which only takes actions away; another run's verdicts change what is due.
-  if (typeof opts.run === "string" && opts.run !== await latestRun(db)) return null;
+  if (typeof opts.run === "string" && opts.run !== await classifyRun(db)) return null;
   if (opts.model !== undefined && opts.model !== embedderId(modelName())) return null;
   return await loadDueRefs(db, kind, "item", opts.repo);
 }

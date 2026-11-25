@@ -1,7 +1,6 @@
 // Facts: everything the review-to-merge rules read about open PRs, built for a whole pass or a slice of it from the module loads of
 // core/pass-load.ts. Each concept has one definition here.
-import { quietFixPrs } from "../security/quiet.ts";
-export { quietFixPrs };
+import { listQuietPrs } from "../data/security/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
 import { loadAssignments, withConfig, config } from "../data/control/index.ts";
@@ -11,7 +10,8 @@ import type { KeySource, Ref } from "../data/keys.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo } from "../fixup/pushable.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
-import { latestRun, refereeClosed, settledSet } from "../classify/settled.ts";
+import { refereeClosed, settle, type Settled } from "../classify/settled.ts";
+import { classifyRun, loadSettled } from "../data/triage/index.ts";
 import { redMainRepos, MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
 import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/changes-requested.ts";
 import { effectiveCiWith } from "../optional-checks.ts";
@@ -129,10 +129,10 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   return await db.read(async () => {
     const [d, run, stale, staleActionable, mainRed, quiet, authorWrites, longLived, holdOf] = await Promise.all([
       loadPrPass(db, keys, { now, mergeEntryHead }),
-      opts.run !== undefined ? Promise.resolve(opts.run) : latestRun(db),
+      opts.run !== undefined ? Promise.resolve(opts.run) : classifyRun(db),
       staleReviews(db, opts.repo, false, { now, refresh: refresh.soon }),
       staleReviews(db, opts.repo, true, { now, refresh: refresh.soon }),
-      redMainRepos(db), quietFixPrs(db, opts.repo), authorWritesOf(db, now), longLivedAll(db), reviewHolds(db, now, refs),
+      redMainRepos(db), listQuietPrs(db, { repo: opts.repo }), authorWritesOf(db, now), longLivedAll(db), reviewHolds(db, now, refs),
     ]);
     const keep = (ref: string): boolean => (!opts.repo || asRef(ref).repo === opts.repo) && (!refs || refs.includes(ref));
     const rows = [...d.mirror].filter(([ref, m]) => keep(ref) && m.item.kind === "pr" && inUniverse(d, ref, m.item.state));
@@ -140,7 +140,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     const ownPrs = ownPrSet(d.mainFixPrs, quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
     const authors = rows.filter(([ref, m]) => scoped.includes(ref) && m.item.author).map(([, m]) => ({ login: m.item.author!, id: m.item.author_id ?? null }));
     const [settled, tiers, postSource] = await Promise.all([
-      settledSet(db, run, scoped), tiersOf(db, authors),
+      loadSettled(db, scoped.map(asRef), run).then((m) => async (repo: string, number: number): Promise<Settled> => m.get(`${repo}#${number}`) ?? settle(null, null)), tiersOf(db, authors),
       postSourcesOf(db, rows.filter(([ref]) => d.review.latest.get(ref)?.mode === CARRIED).map(([ref]) => ref)),
     ]);
     const ctx: Ctx = { now, refresh, stale, staleActionable, mainRed, quiet, ownPrs, authorWrites, longLived, holdOf, settled, tiers, postSource };
@@ -170,7 +170,7 @@ export type { PrTier };
 type Ctx = {
   now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; mainRed: Set<string>; quiet: Set<string>; ownPrs: Set<string>;
   authorWrites: Awaited<ReturnType<typeof authorWritesOf>>; longLived: Awaited<ReturnType<typeof longLivedAll>>; holdOf: Awaited<ReturnType<typeof reviewHolds>>;
-  settled: Awaited<ReturnType<typeof settledSet>>; tiers: Awaited<ReturnType<typeof tiersOf>>; postSource: Awaited<ReturnType<typeof postSourcesOf>>;
+  settled: (repo: string, number: number) => Promise<Settled>; tiers: Awaited<ReturnType<typeof tiersOf>>; postSource: Awaited<ReturnType<typeof postSourcesOf>>;
 };
 
 function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"] {
@@ -435,7 +435,7 @@ export { tierKey, tiersOf, type AuthorRef };
 /** PRs the pipeline opened itself (quiet security PRs, default-branch fix PRs), as `repo#number`, and who counts as the pipeline. */
 export async function ownFixPrs(db: Db, repo?: string, _slug?: string | null): Promise<{ login: string | null; prs: Set<string>; quiet: Set<string>; isOwn: (repo: string, author: string | null) => Promise<boolean> }> {
   const [own, quiet, mainFix, login] = await db.together(() => Promise.all([
-    loadOwnLogins(db), quietFixPrs(db, repo), loadMainFixPrs(db, repo ? [repo] : undefined), withConfig(db, async () => config(db).pipelineLogin),
+    loadOwnLogins(db), listQuietPrs(db, { repo: repo }), loadMainFixPrs(db, repo ? [repo] : undefined), withConfig(db, async () => config(db).pipelineLogin),
   ]));
   return { login, prs: ownPrSet(mainFix, quiet, login), quiet, isOwn: async (_r, author) => !!author && own.has(author) };
 }

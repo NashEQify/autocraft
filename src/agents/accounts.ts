@@ -3,7 +3,7 @@
 //
 // Only accounts present in the box config (box.ts) are listed. Their config
 // directories stay in this process: nothing here returns one.
-import type { AccountAuth, AccountInput, ClaudeAccount } from "../../web/src/api/types.ts";
+import type { AccountAuth, ClaudeAccount } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { JEV_PARALLEL_DEFAULT } from "../prompts/index.ts";
 import { loginInfo } from "./login.ts";

@@ -41,7 +41,6 @@ const MAX_EXTRAS = 8;
 const KINDS: ExtraKind[] = ["comment", "open_issue", "label", "unlabel", "assign", "request_reviewers"];
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const plain = (note: string): string => note.replace(/^dropped (a resolution|a card)[: ]*/, "");
 
 function blockOf(reply: string): { text: string; json: string | null } {

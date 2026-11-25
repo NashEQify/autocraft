@@ -13,7 +13,6 @@ import {
   securityRepo, parseCandidates, parseScanTest, parseThreatModel, parseVerdict, survives, titleKey,
   type Candidate, type SecurityAreaInput, type SecurityModelInput, type SecurityScanTestInput, type SecurityVerifyInput, type ThreatArea, type ThreatModel,
 } from "./rules.ts";
-import { forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
 /** One model call. `text` is null when the call gave no answer; `cost` is what it cost whatever the outcome, null when unknown. */

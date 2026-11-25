@@ -448,7 +448,7 @@ const LOCK_WAIT_MS = 15 * 60_000;
 let inProcess: Promise<unknown> = Promise.resolve();
 // The lock's connection while held: a build awaiting something no handle keeps alive would otherwise let the
 // connection be collected, and closing it releases the lock.
-let held: DatabaseSync | undefined;
+const keep: { held?: DatabaseSync } = {};
 
 /**
  * Runs `fn` as the only snapshot build for `dest`: after the builds already running in this process, and while holding
@@ -479,14 +479,14 @@ async function holdingLock<T>(dest: string, fn: () => Promise<T>, waitMs: number
         await sleep(1000);
       }
     }
-    held = lock;
+    keep.held = lock;
     removePartials(dest);
     try {
       return await fn();
     } finally {
       removePartials(dest);
       lock.exec("ROLLBACK");
-      held = undefined;
+      keep.held = undefined;
     }
   } finally {
     lock.close();

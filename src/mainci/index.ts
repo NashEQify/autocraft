@@ -5,7 +5,8 @@ import type { Querier } from "../mirror.ts";
 import { contextState, type CheckState } from "../review/checks.ts";
 import { trackedNames } from "../repos.ts";
 import { optionalChecks, optionalChecksOf } from "../optional-checks.ts";
-import { mainRedAfterMerge } from "../push-outcomes.ts";
+import { tripMergeBreakers } from "../data/control/index.ts";
+import { loadMergedInfo } from "../data/merge/index.ts";
 import { autocraftTexts } from "../mainfix/status.ts";
 import { classify, derive, type Culprit, type HeadRow, type MainCheck, type MainCiState } from "./classify.ts";
 import { ownerOf } from "../owners.ts";
@@ -96,7 +97,14 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
     heads += parsed.length;
   }
   // A red head whose culprit is a PR we merged stops the merge path.
-  for (const r of await mainCiRepos(db)) if (r.state === "red" && r.culprit?.pr) await mainRedAfterMerge(db, r.repo, r.culprit.pr, r.culprit.sha);
+  const red = (await mainCiRepos(db)).flatMap((r) => (r.state === "red" && r.culprit?.pr ? [{ repo: r.repo, number: r.culprit.pr, sha: r.culprit.sha }] : []));
+  if (red.length) {
+    const merged = await loadMergedInfo(db, red.map((r) => ({ repo: r.repo, number: r.number })));
+    await tripMergeBreakers(db, red.flatMap((r) => {
+      const m = merged.get(`${r.repo}#${r.number}`);
+      return m?.lastAt ? [{ repo: r.repo, number: r.number, mergedAt: m.lastAt, reason: `main CI of ${r.repo} is red after our merge of #${r.number}`, evidence: [`${r.repo}#${r.number}`, `${r.repo}@${r.sha.slice(0, 8)}`] }] : [];
+    }));
+  }
   if (!only) await saveSyncState(db, { main_ci_polled_at: new Date().toISOString() });
   // A new head, or a new toolchain image of the warm producer, queues the repo's warm build.
   const warm = await warmPass(db);

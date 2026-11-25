@@ -159,7 +159,6 @@ export const commands = {
       }
       if (!repo) throw new Error("missing --repo");
       if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error("--limit is a positive whole number");
-      const { connect } = await import("../db.ts");
       await runReviewPost(await openDb(), { repo, limit, dryRun: !apply });
     },
   },

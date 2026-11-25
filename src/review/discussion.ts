@@ -11,7 +11,7 @@ import { ENTRY_LIMIT, TOTAL_LIMIT, type DiscussionEntry } from "./parse.ts";
 import { ownerOf } from "../owners.ts";
 import type { Exec } from "../fixup/git.ts";
 import { pipelineMe, setPipelineLogin } from "../github/pipeline-account.ts";
-import { allOwnLogins, ownLogins } from "../github/identity.ts";
+import { ownLogins } from "../github/identity.ts";
 import type { Db } from "../db/index.ts";
 import { loginsWithRole } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";

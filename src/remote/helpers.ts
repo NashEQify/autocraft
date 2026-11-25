@@ -4,7 +4,7 @@
 // page (GET /api/runners) and my_work list the user's own.
 import { HttpError } from "../dash/server/util.ts";
 import { isTier } from "./mode.ts";
-import { READINESS, type HarnessId, type HelperInfo, type HelperStatus, type Machine, type Readiness, type Reserve, type Tier, type UsageReading, type UsageWindow } from "./protocol.ts";
+import { READINESS, type HarnessId, type HelperInfo, type HelperStatus, type Machine, type Readiness, type Tier, type UsageReading, type UsageWindow } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
 import * as runners from "../data/runners/index.ts";
 

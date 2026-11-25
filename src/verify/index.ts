@@ -190,7 +190,6 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
       const input = planInput(c, cr.crates, cd, ci);
       const checkout = (await deps.checkout?.(repo, c.number, c.head_oid)) ?? undefined;
       if (checkout) input.repo_dir = REPO_PATH;
-      const start = now();
       const planned = await runModelStep(db, VERIFY_PLAN, input, {
         model: deps.model, checkout, ctx: { ref, crates: cr.crates, label: c.label, ci },
         usage: { run: runId, agent: `verify-${c.number}`, stage: "verify", items: (ok) => (ok ? 1 : 0) },

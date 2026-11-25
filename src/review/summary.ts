@@ -2,10 +2,13 @@
 // head the decision was asked at. No model call.
 import { HEAD_FACT } from "../merge/queue.ts";
 import { factsOf, type DecisionRow } from "../decisions.ts";
-import { inPilot } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { firstSentence, WHY_MAX_WORDS, wordCount } from "../prose.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+
+const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
+  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 
 const squash = (s: string | null | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
 

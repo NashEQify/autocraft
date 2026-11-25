@@ -7,13 +7,24 @@ import { settledByExpr } from "../settlers.ts";
 import { audit } from "../dash/audit.ts";
 import { embedHash } from "../itemhash.ts";
 import { backlogHeld } from "../dupes/held.ts";
-import { inPilot } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { textsFor } from "../dupes/texts.ts";
 import { compareAgain } from "../dupes/compare.ts";
-import { comparedHead } from "../dupes/plan.ts";
 import { everySeq, filterSeq, findSeq, someSeq } from "../async-seq.ts";
 import * as kx from "../db/kx.ts";
 import type { Db } from "../db/index.ts";
+
+/** The head a PR had in its newest stored comparison: undefined when none bound it, null when the comparison has no head for it. */
+async function comparedHead(db: Db, repo: string, n: number): Promise<string | null | undefined> {
+  const r = await db.get(db.k.selectFrom("dupe_comparisons").select(["heads", kx.jsonText(db, "heads", `$."${n}"`).as("head")])
+    .where("repo", "=", repo).where("kind", "=", "pr")
+    .where((eb) => eb.exists(eb.selectFrom(kx.jsonEach(db, "dupe_comparisons.members", "je", "bigint")).select(eb.lit(1).as("one")).where("je.value", "=", n)))
+    .orderBy("at", "desc").limit(1));
+  return !r || r.heads == null ? undefined : r.head ?? null;
+}
+
+const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
+  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 
 const ACTOR = "act";
 /** Failed writes on one member before it is recorded as skipped. */

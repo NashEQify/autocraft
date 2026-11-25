@@ -128,7 +128,6 @@ export const commands = {
   "merge-hold": {
     summary: "merge-hold <repo#n>: keep a PR from merging, alone or in a batch, until merge-release (reviews and fixes go on)",
     run: (args: string[]) => cli(async () => {
-      const { connect } = await import("../db.ts");
       const r = parseRef(args[0]);
       return await holdMerge(await openDb(), "cli", r.repo, r.number) ? `${refOf(r.repo, r.number)}: merge held` : `${refOf(r.repo, r.number)}: already held`;
     }),
@@ -136,7 +135,6 @@ export const commands = {
   "merge-release": {
     summary: "merge-release <repo#n>: let a held PR merge again",
     run: (args: string[]) => cli(async () => {
-      const { connect } = await import("../db.ts");
       const r = parseRef(args[0]);
       return await releaseMerge(await openDb(), "cli", r.repo, r.number) ? `${refOf(r.repo, r.number)}: released` : `${refOf(r.repo, r.number)}: was not held`;
     }),
@@ -144,7 +142,6 @@ export const commands = {
   "batch-remove": {
     summary: "batch-remove <repo#n>: close the PR's integration batch PR, hold the PR; the others are rebuilt in a new batch (writes to GitHub)",
     run: (args: string[]) => cli(async () => {
-      const { connect } = await import("../db.ts");
       const r = parseRef(args[0]);
       const out = await removeFromBatch(await openDb(), "cli", r.repo, r.number);
       return `${refOf(r.repo, r.number)}: held and removed from ${out.batch}${out.closed ? `; closed batch PR #${out.closed}` : ""}`;
@@ -153,7 +150,6 @@ export const commands = {
   "batch-stop": {
     summary: "batch-stop <id>: close a batch's integration PR; holds its PRs (writes to GitHub)",
     run: (args: string[]) => cli(async () => {
-      const { connect } = await import("../db.ts");
       const out = await stopBatch(await openDb(), "cli", Number(args[0]));
       return `${out.batch}: stopped${out.closed ? `; closed batch PR #${out.closed}` : ""}; held ${out.held.length ? out.held.map((n) => `#${n}`).join(", ") : "no PRs"} (merge-release to let them merge)`;
     }),

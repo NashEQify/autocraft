@@ -12,7 +12,7 @@ import { guardRepo } from "../core/guard.ts";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { errorFiles, patchFromFailure, type CifixDeps } from "../cifix/index.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { readFailure } from "../cifix/logs.ts";
 import type { CifixPr } from "../cifix/types.ts";
 import { forkOf } from "../github/fork.ts";
@@ -176,7 +176,7 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     /** A model patch (with the earlier patch and its findings after a lint round), applied and checked. */
     const generate = async (previous: { patch: string; findings: string[] } | null, round: number, ses: SessionAsk = {}): Promise<Made> => {
       const made = await patchFromFailure(c.db, c.fix, {
-        git, ref, title, repo: c.repo, number: 0, base: head, ...(now.culpritPr && await isQuiet(c.db, c.repo, now.culpritPr) ? { quiet: true } : {}), head, round, failure: { head, checks }, diffText: "", ...(previous ? { previous } : {}), session: ses,
+        git, ref, title, repo: c.repo, number: 0, base: head, ...(now.culpritPr && (await loadQuiet(c.db, [`${c.repo}#${now.culpritPr}`])).size > 0 ? { quiet: true } : {}), head, round, failure: { head, checks }, diffText: "", ...(previous ? { previous } : {}), session: ses,
         runId: `main-fix-${c.repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`, actor: PR_ACTOR, at,
         reviewReason: `The default branch fails the check${names.length > 1 ? "s" : ""} ${names.join(", ")} at this head. The patch must make ${names.length > 1 ? "them" : "it"} pass without changing what the code is meant to do.`,
         checkout: async () => c.fix.checkout?.(c.repo, now.branch, head),

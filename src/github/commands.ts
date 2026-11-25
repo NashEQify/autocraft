@@ -175,7 +175,7 @@ async function settle(db: Db, d: Drain, r: Row, state: CommandState, result: str
 /** Any of the items the command touches is a quiet pull request (a security fix not yet published): nothing is said there. */
 const quietFor = async (db: Db, d: Drain, r: Row): Promise<boolean> => {
   const numbers = [r.number, ...(r.pr ? [] : await d.closing(db, r.repo, r.number))];
-  return (await loadQuiet(db, numbers.map((number) => ({ repo: r.repo, number })))).size > 0;
+  return (await loadQuiet(db, numbers.map((number) => `${r.repo}#${number}`))).size > 0;
 };
 
 /** The access row of `login` while it is bound to the GitHub id `github_id`; a login never bound counts as unknown. */

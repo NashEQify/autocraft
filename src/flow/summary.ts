@@ -1,6 +1,6 @@
 // The per-repo flowchart summary (table flow_summary): refreshed by the runner
 // for repos whose data changed, read and added up by GET /api/flow.
-import { latestRun, newestVerdictRun } from "../classify/settled.ts";
+import { classifyRun as latestRun, classifyRunInfo } from "../data/triage/index.ts";
 import { trackedNames } from "../repos.ts";
 import { countAll, type Counts } from "./count.ts";
 import type { Db } from "../db/index.ts";
@@ -61,7 +61,7 @@ const globalSig = async (db: Db): Promise<string> => JSON.stringify([await db.ge
     eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("v")).as("tracked"),
     eb.lit(null).as("jev"),
   ];
-})), await newestVerdictRun(db)]);
+})), (await classifyRunInfo(db)).derived]);
 
 /** Marks the repos whose data changed since the last call as stale, and moves the marks. */
 export async function markChanged(db: Db): Promise<number> {

@@ -95,7 +95,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   // Read once per pass, before the first re-read.
   let rateLowP: Promise<boolean> | undefined;
   await pool(cands.map((e) => async () => {
-    const start = now(), ref = refOf(e), head = e.head;
+    const ref = refOf(e), head = e.head;
     const fail = async (error: string, final = false) => {
       await jobItem(db, repo, e.number, error, log);
       await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: deps.model, error, final }]);

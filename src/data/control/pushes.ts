@@ -9,8 +9,8 @@ import { loadChecks } from "../mirror/checks.ts";
 import { loadMainCi, loadMainCiAt } from "../mirror/mainci.ts";
 import { closeMovedPushOutcomes, loadOpenHeadPushes } from "./cross.ts";
 import { REPO_SETTINGS } from "./settings.ts";
-import { loadTrips, tripStage } from "./trips.ts";
-import type { NewPush, PushFacts, PushOutcomeRow, TripRow } from "./types.ts";
+import { tripStage } from "./trips.ts";
+import type { NewPush, PushFacts, PushOutcomeRow } from "./types.ts";
 
 /** Unresolved pushes older than this get the outcome `unknown` (the head moved on, or the checks never ran). */
 const EXPIRE_MS = 3 * 24 * 3_600_000;
@@ -157,7 +157,7 @@ export async function evaluatePushBreakers(db: Db, pairs: { stage: string; repo:
   const [trips, repoRows, stageRows] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("main.stage_trips").select(["stage", "active", "reason", "evidence", "tripped_at", "cleared_at", "cleared_by"])
       .where((eb) => eb.or([kx.inList(db, "stage", stages), ...stages.map((s) => kx.like(db, "stage", eb.val(`${s}:%`)))]))),
-    windowOf("repo", (eb) => kx.tupleIn(db, ["p.stage", "p.repo"], todo.map((p) => [p.stage, p.repo]), ["text", "text"])),
+    windowOf("repo", () => kx.tupleIn(db, ["p.stage", "p.repo"], todo.map((p) => [p.stage, p.repo]), ["text", "text"])),
     windowOf("stage", () => kx.inList(db, "p.stage", stages)),
   ]));
   const state = new Map<string, { active: boolean; clearedAt: string | null }>(trips.map((r) => [r.stage, { active: r.active === 1, clearedAt: r.cleared_at }]));

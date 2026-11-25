@@ -117,7 +117,6 @@ export async function runPostmerge(db: Db, params: PostmergeParams, log: (line: 
   if (!cands.length) { log(`postmerge ${repo}: nothing to review`); return s; }
   let handled = 0;
   await pool(cands.map((c) => async () => {
-    const start = now();
     const p = await prepare(db, c, deps);
     if (p.kind === "error") {
       await jobItem(db, repo, c.number, p.error, log);

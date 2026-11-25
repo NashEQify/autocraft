@@ -109,7 +109,6 @@ export async function createEnv(db: Db, input: unknown, by: string): Promise<{ e
   const confidential = o.confidential === undefined ? false : checkFlag(o.confidential, "confidential");
   const kube = o.kind === "kubernetes";
   if (!kube && o.settings !== undefined) throw new BuildError(400, "settings are only for kubernetes environments");
-  const settings = kube ? JSON.stringify(parseSettings(o.settings)) : null;
   const key = newKey(id);
   await saveNewEnv(db, [{ id, label, kind: o.kind as EnvKind, slots, confidential, keyHash: kube ? UNUSABLE_HASH : hashKey(key), settings: kube ? parseSettings(o.settings) : undefined }], by)
     .catch(rethrow);

@@ -1,7 +1,6 @@
 // The PRs the fix-up and conflict steps work on: those whose Plan holds a `fixup` or `conflict` action.
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
-import type { PrFacts } from "../core/plan.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { type FixCandidate, type FixSelection, parseFixes } from "./candidates.ts";
 import { loadPatchFacts, loadStoredPatches, type PatchFacts, type StoredPatch } from "../data/changes/index.ts";

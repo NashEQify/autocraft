@@ -2,11 +2,16 @@
 // and on every repo when broken pushes come from several repos (an operator resumes it).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { activeTrips, evaluatePushBreaker, trip } from "../src/push-outcomes.ts";
+import { evaluatePushBreakers, loadTrips, tripStage } from "../src/data/control/index.ts";
+import type { Db } from "../src/db/index.ts";
 import { resumeTrip } from "../src/dash/api/pipeline.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { gates } from "../src/core/gates.ts";
 import { connectDb } from "../src/db/open.ts";
+
+const trip = async (db: Db, key: string, reason: string, evidence: string[], at: string): Promise<void> => void await tripStage(db, [{ key, reason, evidence, at }]);
+const evaluatePushBreaker = async (db: Db, stage: string, repo: string, at: string): Promise<void> => void await evaluatePushBreakers(db, [{ stage, repo }], at);
+const activeTrips = async (db: Db): Promise<Record<string, string>> => Object.fromEntries([...await loadTrips(db, { active: true })].map(([k, t]) => [k, t.reason]));
 
 const as = (role: string, stage: string, writable: string[]) => ({
   method: "POST", path: "", params: { stage }, query: new URLSearchParams(), form: new URLSearchParams(), csrf: "", nonce: "",

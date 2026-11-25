@@ -21,12 +21,12 @@ import { changedHunks, hasBinary, ownDiffKey } from "../review/own-diff.ts";
 import { checkLine, parseCheck, recordCheck } from "../patchcheck/index.ts";
 import { CHECK_DIFF_CAP, CHECK_PATCH_CAP, type FixupCheckInput } from "../patchcheck/types.ts";
 import { CLAUDE_PROMPTS, untrustedJson } from "../prompts/index.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL } from "../security/rules.ts";
 import { BASE_NAME, type ConflictCandidate } from "./conflict-state.ts";
 import type { Git } from "./git.ts";
 import { dropSessions, sessionAsk, storeSessions, type Kept, type SessionLedger } from "../prepush/resume.ts";
-import { noteLive, type FixupDeps, type FixupSummary, type PrNode, type Who } from "./index.ts";
+import { noteLive, type FixupDeps, type FixupSummary, type PrNode } from "./index.ts";
 import { answerText, buildScriptsAt, conflictView, endNewline, hasMarkers, locateInHead, parseResolution, resolvablePath, spliceSections, type ConflictFile, type ConflictSection } from "./patch.ts";
 import { ensureAuthorWrites } from "./author-permission.ts";
 import { longLivedOf, pushable } from "./pushable.ts";
@@ -308,7 +308,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       checkout = (await x.d.checkout?.(x.repo, c.number, head)) ?? undefined;
       const body = ((await loadItems(db, [{ repo: x.repo, number: c.number }], "text")).get(refOf(c))?.body ?? "").slice(0, 4000);
       const repoDir = checkout ? { repo_dir: REPO_PATH } : {};
-      const quiet = await isQuiet(db, x.repo, c.number);
+      const quiet = (await loadQuiet(db, [`${x.repo}#${c.number}`])).size > 0;
       const resFiles: { path: string; mode: string; content: string }[] = [];
       const keptNow: Kept = {};
       // One resolver call and one check per file, so the size caps apply to a file, not to the whole PR. Every file must pass before anything is pushed.

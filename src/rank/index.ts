@@ -5,7 +5,7 @@
 // (computed_at is the time the score last changed) and removes the rows of the others.
 import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 import { currentRunReady, loadRankInputs, loadRanks, saveRanks, type RankPut } from "../data/triage/index.ts";
-import { isSize, rankOf, sizeOfLines, type RankBreakdown, type RankInput, type Size } from "./score.ts";
+import { rankOf, sizeOfLines, type RankBreakdown, type RankInput, type Size } from "./score.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 

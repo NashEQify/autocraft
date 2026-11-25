@@ -63,7 +63,7 @@ export type FixDeps = {
   log: (line: string) => void;
 };
 
-export function defaultFixDeps(db: Db, scanId: number, io: { cancelled: () => Promise<boolean>; log: (l: string) => void }): FixDeps {
+export function defaultFixDeps(db: Db, _scanId: number, io: { cancelled: () => Promise<boolean>; log: (l: string) => void }): FixDeps {
   return {
     exec: realExec, root: fixupDir(), fetchCrates: ghCrates, ...io,
     checkout: (repo, branch, sha) => checkoutForCommit(repo, branch, sha, io.log),

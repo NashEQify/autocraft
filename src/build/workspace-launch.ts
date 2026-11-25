@@ -766,7 +766,6 @@ async function warmDone(c: Ctx, w: WorkspaceRow, warm: WorkspaceWarm, mtimes: bo
   if (mtimes) {
     const ch = mark.trimmed ? await warmChanges(w.repo, use.commit, w.base_sha).catch((e: Error) => ({ error: errText(e) })) : null;
     let list = ch && "files" in ch && ch.files ? { files: ch.files, dirs: ch.dirs ?? [] } : null;
-    let putError: string | null = null;
     if (list) {
       const put = async (file: string, paths: string[]) => {
         const r = await execWs(db, c.api, w.id, ["put", file], { tool: "seed", args: { warm: "changed", paths: paths.length }, stdin: Buffer.from(paths.join("\0")), timeoutMs: 120_000 }, c.now);
@@ -776,7 +775,6 @@ async function warmDone(c: Ctx, w: WorkspaceRow, warm: WorkspaceWarm, mtimes: bo
         await put(WARM_CHANGED_FILES, list.files);
         await put(WARM_CHANGED_DIRS, list.dirs.map((d) => d || "."));
       } catch (e) {
-        putError = errText(e);
         list = null;
       }
     }

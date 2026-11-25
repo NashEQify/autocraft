@@ -5,11 +5,10 @@ import { DEFAULT_OWNER, OWNER, reloadOwners, splitSlug } from "./owners.ts";
 import { appCoverage, githubIdentity, setGithubIdentityChecked } from "./github/identity.ts";
 import { listRepoOwner, ownerAllowed } from "./github/allowed-owners.ts";
 import { readAppSecrets } from "./github/install-token.ts";
-import { PilotError, setRepoPipeline } from "./pilot.ts";
 import { AppReadError, readEnv } from "./github/read.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
-import { addTrackedRepo, loadTrackedRepos, removeTrackedRepo } from "./data/control/index.ts";
+import { addTrackedRepo, loadTrackedRepos, PilotError, removeTrackedRepo, setPipelineFlags } from "./data/control/index.ts";
 import { loadFilingReposNamed } from "./data/discord/index.ts";
 import { countItemsByRepo, ensureRepo, loadRepos, purgeRepoMirror, resetRepoSync } from "./data/mirror/index.ts";
 export { SHADOWED_TABLES } from "./db/scoped.ts";
@@ -153,7 +152,7 @@ const sub: Record<string, (args: string[]) => Promise<void | Promise<void>>> = {
     if (a[1] !== "on" && a[1] !== "off") { need([], usage); return; }
     try {
       const on = a[1] === "on";
-      console.log(await setRepoPipeline(await openDb(), "cli", name, on) ? `${name}: pipeline ${a[1]}` : `${name}: pipeline was already ${a[1]}`);
+      console.log((await setPipelineFlags(await openDb(), [{ repo: name, on }], "cli")).changed.length ? `${name}: pipeline ${a[1]}` : `${name}: pipeline was already ${a[1]}`);
     } catch (e) {
       if (!(e instanceof PilotError)) throw e;
       console.error(e.message);

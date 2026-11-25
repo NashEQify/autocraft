@@ -80,7 +80,6 @@ export const commands = {
   "merge-single": {
     summary: "merge-single [N]: show or set how many ready PRs of a repo merge one at a time instead of in a batch (0 = always batch)",
     async run(args: string[]): Promise<void> {
-      const { connect } = await import("../db.ts");
       const db = await openDb();
       if (args.length > 1) throw new Error("usage: merge-single [N]");
       if (args[0] !== undefined) {

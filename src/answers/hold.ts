@@ -9,7 +9,7 @@ import { queuePlace } from "../conversations/queue.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
-import type { AliasableExpression, Expression, SqlBool } from "kysely";
+import type { AliasableExpression, SqlBool } from "kysely";
 
 export const SETTLING = "settling";
 export const DISPUTED = "disputed";

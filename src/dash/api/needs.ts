@@ -15,17 +15,16 @@ import { fixStoppedWait } from "../../core/decide-item.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { allOwnLogins } from "../../github/identity.ts";
-import { isQuiet } from "../../security/quiet.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import type { SelectQueryBuilder, SqlBool } from "kysely";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
-import { mayResumeTrip } from "../../push-outcomes.ts";
+import { mayResumeTrip } from "../../data/control/index.ts";
 import { parseTripKey } from "../../core/push-outcome.ts";
 import { stepTitle } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { setting } from "../../settings-read.ts";
-import { latestAttempts } from "../../implement/store.ts";
 
 export const NEEDS_PAGE = 30;
 /** Older feedback is not asked for any more; the window also bounds the scans. */
@@ -102,7 +101,7 @@ const ownLogin = async (db: Db): Promise<string> => (await setting(db, "pipeline
 
 /** True when a feedback row is about a quiet pull request: its item, or any item of its decision (batch and duplicate-group members too). */
 async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, memo: Map<string, boolean>): Promise<boolean> {
-  if (r.repo !== null && r.number !== null && await isQuiet(db, r.repo, r.number)) return true;
+  if (r.repo !== null && r.number !== null && (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0) return true;
   if (!r.decision) return false;
   let q = memo.get(r.decision);
   if (q === undefined) {
@@ -191,7 +190,7 @@ export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): P
     const k = parseTripKey(t.stage);
     if (k && isHiddenRepo(hidden, k.repo)) continue;
     out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: stepTitle(k?.stage ?? t.stage), ...(k ? { repo: k.repo } : {}), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at,
-      resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(user, t.stage) } });
+      resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(db, user, t.stage) } });
   }
   const updated = new Map(limitRows.map((r) => [r.step, r.updated_at]));
   for (const l of zero)
@@ -222,23 +221,9 @@ export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): P
  * Implementations of open issues that wait on a maintainer: a stuck attempt, or a plan question asked of the maintainers. Each
  * links to its decision. The reason after the cause is the attempt's detail (job and model text): staff only.
  */
-async function implementationRows(db: Db, hidden: HiddenRepos, staff: boolean): Promise<NeedsStoppedRow[]> {
-  const waiting = [...(await latestAttempts(db)).values()].filter((r) => !isHiddenRepo(hidden, r.repo) && r.decisionId
-    && (r.state === "stuck" || (r.state === "asked" && r.question?.audience === "maintainer")));
-  if (!waiting.length) return [];
-  const items = new Map((await db.all(db.k.selectFrom("items").select(["repo", "number", "state", "title"])
-    .where(kx.tupleIn(db, ["repo", "number"], waiting.map((r) => [r.repo, r.number] as [string, number]), ["text", "bigint"])))).map((i) => [`${i.repo}#${i.number}`, i]));
-  return waiting.flatMap((r): NeedsStoppedRow[] => {
-    const it = items.get(`${r.repo}#${r.number}`);
-    if (!it || it.state !== "OPEN") return [];
-    const stuck = r.state === "stuck";
-    const reason = stuck ? (staff ? r.reason : r.reason?.split(": ")[0]) ?? "The implementation is stuck" : "The plan asked the maintainers a question";
-    return [{
-      id: `implement:${r.repo}#${r.number}`, kind: stuck ? "implement-stuck" : "implement-question", title: `${r.repo}#${r.number}`,
-      item: { repo: r.repo, number: r.number, kind: "issue", state: itemState(it.state), title: it.title }, reason, since: stuck ? r.updatedAt : r.question?.at ?? r.updatedAt,
-      resume: { type: "link", to: decisionPath({ id: r.decisionId!, repo: r.repo, number: r.number }) },
-    }];
-  }).sort((a, b) => ((a.since ?? "") < (b.since ?? "") ? -1 : 1));
+async function implementationRows(_db: Db, _hidden: HiddenRepos, _staff: boolean): Promise<NeedsStoppedRow[]> {
+  // Each row linked to the attempt's decision; implementation decisions are retired, so no attempt has one.
+  return [];
 }
 
 export const FIXES_PAGE = 25;

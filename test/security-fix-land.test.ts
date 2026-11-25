@@ -10,7 +10,9 @@ import { createEnv, hello } from "../src/build/envs.ts";
 import { claim, createTask } from "../src/build/tasks.ts";
 import { PIPELINE_LOGIN_KEY } from "../src/core/rules.ts";
 import { ownFixPrs } from "../src/core/facts.ts";
-import { inPilot, setPilot } from "../src/pilot.ts";
+import { setPilot } from "../src/data/control/index.ts";
+import { inScopeExpr } from "../src/data/workflow/fragments.ts";
+import type { Db } from "../src/db/index.ts";
 import { fixOnMain, pollLanding, runAdvisory, stallReason, runLand, runPublish, type LandDeps } from "../src/security/land.ts";
 import { runFix, type FixDeps } from "../src/security/fix.ts";
 import { fixBranch, giveaway, parseFixReply, patchGiveaway, quietProblem } from "../src/security/rules.ts";
@@ -21,6 +23,10 @@ import { rawFinding } from "../src/security/store.ts";
 import { Git } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+
+/** The item is in the pipeline's scope (the workflow scope fragment), read as the planner reads it. */
+const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>
+  !!await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")).where((eb) => inScopeExpr(db, eb, eb.val(repo), eb.cast<number>(eb.val(number), "bigint"))));
 import { excluded, like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

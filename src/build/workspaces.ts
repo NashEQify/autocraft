@@ -20,8 +20,6 @@ export type { WorkspaceRow, WorkspaceStateName };
 /** Output kept per call, after the helper's own cap. */
 export const MAX_CALL_OUTPUT = 64 * 1024;
 
-const SHA = /^[0-9a-f]{40}$/;
-const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 
 export const getWorkspace = async (db: Db, id: number): Promise<WorkspaceRow | undefined> => (await loadWorkspaces(db, { ids: [id] })).get(id);
 export const getCheckpoint = async (db: Db, id: number): Promise<Uint8Array | null> => await loadCheckpoint(db, id);

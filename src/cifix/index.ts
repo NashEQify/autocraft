@@ -29,7 +29,7 @@ import { DIFF_CAP, FILE_CAP, PR_QUERY, TOTAL_CAP, noteLive, scrubReason, whoAmI,
 import { commitIdentity } from "../github/identity.ts";
 import { outsideShown, shownSize, viewFile } from "../fixup/excerpt.ts";
 import { buildScriptsAt, editable, validatePatch } from "../fixup/patch.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL } from "../security/rules.ts";
 import { readGate } from "../merge/changes-requested.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
@@ -318,7 +318,7 @@ export async function patchFromFailure(db: Db, d: Pick<CifixDeps, "ask" | "check
     shown.push(v.file);
   }
   if (!shown.length) return no("failed", "the failure names no file a CI fix may edit");
-  const quiet = !!r.quiet || await isQuiet(db, repo, r.number);
+  const quiet = !!r.quiet || (await loadQuiet(db, [`${repo}#${r.number}`])).size > 0;
   const tool = new CheckTool({ db, step: "cifix", repo, number: r.number || null, head, base: r.base, applies: applyCheck(git, d.root, head, (p) => refusal(validatePatch(p, shown.map((s) => s.path), (x) => editable(x, scripts)))) });
   const reply = await d.ask(db, [{ ref, title, failure: logText(failure), ...(quiet ? { quiet } : {}), files: shown, diff: r.diffText, ...(r.previous ? { previous: r.previous } : {}), ...repoDir }], checkout, tool, r.session);
   if (reply === null) return no("failed", "the model gave no answer");

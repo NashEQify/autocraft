@@ -8,7 +8,6 @@ import { runModelStep } from "../agents/step.ts";
 import { REVIEW_OPUS } from "../agents/steps.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { checksOf, refreshChecks } from "./checks.ts";
-import { openBlockers } from "./blockers.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
 import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
 import { recordLiveBase } from "../merge/base.ts";
@@ -30,7 +29,7 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
-import { loadReviewRows, loadReviewsAt, saveReviews, type ReviewRow } from "../data/review/index.ts";
+import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
@@ -245,7 +244,6 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
   let handled = 0;
   const tally = async (c: { repo: string; number: number }, r: OpusReview) => { summary.verdicts[r.verdict] = (summary.verdicts[r.verdict] ?? 0) + 1; summary.reviewed++; await jobItem(db, c.repo, c.number, `Opus review: ${r.verdict}${r.sure ? "" : " (unsure)"}`, log); };
   await pool(cands.map((c) => async () => {
-    const start = now();
     const p = await prepareOpusInput(db, repo, c, deps, log);
     if (p.kind === "no-diff") {
       await jobItem(db, c.repo, c.number, `no diff: ${p.error}`, log);
@@ -322,7 +320,6 @@ export const commands = {
       if (typeof f.repo !== "string") throw new Error("missing --repo");
       const limit = typeof f.limit === "string" ? Number(f.limit) : undefined;
       if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error("--limit is a positive whole number");
-      const { connect } = await import("../db.ts");
       await runOpusReview(await openDb(), { repo: f.repo, limit, dryRun: f["dry-run"] === true });
     },
   },

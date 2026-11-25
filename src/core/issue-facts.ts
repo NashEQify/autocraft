@@ -2,21 +2,22 @@
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
 import { settleMemo, settledBy, settlesNow } from "../settlers.ts";
 import { featureOn } from "../build/features.ts";
-import { latestAttempts, liveByRepo, type LatestAttempt } from "../implement/store.ts";
+import { loadImplementFacts } from "../data/implement/index.ts";
+import type { AttemptLite, IssueAttempt } from "../data/implement/types.ts";
 import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { ownLoginTest } from "../github/identity.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
-import { activeTrips } from "../push-outcomes.ts";
-import { tripsOfRepo } from "./push-outcome.ts";
+import { loadTrips } from "../data/control/index.ts";
+import { tripOf, tripsOfRepo } from "./push-outcome.ts";
 import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/held.ts";
 import { FAST_FLOOR, fastScoreExpr } from "../fasttrack.ts";
-import { latestRun, needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
+import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { answersToApply, groupsToAsk } from "../dupes/decide.ts";
-import { uncheckedPairCounts } from "../dupes/check.ts";
+import { classifyRun, loadDupeState, loadUncheckedPairCounts } from "../data/triage/index.ts";
 import { dueSets, ruleOutcome } from "../dupes/plan.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts";
@@ -24,22 +25,25 @@ import { actionable } from "../decisions.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { TERMINAL } from "../build/tasks.ts";
 import { fixIssueApprovalOf } from "../implement/approval.ts";
-import { issuesWithOpenPrAll, type OpenPr, notRustKey, textHash } from "./open-prs.ts";
+import { issuesWithOpenPrAll, type OpenPr, textHash } from "./open-prs.ts";
 import { headOf, scopeAnswers, unsettledScope } from "../review/candidates.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
-import { pilotExpr } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { holdMap } from "../outside.ts";
 import { RUNNING_STALE_MS, lockLiveExpr, lockRunningAtExpr } from "../answers/hold.ts";
 import { DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP, isPreparing, prepareStateExpr, utcDayStart } from "../decide/prepared.ts";
 import { nextUtcMidnight } from "../review/discussion.ts";
 import type { ItemFacts } from "./plan.ts";
-import { setting, hasSetting } from "../settings-read.ts";
+import { setting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
-import { loadWorkflowFacts } from "../workflow/facts.ts";
+import { loadWorkflowFacts } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 
 export type { ItemFacts } from "./plan.ts";
+
+/** An issue's latest attempt with its open question, and whether an answer round followed that question. */
+type LatestAttempt = AttemptLite & { question: IssueAttempt["question"]; answered: boolean };
 
 export type ItemLoadOptions = {
   repo?: string;
@@ -68,7 +72,7 @@ const itemRows = (db: Db, model: string) => db.k.selectFrom("items as i").innerJ
   .select((eb) => ["i.repo", "i.number", "i.kind", "i.state", "i.author", "i.assignees", "i.is_draft", "i.updated_at", "i.labels", "i.embed_hash",
     eb.case().when("i.class_scheme", "=", SCHEME_ID).then(eb.ref("i.class_hash")).end().as("class_hash"), "i.jev_failed_hash",
     fastScoreExpr(db, eb, "i.repo", "i.number", "r.score").as("score"),
-    pilotExpr(db, eb, "i").as("in_pilot"), notOwnIntegrationExpr(db, eb, "i").as("not_integration"), backlogHeldExpr(db, eb, "i").as("held_backlog"),
+    inScopeExpr(db, eb, "i.repo", "i.number").as("in_pilot"), notOwnIntegrationExpr(db, eb, "i").as("not_integration"), backlogHeldExpr(db, eb, "i").as("held_backlog"),
     eb.or([
       eb.exists(kx.schemaEb(eb).selectFrom("decisions as dh").select(eb.lit(1).as("one")).where("dh.kind", "=", "duplicate").where(eb.not(kx.like(db, "dh.id", eb.val("%:dupegroup:%"))))
         .where("dh.repo", "=", eb.ref("i.repo")).where("dh.number", "=", eb.ref("i.number")).where((w) => w.or([w("dh.answer", "is", null), w("dh.answer", "=", "close")]))),
@@ -99,8 +103,8 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const pipelineOn = pipelineWrites(await setting(db, "pipeline_enabled"));
 
   // Values read once for all items.
-  const tripped = await activeTrips(db);
-  const run = opts.run !== undefined ? opts.run : await latestRun(db);
+  const tripped = Object.fromEntries([...await loadTrips(db, { active: true })].filter(([k]) => tripOf(k)).map(([k, t]) => [k, t.reason]));
+  const run = opts.run !== undefined ? opts.run : await classifyRun(db);
   const memo = settleMemo();
   const outsideHolds = await holdMap(db);
   const answers = await scopeAnswers(db);
@@ -149,14 +153,14 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     .map((s) => [`${s.repo}#${s.number}`, s.note]));
   const own = await ownFixPrs(db, opts.repo);
   const assigned = await assignmentsOf(db, opts.repo);
-  const pairs = await uncheckedPairCounts(db, { repo: opts.repo, refs: opts.refs });
   const dupeAnswers = new Map<string, string[]>();
   for (const a of await answersToApply(db)) for (const r of a.refs) (dupeAnswers.get(r) ?? dupeAnswers.set(r, []).get(r)!).push(a.id);
   // Group-level work (which groups to ask about, which sets to compare) is planned per group by dupes/decide.ts and dupes/plan.ts; the items carry its result.
   const inGroup = new Set((await groupsToAsk(db, opts.repo)).flatMap((g) => g.group.members.map((n) => `${g.repo}#${n}`)));
   const inCompare = new Map<string, "rule" | "model">();
-  const dueAt = (s: { repo: string; members: { number: number }[] }, at: number): void => { for (const m of s.members) refresh.soon(`${s.repo}#${m.number}`, at); };
-  for (const s of await dueSets(db, opts.repo, now, dueAt)) {
+  const due = dueSets(await loadDupeState(db, opts.repo ? { repo: opts.repo } : {}), now);
+  for (const [k, at] of due.dueAt) refresh.soon(k, at);
+  for (const s of due.sets) {
     const how = ruleOutcome(s) === null ? "model" : "rule";
     for (const m of s.members) { const ref = `${s.repo}#${m.number}`; if (inCompare.get(ref) !== "model") inCompare.set(ref, how); }
   }
@@ -189,6 +193,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const rows = await db.all(itemRows(db, model).where((eb) => eb.or([eb("i.state", "=", "OPEN"), kx.refIn(db, "i", closing)]))
     .$if(!!opts.repo, (q) => q.where("i.repo", "=", opts.repo!)).$if(!!opts.refs, (q) => q.where(kx.refIn(db, "i", opts.refs!)))
     .orderBy("i.repo").orderBy("i.number"));
+  const pairs = await loadUncheckedPairCounts(db, rows.map((r) => ({ repo: r.repo, number: r.number })));
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {
@@ -218,29 +223,26 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     if (!m) {
       const t = (tables ??= { pub: new Set((await db.all(db.k.selectFrom("repos").select("name").where("visibility", "=", "public"))).map((x) => x.name)), openPrs: await issuesWithOpenPrAll(db) });
       m = { comment: await commentApprovalOf(db, repo) !== null, fix: await fixIssueApprovalOf(db, repo) !== null, implement: await featureOn(db, "implement", repo), pub: t.pub.has(repo),
-        notRust: await hasSetting(db, notRustKey(repo)), openPrs: t.openPrs(repo) };
+        notRust: false, openPrs: t.openPrs(repo) };
       repoMemo.set(repo, m);
     }
     return m;
   };
   // Implement: who queued each issue (its fast_track row; in a repo on the maintainer workflow, who started its live implement
   // workflow), its latest attempt, and the live attempts per repo.
-  const wfs = await loadWorkflowFacts(db, opts.repo);
-  const fastQueued = new Map((await db.all(db.k.selectFrom("fast_track").select(["repo", "number", "added_by", "added_at"]).$if(!!opts.repo, (q) => q.where("repo", "=", opts.repo!))))
-    .map((r) => [`${r.repo}#${r.number}`, { by: r.added_by, at: r.added_at }]));
+  const wf = await loadWorkflowFacts(db, rows.map((r) => ({ repo: r.repo, number: r.number })), { nowMs: now });
+  const wfs = {
+    model: (_repo: string) => "new" as const,
+    live: (repo: string, number: number) => wf.live.get(`${repo}#${number}`) ?? null,
+    ended: (repo: string, number: number) => (wf.live.has(`${repo}#${number}`) ? null : wf.ended.get(`${repo}#${number}`) ?? null),
+  };
   const queuedOf = (repo: string, number: number): { by: string; at: string } | null => {
-    if (wfs.model(repo) !== "new") return fastQueued.get(`${repo}#${number}`) ?? null;
     const w = wfs.live(repo, number);
     return w?.entry === "implement" ? { by: w.startedBy, at: w.startedAt } : null;
   };
-  const attempts = await latestAttempts(db, opts.repo);
-  const liveImpl = await liveByRepo(db);
-  const implDecisions = [...new Set([...attempts.values()].flatMap((a) => (a.decisionId ? [a.decisionId] : [])))];
-  const answeredAt = new Map(implDecisions.length ? (await db.all(db.k.selectFrom("decisions").select(["id", "answered_at"]).where("id", "in", implDecisions).where("answer", "is not", null))).map((d) => [d.id, d.answered_at ?? ""]) : []);
-  // An answer that waits for its person's sign-in or access, or is disputed, is not work for the plan or build bucket until that clears.
-  const implHeld = new Set(implDecisions.length ? (await db.all(db.k.selectFrom("decisions").select("id").where("id", "in", implDecisions).where("exec_state", "in", ["waiting-token", "waiting-permission", "disputed"]))).map((d) => d.id) : []);
-  // A stuck attempt's answer counts once someone who settles on the repo gave it and it is not Backlog (actionable()), as applyStuckAnswer reads it.
-  const settledIds = new Set(actionableNow.map((a) => a.id));
+  const implFacts = await loadImplementFacts(db, rows.filter((r) => r.kind === "issue").map((r) => ({ repo: r.repo, number: r.number })));
+  const attempts = new Map([...implFacts.byIssue].map(([k, v]): [string, LatestAttempt] => [k, { ...v.attempt, question: v.question, answered: v.answer !== null }]));
+  const liveImpl = implFacts.liveByRepo;
   // Answers count only when they came after the attempt's newest question (else after it last moved): a re-plan that asks again
   // writes a new question round, so the answers it already read do not plan it again.
   const askedSince = (a: LatestAttempt): string => a.question?.at ?? a.updatedAt;
@@ -344,9 +346,8 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
             state: a.state, attempt: a.attempt,
             textChanged: (() => { const b = texts.get(ref)!; return textHash(b.title ?? "", b.body ?? "") !== a.textHash; })(),
             newCommentAfterQuestion: commentedAfter.has(ref),
-            decisionAnswered: a.decisionId !== null && !implHeld.has(a.decisionId)
-              && (a.state === "stuck" ? settledIds.has(a.decisionId) : a.state === "asked" && (answeredAt.get(a.decisionId) ?? "") > askedSince(a)),
-            asked: a.state === "asked" ? a.question?.audience ?? (a.decisionId !== null ? "maintainer" : "author") : null,
+            decisionAnswered: (a.state === "stuck" || a.state === "asked") && a.answered,
+            asked: a.state === "asked" ? a.question?.audience ?? "author" : null,
             requeuedAfterEnd: ENDED_STATES.has(a.state) && q !== null && q.at > a.updatedAt,
             prOpen: a.prNumber !== null && (prState.get(`${r.repo}#${a.prNumber}`) ?? "OPEN") === "OPEN",
           } : null,

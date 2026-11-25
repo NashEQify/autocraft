@@ -2,7 +2,7 @@
 // per-repo summary rows (src/flow/summary.ts), which the runner keeps current,
 // and shapes them into nodes and edges (src/flow/shape.ts). Read-only, anyone signed in.
 import type { Flow } from "../../../web/src/api/types.ts";
-import { latestRun } from "../../classify/settled.ts";
+import { classifyRun as latestRun } from "../../data/triage/index.ts";
 import { branchMembers, type Refs } from "../../flow/count.ts";
 import { buildFlow } from "../../flow/shape.ts";
 import { readSummary } from "../../flow/summary.ts";

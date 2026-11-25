@@ -167,7 +167,7 @@ async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashe
  * Open items the Plans send to Jev in `run`, with each due item's input hash. "all" takes only items without a verdict.
  * The hashes are stored on the item row (src/itemhash.ts), so no body is read for items that are up to date.
  */
-export async function jevItems(db: Db, run: string, mode: "new" | "all", plans: ClassifyPlans): Promise<{ open: number; due: Item[]; hashes: Map<string, string> }> {
+export async function jevItems(db: Db, _run: string, mode: "new" | "all", plans: ClassifyPlans): Promise<{ open: number; due: Item[]; hashes: Map<string, string> }> {
   const open = (await countItems(db, { states: ["OPEN"] })).get("") ?? 0;
   const due: Item[] = [], hashes = new Map<string, string>();
   for (const { classHash, ...x } of await itemsOf(db, (await bucketItems(db, plans, "jev")).filter((p) => mode === "new" || !p.facts.classification.jev).map((p) => p.facts))) {

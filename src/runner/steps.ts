@@ -255,8 +255,8 @@ export const STEPS: StepDef[] = [
       const repo = String(ctx.params.repo);
       const refused = await checkApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      const { latestRun } = await import("../classify/settled.ts");
-      const runId = await latestRun(ctx.db);
+      const { classifyRun } = await import("../data/triage/index.ts");
+      const runId = await classifyRun(ctx.db);
       if (!runId) throw new Error("there is no classification run yet");
       const { applyLabels, ensureLabels } = await import("../labels/github.ts");
       const { Client } = await import("../mirror.ts");
@@ -655,10 +655,10 @@ export const STEPS: StepDef[] = [
     models: ["sonnet", "opus"],
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 100, help: "items sent to the referee models in this job" }],
     run: async (ctx) => {
-      const { latestRun } = await import("../classify/settled.ts");
+      const { classifyRun } = await import("../data/triage/index.ts");
       const { refereeItems } = await import("../classify/referee.ts");
       const { itemOf, plannedItems } = await import("../core/select-items.ts");
-      const run = await latestRun(ctx.db);
+      const run = await classifyRun(ctx.db);
       if (!run) throw new Error("There is no classification run yet; start a classification pass first.");
       const { takersFirst } = await import("../agents/call.ts");
       const due = (await takersFirst(ctx.db, await plannedItems(ctx.db, "referee", { run }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, Number(ctx.params.limit));
@@ -1021,8 +1021,8 @@ export const STEPS: StepDef[] = [
       const refused = await checkNightlyOn(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runNightly(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.queued + r.issues);
-      return `${r.repo}: queued ${r.queued}, skipped ${r.skipped}, collected ${r.collected}, asked ${r.asked}, ${r.issues} issues opened`;
+      ctx.acted(r.queued);
+      return `${r.repo}: queued ${r.queued}, skipped ${r.skipped}, collected ${r.collected}`;
     },
   },
 ];

@@ -52,7 +52,7 @@ function canonicalJson(v: unknown): string {
 export const bundleHash = (bundle: unknown): string => createHash("sha256").update(canonicalJson(bundle)).digest("hex");
 export const sha256hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
-const ident = (eb: Eb, p: string, name: string) => ref<any>(p ? `${p}.${name}` : name);
+const ident = (_eb: Eb, p: string, name: string) => ref<any>(p ? `${p}.${name}` : name);
 
 /** The dashboard is serving: no stamp ever written counts as serving. */
 export function dashboardAliveExpr(eb: Eb, now: number): Expression<SqlBool> {
@@ -72,7 +72,7 @@ function idleWindowExpr(eb: Eb, now: number): Expression<SqlBool> {
  * no heartbeat for LEASE_IDLE_MS (when it served for the whole window), or still preparing past PREPARE_MS, or running past its limit.
  * Expiry, the heartbeat and the lease routes share this one definition.
  */
-export function lostLeaseExpr(db: Db, eb: Eb, now: number, p = ""): Expression<SqlBool> {
+export function lostLeaseExpr(_db: Db, eb: Eb, now: number, p = ""): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const c = (n: string) => ident(eb, p, n);
   return w.and([

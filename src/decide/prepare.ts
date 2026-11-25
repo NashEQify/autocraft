@@ -21,7 +21,7 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { codeDiff } from "../review/diff.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { applicableSteps } from "../conversations/cards.ts";
-import { pilotExpr } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { judgementModel } from "./judgement.ts";
 import { loadSummaryItems } from "./index.ts";
@@ -117,7 +117,7 @@ export async function prepareIds(db: Db, repos?: string[], nowMs: number = Date.
     .$narrowType<{ repo: string; prepares_today: number }>()
     .where((eb) => eb.and([
       eb("d.answer", "is", null), eb("d.kind", "<>", "backlog"), eb("d.repo", "is not", null), eb("d.number", "is not", null),
-      openSubjectExpr(db, eb, "d", "i"), pilotExpr(db, eb, "i"), notOwnIntegrationExpr(db, eb, "i"), eb.not(lockLiveExpr(db, eb, "d")),
+      openSubjectExpr(db, eb, "d", "i"), inScopeExpr(db, eb, "i.repo", "i.number"), notOwnIntegrationExpr(db, eb, "i"), eb.not(lockLiveExpr(db, eb, "d")),
     ]))
     .orderBy((eb) => eb("d.prepare_requested_at", "is", null)).orderBy("d.prepare_requested_at", (o) => o.asc().nullsFirst()).orderBy("d.asked_at").orderBy("d.id"))).map((r) => ({ ...r, review_queued: Number(r.review_queued) }));
   const due = rows.filter((r) => !repos?.length || repos.includes(r.repo)).filter((r) => prepareDue(r, headOf(r), nowMs));

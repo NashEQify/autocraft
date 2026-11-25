@@ -7,7 +7,6 @@ import { addSentAlerts, loadAlertOptIns, loadAlertState, pruneSentAlerts, remove
 import { listWorkflows } from "../data/workflow/index.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import type { Role } from "../dash/types.ts";
-import { readSeqs } from "../live.ts";
 import { t } from "../i18n/index.ts";
 import { blockerLabel, recommendationLine } from "../workflow/status.ts";
 import type { DiscordKeys } from "./keys.ts";
@@ -133,7 +132,7 @@ export class Alerts {
     void this.sync();
     const poll = exclusive(async () => {
       try {
-        const seqs = await readSeqs(this.#d.db);
+        const seqs = await this.#d.db.seqs();
         const sig = TOPICS.map((k) => seqs[k] ?? 0).join(",");
         let changed = sig !== this.#last;
         this.#last = sig;

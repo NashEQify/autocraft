@@ -2,7 +2,7 @@
 // is open or was answered "close as duplicate", or any decision about them was
 // answered Backlog. An answer of "not a duplicate"
 // or "keep both" releases them. No Node imports besides the type and the app-slug lookup.
-import { pilotExpr } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { appSlug } from "../github/identity.ts";
 import type { Db } from "../db/index.ts";
 import { jsonEach, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
@@ -74,7 +74,7 @@ export function notOwnIntegrationExpr(db: Db, eb: kx.AnyEb, alias: string): Alia
 export function notHeldExpr(db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> {
   return eb.and([
     notOwnIntegrationExpr(db, eb, alias),
-    pilotExpr(db, eb, alias),
+    inScopeExpr(db, eb, `${alias}.repo`, `${alias}.number`),
     eb.not(eb.exists(kx.schemaEb(eb).selectFrom("decisions as dh").select(eb.lit(1).as("one")).where("dh.kind", "=", "duplicate")
       .where((w) => w.not(kx.like(db, "dh.id", w.val("%:dupegroup:%")))).where("dh.repo", "=", eb.ref(`${alias}.repo`)).where("dh.number", "=", eb.ref(`${alias}.number`))
       .where((w) => w.or([w("dh.answer", "is", null), w("dh.answer", "=", "close")])))),

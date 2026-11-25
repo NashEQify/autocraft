@@ -18,7 +18,6 @@ export const ACTIVITY_WINDOW_MS = 14 * 86_400_000;
 /** The sync leaves this many points for its other work. */
 const ACTIVITY_MIN_REMAINING = 2000;
 /** Files and commits per query; the same cap the other per-PR reads use. */
-const CAP = 100;
 
 export const ACTIVITY_QUERY = `
 query($owner: String!, $name: String!, $number: Int!) {

@@ -72,7 +72,6 @@ export const commands = {
   "optional-checks": {
     summary: "optional-checks [--repo R] | add R NAME | remove R NAME: the checks whose failure does not stop a merge",
     async run(args: string[]): Promise<void> {
-      const { connect } = await import("./db.ts");
       const db = await openDb();
       const [verb, repo, ...rest] = args;
       if (verb === "add" || verb === "remove") {

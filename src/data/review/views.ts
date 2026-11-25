@@ -68,7 +68,7 @@ export async function loadReviewSignature(db: Db, keys: KeySource): Promise<Map<
 export async function listReviewEvents(db: Db, f: { since?: string; before?: string; limit: number; repos?: string[] }): Promise<ReviewEventRow[]> {
   if (f.repos && !f.repos.length) return [];
   const q = queryDb(db);
-  const feed = <T extends "main.opus_review_history" | "main.premerge_reviews" | "main.postmerge_reviews">(table: T) => (b: any) => b
+  const feed = <T extends "main.opus_review_history" | "main.premerge_reviews" | "main.postmerge_reviews">(_table: T) => (b: any) => b
     .where("x.at", "is not", null)
     .$if(f.since !== undefined, (c: any) => c.where("x.at", ">=", f.since))
     .$if(f.before !== undefined, (c: any) => c.where("x.at", "<=", f.before))

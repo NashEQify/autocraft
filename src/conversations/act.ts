@@ -3,13 +3,13 @@
 import { guardRepo } from "../core/guard.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { claimSettling, pendingAnswerRefusal, releaseSettling, RUNNING_STALE_MS, sweepSettling } from "../answers/hold.ts";
-import { initExecState, laneForOperator, type Lane, type LaneDeps } from "../github/user-lane.ts";
+import { laneForOperator, type Lane, type LaneDeps } from "../github/user-lane.ts";
 import { createHash } from "node:crypto";
-import { readLive, writeEffect } from "../act/index.ts";
+import { readLive } from "../act/index.ts";
 import { duplicateComment } from "../act/templates.ts";
 import { audit } from "../dash/audit.ts";
 import { optionsOf, BACKLOG, HANDLED, getDecision, reposOf, replaceProposedCards } from "../decisions.ts";
-import { actRoom, needOf, queuedAhead, queuedCards, queuePlace, queueReason, type QueueArgs, cardWriteCount } from "./queue.ts";
+import { actRoom, needOf, queuedAhead, queuedCards, type QueueArgs, cardWriteCount } from "./queue.ts";
 import { settlesNow } from "../settlers.ts";
 import { actBlockedReason } from "../runner/autopilot.ts";
 import { addLabels, closeItem, commentOn, createIssue, IssueError, assignTo, removeLabel, reopenItem, requestReviewers, transferIssue, type Note, type Writer } from "../github/write.ts";
@@ -21,7 +21,7 @@ import { repoLabels } from "../labels/github.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { closeRefusal, decisionStamp, dependsOnCode, holdsIssues, isSettling, openDecision, otherTypeLabel, PUBLIC_TEXT_STEPS, settleLine, stepLine, type CardParams, type Settle, type Step } from "./cards.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { ConversationError, insertTurn, staleOf, systemBlock, type StoreDeps } from "./store.ts";
 import { COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, NOTE_MAX, type CloseReason } from "./types.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -128,7 +128,7 @@ async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined
   const d0 = await getDecision(db, decisionId);
   if (!d0 || d0.answer !== null || d0.repo !== c.repo || d0.number !== c.number || (stamp !== undefined && await decisionStamp(db, d0) !== stamp)) throw new Error("the decision changed");
   if (canWrite) for (const r of reposOf(d0)) if (!(await canWrite(r).catch(() => false))) throw new Error(`no write access to ${slugOf(r)}`);
-  const { d, o } = await db.write(async () => {
+  const { o } = await db.write(async () => {
     const d = await getDecision(db, decisionId);
     if (!d || d.answer !== null || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
     const o = optionsOf(d).find((x) => x.key === key);
@@ -143,7 +143,6 @@ async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined
     await audit(db, by, "answer", d.id, { answer: key, source: "conversation", card: c.id });
     return { d, o };
   });
-  if (writeEffect(d.kind, key)) await initExecState(db, d.id);
   return { result: `Answered the decision with "${o.label}"`, url: null };
 }
 
@@ -488,7 +487,7 @@ async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, c
 
 async function run(db: Db, c: CardRow, p: CardParams, by: string, boxQ: Querier, at: string, canWrite?: ActDeps["canWrite"], note?: string, boxExec: Exec = defaultExec, lane: Lane | null = null): Promise<Outcome> {
   // Under the app's identity only a close uses the presser's lane (write.ts); every other write is the app's.
-  const laneFor = async (repo: string): Promise<Lane | null> => (lane && await githubIdentity(db) === "app" ? lane : null);
+  const laneFor = async (_repo: string): Promise<Lane | null> => (lane && await githubIdentity(db) === "app" ? lane : null);
   const q = (await laneFor(c.repo))?.querier ?? boxQ;
   const ctx: Ctx = { exec: (await laneFor(c.repo))?.exec ?? boxExec, execFor: async (repo) => (await laneFor(repo))?.exec ?? boxExec, note, db, c, by, q, at, w: { db, login: by }, source: { source: "conversation", card: c.id } };
   switch (p.kind) {
@@ -527,7 +526,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   let noteIsSummary = false;
   // A card drafted before the PR became quiet (a security fix not yet published) must not post model-written text any more.
   if ((params.kind === "comment") || (params.kind === "close" && c.text) || (params.kind === "resolution" && params.steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)))) {
-    if (await isQuiet(db, c.repo, c.number)) throw new ConversationError(409, "this card posts text, and the pull request is quiet until its fix is published");
+    if ((await loadQuiet(db, [`${c.repo}#${c.number}`])).size > 0) throw new ConversationError(409, "this card posts text, and the pull request is quiet until its fix is published");
   }
   if (deps.skip?.length) {
     if (params.kind !== "resolution") throw new ConversationError(400, "only a resolution has steps to skip");
@@ -670,10 +669,10 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
     const c = await cardOf(db, q.id);
     if (!c || c.state !== "queued" || !c.acted_by) continue;
     const nowMs = (deps.now?.() ?? new Date()).getTime();
-    let args: QueueArgs, params: CardParams, need: number;
+    let args: QueueArgs, need: number;
     try {
       args = JSON.parse(c.queue_args ?? "{}") as QueueArgs;
-      params = JSON.parse(c.params) as CardParams;
+      JSON.parse(c.params);
       need = needOf(c);
     } catch (e) {
       await failQueued(db, c, oneLine(`the queued press cannot be read: ${(e as Error).message}`), deps);

@@ -68,9 +68,9 @@ import { canSeeInternals } from "./staff.ts";
 import * as operator from "./operator.ts";
 import * as stuck from "./stuck.ts";
 import { actionsOf as releasesOf } from "../../operator-actions.ts";
-import { areaNameOf } from "../../areas/store.ts";
-import { settledOf, unflagged } from "../../classify/settled.ts";
-import { isQuiet } from "../../security/quiet.ts";
+import { settle, unflagged } from "../../classify/settled.ts";
+import { classifyRun, loadItemAreas, loadSettled } from "../../data/triage/index.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { classificationsOf, itemState, relatedOf } from "./decisions.ts";
 import * as sim from "./similar.ts";
 import * as inference from "./inference.ts";
@@ -163,11 +163,11 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     it.author ? contributors(db, { login: it.author }).then((cs) => cs.find((x) => x.login === it.author)) : undefined,
     loadStageLog(db, [ref]),
     loadComments(db, key, { order: "created", body: true }),
-    isQuiet(db, repo, n),
+    loadQuiet(db, [`${repo}#${n}`]).then((q) => q.size > 0),
     pr ? loadFiles(db, key) : new Map<string, never[]>(),
     pr ? loadChecks(db, key) : new Map<string, never>(),
     loadTrackedRepos(db, [repo]),
-    relatedOf(db, repo, n), classificationsOf(db, repo, n), areaNameOf(db, repo, n), discord.discordOf(db, repo, n), settledOf(db, repo, n), priorityOf(db, repo, n),
+    relatedOf(db, repo, n), classificationsOf(db, repo, n), loadItemAreas(db, key).then((m) => m.get(ref)?.area ?? null), discord.discordOf(db, repo, n), classifyRun(db).then((run) => loadSettled(db, key, run)).then((m) => m.get(ref) ?? settle(null, null)), priorityOf(db, repo, n),
     checksOf(db, repo, n),
     pr ? loadReviewRecord(db, key) : new Map<string, ReviewRecord>(),
     pr ? loadPatchTimeline(db, key, { internals }) : new Map(),

@@ -5,7 +5,7 @@
 // security fix) they get no model text either.
 import type { MaintainDuplicate, MaintainEvent, MaintainFinding, MaintainItem, MaintainItemStatus } from "../../../web/src/api/types.ts";
 import type { FindingSeverity, FindingState } from "../../../web/src/api/types.ts";
-import { mayResumeTrip } from "../../push-outcomes.ts";
+import { mayResumeTrip } from "../../data/control/index.ts";
 import { tripKey, tripOf } from "../../core/push-outcome.ts";
 import { loadMaintainItem } from "../../data/views/maintain-item.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -96,7 +96,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   // The breakers that stop a step of this repo: its own, and the instance-wide one of each stage.
   const mineTrips = facts.trips.flatMap((t) => { const k = tripOf(t.stage); return k && (k.repo === null || t.stage === tripKey(k.stage, repo)) ? [t] : []; });
   const breakers = await Promise.all(mineTrips.map(async (t) => ({
-    key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.trippedAt, canResume: may && await mayResumeTrip(req.user, t.stage),
+    key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.trippedAt, canResume: may && await mayResumeTrip(db, req.user, t.stage),
   })));
   const shown: MaintainEvent[] = events.flatMap((e) => (e.kind === "archived" ? [] : [{ id: e.id, at: e.at, login: e.login, via: e.via ?? "cli", kind: e.kind, line: e.line ?? "" }]));
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;

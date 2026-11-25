@@ -13,10 +13,11 @@
 // Item-backed branches also return their refs ("repo#n") for the Items
 // browser's flow filter.
 import type { Compilable, Expression, SqlBool } from "kysely";
-import { latestRun, settledOnExpr, settledTable, verdictExpr } from "../classify/settled.ts";
+import { classifyRun as latestRun, ensureSettled as settledTable } from "../data/triage/index.ts";
+import { settledJoin as settledOnExpr, verdictExpr } from "../data/triage/fragments.ts";
 import { isScope } from "../decide/select.ts";
-import { cachedQueue, dueActions, dueRefs } from "../core/plan-read.ts";
-import type { QueueState } from "../core/plan.ts";
+import { loadMergeQueue as cachedQueue } from "../data/views/merge-queue.ts";
+import type { Action, ActionKind, QueueState } from "../core/plan.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { fixIssueApprovalOf } from "../implement/approval.ts";
 import { featureOn } from "../build/features.ts";
@@ -30,6 +31,21 @@ import { BACKLOG_KIND } from "../decisions.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+
+type DueOptions = { repo?: string; /** The action's `bucket` param, else its `source` param. */ bucket?: string };
+
+/** The items whose cached Plan holds an action of `kind`, in (repo, number) order. */
+async function dueActions(db: Db, kind: ActionKind, opts: DueOptions = {}): Promise<{ repo: string; number: number; action: Action }[]> {
+  const rows = await db.all(db.k.selectFrom(["main.item_plans as p", kx.jsonEach(db, "p.actions", "a")]).select(["p.repo", "p.number", "a.value as action"])
+    .where(kx.jsonText(db, "a.value", "$.kind"), "=", kind)
+    .$if(!!opts.repo, (q) => q.where("p.repo", "=", opts.repo!))
+    .orderBy("p.repo").orderBy("p.number"));
+  const out = rows.map((r) => ({ repo: r.repo, number: r.number, action: JSON.parse(r.action) as Action }));
+  if (opts.bucket === undefined) return out;
+  return out.filter(({ action: a }) => (typeof a.params?.bucket === "string" ? a.params.bucket : typeof a.params?.source === "string" ? a.params.source : null) === opts.bucket);
+}
+
+const dueRefs = async (db: Db, kind: ActionKind, opts: DueOptions = {}): Promise<Set<string>> => new Set((await dueActions(db, kind, opts)).map((d) => `${d.repo}#${d.number}`));
 
 export type Counts = Record<string, number>;
 export type Refs = Set<string>;

@@ -70,7 +70,6 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     try {
     if (await p.cancelled?.()) return;
     const { repo, number: n } = c;
-    const start = now();
     // The item may have changed since the message was written; the update goes in front of the message.
     await refreshItem(db, repo, n, { diff: p.diff });
     // One run holds the message; another run or a second start skips it.

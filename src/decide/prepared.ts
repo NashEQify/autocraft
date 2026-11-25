@@ -1,5 +1,5 @@
 // When an open decision counts as prepared. Only items in scope (pipeline on for the repo, not our own integration PR) are prepared.
-import { pilotExpr } from "../pilot.ts";
+import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { OWN_NOTE_PREFIXES } from "../conversations/store.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
@@ -191,7 +191,7 @@ type Open = Partial<PrepareColumns> & { id: string; answer: string | null; repo:
 
 const subjects = (db: Db) => db.k.selectFrom("decisions as d").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
   .select((eb) => ["d.id as did", "i.kind", "i.head_oid", "d.kind as dkind", ...prepareStateExpr(db, eb, "d", utcDayStart(Date.now()))])
-  .where((eb) => eb.and([openSubjectExpr(db, eb, "d", "i"), pilotExpr(db, eb, "i"), notOwnIntegrationExpr(db, eb, "i")]));
+  .where((eb) => eb.and([openSubjectExpr(db, eb, "d", "i"), inScopeExpr(db, eb, "i.repo", "i.number"), notOwnIntegrationExpr(db, eb, "i")]));
 
 function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; head: string | null; open: true } | null {
   if (!it) return null;

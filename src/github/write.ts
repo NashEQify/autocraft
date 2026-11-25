@@ -4,7 +4,6 @@
 // `Guarded` value that only core/guard.ts makes, so the compiler enforces that the
 // guard ran right before. Transports (querier, exec, git, merge command) stay
 // injected so tests fake them and assert the rows.
-import { recordPush } from "../push-outcomes.ts";
 import type { Grant, Guarded, GuardedFiling, GuardedItem, GuardedRepo } from "../core/guard.ts";
 import { auditIdentity, githubIdentity, identityFor, type WriteKind } from "./identity.ts";
 
@@ -26,7 +25,7 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { abandonWrites, addOwnCommits, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits } from "../data/control/index.ts";
+import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
@@ -850,10 +849,10 @@ async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, acti
     undefined,
     (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`),
     { key: onceKey(o.remote, o.branch, o.sha), replay: () => ({ code: 0, stdout: "", stderr: "" }) });
-  // Also for a push the job's earlier run made: that run may have stopped before recording it (recordPush records once).
+  // Also for a push the job's earlier run made: that run may have stopped before recording it (a push is recorded once).
   if (r.code === 0) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
-    try { await recordPush(w.db, action, { ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    try { await addPushOutcomes(w.db, [{ action, ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }]); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
   }
   return r;
 }

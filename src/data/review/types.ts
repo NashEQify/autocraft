@@ -10,7 +10,7 @@ export type HeadKey = { repo: string; number: number; head: string };
 
 /** One plan part of a review. */
 export type ReviewFinding = { file: string; change: string; title?: string; major?: boolean };
-export type ReviewRecommendation = { text: string; fix: number[]; drop: number[]; merges: boolean };
+export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
 export type ReviewWorkflow = { outside_purpose: { lines: number; note: string } | null; recommendation: ReviewRecommendation | null };
 export type Verdict = "take" | "take-fix" | "hold" | "close";
 

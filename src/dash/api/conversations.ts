@@ -12,7 +12,7 @@ import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunn
 import { ConversationError, addMessage, withdrawTurn, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
-import { isQuiet } from "../../security/quiet.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle } from "../../settlers.ts";
@@ -208,7 +208,7 @@ export async function getConversation(db: Db, req: Req): Promise<ConversationVie
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
   const view = await viewFor(db, req, repo, n);
-  return !canSeeInternals(req) && await isQuiet(db, repo, n) ? veilConversation(view) : view;
+  return !canSeeInternals(req) && (await loadQuiet(db, [`${repo}#${n}`])).size > 0 ? veilConversation(view) : view;
 }
 
 /** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, cards, choices and their reasons go. */

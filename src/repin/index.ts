@@ -35,7 +35,7 @@ import { ghComment, pushRepin, WritePacedError } from "../github/write.ts";
 import type { Querier } from "../mirror.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission } from "../remote/permission.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { settleRefusal } from "../settlers.ts";
 import { fetchScript } from "../worker/rust.ts";
 import { BRANCH_MAX_MS, BRANCH_POLL_MS, LOCK_MAX_MS, RETRY_MS, repinsDue, type RepinRow } from "./due.ts";
@@ -321,7 +321,7 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
   if (p === "transient") throw new Retry(`GitHub could not tell ${r.login}'s access to ${slugOf(r.repo)}`);
   const access = await boundAccess(db, r);
   if (!access) throw failed(`${r.login} no longer has an AutoCraft login bound to the GitHub account that asked`);
-  if (access.role !== "operator" && await isQuiet(db, r.repo, r.number)) throw failed("the pull request is quiet until its fix is published");
+  if (access.role !== "operator" && (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0) throw failed("the pull request is quiet until its fix is published");
   const refusal = await settleRefusal(db, { login: r.login, role: access.role, canWrite: async (x) => x === r.repo && p === "ok" }, [r.repo], `repins on ${r.repo}`);
   if (refusal) throw failed(refusal);
   const g = await guardRepo(db, r.repo, "push", { operator: r.login }, undefined, r.login);
@@ -471,7 +471,7 @@ export function noticeText(r: Pick<RepinRow, "login" | "state" | "result" | "ref
 /** Posts the outcome. A paced write leaves it for the next drain; any other failure is logged and not retried. Nothing is posted on a quiet pull request. */
 async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "failed" | "paced" | "none"> {
   // A quiet pull request (a security fix not yet published) gets no comment.
-  if (await isQuiet(db, r.repo, r.number)) {
+  if ((await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0) {
     await patchRow(db, r, { notice: "none" });
     return "none";
   }

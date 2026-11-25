@@ -1,6 +1,6 @@
 // The Plans of every PR and item at one moment: facts loaded once, decided once. The planner builds one per pass; lanes and
 // executors read it through planned() / plannedItems() instead of loading facts again.
-import { latestRun } from "../classify/settled.ts";
+import { classifyRun } from "../data/triage/index.ts";
 import { decideItem } from "./decide-item.ts";
 import { decidePr } from "./decide.ts";
 import { loadPass, loadPrFacts } from "./facts.ts";
@@ -31,7 +31,7 @@ export type PlanSetOptions = {
 /** Loads PR and item facts once and decides them. */
 export async function loadPlanSet(db: Db, opts: PlanSetOptions = {}): Promise<PlanSet> {
   const now = opts.now ?? Date.now();
-  const run = opts.run !== undefined ? opts.run : await latestRun(db);
+  const run = opts.run !== undefined ? opts.run : await classifyRun(db);
   const load = { now, run, ...(opts.refs ? { refs: [...opts.refs] } : {}) };
   const pass = loadPass(now);
   const prs = (await loadPrFacts(db, load)).map((facts): PrPlan => ({ facts, plan: decidePr(facts, pass) }));

@@ -21,7 +21,7 @@ import * as kx from "../db/kx.ts";
 import { OPERATOR_MODELS } from "../prompts/index.ts";
 import { audit } from "../dash/audit.ts";
 import { closeItem, commentOn, duplicateClose, type CloseHow, type Note, type Writer } from "../github/write.ts";
-import { isQuiet } from "../security/quiet.ts";
+import { loadQuiet } from "../data/security/index.ts";
 import { actionable, ask, factsOf, getDecision, type Actionable, type DecisionRow, type Kind } from "../decisions.ts";
 import { HEAD_FACT } from "../merge/queue.ts";
 import { fillReviewSummaries, reviewText } from "../review/summary.ts";
@@ -43,11 +43,18 @@ import { holdDecisionId, HOLD_OPTIONS } from "../core/rules.ts";
 import { planned } from "../core/select.ts";
 import { ownerOf } from "../owners.ts";
 import { sweepStaleAnswers } from "../answers/sweep.ts";
-import { authFailure, isWaiting, laneForDecision, markExecDone, noWriteReason, setExecState, SIGN_IN_REASON, type LaneDeps, type Lane } from "../github/user-lane.ts";
+import { authFailure, noWriteReason, SIGN_IN_REASON, type ExecState, type LaneDeps, type Lane, type LaneResult } from "../github/user-lane.ts";
+
 import type { Exec } from "../fixup/git.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+
+// Decision answers are retired: no decision reaches this executor any more, so its per-decision lane and execution state are inert.
+const laneForDecision = async (_db: Db, _deps: LaneDeps | undefined, _id: string, _repos: string[]): Promise<LaneResult | null> => null;
+const setExecState = async (_db: Db, _id: string, _state: ExecState, _reason: string | null = null): Promise<void> => {};
+const markExecDone = async (_db: Db): Promise<void> => {};
+const isWaiting = async (_db: Db, _id: string): Promise<boolean> => false;
 
 const ACTOR = "act";
 const NO_IO: GroupIo = { live: async () => null, comment: async () => "", close: async () => {} };
@@ -177,7 +184,7 @@ export async function askHoldDecisions(db: Db, at: string, repo?: string): Promi
   for (const p of todo) {
     if (p.action.params?.withdraw) { await withdrawHoldQuestion(db, p.facts.repo, p.facts.number, String(p.action.params?.decisionHead ?? p.action.head ?? ""), at, "the review at that head no longer says hold"); continue; }
     const r = await db.get(reviewQuery(db, p.facts.repo, p.facts.number, p.action.head));
-    if (r) qs.push(holdQuestion(r, await isQuiet(db, r.repo, r.number), typeof p.action.params?.ci === "string" ? p.action.params.ci : null));
+    if (r) qs.push(holdQuestion(r, (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0, typeof p.action.params?.ci === "string" ? p.action.params.ci : null));
   }
   if (qs.length) { await ask(db, qs.map((q) => ({ ...q, asked_at: at }))); await setAsideSupersededQuestions(db, at, repo); }
   else await setAsideSupersededQuestions(db, at, repo);
@@ -186,7 +193,7 @@ export async function askHoldDecisions(db: Db, at: string, repo?: string): Promi
 }
 
 export async function askCloseDecisions(db: Db, repo: string, at: string): Promise<string[]> {
-  const qs = await mapSeq((await closeRows(db, repo)), async (r) => closeQuestion(r, (await reviewText(db, r.repo, r.number, r.head_oid))?.why ?? null, await isQuiet(db, r.repo, r.number)));
+  const qs = await mapSeq((await closeRows(db, repo)), async (r) => closeQuestion(r, (await reviewText(db, r.repo, r.number, r.head_oid))?.why ?? null, (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0));
   if (qs.length) { await ask(db, qs.map((q) => ({ ...q, asked_at: at }))); await setAsideSupersededQuestions(db, at, repo); }
   await fillReviewSummaries(db, at, repo);
   return qs.map((q) => q.id);
@@ -395,7 +402,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
           if (!o) { await skip(t, "GitHub returned no such original"); continue; }
           how = duplicateClose({ id: o.id, pr: o.type === "PullRequest" }, `${orig[1]}#${orig[2]}`);
           body = duplicateComment({ repo: t.repo, original: `${orig[1]}#${orig[2]}`, closed: o.state !== "OPEN" });
-        } else body = commentFor(dec, t, (t.kind === "close" || t.kind === "hold") && await isQuiet(db, t.repo, t.number));
+        } else body = commentFor(dec, t, (t.kind === "close" || t.kind === "hold") && (await loadQuiet(db, [`${t.repo}#${t.number}`])).size > 0);
         url = await commentOn(w, g, q, "act-comment", { repo: t.repo, number: t.number, id: live.id }, decisionNote(dec), body, { decision: t.decisionId });
         // Saved before the close so a retry after a failed close does not comment twice.
         await save(t, "failed", "comment posted; close not done yet", url);

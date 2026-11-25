@@ -178,7 +178,7 @@ export async function addedCore(db: Db, d: DecisionRow, key: CoreKey, applicable
   }
 }
 
-const viewExtra = (e: StoredExtra, core: Core, d: DecisionRow): ChoiceExtra => ({
+const viewExtra = (e: StoredExtra, _core: Core, d: DecisionRow): ChoiceExtra => ({
   id: e.id, kind: e.kind, tag: EXTRA_TAG[e.kind], on: e.on,
   ...(e.text !== undefined && { text: e.text }),
   ...(e.title !== undefined && { title: e.title }),

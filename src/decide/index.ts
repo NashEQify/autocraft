@@ -13,7 +13,8 @@ import { ask } from "../decisions.ts";
 import { takersFirst } from "../agents/call.ts";
 import { decisionRefs, prepare, prepareIds } from "./prepare.ts";
 import { type Candidate, type Reason } from "./select.ts";
-import { latestRun, settledSet } from "../classify/settled.ts";
+import { settle } from "../classify/settled.ts";
+import { classifyRun as latestRun, loadSettled } from "../data/triage/index.ts";
 import { scopeReason } from "../core/decide-item.ts";
 import { unsettledScope } from "../review/candidates.ts";
 import { setAsideLapsedScope } from "../merge/withdraw.ts";
@@ -81,7 +82,8 @@ export async function runDecide(db: Db, params: DecideParams = {}, log: Log = co
   if (!run) log("decide: no classification run with Jev verdicts");
   else {
     const planned = (await plannedItems(db, "decide", { run, bucket: "new" })).filter((p) => !params.repos?.length || params.repos.includes(p.facts.repo));
-    const lookup = await settledSet(db, run, planned.map((p) => `${p.facts.repo}#${p.facts.number}`));
+    const settledMap = await loadSettled(db, planned.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), run);
+    const lookup = async (repo: string, number: number) => settledMap.get(`${repo}#${number}`) ?? settle(null, null);
     const all: Candidate[] = await mapSeq(planned, async (p) => ({ repo: p.facts.repo, number: p.facts.number, reason: scopeReason(p.facts)!, settled: await lookup(p.facts.repo, p.facts.number) }));
     picked.push(...all.slice(0, total));
     const reasonKey: Record<Reason, "needsDecision" | "scopeDisagreement"> = { "needs-decision": "needsDecision", "scope-disagreement": "scopeDisagreement" };
@@ -106,7 +108,7 @@ export async function runDecide(db: Db, params: DecideParams = {}, log: Log = co
     await ask(db, [{ ...q, asked_at: at }]);
     await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "needs-decision", at, actor: "decide", note: `scope decision ${q.id}` }));
     count(result.byRepo, c.repo).asked++;
-    await jobItem(db, c.repo, c.number, "asked a scope decision", log, q.id);
+    await jobItem(db, c.repo, c.number, "asked a scope decision", log);
   }
   const due = await prepareIds(db, params.repos);
   const rowOf = due.length > total ? new Map((await db.all(db.k.selectFrom("decisions").select(["id", "repo", "number"]))).map((r) => [r.id, r])) : new Map<string, { repo: string | null; number: number | null }>();

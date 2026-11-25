@@ -6,8 +6,8 @@ import { accountListOrNull } from "../../agents/account-actions.ts";
 import { jevEnabled, jevOutage } from "../../agents/jev.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { mainCiRepos } from "../../mainci/index.ts";
-import { pipelineRepos } from "../../pilot.ts";
-import { quietFixPrs } from "../../security/quiet.ts";
+import { loadTrackedRepos } from "../../data/control/index.ts";
+import { listQuietPrs } from "../../data/security/index.ts";
 import { pipelineSwitch, zeroLimits } from "./limits.ts";
 import { computeChecks } from "../../health-checks.ts";
 import type { Req } from "../types.ts";
@@ -18,7 +18,7 @@ import { canSeeInternals } from "./staff.ts";
 import { t } from "../../i18n/index.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
-import { touchesHiddenExpr } from "../../agents/runs.ts";
+import { runVisible } from "../../data/inference/fragments.ts";
 import type { Db } from "../../db/index.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../../db/kx.ts";
@@ -97,7 +97,7 @@ export async function checkProblems(db: Db, hidden: HiddenRepos, internals: bool
 export async function healthOf(db: Db, hidden: HiddenRepos, internals: boolean, nowMs: number): Promise<NowHealth> {
   const since = new Date(nowMs - HOUR_MS).toISOString();
   // Repos with the pipeline off are off by design; their red mains stay on the Main CI page.
-  const onRead = pipelineRepos(db);
+  const onRead = loadTrackedRepos(db).then((m) => new Set([...m.values()].filter((r) => r.pipeline).map((r) => r.name)));
   // Every source reads on its own, so they run together; the problems keep this order.
   const [state, on, checks, trips, zero, accounts, outage, ci, failed] = await Promise.all([
     pipelineSwitch(db), onRead, checkProblems(db, hidden, internals, nowMs),
@@ -213,7 +213,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
       .$if(!!before, (q) => q.where("started_at", "<", before!)).orderBy("started_at", "desc").limit(SCAN)),
     before ? [] : db.all(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id")
       .select((eb) => ["r.id", "r.job_id", "r.step", "r.model", "r.provider", eb.fn.coalesce("a.label", "r.account_id").as("label"), "r.started_at", "r.progress", "r.item_count", "r.user_login", "r.harness", "r.reported_model"])
-      .where("r.state", "=", "running").$if(filtered(hidden), (q) => q.where((eb) => touchesHiddenExpr(db, eb, hidden))).orderBy("r.id")),
+      .where("r.state", "=", "running").$if(filtered(hidden), (q) => q.where((eb) => runVisible({ hidden }, eb, "r"))).orderBy("r.id")),
     before ? [] : db.all(db.k.selectFrom("build_tasks as t").leftJoin("build_envs as e", "e.id", "t.env_id")
       .select(["t.id", "t.job_id", "t.step", "t.repo", "t.number", "t.state", "t.queued_at", "t.started_at", "t.summary", "e.label"])
       .where("t.state", "in", ["queued", "claimed", "running"])
@@ -225,7 +225,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
       .$if(!!before, (q) => q.where("answered_at", "<", before!)).orderBy("answered_at", "desc").limit(SCAN)),
     // Failed calls and tasks of a job show on the job; only those without one stand alone.
     db.all(db.k.selectFrom("agent_runs as r").select((eb) => ["r.id", "r.step", "r.model", eb.fn.coalesce("r.ended_at", "r.started_at").as("at"), "r.error"])
-      .where("r.state", "=", "failed").where("r.job_id", "is", null).$if(filtered(hidden), (q) => q.where((eb) => touchesHiddenExpr(db, eb, hidden)))
+      .where("r.state", "=", "failed").where("r.job_id", "is", null).$if(filtered(hidden), (q) => q.where((eb) => runVisible({ hidden }, eb, "r")))
       .$if(!!before, (q) => q.where((eb) => eb(eb.fn.coalesce("r.ended_at", "r.started_at"), "<", before!))).orderBy("at", "desc").limit(SCAN)),
     db.all(db.k.selectFrom("build_tasks").select((eb) => ["id", "step", "repo", "number", "state", eb.fn.coalesce("ended_at", "queued_at").as("at"), "summary"])
       .where("state", "in", ["failed", "lost"]).where("job_id", "is", null)
@@ -250,7 +250,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
       .$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden))).orderBy("id")) : [],
     before ? new Map<number, { repo: string; number: number }[]>() : runItems(db, liveRuns.map((r) => r.id), PER_KIND),
     before ? new Map<number, { number: number }[]>() : batchPrs(db, openBatches.map((b) => b.id)),
-    decisions.length ? quietFixPrs(db) : new Set<string>(),
+    decisions.length ? listQuietPrs(db) : new Set<string>(),
     runItems(db, runs.map((r) => r.id), 1),
   ]);
   for (const { a, ref, repo, branch } of parsed) {
