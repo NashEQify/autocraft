@@ -33,8 +33,10 @@ export type NewWorkflow = {
   repo: string; number: number; kind: ItemKind; entry: Entry; weight: number; startedBy: string; startedVia: Surface; baseHead?: string | null;
   approvedBy?: string | null; approvedVia?: Surface | null; plan?: PlanPart[]; step?: string | null; at?: string;
 };
-/** The fields of `ItemWorkflow` except identity. */
-export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "updatedAt">>;
+/** The fields of `ItemWorkflow` except identity and the PR, which only `linkWorkflows` writes. */
+export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "prNumber" | "updatedAt">>;
+/** An implement workflow of an issue and the PR it works on. */
+export type WorkflowLink = { workflowId: number; repo: string; issue: number; pr: number; live: boolean };
 export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
 export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string };

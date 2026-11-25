@@ -341,6 +341,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "workflow", "TEXT"],
   // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
   ["item_workflows", "step", "TEXT"],
+  // The PR an implement workflow works on, written by linkWorkflows (src/data/workflow/link.ts).
+  ["item_workflows", "pr_number", "INTEGER"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],
   // The workflow a held follow-up issue belongs to and its merge approval when it was held (src/data/conversations/held.ts).
@@ -439,6 +441,8 @@ const STATE_INDEXES = [
   "CREATE INDEX IF NOT EXISTS main.agent_runs_first ON agent_runs(first_repo, started_at)",
   // The implementation a PR belongs to.
   "CREATE INDEX IF NOT EXISTS main.implementations_pr ON implementations(repo, pr_number) WHERE pr_number IS NOT NULL",
+  // The implement workflows linked to a PR.
+  "CREATE INDEX IF NOT EXISTS main.item_workflows_pr ON item_workflows(repo, pr_number) WHERE pr_number IS NOT NULL",
   // One active pre-approved merge leg per PR: a second one is refused by the insert. Built after oneActiveLeg (src/db/state-copy.ts).
   `CREATE UNIQUE INDEX IF NOT EXISTS main.${ACTIVE_LEG_INDEX} ON preapprovals(repo, number) WHERE state IN (${ACTIVE_LEG_STATES.map((s) => `'${s}'`).join(", ")})`,
 ];

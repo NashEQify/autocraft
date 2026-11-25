@@ -82,6 +82,8 @@ export type ItemWorkflow = {
   plan: PlanPart[];
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */
   step: string | null;
+  /** An implement workflow's PR as `linkWorkflows` stored it (data/workflow/link.ts); null before an attempt opened one. */
+  prNumber: number | null;
   legacyPreapprovalId: number | null;
   updatedAt: string;
 };

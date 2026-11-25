@@ -9,6 +9,7 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { attemptOf, LIVE_STATES, notArchived, workScore } from "./fragments.ts";
+import { linkWorkflows } from "./link.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
@@ -34,7 +35,7 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
@@ -46,7 +47,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: parse<PlanPart[]>(r.plan, []), step: r.step, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), updatedAt: r.updated_at,
+    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), updatedAt: r.updated_at,
   };
 }
 
@@ -319,7 +320,8 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
 
 /**
  * Inserts workflows in the `running` state, one statement per 500 rows, `ON CONFLICT DO NOTHING` against the unique index of live workflows: a
- * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. Joins the caller's `db.write`.
+ * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. An implement workflow takes over the
+ * PR of an attempt that has not ended (linkWorkflows). Joins the caller's `db.write`.
  */
 export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<RefKey, number>> {
   const out = new Map<RefKey, number>();
@@ -338,6 +340,8 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
       })).onConflict((oc: any) => oc.doNothing()).returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[];
       for (const r of got) out.set(refKey(r.repo, Number(r.number)), Number(r.id));
     }
+    const ids = rows.filter((w) => w.entry === "implement").flatMap((w) => out.get(refKey(w.repo, w.number)) ?? []);
+    await linkWorkflows(db, { ids });
   });
   return out;
 }

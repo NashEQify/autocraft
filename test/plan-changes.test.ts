@@ -97,6 +97,11 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   await workflow({ rec: "{}" });
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [[], false]);
+  // Its link to a PR (item_workflows.pr_number): the issue and the linked PR, with no full pass.
+  await db.run(db.k.updateTable("item_workflows").set({ pr_number: 14 }).where("number", "=", 9));
+  c = await since(seq);
+  assert.ok(c.refs.includes("app#9") && c.refs.includes("app#14") && !c.full, c.refs.join(" "));
+  seq = c.cursor;
   await workflow({ state: "stopped" });
   c = await since(seq);
   assert.equal(c.full, true);

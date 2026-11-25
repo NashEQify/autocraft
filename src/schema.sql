@@ -2289,7 +2289,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   plan TEXT NOT NULL DEFAULT '[]',
   legacy_preapproval_id INTEGER,
   updated_at TEXT NOT NULL,
-  step TEXT                           -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  pr_number INTEGER                   -- an implement workflow: the PR it works on, the newest an attempt of its issue opened for it; null before that (src/data/workflow/link.ts)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);

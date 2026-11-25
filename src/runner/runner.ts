@@ -43,7 +43,7 @@ import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
 import { CALLER_STALE_MS, roomState } from "../remote/room.ts";
 import { claimJob, failQueued, loadLiveJobs, loadRunnerTick, markDeadlineStops, saveLaneState, setPids, type LogCursor, type QueuedJob, type RunningState } from "../data/jobs/index.ts";
 import { loadSyncState, hasSyncRequests } from "../data/mirror/index.ts";
-import { hasCommandWork } from "../data/workflow/index.ts";
+import { hasCommandWork, linkWorkflows } from "../data/workflow/index.ts";
 import { exclusive } from "../async-seq.ts";
 import { refreshReadIdentity } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
@@ -446,6 +446,13 @@ export class Runner {
     read.stale = true;
     const next = { sig, wakeAt: Infinity };
     const wake = (at: number): void => { if (at < next.wakeAt) next.wakeAt = at; };
+    try {
+      await linkWorkflows(this.db);
+      this.passed("links");
+    } catch (e) {
+      this.fault("links", e);
+      wake(t);
+    }
     // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on,
     // so legs wait while the blockers could not be checked.
     let checked = false;
