@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));
 

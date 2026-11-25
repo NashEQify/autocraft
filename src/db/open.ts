@@ -10,6 +10,7 @@ import { Handle } from "./handle.ts";
 import type { Db, DbRole } from "./index.ts";
 import { migratePg, newerPgSchema, pgStamp, storedPgStamp } from "./pg-triggers.ts";
 import { pgConnectionString, postgresEngine } from "./postgres.ts";
+import { queryDb } from "./query-db.ts";
 import { bindSql } from "./sql.ts";
 import { sqliteEngine } from "./sqlite.ts";
 
@@ -95,7 +96,7 @@ export interface ConnectOptions {
   role?: DbRole;
   /** Postgres: bring the schema and triggers up to date first (default). False opens the database as it is. */
   migrate?: boolean;
-  /** Postgres: how long a transaction may sit idle before the server ends its session (default 60 s). */
+  /** Postgres: how long a transaction may sit idle before the server ends its session (default 10 s). */
   idleInTransactionMs?: number;
   /**
    * Postgres: write statements outside a transaction run under their row locks only, not as a transaction under the writer
@@ -152,7 +153,8 @@ export async function openDb(): Promise<Db> {
       // A process without the file never reads the keys by design (a build worker); say so only when a stored app is going unread.
       const file = envVar("SECRETS_FILE");
       if (!file || !existsSync(file)) return;
-      const stored = await db.get(db.k.selectFrom("github_app").select("id").where("id", "=", 1).where("keys_enc", "is not", null)).catch(() => undefined);
+      const q = queryDb(db);
+      const stored = await q.get(q.k.selectFrom("github_app").select("id").where("id", "=", 1).where("keys_enc", "is not", null)).catch(() => undefined);
       if (stored) console.error(`GitHub App keys not read: ${e.message}`);
     });
     return { db, close };

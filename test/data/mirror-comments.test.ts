@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { loadActivityByLogins, loadAuthoredIn, loadCommentHeads, loadComments, loadCommentStats, loadFormalReviews, loadNewerComments, loadSpokenComments, newerKey, searchComments } from "../../src/data/mirror/index.ts";
-import type { Db } from "../../src/db/index.ts";
+import type { Db } from "../helpers/raw-db.ts";
 import { both, bothFlat, comment, seedItems } from "./mirror-fixture.ts";
 
 const put = (db: Db, rows: ReturnType<typeof comment>[]) => db.write(async () => { await db.run(db.k.insertInto("main.comments").values(rows as never)); });

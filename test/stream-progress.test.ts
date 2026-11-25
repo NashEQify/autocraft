@@ -7,8 +7,7 @@ import { fakeTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { askClaude, setWorkspace } from "../src/classify/run.ts";
 import { eventLines } from "../src/classify/progress.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "stream-"));

@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 // Every user-local window, the hold included, at a fifth: a 25 s hold is 5 s, the full retry every second. Read on import.
 process.env.AUTOCRAFT_REMOTE_TIME_SCALE = "0.2";

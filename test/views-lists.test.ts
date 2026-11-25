@@ -1,7 +1,7 @@
 // The list views behind Home, Items, Repos, Stats and the top-bar search (src/data/views): filters, hidden repos and counts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { loadMaintainRepos } from "../src/data/views/maintain.ts";
 import { loadItemsBase } from "../src/data/views/maintain-items.ts";
 import { loadMaintainStats } from "../src/data/views/stats.ts";

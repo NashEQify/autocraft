@@ -7,7 +7,7 @@ import "../src/trigger-sources.ts";
 import { bulkWrites, changeCursor, changesSince, pruneChanges, type ChangeCursor } from "../src/core/plan-changes.ts";
 import { planTriggers } from "../src/db/plan-triggers.ts";
 import { pgExpr } from "../src/core/pg-expr.ts";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { loadPg } from "../src/db/open.ts";
 import { PG_COLUMNS_SQL, pgColumns } from "../src/db/pg-triggers.ts";
 import { liveTriggers } from "../src/db/live.ts";

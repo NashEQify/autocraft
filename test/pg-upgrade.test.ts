@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { loadPg } from "../src/db/open.ts";
 import { PG_SCHEMA_GENERATION } from "../src/db/pg-generation.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";

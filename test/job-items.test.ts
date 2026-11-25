@@ -10,7 +10,7 @@ import { flushJobItems } from "../src/data/jobs/index.ts";
 import { JOB_KEEP_MS, pruneJobs } from "../src/runner/jobs.ts";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "job-items-")), "t.db"));

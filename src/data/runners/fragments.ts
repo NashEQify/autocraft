@@ -1,8 +1,9 @@
 // Predicates other modules embed.
-import { sql, type Expression, type RawBuilder, type SelectQueryBuilder, type SqlBool } from "kysely";
+import type { Expression, RawBuilder, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { exprOf, ref, schemaEb, type AnyEb, type Eb, type Ex } from "../../db/kx.ts";
+import { sql } from "../../db/sql.ts";
 
 import { earlierRunCall as jobsEarlierRunCall, resumingJobs } from "../jobs/fragments.ts";
 

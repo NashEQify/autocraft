@@ -11,7 +11,7 @@ import { runSync } from "../src/mirror.ts";
 import { RepoError, trackRepo, trackRepoChecked } from "../src/repos.ts";
 import { G } from "./guarded.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { saveSyncState, loadSyncState } from "../src/data/mirror/index.ts";
 
 test("a tracked repo of another owner is written to under its own owner; storytold repos are unchanged", async () => {

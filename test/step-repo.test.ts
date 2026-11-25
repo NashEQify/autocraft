@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SCRATCH } from "./scratch.ts";
 import { everySeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { inList } from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));

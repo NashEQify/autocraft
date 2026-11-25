@@ -16,7 +16,7 @@ import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { MCP_TOKENS_PER_LOGIN } from "../src/dash/mcp/tokens.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

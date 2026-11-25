@@ -12,7 +12,7 @@ import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "visibility-sec3-"));

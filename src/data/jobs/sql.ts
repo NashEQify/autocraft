@@ -1,8 +1,9 @@
 // Statement pieces shared by the module's own files (not re-exported by index.ts).
-import { sql, type RawBuilder } from "kysely";
+import type { RawBuilder } from "kysely";
 import type { Db } from "../../db/index.ts";
 import type { AnyEb } from "../../db/kx.ts";
 import * as kx from "../../db/kx.ts";
+import { sql } from "../../db/sql.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import type { HiddenRepos } from "./types.ts";
 

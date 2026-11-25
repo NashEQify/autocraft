@@ -24,7 +24,7 @@ import { setAcceptedModels } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

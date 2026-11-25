@@ -5,7 +5,7 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { bundleOf, claimCall, heartbeat, submitCall, type Caller } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { PROTOCOL_VERSION, type TaskBundle, type SubmitTool } from "../src/remote/protocol.ts";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 
 /** What a call hands the runner: its bundle, with the call id. `beat` sends a heartbeat with a progress line. */
 export type FakeCall = TaskBundle;

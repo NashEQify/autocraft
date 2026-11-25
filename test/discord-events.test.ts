@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { eventCounts, recordEvent } from "../src/discord/events.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

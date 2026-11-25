@@ -10,7 +10,7 @@ import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { noTakerFor } from "../src/remote/takers.ts";
 import { world } from "./world-db.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

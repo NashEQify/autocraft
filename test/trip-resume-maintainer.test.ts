@@ -3,11 +3,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { evaluatePushBreakers, loadTrips, tripStage } from "../src/data/control/index.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { resumeTrip } from "../src/dash/api/pipeline.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { gates } from "../src/core/gates.ts";
-import { connectDb } from "../src/db/open.ts";
 
 const trip = async (db: Db, key: string, reason: string, evidence: string[], at: string): Promise<void> => void await tripStage(db, [{ key, reason, evidence, at }]);
 const evaluatePushBreaker = async (db: Db, stage: string, repo: string, at: string): Promise<void> => void await evaluatePushBreakers(db, [{ stage, repo }], at);

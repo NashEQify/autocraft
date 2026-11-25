@@ -4,8 +4,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { acceptProposal, decideSuggestion, editAreas, listAreaVersions, loadAreaLists, loadAreaOverview, loadItemAreas, loadProposals, saveItemAreas, saveProposal } from "../src/data/triage/index.ts";
-import { connectDb } from "../src/db/open.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";

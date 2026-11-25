@@ -1,5 +1,5 @@
 // The implement tests' reads and writes of attempts by id, over the implement module and its row shapes.
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { IMPL_COLS, ofRow, roundOf, type ImplRow, type RoundRow } from "../src/data/implement/rows.ts";
 import { currentAttempt } from "../src/implement/attempt.ts";

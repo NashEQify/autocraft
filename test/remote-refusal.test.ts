@@ -12,7 +12,7 @@ import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { claimCall, REFUSED_PREFIX, submitCall, type Caller } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { PROTOCOL_VERSION } from "../src/remote/protocol.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

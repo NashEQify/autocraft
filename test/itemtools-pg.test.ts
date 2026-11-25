@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { writeSnapshot, writeSnapshotFromDb } from "../src/itemtools/snapshot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { needsPg, testDatabase } from "./test-db.ts";

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { item } from "../src/dash/api/maintain-item.ts";
 import type { Req } from "../src/dash/types.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { insertWorkflow } from "../src/workflow/store.ts";
 import { SCRATCH } from "./scratch.ts";
 

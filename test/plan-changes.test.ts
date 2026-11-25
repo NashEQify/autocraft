@@ -19,8 +19,7 @@ import { saveOpus } from "../src/review/opus.ts";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
 import { everySeq, filterSeq } from "../src/async-seq.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

@@ -22,7 +22,7 @@ import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } fro
 import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

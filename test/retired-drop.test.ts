@@ -2,11 +2,10 @@
 // the switch moved, it archives what is left, drops everything and leaves a database that works.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { dropRetired } from "../src/db/retired.ts";
 import { DROP_RETIRED, RETIRED_COLUMNS, RETIRED_TABLES } from "../src/db/retired-names.ts";
 import { switchOver } from "../src/db/switch-over.ts";
-import type { Db } from "../src/db/index.ts";
 import { TEST_PG_URL } from "./test-db.ts";
 
 const columns = async (db: Db, table: string): Promise<string[]> => (await db.prepare(db.dialect === "postgres"

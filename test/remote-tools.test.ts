@@ -22,7 +22,7 @@ import { buildReferenceIndex } from "../src/data/external/index.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
 import { SCRATCH } from "./scratch.ts";
 import { writeTestSnapshot } from "./test-db.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

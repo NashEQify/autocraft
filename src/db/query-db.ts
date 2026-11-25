@@ -6,7 +6,7 @@ import type { DB, Db, QueryOpts, RunResult, Statement } from "./index.ts";
 export type { QueryOpts };
 
 export interface QueryDb extends Db {
-  /** Kysely, routed to the transaction open in the current async context. Read it at each use. */
+  /** Kysely, routed to the transaction open in the current async context. Read it at each use: one captured outside a transaction stays outside it. */
   readonly k: Kysely<DB>;
   /** Runs a Kysely query: its first row. Inside `together` a SELECT joins the current wave. */
   get<O>(q: Compilable<O>, o?: QueryOpts): Promise<O | undefined>;
@@ -16,11 +16,14 @@ export interface QueryDb extends Db {
   run(q: Compilable<unknown>): Promise<RunResult>;
   /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
   script(text: string): Promise<void>;
-  /** See `Db.attempt`: a statement error inside `fn` leaves the open transaction usable. */
+  /**
+   * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
+   * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
+   * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
+   * Attempts in one transaction run one at a time, like its statements.
+   */
   attempt<T>(fn: () => Promise<T>): Promise<T>;
-  /** See `Db.scope`. */
-  scope(): Promise<void>;
-  /** Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters. It never joins a `together` wave. */
+  /** Raw SQL in the SQLite dialect, with `?` and `:name` parameters. It never joins a `together` wave. */
   prepare(text: string): Statement;
   /** The underlying SQLite connection, for code that cannot await yet. Absent on Postgres. */
   readonly sync?: DatabaseSync;

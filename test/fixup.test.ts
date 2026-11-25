@@ -13,8 +13,7 @@ import { validatePatch, type FixupPr } from "../src/fixup/patch.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

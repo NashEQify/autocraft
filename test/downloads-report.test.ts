@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pollReleases, type GhRelease, type RepoReleases } from "../src/downloads/poll.ts";
 import { downloadsReport } from "../src/downloads/report.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 const T0 = Date.parse("2026-11-01T10:20:00Z");
 const H = 3600_000;

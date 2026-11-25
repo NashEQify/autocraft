@@ -197,8 +197,7 @@ test("search results GitHub refuses for lack of access are dropped; other errors
 // ---- mergeable keeps its known value at one head ----
 import { tmpdir } from "node:os";
 import { saveChecks, type PrChecks } from "../src/review/checks.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 test("saveChecks keeps a known mergeable at the same head and replaces it at a new head", async () => {
   const db = await connectDb(join(mkdtempSync(join(tmpdir(), "mergeable-")), "t.db"));

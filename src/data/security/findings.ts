@@ -2,10 +2,10 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
+import { sql } from "../../db/sql.ts";
 // reads: control.hiddenRepos (fragment, tracked_repos hidden list)
 import { hiddenRepos } from "../control/fragments.ts";
 import { jobsOfItems, liveJobOfFinding } from "../jobs/fragments.ts";
-import { sql } from "kysely";
 import { briefCols, nowIso, severityRank } from "./internal.ts";
 import {
   ENV_WAIT_NOTE, INTERNAL_FINDING_STATES, TRANSITIONS, findingKey,

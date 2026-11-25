@@ -7,7 +7,7 @@ import { TOPICS } from "../src/db/live.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 

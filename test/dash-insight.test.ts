@@ -5,7 +5,7 @@ import { barOf } from "../src/dash/api/item-bar.ts";
 import { loadItemPage } from "../src/data/views/item-page.ts";
 import { classifiersReport, cost, disagreements } from "../src/dash/api/insight.ts";
 import type { Req } from "../src/dash/types.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 const req = (query: Record<string, string> = {}): Req => ({
   method: "GET", path: "", params: {}, query: new URLSearchParams(query), form: new URLSearchParams(), user: { login: "op", role: "operator", canWrite: async () => true, canRead: async () => true },

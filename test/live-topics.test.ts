@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { TOPICS, liveTriggers } from "../src/db/live.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 import { sqliteOnly } from "./test-db.ts";
 

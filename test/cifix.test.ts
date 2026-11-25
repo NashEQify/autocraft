@@ -20,8 +20,7 @@ import type { Querier } from "../src/mirror.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

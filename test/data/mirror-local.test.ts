@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { applyLocal, closeGoneItems, fillItemHashes, loadChecks, loadItems, saveChecks, saveDiffFacts, saveItems } from "../../src/data/mirror/index.ts";
 import type { ItemEntry } from "../../src/data/mirror/index.ts";
-import type { Db } from "../../src/db/index.ts";
+import type { Db } from "../helpers/raw-db.ts";
 import { both, bothFlat, comment, entry, seedItems } from "./mirror-fixture.ts";
 
 const item = async (db: Db, number: number, repo = "app") => (await loadItems(db, [{ repo, number }], "full")).get(`${repo}#${number}`)!;

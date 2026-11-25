@@ -2,7 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
-import { sql } from "kysely";
+import { sql } from "../../db/sql.ts";
 import { MAX_RESUMES, MAX_TOTAL_RESUMES } from "../../runner/resuming.ts";
 import { flushJobItems } from "./items.ts";
 import { nowIso } from "./sql.ts";

@@ -8,7 +8,7 @@ import { FEATURES_REPO_ONLY_DONE, featuresRepoOnlySqlite } from "../src/db/featu
 import { connect } from "../src/db.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb, dbFor } from "../src/db/open.ts";
+import { connectDb, dbFor } from "./helpers/raw-db.ts";
 import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

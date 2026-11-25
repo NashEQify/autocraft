@@ -11,7 +11,7 @@ import { writeItemNode } from "../src/mirror.ts";
 import { contributors, isWhitelisted, setOverride, tierKey, tiersOf } from "../src/whitelist.ts";
 import { SCRATCH } from "./scratch.ts";
 import { T0, world, type World } from "./world-db.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());

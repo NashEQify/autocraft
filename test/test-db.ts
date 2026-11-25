@@ -4,9 +4,8 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, dbFor, type Db } from "./helpers/raw-db.ts";
 import { connect } from "../src/db.ts";
-import { connectDb, dbFor } from "../src/db/open.ts";
 import { pgSuite } from "./pg-suite.ts";
 
 /** The Postgres server tests run against, if any. */

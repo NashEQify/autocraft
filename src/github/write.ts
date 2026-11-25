@@ -27,6 +27,7 @@ import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
+import { effect } from "../db/effects.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
 export type { Note } from "./note.ts";
@@ -342,6 +343,7 @@ async function recorded<T>(w: Writer, identity: string, action: string, target: 
     }
   }
   const details = { ...details0, identity, ...jobOf(), ...(once && { writeKey: once.key }), ...(repeats !== undefined && { repeats }) };
+  effect("github-write");
   const id = await begin(w, action, target, details, owner);
   let r: T;
   try {
@@ -531,6 +533,7 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
     await abandonWrites(w.db, ids);
   };
   try {
+    effect("github-write");
     for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it), undefined, unsent));
   } catch (e) {
     await unsent();
@@ -972,6 +975,7 @@ export async function mergeViaCommand(w: Writer, run: (cmd: string, args: string
   const method: string = o.method;
   const base = { ...details, method, identity: await idOf(w, g, "merge"), ...jobOf() };
   const target = refOf(repo, g.number);
+  effect("github-write");
   const id = await begin(w, "merge", target, base);
   let r: CommandResult;
   try {

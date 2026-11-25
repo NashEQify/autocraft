@@ -7,7 +7,7 @@ import { parsePlanReply, recordPlan } from "../src/implement/plan.ts";
 import { currentImplementation, roundsOf, startImplementation } from "./implement-rows.ts";
 import type { PlanReply, QuestionRound } from "../src/implement/types.ts";
 import { join } from "node:path";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { OPERATOR, tmpdir, world } from "./world-db.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { rememberSlug } from "../src/github/identity.ts";

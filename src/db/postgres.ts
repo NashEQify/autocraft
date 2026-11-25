@@ -28,7 +28,7 @@ const EXCLUSIVE_LOCKS = 0x61636578; // "acex"
 
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 /** A transaction whose client sends nothing for this long is ended by the server, so a dead process cannot keep the writer lock. */
-const DEFAULT_IDLE_IN_TRANSACTION_MS = 60_000;
+const DEFAULT_IDLE_IN_TRANSACTION_MS = 10_000;
 
 /**
  * Server-side TCP settings of every connection: the server drops a client that went silent (a lost node) after about

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { loadAllDiffFacts, loadChecks, loadCheckSamples, loadDiffFacts, loadGates, loadRepoCiSignals, markDiffRead, markGateFailures, removeDiffFacts, saveChecks, saveDiffFacts, saveGates, setDiffFactsIf } from "../../src/data/mirror/index.ts";
 import type { PrChecksRow } from "../../src/data/mirror/index.ts";
-import type { Db } from "../../src/db/index.ts";
+import type { Db } from "../helpers/raw-db.ts";
 import { both, bothFlat } from "./mirror-fixture.ts";
 
 const check = (repo: string, number: number, o: Partial<PrChecksRow> = {}): PrChecksRow =>

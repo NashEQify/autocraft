@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { computeChecks } from "../src/health-checks.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 const NOW = Date.parse("2026-11-20T12:00:00Z");

@@ -8,25 +8,15 @@
  * - `await connectDb(target, { busyTimeoutMs, role })`: a handle of its own (tests, the dashboard's second handle, worker
  *   threads). `target` is a SQLite path or a postgres:// URL.
  * - `await dbFor(sync)`: the handle over a `DatabaseSync` that `connect()` (src/db.ts) returned, memoized per connection.
- *   Code that still holds a `DatabaseSync` reaches the async API this way while the rest of the call graph is converted.
  *
- * Target shape of the sync → async conversion (statement API mirrors node:sqlite's, but every call returns a promise):
- * - `db: DatabaseSync`                         → `db: Db`
- * - `db.prepare(X).get(a)` / `.all` / `.run`   → `await db.prepare(X).get(a)` / ...  (`?` and `:name` parameters as today)
- * - `db.prepare(X).iterate(a)` in `for`        → `for await (... of db.prepare(X).iterate(a))`
- * - `db.exec(X)`                               → `await db.script(X)`
- * - `db.isTransaction`                         → `db.inTransaction()`
- * - `BEGIN IMMEDIATE; ...; COMMIT`             → `await db.write(async () => { ... })`
- * - `BEGIN; ...; COMMIT` (read snapshot)       → `await db.read(async () => { ... })`
- * - `connect(path, opts)`                      → `await connectDb(path, opts)`; the default database → `await openDb()`
- * `db.sync` is the underlying `DatabaseSync` on SQLite, for residue that cannot await yet; it bypasses transaction
- * routing (it runs on the same connection, so inside whatever transaction is open on it) and goes away after the move.
+ * A `Db` carries transactions, waves, locks and notifications and has no query methods: the statements live in the data
+ * modules (src/data/**) and in infrastructure (src/db/**), which take the query surface of a handle with `queryDb`
+ * (src/db/query-db.ts; test/data-layer.test.ts keeps it there).
  *
  * Transactions are routed through AsyncLocalStorage: every call made inside `db.write(fn)` / `db.read(fn)`, at any depth
- * of awaits, runs in that transaction. Read `db.k` at each use; a `Kysely` captured outside a transaction stays outside it.
+ * of awaits, runs in that transaction.
  */
-import type { Compilable, Kysely } from "kysely";
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+import type { SQLInputValue, SQLOutputValue } from "node:sqlite";
 
 export type Dialect = "sqlite" | "postgres";
 
@@ -35,7 +25,6 @@ export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "job" | "plan
 
 /** The table types Kysely queries are checked against, generated from the migrated schema (scripts/gen-db-types.ts). */
 export type { DB } from "./types.ts";
-import type { DB } from "./types.ts";
 
 export type Value = SQLOutputValue;
 export type Row = Record<string, Value>;
@@ -115,31 +104,6 @@ export interface Subscription {
 export interface Db {
   readonly dialect: Dialect;
   /**
-   * Kysely, routed to the transaction open in the current async context.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  readonly k: Kysely<DB>;
-  /**
-   * Runs a Kysely query: its first row.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  get<O>(q: Compilable<O>): Promise<O | undefined>;
-  /**
-   * Runs a Kysely query: all rows.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  all<O>(q: Compilable<O>): Promise<O[]>;
-  /**
-   * Runs a Kysely write.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  run(q: Compilable<unknown>): Promise<RunResult>;
-  /**
-   * Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  prepare(text: string): Statement;
-  /**
    * Runs `fn` with its Kysely SELECTs outside a transaction shared: one with the same text and parameters as an earlier
    * one in this async context gets that read's rows (fresh copies) instead of another round trip. A write through the
    * handle in the context, and the end of `fn`, forget them. For read-only requests, whose parts read the same rows.
@@ -188,14 +152,6 @@ export interface Db {
    * synchronously. An error from `fn`, thrown or rejected, is logged and never reaches the caller.
    */
   afterCommit(fn: () => void | Promise<void>): void;
-  /**
-   * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
-   * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
-   * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
-   * Attempts in one transaction run one at a time, like its statements.
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  attempt<T>(fn: () => Promise<T>): Promise<T>;
   /** Whether a transaction is open in the current async context; with `mode`, one of that kind (a read snapshot or a write). */
   inTransaction(mode?: "read" | "write"): boolean;
   /**
@@ -205,11 +161,6 @@ export interface Db {
    * opening, outside any transaction.
    */
   scope(): Promise<void>;
-  /**
-   * Runs several statements with no parameters (schema scripts, PRAGMAs).
-   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
-   */
-  script(text: string): Promise<void>;
   /**
    * Postgres: NOTIFY `channel` with `payload` for every process listening; inside a write transaction it is sent when the
    * transaction commits. SQLite: nothing, since its processes poll.
@@ -230,6 +181,4 @@ export interface Db {
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */
   observe(fn: (e: DbEvent) => void): () => void;
   close(): Promise<void>;
-  /** The underlying SQLite connection, for code that cannot await yet. Absent on Postgres. */
-  readonly sync?: DatabaseSync;
 }

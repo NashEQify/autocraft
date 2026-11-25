@@ -8,7 +8,7 @@ import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { selectFixups } from "../src/fixup/select.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixup-conflict-skip-"));

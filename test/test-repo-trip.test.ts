@@ -3,8 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadTrips, resumeStage, tripMergeBreakers } from "../src/data/control/index.ts";
 import { loadMergedInfo } from "../src/data/merge/index.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 /** A post-merge review of a PR we merged found defects, as the post-merge review records it. */
 async function mergeDefect(db: Db, repo: string, number: number, defects: number, at: string): Promise<void> {

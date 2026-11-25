@@ -19,7 +19,7 @@ import { parseClaim } from "../src/remote/calls.ts";
 import { addressKey, MAX_PENDING_PER_ADDRESS, startLogin } from "../src/remote/device-login.ts";
 import { PROTOCOL_VERSION, ROUTES, type LoginStartReply, type PendingRunnerLogin } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

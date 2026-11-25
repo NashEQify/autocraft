@@ -7,7 +7,7 @@ import { handleMcp, type McpEnv } from "../src/dash/mcp/index.ts";
 import type { Role } from "../src/dash/types.ts";
 import { userReserve } from "../src/remote/reserve.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

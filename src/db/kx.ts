@@ -16,6 +16,7 @@
 import type { AliasedRawBuilder, Expression, ExpressionBuilder, InsertObject, RawBuilder, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db, Dialect, Param } from "./index.ts";
 import { nowParam, pgPath, quote, rowidOf } from "./portable.ts";
+import { queryDb } from "./query-db.ts";
 import { fts5Query, tsQueryText, type Search } from "./search.ts";
 import { sql } from "./sql.ts";
 import { COLUMNS, type DB } from "./types.ts";
@@ -171,7 +172,7 @@ export async function updateFrom(db: Db, table: string, keyCols: readonly string
   if (rows.length === 0) return 0;
   const set = setCols ?? Object.keys(rows[0]).filter((c) => !keyCols.includes(c));
   if (set.length === 0 || keyCols.length === 0) throw new Error("updateFrom needs key columns and columns to set");
-  const k = db.k as any;
+  const qdb = queryDb(db), k = qdb.k as any;
   const names = [...keyCols, ...set].map(ident);
   let changed = 0;
   for (const chunk of chunks(rows)) {
@@ -181,7 +182,7 @@ export async function updateFrom(db: Db, table: string, keyCols: readonly string
     const q = k.updateTable(table).from(v)
       .set((eb: ExpressionBuilder<any, any>) => Object.fromEntries(set.map((c) => [c, eb.ref(`v.${c}`)])))
       .where((eb: ExpressionBuilder<any, any>) => eb.and(keyCols.map((c) => eb(`${table}.${c}`, "=", eb.ref(`v.${c}`)))));
-    changed += (await db.run(q)).changes;
+    changed += (await qdb.run(q)).changes;
   }
   return changed;
 }
@@ -390,13 +391,13 @@ export const batches = <T>(rows: readonly T[]): T[][] => Array.from({ length: Ma
  * rowid only increases. Postgres runs two statements: call it inside `db.write`.
  */
 export async function replaceRow<T extends keyof DB & string>(db: Db, table: T, key: readonly string[], row: InsertObject<DB, T>): Promise<void> {
-  const k = db.k as any;
+  const q = queryDb(db), k = q.k as any;
   if (db.dialect !== "postgres") {
-    await db.run(k.insertInto(table).orReplace().values(row));
+    await q.run(k.insertInto(table).orReplace().values(row));
     return;
   }
-  await db.run(k.deleteFrom(table).where((eb: ExpressionBuilder<any, any>) => eb.and(key.map((c) => eb(c, "=", (row as Record<string, unknown>)[c])))));
-  await db.run(k.insertInto(table).values(row));
+  await q.run(k.deleteFrom(table).where((eb: ExpressionBuilder<any, any>) => eb.and(key.map((c) => eb(c, "=", (row as Record<string, unknown>)[c])))));
+  await q.run(k.insertInto(table).values(row));
 }
 
 /**
@@ -404,14 +405,14 @@ export async function replaceRow<T extends keyof DB & string>(db: Db, table: T, 
  * rowids in the order given. Call inside `db.write`.
  */
 export async function replaceRows<T extends keyof DB & string>(db: Db, table: T, key: readonly string[], rows: readonly InsertObject<DB, T>[]): Promise<void> {
-  const k = db.k as any;
+  const q = queryDb(db), k = q.k as any;
   for (const chunk of batches(rows)) {
     if (db.dialect !== "postgres") {
-      await db.run(k.insertInto(table).orReplace().values(chunk));
+      await q.run(k.insertInto(table).orReplace().values(chunk));
       continue;
     }
-    await db.run(k.deleteFrom(table).where((eb: ExpressionBuilder<any, any>) => eb.or(chunk.map((row) => eb.and(key.map((c) => eb(c, "=", (row as Record<string, unknown>)[c])))))));
-    await db.run(k.insertInto(table).values(chunk));
+    await q.run(k.deleteFrom(table).where((eb: ExpressionBuilder<any, any>) => eb.or(chunk.map((row) => eb.and(key.map((c) => eb(c, "=", (row as Record<string, unknown>)[c])))))));
+    await q.run(k.insertInto(table).values(chunk));
   }
 }
 
@@ -538,7 +539,7 @@ export function rowArray(d: D, q: SelectQueryBuilder<any, any, any>): RawBuilder
  * Every value is an integer, text or null, which a JSON array carries unchanged.
  */
 export async function rowValues(db: Db, queries: readonly SelectQueryBuilder<any, any, any>[]): Promise<unknown[][]> {
-  const row: Record<string, string | null> | undefined = await db.get(db.k.selectNoFrom(queries.map((q, k) => rowArray(db, q).as(`c${k}`))));
+  const row: Record<string, string | null> | undefined = await queryDb(db).get(queryDb(db).k.selectNoFrom(queries.map((q, k) => rowArray(db, q).as(`c${k}`))));
   return queries.map((_, k) => { const v = row?.[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
 }
 

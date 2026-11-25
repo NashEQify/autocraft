@@ -8,7 +8,7 @@ import { decidePr } from "../src/core/decide.ts";
 import { authorWrites, ensureAuthorWrites } from "../src/fixup/author-permission.ts";
 import { prFacts } from "./world.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "base-binding-"));

@@ -14,7 +14,7 @@ import { calls, image } from "../src/dash/api/workspaces.ts";
 import type { Req } from "../src/dash/types.ts";
 import { mcpReply } from "../src/dash/mcp/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { awaitCall, claimCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { PROTOCOL_VERSION, type TaskBundle } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";

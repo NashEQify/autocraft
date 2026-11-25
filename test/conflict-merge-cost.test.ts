@@ -6,7 +6,7 @@ import { carriedReview } from "../src/review/carry.ts";
 import { changedHunks, ownDiffKey } from "../src/review/own-diff.ts";
 import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { conflictBucket } from "../src/fixup/conflict-state.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("conflict-cost-diffs"), "cache");
 

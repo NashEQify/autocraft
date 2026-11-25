@@ -4,7 +4,7 @@ import { currentComparison, kindSets } from "../src/dupes/plan.ts";
 import { loadDupeState, saveComparisons, type ComparisonPut } from "../src/data/triage/index.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
 import { T0, world } from "./world-db.ts";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 
 /**
  * A confirmed duplicate pair of PRs 1 and 2 at their current text, so the two form a group in the stored state. An edit outside

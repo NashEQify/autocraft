@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { countQueries } from "../src/db/counter.ts";
 import { isLockTimeout } from "../src/db/errors.ts";
 import { rewriteScriptForPostgres } from "../src/db/params.ts";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
 import type { Generated } from "kysely";
 

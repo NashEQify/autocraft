@@ -4,7 +4,8 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import type { Compilable, Expression, SqlBool } from "kysely";
-import type { Db, NamedParams, Param } from "../src/db/index.ts";
+import type { NamedParams, Param } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import type { AnyEb } from "../src/db/kx.ts";
 import { pilotExpr, pilotExprFor, pilotSql, pilotSqlFor } from "../src/pilot.ts";
 import { backlogHeldExpr, backlogHeldSql } from "../src/dupes/held.ts";

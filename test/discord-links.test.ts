@@ -7,7 +7,7 @@ import { DiscordKeys } from "../src/discord/keys.ts";
 import { CODE_TTL_MS, createLinkCode, forgetLink, loginOf, redeemLinkCode } from "../src/discord/links.ts";
 import { publicStats, publicStatus } from "../src/public/status.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { cols } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

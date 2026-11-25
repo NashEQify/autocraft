@@ -14,7 +14,7 @@ import { TokenBox } from "../src/dash/server/crypto.ts";
 import type { Provider, Tokens } from "../src/dash/server/provider.ts";
 import { reporterSignIn } from "../src/dash/server/reporter-signin.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-file-"));

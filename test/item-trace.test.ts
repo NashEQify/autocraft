@@ -7,8 +7,7 @@ import { trace, traceDetail } from "../src/dash/api/trace.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ItemTrace } from "../web/src/api/types.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { rowid } from "../src/db/kx.ts";
 
 const req = (n: number, query: Record<string, string> = {}, extra: Record<string, string> = {}): Req => ({

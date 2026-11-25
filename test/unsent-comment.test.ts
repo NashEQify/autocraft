@@ -13,7 +13,7 @@ import type { ConflictCandidate } from "../src/fixup/conflict-state.ts";
 import type { FixupDeps, FixupSummary } from "../src/fixup/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
