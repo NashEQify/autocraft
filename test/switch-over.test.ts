@@ -199,6 +199,18 @@ test("a started pull request whose pre-approved merge had stopped comes back wit
   await db.close();
 });
 
+test("a stopped merge whose reason was cut comes back with a sentence that shows the cut", async () => {
+  const db = await legacy();
+  const quote = "Scope is settled. ".padEnd(152, "word ") + "referen";
+  await db.prepare("UPDATE main.preapprovals SET reason = ? WHERE workflow_id = 1002").run(`the review says take-fix: ${quote.padEnd(160, "c")}`);
+  await switchOver(db, { now: NOW });
+  await advanceWorkflows(db);
+  const w = (await rows(db, "SELECT blocker, rec FROM main.item_workflows WHERE id = 1002"))[0]!;
+  assert.equal(w.blocker, "other");
+  assert.match((JSON.parse(w.rec as string) as { text: string }).text, / word…$/);
+  await db.close();
+});
+
 test("a pull request of an earlier attempt goes with no later workflow of its issue, one the workflow's own attempt opened does", async () => {
   const db = await legacy();
   const START = "2026-11-20T00:30:00.000Z";

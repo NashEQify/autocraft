@@ -52,6 +52,7 @@ import {
   type LegContext, type LegMove, type LegPass, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
+import { asSentence, clipText } from "../prose.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
 const ACTOR = "pipeline";
@@ -60,7 +61,7 @@ const ACTIVE: readonly LegState[] = ["fixup", "review", "ci", "queued"];
 /** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts); a draft waits to be marked ready. */
 const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog"];
 const short = (sha: string | null) => (sha ?? "").slice(0, 7);
-const oneLine = (s: string, n = 200) => s.replace(/\s+/g, " ").trim().slice(0, n);
+const oneLine = (s: string, n = 200) => clipText(s, n);
 const refOf = (repo: string, n: number) => `${repo}#${n}`;
 
 type Row = LegRow;
@@ -470,7 +471,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (it?.state !== "MERGED") return cancel("its workflow ended");
   }
   const leg = ctx === "ended" ? null : ctx;
-  const stop = async (why: string) => void await move(db, p, "failed", { reason: why, line: `The pre-approved merge stopped: ${why}.` });
+  const stop = async (why: string) => void await move(db, p, "failed", { reason: why, line: asSentence(`The pre-approved merge stopped: ${why}`) });
   // A review the person had seen when they last answered: they chose to go on.
   const accepted = (r: ReviewRead): ReviewRead => (leg && r.kind === "bad" && r.at !== undefined && r.at <= leg.since ? { ...r, kind: "take" } : r);
   if (!it) return cancel("the PR is gone");
