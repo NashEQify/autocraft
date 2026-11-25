@@ -140,7 +140,7 @@ export type IssueAttempt = {
   /** Heads of this attempt's `revise` rounds with a review or CI fix. */
   reviseHeads: string[];
   lastRevise: ReviseRound | null;
-  /** Attempts of the issue per text_hash; empty for an issue with one attempt. */
+  /** Attempts of the issue per text_hash; empty while its only attempt is neither failed nor stuck. */
   textCounts: Record<string, number>;
   /** Attempts with a PR, newest id first; the plan each was built from only with `withPlans`. */
   prAttempts: { id: number; prNumber: number; state: ImplementationState; createdAt: string; diffStat: string | null; plan?: PlanReply | null }[];

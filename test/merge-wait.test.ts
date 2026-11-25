@@ -79,6 +79,17 @@ for (const kind of ["pr", "issue"] as const) test(`an approved merge of ${kind =
   await merge();
   assert.equal(asked, before, "a waiting merge asks for no token");
 
+  // Approving it again tries it once more; anyone else's approval of the approved merge runs nothing.
+  const approve = async (who: Actor) => (await runCommand(db, who, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: item }] })).items[0]!;
+  await db.run(db.k.insertInto("main.access").values({ login: "ann", role: "operator" }));
+  assert.equal((await approve({ login: "ann", canWrite: async () => true })).outcome, "refused");
+  assert.equal(await mergesPlanned(), 0);
+  const o = await approve(actor);
+  assert.equal(o.outcome, "run", o.line);
+  assert.equal(await mergesPlanned(), 1);
+  for (let i = 0; i < 2; i++) await merge();
+  assert.deepEqual([asked - before, (await action())?.state, await mergesPlanned()], [1, "waiting-token", 0]);
+
   token = "user-token";
   assert.equal(await retryWaiting(db, APPROVER), 1);
   assert.equal(await mergesPlanned(), 1);

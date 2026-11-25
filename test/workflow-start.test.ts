@@ -2,6 +2,10 @@
 // on an item someone stopped, and a refusal writes nothing. Through the command entry point every surface uses.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { setFeature } from "../src/build/features.ts";
+import { textHash } from "../src/core/open-prs.ts";
+import { addOwnCommits } from "../src/data/control/index.ts";
+import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { mergeMay } from "../src/core/gates.ts";
 import { loadPrFact } from "../src/core/facts.ts";
 import { implementStep } from "../src/core/decide-item.ts";
@@ -16,7 +20,7 @@ import { advancePreapprovals, preapprovalOf } from "../src/preapproval/index.ts"
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { insertWorkflow, liveWorkflow } from "../src/workflow/store.ts";
+import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { T0, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
@@ -193,4 +197,100 @@ test("trying a failed merge again approves as the person who pressed it, whateve
     await mergesAsPerson(w, ended ? "sha1" : "sha1b");
     w.close();
   }
+});
+
+/** An attempt of issue 7 an earlier workflow made, with its PR 8. */
+async function earlier(w: World, o: { state: string; pr: "CLOSED" | "MERGED" | "OPEN" }): Promise<number> {
+  await w.pr(8, { author: "craft-bot" });
+  await w.db.run(w.db.k.updateTable("main.items").set({ state: o.pr, closed_at: o.pr === "OPEN" ? null : T0 }).where("number", "=", 8));
+  const it = (await w.db.get(w.db.k.selectFrom("main.items").select(["title", "body"]).where("number", "=", 7)))!;
+  const im = (await startAttempt(w.db, { repo: "app", number: 7, queuedBy: MAINT, textHash: textHash(it.title ?? "", it.body ?? "") }, T0))!;
+  await recordSteps(w.db, [{ id: im.id, to: o.state as "closed", patch: { prNumber: 8, branch: "fix-8", prUrl: "https://example.invalid/8" } }], T0);
+  return im.id;
+}
+
+test("implement on an issue whose earlier implementation ended starts afresh", async () => {
+  const cases = [{ state: "closed", pr: "CLOSED" }, { state: "merged", pr: "MERGED" }, { state: "pr-opened", pr: "CLOSED" }, { state: "stuck", pr: "CLOSED" }, { state: "closed", pr: "OPEN" }] as const;
+  for (const c of cases) {
+    const w = await (await unstarted(false)).issue(7);
+    await setFeature(w.db, "implement", true, MAINT, "app");
+    const id = await earlier(w, c);
+    await run(w, "implement and merge", 7);
+    await settle(w);
+    const why = `attempt ${c.state}, its PR ${c.pr}`;
+    assert.equal((await liveWorkflow(w.db, "app", 7))?.state, "running", why);
+    // What is left of an attempt whose PR is over is recording its end.
+    if (c.state === "pr-opened" || c.state === "stuck") {
+      if (c.state === "pr-opened") assert.deepEqual(implementStep((await loadItemFact(w.db, "app", 7))!), { bucket: "revise" }, why);
+      await recordSteps(w.db, [{ id, to: "closed" }]);
+      await settle(w);
+    }
+    assert.deepEqual(implementStep((await loadItemFact(w.db, "app", 7))!), { bucket: "plan" }, why);
+    if (c.pr === "OPEN") {
+      // The earlier attempt's PR, reopened, is no part of it: it starts on its own.
+      await run(w, "review", 8);
+      assert.equal((await liveWorkflow(w.db, "app", 8))?.startedBy, MAINT);
+    }
+    w.close();
+  }
+});
+
+test("a PR closed during the workflow that opened it ends the workflow", async () => {
+  const w = await (await unstarted(false)).issue(7);
+  await run(w, "implement and merge", 7);
+  const id = await earlier(w, { state: "pr-opened", pr: "OPEN" });
+  await settle(w);
+  await w.db.run(w.db.k.updateTable("main.items").set({ state: "CLOSED", closed_at: new Date().toISOString() }).where("number", "=", 8));
+  await recordSteps(w.db, [{ id, to: "closed" }]);
+  await settle(w);
+  assert.equal(await liveWorkflow(w.db, "app", 7), null);
+});
+
+test("a PR that a live implement workflow works on takes no workflow of its own, and the issue's approved merge goes on", async () => {
+  const w = await (await unstarted(false)).issue(7);
+  await run(w, "implement and merge", 7);
+  await earlier(w, { state: "pr-opened", pr: "OPEN" });
+  await addOwnCommits(w.db, [{ repo: "app", sha: "sha8", action: "implement-push" }]);
+  await settle(w);
+  const legs = async () => await w.rows("SELECT workflow_id, state FROM preapprovals WHERE number = 8");
+  const before = await legs();
+  assert.deepEqual(before.map((l) => l.state), ["review"]);
+  for (const text of ["review", "fix-up", "merge", "review and merge", "stop", "yes", "urgent"]) {
+    const o = await send(w, text, 8);
+    assert.equal(o.outcome, "refused", `${text}: ${o.line}`);
+    assert.match(o.line, /app#7/, "it names where the work runs");
+    assert.match(o.line, new RegExp(MAINT), "and who started it");
+  }
+  assert.equal(await liveWorkflow(w.db, "app", 8), null);
+  assert.deepEqual(await legs(), before);
+
+  // Stopped on the issue, the PR can be started on its own; then the issue is not started over it.
+  await run(w, "stop", 7);
+  await run(w, "review", 8);
+  const o = await send(w, "implement", 7);
+  assert.equal(o.outcome, "refused", o.line);
+  assert.match(o.line, /app#8/);
+});
+
+/** Runs `fn` once, before the next write transaction of `db` starts. */
+function before(db: World["db"], fn: () => Promise<unknown>): void {
+  const write = db.write;
+  db.write = (async (f: () => Promise<unknown>, o?: never) => {
+    db.write = write;
+    await fn();
+    return await write.call(db, f, o);
+  }) as typeof write;
+}
+
+test("a command resolved on a workflow the pass changed meanwhile runs on what it is now", async () => {
+  const w = await unstarted();
+  await run(w, "review");
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  const rec = { text: "Merge it.", parts: { fix: [], drop: [] }, merges: true };
+  // The pass comes back with a recommendation after the command read the workflow and before it writes.
+  before(w.db, () => updateWorkflow(w.db, wf.id, { state: "recommending", rec, recAt: T0, recHead: "sha1" }));
+  await run(w, "merge");
+  const now = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([now.state, now.rec, now.approvedBy], ["running", null, MAINT]);
+  assert.equal((await eventsOf(w.db, "app", 1)).at(-1)!.kind, "answered", "the approval answers the recommendation");
 });
