@@ -16,6 +16,7 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { IMPLEMENT_BUCKETS } from "../implement/types.ts";
 import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
+import { findingKey, loadFindings, loadScans } from "../data/security/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** `cliOnly`: set from the command line only; the dashboard's run-step form does not offer it and refuses it. */
@@ -88,7 +89,7 @@ export type StepDef = {
 /** Labelling writes to GitHub only for repos in the pipeline scope that an operator approved on the Repos page. */
 async function checkApproved(db: Db, p: Params): Promise<string | null> {
   const { approvalOf } = await import("../labels/approval.ts");
-  const { scopeRepos } = await import("../pilot.ts");
+  const { scopeRepos } = await import("./scope.ts");
   if (!(await scopeRepos(db)).has(String(p.repo))) return `${p.repo} is not in the pipeline scope`;
   return await approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
 }
@@ -158,7 +159,8 @@ const SECURITY_FINDING_PARAMS: ParamDef[] = [
 
 /** The finding exists and is in a state the step works on. */
 async function securityFindingCheck(db: Db, p: Params, states: string[]): Promise<string | null> {
-  const row = await db.get(db.k.selectFrom("security_findings").select("state").where("repo", "=", String(p.repo)).where("number", "=", Number(p.number)));
+  const key = findingKey(String(p.repo), Number(p.number));
+  const row = (await loadFindings(db, [key], { internal: true })).get(key);
   if (!row) return "no such finding";
   return states.includes(row.state) ? null : `the finding is ${row.state}`;
 }
@@ -268,29 +270,6 @@ export const STEPS: StepDef[] = [
     },
   },
   {
-    name: "decide",
-    priority: 1,
-    title: "Ask decisions",
-    description: "Turns items that need a decision, and items where Jev and Haiku disagree between scope labels, into decisions on the dashboard, then prepares every open decision: one call of the judgement model writes the summary, the pick and drafted answers from what stopped the pipeline. Each prepare call counts as an item.",
-    stage: runStage("decide"),
-    requires: "operator",
-    models: () => ["opus"],
-    params: [
-      { name: "repo", label: "Repo", kind: "repo", help: "every tracked repo when empty" },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 50, help: "decisions to ask in this job; also the most prepare calls" },
-    ],
-    run: async (ctx) => {
-      const { runDecide } = await import("../decide/index.ts");
-      const r = await runDecide(ctx.db, {
-        repos: ctx.params.repo ? [String(ctx.params.repo)] : undefined,
-        limit: Number(ctx.params.limit),
-        onSent: ctx.handled,
-      }, ctx.log);
-      if (r.usageRun) ctx.usageRun(r.usageRun);
-      return `asked ${r.asked} decisions; ${r.prepared} prepared`;
-    },
-  },
-  {
     name: "main-ci",
     title: "Read CI on the default branches",
     description: "Reads the head commit and the checks of the default branch of every synced repo from GitHub in one query, and stores the state of each: green, red, optional failing, running or no CI. Writes nothing to GitHub.",
@@ -351,22 +330,6 @@ export const STEPS: StepDef[] = [
       }
       ctx.acted(b.started.length + b.published.length + b.split.length + b.superseded.length + b.failed.length + single.merged.length + single.asked.length + b.merged.length);
       return `${repo}: ${b.merged.length} merged in batches (${b.started.length} started, ${b.published.length} opened, ${b.split.length} split), ${single.merged.length} merged singly, ${single.asked.length} decisions asked`;
-    },
-  },
-  {
-    name: "merge-ask",
-    title: "Ask Merge? decisions",
-    description: "Asks a \"Merge this PR?\" decision for every taken pull request the merge rule does not cover once its verification is in, in all tracked repos, whether or not merging is approved there. Calls no model and writes nothing to GitHub.",
-    stage: runStage("merge-ask"),
-    requires: "operator",
-    models: [],
-    params: [],
-    run: async (ctx) => {
-      const { askMergeDecisions } = await import("../merge/index.ts");
-      const { trackedNames } = await import("../repos.ts");
-      const ids = await askMergeDecisions(ctx.db, { repos: await trackedNames(ctx.db), log: ctx.log });
-      ctx.handled(ids.length);
-      return `Asked Merge? on ${ids.length} PR${ids.length === 1 ? "" : "s"}`;
     },
   },
   {
@@ -583,7 +546,7 @@ export const STEPS: StepDef[] = [
       { name: "scan", label: "Scan", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the scan row the API created" },
     ],
     check: async (db, p) => {
-      const row = await db.get(db.k.selectFrom("security_scans").select(["repo", "state"]).where("id", "=", Number(p.scan)));
+      const row = (await loadScans(db, [Number(p.scan)])).get(Number(p.scan));
       if (!row || row.repo !== p.repo) return "no such scan";
       return ["modeling", "scanning", "verifying"].includes(row.state) ? null : `the scan already ended (${row.state})`;
     },

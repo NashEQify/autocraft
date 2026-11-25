@@ -167,28 +167,24 @@ export const STAGES: StageDef[] = [
   {
     id: "decide", title: "Decide", order: 5, runStage: 3, docSection: "Decide", mode: "gate",
     description: "Asks an operator for scope calls, prepares every open decision with a summary, a pick and drafted answers, and answers questions about an item in its conversation.",
-    steps: [{ name: "decide", maxMin: 75, label: "Decide", limit: null, seeded: 100 }, { name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }, { name: "conversation-maintainer", maxMin: 30, label: "Maintainers' conversations", limit: null }],
-    lanes: [{ name: "decide", steps: ["decide"], order: 6 }, { name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
+    steps: [{ name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }, { name: "conversation-maintainer", maxMin: 30, label: "Maintainers' conversations", limit: null }],
+    lanes: [{ name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
     reads: ["Classified items", "Reviews", "Operator answers"],
     sets: ["Decisions with summary, pick and drafted answers", "Conversation replies"],
     states: [
-      { id: "not-asked", label: "Not asked yet", waitsOn: "model", tone: "neutral", hint: "Needs a decision; the decide step writes the question and summary" },
       { id: "open", label: "Waiting for an answer", waitsOn: "person", tone: "accent", gate: true },
       { id: "take", label: "Wanted in core", waitsOn: "nothing", tone: "ok", hint: "Answered take: PRs go to review" },
       { id: "small-extra", label: "Small extra", waitsOn: "nothing", tone: "ok", hint: "Answered small extra: kept in core, PRs go to review" },
       { id: "plugin", label: "Plug-in candidate", waitsOn: "nothing", tone: "neutral", hint: "Answered plugin: kept open, labelled plugin candidate" },
       { id: "close", label: "Out of scope", waitsOn: "nothing", tone: "neutral", hint: "Answered close: to be closed with a short reason" },
       { id: "need-info", label: "Check the reference app", waitsOn: "nothing", tone: "warn", hint: "Answered need info: asked again once the reference app's behaviour is known" },
-      { id: "backlog", label: "Backlog", waitsOn: "nothing", tone: "neutral", hint: "Answered backlog: held undecided, no later step takes it up" },
     ],
     models: [
       { model: "haiku", use: "Summaries of duplicate decisions" },
-      { model: "opus", use: "Prepares every open decision (summary, pick, drafted answers; the judgement model setting), and conversation replies" },
+      { model: "opus", use: "Conversation replies" },
     ],
-    promptIds: ["decide.prepare", "conversation.turn"], promptStage: "Decide",
-    waits: [
-      { name: "Failed prepare", why: "A prepare call that keeps failing must not re-run Decide", howLong: "1 hour between tries, at most 3 at one PR head; then the decision keeps what it has", showsAs: "none (the decision shows no pick or drafts)", kind: "backoff" },
-    ],
+    promptIds: ["conversation.turn"], promptStage: "Decide",
+    waits: [],
     writes: [],
     person: "An operator answers",
     swimlane: [
@@ -366,8 +362,8 @@ export const STAGES: StageDef[] = [
   {
     id: "merge", title: "Merge queue", order: 11, runStage: 6, docSection: "Merge queue", mode: "steps",
     description: "Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge, and asks for a Merge? decision on PRs outside the rules. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up or a Merge? question (for a pre-approved merge, a Merge? question). Approves held CI runs of outside contributors where the repo allows it.",
-    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "merge-ask", maxMin: 10 }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }, { name: "pr-status", maxMin: 10, label: "PR status comments", limit: 2000 }],
-    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge-ask", steps: ["merge-ask"], order: 10 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }, { name: "pr-status", steps: ["pr-status"], order: 17 }],
+    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }, { name: "pr-status", maxMin: 10, label: "PR status comments", limit: 2000 }],
+    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }, { name: "pr-status", steps: ["pr-status"], order: 17 }],
     reads: ["Reviews", "Verification results", "CI state", "Merge decisions"],
     sets: ["Integration batches", "Merged PRs", "Merge? decisions"],
     states: [

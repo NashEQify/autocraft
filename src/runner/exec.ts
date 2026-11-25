@@ -4,32 +4,34 @@
 import type { JobUsage } from "../../web/src/api/types.ts";
 import { NoTakerError, setCallContext, StoppedError } from "../agents/call.ts";
 import { trackedNames } from "../repos.ts";
-import { AUTOPILOT_USER, isDraining, isEnabled, KEY_ENABLED } from "./autopilot.ts";
-import { JEV_PARALLEL_KEY, USAGE_PAUSE_KEY } from "../agents/accounts.ts";
-import { withSettingsSnapshot } from "../settings-read.ts";
+import { AUTOPILOT_USER, KEY_ENABLED } from "./autopilot.ts";
+import { loadLiveConfig, withConfig } from "../data/control/index.ts";
+import { loadJobUsage } from "../data/inference/index.ts";
+import { openJobPulse, type JobPulse } from "../data/jobs/index.ts";
 import { leaseSkipKeys, leaseSkips } from "./leases.ts";
-import { DEADLINE_ERROR, jobRow, scrub, type JobRow } from "./jobs.ts";
+import { jobRow, scrub, type JobRow } from "./jobs.ts";
+import { recordResult } from "../data/jobs/index.ts";
 import { loadSteps, validateParams, type StepContext } from "./steps.ts";
 import { JOB_DEADLINE_ENV, SLICE_SHARE } from "./deadlines.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { stopWrites } from "../github/write.ts";
 
+const liveWrites = async (db: Db): Promise<boolean> => { const c = await loadLiveConfig(db); return c.pipelineEnabled || c.drain; };
+
+/** At most one write of a running job's progress, counts and cancel flag per this long. */
+const PULSE_MS = 2000;
+
 /** How long a stopping job waits for its GitHub writes in flight: inside the runner's 10 s before SIGKILL, with time left to record usage. */
 const WRITE_SETTLE_MS = 7000;
 
 /** Settings a running step re-reads to stop or to size its parallelism: the pipeline switch and the account limits. */
-const LIVE_SETTINGS = [KEY_ENABLED, JEV_PARALLEL_KEY, USAGE_PAUSE_KEY];
+const LIVE_SETTINGS = [KEY_ENABLED, "jev_parallel", "usage_pause"];
 
 const oneLine = (s: string, max = 500): string => scrub(s.replace(/\s+/g, " ").trim()).slice(0, max);
 
 async function usageOf(db: Db, runs: Set<string>, since: string): Promise<JobUsage | null> {
-  if (!runs.size) return null;
-  const r = (await db.get(db.k.selectFrom("token_usage").select((eb) => [
-    eb.fn.countAll<number>().as("calls"), eb.fn.coalesce(eb.fn.sum<number>("input_tokens"), eb.val(0)).as("input"),
-    eb.fn.coalesce(eb.fn.sum<number>("output_tokens"), eb.val(0)).as("output"), eb.fn.sum<number | null>("cost_usd").as("cost"),
-  ]).where("run_id", "in", [...runs]).where("started_at", ">=", since)))!;
-  return { calls: r.calls, input: r.input, output: r.output, costUsd: r.cost };
+  return await loadJobUsage(db, [...runs], since);
 }
 
 export async function execJob(id: number): Promise<number> {
@@ -44,15 +46,15 @@ export async function execJob(id: number): Promise<number> {
   // A resumed job (src/runner/resuming.ts) adds this run's calls to those of its earlier runs.
   let before: JobUsage | null = null;
   try { before = row.resumes && row.usage ? JSON.parse(row.usage) as JobUsage : null; } catch { /* unreadable: this run's alone */ }
-  const itemsBefore = row.resumes ? Number(row.items ?? 0) : 0, actedBefore = row.resumes ? Number(row.acted ?? 0) : 0;
-  const saveUsage = async () => {
+  const pulse = await openJobPulse(db, row, { minMs: PULSE_MS });
+  const usageJson = async (): Promise<string | undefined> => {
     const u = await usageOf(db, runs, startedAt);
     const all = u && before ? { calls: before.calls + u.calls, input: before.input + u.input, output: before.output + u.output, costUsd: before.costUsd === null && u.costUsd === null ? null : (before.costUsd ?? 0) + (u.costUsd ?? 0) } : u;
-    if (all) await db.run(db.k.updateTable("jobs").set({ usage: JSON.stringify(all) }).where("id", "=", id));
+    return all ? JSON.stringify(all) : undefined;
   };
+  const saveUsage = async () => await recordResult(db, id, { usage: await usageJson() });
   const fail = async (msg: string): Promise<number> => {
-    await saveUsage();
-    await db.run(db.k.updateTable("jobs").set({ error: oneLine(msg) }).where("id", "=", id));
+    await recordResult(db, id, { usage: await usageJson(), error: oneLine(msg) });
     console.error(`failed: ${msg}`);
     return 1;
   };
@@ -75,8 +77,10 @@ export async function execJob(id: number): Promise<number> {
       process.exit(ran.code ?? 143);
     })();
   });
-  const code = await runJob(db, id, row, { runs, saveUsage, fail, itemsBefore, actedBefore });
+  const { value: code, stats } = await db.meter(() => runJob(db, id, row, { runs, usageJson, saveUsage, fail, pulse }));
   ran.code = code;
+  await pulse.flush().catch(() => {});
+  await recordResult(db, id, { stats: { statements: stats.statements, roundTrips: stats.roundTrips, ms: stats.ms, effects: stats.effects } }).catch(() => {});
   stepEnded();
   // Stopping: the handler exits once the writes in flight are recorded.
   if (ran.stop) await ran.stop;
@@ -84,8 +88,8 @@ export async function execJob(id: number): Promise<number> {
 }
 
 /** Runs the job's step in this process; returns the exit code. */
-async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; saveUsage: () => Promise<void>; fail: (msg: string) => Promise<number>; itemsBefore: number; actedBefore: number }): Promise<number> {
-  const { runs, saveUsage, fail, itemsBefore, actedBefore } = o;
+async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; usageJson: () => Promise<string | undefined>; saveUsage: () => Promise<void>; fail: (msg: string) => Promise<number>; pulse: JobPulse }): Promise<number> {
+  const { runs, usageJson, fail, pulse } = o;
   const startedAt = row.started_at!;
   const step = (await loadSteps()).get(row.step);
   if (!step) return await fail(`no step ${row.step} in this build`);
@@ -111,44 +115,33 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; s
       const t = Date.now();
       if (t - lastProgress < 1000) return;
       lastProgress = t;
-      await db.run(db.k.updateTable("jobs").set({ progress: oneLine(text, 200) }).where("id", "=", id));
+      pulse.progress(oneLine(text, 200));
       console.log(text);
     },
     log: (line) => console.log(line),
     usageRun: (r) => void runs.add(r),
     // Counts of a resumed job add to its earlier runs', so the daily limits see all of them.
-    handled: async (n) => void await db.run(db.k.updateTable("jobs").set({ items: itemsBefore + n }).where("id", "=", id)),
-    acted: async (n) => void await db.run(db.k.updateTable("jobs").set({ acted: actedBefore + n }).where("id", "=", id)),
-    cancelled: async () => {
-      const r = (await db.get(db.k.selectFrom("jobs").select(["cancel_requested_at", "error"]).where("id", "=", id)))!;
-      return !!r.cancel_requested_at || DEADLINE_ERROR.test(r.error ?? "");
-    },
-    stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await isEnabled(db)),
-    // Read from the row on each call: started_at is the runner's claim time, the start its deadline counts from.
-    timeUp: async () => {
-      if (sliceMs === null) return false;
-      const r = await db.get(db.k.selectFrom("jobs").select("started_at").where("id", "=", id));
-      return Date.now() - Date.parse(r?.started_at ?? startedAt) >= sliceMs;
-    },
+    handled: (n) => pulse.handled(n),
+    acted: (n) => pulse.acted(n),
+    cancelled: async () => await pulse.cancelled(),
+    stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !(await loadLiveConfig(db)).pipelineEnabled),
+    // The pulse reads the row's started_at, the runner's claim time, which the deadline counts from.
+    timeUp: async () => sliceMs !== null && await pulse.timeUp(sliceMs),
   };
   setCallContext({ jobId: id, step: step.name, stage: step.stage, class: step.priority ?? 0, ...(typeof params.repo === "string" && { repo: params.repo }), cancelled: ctx.cancelled,
     // Model calls (local and remote) are withdrawn when the pipeline is switched off, not during a drain: running jobs finish with their calls.
-    stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await isEnabled(db) && !await isDraining(db)) });
+    stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await liveWrites(db)) });
   try {
     // One reading of the settings table serves the step's reads; the keys it polls to stop or throttle stay live.
-    const summary = await withSettingsSnapshot(db, () => step.run(ctx), undefined, { live: LIVE_SETTINGS, watchWrites: true });
-    await saveUsage();
+    const summary = await withConfig(db, () => step.run(ctx), { live: LIVE_SETTINGS, watchWrites: true });
     // Items skipped for a lease are work left for a later job: the planner retries once no job holds a lease (unchangedSinceIdle).
-    if (leaseSkips()) await db.run(db.k.updateTable("jobs").set({ lease_skips: leaseSkips(), lease_skip_keys: JSON.stringify(leaseSkipKeys()) }).where("id", "=", id));
-    await db.run(db.k.updateTable("jobs").set({ summary: oneLine(summary) }).where("id", "=", id));
+    await recordResult(db, id, { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary: oneLine(summary) });
     console.log(`${new Date().toISOString()} done: ${summary}`);
     return 0;
   } catch (e) {
     if (e instanceof StoppedError || e instanceof NoTakerError) {
-      await saveUsage();
-      if (leaseSkips()) await db.run(db.k.updateTable("jobs").set({ lease_skips: leaseSkips(), lease_skip_keys: JSON.stringify(leaseSkipKeys()) }).where("id", "=", id));
       const summary = e instanceof NoTakerError ? `skipped: ${e.message}` : "stopped: the pipeline was switched off";
-      await db.run(db.k.updateTable("jobs").set({ summary }).where("id", "=", id));
+      await recordResult(db, id, { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary });
       console.log(`${new Date().toISOString()} done: ${summary}`);
       return 0;
     }
