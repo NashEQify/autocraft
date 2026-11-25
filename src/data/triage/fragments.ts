@@ -5,6 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { registerKeySource } from "../keys.ts";
 import { openItem } from "../mirror/fragments.ts";
+import { onEdgeExpr } from "./cross.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 
@@ -50,13 +51,10 @@ export const rankJoin = <Q extends { leftJoin: (...a: any[]) => any }>(q: Q, ite
 /** The score column of `rankJoin`'s alias. */
 export const rankScore = (eb: kx.AnyEb, alias = "r"): Expression<number | null> => eb.ref(`${alias}.score`) as Expression<number | null>;
 
-/** The item is the member a duplicate group closes. */
-export const isDuplicateClose = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.dupe_group_items as dc").select(one(eb)).where("dc.repo", "=", kx.exprOf(eb, repo)).where("dc.number", "=", kx.exprOf(eb, number)).where("dc.role", "=", "close"));
-
-/** The item is a member of a duplicate group. */
-export const inDuplicateGroup = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.dupe_group_items as dg").select(one(eb)).where("dg.repo", "=", kx.exprOf(eb, repo)).where("dg.number", "=", kx.exprOf(eb, number)));
+/** The item is the member a duplicate group closes, and a duplicate edge of it holds (as loadDupeSignals reads it: a stored group counts for nothing without one). */
+export const isDuplicateClose = (db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.dupe_group_items as dc").select(one(eb)).where("dc.repo", "=", kx.exprOf(eb, repo)).where("dc.number", "=", kx.exprOf(eb, number)).where("dc.role", "=", "close")
+    .where((w) => onEdgeExpr(db, w, "dc.repo", "dc.number")));
 
 /** The item's rank level (`item_rank.score / 10000`, default 2). */
 export const rankLevel = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<number> => {

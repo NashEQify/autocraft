@@ -53,7 +53,7 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
     for (const x of f.filters) {
       if (x === "outside") c.push(heldExpr(eb, "i.repo", "i.number"));
       if (x === "stuck") c.push(stuckItem(eb, "i"));
-      if (x === "duplicates") c.push(isDuplicateClose(eb, "i.repo", "i.number"));
+      if (x === "duplicates") c.push(isDuplicateClose(db, eb, "i.repo", "i.number"));
       if (x === "security") c.push(eb.and([
         eb.exists(kx.schemaEb(eb).selectFrom("main.item_settled as s").select(eb.lit(1).as("one")).where((w) => settledJoin(w, run, "s")).where("s.security", "=", 1)),
         eb.not(quietPrExpr(eb, "i.repo", "i.number")),
