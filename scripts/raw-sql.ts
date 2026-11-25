@@ -18,8 +18,7 @@ export const PERMANENT: readonly string[] = [
   "src/itemtools/snapshot.ts",
   "src/itemtools/index.ts",
   "src/itemtools/server/tools.ts",
-  "src/reference-search.ts",
-  "src/reference-score-worker.ts",
+  "src/data/external/",
 ];
 
 export const TODO_FILE = join(ROOT, "test/raw-sql-not-converted.txt");

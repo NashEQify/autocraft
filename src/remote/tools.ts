@@ -15,7 +15,7 @@ import { fixupDir, GIT_ENV, gitDirEnv, HARDENING } from "../fixup/git.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
 import { callTool as itemTool, openDb, TOOLS as ITEM_TOOLS, type ToolResult } from "../itemtools/server/tools.ts";
 import { snapshotFile } from "../itemtools/snapshot.ts";
-import { MAX_AROUND, MAX_RESULTS, referenceAround, referenceSearch, type Passage, type SearchOptions } from "../reference-search.ts";
+import { MAX_AROUND, MAX_RESULTS, referenceAround, referenceSearch, type Passage, type SearchOptions } from "../data/external/index.ts";
 import { diffCacheDir } from "../review/diff.ts";
 import { REFERENCE_SERVER } from "./bundle.ts";
 import { liveLease } from "./calls.ts";

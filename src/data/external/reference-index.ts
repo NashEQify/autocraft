@@ -6,13 +6,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { dataDir } from "./db.ts";
-import { DEFAULT_MODEL, localEmbedder, type Embedder } from "./embed/model.ts";
-import { toBlob } from "./embed/store.ts";
-import type { ScoreReply, ScoreRequest } from "./reference-score-worker.ts";
+import { dataDir } from "../../db.ts";
+import { DEFAULT_MODEL, localEmbedder, type Embedder } from "../../embed/model.ts";
+import { toBlob } from "../../embed/store.ts";
+import type { ScoreReply, ScoreRequest } from "./score-worker.ts";
+import type { BuildMode, Passage, SearchOptions } from "./types.ts";
 
-export type Passage = { id: number; page: string; title: string; text: string };
-export type SearchOptions = { embedder?: Embedder; dir?: string; indexFile?: string };
 
 export const MAX_RESULTS = 8;
 export const MAX_AROUND = 3;
@@ -91,7 +90,6 @@ export function statFingerprint(dir: string): string {
   return h.digest("hex");
 }
 
-export type BuildMode = "stat" | "content" | "force";
 
 function openIndex(file: string): DatabaseSync {
   mkdirSync(dirname(file), { recursive: true });
@@ -184,7 +182,7 @@ let scorer: Worker | undefined, seq = 0;
 const pending = new Map<number, { ok: (ids: number[]) => void; fail: (e: Error) => void }>();
 function scoreWorker(): Worker {
   if (scorer) return scorer;
-  const w = new Worker(new URL("./reference-score-worker.ts", import.meta.url));
+  const w = new Worker(new URL("./score-worker.ts", import.meta.url));
   const drop = (e: Error): void => {
     if (scorer === w) scorer = undefined;
     for (const p of pending.values()) p.fail(e);
