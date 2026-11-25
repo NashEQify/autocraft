@@ -5,7 +5,7 @@ import type { Db } from "./db/index.ts";
 import * as kx from "./db/kx.ts";
 import { onSettingsWrite } from "./db/handle.ts";
 
-type Store = { db: Db; map: Map<string, string | null>; live: ReadonlySet<string>; watch: boolean; dirty: boolean; reread?: Promise<void> };
+type Store = { db: Db; map: Map<string, string | null>; live: ReadonlySet<string>; watch: boolean; dirty: boolean; reread?: Promise<void>; at: number };
 
 /** The snapshot of the pass running in the current async context, for the handle it was read on. */
 const pass = new AsyncLocalStorage<Store>();
@@ -17,13 +17,20 @@ onSettingsWrite((db) => {
   if (s?.watch && s.db === db) s.dirty = true;
 });
 
+/** A watching snapshot older than this is read again, so settings other processes change reach a long job. */
+const MAX_AGE_MS = 5000;
+
+/** Runs `fn` with the reads of a job's snapshot taken from the table, for the checks that guard a GitHub write (a planner pass keeps its reading). */
+export const freshSettings = <T>(fn: () => Promise<T>): Promise<T> => pass.getStore()?.watch ? pass.exit(fn) : fn();
+
 const snapshotOf = async (db: Db, ...keys: string[]): Promise<Map<string, string | null> | undefined> => {
   const s = pass.getStore();
   if (s?.db !== db || keys.some((k) => s.live.has(k))) return undefined;
+  if (s.watch && Date.now() - s.at > MAX_AGE_MS) s.dirty = true;
   while (s.dirty || s.reread) {
     if (!s.reread) {
       s.dirty = false;
-      s.reread = readSettingsSnapshot(db).then((m) => { s.map = m; }).finally(() => { s.reread = undefined; });
+      s.reread = readSettingsSnapshot(db).then((m) => { s.map = m; s.at = Date.now(); }).finally(() => { s.reread = undefined; });
     }
     await s.reread;
   }
@@ -45,7 +52,7 @@ export interface SnapshotOptions {
  */
 export async function withSettingsSnapshot<T>(db: Db, fn: () => Promise<T>, read?: Promise<SettingsSnapshot>, opts: SnapshotOptions = {}): Promise<T> {
   if (pass.getStore()?.db === db) return await fn();
-  return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)), live: new Set(opts.live), watch: !!opts.watchWrites, dirty: false }, fn);
+  return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)), live: new Set(opts.live), watch: !!opts.watchWrites, dirty: false, at: Date.now() }, fn);
 }
 
 export type SettingsSnapshot = Map<string, string | null>;
