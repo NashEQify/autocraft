@@ -6,7 +6,6 @@ import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, wri
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { reloadRepoOwners, trackedNames } from "./repos.ts";
-import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
 import { textRefs } from "./core/open-prs.ts";
 import { syncActivity } from "./activity.ts";
@@ -18,26 +17,21 @@ import { DEFAULT_OWNER, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { exclusive } from "./async-seq.ts";
 import { isFenced } from "./db/fence.ts";
-import type { Expression, Insertable } from "kysely";
 import type { Db } from "./db/index.ts";
-import * as kx from "./db/kx.ts";
-import type { Comments, Items } from "./db/types.ts";
 import { dbLockName, openDb, setDbRole } from "./db/open.ts";
+import { loadTrackedRepos } from "./data/control/index.ts";
+import {
+  advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan, loadSyncState,
+  markReposReconciled, markReposRead, markReposSyncedByError, saveItems, saveRepoList, saveSyncState, startSyncRun,
+  type CommentInsert, type ItemEntry, type ItemRowInput, type SyncState,
+} from "./data/mirror/index.ts";
+
+export { keepKnownMergeableExpr } from "./data/mirror/fragments.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
 const FULL_PAGE = 30;
 const LIGHT_PAGE = 100;
 const MIN_PAGE = 10;
-
-const COLUMNS = [
-  "repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_id", "author_association",
-  "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft",
-  "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files",
-  "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable",
-  "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme",
-] as const;
-
-type ItemRow = Pick<Items, (typeof COLUMNS)[number]>;
 
 type Kind = "issue" | "pr";
 type Detail = "full" | "light";
@@ -271,17 +265,20 @@ export async function* untilCutoff(pages: AsyncIterable<Node[]>, cutoff: string 
 
 const login = (n: Node): string | null => n?.login ?? null;
 
-function toRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRow {
+function toRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRowInput {
   const r = baseRow(repo, kind, n, detail);
-  return Object.assign(r, hashColumns(r));
+  Object.assign(r, hashColumns(r));
+  // Numbers a pull request's text closes or mentions; the writer stores them with the row.
+  if (kind === "pr") r.text_refs = textRefs(r.title, r.body);
+  return r;
 }
 
 /** True when `nameWithOwner` is the repo of the item at `url` (https://github.com/<owner>/<repo>/...). */
 const sameRepo = (nameWithOwner: unknown, url: unknown): boolean =>
   typeof nameWithOwner === "string" && typeof url === "string" && url.toLowerCase().startsWith(`https://github.com/${nameWithOwner.toLowerCase()}/`);
 
-function baseRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRow {
-  const r = Object.fromEntries(COLUMNS.map((c) => [c, null])) as unknown as ItemRow;
+function baseRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRowInput {
+  const r = {} as Record<string, unknown> as ItemRowInput;
   Object.assign(r, {
     repo, number: n.number, kind, state: n.state, title: n.title, body: n.body, url: n.url,
     author: login(n.author), author_type: n.author?.__typename ?? null, author_id: typeof n.author?.databaseId === "number" ? n.author.databaseId : null, author_association: n.authorAssociation,
@@ -318,10 +315,10 @@ const mentions = (body: unknown, names: string[]): number => {
   return names.some((n) => n && b.includes(`@${n.toLowerCase()}`)) ? 1 : 0;
 };
 
-function commentRows(repo: string, kind: Kind, n: Node, own: string[]): Insertable<Comments>[] {
+function commentRows(repo: string, kind: Kind, n: Node, own: string[]): CommentInsert[] {
   // `counted`: whether the entry counts as new discussion for the review stage (src/review/discussion.ts).
   const counted = (c: Node) => Number(isCounted({ author: login(c.author), association: c.authorAssociation, bot: c.author?.__typename === "Bot", prAuthor: login(n.author), state: c.state, body: c.body, inline: c.comments?.totalCount }));
-  const rows: Insertable<Comments>[] = (n.comments?.nodes ?? []).filter(Boolean).map((c: Node) =>
+  const rows: CommentInsert[] = (n.comments?.nodes ?? []).filter(Boolean).map((c: Node) =>
     ({ repo, number: n.number, id: c.id, kind: "comment", author: login(c.author), created_at: c.createdAt, body: c.body, review_state: null, commit_oid: null, counted: counted(c), author_association: c.authorAssociation ?? null, mentions_pipeline: mentions(c.body, own), url: c.url ?? null }));
   if (kind === "pr") {
     for (const c of (n.reviews?.nodes ?? []).filter(Boolean)) {
@@ -331,15 +328,6 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): Insertab
   }
   return rows;
 }
-
-/** An upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
-export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<string | null> =>
-  eb.case().when(eb.and([
-    eb(eb.ref(`${table}.head_oid`), "is not distinct from", eb.ref("excluded.head_oid")),
-    eb(eb.ref(`${table}.mergeable`), "in", ["CONFLICTING", "MERGEABLE"]),
-    eb(eb.ref("excluded.mergeable"), "is distinct from", "CONFLICTING"),
-    eb(eb.ref("excluded.mergeable"), "is distinct from", "MERGEABLE"),
-  ])).then(eb.ref(`${table}.mergeable`)).else(eb.ref("excluded.mergeable")).end();
 
 /** One item read: its repo, kind and detail level, and the node GitHub returned. */
 type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node };
@@ -358,81 +346,19 @@ async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes
  * when nothing needed writing, so what it records commits with the items or not at all.
  */
 async function writeNodes(db: Db, nodes: readonly NodeWrite[], opts: { force?: boolean; readAt?: string; inside?: () => Promise<void> } = {}): Promise<void> {
-  const force = opts.force ?? false;
   const readAt = opts.readAt ?? iso(new Date());
-  // Upserts keep each row's rowid, which the full-text index (schema.sql) is keyed on.
-  const itemUpsert = COLUMNS.filter((c) => c !== "repo" && c !== "number" && c !== "mergeable");
-  const commentUpsert = ["repo", "number", "kind", "author", "created_at", "body", "review_state", "commit_oid", "counted", "author_association", "mentions_pipeline", "url"] as const;
   const live = appSlug();
   if (live) { try { await rememberSlug(db, live); } catch { /* read-only connection */ } }
   const own = await mentionNames(db, live);
-  // Rows are built before the write lock, and the lock covers a fixed number of statements per call (multi-row, in
-  // batches), not statements per item: on Postgres each one is a network round trip. An item read twice keeps its last read.
-  const key = (repo: string, number: number) => `${repo}#${number}`;
-  const page = [...new Map(nodes.map((w) => [key(w.repo, Number(w.n.number)), w])).values()].map((w) => ({
-    n: w.n, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [],
+  // Rows are built before the write lock. An item read twice keeps its last read (the writer also keeps one entry per item).
+  const entries: ItemEntry[] = nodes.map((w) => ({
+    repo: w.repo, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [],
   }));
-  if (!page.length) {
-    if (opts.inside) await db.write(opts.inside);
-    return;
-  }
-  type Entry = (typeof page)[number];
-  const pairsOf = (xs: readonly Entry[]) => xs.map((x) => [x.row.repo, x.row.number] as const);
-  const isRef = (xs: readonly Entry[]) => kx.tupleIn(db, ["repo", "number"], pairsOf(xs), ["text", "bigint"]);
+  if (!entries.length && !opts.inside) return;
   await db.write(async () => {
-    // A read never replaces what a later-started read stored: the item, its comments and its read time stay the newer read's.
-    const reads = new Map<string, string>();
-    for (const b of kx.batches(page)) {
-      for (const r of await db.all(db.k.selectFrom("main.item_reads").select(["repo", "number", "synced_at"]).where(isRef(b)))) reads.set(key(r.repo, Number(r.number)), r.synced_at);
-    }
-    const current = page.filter((x) => { const last = reads.get(key(x.row.repo, x.row.number)); return last === undefined || !(Date.parse(last) > Date.parse(readAt)); });
-    if (current.length) await writeCurrent(current);
+    if (entries.length) await saveItems(db, entries, { readAt, force: opts.force });
     if (opts.inside) await opts.inside();
   });
-
-  async function writeCurrent(current: Entry[]): Promise<void> {
-    // A row identical to the stored one (overlapping reads re-fetch many) writes nothing.
-    const stored = new Map<string, Record<string, unknown>>();
-    for (const b of kx.batches(current)) {
-      for (const r of await db.all(db.k.selectFrom("items").select(COLUMNS).where(isRef(b)))) stored.set(key(r.repo, Number(r.number)), r);
-    }
-    const changed = force ? current : current.filter((x) => { const old = stored.get(key(x.row.repo, x.row.number)); return !old || !COLUMNS.every((c) => old[c] === x.row[c]); });
-    for (const b of kx.batches(changed)) {
-      await db.run(db.k.insertInto("main.items").values(b.map((x) => x.row)).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
-        ...kx.excluded(itemUpsert)(eb),
-        mergeable: keepKnownMergeableExpr(eb, "items"),
-      }))));
-      // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
-      const prs = b.filter((x) => x.kind === "pr");
-      if (prs.length) {
-        const refs = kx.refCase(prs.map((x) => [x.row.repo, x.row.number, textRefs(x.row.title, x.row.body)] as const));
-        await db.run(db.k.updateTable("main.items").set({ text_refs: refs }).where(isRef(prs)));
-      }
-    }
-    // The account seen under a login string owns its id-less history for the whitelist; a later account with the same login does not inherit it.
-    // A login with merged or closed PRs mirrored without an id is left to the backfill, which binds the author of that history, not the login's current holder.
-    const ids = new Map<string, number>();
-    for (const { row } of changed) if (typeof row.author === "string" && typeof row.author_id === "number" && !ids.has(row.author)) ids.set(row.author, row.author_id);
-    if (ids.size) {
-      const unbound = new Set((await db.all(db.k.selectFrom("main.items").select("author").distinct().where(kx.inList(db, "author", [...ids.keys()]))
-        .where("kind", "=", "pr").where("state", "in", ["MERGED", "CLOSED"]).where("author_id", "is", null))).map((r) => r.author));
-      const bind = [...ids].filter(([login]) => !unbound.has(login)).map(([login, id]) => ({ login, id }));
-      for (const b of kx.batches(bind)) await db.run(db.k.insertInto("main.author_ids").values(b).onConflict((oc) => oc.doNothing()));
-    }
-    const full = changed.filter((x) => x.detail === "full");
-    if (full.length) {
-      // A forced re-read of an unchanged item upserts in place: an identical comment bumps no topic. Comments past the newest 20 go.
-      if (!force) for (const b of kx.batches(full)) await db.run(db.k.deleteFrom("main.comments").where(isRef(b)));
-      const comments = [...new Map(full.flatMap((x) => x.comments).map((c) => [c.id, c])).values()];
-      for (const b of kx.batches(comments)) await db.run(db.k.insertInto("main.comments").values(b).onConflict((oc) => oc.column("id").doUpdateSet(kx.excluded(commentUpsert))));
-      if (force) for (const x of full) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", x.row.repo).where("number", "=", x.row.number).where(kx.inList(db, "id", x.comments.map((r) => r.id), "text", true)));
-    }
-    for (const b of kx.batches(current)) {
-      await db.run(db.k.insertInto("main.item_reads").values(b.map((x) => ({ repo: x.row.repo, number: x.row.number, synced_at: readAt })))
-        .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["synced_at"]))
-          .where((eb) => eb(eb.fn<number>("julianday", [eb.ref("excluded.synced_at")]), ">=", eb.fn<number>("julianday", [eb.ref("main.item_reads.synced_at")])))));
-    }
-  }
 }
 
 // `repositoryOwner` serves organizations and users alike.
@@ -478,19 +404,13 @@ async function readRepoSince(db: Db, client: Querier, name: string, cutoff: stri
 async function syncRepo(db: Db, client: Querier, name: string, full: boolean): Promise<number> {
   // synced_at is the start of the sync: every item the sync read is at least as new as it (the pre-approved merge compares it with a push).
   const startedAt = iso(new Date());
-  const row = await db.get(db.k.selectFrom("repos").select("high_water").where("name", "=", name));
-  const high = row?.high_water ?? null;
+  const high = (await loadRepos(db, { names: [name] })).get(name)?.high_water ?? null;
   const cutoff = high && !full ? iso(new Date(new Date(high).getTime() - OVERLAP_MS)) : null;
   const read = await readRepoSince(db, client, name, cutoff);
   const count = read.count;
   const newest = read.newest > (high ?? "") ? read.newest : (high ?? "");
-  // max(): an incremental sync may have moved the high water further while a full pass ran.
-  const hw = newest || null;
-  await db.run(db.k.updateTable("main.repos").set((eb) => ({
-    synced_at: startedAt,
-    high_water: hw === null ? eb.ref("high_water")
-      : eb.case().when(eb.or([eb("high_water", "is", null), eb("high_water", "<", hw)])).then(hw).else(eb.ref("high_water")).end(),
-  })).where("name", "=", name));
+  // The writer moves the high water only forward: an incremental sync may have moved it further while a full pass ran.
+  await markReposRead(db, [{ name, syncedAt: startedAt, highWater: newest || null }]);
   return count;
 }
 
@@ -563,12 +483,6 @@ async function failRepo(db: Db, client: Querier, name: string, e: unknown): Prom
   console.warn(`${slugOf(name)}: not synced: ${(e as Error).message}${moved ? ` (moved to ${moved})` : ""}`);
 }
 
-const getSetting = async (db: Db, key: string): Promise<string | null> =>
-  (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", key)))?.value ?? null;
-const setSetting = async (db: Db, key: string, value: string): Promise<void> => {
-  await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
-};
-
 /**
  * How far a page of a slice `..to` searched in updatedAt order lets the org high water move once it is stored, or null.
  * A finished slice is stored up to its newest item (at most `to`: later slices are unread). Mid-slice, search sorts on
@@ -586,12 +500,6 @@ export function pageMark(nodes: readonly { updatedAt: string }[], o: { to: strin
 }
 
 const settledTimes = (nodes: readonly { updatedAt: string }[], before: string): string[] => nodes.map((n) => n.updatedAt).filter((t) => t < before);
-
-/** Moves `org_high_water` to `t` unless it is already there or later. */
-const advanceHighWater = async (db: Db, t: string): Promise<void> => {
-  await db.run(db.k.insertInto("main.settings").values({ key: "org_high_water", value: t })
-    .onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"])).where((eb) => eb("main.settings.value", "<", eb.ref("excluded.value")))));
-};
 
 // Search returns at most SEARCH_CAP results per query. A window with more matches is cut in half
 // (`updated:A..B` is inclusive, in whole seconds) until every slice fits. A one-second slice with
@@ -708,7 +616,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
   for (const name of tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
     try {
       // A repo that failed for a while has its own high water behind the window: read from there.
-      const hw = (await db.get(db.k.selectFrom("repos").select("high_water").where("name", "=", name)))?.high_water;
+      const hw = (await loadRepos(db, { names: [name] })).get(name)?.high_water;
       const own = hw ? new Date(new Date(hw).getTime() - OVERLAP_MS) : null;
       const r = await readRepoSince(db, client, name, iso(own && own < from ? own : from));
       await clearRepoFailure(db, name);
@@ -718,10 +626,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
       await failRepo(db, client, name, e);
     }
   }
-  for (const [repo, t] of repoNewest) {
-    await db.run(db.k.updateTable("main.repos").set({ high_water: t }).where("name", "=", repo)
-      .where((eb) => eb.or([eb("high_water", "is", null), eb("high_water", "<", t)])));
-  }
+  await advanceRepoHighWater(db, [...repoNewest].map(([name, t]) => ({ name, t })));
   return out;
 }
 
@@ -847,20 +752,15 @@ async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
       else console.warn(`  ${slugOf(name)}: ${(e as Error).message}`);
     }
   }
-  // Names are unique across owners: a repo already known under another owner is left alone.
+  // Names are unique across owners: a repo already known under another owner is left alone. The writer also clears the not-found record of every repo it wrote.
+  const written = new Set(await saveRepoList(db, repos.map((r) => ({
+    name: r.name, owner: r.owner, visibility: r.visibility.toLowerCase(), default_branch: r.defaultBranchRef?.name ?? null, open_prs: r.pullRequests.totalCount, open_issues: r.issues.totalCount,
+  }))));
   for (const r of repos) {
-    const res = await db.run(db.k.insertInto("main.repos")
-      .values({ name: r.name, owner: r.owner, visibility: r.visibility.toLowerCase(), default_branch: r.defaultBranchRef?.name ?? null, open_prs: r.pullRequests.totalCount, open_issues: r.issues.totalCount })
-      .onConflict((oc) => oc.column("name").doUpdateSet(kx.excluded(["visibility", "default_branch", "open_prs", "open_issues"]))
-        .whereRef("main.repos.owner", "=", "excluded.owner")));
-    if (!res.changes) {
-      await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
-    }
+    if (!written.has(r.name)) await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
   }
   await reloadRepoOwners(db);
-  // A repo the listing shows exists again: its not-found record is stale.
-  for (const r of repos) await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", r.name).where("kind", "=", "not-found"));
-  await setSetting(db, "repos_refreshed_at", iso(new Date()));
+  await saveSyncState(db, { repos_refreshed_at: iso(new Date()) });
   return [...new Set(repos.map((r: Node) => r.name as string))];
 }
 
@@ -877,7 +777,7 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
   // so a stopped run continues after it. The cursor belongs to one scope (tracked repos or all).
   const resumable = opts.full && !opts.only.length;
   const scope = opts.all ? "all" : "tracked";
-  const saved = resumable ? await getSetting(db, "full_sync_cursor") : null;
+  const saved = resumable ? (await loadSyncState(db)).full_sync_cursor : null;
   const after = saved?.startsWith(`${scope}|`) ? saved.slice(scope.length + 1) : null;
   const todo = after === null ? names : names.filter((n) => n > after);
   if (after !== null) console.log(`resuming the full re-sync after ${after}: ${todo.length} of ${names.length} repos left`);
@@ -903,10 +803,10 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
     await clearRepoFailure(db, name);
     total += count;
     // The cursor stops at the first failure so the next full run redoes that repo.
-    if (resumable && !failed) await setSetting(db, "full_sync_cursor", `${scope}|${name}`);
+    if (resumable && !failed) await saveSyncState(db, { full_sync_cursor: `${scope}|${name}` });
     console.log(`${name}: ${count} items, ${client.spent - before} points used, ${client.remaining} left`);
   }
-  if (resumable && !failed) await db.run(db.k.deleteFrom("settings").where("key", "=", "full_sync_cursor"));
+  if (resumable && !failed) await saveSyncState(db, { full_sync_cursor: null });
   // One broken repo does not fail the run; all of them failing does.
   if (failed > 0 && failed === todo.length) throw lastError;
   syncFailures = failed;
@@ -947,31 +847,26 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
       for (const n of nodes) listed.add(`${kind}\t${n.number}`);
     }
   }
-  const stale = (await db.all(db.k.selectFrom("items").select(["kind", "number"]).where("repo", "=", name).where("state", "=", "OPEN")
-    .orderBy("number").$narrowType<{ kind: Kind }>()))
-    .filter((r) => !listed.has(`${r.kind}\t${r.number}`));
+  const stale = (await listItems(db, { repos: [name], states: ["OPEN"] }, "ref")).filter((r) => !listed.has(`${r.kind}\t${r.number}`)).sort((a, b) => a.number - b.number);
   let updated = 0;
-  let gone = 0;
+  const goneRefs: string[] = [];
   for (const r of stale) {
     const sentAt = iso(new Date());
     const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
     if (n && n.repository?.name === name && ownedBy(n, name)) {
       await writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
       updated++;
-    } else {
-      await db.run(db.k.updateTable("main.items").set((eb) => ({ state: "CLOSED", closed_at: eb.fn.coalesce("closed_at", eb.val(iso(now))) }))
-        .where("repo", "=", name).where("number", "=", r.number).where("state", "=", "OPEN"));
-      await audit(db, "sync", "item-gone", `${name}#${r.number}`, { reason: "not found or transferred on GitHub; marked CLOSED" });
-      gone++;
-    }
+    } else goneRefs.push(`${name}#${r.number}`);
   }
-  await db.run(db.k.updateTable("main.repos").set({ reconciled_at: iso(now) }).where("name", "=", name));
+  // Deleted or transferred items are marked CLOSED (no consumer reads a state other than OPEN, CLOSED and MERGED) and audited.
+  const gone = await closeGoneItems(db, goneRefs, iso(now));
+  await markReposReconciled(db, [{ name, at: iso(now) }]);
   return { open: listed.size, updated, gone };
 }
 
 // Of the tracked repos the sync has read in full, the one whose last reconcile is oldest, when it is over a day old (never: first).
 export async function reconcileDue(db: Db, tracked: string[], now: Date): Promise<string | null> {
-  const at = new Map((await db.all(db.k.selectFrom("repos").select(["name", "reconciled_at"]).where("synced_at", "is not", null).where("high_water", "is not", null))).map((r) => [r.name, r.reconciled_at ?? ""]));
+  const at = new Map([...(await loadRepos(db, { names: tracked })).values()].filter((r) => r.synced_at !== null && r.high_water !== null).map((r) => [r.name, r.reconciled_at ?? ""]));
   const oldest = [...tracked].filter((n) => at.has(n)).sort((a, b) => at.get(a)!.localeCompare(at.get(b)!))[0];
   if (oldest === undefined) return null;
   const last = at.get(oldest)!;
@@ -988,7 +883,7 @@ export async function reconcileNext(db: Db, client: Querier, now: Date = new Dat
     log(`reconcile ${due}: ${c.open} open, ${c.updated} re-read, ${c.gone} gone`);
   } catch (e) {
     await failRepo(db, client, due, e);
-    await db.run(db.k.updateTable("main.repos").set({ reconciled_at: iso(now) }).where("name", "=", due));
+    await markReposReconciled(db, [{ name: due, at: iso(now) }]);
   }
   return due;
 }
@@ -998,12 +893,11 @@ export async function reconcileNext(db: Db, client: Querier, now: Date = new Dat
 // runs, and a full re-sync leaves an existing one alone.
 export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date = new Date()): Promise<{ mode: string; items: number }> {
   const started = iso(now);
-  const orgHigh = await getSetting(db, "org_high_water");
-  const tracked = await trackedNames(db);
-  const synced = new Set((await db.all(db.k.selectFrom("repos").select("name").where("synced_at", "is not", null))).map((r) => r.name));
+  const [tracked, plan] = await db.together(() => Promise.all([trackedNames(db), loadSyncPlan(db)]));
+  const orgHigh = plan.state.org_high_water;
   // A repo that cannot be read has no synced_at and would keep every run per-repo.
   // Only a repo that cannot be read at all (not found, no access) is passed over; others are retried per repo for their first full read.
-  const broken = new Set((await db.all(db.k.selectFrom("sync_repo_errors").select("repo").where("kind", "in", ["not-found", "forbidden"]))).map((r) => r.repo));
+  const { synced, broken } = plan;
   const wantsSearch = !opts.only.length && !opts.all && !opts.full && !opts.perRepo && orgHigh !== null
     && tracked.every((n) => synced.has(n) || broken.has(n));
   const spent0 = client.spent;
@@ -1012,53 +906,49 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
   try {
     if (wantsSearch) {
       // Runs inside each page's transaction; a compare-and-set, so a rolled-back page leaves nothing to remember.
-      const progress = (t: string) => advanceHighWater(db, t);
+      const progress = async (t: string) => { await advanceOrgHighWater(db, t); };
       const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started, progress);
       mode = "search";
       items = r.count;
       const high = r.newest && r.newest > (orgHigh as string) ? r.newest : (orgHigh as string);
-      await advanceHighWater(db, high);
-      const last = await getSetting(db, "search_catchup_at");
+      await advanceOrgHighWater(db, high);
+      const last = plan.state.search_catchup_at;
       if (!last || now.getTime() - new Date(last).getTime() >= CATCHUP_EVERY_MS) {
         const c = await syncBySearch(db, client, tracked, iso(new Date(new Date(high).getTime() - CATCHUP_SPAN_MS)), iso(new Date(high)));
         items += c.count;
-        await setSetting(db, "search_catchup_at", started);
+        await saveSyncState(db, { search_catchup_at: started });
       }
       // One org-wide search covers every tracked repo, so each counts as synced now.
       // The search read every default-org repo, so errors of earlier runs other than not-found are stale; a failure of this run (at >= started) stays.
-      for (const n of tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER)) await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", n).where("kind", "in", ["transient", "error"]).where("at", "<", started));
+      await clearRepoFailures(db, tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER), { kinds: ["transient", "error"], before: started });
       // Not the repos that were never read in full (no high water) or that cannot be read.
-      for (const n of tracked) {
-        await db.run(db.k.updateTable("main.repos").set({ synced_at: started }).where("name", "=", n).where("high_water", "is not", null)
-          .where((eb) => eb.not(eb.exists(eb.selectFrom("sync_repo_errors as e").select(eb.lit(1).as("one")).whereRef("e.repo", "=", "main.repos.name")))));
-      }
+      await markReposSyncedByError(db, tracked, started);
       console.log(`search: ${r.slices} slice${r.slices === 1 ? "" : "s"}${r.fallbacks ? `, ${r.fallbacks} listed per repo` : ""}`);
-      const at = await getSetting(db, "repos_refreshed_at");
+      const at = (await loadSyncState(db)).repos_refreshed_at;
       if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) await refreshRepoList(db, client);
     } else {
       syncFailures = 0;
       items = await syncPerRepo(db, client, opts);
-      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) await setSetting(db, "org_high_water", started);
+      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) await saveSyncState(db, { org_high_water: started });
     }
   } finally {
     // The dashboard can show the rate budget from these.
-    const prefix = opts.full ? "sync_full" : "sync";
-    await setSetting(db, `${prefix}_points_last_run`, String(client.spent - spent0));
-    if (client.remaining !== null) await setSetting(db, "sync_rate_remaining", String(client.remaining));
-    if (client.resetAt) await setSetting(db, "sync_rate_reset_at", client.resetAt.toISOString());
+    const rate: Partial<SyncState> = opts.full ? { full_points_last_run: client.spent - spent0 } : { points_last_run: client.spent - spent0 };
+    if (client.remaining !== null) rate.rate_remaining = client.remaining;
+    if (client.resetAt) rate.rate_reset_at = client.resetAt.toISOString();
+    await saveSyncState(db, rate);
   }
   // History written before ids were bound: one batched pass, nothing when every login is bound.
-  if (opts.full || (!opts.only.length && await getSetting(db, "author_ids_backfilled") === null)) {
+  if (opts.full || (!opts.only.length && (await loadSyncState(db)).author_ids_backfilled_at === null)) {
     try {
       const { backfillAuthorIds } = await import("./author-ids.ts");
       const bound = await backfillAuthorIds(db, client);
       if (bound) console.log(`bound ${bound} author account id${bound === 1 ? "" : "s"}`);
-      await setSetting(db, "author_ids_backfilled", iso(new Date()));
-      await db.run(db.k.deleteFrom("main.settings").where("key", "=", "author_ids_error"));
+      await saveSyncState(db, { author_ids_backfilled_at: iso(new Date()), author_ids_error: null });
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
       console.log(`author ids: ${msg}`);
-      await setSetting(db, "author_ids_error", `${iso(new Date())} ${(e as { type?: string })?.type ?? ""} ${msg}`);
+      await saveSyncState(db, { author_ids_error: `${iso(new Date())} ${(e as { type?: string })?.type ?? ""} ${msg}` });
     }
   }
   // Questions about items this sync found closed or merged no longer apply. Writes decisions only.
@@ -1098,11 +988,10 @@ async function sync(args: string[]): Promise<void> {
     setDbRole("periodic");
     const db = await openDb();
     const client = new Client(reserve);
-    if (restart) await db.run(db.k.deleteFrom("settings").where("key", "=", "full_sync_cursor"));
+    if (restart) await saveSyncState(db, { full_sync_cursor: null });
     const querier = opts.full ? lowPriority(client, { busy: () => lockHeld(lockPath()), minRemaining: keep }) : client;
     // Each run leaves a row for the Pipeline page; rows older than two days go.
-    const row = (await db.get(db.k.insertInto("sync_runs").values({ started_at: iso(new Date()) }).returning(kx.rowid("sync_runs").as("rowid"))))!.rowid;
-    await db.run(db.k.deleteFrom("sync_runs").where("started_at", "<", iso(new Date(Date.now() - 2 * 86400_000))));
+    const row = await startSyncRun(db, iso(new Date()));
     // The default-branch poll, and the warm builds it queues, keep their own cadence while a long pass runs. Its own client:
     // a client's rate figures follow one request at a time.
     const mainCi = exclusive(async () => {
@@ -1118,7 +1007,7 @@ async function sync(args: string[]): Promise<void> {
     mainCiTimer?.unref();
     try {
       const { mode, items } = await runSync(db, querier, opts).finally(() => clearInterval(mainCiTimer));
-      await db.run(db.k.updateTable("sync_runs").set({ ended_at: iso(new Date()), mode, items }).where(kx.rowid("sync_runs"), "=", row));
+      await finishSyncRun(db, row, { endedAt: iso(new Date()), mode, items });
       console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
       // Files, commits and label events of the items that changed; a failed read leaves them for the next run.
       if (!opts.full && !opts.only.length) {
@@ -1156,7 +1045,7 @@ async function sync(args: string[]): Promise<void> {
         }
       }
     } catch (e) {
-      await db.run(db.k.updateTable("sync_runs").set({ ended_at: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) }).where(kx.rowid("sync_runs"), "=", row));
+      await finishSyncRun(db, row, { endedAt: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) });
       throw e;
     }
   } finally {
@@ -1166,11 +1055,8 @@ async function sync(args: string[]): Promise<void> {
 
 async function syncStatus(): Promise<void> {
   const db = await openDb();
-  const rows = await db.all(db.k.selectFrom("repos as r").select((eb) => [
-    "r.name", "r.open_prs", "r.open_issues", "r.synced_at",
-    eb.exists(eb.selectFrom("tracked_repos as t").select(eb.lit(1).as("one")).whereRef("t.name", "=", "r.name")).as("tracked"),
-    eb.selectFrom("items as i").select(eb.fn.countAll<number>().as("n")).whereRef("i.repo", "=", "r.name").as("n"),
-  ]).orderBy("r.name"));
+  const [repos, tracked, counts] = await db.together(() => Promise.all([loadRepos(db, { all: true }), loadTrackedRepos(db), countItemsByRepo(db)]));
+  const rows = [...repos.values()].map((r) => ({ name: r.name, open_prs: r.open_prs, open_issues: r.open_issues, synced_at: r.synced_at, tracked: tracked.has(r.name), n: counts.get(r.name) ?? 0 }));
   console.log(`${"repo".padEnd(28)} ${"tracked".padEnd(7)} ${"open PRs".padStart(8)} ${"open iss".padStart(8)} ${"mirrored".padStart(8)}  synced_at`);
   for (const r of rows) {
     console.log(`${r.name.padEnd(28)} ${(r.tracked ? "yes" : "-").padEnd(7)} ${String(r.open_prs).padStart(8)} ${String(r.open_issues).padStart(8)} ${String(r.n).padStart(8)}  ${r.synced_at ?? "-"}`);
@@ -1184,6 +1070,5 @@ export const commands = {
 
 /** Marks a PR we just merged as merged in the mirror, so counts don't wait for the next sync; the sync later fills in what GitHub reports. */
 export async function markMerged(db: Db, repo: string, number: number, at: string): Promise<void> {
-  await db.run(db.k.updateTable("main.items").set((eb) => ({ state: "MERGED", merged_at: eb.fn.coalesce("merged_at", eb.val(at)), closed_at: eb.fn.coalesce("closed_at", eb.val(at)) }))
-    .where("repo", "=", repo).where("number", "=", number).where("state", "=", "OPEN"));
+  await applyLocal(db, [{ kind: "merged", repo, number, at }]);
 }

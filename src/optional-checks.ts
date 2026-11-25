@@ -1,22 +1,13 @@
 // Per-repo list of optional checks, set by an operator: checks whose failure does not stop a merge, make main red
 // or count as a failure to fix. Exact check names. Every other check must still be green.
-import { audit } from "./dash/audit.ts";
-import * as kx from "./db/kx.ts";
-import { setting } from "./settings-read.ts";
+import { REPO_SETTINGS, listSettings, loadTrackedRepos, saveSettings, setting, settingKey } from "./data/control/index.ts";
+import { loadCheckSamples } from "./data/mirror/index.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
 
-const key = (repo: string) => `optional_checks:${repo}`;
-
-const parseList = (value: string | undefined): string[] => {
-  if (value === undefined) return [];
-  try {
-    const v = JSON.parse(value) as unknown;
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x !== "") : [];
-  } catch {
-    return [];
-  }
-};
+const def = REPO_SETTINGS.optionalChecks;
+const key = (repo: string) => settingKey(def.name, repo);
+const parseList = (value: string | undefined): string[] => def.read(value) as string[];
 
 export async function optionalChecks(db: Db, repo: string): Promise<string[]> {
   return parseList(await setting(db, key(repo)));
@@ -24,25 +15,20 @@ export async function optionalChecks(db: Db, repo: string): Promise<string[]> {
 
 /** optionalChecks() of every repo, read in one query. */
 export async function optionalChecksOf(db: Db): Promise<(repo: string) => string[]> {
-  const rows = new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"])
-    .where((eb) => kx.like(db, "key", eb.val(`${kx.likeEscape("optional_checks:")}%`), "\\")))).map((r) => [r.key, r.value ?? undefined]));
+  const rows = new Map((await listSettings(db, { scope: "repo" })).filter((r) => r.def === def && r.repo !== null).map((r) => [key(r.repo!), r.value ?? undefined]));
   return (repo) => parseList(rows.get(key(repo)));
-}
-
-async function save(db: Db, repo: string, names: string[]): Promise<void> {
-  if (!names.length) await db.run(db.k.deleteFrom("main.settings").where("key", "=", key(repo)));
-  else await db.run(db.k.insertInto("main.settings").values({ key: key(repo), value: JSON.stringify(names) }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
 }
 
 /** Returns false when nothing changed. */
 export async function setOptionalCheck(db: Db, by: string, repo: string, name: string, on: boolean): Promise<boolean> {
   const check = name.trim();
   if (!check) throw new Error("the check name is empty");
-  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", repo))) throw new Error(`${repo} is not tracked`);
+  if (!(await loadTrackedRepos(db, [repo])).has(repo)) throw new Error(`${repo} is not tracked`);
   const cur = await optionalChecks(db, repo);
   if (cur.includes(check) === on) return false;
-  await save(db, repo, on ? [...cur, check] : cur.filter((c) => c !== check));
-  await audit(db, by, on ? "optional-check-add" : "optional-check-remove", repo, { check });
+  const names = on ? [...cur, check] : cur.filter((c) => c !== check);
+  await saveSettings(db, [{ key: def.name, repo, value: names.length ? JSON.stringify(names) : null }], by,
+    { action: on ? "optional-check-add" : "optional-check-remove", target: repo, details: { check } });
   return true;
 }
 
@@ -78,15 +64,8 @@ export function effectiveCiWith(optional: string[], overall: string, checks: str
 
 /** Check names seen on the repo's recent PRs and default-branch heads, for the add control. */
 export async function seenChecks(db: Db, repo: string): Promise<string[]> {
-  const names = new Set<string>();
-  const rows = (await Promise.all([
-    db.all(db.k.selectFrom("main.pr_checks").select("checks").where("repo", "=", repo).orderBy("fetched_at", "desc").limit(40)),
-    db.all(db.k.selectFrom("main.main_ci").select("checks").where("repo", "=", repo).orderBy("updated_at", "desc").limit(10)),
-  ])).flat();
-  for (const r of rows) {
-    try { for (const c of JSON.parse(r.checks) as { name?: string }[]) if (c.name) names.add(c.name); } catch { /* skip */ }
-  }
-  return [...names].sort();
+  const seen = (await loadCheckSamples(db, [repo])).get(repo);
+  return [...new Set([...(seen?.pr ?? []), ...(seen?.main ?? [])])].sort();
 }
 
 export const commands = {
@@ -110,7 +89,7 @@ export const commands = {
       }
       const only = verb === "--repo" ? repo : undefined;
       if (verb && !only) { console.error("usage: autocraft-server optional-checks [--repo R] | add R NAME | remove R NAME"); process.exit(2); }
-      const repos = (await db.all(db.k.selectFrom("main.tracked_repos").select("name").orderBy("name"))).map((r) => r.name).filter((r) => !only || r === only);
+      const repos = [...(await loadTrackedRepos(db)).keys()].filter((r) => !only || r === only);
       for (const r of repos) {
         const list = await optionalChecks(db, r);
         if (list.length || only) console.log(`${r}: ${list.length ? list.join("; ") : "none"}`);

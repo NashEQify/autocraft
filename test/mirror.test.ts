@@ -27,6 +27,7 @@ import { runSync } from "../src/mirror.ts";
 import { itemText, textHash } from "../src/embed/text.ts";
 import { inputHash } from "../src/runner/classify.ts";
 import { SCRATCH } from "./scratch.ts";
+import { saveSyncState, loadSyncState } from "../src/data/mirror/index.ts";
 
 const node = (repo: string, number: number, state = "OPEN", updatedAt = "2026-11-02T10:00:00Z") => ({
   __typename: "Issue", repository: { name: repo }, number, title: `t${number}`, body: "", url: "u", author: { login: "a" },
@@ -54,13 +55,11 @@ async function scratch() {
   await db.run(db.k.insertInto("tracked_repos").values(["a", "b"].map((name) => ({ name, added_by: "t", added_at: "x", pipeline: 1 }))));
   const seen = "2026-11-02T09:00:00Z";
   await db.run(db.k.insertInto("repos").values(["a", "b"].map((name) => ({ name, synced_at: seen, high_water: seen, reconciled_at: seen }))));
-  await db.run(db.k.insertInto("settings").values([
-    { key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
-  ]));
+  await saveSyncState(db, { org_high_water: "2026-11-02T09:30:00Z", repos_refreshed_at: "2999-01-01T00:00:00Z", search_catchup_at: "2999-01-01T00:00:00Z" });
   return { dir, db };
 }
 const opts = { only: [], all: false, full: false, perRepo: false };
-const hw = async (db: Db) => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "org_high_water")))!.value;
+const hw = async (db: Db) => (await loadSyncState(db)).org_high_water;
 
 
 test("search mode writes tracked results, ignores untracked, advances the high water", async () => {
