@@ -2,7 +2,6 @@
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
-import { sql } from "../../db/sql.ts";
 import { registerKeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { OpenItemsArgs } from "./types.ts";
@@ -48,9 +47,17 @@ export const openPrsExpr = (db: Db, repos: readonly string[]) => itemsOfRepos(db
 /** PRs of `repos` in one of `states` (OPEN, MERGED, CLOSED). */
 export const prsInStatesExpr = (db: Db, repos: readonly string[], states: readonly string[]) => itemsOfRepos(db, repos).where("ir.kind", "=", "pr").where(kx.inList(db, "ir.state", states));
 
-/** A known `mergeable` value at the same head survives GitHub reporting UNKNOWN. */
-export const keepKnownMergeableExpr = (known: kx.Ex, incoming: kx.Ex): Expression<string | null> =>
-  sql<string | null>`COALESCE(NULLIF(${kx.ref(incoming)}, 'UNKNOWN'), ${kx.ref(known)}, ${kx.ref(incoming)})` as unknown as Expression<string | null>;
+/**
+ * An upsert's `mergeable` value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value stored for the same
+ * head. `table` is the table of the upsert (`items`, `pr_checks`); the incoming row is `excluded`.
+ */
+export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<string | null> =>
+  eb.case().when(eb.and([
+    eb(eb.ref(`${table}.head_oid`), "is not distinct from", eb.ref("excluded.head_oid")),
+    eb(eb.ref(`${table}.mergeable`), "in", ["CONFLICTING", "MERGEABLE"]),
+    eb(eb.ref("excluded.mergeable"), "is distinct from", "CONFLICTING"),
+    eb(eb.ref("excluded.mergeable"), "is distinct from", "MERGEABLE"),
+  ])).then(eb.ref(`${table}.mergeable`)).else(eb.ref("excluded.mergeable")).end();
 
 const openItemsKeys = (db: Db, o: OpenItemsArgs) =>
   queryDb(db).k.selectFrom("main.items as ki").select(["ki.repo", "ki.number"]).where("ki.state", "=", "OPEN")
