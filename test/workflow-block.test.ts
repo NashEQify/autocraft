@@ -180,7 +180,7 @@ test("an issue accepts the head its merge leg starts at and the one a person ans
   assert.equal((await row()).acceptedHead, "sha8");
 
   // Our own push moves it, someone else's is shown and not accepted.
-  await db.run(db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "fixup", action: "conflict-push", repo: "app", number: 8, from_oid: "sha8", to_oid: "ours", before_res: "unknown", lines: 0 }));
+  await db.run(db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "fixup", action: "conflict-push", repo: "app", number: 8, from_oid: "sha8", to_oid: "ours", before_res: "unknown" }));
   await w.synced(8, "ours");
   await advanceWorkflows(db);
   assert.equal((await row()).acceptedHead, "ours");
