@@ -107,7 +107,7 @@ export async function tiersOf(db: Db, authors: AuthorRef[]): Promise<Map<string,
   return new Map([...standingsOf(input)].map(([k, s]) => [k, tierOf(s.merged, s.closed, s.override, input.rule)]));
 }
 
-/** Merged, closed and open PR counts of a login over every repo and account, as the decision facts show them. */
+/** Merged, closed and open PR counts of a login over every repo and account. */
 export async function authorTotals(db: Db, login: string): Promise<{ merged: number; closed: number; open: number }> {
   const t = { merged: 0, closed: 0, open: 0 };
   for (const r of await loadAuthorHistory(db, { logins: [login] })) { t.merged += r.merged; t.closed += r.closed; t.open += r.open; }

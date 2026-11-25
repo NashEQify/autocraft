@@ -15,7 +15,7 @@ import type { Db } from "../db/index.ts";
 /** The merge-queue fields of a PR whose Plan is in a queue state: what the Queue page and the flow counts show besides the Plan's own state, reasons and note. */
 export type QueueView = {
   author: string | null; tier: string; head: string; size: string; label: string | null; /** Null for a merge-entry PR, which has no review. */ verdict: "take" | "take-fix" | null; reason: string; fixes: number;
-  ci: string; mergeable: string; path: MergePath; eligible: boolean; /** Retired with the Merge? decisions: always null. */ decisionId: string | null; answer: string | null; refusedReason: string | null;
+  ci: string; mergeable: string; path: MergePath; eligible: boolean; refusedReason: string | null;
   reviewedAt: string; held: boolean; blockedLive: boolean; noCi: boolean; runsWaiting: number; runsBlocked: "off" | "failed" | "unsupported" | null;
   verify: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
   conflictNote?: string; mainFix?: true;
@@ -66,7 +66,7 @@ function queueViewOf(f: PrFacts, plan: Plan): QueueView {
   const x = queueEntry(f, merged, !merged);
   return {
     author: f.author, tier: f.tier, head, size: f.size, label: f.label, verdict: r ? r.verdict as "take" | "take-fix" : null, reason: r?.reason ?? "", fixes: r?.fixes ?? 0, ci: f.ci, mergeable: f.mergeable,
-    path: plan.path, eligible: plan.eligible, decisionId: null, answer: null, refusedReason: null,
+    path: plan.path, eligible: plan.eligible, refusedReason: null,
     reviewedAt: r?.at ?? f.workflow?.startedAt ?? "", held: f.mergeHeld, blockedLive: plan.state === "changes-requested" && !!f.changesRequested?.live, noCi: x.noCi,
     runsWaiting: f.runs?.waiting ?? 0, runsBlocked: f.runs?.blocked ?? null, verify: f.verification,
     ...(plan.conflictNote !== null ? { conflictNote: plan.conflictNote } : {}), ...(f.mainFix ? { mainFix: true as const } : {}),

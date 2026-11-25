@@ -57,11 +57,6 @@ export type WriteKind = "merge" | "close" | "other";
 /** Only a merge or a close that carries out a person's answer is made as that person; every other write is the app's. */
 export const actsAsPerson = (kind: WriteKind): boolean => kind === "merge" || kind === "close";
 
-/** Decisions are retired, so none names a person: the write is the app's. */
-export async function identityOfDecision(_db: Db, _decisionId: string | undefined): Promise<Identity> {
-  return "app";
-}
-
 /** The identity a write of `kind` under grant `g` is made as. */
 export const identityFor = (g: Guarded | Grant | GuardedFiling, kind: WriteKind = "other"): Identity => (actsAsPerson(kind) ? g.as : "app");
 

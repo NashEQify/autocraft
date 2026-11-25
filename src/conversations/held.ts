@@ -136,7 +136,7 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
     const may = await stillActs(db, h.by, [h.issue_repo], { permission: deps.permission });
     if (!may.ok && may.standing === "no") { if (await drop(db, h, `${h.by} no longer has write access to ${h.issue_repo}`, at)) s.dropped++; continue; }
     if (!may.ok) { await markHeld(db, [{ id: h.id, from: "held", set: { reason: `GitHub has not answered on ${h.by}'s access to ${h.issue_repo}` } }]); continue; }
-    const g = await guardRepo(db, h.issue_repo, "comment", { operator: h.by }, undefined, h.by);
+    const g = await guardRepo(db, h.issue_repo, "comment", { operator: h.by }, h.by);
     if ("refused" in g) {
       await markHeld(db, [{ id: h.id, from: "held", set: { reason: g.refused } }]);
       continue;

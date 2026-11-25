@@ -12,7 +12,7 @@ import { gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, 
 import { loadItemFact } from "./issue-facts.ts";
 import type { ActionKind, PrFacts } from "./plan.ts";
 import type { MayResult } from "./may.ts";
-import { identityOfDecision, type Identity } from "../github/identity.ts";
+import type { Identity } from "../github/identity.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
 
@@ -32,7 +32,7 @@ export type Refused = { refused: string };
 /** An item action to guard: the Plan must hold the kind with the bucket, person action and source given. */
 export type ItemWant = Want & { id?: number; source?: string };
 /** The action to guard: `head` is the head the caller reviewed or worked on. `batch`: a member of a merge batch, which is in its batch state, not ready. */
-export type Ask<K extends ActionKind = ActionKind> = Want<K> & { head: string; batch?: boolean; /** Fix-up: the Plan action's source (review, premerge or carry). */ source?: string; /** The answered decision this merge or push carries out: the answering operator is the identity. */ decisionId?: string };
+export type Ask<K extends ActionKind = ActionKind> = Want<K> & { head: string; batch?: boolean; /** Fix-up: the Plan action's source (review, premerge or carry). */ source?: string };
 export type Ref = { repo: string; number: number };
 
 export type LiveRead = { state: "OPEN" | "MERGED" | "CLOSED"; head: string; draft: boolean; mergeable: string };
@@ -93,7 +93,7 @@ export async function guard<K extends ActionKind>(db: Db, ref: Ref, action: Ask<
   if ("refused" in r) return r;
   // A merge a person approved is made as them (src/core/may.ts); a merge on the repo's approval as the app.
   const m = action.kind === "merge" ? mergeMay(r.f) : null;
-  return make(ref, action, action.head, m?.ok && m.as === "person" ? `user:${m.by}` : await identityOfDecision(db, action.decisionId));
+  return make(ref, action, action.head, m?.ok && m.as === "person" ? `user:${m.by}` : "app");
 }
 
 /**
@@ -151,11 +151,11 @@ export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals
  * `members`: the merge rule's verdicts (src/core/may.ts) of the PRs a batch write carries; a "merge" write passes without the repo's
  * merge approval when every one of them passes, so a batch of PRs people approved one by one needs no repo switch.
  */
-export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string, o: { members?: readonly MayResult[] } = {}): Promise<GuardedRepo | Refused> {
+export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, login?: string, o: { members?: readonly MayResult[] } = {}): Promise<GuardedRepo | Refused> {
   const approved = need === "merge" && !!o.members?.length && o.members.every((m) => m.ok);
   const why = gateRepo(await repoApprovals(db, repo), approved ? null : need, by, repo);
-  // `login`: the operator pressing the button right now (a conversation card), who acts as themselves with no answered decision yet.
-  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : await identityOfDecision(db, decisionId) } as unknown as GuardedRepo);
+  // `login`: the person pressing the button right now (a conversation card), who acts as themselves.
+  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : "app" } as unknown as GuardedRepo);
 }
 
 /**

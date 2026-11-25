@@ -1,5 +1,5 @@
-// Per-repo approval for the pipeline to act on a red default branch: rerun the failed jobs, and open an issue
-// when an operator answered a decision that asks for it. Set only from the dashboard by an operator (src/dash/api/admin.ts).
+// Per-repo approval for the pipeline to act on a red default branch: rerun the failed jobs, push a fix PR, and open an
+// issue for an infrastructure failure. Set only from the dashboard by an operator (src/dash/api/admin.ts).
 import { loadStepApprovals, setStepApproval } from "../data/control/index.ts";
 import type { Db } from "../db/index.ts";
 

@@ -100,7 +100,7 @@ function parseArgs(args: string[]): DupesParams {
 
 export const commands = {
   dupes: {
-    summary: "dupes [--limit N] [--dry-run]: find duplicate issues and PRs (Jev, then Haiku); the dupe-compare step compares each group and asks its decision",
+    summary: "dupes [--limit N] [--dry-run]: find duplicate issues and PRs (Jev, then Haiku); the dupe-compare step compares each group",
     async run(args: string[]): Promise<void> {
       const db = await openDb();
       const r = await runDupes(db, parseArgs(args), (l) => console.error(l));

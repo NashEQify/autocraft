@@ -235,7 +235,7 @@ export type PrFacts = {
   /** The pre-merge review row at the reviewed head. */
   premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   premergeFixUsed: boolean;
-  /** Owner statements (owner_statements) that the Opus review or the pre-merge review at the reviewed head says the PR goes against; any makes the PR ask for a Merge? answer. */
+  /** Owner statements (owner_statements) that the Opus review or the pre-merge review at the reviewed head says the PR goes against; any keeps the PR off the merge rule. */
   /** Reasons from the PR's diff that keep it off the merge rule (README, brand files, third-party links); read from the diff cache at the reviewed head, null when the diff is not cached. */
   sensitive: string[] | null;
   /**

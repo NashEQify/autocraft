@@ -28,7 +28,7 @@ export type Verdict = { label: string; flags: string[] };
 /** The referee's answer to the item's current disagreement. */
 export type Referee = {
   label: string; sure: boolean; reason: string;
-  /** The answer of the last referee (Opus, after Sonnet was unsure). An unsure final answer still settles the label, with a scope decision for the maintainer. */
+  /** The answer of the last referee (Opus, after Sonnet was unsure). An unsure final answer still settles the label; its PR stays off the merge rule. */
   final?: boolean;
   /** Opus calls that gave no answer for the item, and when the last one failed. */
   failures?: number;

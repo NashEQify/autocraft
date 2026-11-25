@@ -12,7 +12,7 @@ import * as runners from "../../data/runners/index.ts";
 
 const DAY = 86_400_000;
 export const MCP_TOKEN_TTL = 90 * DAY;
-/** A connector token that may answer decisions lasts as long as an operator's dashboard session at most (OPERATOR_SESSION_MAX). */
+/** A connector token that may send commands lasts as long as an operator's dashboard session at most (OPERATOR_SESSION_MAX). */
 export const MCP_ANSWER_TOKEN_TTL = 7 * DAY;
 /** A Task Runner credential lasts this long after its last use, whatever its scopes. */
 export const RUNNER_TOKEN_TTL = 90 * DAY;
@@ -26,8 +26,7 @@ const TOUCH_EVERY = 60_000;
 export type TokenKind = "connector" | "runner";
 export type McpTokenRow = { id: number; label: string | null; kind: TokenKind; canAnswer: boolean; /** A runner credential may also use /mcp; true for every connector. */ canAgent: boolean; /** Equal to `kind === "runner"`: the credential may claim model calls in the user-local inference mode (src/remote/). */ canRun: boolean; createdAt: string; lastUsedAt: string | null; expiresAt: string };
 /**
- * `canAnswer`: the credential was made to answer; the answer tools also need answering to be available and `role` to settle
- * decisions at the time of the call. `canAgent`: the credential may use /mcp (always for a connector).
+ * `canAnswer`: the credential may send commands, while `role` may act at the time of the call. `canAgent`: the credential may use /mcp (always for a connector).
  */
 export type McpCaller = { tokenId: number; login: string; role: Role; canAnswer: boolean; canAgent: boolean; kind: TokenKind };
 

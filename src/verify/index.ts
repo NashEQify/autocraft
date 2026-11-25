@@ -109,7 +109,7 @@ export async function saveVerification(db: Db, c: { repo: string; number: number
 /** The plan as stored: the patch is in the task row, so the plan column keeps its size. */
 const storedPlan = (p: VerifyPlan): unknown => (p.kind === "regression" ? { kind: p.kind, crate: p.crate, dir: p.dir, test_lines: p.patch.split("\n").length - 6 } : p);
 
-/** Verify cannot build this PR's repo: the Merge? decision says "not verified" and an operator decides. */
+/** Verify cannot build this PR's repo: the merge needs a person's approval, which says "not verified". */
 const unavailableRow = (reason: string): Saved => ({ kind: "unavailable", reason, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "unavailable", summary: reason });
 
 const errorRow = (reason: string): Saved => ({ kind: "error", reason, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "error", summary: reason });
@@ -129,7 +129,7 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
     return summary;
   }
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
-  // Nothing to build for these: recorded at once so the PR goes on to the Merge? decision.
+  // Nothing to build for these: recorded at once so the PR goes on to its merge approval.
   const unavailable = await unavailableCandidates(db, repo);
   await saveVerifications(db, unavailable.map((u) => ({ c: u.c, v: unavailableRow(u.reason) })));
   for (const u of unavailable) {

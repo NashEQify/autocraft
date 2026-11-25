@@ -63,7 +63,7 @@ async function need(db: Db, id: number): Promise<CardRow> {
   return c;
 }
 
-const RETIRED = "this card answers a question of the retired decision system; ask Opus again";
+const RETIRED = "this card was made for a question that no longer exists; ask Opus again";
 
 function paramsOf(c: CardRow): CardParams {
   const p = readParams(c.kind, c.params);
@@ -225,7 +225,7 @@ async function action(ctx: Ctx, a: OtherAction): Promise<Outcome> {
 
 /** The Act approval of `repo` for the presser's write. Room under the daily limit was taken before it (doCard). */
 async function actGrant(db: Db, repo: string, by: string, need: "comment" | "labels" = "comment") {
-  const g = await guardRepo(db, repo, need, { operator: by }, undefined, by);
+  const g = await guardRepo(db, repo, need, { operator: by }, by);
   if ("refused" in g) throw new Error(g.refused);
   return g;
 }
@@ -298,7 +298,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   const needW = cardWriteCount(params);
   if (draining && needW > 0) await presserStill(db, by, cardRepos(c.repo, params), deps);
   for (const repo of cardRepos(c.repo, params).filter((r) => r !== c.repo)) {
-    const g = await guardRepo(db, repo, "comment", { operator: by }, undefined, by);
+    const g = await guardRepo(db, repo, "comment", { operator: by }, by);
     if ("refused" in g) throw new ConversationError(409, g.refused);
   }
   let claimed: "busy" | "lost" | { queued: boolean };
@@ -310,7 +310,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
       if (wait && draining) return "busy" as const;
       if (!wait) return await markCard(db, id, [draining ? "queued" : "proposed"], { state: "running", acted_by: by, acted_at: at }) ? { queued: false } : "lost" as const;
       // Refusals a press that has to wait would only meet at the drain are given now.
-      const g = await guardRepo(db, c.repo, params.kind === "label" ? "labels" : "comment", { operator: by }, undefined, by);
+      const g = await guardRepo(db, c.repo, params.kind === "label" ? "labels" : "comment", { operator: by }, by);
       if ("refused" in g) throw new Error(g.refused);
       const block = (await loadActBlocked(db, [c.repo])).get(c.repo);
       if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);

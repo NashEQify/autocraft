@@ -1,5 +1,4 @@
 // decidePr: the review-to-merge rules for one open PR, in one place. Pure: no database, no clock (facts carry `now`).
-// The merge queue's rules (src/merge/queue.ts buildQueue, stateOf, eligible, toAsk) are ported rule by rule, in the same order and with the same reason wording.
 import {
   BATCHABLE, MAIN_RED_HELD, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, RETRY_AFTER_MS,
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, VERIFY_UNAVAILABLE, ciAllows, conflictNote, verifyAllows, verifyOk,
@@ -597,7 +596,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const holdWait: Wait | null = holdState ? person(MAINTAINER_ANSWER_WAIT) : null;
   // An implementation PR whose session revises it, or whose revision is stuck: that is what it waits on, whatever the queue state.
   const implWait: Wait | null = implOff ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
-    : im?.state === "stuck" ? person(`a decision on the stuck implementation of #${im.issue}`)
+    : im?.state === "stuck" ? person(`a maintainer's answer on the stuck implementation of #${im.issue}`)
     : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null);
   // A revision in progress is what the PR waits on, also while its continuation is planned.
   const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);

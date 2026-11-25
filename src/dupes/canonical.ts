@@ -37,7 +37,7 @@ export async function canonInfo(db: Db, repo: string, numbers: number[], known?:
   });
 }
 
-/** The item to keep, and a short reason for the decision card. */
+/** The item to keep, and a short reason. */
 export async function pickCanonical(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): Promise<{ number: number; why: string }> {
   const sorted = (await canonInfo(db, repo, numbers, known)).sort(compareCanonical);
   const [best, next] = sorted as [CanonInfo, CanonInfo | undefined];

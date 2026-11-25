@@ -10,7 +10,7 @@ export type User = {
   role: Role;
   // write, maintain or admin on <owner>/<repo>, checked against GitHub
   // (cached; re-checked when older than a minute). Handlers call this
-  // before every decision write.
+  // before every write a person starts.
   canWrite(repo: string): Promise<boolean>;
   // Any permission but none on <owner>/<repo>, from the same cached check.
   canRead(repo: string): Promise<boolean>;

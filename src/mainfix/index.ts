@@ -65,7 +65,7 @@ export type MainFixSummary = { repo: string; classified: number; reran: number; 
 
 const oneLine = (s: string, max = 200): string => s.replace(/\s+/g, " ").trim().slice(0, max);
 const words = (s: string): string => s.replace(/\s+/g, " ").trim().split(" ").slice(0, REASON_WORDS).join(" ");
-/** URLs and mentions out of text that goes into a public issue or a decision. */
+/** URLs and mentions out of text that goes into a public issue. */
 const plain = (s: string): string => scrub(s).replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>"')]*/gi, "<url>").replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9_])/g, "$1");
 
 export function defaultDeps(): MainFixDeps {

@@ -155,7 +155,7 @@ export async function requestRepin(db: Db, o: { login: string; githubId: number;
   const other = (await itemsOf(db, [{ repo: dep, number: ref.number }])).get(`${dep}#${ref.number}`);
   if (other?.kind !== "pr") throw refused(`${depRef} is not a pull request AutoCraft has read`);
   if (other.state === "CLOSED") throw refused(`${depRef} was closed without merging`);
-  const g = await guardRepo(db, o.repo, "push", { operator: o.login }, undefined, o.login);
+  const g = await guardRepo(db, o.repo, "push", { operator: o.login }, o.login);
   if ("refused" in g) throw refused(g.refused);
   const scope = await outOfBuildScope(db, o.repo, o.number);
   if (scope) throw refused(scope);
@@ -332,7 +332,7 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
   if (access.role !== "operator" && (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0) throw failed("the pull request is quiet until its fix is published");
   const refusal = await actRefusalText(db, r.login, p === "ok", r.repo, `repins on ${r.repo}`);
   if (refusal) throw failed(refusal);
-  const g = await guardRepo(db, r.repo, "push", { operator: r.login }, undefined, r.login);
+  const g = await guardRepo(db, r.repo, "push", { operator: r.login }, r.login);
   if ("refused" in g) throw failed(g.refused);
 
   const l = await q.query(PR_QUERY, { owner: ownerOf(r.repo), name: r.repo, n: r.number }) as PrRead;
@@ -483,7 +483,7 @@ async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "fa
     await patchRow(db, r, { notice: "none" });
     return "none";
   }
-  const g = await guardRepo(db, r.repo, null, { operator: r.login }, undefined, r.login);
+  const g = await guardRepo(db, r.repo, null, { operator: r.login }, r.login);
   let notice: "posted" | "failed" = "failed";
   if ("refused" in g) d.log?.(`autorepin ${refOf(r)}: no comment: ${g.refused}`);
   else {
