@@ -22,8 +22,8 @@ const PR_PHASE = {
   "batch-checking": "In queue", "in-batch": "In queue", "ci-approval": "In queue", "waiting-main-ci": "In queue", integration: "In queue",
   "ci-failed": "Fixing", conflict: "Fixing", "needs-fix-up": "Fixing", "verify-failed": "Fixing", "batch-failed": "Fixing", pushed: "Fixing",
   "waiting-verify": "Verifying", "verify-error": "Verifying",
-  "needs-decision": "Waiting for a person", "changes-requested": "Waiting for a person", scope: "Waiting for a person", "not-started": "Waiting for a person",
-  "opus-hold": "Held", declined: "Held", "held-duplicate": "Held", "held-backlog": "Held", backlog: "Held", duplicate: "Held", draft: "Held", "label-not-reviewed": "Held",
+  "needs-decision": "Waiting for a person", "changes-requested": "Waiting for a person", "not-started": "Waiting for a person",
+  "opus-hold": "Held", "held-backlog": "Held", backlog: "Held", draft: "Held",
   "out-of-scope": "Pipeline off", "opus-close": "Out of scope",
   "not-reviewed": "Review", "review-stale": "Review",
   merged: "Merged", closed: "Closed",
@@ -31,12 +31,12 @@ const PR_PHASE = {
 
 /** Phase of every triage state, used when the item has no PR plan. */
 const ITEM_PHASE = {
-  "held-duplicate": "Held", "held-backlog": "Held", "scope-open": "Waiting for a person",
-  "referee-due": "Triage", unclassified: "Triage", "waiting-haiku": "Triage", "scope-due": "Triage", classified: "Triage",
+  "held-backlog": "Held",
+  "referee-due": "Triage", unclassified: "Triage", "waiting-haiku": "Triage", classified: "Triage",
 } as const satisfies Record<ItemState, ItemPhase>;
 
 /** Triage states that hold or park the item whatever its PR plan says. */
-const TRIAGE_OVERRIDES: readonly ItemState[] = ["held-duplicate", "held-backlog", "scope-open"];
+const TRIAGE_OVERRIDES: readonly ItemState[] = ["held-backlog"];
 
 export type StatusInput = {
   /** GitHub state; wins over every plan state. */
@@ -52,9 +52,7 @@ export type StatusInput = {
   next: string | null;
   /** A due review is held because another item blocks the PR (reviewHold kind "blocked"). */
   reviewBlocked?: boolean;
-  /** The scope question about the PR is answered (a `scope` state then means the answer keeps it out of core, and nobody is asked). */
-  scopeAnswered?: boolean;
-  /** False for an open item whose repo's Pipeline switch is off (and that is not fast-tracked): AutoCraft does nothing with it. */
+  /** False for an open item whose repo's Pipeline switch is off and that nobody started: AutoCraft does nothing with it. */
   inPipeline?: boolean;
   /** Held for model work because its author is outside the team (src/outside.ts). */
   outside?: OutsideHoldInfo;
@@ -73,7 +71,6 @@ export function phaseOf(i: StatusInput): ItemPhase {
   if (i.state) {
     const phase: ItemPhase = PR_PHASE[i.state];
     if (i.reviewBlocked && (phase === "Review" || i.state === "opus-hold")) return "Held";
-    if (i.state === "scope" && i.scopeAnswered) return "Out of scope";
     return phase;
   }
   if (i.next?.startsWith("Fix:")) return "Fixing";

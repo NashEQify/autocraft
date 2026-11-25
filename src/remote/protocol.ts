@@ -202,12 +202,12 @@ export type RunnerInfo = HelperInfo & {
   createdAt: string;
   /** When the credential expires unless used (ISO time); each use moves it on. */
   expiresAt: string;
-  /** Agent access: the credential may also use /mcp (inbox, decisions, feedback, merge queue). */
+  /** Agent access: the credential may also use /mcp (its tools). */
   agent: boolean;
-  /** The credential may answer decisions and approve merges on /mcp (with agent access, while answering is available and the user's role settles decisions). */
+  /** The credential may send commands on /mcp (with agent access, while the user may act). */
   answer: boolean;
 };
-/** `answering`: whether the signed-in user may let a runner answer (answering is available and the user settles decisions). */
+/** `answering`: whether the signed-in user may let a runner send commands. */
 export type RunnersReply = { runners: RunnerInfo[]; answering: boolean };
 
 /** GET /api/runners/pending?code=<user code> (session route): a device login waiting for approval, or 404. Times are ISO. */
@@ -308,7 +308,7 @@ export type Machine = { hostname: string; platform: string; arch: string };
  * Device-style login: the runner makes its own credential (`acrun_` + 32 random bytes, base64url), keeps it, and sends only
  * its hash, lowercase hex SHA-256 of the whole credential string. A signed-in user approves the shown `userCode` on the dashboard.
  */
-/** `agent`: the credential may also use /mcp; `answer`: it may answer decisions and approve merges there. */
+/** `agent`: the credential may also use /mcp; `answer`: it may send commands there. */
 export type LoginScopes = { agent: boolean; answer: boolean };
 /** `scopes`: what the runner asks for; `agent` counts as true and `answer` as false when left out. */
 export type LoginStart = { credentialHash: string; /** The name the runner is listed under; the approving user may change it. */ label: string; machine: Machine; helperVersion: string; scopes?: Partial<LoginScopes> };

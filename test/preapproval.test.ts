@@ -7,7 +7,6 @@ import { mergeAllowed } from "../src/core/gates.ts";
 import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
 import { scopeToTracked } from "../src/repos.ts";
-import { excluded } from "../src/db/kx.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
@@ -323,7 +322,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
   test("the queue row says who added the PR and how; viewers see no login", async () => {
     const w = await (await take(await fresh(), 14)).pr(15);
     await preapproveMerge(w.db, { repo: "app", number: 14, by: OPERATOR });
-    const entry = (number: number) => ({ repo: "app", number, decisionId: null, reviewedAt: T0 }) as unknown as CachedEntry;
+    const entry = (number: number) => ({ repo: "app", number, reviewedAt: T0 }) as unknown as CachedEntry;
     const facts = { legs: (await loadLegPass(w.db)).rows, carried: new Map() };
     const staff = queueOriginOf(facts, true);
     assert.deepEqual({ ...staff(entry(14)), at: null }, { how: "queued", by: OPERATOR, at: null });
@@ -348,44 +347,3 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     assert.ok(!after.pending?.some((p) => p.number === 16));
   });
 });
-
-
-describe("a maintainer's pre-approval after their dashboard session", () => {
-  test("the pipeline reads the write permission again through the app: write keeps it, a failed read keeps it for an hour, read cancels it", async () => {
-    const w = await (await (await (await (await fresh()).acting("maint")).pr(61)).pr(62)).workflow(61, { by: "maint" });
-    await w.workflow(62, { by: "maint" });
-    const stale = new Date(Date.now() - 11 * 60_000).toISOString();
-    const perm = async (permission: string, at: string) =>
-      await w.db.run(w.db.k.insertInto("repo_permissions").values({ login: "maint", repo: "app", permission, checked_at: at })
-        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
-    await perm("write", new Date().toISOString());
-    await preapproveMerge(w.db, { repo: "app", number: 61, by: "maint" });
-    // Stands in for appPermission, which writes what GitHub answered to repo_permissions.
-    const answer = (permission: string | null) => async () => {
-      if (permission === null) return { kind: "error" as const, why: "GitHub permission check failed: 502" };
-      await perm(permission, new Date().toISOString());
-      return { kind: "ok" as const, permission };
-    };
-    const pass = async (permission: string | null) => {
-      await advancePreapprovals(w.db, () => {}, { permission: answer(permission) });
-      await new Promise((r) => setImmediate(r));
-      await advancePreapprovals(w.db, () => {}, { permission: answer(permission) });
-    };
-    await perm("write", stale);
-    await pass("write");
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "review");
-    await perm("write", stale);
-    await pass(null);
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "review");
-    await perm("write", stale);
-    await pass("read");
-    assert.equal((await preapprovalOf(w.db, "app", 61))?.state, "cancelled");
-    // A write permission GitHub last confirmed over an hour ago no longer counts while the reads fail.
-    await perm("write", new Date().toISOString());
-    await preapproveMerge(w.db, { repo: "app", number: 62, by: "maint" });
-    await perm("write", new Date(Date.now() - 61 * 60_000).toISOString());
-    await pass(null);
-    assert.equal((await preapprovalOf(w.db, "app", 62))?.state, "cancelled");
-  });
-});
-

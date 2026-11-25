@@ -1,6 +1,6 @@
 # AutoCraft
 
-AutoCraft is a model harness for maintaining GitHub repositories with a large backlog. It mirrors every issue and PR into a local database and runs a pipeline of model steps over them. Jev classifiers and Claude Haiku, Sonnet and Opus classify, prioritise, find duplicates, ask maintainers for decisions, review, write fixes, verify and merge.
+AutoCraft is a model harness for maintaining GitHub repositories with a large backlog. It mirrors every issue and PR into a local database and runs a pipeline of model steps over them. Jev classifiers and Claude Haiku, Sonnet and Opus classify, prioritise, find duplicates, review, write fixes, implement issues, verify and merge. Maintainers start items and answer one recommendation each.
 
 The models' tools are a fixed set of GitHub actions (comments, labels, branches, PRs, merges), all behind one write module and `safe-merge`-style checks. Actions run automatically where the rules say they are safe. Otherwise a model proposes and a person accepts. Each issue and PR has its own conversation between Opus and a maintainer, with action cards the maintainer can run. The pipeline is built around maintainers' judgement, which is the limited resource, not around token cost.
 
@@ -14,16 +14,16 @@ Stages run in this order. Details, limits and rules for each are in [docs/pipeli
 | Stage | What it does | Model | Stops for a person |
 |---|---|---|---|
 | Sync | Mirrors every issue, PR and comment of the tracked repos into the local database each minute, reads the CI state of each default branch every 2 minutes, and makes a vector of each item's title and body for similar-item search. | Local embedding model | no |
-| Duplicates | Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group. | Jev, Haiku, Opus, Sonnet | yes: duplicate? decision |
-| Classify | Gives each open item one type label and two flags (security, needs decision). Jev goes first, Haiku gives a second opinion, and a referee settles disagreements outside the scope labels. | Jev, Haiku, Sonnet, Opus | yes: scope disagreements and labels the referees were unsure of (through Decide) |
+| Duplicates | Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group. A duplicate is a signal on the items; it closes and holds nothing. | Jev, Haiku, Opus, Sonnet | no |
+| Classify | Gives each open item one type label and two flags (security, needs decision). Jev goes first, Haiku gives a second opinion, and a referee settles disagreements. | Jev, Haiku, Sonnet, Opus | no |
 | Priority | Gives each open item a level from P0 to P4, then orders the candidates of later stages by a work rank. | Jev, Haiku | no |
-| Decide | Asks an operator for scope calls, prepares every open decision with a summary, a pick and drafted answers, and answers questions about an item in its conversation. | Haiku, Opus | yes: an operator answers |
+| Conversations | Answers what a maintainer or operator writes in an item's conversation; a reply may propose commands that a person runs with a button. | Opus | yes: a person runs the commands a reply proposes |
 | Label | Writes each settled type label and flag to GitHub. A label a person set is never changed. | none | yes: per-repo approval |
-| Review | Opus reviews every wanted PR at its current head, reading the repo, and gives a verdict with the complete fix list. It writes nothing to GitHub until the final review is posted. | Opus | yes: hold, close and merge-outside-rule verdicts |
-| Implement | Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. A review that asks for fixes or red CI on that pull request goes back to the same session, and AutoCraft pushes the checked revision for a new review. | Opus | yes: queueing an issue, per-repo approval, questions the plan leaves open, stuck implementations |
-| Fix-up | For a take-with-fixes review, applies the listed small fixes to the contributor's branch, or posts them as a comment when the branch cannot be pushed to. For a wanted PR whose gate check fails, runs the formatter, reruns an infrastructure failure once, or has a model patch the code. For a red default branch in an approved repo, reruns a flaky failure once and asks an operator about reporting an infrastructure failure. | Sonnet, Opus, Haiku | yes: per-repo approval |
-| Verify | Records upstream CI as the verification of taken PRs in repos that have it. A repo without CI, and a bugfix that changes a test file, get a model-planned build in a build environment; a model summarises failures. With the Screenshots feature on, a UI pull request is also rendered at the base and at the head, and a model compares the images; a clear regression holds the merge. | Sonnet, Haiku, Opus | yes: failures and errors |
-| Merge queue | Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge, and asks for a Merge? decision on PRs outside the rules. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up or a Merge? question (for a pre-approved merge, a Merge? question). Approves held CI runs of outside contributors where the repo allows it. | Opus | yes: merge? decision for PRs outside the rules |
+| Review | Opus reviews every wanted PR at its current head, reading the repo, and gives a verdict with the complete fix list. It writes nothing to GitHub until the final review is posted. | Opus | yes: hold and close verdicts, and every review of an item not approved for merge: one recommendation to answer |
+| Implement | Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. A review that asks for fixes or red CI on that pull request goes back to the same session, and AutoCraft pushes the checked revision for a new review. | Opus | yes: starting an issue, per-repo approval, questions the plan leaves open, stuck implementations |
+| Fix-up | For a take-with-fixes review, applies the listed small fixes to the contributor's branch, or posts them as a comment when the branch cannot be pushed to. For a wanted PR whose gate check fails, runs the formatter, reruns an infrastructure failure once, or has a model patch the code. For a red default branch in an approved repo, reruns a flaky failure once, opens an issue for an infrastructure failure and a fix PR for a code failure. | Sonnet, Opus, Haiku | yes: per-repo approval |
+| Verify | Records upstream CI as the verification of taken PRs in repos that have it. A repo without CI, and a bugfix that changes a test file, get a model-planned build in a build environment; a model summarises failures. With the Screenshots feature on, a UI pull request is also rendered at the base and at the head, and a model compares the images; a clear regression holds the merge. | Sonnet, Haiku, Opus | yes: failures and errors: a blocker to answer |
+| Merge queue | Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge; a PR outside the rules merges once a maintainer approves it. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up, or brings an approved item back to a maintainer. Approves held CI runs of outside contributors where the repo allows it. | Opus | yes: approval to merge, for PRs outside the rules |
 | Act | Carries out the closes people command, as them, with a short comment from a fixed template. | none | yes: per-repo approval |
 | Post-merge review | Opus reviews each PR the pipeline merged a second time, reading what landed with the pipeline's own commits and reviews of the PR, and lists defects and minor findings. Each defect that no open item covers becomes one follow-up issue in repos approved for commenting, except on a security fix whose advisory is not published yet (its findings are only shown); minor findings are only shown. | Opus | yes: per-repo approval |
 <!-- stages:end stage-table -->
@@ -39,14 +39,14 @@ The image is the dashboard's home page (mock data). Each column is a stage with 
 - Only `src/github/write.ts` writes to GitHub. Every write is recorded in an audit table, and a test fails if another file writes.
 - Every GitHub write needs an operator's approval for that repo. Approvals are given on the dashboard and cannot be set from the CLI.
 - The dashboard needs GitHub sign-in. Roles are `operator` (answers, approvals, switches, accounts), `maintainer` (read and comment) and `viewer` (read only).
-- Contributors' own agents reach the Inbox through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act with their user's role, and what they send back is feedback, the same as the dashboard's Feedback box: an operator still answers. MCP decision answering and undo are currently disabled (`answering.enabled` in `src/dash/mcp/index.ts`), including when GitHub App sign-in is configured. Answer decisions on the dashboard.
+- Contributors' own agents reach AutoCraft through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act with their user's role, and send the same commands the user can send on GitHub or the dashboard.
 - A pipeline switch (on/off) turns the whole pipeline off, a per-repo pipeline switch limits it to chosen repos, and each step has a daily limit.
 
 See [Trust boundary](docs/pipeline.md#trust-boundary).
 
 ### Dashboard browsing
 
-Items is one filterable list; a row's details open inline under it. Needs you shows the decision queue beside the selected decision, with its Evidence, Discussion and item timeline. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
+Items is one filterable list; a row's details open inline under it. Home lists what waits for the reader. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
 
 ## Setup
 
@@ -133,7 +133,7 @@ autocraft-server sync                   # first sync of the tracked repos
 
 Repo names are unique across owners and case-sensitive. With the GitHub App identity, the app must also be installed on `storytold`. See [Tracked repos](docs/operations.md#tracked-repos).
 
-Newly tracked repositories start with their pipeline disabled. Sync, Embed, and Rank remain available; operator conversations and explicitly fast-tracked items are exceptions to the pipeline-off restriction. For recurring sync, install and enable the supplied systemd timer (`deploy/systemd/autocraft-sync.timer`) or use the periodic service in the Docker Compose deployment. Running the initial sync does not schedule future runs. `autocraft-server embed` populates vectors. With the default model and an empty cache, the first embedding operation downloads the approximately 34 MB model plus supporting files.
+Newly tracked repositories start with their pipeline disabled. Sync, Embed, and Rank remain available; conversations and items a maintainer started are exceptions to the pipeline-off restriction. For recurring sync, install and enable the supplied systemd timer (`deploy/systemd/autocraft-sync.timer`) or use the periodic service in the Docker Compose deployment. Running the initial sync does not schedule future runs. `autocraft-server embed` populates vectors. With the default model and an empty cache, the first embedding operation downloads the approximately 34 MB model plus supporting files.
 
 ### Start the dashboard and add the first operator
 
@@ -152,7 +152,7 @@ Sign in at the base URL. Further users are added on the Access page or with `aut
 
 ### Contributors' agents
 
-Maintainers (and operators) can work the Inbox from their own agent: from the user menu (top right, **Connect**) they make an MCP Connector token and get the command that adds the AutoCraft MCP server to Claude Code (`claude mcp add --transport http autocraft <base URL>/mcp --header "Authorization: Bearer <token>"`). Then they ask things like "is there anything open in photocraft I can help with?" or "give me 5 PRs that need a fix-up". The agent lists open decisions and held fix-ups, works one through with them locally, and sends their pick and note back as feedback. MCP decision answering and undo remain disabled, even with GitHub App sign-in configured; use the dashboard for these actions. See [MCP Connector](docs/operations.md#mcp-connector).
+Maintainers (and operators) can work from their own agent: from the user menu (top right, **Connect**) they make an MCP Connector token and get the command that adds the AutoCraft MCP server to Claude Code (`claude mcp add --transport http autocraft <base URL>/mcp --header "Authorization: Bearer <token>"`). Then they ask things like "is there anything open in photocraft I can help with?" or "give me 5 PRs that need a fix-up". The agent lists the items waiting for an answer and held fix-ups, works one through with them locally, and sends their command. See [MCP Connector](docs/operations.md#mcp-connector).
 
 ### Discord mentions (optional)
 
@@ -204,7 +204,7 @@ The mock API serves fixture data; pick the role with `?as=operator|maintainer|vi
 | `src/cli.ts` | Entry point; commands come from modules listed in `MODULES` |
 | `src/mirror.ts`, `src/db.ts`, `src/schema.sql` | Sync and the SQLite schema |
 | `src/classify`, `src/priority`, `src/dupes`, `src/embed`, `src/rank` | Classification, priority, duplicates, embeddings, work rank |
-| `src/decide`, `src/conversations`, `src/act` | Decisions, Opus conversations and cards, applying answers |
+| `src/workflow`, `src/conversations`, `src/act` | The maintainer workflow, Opus conversations and cards, closes made as a person |
 | `src/review`, `src/implement`, `src/fixup`, `src/verify`, `src/merge` | Review, fix, fix-up, verify, merge queue |
 | `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Agent runs and Jev calls, prompts, bubblewrap, read-only item tools |
 | `src/github` | `write.ts`, the only module that writes to GitHub |

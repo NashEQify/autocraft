@@ -31,7 +31,7 @@ const TOOLCHAINS = ["rust-stable"];
 
 export const WARM_REPOS_KEY = "warm_repos";
 export const WARM_EXCLUDED_KEY = "warm_repos_excluded";
-const CONFIG_KEYS = [WARM_REPOS_KEY, WARM_EXCLUDED_KEY, WARM_INTERVAL_KEY, "pilot_items"];
+const CONFIG_KEYS = [WARM_REPOS_KEY, WARM_EXCLUDED_KEY, WARM_INTERVAL_KEY];
 
 /** The repos an operator added to the warm producer, sorted. */
 export const warmRepos = async (db: Db): Promise<string[]> => (await settingsConfig(db, CONFIG_KEYS)).warmRepos;
@@ -48,7 +48,7 @@ export async function warmCoverage(db: Db): Promise<WarmCoverage> {
   const [c, tracked, trimmed] = await Promise.all([settingsConfig(db, CONFIG_KEYS), loadTrackedRepos(db), loadTrimmedPublish(db)]);
   const added = c.warmRepos, excluded = c.warmReposExcluded;
   const allSince = trimmed ? trimmed.at : null;
-  const repos = [...baseScope(tracked.values(), c.pilotItems)].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
+  const repos = [...baseScope(tracked.values())].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
     .map((repo) => ({ repo, why: added.includes(repo) ? "added" as const : "pipeline" as const }));
   return { allSince, added, excluded, repos };
 }

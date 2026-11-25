@@ -516,7 +516,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/pipeline/limits/:step/reset", operator: true, handler: ok(pipeline.resetLimit) },
     { method: "POST", pattern: "/api/pipeline/steps/:step/deadline-ack", operator: true, handler: ok(pipeline.ackStepDeadline) },
     { method: "POST", pattern: "/api/pipeline/trips/:stage/resume", handler: ok(pipeline.resumeTrip) },
-    { method: "PUT", pattern: "/api/pipeline/pilot", operator: true, handler: ok(adm.putPilot) },
     { method: "PUT", pattern: "/api/pipeline/outside-limits", operator: true, handler: ok(outside.putLimits) },
     { method: "GET", pattern: "/api/pipeline/blocker-thresholds", handler: ok((db) => outside.getBlockerThresholds(db)) },
     { method: "PUT", pattern: "/api/pipeline/blocker-thresholds", operator: true, handler: ok(outside.putBlockerThresholds) },

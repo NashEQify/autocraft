@@ -11,13 +11,14 @@ type Row = { name: string; facts: Over; expect: { state?: string; path?: "rule" 
 
 const tokens = (p: Plan): string[] => p.actions.map((a) => {
   const bucket = typeof a.params?.bucket === "string" ? a.params.bucket : null;
-  if (a.kind === "fixup") return a.params?.source === "premerge" ? "fixup:premerge" : a.params?.source === "carry" ? `fixup:carry-${bucket}` : `fixup:${bucket}`;
+  if (a.kind === "fixup") return a.params?.source === "premerge" ? "fixup:premerge" : `fixup:${bucket}`;
   return bucket ? `${a.kind}:${bucket}` : a.kind;
 }).sort();
 const SIZE_L = { size: "L", lines: 900 } as const;
-const NEW_REPO = { repoFacts: { workflow: "new" } } as const;
+/** Nobody started it. */
+const UNSTARTED = { workflow: null } as const;
 const MERGE_ENTRY = { entry: "merge", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } as const;
-const answered = (answer: string, after = true) => ({ asked: true, answer, mergeAnswerAfterReview: after });
+const HANDED = { handOver: { afterReview: true } } as const;
 const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, minor: 0, error: null, ...o });
 const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });
@@ -31,37 +32,31 @@ const rows: Row[] = [
   // ---- the rule path
   { name: "clean rule PR is ready and merges", facts: {}, expect: { state: "ready", path: "rule", actions: ["merge"], reasons: [], eligible: true } },
   { name: "take-fix goes to fix-up, outside the rule", facts: { review: { verdict: "take-fix" } }, expect: { state: "needs-fix-up", path: null, actions: [], reasons: ["review asks for fixes"] } },
-  { name: "size L is outside the rule and asked about", facts: SIZE_L, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: ["size L"] } },
-  { name: "a conflict with an owner statement keeps a clean PR off the rule and asks", facts: { statementConflicts: [{ id: 3, where: "designcraft#1484", text: "Hyphenation and dictionaries belong in craft-libs", reason: "adds a hyphenation table" }] }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: ["conflicts with designcraft#1484: \"Hyphenation and dictionaries belong in craft-libs\" (adds a hyphenation table)"] } },
-  { name: "a conflict does not stop an operator's Merge answer", facts: { statementConflicts: [{ id: 3, where: "app#2", text: "t", reason: "r" }], decision: answered("merge") }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
+  { name: "size L is outside the rule", facts: SIZE_L, expect: { state: "needs-decision", path: null, actions: [], reasons: ["size L"] } },
+  { name: "a conflict with an owner statement keeps a clean PR off the rule", facts: { statementConflicts: [{ id: 3, where: "designcraft#1484", text: "Hyphenation and dictionaries belong in craft-libs", reason: "adds a hyphenation table" }] }, expect: { state: "needs-decision", path: null, actions: [], reasons: ["conflicts with designcraft#1484: \"Hyphenation and dictionaries belong in craft-libs\" (adds a hyphenation table)"] } },
+  { name: "a conflict does not stop a hand-over", facts: { statementConflicts: [{ id: 3, where: "app#2", text: "t", reason: "r" }], ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
   { name: "no conflict leaves the rule path alone", facts: { statementConflicts: [] }, expect: { state: "ready", path: "rule", actions: ["merge"], reasons: [] } },
-  { name: "a README or brand change keeps a clean PR off the rule and asks", facts: { sensitive: ["changes the README"] }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: ["changes the README"] } },
-  { name: "an uncached diff keeps a clean PR off the rule", facts: { sensitive: null }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: ["diff not checked for README or third-party links"] } },
-  { name: "other label", facts: { label: "performance" }, expect: { state: "needs-decision", reasons: ["label performance"], actions: ["ask-merge"] } },
-  { name: "no settled label", facts: { label: null }, expect: { state: "needs-decision", reasons: ["no settled label"], actions: ["ask-merge"] } },
+  { name: "a README or brand change keeps a clean PR off the rule", facts: { sensitive: ["changes the README"] }, expect: { state: "needs-decision", path: null, actions: [], reasons: ["changes the README"] } },
+  { name: "an uncached diff keeps a clean PR off the rule", facts: { sensitive: null }, expect: { state: "needs-decision", path: null, actions: [], reasons: ["diff not checked for README or third-party links"] } },
+  { name: "other label", facts: { label: "performance" }, expect: { state: "needs-decision", reasons: ["label performance"], actions: [] } },
+  { name: "no settled label", facts: { label: null }, expect: { state: "needs-decision", reasons: ["no settled label"], actions: [] } },
   { name: "tier not on the whitelist", facts: { tier: "not" }, expect: { state: "needs-decision", reasons: ["author not on the whitelist"] } },
   { name: "unknown author", facts: { tier: "not", author: null }, expect: { state: "needs-decision", reasons: ["author unknown"] } },
   { name: "allow tier counts as whitelisted", facts: { tier: "allow" }, expect: { state: "ready", path: "rule" } },
-  { name: "review mode skipped never merges by rule", facts: { review: { mode: "skipped" } }, expect: { state: "needs-decision", reasons: ["the review was skipped"], actions: ["ask-merge"] } },
-  { name: "an open Merge? question counts against the rule", facts: { decision: { openQuestion: true } }, expect: { state: "needs-decision", reasons: ["a Merge? question is still open"] } },
-  { name: "verification unavailable puts it outside the rule", facts: { verification: { state: "unavailable", summary: "the repo is private" } }, expect: { state: "needs-decision", reasons: ["not verified: the repo is private"], actions: ["ask-merge"] } },
+  { name: "review mode skipped never merges by rule", facts: { review: { mode: "skipped" } }, expect: { state: "needs-decision", reasons: ["the review was skipped"], actions: [] } },
+  { name: "verification unavailable puts it outside the rule", facts: { verification: { state: "unavailable", summary: "the repo is private" } }, expect: { state: "needs-decision", reasons: ["not verified: the repo is private"], actions: [] } },
   { name: "no CI in the repo puts it outside the rule", facts: { ci: "none", repoFacts: { noCi: true } }, expect: { state: "needs-decision", reasons: ["the repo has no CI checks"] } },
   { name: "several reasons keep the queue's order", facts: { ...SIZE_L, label: "infra", tier: "not", review: { verdict: "take-fix" } }, expect: { state: "needs-fix-up", reasons: ["review asks for fixes", "size L", "author not on the whitelist"] } },
 
   // ---- unsure heads and operator answers
-  { name: "unsure head does not merge by rule", facts: { review: { unsure: true } }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: [UNSURE_REASON] } },
-  { name: "an operator Merge answer waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, decision: { ...answered("merge"), execWaiting: true } }, expect: { state: "decision-answered-merge", path: "operator", actions: [] } },
-  { name: "the same Merge answer merges once the sign-in arrived", facts: { ...SIZE_L, decision: { ...answered("merge"), execWaiting: false } }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
-  { name: "unsure head, Merge answer given before the review, does not merge", facts: { review: { unsure: true }, decision: answered("merge", false) }, expect: { state: "needs-decision", path: null, actions: [] } },
-  { name: "unsure head, Merge answer after the review, merges as operator", facts: { review: { unsure: true }, decision: answered("merge", true) }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
-  { name: "unsure head, Hold answer is declined and does not merge", facts: { review: { unsure: true }, decision: answered("hold") }, expect: { state: "declined", actions: [] } },
-  { name: "Hold answer on a PR outside the rule: no merge", facts: { ...SIZE_L, decision: answered("hold") }, expect: { state: "declined", path: null, actions: [] } },
-  { name: "Hold answer blocks the pre-merge fix-up", facts: { ...SIZE_L, decision: answered("hold") , premerge: premerge({ defects: 1 }) }, expect: { state: "declined", actions: [] } },
-  { name: "Merge answer on a large PR merges as operator", facts: { ...SIZE_L, decision: answered("merge") }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], eligible: true } },
-  { name: "asked and unanswered: waits, no second question", facts: { ...SIZE_L, decision: { asked: true } }, expect: { state: "needs-decision", actions: [] } },
-  { name: "member of an open duplicate group is asked later", facts: { ...SIZE_L, decision: { inOpenGroup: true } }, expect: { state: "needs-decision", actions: [] } },
-  { name: "operator Merge answer accepts a repo without CI", facts: { ...SIZE_L, ci: "none", repoFacts: { noCi: true }, decision: answered("merge") }, expect: { state: "decision-answered-merge", actions: ["merge"], eligible: true } },
-  { name: "operator Merge answer on an unverifiable repo merges", facts: { verification: { state: "unavailable", summary: "x" }, decision: answered("merge") }, expect: { state: "decision-answered-merge", actions: ["merge"] } },
+  { name: "unsure head does not merge by rule", facts: { review: { unsure: true } }, expect: { state: "needs-decision", path: null, actions: [], reasons: [UNSURE_REASON] } },
+  { name: "a handed-over merge waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, ...HANDED, mergeWaiting: true }, expect: { state: "decision-answered-merge", path: "operator", actions: [] } },
+  { name: "the same merge runs once the sign-in arrived", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
+  { name: "unsure head, handed over before the review, does not merge", facts: { review: { unsure: true }, handOver: { afterReview: false } }, expect: { state: "needs-decision", path: null, actions: [] } },
+  { name: "unsure head, handed over after the review, merges as its approver", facts: { review: { unsure: true }, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
+  { name: "a handed-over large PR merges as its approver", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], eligible: true } },
+  { name: "a hand-over accepts a repo without CI", facts: { ...SIZE_L, ci: "none", repoFacts: { noCi: true }, ...HANDED }, expect: { state: "decision-answered-merge", actions: ["merge"], eligible: true } },
+  { name: "a handed-over PR of an unverifiable repo merges", facts: { verification: { state: "unavailable", summary: "x" }, ...HANDED }, expect: { state: "decision-answered-merge", actions: ["merge"] } },
 
   // ---- order of the state rules
   { name: "conflicting PR", facts: { mergeable: "CONFLICTING", conflict: { bucket: "merge", base: "main", baseOk: true } }, expect: { state: "conflict", path: "rule", actions: ["conflict:merge"], note: null, conflictNote: "conflict: merging main" } },
@@ -74,8 +69,10 @@ const rows: Row[] = [
   { name: "checks of another head: CI unknown", facts: { ci: "unknown", checksHere: false }, expect: { state: "waiting-ci" } },
   { name: "no verification yet", facts: { verification: null }, expect: { state: "waiting-verify", path: "rule", actions: ["verify:plan"] } },
   { name: "stale verification is verified again", facts: { verification: { state: "stale" } }, expect: { state: "waiting-verify", actions: ["verify:plan"] } },
-  { name: "failed verification", facts: { verification: { state: "failed", summary: "tests fail" } }, expect: { state: "needs-decision", actions: ["ask-merge"] } },
-  { name: "verification error", facts: { verification: { state: "error", summary: "no build" } }, expect: { state: "needs-decision", actions: ["ask-merge"] } },
+  { name: "failed verification", facts: { verification: { state: "failed", summary: "tests fail" } }, expect: { state: "needs-decision", actions: [] } },
+  { name: "verification error", facts: { verification: { state: "error", summary: "no build" } }, expect: { state: "needs-decision", actions: [] } },
+  { name: "an approval given after the failed verification merges over it", facts: { ...HANDED, verification: { state: "failed", summary: "tests fail" }, verifyOverride: true }, expect: { state: "decision-answered-merge", actions: ["merge"] } },
+  { name: "an approval given before the failed verification does not", facts: { ...HANDED, verification: { state: "failed", summary: "tests fail" } }, expect: { state: "verify-failed", actions: [] } },
   { name: "CI is enough counts as verified", facts: { verification: { state: "ci-enough" } }, expect: { state: "ready", actions: ["merge"] } },
   { name: "outside the rule, not verified yet: no question before the result", facts: { ...SIZE_L, verification: null }, expect: { state: "waiting-verify", actions: ["verify:plan"] } },
   { name: "unavailable repo is Verify's second bucket", facts: { verification: null, verifyUnavailable: "the repo is private" }, expect: { state: "waiting-verify", actions: ["verify:unavailable"] } },
@@ -83,33 +80,32 @@ const rows: Row[] = [
   // ---- pre-merge review
   { name: "no pre-merge review yet", facts: { premerge: null }, expect: { state: "waiting-premerge", path: "rule", actions: ["premerge"] } },
   { name: "no pre-merge review, merging not approved in the repo", facts: { premerge: null, repoFacts: { mergeApproved: false } }, expect: { state: "waiting-premerge", actions: [] } },
-  { name: "pre-merge review with an unverified claim goes to a person, not the rule", facts: { premerge: premerge({ unsure: true }) }, expect: { state: "needs-decision", reasons: [PREMERGE_UNSURE_REASON], actions: ["ask-merge"] } },
+  { name: "pre-merge review with an unverified claim goes to a person, not the rule", facts: { premerge: premerge({ unsure: true }) }, expect: { state: "needs-decision", reasons: [PREMERGE_UNSURE_REASON], actions: [] } },
   { name: "failed try waits for its backoff", facts: { premerge: premerge({ hasFindings: false, tries: 1, at: new Date(NOW - 600_000).toISOString() }) }, expect: { state: "waiting-premerge", actions: [] } },
   { name: "failed try is due after the backoff", facts: { premerge: premerge({ hasFindings: false, tries: 1, at: new Date(NOW - 3_700_000).toISOString() }) }, expect: { state: "waiting-premerge", actions: ["premerge"] } },
-  { name: "three failed tries: outside the rule", facts: { premerge: premerge({ hasFindings: false, tries: 3 }) }, expect: { state: "needs-decision", reasons: [PREMERGE_FAILED_REASON], actions: ["ask-merge"] } },
-  { name: "defect without a fix is asked about", facts: { premerge: premerge({ defects: 1, defectsAllFixable: false }) }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON], actions: ["ask-merge"] } },
+  { name: "three failed tries: outside the rule", facts: { premerge: premerge({ hasFindings: false, tries: 3 }) }, expect: { state: "needs-decision", reasons: [PREMERGE_FAILED_REASON], actions: [] } },
+  { name: "defect without a fix is asked about", facts: { premerge: premerge({ defects: 1, defectsAllFixable: false }) }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON], actions: [] } },
   { name: "fixable defects go to fix-up", facts: { premerge: premerge({ defects: 2 }) }, expect: { state: "needs-fix-up", path: "rule", actions: ["fixup:premerge"], note: "pre-merge review: 2 defects to fix" } },
   { name: "one fixable defect is singular", facts: { premerge: premerge({ defects: 1 }) }, expect: { state: "needs-fix-up", note: "pre-merge review: 1 defect to fix" } },
   { name: "fix-up already used: defect", facts: { premerge: premerge({ defects: 1 }), premergeFixUsed: true }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON] } },
   { name: "no push approval: defect", facts: { premerge: premerge({ defects: 1 }), repoFacts: { pushApproved: false } }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON] } },
   { name: "branch not pushable: defect", facts: { premerge: premerge({ defects: 1 }), pushable: false }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON] } },
-  { name: "a Merge? decision at the head blocks the fix-up", facts: { premerge: premerge({ defects: 1 }), decision: { asked: true } }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON], actions: [] } },
   { name: "minor findings do not block", facts: { premerge: premerge({ minor: 3 }) }, expect: { state: "ready", actions: ["merge"] } },
-  { name: "a PR outside the rule skips the pre-merge review", facts: { ...SIZE_L, premerge: null }, expect: { state: "needs-decision", actions: ["ask-merge"] } },
+  { name: "a PR outside the rule skips the pre-merge review", facts: { ...SIZE_L, premerge: null }, expect: { state: "needs-decision", actions: [] } },
 
   // ---- merge, refusal, holds, batches, main CI
   { name: "refused PR with changed CI is retried", facts: { lastMerge: { outcome: "refused", reason: "x", ci: "pending", mergeable: "MERGEABLE" } }, expect: { state: "refused", path: "rule", actions: ["merge"], eligible: true } },
   { name: "refused PR in the same state waits, on every path", facts: { lastMerge: { outcome: "refused", reason: "not ready at merge time: CI pending", ci: "success", mergeable: "MERGEABLE" } }, expect: { state: "refused", actions: [], eligible: true } },
-  { name: "refused PR waits also when it merges alone", facts: { verification: { state: "unavailable", summary: "s" }, decision: answered("merge"), lastMerge: { outcome: "refused", reason: "x", ci: "success", mergeable: "MERGEABLE" } }, expect: { state: "refused", actions: [] } },
+  { name: "refused PR waits also when it merges alone", facts: { verification: { state: "unavailable", summary: "s" }, ...HANDED, lastMerge: { outcome: "refused", reason: "x", ci: "success", mergeable: "MERGEABLE" } }, expect: { state: "refused", actions: [] } },
   { name: "refusal without a recorded CI state waits", facts: { lastMerge: { outcome: "refused", reason: "not ready at merge time: CI pending", ci: null, mergeable: null } }, expect: { state: "refused", actions: [] } },
   { name: "approved runs after a refusal release it", facts: { lastMerge: { outcome: "refused", reason: "x", ci: "success", mergeable: "MERGEABLE" }, runsApprovedAfterMerge: true }, expect: { state: "refused", actions: ["merge"] } },
   { name: "held PR keeps its state and never merges", facts: { mergeHeld: true }, expect: { state: "ready", path: "rule", actions: [], eligible: false } },
-  { name: "held PR with an operator answer never merges", facts: { ...SIZE_L, decision: answered("merge"), mergeHeld: true }, expect: { state: "decision-answered-merge", actions: [], eligible: false } },
+  { name: "held PR that was handed over never merges", facts: { ...SIZE_L, ...HANDED, mergeHeld: true }, expect: { state: "decision-answered-merge", actions: [], eligible: false } },
   { name: "batch state replaces ready", facts: { batch: "in-batch" }, expect: { state: "in-batch", actions: [] } },
   { name: "batch state replaces waiting-ci", facts: { batch: "batch-checking", ci: "pending" }, expect: { state: "batch-checking" } },
   { name: "failed batch state", facts: { batch: "batch-failed" }, expect: { state: "batch-failed", actions: [] } },
   { name: "batch does not take a rule PR without a clean pre-merge review", facts: { batch: "in-batch", premerge: null }, expect: { state: "waiting-premerge" } },
-  { name: "batch takes an operator-approved PR", facts: { ...SIZE_L, decision: answered("merge"), batch: "in-batch", premerge: null }, expect: { state: "in-batch" } },
+  { name: "batch takes a handed-over PR", facts: { ...SIZE_L, ...HANDED, batch: "in-batch", premerge: null }, expect: { state: "in-batch" } },
   { name: "red main holds a ready PR", facts: { repoFacts: { mainRed: true } }, expect: { state: "waiting-main-ci", actions: [] } },
   { name: "red main does not hold the PR that fixes it", facts: { repoFacts: { mainRed: true }, mainFix: true }, expect: { state: "ready", actions: ["merge"] } },
   { name: "batch members keep the batch state while main is red", facts: { repoFacts: { mainRed: true }, batch: "in-batch" }, expect: { state: "in-batch" } },
@@ -117,11 +113,10 @@ const rows: Row[] = [
 
   // ---- changes requested, held, merged
   { name: "changes requested blocks a ready PR", facts: { changesRequested: { why: "changes requested by a maintainer (ana)", live: true } }, expect: { state: "changes-requested", path: null, actions: [], note: "changes requested by a maintainer (ana)" } },
-  { name: "changes requested blocks an operator Merge answer", facts: { ...SIZE_L, decision: answered("merge"), changesRequested: { why: "w", live: false } }, expect: { state: "changes-requested", actions: [] } },
+  { name: "changes requested blocks a hand-over", facts: { ...SIZE_L, ...HANDED, changesRequested: { why: "w", live: false } }, expect: { state: "changes-requested", actions: [] } },
   { name: "changes requested blocks the question", facts: { ...SIZE_L, changesRequested: { why: "w", live: false } }, expect: { state: "changes-requested", actions: [] } },
   { name: "failed review reads give a note", facts: { gateFailureNote: "reviews could not be read from GitHub 3 times in a row", ...SIZE_L }, expect: { state: "needs-decision", note: "reviews could not be read from GitHub 3 times in a row" } },
   { name: "backlog hold wins over the rule", facts: { heldBacklog: true }, expect: { state: "held-backlog", actions: [] } },
-  { name: "duplicate hold", facts: { heldDuplicate: true }, expect: { state: "held-duplicate", actions: [] } },
   { name: "merged PR", facts: { ghState: "MERGED" }, expect: { state: "merged", actions: [] } },
   { name: "PR merged by us before the mirror noticed", facts: { lastMerge: { outcome: "merged", reason: null, ci: "success", mergeable: "MERGEABLE" } }, expect: { state: "merged", actions: [] } },
 
@@ -131,25 +126,15 @@ const rows: Row[] = [
   { name: "review made stale by the discussion", facts: { review: { stale: true, staleActionable: true } }, expect: { state: "review-stale", actions: ["review"] } },
   { name: "stale review at the daily re-review cap waits", facts: { review: { stale: true, staleActionable: false } }, expect: { state: "review-stale", actions: [] } },
   { name: "a stale take is never verified or merged", facts: { review: { stale: true, staleActionable: true }, verification: null }, expect: { state: "review-stale", actions: ["review"] } },
-  { name: "label that gets no code review", facts: { review: null, label: "plugin candidate" }, expect: { state: "label-not-reviewed", actions: [] } },
-  { name: "unclassified PR", facts: { review: null, label: null }, expect: { state: "label-not-reviewed", actions: [] } },
-  { name: "needs-decision flag waits for a scope answer", facts: { review: null, needsDecisionFlag: true }, expect: { state: "scope", actions: [] } },
-  { name: "scope answer take lets it be reviewed", facts: { review: null, needsDecisionFlag: true, scopeAnswer: "take" }, expect: { state: "not-reviewed", actions: ["review"] } },
-  { name: "scope answer plugin keeps it out", facts: { review: null, scopeAnswer: "plugin" }, expect: { state: "scope", actions: [] } },
   { name: "draft without a review", facts: { review: null, draft: true }, expect: { state: "draft", actions: [] } },
   { name: "draft with a take review stays in the queue", facts: { draft: true, verification: null }, expect: { state: "waiting-verify", actions: [] } },
-  { name: "Opus said hold", facts: { review: { verdict: "hold" } }, expect: { state: "opus-hold", actions: ["ask-merge"] } },
+  { name: "Opus said hold", facts: { review: { verdict: "hold" } }, expect: { state: "opus-hold", actions: [] } },
   { name: "Opus said close", facts: { review: { verdict: "close" } }, expect: { state: "opus-close", actions: [] } },
   { name: "backlog without a review", facts: { review: null, heldBacklog: true }, expect: { state: "backlog", actions: [] } },
-  { name: "duplicate hold without a review", facts: { review: null, heldDuplicate: true }, expect: { state: "duplicate", actions: [] } },
-  { name: "outside the pilot", facts: { inScope: false }, expect: { state: "out-of-scope", actions: [] } },
+  { name: "outside the scope", facts: { inScope: false }, expect: { state: "out-of-scope", actions: [] } },
   { name: "integration PR with runs to read", facts: { integration: true, runs: runs({ reread: true }) }, expect: { state: "integration", actions: ["approve-ci"] } },
   { name: "integration PR of a repo out of scope", facts: { integration: true, inScope: false, runs: runs({ reread: true }) }, expect: { state: "out-of-scope", actions: [] } },
   { name: "runs wait at the reviewed head but the PR moved on: not approved", facts: { head: "h2", runs: runs() }, expect: { actions: ["review"] } },
-  { name: "a Hold answer stops the fix-up of a take-fix review", facts: { ...TAKE_FIX, fixup: fixup(), decision: answered("hold") }, expect: { actions: [] } },
-  { name: "a Hold answer stops the CI fix", facts: { ...CI_FAIL, cifix: cifix(), decision: answered("hold") }, expect: { actions: [] } },
-  { name: "a Hold answer stops the conflict merge", facts: { ...conflicting(), decision: answered("hold") }, expect: { actions: [] } },
-  { name: "a Close answer stops a carry-over fix-up", facts: { carry: [{ attempts: 0 }], decision: answered("close") }, expect: { actions: [] } },
   { name: "integration PR without runs", facts: { integration: true }, expect: { state: "integration", actions: [] } },
 
   // ---- other actions
@@ -160,14 +145,11 @@ const rows: Row[] = [
   { name: "waiting runs of a fork PR are approved", facts: { runs: runs(), ci: "pending" }, expect: { state: "ci-approval", actions: ["approve-ci"] } },
   { name: "runs that failed twice are left to a person", facts: { runs: runs({ approvable: 0 }) }, expect: { state: "ci-approval", actions: [] } },
   { name: "runs of a same-repo PR are not approved", facts: { runs: runs({ crossRepo: false }) }, expect: { state: "ci-approval", actions: [] } },
-  { name: "no approval of runs after an answer that is not Merge", facts: { ...SIZE_L, decision: answered("hold"), runs: runs() }, expect: { state: "declined", actions: [] } },
   { name: "no approval of runs for a held merge", facts: { runs: runs(), mergeHeld: true }, expect: { state: "ci-approval", actions: [] } },
   { name: "checks of another head: nothing to approve", facts: { runs: runs(), checksHere: false, ci: "unknown" }, expect: { state: "ci-approval", actions: [] } },
   { name: "failing CI is not verified", facts: { ci: "failure", verification: null }, expect: { state: "ci-failed", actions: [] } },
   // ---- operator Hold and Close decline on the rule path too
-  { name: "Hold answer declines a PR the rule would merge", facts: { decision: answered("hold") }, expect: { state: "declined", actions: [] } },
-  { name: "Close answer declines a PR the rule would merge", facts: { decision: answered("close") }, expect: { state: "declined", actions: [] } },
-  { name: "Merge answer on a rule PR still merges by the rule", facts: { decision: answered("merge") }, expect: { state: "ready", path: "rule", actions: ["merge"] } },
+  { name: "a handed-over rule PR still merges by the rule", facts: { ...HANDED }, expect: { state: "ready", path: "rule", actions: ["merge"] } },
 
   // ---- fix-up of a take-fix review
   { name: "fix-up: pushable branch with approval", facts: { ...TAKE_FIX, fixup: fixup() }, expect: { state: "needs-fix-up", actions: ["fixup:fix"] } },
@@ -182,7 +164,7 @@ const rows: Row[] = [
   { name: "fix-up: too-large becomes an ask once comments are approved", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["too-large"] }) }, expect: { actions: ["fixup:ask"] } },
   { name: "fix-up: too-large and asked is final", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["too-large", "asked"] }) }, expect: { actions: [] } },
   { name: "fix-up: too-large without comment approval is final", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["too-large"] }), repoFacts: { commentApproved: false } }, expect: { actions: [] } },
-  { name: "a label settled by an unsure referee keeps a clean PR off the rule and asks", facts: { labelUnsure: true }, expect: { state: "needs-decision", path: null, actions: ["ask-merge"], reasons: ["label settled by an unsure referee"] } },
+  { name: "a label settled by an unsure referee keeps a clean PR off the rule", facts: { labelUnsure: true }, expect: { state: "needs-decision", path: null, actions: [], reasons: ["label settled by an unsure referee"] } },
   { name: "fix-up: an operator merge hold stops the too-large ask", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["too-large"] }), mergeHeld: true }, expect: { actions: [] } },
   { name: "fix-up: two tries used are followed by an ask", facts: { ...TAKE_FIX, fixup: fixup({ attempts: 2 }) }, expect: { actions: ["fixup:ask"] } },
   { name: "fix-up: two tries used and asked is final", facts: { ...TAKE_FIX, fixup: fixup({ attempts: 2, recorded: ["asked"] }) }, expect: { actions: [] } },
@@ -190,29 +172,18 @@ const rows: Row[] = [
   { name: "fix-up: a review with no usable fixes", facts: { ...TAKE_FIX, fixup: fixup({ fixes: 0 }) }, expect: { actions: [] } },
   { name: "fix-up: conflicting PRs are not fixed up", facts: { ...TAKE_FIX, fixup: fixup(), mergeable: "CONFLICTING" }, expect: { actions: [] } },
   { name: "fix-up: a draft is not fixed up", facts: { ...TAKE_FIX, fixup: fixup(), draft: true }, expect: { actions: [] } },
-  { name: "fix-up: a held duplicate is not fixed up", facts: { ...TAKE_FIX, fixup: fixup(), heldDuplicate: true }, expect: { state: "held-duplicate", actions: [] } },
   { name: "fix-up: review made stale waits for the new review", facts: { ...TAKE_FIX, fixup: fixup(), review: { stale: true, staleActionable: true } }, expect: { state: "review-stale", actions: ["review"] } },
   { name: "lint: a stored fix-up patch whose task ended is collected, and holds the fix-up meanwhile", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["linting"] }), lint: [{ step: "fixup", source: "review", ended: true }] }, expect: { actions: ["lint:fixup"] } },
   { name: "lint: a task still running is waited for", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["linting"] }), lint: [{ step: "fixup", source: "review", ended: false }] }, expect: { actions: [] } },
-  { name: "lint: a Hold answer drops the stored patch's push", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["linting"] }), lint: [{ step: "fixup", source: "review", ended: true }], decision: answered("hold") }, expect: { actions: [] } },
   { name: "lint: revoked push approval drops the stored patch's push", facts: { ...TAKE_FIX, fixup: fixup({ recorded: ["linting"] }), lint: [{ step: "fixup", source: "review", ended: true }], repoFacts: { pushApproved: false } }, expect: { actions: [] } },
   { name: "lint: a stored CI fix patch whose task ended is collected", facts: { ...CI_FAIL, cifix: cifix({ states: ["linting"] }), lint: [{ step: "cifix", source: "review", ended: true }] }, expect: { actions: ["lint:cifix"] } },
   { name: "lint: a stored CI fix patch of our own breakage is collected at the pushed head", facts: { head: "pushed1", ci: "unknown", brokeByUs: true, cifix: cifix({ states: ["linting"] }), lint: [{ step: "cifix", source: "review", ended: true }] }, expect: { actions: ["lint:cifix", "review"] } },
   { name: "lint: a stored pre-merge patch is collected and the pre-merge fix-up waits", facts: { premerge: premerge({ defects: 1 }), lint: [{ step: "fixup", source: "premerge", ended: true }] }, expect: { state: "needs-fix-up", actions: ["lint:fixup"] } },
-  { name: "lint: a carry-over waits while its patch is linted", facts: { carry: [{ attempts: 0 }], lint: [{ step: "fixup", source: "carry", ended: false }] }, expect: { actions: ["merge"] } },
   { name: "pre-merge fix-up of a rule PR", facts: { premerge: premerge({ defects: 1 }) }, expect: { state: "needs-fix-up", actions: ["fixup:premerge"] } },
   { name: "pre-merge fix-up needs safe fix paths", facts: { premerge: premerge({ defects: 1, fixesSafe: false }) }, expect: { state: "needs-fix-up", actions: [] } },
   { name: "pre-merge fix-up not for a conflicting PR", facts: { premerge: premerge({ defects: 1 }), mergeable: "CONFLICTING" }, expect: { state: "conflict", actions: [] } },
   { name: "pre-merge fix-up not for a held merge", facts: { premerge: premerge({ defects: 1 }), mergeHeld: true }, expect: { state: "needs-fix-up", actions: [] } },
 
-  // ---- carry-over of closed duplicates
-  { name: "carry: push when allowed", facts: { carry: [{ attempts: 0 }] }, expect: { state: "ready", actions: ["merge", "fixup:carry-fix"] } },
-  { name: "carry: ask when the branch cannot be pushed", facts: { carry: [{ attempts: 0 }], pushable: false }, expect: { actions: ["merge", "fixup:carry-ask"] } },
-  { name: "carry: ask after two tries", facts: { carry: [{ attempts: 2 }] }, expect: { actions: ["merge", "fixup:carry-ask"] } },
-  { name: "carry: nothing without comment approval when it cannot push", facts: { carry: [{ attempts: 0 }], pushable: false, repoFacts: { commentApproved: false } }, expect: { actions: ["merge"] } },
-  { name: "carry: not for a conflicting PR", facts: { carry: [{ attempts: 0 }], mergeable: "CONFLICTING" }, expect: { state: "conflict", actions: [] } },
-  { name: "carry: also for a PR without a review", facts: { review: null, carry: [{ attempts: 0 }] }, expect: { state: "not-reviewed", actions: ["review", "fixup:carry-fix"] } },
-  { name: "carry: not under a Backlog hold", facts: { review: null, heldBacklog: true, carry: [{ attempts: 0 }] }, expect: { state: "backlog", actions: [] } },
 
   // ---- conflicts
   { name: "conflict: merge the base branch", facts: conflicting(), expect: { state: "conflict", actions: ["conflict:merge"] } },
@@ -275,14 +246,14 @@ const rows: Row[] = [
   { name: "postmerge: outside the queue", facts: { ghState: "CLOSED", review: null, postmerge: merged() }, expect: { state: "closed", actions: ["postmerge"] } },
   { name: "postmerge: nothing for a closed PR the pipeline did not merge", facts: { ghState: "CLOSED", review: null }, expect: { state: "closed", actions: [] } },
 
-  // ---- a repo on the maintainer workflow
-  { name: "workflow repo: an unstarted PR off the auto path plans no model work", facts: { ...NEW_REPO, review: null, label: "missing feature" }, expect: { state: "not-started", actions: [], wait: NOT_STARTED_WAIT } },
-  { name: "workflow repo: an unstarted reviewed PR off the auto path is neither merged nor asked about", facts: { ...NEW_REPO, ...SIZE_L }, expect: { state: "not-started", actions: [] } },
-  { name: "workflow repo: a stopped auto-eligible PR is left alone", facts: { ...NEW_REPO, endedWorkflow: "stopped" }, expect: { state: "not-started", actions: [] } },
-  { name: "workflow repo: an auto-eligible PR is reviewed", facts: { ...NEW_REPO, review: null }, expect: { state: "not-reviewed", actions: ["review"] } },
-  { name: "workflow repo: an auto-eligible PR merges by rule", facts: NEW_REPO, expect: { state: "ready", path: "rule", actions: ["merge"], eligible: true } },
-  { name: "workflow repo: merge entry is verified without a review", facts: { ...NEW_REPO, ...SIZE_L, workflow: MERGE_ENTRY, review: null, verification: null, premerge: null }, expect: { state: "waiting-verify", path: "maintainer", actions: ["verify:plan"] } },
-  { name: "workflow repo: merge entry gets its pre-merge review, not an Opus review", facts: { ...NEW_REPO, ...SIZE_L, workflow: MERGE_ENTRY, review: null, premerge: null }, expect: { state: "waiting-premerge", path: "maintainer", actions: ["premerge"], eligible: false } },
+  // ---- started, unstarted and merge-entry PRs
+  { name: "an unstarted PR off the auto path plans no model work", facts: { ...UNSTARTED, review: null, label: "missing feature" }, expect: { state: "not-started", actions: [], wait: NOT_STARTED_WAIT } },
+  { name: "an unstarted reviewed PR off the auto path is neither merged nor asked about", facts: { ...UNSTARTED, ...SIZE_L }, expect: { state: "not-started", actions: [] } },
+  { name: "a stopped auto-eligible PR is left alone", facts: { ...UNSTARTED, endedWorkflow: "stopped" }, expect: { state: "not-started", actions: [] } },
+  { name: "an auto-eligible PR is reviewed", facts: { ...UNSTARTED, review: null }, expect: { state: "not-reviewed", actions: ["review"] } },
+  { name: "an auto-eligible PR merges by rule", facts: UNSTARTED, expect: { state: "ready", path: "rule", actions: ["merge"], eligible: true } },
+  { name: "merge entry is verified without a review", facts: { ...SIZE_L, workflow: MERGE_ENTRY, review: null, verification: null, premerge: null }, expect: { state: "waiting-verify", path: "maintainer", actions: ["verify:plan"] } },
+  { name: "merge entry gets its pre-merge review, not an Opus review", facts: { ...SIZE_L, workflow: MERGE_ENTRY, review: null, premerge: null }, expect: { state: "waiting-premerge", path: "maintainer", actions: ["premerge"], eligible: false } },
 ];
 
 test("broke: the CI fix comes first among the PR's actions", () => {
@@ -315,32 +286,22 @@ test("a rule PR without a clean pre-merge review never gets merge", () => {
   assert.equal(merges(prFacts({ premerge: premerge({}) })), true);
 });
 
-test("an unsure head merges only on an operator Merge answer given after its latest review", () => {
-  for (const decision of [{}, answered("merge", false), answered("hold"), answered("close")]) {
-    assert.equal(merges(prFacts({ review: { unsure: true }, decision })), false, JSON.stringify(decision));
-  }
-  assert.equal(merges(prFacts({ review: { unsure: true }, decision: answered("merge", true) })), true);
+test("an unsure head merges only on a hand-over after its latest review", () => {
+  for (const over of [{}, { handOver: { afterReview: false } }]) assert.equal(merges(prFacts({ review: { unsure: true }, ...over })), false, JSON.stringify(over));
+  assert.equal(merges(prFacts({ review: { unsure: true }, ...HANDED })), true);
 });
 
 test("a held PR never merges, whatever its path", () => {
-  for (const over of [{}, { ...SIZE_L, decision: answered("merge") }, { review: { unsure: true }, decision: answered("merge") }]) {
+  for (const over of [{}, { ...SIZE_L, ...HANDED }, { review: { unsure: true }, ...HANDED }]) {
     assert.equal(merges(prFacts({ ...over, mergeHeld: true })), false);
   }
 });
 
-test("a Hold answer means no merge and no pre-merge fix-up", () => {
-  for (const over of [{ ...SIZE_L }, { review: { unsure: true } }, { premerge: premerge({ defects: 1 }) }]) {
-    const p = decidePr(prFacts({ ...over, decision: answered("hold") }));
-    assert.notEqual(p.state, "needs-fix-up");
-    assert.equal(p.actions.some((a) => a.kind === "merge"), false);
-  }
-});
-
 test("changes requested blocks every action that moves the PR toward a merge", () => {
-  for (const over of [{}, { ...SIZE_L, decision: answered("merge") }, { ...SIZE_L }, { premerge: null }, { verification: null }, { runs: runs() }]) {
+  for (const over of [{}, { ...SIZE_L, ...HANDED }, { ...SIZE_L }, { premerge: null }, { verification: null }, { runs: runs() }]) {
     const p = decidePr(prFacts({ ...over, changesRequested: { why: "w", live: false } }));
     assert.equal(p.state, "changes-requested");
-    assert.deepEqual(p.actions.filter((a) => ["merge", "ask-merge", "premerge"].includes(a.kind)), []);
+    assert.deepEqual(p.actions.filter((a) => ["merge", "premerge"].includes(a.kind)), []);
   }
 });
 
@@ -381,7 +342,7 @@ test("a PR our push moved off its mirrored head is left alone and stays assigned
 });
 
 test("every plan state is one of the declared states", () => {
-  const all = new Set<string>([...QUEUE_STATES, "out-of-scope", "integration", "pushed", "backlog", "duplicate", "draft", "opus-hold", "opus-close", "review-stale", "label-not-reviewed", "scope", "not-reviewed", "not-started", "closed"]);
+  const all = new Set<string>([...QUEUE_STATES, "out-of-scope", "integration", "pushed", "backlog", "draft", "opus-hold", "opus-close", "review-stale", "not-reviewed", "not-started", "closed"]);
   for (const row of rows) assert.ok(all.has(decidePr(prFacts(row.facts)).state), row.name);
   assert.equal(REVIEW_AT.length > 0, true);
 });

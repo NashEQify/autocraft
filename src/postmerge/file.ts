@@ -162,7 +162,7 @@ export async function fileFinding(db: Db, ref: string, index: number, log: (line
   if (f.severity !== "defect") throw new Error(`finding ${index} of ${ref} is minor; only defects are filed`);
   if (!await commentApprovalOf(db, repo)) throw new Error(`commenting in ${repo} is not approved`);
   if ((await loadQuiet(db, [`${repo}#${number}`])).size > 0) throw new Error(`${ref} is a quiet pull request: its fix is not public yet, so no issue is filed about it`);
-  if (!(await listItems(db, { repos: [repo], numbers: [number], inScope: true }, "ref")).length) throw new Error(`${ref} is outside the pipeline's scope (pipeline flag or pilot)`);
+  if (!(await listItems(db, { repos: [repo], numbers: [number], inScope: true }, "ref")).length) throw new Error(`${ref} is outside the pipeline's scope`);
   const have = (await followupsOf(db, repo, number)).find((x) => x.review_at === r.at && x.finding === index);
   if (have?.state === "filed" || have?.state === "filing") throw new Error(`finding ${index} of ${ref} is already ${have.state === "filed" ? `filed as issue ${have.issue_number}` : "being filed with an unknown outcome; check GitHub"}`);
   await audit(db, OPERATOR, "postmerge-file-one", ref, { finding: index });

@@ -30,8 +30,6 @@ export type DupesDeps = { index: VectorIndex; check: CheckDeps };
 export type DupesSummary = {
   scanned: number; pairsAdded: number; checked: number; jev: number; haiku: number; verdicts: Record<string, number>;
   unanswered: number; dryRun: boolean;
-  /** Duplicate decisions are gone: these stay empty until the job result drops them. */
-  asked: string[]; answersApplied: number;
 };
 
 export function defaultDeps(db: Db): DupesDeps {
@@ -57,7 +55,7 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const limit = params.limit ?? DEFAULT_LIMIT;
   const d = deps ?? defaultDeps(db);
-  const s: DupesSummary = { scanned: 0, pairsAdded: 0, checked: 0, jev: 0, haiku: 0, verdicts: {}, unanswered: 0, asked: [], answersApplied: 0, dryRun: !!params.dryRun };
+  const s: DupesSummary = { scanned: 0, pairsAdded: 0, checked: 0, jev: 0, haiku: 0, verdicts: {}, unanswered: 0, dryRun: !!params.dryRun };
   const at = () => d.check.now();
   const model = d.index.embedder.id;
   if (!params.dryRun) await fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
@@ -102,7 +100,7 @@ function parseArgs(args: string[]): DupesParams {
 
 export const commands = {
   dupes: {
-    summary: "dupes [--limit N] [--dry-run]: find duplicate issues and PRs (Jev, then Haiku); the dupe-compare step compares each group and asks its decision",
+    summary: "dupes [--limit N] [--dry-run]: find duplicate issues and PRs (Jev, then Haiku); the dupe-compare step compares each group",
     async run(args: string[]): Promise<void> {
       const db = await openDb();
       const r = await runDupes(db, parseArgs(args), (l) => console.error(l));

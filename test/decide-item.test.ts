@@ -2,10 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decideAll, decideItem } from "../src/core/decide-item.ts";
-import { TYPE_LABEL_NAMES, PLUGIN_LABEL } from "../src/core/item-rules.ts";
+import { TYPE_LABEL_NAMES } from "../src/core/item-rules.ts";
 import type { ItemPlan } from "../src/core/plan.ts";
 import { TYPE_LABELS } from "../src/labels/set.ts";
-import { PLUGIN_LABEL as OLD_PLUGIN } from "../src/labels/plan.ts";
 import { NOW, itemFacts, prFacts } from "./world.ts";
 
 type Over = Parameters<typeof itemFacts>[0];
@@ -15,12 +14,11 @@ const tokens = (p: ItemPlan): string[] => p.actions.map((a) => a.kind).sort();
 const T = "2026-11-04";
 const jev = (o: Partial<{ at: string; changed: boolean; unsure: boolean }> = {}) => ({ at: `${T}T08:00:00.000Z`, changed: false, unsure: false, ...o });
 const disagree = (o: Over = {}): Over => ({ classification: { status: "disagree", label: null, jevLabel: "bugfix", haikuLabel: "infra", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false }, ...(o?.classification ?? {}) } });
-const scopeDisagree: Over = { classification: { status: "disagree", label: null, jevLabel: "missing feature", haikuLabel: "small extra", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } } };
 const needsDecision: Over = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 type ImplementRow = NonNullable<ReturnType<typeof itemFacts>["implement"]["row"]>;
 const attempt = (state: string, o: Partial<ImplementRow> = {}): ImplementRow => ({ state, attempt: 1, textChanged: false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false, ...o });
 /** An issue queued by a settler, in a repo with Implement on. */
-const queued = (o: Over = {}): Over => ({ ...o, implement: { queuedBy: "maint", settles: true, featureOn: true, row: null, liveInRepo: 0, ...(o?.implement ?? {}) } });
+const queued = (o: Over = {}): Over => ({ ...o, implement: { queuedBy: "maint", standing: "yes", featureOn: true, row: null, liveInRepo: 0, ...(o?.implement ?? {}) } });
 const close = () => ({ id: 1, by: "mira", weight: 5, at: `${T}T08:00:00.000Z` });
 const hoursAgo = (h: number) => new Date(NOW - h * 3600_000).toISOString();
 
@@ -37,7 +35,7 @@ const rows: Row[] = [
   { name: "Haiku as new as Jev's verdict: not due", facts: { classification: { status: "settled", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } } }, expect: { state: "classified", actions: [] } },
   { name: "an item out of scope is not classified", facts: { inScope: false, classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "unclassified", wait: "not in scope" } },
   { name: "our own integration PR is not classified", facts: { kind: "pr", integration: true, classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "unclassified", actions: [] } },
-  { name: "a held item is still classified", facts: { held: "duplicate", classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "held-duplicate", actions: ["classify"], next: "Held" } },
+  { name: "a held item is still classified", facts: { held: "backlog", classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "held-backlog", actions: ["classify"], next: "Held" } },
 
   // ---- referee and disagreement
   { name: "labels disagree, Sonnet has not answered", facts: disagree(), expect: { state: "referee-due", actions: ["referee"], next: "Referee: waiting for Sonnet" } },
@@ -65,23 +63,18 @@ const rows: Row[] = [
   { name: "member of a set to compare", facts: { inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes-compare"] } },
   { name: "pair check and compare together", facts: { pairsToCheck: 1, inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes", "dupes-compare"] } },
 
-  // ---- scope decision
-  { name: "a scope decision was answered: covered", facts: { ...needsDecision, scope: { covered: true, answer: "take" } }, expect: { state: "classified", actions: [] } },
+  // ---- plugin candidates and failed referees
   { name: "a PR settled as plugin candidate stays open with its label", facts: { kind: "pr", classification: { label: "plugin candidate" }, labels: { existing: ["plugin candidate"] } }, expect: { state: "classified", actions: [], wait: "stays open as a plugin candidate", next: "Stays open as a plugin candidate" } },
   { name: "a failed Opus call is not repeated within the backoff", facts: disagree({ classification: { referee: { sure: false, final: false, failedAt: new Date(NOW - 60_000).toISOString() } } }), expect: { state: "referee-due", actions: [], wait: "the label referee" } },
-  { name: "a decision covers the item", facts: { ...needsDecision, scope: { covered: true } }, expect: { state: "classified", actions: [] } },
-  { name: "held items are not asked about", facts: { ...needsDecision, held: "duplicate" }, expect: { state: "held-duplicate", actions: [] } },
 
   // ---- labels
   { name: "a settled type label is missing on GitHub", facts: { labels: { existing: [] } }, expect: { state: "classified", actions: ["label"] } },
   { name: "flags are added next to the type", facts: { classification: { flags: ["security"] }, labels: { existing: ["bugfix"] } }, expect: { state: "classified", actions: ["label"] } },
   { name: "another type label is on the item: conflict, nothing added", facts: { labels: { existing: ["infra"] } }, expect: { state: "classified", actions: [] } },
   { name: "label match ignores case", facts: { labels: { existing: ["Bugfix"] } }, expect: { state: "classified", actions: [] } },
-  { name: "an operator's plugin answer decides the type", facts: { labels: { existing: [], pluginAnswer: true } }, expect: { state: "classified", actions: ["label"] } },
   { name: "the previous pass already added them", facts: { labels: { existing: [], labeledNote: "added: bugfix" } }, expect: { state: "classified", actions: [] } },
   { name: "labelling approval is a fact: gates() applies it, not decideItem", facts: { labels: { existing: [] }, repoFacts: { labelsApproved: false } }, expect: { state: "classified", actions: ["label"] } },
   { name: "a Backlog hold stops labelling", facts: { labels: { existing: [] }, held: "backlog" }, expect: { state: "held-backlog", actions: [] } },
-  { name: "a duplicate hold does not stop labelling", facts: { labels: { existing: [] }, held: "duplicate" }, expect: { state: "held-duplicate", actions: ["label"] } },
   { name: "an unsettled item is not labelled", facts: { classification: { status: "waiting", label: null, jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } }, labels: { existing: [] } }, expect: { state: "waiting-haiku", actions: [] } },
 
   // ---- act
@@ -89,20 +82,20 @@ const rows: Row[] = [
   { name: "a closed item gets nothing but its close: no classify, embed, prioritize or label", facts: { open: false, priorityHash: null, embeddedHash: null, classification: { status: "unclassified", label: null, jev: null }, close: close() }, expect: { state: "unclassified", actions: ["act"] } },
   { name: "a closed item without one has nothing due", facts: { open: false, embeddedHash: null }, expect: { state: "classified", actions: [] } },
   { name: "a Backlog hold stops the close", facts: { held: "backlog", close: close() }, expect: { state: "held-backlog", actions: [] } },
-  { name: "a close applies outside the scope, also to an item whose workflow it ended", facts: { inScope: false, repoFacts: { workflow: "new" }, endedWorkflow: "closed", close: close() }, expect: { state: "classified", actions: ["act"] } },
+  { name: "a close applies outside the scope, also to an item whose workflow it ended", facts: { inScope: false, endedWorkflow: "closed", close: close() }, expect: { state: "classified", actions: ["act"] } },
   { name: "comment approval is a fact: gates() applies it, not decideItem", facts: { repoFacts: { commentApproved: false }, close: close() }, expect: { state: "classified", actions: ["act"] } },
 
   // ---- implement
-  { name: "a settled bugfix issue nobody queued is left for a person", facts: { fix: { impact: "P2" } }, expect: { state: "classified", actions: [], wait: "an open request for a person to pick up", next: "Triage by a person" } },
+  { name: "a settled bugfix issue nobody queued is left for a person", facts: {}, expect: { state: "classified", actions: [], wait: "an open request for a person to pick up", next: "Triage by a person" } },
   { name: "a queued issue is planned", facts: queued(), expect: { state: "classified", actions: ["implement"], bucket: "plan", next: "Implement" } },
   { name: "approval is a fact: gates() applies it", facts: queued({ repoFacts: { fixIssueApproved: false } }), expect: { state: "classified", actions: ["implement"] } },
   { name: "Implement off for the repo: the queued issue waits on it", facts: queued({ implement: { featureOn: false } }), expect: { state: "classified", actions: [], wait: "Implement is off for app" } },
-  { name: "queued by someone who no longer settles", facts: queued({ implement: { settles: false } }), expect: { state: "classified", actions: [], wait: "an open request for a person to pick up" } },
+  { name: "queued by someone who no longer settles", facts: queued({ implement: { standing: "no" } }), expect: { state: "classified", actions: [], wait: "an open request for a person to pick up" } },
+  { name: "GitHub has not answered on who queued it: nothing runs, nobody is asked", facts: queued({ implement: { standing: "unknown", row: attempt("planned") } }), expect: { state: "classified", actions: [], wait: "GitHub's answer on maint's access to app" } },
   { name: "a queued PR is not implemented", facts: queued({ kind: "pr" }), expect: { state: "classified", actions: [] } },
   { name: "the repo's live implementations are full", facts: queued({ implement: { liveInRepo: 2 } }), expect: { state: "classified", actions: [], wait: "2 implementations already running in app" } },
-  { name: "an open PR closes the queued issue", facts: queued({ fix: { openPr: { number: 7, closes: true } } }), expect: { state: "classified", actions: [], wait: "open PR #7" } },
+  { name: "an open PR closes the queued issue", facts: queued({ openPr: { number: 7, closes: true } }), expect: { state: "classified", actions: [], wait: "open PR #7" } },
   { name: "a Backlog hold stops it", facts: queued({ held: "backlog" }), expect: { state: "held-backlog", actions: [] } },
-  { name: "a duplicate hold stops it", facts: queued({ held: "duplicate" }), expect: { state: "held-duplicate", actions: [] } },
   { name: "a stored plan is built", facts: queued({ implement: { row: attempt("planned") } }), expect: { state: "classified", actions: ["implement"], bucket: "build", next: "Implement: in progress" } },
   { name: "a session cut off by a restart is built again", facts: queued({ implement: { row: attempt("checking"), liveInRepo: 2 } }), expect: { state: "classified", actions: ["implement"], bucket: "build" } },
   { name: "an interrupted revision resumes", facts: queued({ implement: { row: attempt("revising") } }), expect: { state: "classified", actions: ["implement"], bucket: "revise" } },
@@ -110,21 +103,18 @@ const rows: Row[] = [
   { name: "a question waits for a maintainer", facts: queued({ implement: { row: attempt("asked", { asked: "maintainer" }) } }), expect: { state: "classified", actions: [], wait: "a maintainer's answer" } },
   { name: "a comment after the question plans again", facts: queued({ implement: { row: attempt("asked", { asked: "author", newCommentAfterQuestion: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
   { name: "an answered question plans again", facts: queued({ implement: { row: attempt("asked", { asked: "maintainer", decisionAnswered: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
-  { name: "a stuck implementation waits on its decision", facts: queued({ implement: { row: attempt("stuck") } }), expect: { state: "classified", actions: [], wait: "a decision on the stuck implementation", next: "Needs a person" } },
-  { name: "our open PR is the wait", facts: queued({ implement: { row: attempt("pr-opened", { prOpen: true }) }, fix: { openPr: { number: 9, closes: true } } }), expect: { state: "classified", actions: [], wait: "open PR #9", next: "Implement: pull request opened" } },
+  { name: "a stuck implementation waits on a maintainer", facts: queued({ implement: { row: attempt("stuck") } }), expect: { state: "classified", actions: [], wait: "a maintainer's answer on the stuck implementation", next: "Needs a person" } },
+  { name: "our open PR is the wait", facts: queued({ implement: { row: attempt("pr-opened", { prOpen: true }) }, openPr: { number: 9, closes: true } }), expect: { state: "classified", actions: [], wait: "open PR #9", next: "Implement: pull request opened" } },
   { name: "an ended attempt is not repeated on the same text", facts: queued({ implement: { row: attempt("failed") } }), expect: { state: "classified", actions: [], wait: "a person to queue the implementation again" } },
   { name: "an ended attempt starts again when the text changed", facts: queued({ implement: { row: attempt("failed", { textChanged: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
   { name: "an ended attempt starts again when the issue was queued again after it", facts: queued({ implement: { row: attempt("failed", { requeuedAfterEnd: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
-  { name: "an open PR of a retired fix attempt keeps our assignment", facts: { fix: { attempt: { state: "pr-opened", textChanged: false, headDone: true, baseDone: true }, openPr: { number: 9, closes: true } }, assignment: { login: "bot", assignees: ["bot"], ours: true } }, expect: { state: "classified", actions: [], wait: "open PR #9" } },
   { name: "a running implementation keeps our assignment", facts: queued({ implement: { row: attempt("planned") }, assignment: { login: "bot", assignees: ["bot"], ours: true } }), expect: { state: "classified", actions: ["implement"] } },
   { name: "a question releases our assignment", facts: queued({ implement: { row: attempt("asked", { asked: "author" }) }, assignment: { login: "bot", assignees: ["bot"], ours: true } }), expect: { state: "classified", actions: ["unassign"] } },
 
   // ---- next-step text of issues
   { name: "issue that is not a bugfix", facts: { classification: { label: "infra" }, labels: { existing: ["infra"] } }, expect: { state: "classified", next: "Triage by a person" } },
 
-  // ---- a repo on the maintainer workflow
-  { name: "workflow repo: a needs-decision item gets no scope question", facts: { ...needsDecision, repoFacts: { workflow: "new" } }, expect: { state: "classified", actions: [] } },
-  { name: "workflow repo: an open decision is not prepared", facts: { repoFacts: { workflow: "new" }, scope: { recommend: { failures: 0, failedAt: null } } }, expect: { state: "classified", actions: [] } },
+  { name: "a needs-decision item gets no question", facts: needsDecision, expect: { state: "classified", actions: [] } },
 ];
 
 for (const r of rows) {
@@ -153,7 +143,6 @@ test("a PR without a review is next to be reviewed; with a take-fix review, fix-
   assert.equal(decideAll(itemFacts({ kind: "pr" }), prFacts({ review: { stale: true } })).next, "Review");
 });
 
-test("the constants copied into core equal the old modules'", () => {
+test("the type labels are the ones the label step sets", () => {
   assert.deepEqual(TYPE_LABEL_NAMES, TYPE_LABELS.map((l) => l.name));
-  assert.equal(PLUGIN_LABEL, OLD_PLUGIN);
 });

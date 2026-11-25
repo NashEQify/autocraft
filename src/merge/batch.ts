@@ -170,7 +170,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const verdicts = members ? await mergeVerdicts(db, repo, members.map((m) => ({ number: m.number, head: m.head_oid }))) : null;
     const why = verdicts && firstRefusal(verdicts, repo);
     if (why) { log(`  ${why}`); return null; }
-    const g = await guardRepo(db, repo, members ? "merge" : null, by, undefined, undefined, { members: verdicts ? [...verdicts.values()] : [] });
+    const g = await guardRepo(db, repo, members ? "merge" : null, by, undefined, { members: verdicts ? [...verdicts.values()] : [] });
     if ("refused" in g) { log(`  ${g.refused}`); return null; }
     return g;
   };

@@ -26,7 +26,7 @@ type RefereeOpts = {
   perCall?: number;
   /** Pipeline results carry probs {"sure": bool}, which settled.ts reads; evaluation rows carry none and never settle an item. */
   pipeline: boolean;
-  /** The model asked, when not the prompt's own (Sonnet). An Opus answer is the last word: its row is marked final, so an unsure one still settles the label and flags a scope decision. */
+  /** The model asked, when not the prompt's own (Sonnet). An Opus answer is the last word: its row is marked final, so an unsure one still settles the label. */
   model?: string;
   /** Items sent to the model so far. */
   onSent?: (n: number) => void;

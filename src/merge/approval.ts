@@ -1,7 +1,7 @@
 // Merge approval. A repo's `merge` step approval lets the pipeline merge PRs nobody approved one by one (the automatic
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
 // approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
-import { loadOwnCommits, loadStepApprovals, loadTrackedRepos, repoStepApproval, SETTINGS, setStepApproval, setting } from "../data/control/index.ts";
+import { loadOwnCommits, loadStepApprovals, loadTrackedRepos, repoStepApproval, setStepApproval } from "../data/control/index.ts";
 import type { StepApproval } from "../data/control/types.ts";
 import { loadPushEdges } from "../data/changes/index.ts";
 import { loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
@@ -51,13 +51,11 @@ export const firstRefusal = (verdicts: Map<number, MayResult>, repo: string): st
 };
 
 /**
- * The repos the merge stages act in. `full`: the pipeline flag is on (and, with a pilot set, one of its items names the repo).
+ * The repos the merge stages act in. `full`: the pipeline flag is on.
  * `any`: those and the tracked repos with a live workflow, which take part for those items alone.
  */
 export async function mergeScope(db: Db): Promise<{ full: Set<string>; any: Set<string> }> {
-  const [tracked, live, pilot] = await db.together(() => Promise.all([loadTrackedRepos(db), loadLiveRepos(db), setting(db, "pilot_items")]));
-  const items = SETTINGS.pilotItems.read(pilot) as string[];
-  const named = new Set(items.map((i) => i.split("#")[0]!));
-  const full = new Set([...tracked.values()].filter((t) => t.pipeline && (!items.length || named.has(t.name))).map((t) => t.name));
+  const [tracked, live] = await db.together(() => Promise.all([loadTrackedRepos(db), loadLiveRepos(db)]));
+  const full = new Set([...tracked.values()].filter((t) => t.pipeline).map((t) => t.name));
   return { full, any: new Set([...full, ...[...live].filter((r) => tracked.has(r))]) };
 }

@@ -8,33 +8,33 @@ import { connectDb } from "../src/db/open.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 
-const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", settles: true, featureOn: true, liveInRepo: 0,
+const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", standing: "yes" as const, featureOn: true, liveInRepo: 0,
   row: { state, attempt: 1, textChanged: o.textChanged ?? false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false } });
 
 test("a stuck or ended implementation waits on a person", () => {
-  for (const [s, wait] of [["stuck", "a decision on the stuck implementation"], ["failed", "a person to queue the implementation again"]]) {
-    const p = decideItem(itemFacts({ fix: { impact: "P2" }, implement: queued(s!) }));
+  for (const [s, wait] of [["stuck", "a maintainer's answer on the stuck implementation"], ["failed", "a person to queue the implementation again"]]) {
+    const p = decideItem(itemFacts({ implement: queued(s!) }));
     assert.equal(p.wait, wait);
     assert.equal(p.waitKind, "person");
   }
 });
 
 test("an ended implementation whose issue text changed is started again, not waited on", () => {
-  const p = decideItem(itemFacts({ fix: { impact: "P2" }, implement: queued("failed", { textChanged: true }) }));
+  const p = decideItem(itemFacts({ implement: queued("failed", { textChanged: true }) }));
   assert.deepEqual(p.actions.map((a) => [a.kind, a.params?.bucket]), [["implement", "plan"]]);
   assert.equal(p.wait, null);
 });
 
 test("an issue whose fix PR is open waits on that PR (system)", () => {
-  const p = decideItem(itemFacts({ fix: { impact: "P2", openPr: { number: 84, closes: true } } }));
+  const p = decideItem(itemFacts({ openPr: { number: 84, closes: true } }));
   assert.equal(p.wait, "open PR #84");
   assert.equal(p.waitKind, "system");
 });
 
 test("an open PR waits the issue whatever its implementation state, and a mention says so", () => {
-  const stopped = decideItem(itemFacts({ fix: { impact: "P2", openPr: { number: 9, closes: true } }, implement: queued("failed") }));
+  const stopped = decideItem(itemFacts({ openPr: { number: 9, closes: true }, implement: queued("failed") }));
   assert.equal(stopped.wait, "open PR #9");
-  const mention = decideItem(itemFacts({ fix: { impact: "P2", openPr: { number: 9, closes: false } } }));
+  const mention = decideItem(itemFacts({ openPr: { number: 9, closes: false } }));
   assert.equal(mention.wait, "open PR #9 mentions it");
 });
 

@@ -273,7 +273,7 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
     if (jv === null && down) out.alone.add(tier.ref(x));
     ask.push(x);
   }
-  if (!ask.length) { await keepUnsure(db, tier, items, out, kept); return out; }
+  if (!ask.length) { await keepUnsure(db, tier, items, out, kept, down); return out; }
   if (await opts.cancelled?.()) return out;
   const per = opts.perCall ?? CLAUDE_PROMPTS[tier.haiku.id].limits.perCall;
   const batches = await repoBatches(db, ask, per, tier.repo, (x) => [tier.item(x)]);
@@ -285,11 +285,11 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
   }), poolRoom(db, (i) => [...new Set(batches[i]!.map(tier.repo))], (i) => batches[i]!.map(tier.item), { promptId: tier.haiku.id }), { first: opts.first, skipped: (i) => {
     for (const x of batches[i]!) { out.skipped.add(tier.ref(x)); out.alone.delete(tier.ref(x)); }
   } });
-  await keepUnsure(db, tier, items, out, kept);
+  await keepUnsure(db, tier, items, out, kept, down);
   return out;
 }
 
-type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV }>; hashOf: (x: It) => string };
+type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV | null }>; hashOf: (x: It) => string };
 
 /** The unsure Jev answers kept for `items` (jev_unsure), and the hash of each item's Jev request they are valid for. */
 async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], ctx: C): Promise<Kept<It, JV>> {
@@ -303,7 +303,7 @@ async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
     }
     return h;
   };
-  const rows = new Map<string, { hash: string; answer: JV }>();
+  const rows = new Map<string, { hash: string; answer: JV | null }>();
   if (!items.length) return { rows, hashOf };
   for (const [ref, r] of await loadUnsure(db, tier.jev.id, items.map(tier.ref))) {
     try { rows.set(ref, { hash: r.hash, answer: JSON.parse(r.answer) as JV }); } catch { /* asked again */ }
@@ -311,15 +311,20 @@ async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
   return { rows, hashOf };
 }
 
+/** Whether a kept Jev answer with `hash` is for the item's current request: its next call is then Haiku's, not Jev's. */
+export async function keptIsCurrent<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, item: It, hash: string, ctx: C): Promise<boolean> {
+  return (await keptUnsure(db, tier, [], ctx)).hashOf(item) === hash;
+}
+
 /**
- * Keeps the unsure Jev answer of each item whose Haiku batch no Task Runner could take, so the next pass asks only Haiku while
- * the Jev request is unchanged; drops the kept answers of the other items (settled, or sent to Haiku).
+ * Keeps the unsure Jev answer (or that Jev, while up, gave none) of each item whose Haiku batch no Task Runner could take, so the next pass
+ * asks only Haiku while the Jev request is unchanged; drops the kept answers of the other items (settled, or sent to Haiku).
  */
-async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], out: TieredResult<JV, HV>, kept: Kept<It, JV>): Promise<void> {
+async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], out: TieredResult<JV, HV>, kept: Kept<It, JV>, down: boolean): Promise<void> {
   const at = new Date().toISOString();
   const keep = items.flatMap((x) => {
     const ref = tier.ref(x), jv = out.jev.get(ref) ?? null;
-    if (!out.skipped.has(ref) || jv === null) return [];
+    if (!out.skipped.has(ref) || (jv === null && (down || !out.jev.has(ref)))) return [];
     const hash = kept.hashOf(x);
     return kept.rows.get(ref)?.hash === hash ? [] : [{ ref, hash, answer: JSON.stringify(jv), at }];
   });

@@ -58,7 +58,7 @@ both("savePermissions upserts in one batch and keeps the last of a repeated pair
   assert.equal(await access.endPermissions(db, ["ALICE"]), 1);
 });
 
-both("canActMany: an operator needs a write permission too, a maintainer's stale one is read again, a held one counts", async ({ db }) => {
+both("canActMany: an operator needs a write permission too, a maintainer's stale one is read again", async ({ db }) => {
   await seedAccess(db, ["Op"], "operator");
   await seedAccess(db, ["Mia"]);
   await seedAccess(db, ["Vic"], "viewer");
@@ -69,16 +69,32 @@ both("canActMany: an operator needs a write permission too, a maintainer's stale
     { login: "Op", repo: "ro", permission: "read", checkedAt: AT },
   ]);
   const pairs = [{ login: "op", repo: "app" }, { login: "mia", repo: "app" }, { login: "vic", repo: "app" }, { login: "op", repo: "ro" }, { login: null, repo: "app" }, { login: "ghost", repo: "app" }];
-  const run = (o: { maxAgeMs: number; held?: Set<string> }) => access.canActMany(db, pairs, { identity: "app", mode: "cached", now, ...o });
+  const run = (o: { maxAgeMs: number }) => access.canActMany(db, pairs, { identity: "app", mode: "cached", now, ...o });
   const v = await run({ maxAgeMs: 10 * 60_000 });
   const why = (login: string, repo: string) => { const x = v.get(access.permKey(login, repo))!; return x.ok ? "ok" : x.why; };
   assert.deepEqual([why("op", "app"), why("mia", "app"), why("vic", "app"), why("op", "ro"), why("", "app"), why("ghost", "app")], ["stale", "ok", "no-role", "no-write", "no-login", "no-login"]);
   const old = await run({ maxAgeMs: 60_000 });
   assert.equal(old.get(access.permKey("mia", "app")) && (old.get(access.permKey("mia", "app")) as { ok: boolean; why?: string }).why, "stale");
-  const held = await run({ maxAgeMs: 60_000, held: new Set([access.permKey("mia", "app")]) });
-  assert.deepEqual(held.get(access.permKey("mia", "app")), { ok: true, role: "maintainer", basis: "held" });
   const box = await access.canActMany(db, pairs, { identity: "box", mode: "cached", now, maxAgeMs: 10 * 60_000 });
   assert.deepEqual(box.get(access.permKey("mia", "app")), { ok: false, why: "box-identity" });
+});
+
+both("an earlier approval ends only on the role or GitHub's own answer; unread or stale access is unknown", async ({ db }) => {
+  await seedAccess(db, ["Op"], "operator");
+  await seedAccess(db, ["Mia"]);
+  await seedAccess(db, ["Vic"], "viewer");
+  const now = Date.parse(AT) + 30 * 60_000;
+  const at = (min: number) => new Date(now - min * 60_000).toISOString();
+  await access.savePermissions(db, [
+    { login: "Mia", repo: "app", permission: "write", checkedAt: at(50) }, { login: "Mia", repo: "old", permission: "write", checkedAt: at(70) },
+    { login: "Mia", repo: "no", permission: "read", checkedAt: at(5) }, { login: "Mia", repo: "was", permission: "read", checkedAt: at(15) },
+    { login: "Vic", repo: "app", permission: "admin", checkedAt: at(1) }, { login: "Op", repo: "no", permission: "none", checkedAt: at(1) },
+  ]);
+  const pairs = [["Mia", "app"], ["Mia", "old"], ["Mia", "no"], ["Mia", "was"], ["Mia", "unread"], ["Vic", "app"], ["Op", "no"], ["Op", "app"], ["ghost", "app"]].map(([login, repo]) => ({ login: login!, repo: repo! }));
+  const v = await access.standings(db, pairs, { identity: "app", now });
+  assert.deepEqual(pairs.map((p) => v.get(access.permKey(p.login, p.repo))), ["yes", "unknown", "no", "unknown", "unknown", "no", "no", "unknown", "no"]);
+  const box = await access.standings(db, pairs, { identity: "box", now });
+  assert.deepEqual([box.get(access.permKey("Mia", "app")), box.get(access.permKey("Vic", "app"))], ["unknown", "no"]);
 });
 
 both("canAct refuses in the order login, role, live write, identity", async ({ db }) => {

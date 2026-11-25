@@ -61,12 +61,11 @@ export type MainFixDeps = {
 
 export type FixRow = MainFixRow;
 
-/** `asked` is always 0: infrastructure failures open their issue without a question. */
-export type MainFixSummary = { repo: string; classified: number; reran: number; asked: number; needsFix: number; issues: number; prs: number; note: string | null };
+export type MainFixSummary = { repo: string; classified: number; reran: number; needsFix: number; issues: number; prs: number; note: string | null };
 
 const oneLine = (s: string, max = 200): string => s.replace(/\s+/g, " ").trim().slice(0, max);
 const words = (s: string): string => s.replace(/\s+/g, " ").trim().split(" ").slice(0, REASON_WORDS).join(" ");
-/** URLs and mentions out of text that goes into a public issue or a decision. */
+/** URLs and mentions out of text that goes into a public issue. */
 const plain = (s: string): string => scrub(s).replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>"')]*/gi, "<url>").replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9_])/g, "$1");
 
 export function defaultDeps(): MainFixDeps {
@@ -236,7 +235,7 @@ async function settleReruns(db: Db, repo: string, cur: Current, deps: MainFixDep
 /** One repo: nothing without the approval; then answers, rerun results and, for a red head with no rows, the reading and sorting. */
 export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n: number) => void; stopping?: () => Promise<boolean>; by?: By }, log: (line: string) => void = console.log, deps: MainFixDeps = defaultDeps()): Promise<MainFixSummary> {
   const { repo } = params;
-  const s: MainFixSummary = { repo, classified: 0, reran: 0, asked: 0, needsFix: 0, issues: 0, prs: 0, note: null };
+  const s: MainFixSummary = { repo, classified: 0, reran: 0, needsFix: 0, issues: 0, prs: 0, note: null };
   if (!await mainFixApprovalOf(db, repo)) {
     s.note = `fixing a red main in ${repo} is not approved`;
     log(`main-fix ${repo}: ${s.note}; nothing done`);

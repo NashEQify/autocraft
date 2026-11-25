@@ -38,7 +38,7 @@ export async function loadBlockerReads(db: Db, refs: Iterable<string>): Promise<
   const list = [...keys.values()];
   const [items, wf, latest] = await db.together(() => Promise.all([loadItems(db, list, "ref"), loadWorkflowFacts(db, list), loadLatestReviews(db, list)]));
   for (const [k, i] of items) out.item.set(k, i);
-  // What an unanswered decision meant: a person is asked about the item's workflow.
+  // A person is asked about the item's workflow.
   for (const [k, w] of wf.live) if (w.state === "recommending" || w.state === "blocked") out.pending.add(k);
   for (const [k, r] of latest) out.latest.set(k, { verdict: r.verdict, blocked_by: r.blocked_by });
   return out;
@@ -75,13 +75,3 @@ export function activeFrom(reads: BlockerReads, self: string, stored: readonly s
 
 /** Whether any of `refs` has a person asked about it: the wait is then on a person. */
 export const hasOpenQuestion = (reads: BlockerReads, refs: readonly string[]): boolean => refs.some((r) => { const k = keyOf(r); return k !== null && reads.pending.has(k); });
-
-/** Retired with the decisions: no decision names the PRs whose review it holds any more. */
-export async function blocksFacts(_db: Db, _repo: string | null, _number: number | null, _hidden: HiddenRepos): Promise<string[]> {
-  return [];
-}
-
-/** Retired with the decisions. */
-export async function blocksIndex(_db: Db, _hidden: HiddenRepos): Promise<Map<string, string[]>> {
-  return new Map();
-}

@@ -77,27 +77,24 @@ export async function loadRepoGuards(db: Db, repos: RepoKeys, need?: RepoNeed): 
 
 /**
  * Why Act cannot run for each repo, null when it can: the pipeline is off or draining, the repo is outside the pipeline's scope
- * (its flag is off or the pilot leaves it out, and it has no live workflow), or the Act limit is 0. `defaults` are the step
+ * (its flag is off, and it has no live workflow), or the Act limit is 0. `defaults` are the step
  * defaults of the daily limits, for an Act limit nobody set.
  */
 export async function loadActBlocked(db: Db, repos: RepoKeys, defaults?: Record<string, number | null>): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   if (isEmpty(repos)) return out;
   const q = queryDb(db);
-  const [rows, sw, pilot, act] = await db.together(() => Promise.all([
+  const [rows, sw, act] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom(repoSet(db, repos).as("rk")).leftJoin("main.tracked_repos as t", "t.name", "rk.repo")
       .select((eb) => ["rk.repo as repo", eb.fn.coalesce("t.pipeline", eb.lit(0)).as("on"), startedRepo(eb, "rk.repo").as("live")])),
     q.get(q.k.selectFrom("main.settings").select("value").where("key", "=", "pipeline_enabled")),
-    q.get(q.k.selectFrom("main.settings").select("value").where("key", "=", "pilot_items")),
     q.get(q.k.selectFrom("main.stage_limits").select(["per_day", "limit_set"]).where("step", "=", "act")),
   ]));
   const raw = sw?.value ?? undefined;
   const off = SETTINGS.pipelineEnabled.read(raw) ? null : SETTINGS.pipelineDraining.read(raw) ? "the pipeline is draining" : "the pipeline is off";
-  const items = SETTINGS.pilotItems.read(pilot?.value ?? undefined) as string[];
-  const pilotRepos = new Set(items.map((i) => i.split("#")[0]!));
   const perDay = act && act.limit_set === 1 ? act.per_day : defaults?.act ?? null;
   for (const r of rows) {
-    const inScope = (Number(r.on) === 1 && (!items.length || pilotRepos.has(r.repo))) || !!Number(r.live);
+    const inScope = Number(r.on) === 1 || !!Number(r.live);
     out.set(r.repo, off ?? (!inScope ? `the pipeline is off for ${r.repo}` : perDay === 0 ? "the daily limit of Act is 0" : null));
   }
   return out;

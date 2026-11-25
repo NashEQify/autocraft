@@ -52,12 +52,12 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const facts = await loadMaintainHome(db, { repos, hidden, staff, login: req.user.login }, {
     nowMs, withRunner: staff, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY },
   });
-  const live = new Set(facts.rows.map((w) => w.repo));
+  const live = new Set([...facts.rows, ...facts.attention.closesFailed].map((w) => w.repo));
   const may = req.user.role === "viewer" ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
   const acting = new Set([...live].filter((_, i) => may[i]));
   const stops = await stoppedRows(facts.attention.stops, hidden);
   const [attention, runner] = await Promise.all([
-    problems(db, { hidden, staff, nowMs, stops, facts: facts.attention }),
+    problems(db, { hidden, staff, nowMs, stops, facts: facts.attention, acting }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
   ]);
   const rows = rowsOf(facts.rows);

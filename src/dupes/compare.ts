@@ -57,8 +57,6 @@ export type CompareDeps = {
 export type CompareParams = { limit?: number; repo?: string; dryRun?: boolean; onHandled?: (n: number) => void };
 export type CompareSummary = {
   due: number; compared: number; byRule: number; closedWins: number; single: number; dropped: number; dryRun: boolean;
-  /** Duplicate decisions are gone: this stays empty until the job result drops it. */
-  asked: string[];
 };
 
 type ComparisonResult = { others: { number: number; duplicate?: boolean; better?: string[]; carry?: string[]; adds?: string[]; via?: number }[]; rounds: number };
@@ -253,7 +251,7 @@ async function compareSet(x: Ctx, s: KindSet): Promise<ComparisonPut> {
 export async function runDupeCompare(db: Db, params: CompareParams = {}, log: (line: string) => void = console.log, deps?: CompareDeps): Promise<CompareSummary> {
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const d = deps ?? defaultCompareDeps(db);
-  const s: CompareSummary = { due: 0, compared: 0, byRule: 0, closedWins: 0, single: 0, dropped: 0, asked: [], dryRun: !!params.dryRun };
+  const s: CompareSummary = { due: 0, compared: 0, byRule: 0, closedWins: 0, single: 0, dropped: 0, dryRun: !!params.dryRun };
   const state = await loadDupeState(db, { repo: params.repo });
   const sets = dueSets(state, d.now().getTime()).sets;
   s.due = sets.length;

@@ -9,7 +9,7 @@ import { guardItem } from "../core/guard.ts";
 import { byOfJob } from "../core/gates.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { textHash } from "../core/open-prs.ts";
-import { loadActFacts, permKey, stillCounts } from "../data/access/index.ts";
+import { permKey, standings } from "../data/access/index.ts";
 import { loadGuidanceTurns } from "../data/conversations/index.ts";
 import { startAttempts } from "../data/implement/index.ts";
 import { loadComments, loadItems } from "../data/mirror/index.ts";
@@ -182,11 +182,11 @@ export async function planInput(db: Db, o: { repo: string; number: number; sha: 
   const issue: PlanIssue = { number: o.number, title: it.title ?? "", body: cut(it.body, PLAN_BODY_CHARS), author: it.author, labels, comments };
   const said = turns.get(ref) ?? [];
   const maintainers = [...new Set(said.flatMap((t) => (t.kind === "maintainer" && t.login ? [t.login] : [])))];
-  const [act, identity] = maintainers.length ? await Promise.all([loadActFacts(db, maintainers.map((login) => ({ login, repo: o.repo }))), githubIdentity(db)]) : [null, "box" as const];
+  const stands = maintainers.length ? await standings(db, maintainers.map((login) => ({ login, repo: o.repo })), { identity: await githubIdentity(db) }) : new Map();
   const guidance: PlanGuidance[] = [];
   for (const t of said) {
-    // A maintainer's message counts while they act on the repo (write access where the app acts for them).
-    if (t.kind === "maintainer" && !stillCounts(act?.get(permKey(t.login, o.repo)), identity)) continue;
+    // A maintainer had write access when they wrote it; the message counts until GitHub answers that they have none, or their role ends.
+    if (t.kind === "maintainer" && stands.get(permKey(t.login, o.repo)) === "no") continue;
     guidance.push({ from: t.kind as PlanGuidance["from"], login: t.login, at: t.at, text: cut(t.body, PLAN_GUIDANCE_CHARS) });
   }
   if (o.rounds !== null) {

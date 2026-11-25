@@ -351,7 +351,7 @@ async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "fa
   const stranger = r.state === "ignored";
   const g = stranger
     ? await guardRepo(db, r.repo, "comment", { operator: AUDIT_LOGIN })
-    : await guardRepo(db, r.repo, r.allowed ? null : "comment", { operator: r.login }, undefined, r.login);
+    : await guardRepo(db, r.repo, r.allowed ? null : "comment", { operator: r.login }, r.login);
   let reply: "posted" | "failed";
   if ("refused" in g) {
     deps.log?.(`github command ${refOf(r)}: no answer: ${g.refused}`);

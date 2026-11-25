@@ -106,7 +106,7 @@ const WAIT = "Recommendation: wait for maintainer feedback.";
 export function recommendation(r: RecommendInput): string {
   switch (r.verdict) {
     case "take":
-      if (!r.queue || r.queue.state === "declined" || r.queue.state === "merged") return WAIT;
+      if (!r.queue || r.queue.state === "merged") return WAIT;
       return r.queue.path === "rule" && r.mergeApproved
         ? "Recommendation: merge after CI and checks pass."
         : "Recommendation: merge, after a maintainer's decision.";

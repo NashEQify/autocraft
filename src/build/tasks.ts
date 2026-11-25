@@ -6,11 +6,10 @@ import type { BuildSummary, BuildTask, BuildTaskDetail, Capabilities, Requires, 
 import {
   appendTaskLogs, cancelTasks, claimTasks, createTasks, failQueuedTasks, finishTask as saveFinish, loadCancelIds, loadClaimInputs, loadConfidentialReadyAt, loadEnvs, loadLogTails, loadMemorySummary, loadTaskDetail, loadTaskPage,
   loadTaskStates, loadTasks, loadWorkerTask, pruneTaskBatch, QueueFullError, reapStaleTasks, releaseClaims, startTasks, StatusError, TaskAccessError, touchTasks, loseTasks,
-  LOG_TAIL_BYTES, LOST_AFTER_MS, loadTaskSummary, MAX_CHUNK_BYTES,
+  LOG_TAIL_BYTES, LOST_AFTER_MS, loadTaskSummary, MAX_CHUNK_BYTES, warmKeyOfRepo,
 } from "../data/build/index.ts";
 import type { ClaimInputs, ClaimPick, NewTask, TaskRecord, TaskState, Warm } from "../data/build/index.ts";
 import type { Config } from "../data/control/index.ts";
-import { warmKeyOfRepo } from "../data/build/warm-key.ts";
 import { removeArtifactDirs } from "./artifacts.ts";
 import { BuildError, envSettings } from "./envs.ts";
 import { toolchainImage } from "./pods.ts";

@@ -31,10 +31,9 @@ export function satisfies(caps: Capabilities, req: Requires): boolean {
 
 const SWITCHED = [["pr-build", "pr-builds"], ["nightly", "nightly"], ["screenshot", "screenshots"]] as const;
 
-/** The settings a choice over `inputs` reads: the pilot list and the build switches of the candidates' repos. */
-export const claimConfigKeys = (inputs: Pick<ClaimInputs, "candidates">): string[] => [
-  "pilot_items", ...inputs.candidates.flatMap((t) => SWITCHED.filter(([step]) => step === t.step).map(([, feature]) => `build_feature:${feature}:${t.repo}`)),
-];
+/** The settings a choice over `inputs` reads: the build switches of the candidates' repos. */
+export const claimConfigKeys = (inputs: Pick<ClaimInputs, "candidates">): string[] =>
+  inputs.candidates.flatMap((t) => SWITCHED.filter(([step]) => step === t.step).map(([, feature]) => `build_feature:${feature}:${t.repo}`));
 
 /** The task builds code from a PR: its head, or an integration branch of PRs. */
 const runsPrCode = (t: Pick<TaskRecord, "step" | "number">): boolean => t.step === "pr-build" || t.step === "merge-batch" || t.number !== null;
@@ -60,7 +59,7 @@ export async function chooseTasks(inputs: ClaimInputs, o: ChooseOptions): Promis
   const kube = env.kind === "kubernetes" ? envSettings(env) : null;
   const room = Math.min(o.free, (o.fit ? env.operatorSlots : env.slots) - inputs.running);
   if (room <= 0) return out;
-  const scope = baseScope(inputs.tracked.values(), o.config.pilotItems);
+  const scope = baseScope(inputs.tracked.values());
   for (const t of inputs.candidates) {
     if (out.picks.length >= room) break;
     if (!satisfies(caps, t.requires)) continue;
