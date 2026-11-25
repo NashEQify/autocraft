@@ -66,22 +66,29 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   if (names.length) s = s.replace(mentionRe(names), "");
   // The list form: the command, a colon, then the items. A colon that starts `://` belongs to a URL.
   const list = /^([^:\n]+?):(?!\/\/)([\s\S]*)$/.exec(s);
-  const inline = pullItems(list ? list[1]! : s, opts.repo);
+  const head = list ? list[1]! : s;
+  const inline = pullItems(head, opts.repo);
+  const marked = pullItems(head, opts.repo, true);
   let items = inline.items;
   s = inline.text;
+  // The items an ambiguous reply may quote: not those that stood inside words it could not read.
+  const named = (r: Read, all: ItemRef[]): ItemRef[] => {
+    const lost = [...r.tainted].map((id) => marked.marks[id]!.ref);
+    return all.filter((i) => !lost.some((l) => l.repo === i.repo && l.number === i.number) || !inline.items.some((x) => x.repo === i.repo && x.number === i.number));
+  };
   if (list) {
     const read = readItems(list[2]!, inline.last ?? opts.repo);
     items = addItems(items, read.items);
     if (read.bad.length || !read.items.length) {
-      const head = readWords(s);
-      return { kind: "ambiguous", understood: describe(head.parts, items), rest: [...head.unknown, ...read.bad].join(" ") };
+      const r = readWords(marked.text, marked.marks);
+      return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: [...r.unknown, ...read.bad].join(" ") };
     }
   }
   const yes = readYes(s);
   if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
   if (saysHold(s)) return { kind: "commands", items, parts: [{ word: "hold" }] };
-  const r = readWords(s);
-  if (r.unknown.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, items), rest: r.unknown.join(", ") };
+  const r = readWords(marked.text, marked.marks);
+  if (r.unknown.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: r.unknown.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
 }
 
@@ -143,7 +150,7 @@ function conditionIn(after: readonly string[], mention: RegExp): string | null {
   return null;
 }
 
-type Read = { parts: CommandPart[]; unknown: string[]; conflict: boolean; /** A yes-word stood beside the commands ("yes, merge"). */ yes: boolean };
+type Read = { parts: CommandPart[]; unknown: string[]; conflict: boolean; /** A yes-word stood beside the commands ("yes, merge"). */ yes: boolean; /** Inline items that stood inside words that were not read. */ tainted: ReadonlySet<number> };
 
 /** A yes-word with nothing else but a weight and politeness: `yes`, `lgtm, thanks`, `go ahead, urgent`. */
 function readYes(s: string): { weight: number | null } | null {
@@ -195,7 +202,8 @@ function saysHold(s: string): boolean {
 }
 
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
-function readWords(src: string): Read {
+function readWords(src: string, marks: readonly { tok: string }[] = []): Read {
+  const tainted = new Set<number>();
   const parts: CommandPart[] = [];
   const unknown: string[] = [];
   const weights: { text: string; w: number }[] = [];
@@ -217,15 +225,24 @@ function readWords(src: string): Read {
     const key = JSON.stringify(p);
     if (!parts.some((q) => JSON.stringify(q) === key)) parts.push(p);
   };
-  for (const raw of s.split(/\s*[,;\n]\s*|\s+(?:and\s+then|then|and|&)\s+/i)) {
+  const readSeg = (text: string): void => {
+    const before = unknown.length;
+    const ids = [...text.matchAll(MARK_RE)].map((m) => Number(m[1]));
+    readOne(text.replace(MARK_RE, " "));
+    if (unknown.length === before || !ids.length) return;
+    // An item named inside words that were not read is part of those words, not a target.
+    for (const id of ids) tainted.add(id);
+    unknown[unknown.length - 1] = [unknown[unknown.length - 1], ...ids.map((id) => marks[id]?.tok)].filter(Boolean).join(" ");
+  };
+  const readOne = (raw: string): void => {
     let seg = raw.trim().replace(/\s+/g, " ").replace(/^(?:(?:and then|then|and|please) )+/i, "").replace(/(?: (?:and|&))+$/i, "").trim();
-    if (!seg) continue;
+    if (!seg) return;
     if (!/^auto[-\s]?repin(?:\s|$)/i.test(seg)) {
       const bare = stripFiller(seg);
       yes ||= saysYes(seg);
-      if (!bare) continue;
+      if (!bare) return;
       // "yes?" asks, so what is left of it says nothing: the words as written are what was not understood.
-      if (!/[\p{L}\p{N}]/u.test(bare)) { unknown.push(seg); continue; }
+      if (!/[\p{L}\p{N}]/u.test(bare)) { unknown.push(seg); return; }
       seg = bare;
     }
     const repin = /^auto[-\s]?repin(?:\s+(.+))?$/i.exec(seg);
@@ -233,10 +250,10 @@ function readWords(src: string): Read {
       const args = repin[1]?.trim().replace(/\s+/g, " ") ?? "";
       if (validRepin(args)) push({ word: "autorepin", args });
       else unknown.push(seg);
-      continue;
+      return;
     }
     const reason = readClose(seg);
-    if (reason) { push({ word: "close", reason }); continue; }
+    if (reason) { push({ word: "close", reason }); return; }
     const named = /^(drop|fix)\s+(.+)$/i.exec(seg);
     if (named && !/^fix\s+up(?:\s|$)/i.test(seg)) {
       const word = named[1]!.toLowerCase() as "drop" | "fix";
@@ -244,7 +261,7 @@ function readWords(src: string): Read {
       const rest = takeWeightsIfNumbers(tokens, weights);
       if (rest) for (const n of rest) push({ word, part: n });
       else push({ word, part: named[2]!.trim().replace(/\s+/g, " ") });
-      continue;
+      return;
     }
     if (/^#?\d+(?:\s+#?\d+)*$/.test(seg)) {
       // "fix 1 and 2": a bare number continues the fix or drop before it.
@@ -252,27 +269,28 @@ function readWords(src: string): Read {
       if (last && (last.word === "fix" || last.word === "drop") && typeof last.part === "number") {
         for (const n of seg.split(/\s+/)) push({ word: last.word, part: Number(n.replace("#", "")) });
       } else unknown.push(seg);
-      continue;
+      return;
     }
     const tokens = takeWeights(seg.split(/\s+/));
-    if (!tokens.length) continue;
+    if (!tokens.length) return;
     const text = norm(tokens.join(" "));
     const legacy = /^merge[- ]?queue (\d{1,2})$/.exec(text);
     if (legacy) {
       const w = Number(legacy[1]);
       if (w < WEIGHT_MIN || w > WEIGHT_MAX) unknown.push(seg);
       else { weights.push({ text: legacy[1]!, w }); push({ word: "merge" }); }
-      continue;
+      return;
     }
     const c = commandOf(text);
     if (c && c.word !== "drop" && c.word !== "fix" && c.word !== "autorepin") push({ word: c.word });
     else unknown.push(seg);
-  }
+  };
+  for (const raw of s.split(/\s*[,;\n]\s*|\s+(?:and\s+then|then|and|&)\s+/i)) readSeg(raw);
   const distinct = [...new Set(weights.map((w) => w.w))];
   const conflict = distinct.length > 1;
   if (conflict) unknown.push(...weights.map((w) => w.text));
   else if (distinct.length) push({ word: "weight", weight: distinct[0]! });
-  return { parts, unknown, conflict, yes };
+  return { parts, unknown, conflict, yes, tainted };
 }
 
 /** The part numbers when the tokens are numbers (with `part`, `finding` or `change` before them, and weight words), else null. */
@@ -314,13 +332,18 @@ const addItems = (into: ItemRef[], more: readonly ItemRef[]): ItemRef[] => {
   return into;
 };
 
+/** Wraps the index of an item taken out of the text, so the reader can tell which words an item stood in. */
+const MARK = "\u0001";
+const MARK_RE = /\u0001(\d+)\u0001/g;
+
 /**
  * Items written inline, taken out of the text: `[owner/]repo#n` and GitHub links anywhere, and `#n` when a repo is known (the last
  * one written before it, else `repo`). A `#n` after `drop` or `fix` stays a plan part, and the arguments of autorepin and of a close
- * as a duplicate stay their own.
+ * as a duplicate stay their own. With `mark`, each item leaves a marker in the text instead of nothing.
  */
-function pullItems(text: string, repo: string | undefined): { text: string; items: ItemRef[]; last: string | null } {
+function pullItems(text: string, repo: string | undefined, mark = false): { text: string; items: ItemRef[]; last: string | null; marks: { tok: string; ref: ItemRef }[] } {
   const items: ItemRef[] = [];
+  const marks: { tok: string; ref: ItemRef }[] = [];
   let last = repo ?? null;
   const out = text.replace(/(^|[\s,;(])(https?:\/\/[^\s,;]+|(?:[\w.-]+\/)?[\w.-]*#\d+)(?=$|[\s,;)!?]|\.(?:\s|$))/g, (m, pre: string, raw: string, at: number) => {
     const before = text.slice(0, at + pre.length);
@@ -335,9 +358,11 @@ function pullItems(text: string, repo: string | undefined): { text: string; item
     if (!ref) return m;
     last = ref.repo;
     addItems(items, [ref]);
-    return `${pre} `;
+    if (!mark) return `${pre} `;
+    marks.push({ tok, ref });
+    return `${pre} ${MARK}${marks.length - 1}${MARK} `;
   });
-  return { text: out, items, last };
+  return { text: out, items, last, marks };
 }
 
 /** Items in a list: `owner/name#12`, `name#12`, a GitHub URL, or a bare `#12`/`12` taking the repo before it. */
