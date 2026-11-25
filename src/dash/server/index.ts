@@ -661,9 +661,8 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       const url = new URL(req.url ?? "/", "http://dashboard.invalid");
       const cookies = parseCookies(req.headers.cookie);
-      if (SESSIONLESS.some((p) => url.pathname === p || (p.endsWith("/") && url.pathname.startsWith(p)))) void sweepRevoked().catch(() => {});
+      if (SESSIONLESS.some((p) => url.pathname === p || (p.endsWith("/") && url.pathname.startsWith(p)))) apart(() => void sessions.hasFreshRevocation(db).then(sweepFresh).catch(() => {}));
       if (url.pathname.startsWith("/auth/")) {
-        apart(() => void sessions.hasFreshRevocation(db).then(sweepFresh).catch(() => {}));
         const { r, cookies: set } = await auth(req, url, nonce, cookies);
         return send(res, nonce, r, set);
       }
