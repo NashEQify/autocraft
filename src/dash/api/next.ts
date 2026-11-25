@@ -1,6 +1,6 @@
 // The Next page: per pipeline step, the items its next job will take, in the autopilot's own order (laneItems, stored by each planner pass), whether the step can run now, and the items waiting on something outside.
 import type { NextItem, NextPage, NextStep, NextWaiting } from "../../../web/src/api/types.ts";
-import { LANES, laneGate, stageStatus, storedLaneItems } from "../../runner/autopilot.ts";
+import { LANES, laneGates, stageStatus, storedLaneItems } from "../../runner/autopilot.ts";
 import { lanesInOrder, STAGES } from "../../stages/registry.ts";
 import { loadSteps } from "../../runner/steps.ts";
 import * as control from "../../data/control/index.ts";
@@ -32,12 +32,13 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
   const why = async (repo: string, number: number, action: string): Promise<string> =>
     (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText(plans.get(`${repo}#${number}`)), hidden) || null) ?? action;
   const stageOf = new Map(lanesInOrder().map((l) => [l.name, STAGES.find((s) => s.id === l.stage)?.title ?? l.stage]));
+  const gates = await laneGates(db, LANES, stepDefs, ms);
   const steps: NextStep[] = [];
   for (const lane of LANES) {
     const kept = stored[lane.name]?.items ?? [];
     const items: NextItem[] = await mapSeq(kept.filter((i) => visible.has(i.repo)), async (i) => ({ ...i, ...await shown(i.repo, i.number), why: await why(i.repo, i.number, i.action) }));
     const total = (stored[lane.name]?.total ?? 0) - (kept.length - items.length);
-    const gate = await laneGate(db, lane, stepDefs, ms);
+    const gate = gates.get(lane.name)!;
     const open = items.filter((i) => !i.blocked);
     // Every item blocked by a repo approval: the step cannot do its work although it could start.
     const refused = !open.length && items.length ? items[0]!.blocked : null;

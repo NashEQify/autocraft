@@ -4,11 +4,11 @@
 // A step outside the planner's pass loads facts only for the items that can be due (planner.loadDueRefs) and decides them
 // again, so an item that is no longer due drops out.
 import type { Item } from "../classify/parse.ts";
-import { classifyRun } from "../data/triage/index.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { decideItem } from "./decide-item.ts";
 import { inFlightNow } from "./select.ts";
 import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
+import { loadPassBase, type PassBase } from "./pass-load.ts";
 import { loadDueRefs } from "../data/planner/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import type { ItemPlanned, PlanSet } from "./plan-set.ts";
@@ -80,21 +80,21 @@ async function planSortKeys(db: Db, plans: ItemPlans, items: { repo: string; num
 
 /**
  * The items that can be due for `kind` now (planner.loadDueRefs), or null when the stored Plans do not stand for the facts
- * asked: none is stored yet, or the caller asks for another decision time, run or embedding model.
+ * asked: none is stored yet, or the caller asks for another decision time, run or embedding model. `base`: what the facts read first.
  */
-async function candidateRefs(db: Db, kind: ActionKind, opts: ItemLoadOptions): Promise<string[] | null> {
-  if (opts.now !== undefined) return null;
+async function candidateRefs(db: Db, kind: ActionKind, opts: ItemLoadOptions): Promise<{ refs: string[] | null; base?: PassBase }> {
+  if (opts.now !== undefined) return { refs: null };
+  const [base, refs] = await db.together(() => Promise.all([loadPassBase(db), loadDueRefs(db, kind, "item", opts.repo)]));
   // A run of null reads no verdicts, which only takes actions away; another run's verdicts change what is due.
-  if (typeof opts.run === "string" && opts.run !== await classifyRun(db)) return null;
-  if (opts.model !== undefined && opts.model !== embedderId(modelName())) return null;
-  return await loadDueRefs(db, kind, "item", opts.repo);
+  const other = (typeof opts.run === "string" && opts.run !== base.run) || (opts.model !== undefined && opts.model !== embedderId(modelName()));
+  return { refs: other ? null : refs, base: opts.run !== undefined ? { ...base, run: opts.run } : base };
 }
 
 /** Facts and fresh Plans of the items that can be due for `kind` (all of `opts.refs` when given), to pass as `plans` to plannedItems. */
 export async function itemPlans(db: Db, kind: ActionKind, opts: ItemLoadOptions = {}): Promise<ItemPlans> {
-  const refs = opts.refs ? [...opts.refs] : await candidateRefs(db, kind, opts);
+  const { refs, base } = opts.refs ? { refs: [...opts.refs], base: undefined } : await candidateRefs(db, kind, opts);
   if (refs && !refs.length) return { items: [] };
-  return { items: (await loadItemFacts(db, refs ? { ...opts, refs } : opts)).map((facts): ItemPlanned => ({ facts, plan: decideItem(facts) })) };
+  return { items: (await loadItemFacts(db, { ...opts, ...(refs ? { refs } : {}), ...(base ? { base } : {}) })).map((facts): ItemPlanned => ({ facts, plan: decideItem(facts) })) };
 }
 
 /** Items the Plans say are due for `kind`, one entry per due action. */

@@ -16,6 +16,8 @@ import { connectDb } from "../src/db/open.ts";
 import { queryDb } from "../src/db/query-db.ts";
 import { COLUMNS } from "../src/db/types.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
+import { planned } from "../src/core/select.ts";
+import { plannedItems } from "../src/core/select-items.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { dropPlanState } from "../src/core/plan-engine.ts";
 import { enqueueCall } from "../src/remote/calls.ts";
@@ -151,6 +153,9 @@ try {
   await pass("incremental, 1 item");
   await touch(20);
   await pass("incremental, 20 items");
+  await unit("job start: PRs to review", () => planned(db, "review", { repo: "app" }));
+  await unit("job start: PRs to fix up", () => planned(db, "fixup", { repo: "app1" }));
+  await unit("job start: items to label", () => plannedItems(db, "label", { repo: "app1" }));
   await unit("due check, quiet", () => planDue(db));
   await unit("due check, quiet again", () => planDue(db));
   const found = await pass("incremental, before apply");

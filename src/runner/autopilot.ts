@@ -1469,19 +1469,28 @@ export async function actBlockedReason(db: Db, repo: string): Promise<string | n
 
 export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "account" | "backoff"; why: string | null };
 
-/** Whether a job of the lane can start now, from the same checks the planner's gate() makes. */
-export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<LaneGate> {
-  if (!await isEnabled(db)) return { canRun: false, kind: "off", why: await isDraining(db) ? "The pipeline is draining" : "The pipeline is off" };
-  const steps = lane.steps ?? [];
-  let blocked: LaneGate | null = null;
-  for (const s of steps) {
-    // Blocked only when no repo can start: the step already works its most repos.
-    const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true });
-    if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
-    const why = await pauseReason(db, s, ms);
-    if (!why) return { canRun: true, kind: "ok", why: null };
-    const kind = /^tripped/.test(why) ? "breaker" : /daily limit/.test(why) ? "limit" : /^failed/.test(why) ? "backoff" : "account";
-    blocked ??= { canRun: false, kind, why: plain(why) };
-  }
-  return blocked ?? { canRun: true, kind: "ok", why: null };
+/** Whether a job of each lane can start now, from the same checks the planner's gate() makes; one reading serves them all. */
+export async function laneGates(db: Db, lanes: readonly Pick<Lane, "name" | "steps">[], allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<Map<string, LaneGate>> {
+  const untaken = await untakenTest(db, allSteps, ms);
+  const [cfg, reads, cap, act] = await db.together(() => Promise.all([freshConfig(db, [KEY_ENABLED]), loadReads(db, ms), stepParallel(db), actUsedToday(db, ms), untaken.load?.()]));
+  const off: LaneGate | null = cfg.pipelineEnabled ? null : { canRun: false, kind: "off", why: cfg.pipelineDraining ? "The pipeline is draining" : "The pipeline is off" };
+  const active: Active[] = reads.inputs.live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
+  const gateOf = async (lane: Pick<Lane, "steps">): Promise<LaneGate> => {
+    let blocked: LaneGate | null = null;
+    for (const s of lane.steps ?? []) {
+      // Blocked only when no repo can start: the step already works its most repos.
+      const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true, untaken, active, cap });
+      if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
+      const why = await pauseReason(db, s, ms);
+      if (!why) return { canRun: true, kind: "ok", why: null };
+      const kind = /^tripped/.test(why) ? "breaker" : /daily limit/.test(why) ? "limit" : /^failed/.test(why) ? "backoff" : "account";
+      blocked ??= { canRun: false, kind, why: plain(why) };
+    }
+    return blocked ?? { canRun: true, kind: "ok", why: null };
+  };
+  return await withPassReads(db, { reads, act: new Map([[dayStart(ms), act]]) }, async () => {
+    const out = new Map<string, LaneGate>();
+    for (const l of lanes) out.set(l.name, off ?? await gateOf(l));
+    return out;
+  });
 }
