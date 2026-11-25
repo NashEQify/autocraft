@@ -76,7 +76,7 @@ describe("what counts as a command", () => {
   test("a line of its own addressed to the app, any case and spelling; `merge queue` reads as `merge`; a weight rides along", () => {
     assert.deepEqual(parsed(`@${SLUG} merge queue`), { kind: "commands", items: [], parts: [{ word: "merge" }] });
     assert.deepEqual(parsed(`Looks good.\n\n  @Autocraft-Bot Merge-Queue!  \nthanks`), { kind: "commands", items: [], parts: [{ word: "merge" }] });
-    assert.deepEqual(parsed(`@${SLUG}[bot]: review weight 3`)?.kind === "commands" && parsed(`@${SLUG}[bot]: review weight 3`)!.parts, [{ word: "review" }, { word: "weight", weight: 3 }]);
+    assert.deepEqual(parsed(`@${SLUG}[bot]: review weight 3`), { kind: "commands", items: [], parts: [{ word: "review" }, { word: "weight", weight: 3 }] });
     assert.equal(parsed(`@${SLUG} merge queue 42`)?.kind, "ambiguous", "text the parser cannot read runs nothing");
   });
 
