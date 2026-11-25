@@ -14,7 +14,8 @@ export const MAX_ITEM_REFS = 50;
 export const RUN_KEEP_MS = 3650 * 86_400_000;
 export const TEXT_KEEP_MS = RUN_KEEP_MS;
 export const RUN_SLOT_MS = 60 * 60_000;
-const TEXT_MAX = 1_000_000;
+export const TEXT_MAX = 1_000_000;
+export const ERROR_MAX = 400;
 
 /** A stored text: gzip, which SQLite keeps as a BLOB. */
 export const packText = (s: string): Uint8Array => gzipSync(s);
@@ -26,7 +27,7 @@ export const packPrompt = (prompt: string, scrub: (s: string) => string): Uint8A
 export type RunStart = {
   jobId: number | null; step: string; stage: number; promptId: string; promptVersion: string; provider: "claude" | "jev"; model: string;
   items: ItemRef[];
-  /** The prompt text, or the stored form `packPrompt` made of it. */
+  /** The prompt text (stored scrubbed: `openRun` then needs the caller's `scrub`), or the stored form `packPrompt` made of it. */
   prompt: string | Uint8Array;
   /** A call a Task Runner leased: its user, harness and the model the claim named. */
   remote?: { userLogin: string; harness: string; reportedModel: string };
@@ -34,14 +35,17 @@ export type RunStart = {
 export type RunEnd = {
   id: number; state: Exclude<AgentRunState, "running"> | "cancelled";
   tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  summary?: string | null; error?: string | null; output?: string | null; costUsd?: number | null;
+  summary?: string | null; error?: string | null; costUsd?: number | null;
+  /** The output text (stored scrubbed: `finishRuns` then needs the caller's `scrub`), or the stored form `packPrompt` made of it. */
+  output?: string | Uint8Array | null;
 };
 export type RunRow = {
   id: number; jobId: number | null; step: string; stage: number; promptId: string; promptVersion: string; provider: "claude" | "jev"; model: string;
   /** At most `MAX_ITEM_REFS`. */
   items: ItemRef[]; itemCount: number; firstRepo: string | null; firstNumber: number | null;
   state: AgentRunState; startedAt: string; endedAt: string | null;
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Null until the run ends. */
+  tokens: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null };
   costUsd: number | null; summary: string | null; error: string | null; progress: string | null;
   userLogin: string | null; harness: string | null; reportedModel: string | null;
 };
@@ -49,7 +53,8 @@ export type ItemRun = RunRow & { toolCount: number; repo: string; number: number
 export type ToolRow = { runId: number; seq: number; tool: string; args: string | null; resultBytes: number | null; isError: boolean; startedAt: string | null; endedAt: string | null; checkId: number | null };
 export type ToolView = Omit<ToolRow, "runId">;
 export type RunFilter = Omit<AgentRunFilter, "account">;
-export type RunDetail = { run: RunRow; prompt: Uint8Array | null; output: Uint8Array | null; tools: ToolView[] };
+/** Texts as stored (`unpackText` reads both forms); null when the viewer is not staff or the run has none. Tool arguments are null for a viewer who is not staff. */
+export type RunDetail = { run: RunRow; prompt: Uint8Array | string | null; output: Uint8Array | string | null; tools: ToolView[] };
 export type RunningCounts = { repoN: Map<string, number>; stepN: Map<string, number> };
 
 export type Usage = {
@@ -59,7 +64,8 @@ export type Usage = {
 };
 export type UsageRow = { runId: string; agent: string; stage: string; model: string; items: number; u: Usage; start: string; end: string };
 export type JobUsage = { calls: number; input: number; output: number; costUsd: number | null };
-export type UsageModelRow = { model: string; calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number | null; wallSeconds: number };
+/** `wallSeconds` runs from the model's first start to its last end; `busySeconds` sums its calls' own durations. */
+export type UsageModelRow = { model: string; calls: number; items: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number | null; wallSeconds: number; busySeconds: number; first: string | null; last: string | null };
 export type UsageReport = Omit<CostReport, "itemsClassified">;
 export type PromptSpend = { prompt: string; dayCalls: number; dayUsd: number; weekCalls: number; weekUsd: number };
 
