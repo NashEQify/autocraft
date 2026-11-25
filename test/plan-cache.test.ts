@@ -5,11 +5,10 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { prunePlanHistory, refreshPlanCache } from "../src/core/plan-cache.ts";
 import { loadPlanHistory } from "../src/data/planner/index.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { detectAutopilot, planDue, setEnabled } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
 import { sqliteOnly } from "./test-db.ts";
 

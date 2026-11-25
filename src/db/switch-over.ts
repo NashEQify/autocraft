@@ -28,8 +28,9 @@
 import type { ReviewWorkflow } from "../data/review/types.ts";
 import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
 import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
-import type { Db } from "./index.ts";
+import type { Db, Statement } from "./index.ts";
 import * as kx from "./kx.ts";
+import { queryDb } from "./query-db.ts";
 import { ACTIVE_LEG_STATES, backfills, boundsSql, settingsState, spans, STATE_COPY_DONE, type StateRows, type Task, type Value } from "./state-copy.ts";
 
 export const SWITCH_KEY = "workflow_switch";
@@ -121,10 +122,11 @@ export function reportLines(r: SwitchReport): string[] {
 
 type Row = Record<string, any>;
 /** Read at each use: the builder of the open transaction. */
-const q = (db: Db): any => db.k;
-const all = (db: Db, x: any): Promise<Row[]> => db.all(x) as Promise<Row[]>;
-const get = (db: Db, x: any): Promise<Row | undefined> => db.get(x) as Promise<Row | undefined>;
-const run = (db: Db, x: any): Promise<{ changes: number }> => db.run(x);
+const q = (db: Db): any => queryDb(db).k;
+const all = (db: Db, x: any): Promise<Row[]> => queryDb(db).all(x) as Promise<Row[]>;
+const get = (db: Db, x: any): Promise<Row | undefined> => queryDb(db).get(x) as Promise<Row | undefined>;
+const run = (db: Db, x: any): Promise<{ changes: number }> => queryDb(db).run(x);
+const prepare = (db: Db, text: string): Statement => queryDb(db).prepare(text);
 const key = (r: { repo: string; number: number | string }): string => `${r.repo}#${r.number}`;
 
 const setting = async (db: Db, name: string): Promise<string | null> =>
@@ -269,9 +271,9 @@ async function carryLimits(db: Db, resets: [string, string][], perDay: Record<st
 }
 
 async function carryJevFailed(db: Db, o: CarryOptions): Promise<number> {
-  const gone = await db.prepare(`DELETE FROM main.classify_state WHERE kind = 'jev_failed' AND (CAST(? AS TEXT) IS NULL OR at <= ?)
+  const gone = await prepare(db, `DELETE FROM main.classify_state WHERE kind = 'jev_failed' AND (CAST(? AS TEXT) IS NULL OR at <= ?)
     AND NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = classify_state.repo AND i.number = classify_state.number AND i.jev_failed_hash = classify_state.value)`).run(o.keepAfter, o.keepAfter);
-  const put = await db.prepare(`INSERT INTO main.classify_state (kind, repo, number, value, at)
+  const put = await prepare(db, `INSERT INTO main.classify_state (kind, repo, number, value, at)
     SELECT 'jev_failed', repo, number, jev_failed_hash, CAST(? AS TEXT) FROM main.items WHERE jev_failed_hash IS NOT NULL
     ON CONFLICT (kind, repo, number) DO UPDATE SET value = excluded.value, at = excluded.at WHERE classify_state.value <> excluded.value`).run(o.now);
   return Number(gone.changes) + Number(put.changes);
@@ -286,20 +288,20 @@ async function carryColumns(db: Db, r: SwitchReport, since: string): Promise<voi
   await backfill(db, t.agentRuns, (await get(db, q(db).selectFrom("main.agent_runs").select((eb: any) => [eb.fn.min("id").as("lo"), eb.fn.max("id").as("hi")]).where("started_at", ">=", from))));
   for (const task of [t.callItems, t.batchPrs, t.batchForks, t.alerts, t.groups, t.groupItems]) await backfill(db, task);
   const idle = (col: string): string => `(SELECT t.${col} FROM main.mcp_tokens t WHERE t.id = remote_helpers.token_id)`;
-  r.carried.remote_helpers = await db.write(async () => Number((await db.prepare(`UPDATE main.remote_helpers
+  r.carried.remote_helpers = await db.write(async () => Number((await prepare(db, `UPDATE main.remote_helpers
       SET idle_claim_at = ${idle("idle_claim_at")}, idle_tiers = ${idle("idle_tiers")}, idle_repos = ${idle("idle_repos")}
       WHERE ${idle("idle_claim_at")} > COALESCE(idle_claim_at, 0)`).run()).changes)
-    + Number((await db.prepare(`UPDATE main.remote_helpers SET machine = ${idle("machine")} WHERE machine IS NULL AND ${idle("machine")} IS NOT NULL`).run()).changes));
+    + Number((await prepare(db, `UPDATE main.remote_helpers SET machine = ${idle("machine")} WHERE machine IS NULL AND ${idle("machine")} IS NOT NULL`).run()).changes));
 }
 
 /** Runs a backfill of the state copy again, one write transaction per unit. */
 async function backfill(db: Db, t: Task, bounds?: Row): Promise<void> {
-  const b = t.range ? bounds ?? await db.prepare(boundsSql(t, "main.")).get() : undefined;
+  const b = t.range ? bounds ?? await prepare(db, boundsSql(t, "main.")).get() : undefined;
   for (const [lo, hi] of spans(t, b)) {
     await db.write(async () => {
       const read = t.read?.(lo, hi);
-      const rows = read ? await db.prepare(read.sql).all(...read.params as Value[]) : [];
-      for (const w of t.writes(rows, lo, hi)) await db.prepare(w.sql).run(...w.params as Value[]);
+      const rows = read ? await prepare(db, read.sql).all(...read.params as Value[]) : [];
+      for (const w of t.writes(rows, lo, hi)) await prepare(db, w.sql).run(...w.params as Value[]);
     });
   }
 }

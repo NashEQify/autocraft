@@ -12,7 +12,7 @@ import { mergeDecisionId } from "../src/merge/queue.ts";
 import { parseSafeMergeArgs, safeMerge } from "../src/merge/safe-merge.ts";
 import { world } from "./world-db.ts";
 import { prFacts } from "./world.ts";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 
 const ref = { repo: "app", number: 1 };
 const open: LiveRead = { state: "OPEN", head: "sha1", draft: false, mergeable: "MERGEABLE" };

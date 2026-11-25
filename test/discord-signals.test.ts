@@ -9,7 +9,7 @@ import { SIGNAL_CAP_KEY, Signals, signalCountOf, signalLinks, type Judge } from 
 import { handleDispatch } from "../src/discord/store.ts";
 import type { Req } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

@@ -24,9 +24,8 @@ import { embedderId, modelName } from "../embed/model.ts";
 import { jevUsable } from "../agents/jev.ts";
 import { PACE_MAX_WAIT_MS, pipelineWriteWait } from "../github/write.ts";
 import { embedDue } from "../embed/store.ts";
-import { commentApprovalOf } from "../act/approval.ts";
 import { selectFixups } from "../fixup/select.ts";
-import { needsWork } from "../merge/ci-approval.ts";
+import { ciApproveRepos } from "../merge/ci-approval.ts";
 import { batchesDue } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
 import { inFlightNow, planned, type Planned } from "../core/select.ts";
@@ -41,9 +40,8 @@ import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
 import { premergeCandidates } from "../premerge/review.ts";
-import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
-import { mainFixDue } from "../mainfix/index.ts";
-import { statusApprovalOf } from "../prstatus/approval.ts";
+import { pendingDefects, postmergeRepos } from "../postmerge/select.ts";
+import { mainFixDueRepos } from "../mainfix/index.ts";
 import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
 import { waitsForHaiku } from "../priority/index.ts";
 import { classifyRun } from "../data/triage/index.ts";
@@ -54,7 +52,7 @@ import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } fr
 import { loadSteps, type Params, type StepDef } from "./steps.ts";
 import { scopeRepos } from "./scope.ts";
 import { refreshOutsideHolds } from "../outside.ts";
-import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadTrips, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withConfig, limitsSignature } from "../data/control/index.ts";
+import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withConfig, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
 import { loadDeadlineStops, loadLaneInputs, loadLaneState, loadPipelineEndedSince, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
@@ -538,16 +536,17 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
       const first = { weight: Infinity, at: "" };
+      const approved = await loadStepApprovals(db, ctx.tracked, ["comment"]);
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
       const head = await queueHead(db);
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-      else if (head && ctx.tracked.includes(head.repo) && await commentApprovalOf(db, head.repo)) best.set(head.repo, first);
+      else if (head && approved.has(head.repo)) best.set(head.repo, first);
       // Follow-up issues held until a PR merged: filed by the job of the PR's repo once it merged, dropped once it closed or its merge path ended.
       // A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
       ctx.wake?.push(...await filingWakes(db));
       for (const [repo, fits] of (await heldDue(db)).repos) {
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-        else if (ctx.tracked.includes(repo) && await commentApprovalOf(db, repo)) best.set(repo, first);
+        else if (approved.has(repo)) best.set(repo, first);
       }
       const served = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
       const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
@@ -671,7 +670,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Runs GitHub holds for approval on reviewed outside PRs; the checks job records them, the step approves.
     name: "ci-approve",
     perRepo: true,
-    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => repoAllows(await plansOf(db, ctx), repo, { kind: "approve-ci" }) && (await needsWork(db, repo, ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "ci-approve", params: { repo } })),
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx), due = await ciApproveRepos(db, plans, ctx.run);
+      return ctx.tracked.filter((repo) => due.has(repo) && repoAllows(plans, repo, { kind: "approve-ci" })).sort().map((repo) => ({ step: "ci-approve", params: { repo } }));
+    },
   },
   {
     // Failing gate checks of wanted PRs: the log is read, a formatter run is queued or collected, or a patch is written and pushed.
@@ -704,8 +706,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      return (await filterSeq(await trackedNames(db), async (repo) => {
-        if (!await statusApprovalOf(db, repo)) return false;
+      const tracked = await trackedNames(db);
+      const approved = await loadStepApprovals(db, tracked, ["prstatus"]);
+      return (await filterSeq(tracked.filter((repo) => approved.has(repo)), async (repo) => {
         const retry = await statusRetryAt(db, repo, now);
         if (retry !== null) ctx.wake?.push(retry);
         if (!(await statusDue(db, repo, now)).length) return false;
@@ -737,7 +740,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Opus reviews what each pipeline merge landed; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
-    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => (await selectPostmerge(db, repo, Date.now(), ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "postmerge", params: { repo } })),
+    detect: async (db, ctx) => {
+      const due = new Set(await postmergeRepos(db, await plansOf(db, ctx), Date.now(), ctx.run));
+      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
+    },
   },
   {
     // The defects of those reviews become issues in repos approved for comments.
@@ -745,7 +751,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, { tracked }) => {
       const pending = new Set((await pendingDefects(db)).map((d) => d.repo));
-      return (await filterSeq(tracked, async (repo) => await commentApprovalOf(db, repo) && pending.has(repo))).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
+      const approved = await loadStepApprovals(db, tracked, ["comment"]);
+      return tracked.filter((repo) => approved.has(repo) && pending.has(repo)).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
     },
   },
   {
@@ -757,7 +764,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const n = await countMainFixes(db, { state: "rerun-requested" });
       return n ? `${n}:${Math.floor(Date.now() / 300_000)}` : "";
     },
-    detect: async (db, { tracked }) => (await filterSeq(tracked, async (repo) => await mainFixDue(db, repo))).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
+    detect: async (db, { tracked }) => (await mainFixDueRepos(db, tracked)).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
   },
   {
     // The nightly checks of repos with the build feature on: queued once a day per repo (in data, from the last run's time), collected when their tasks end.
@@ -1064,7 +1071,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   const live = (await readsOf(db, ms)).inputs.live;
   const active: Active[] = live.map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
   ctx.marks = (await readsOf(db, ms)).inputs.marks;
-  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(await stepParallel(db), 16));
+  const cap = await stepParallel(db);
+  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(cap, 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();
   const limitLeft = new Map<string, { limit?: number } | null>();
@@ -1089,7 +1097,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (!step) return null;
     const pending: Active[] = proposals.filter((p) => p.step === stepName).map((p) => ({ id: 0, step: p.step, state: "proposed", repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }));
     const repo0 = typeof params.repo === "string" ? params.repo : null;
-    if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
+    if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active, cap })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
     // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row (pausedWhy covers a trip on every repo).

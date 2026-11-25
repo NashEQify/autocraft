@@ -13,10 +13,9 @@ import { putConfig, type ScreenshotConfigBody } from "../src/verify/screenshot-c
 import { runVerify, type VerifyDeps } from "../src/verify/index.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { cols, excluded, like } from "../src/db/kx.ts";
 import { insertWorkflow } from "../src/workflow/store.ts";
-import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "shots-collect-"));

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { decideItem } from "../src/core/decide-item.ts";
 import { issuesWithOpenPr, textRefs } from "../src/core/open-prs.ts";
 import { itemFacts } from "./world.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 

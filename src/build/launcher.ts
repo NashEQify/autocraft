@@ -39,6 +39,7 @@ import { appendLog, finishTask, loseTask, pickTasks, satisfies, type ClaimFit, M
 import { appendTaskLogs, claimRun, failQueuedTasks, loadClaimInputs, loadEnvPass, loadEnvTasks, loadTasks, reportKubeEnv, releaseClaims, removePodRuns, savePodRuns, touchTasks } from "../data/build/index.ts";
 import type { ClaimInputs, EnvRecord, PodRun, PodRunPatch } from "../data/build/index.ts";
 import type { Db } from "../db/index.ts";
+import { effect } from "../db/effects.ts";
 
 export const PASS_MS = 5000;
 /** Beyond a deadline Kubernetes should have enforced, the runner gives up on the pod itself. */
@@ -505,6 +506,7 @@ async function createPod(c: EnvCtx, run: Run, stage: number, spec: (ctx: PodCtx)
   const at = new Date(now).toISOString();
   await patchRun(c.d.db, run.task_id, { stage, pod: name, pod_created_at: at });
   Object.assign(run, { stage, pod: name, pod_created_at: at });
+  effect("build-launch");
   await c.api!.createPod(c.s.namespace, spec(ctx));
 }
 

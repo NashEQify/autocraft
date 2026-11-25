@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createEnv } from "../src/build/envs.ts";
 import { parseSettings } from "../src/build/pods.ts";
 import { changeWarmRepos, warmPass, warmRepos } from "../src/build/warm-queue.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 test("warmPass queues only repos that are in scope and in the allowlist", async () => {
   const d = await connectDb(":memory:");

@@ -8,6 +8,7 @@
 // caller that writes them to the secrets file.
 import { createSign } from "node:crypto";
 import type { AppOwner, AppSecrets } from "../dash/server/config.ts";
+import { effect } from "../db/effects.ts";
 
 export const GITHUB_API = "https://api.github.com";
 export const REPO_URL = "https://github.com/storytold/autocraft";
@@ -74,6 +75,7 @@ export function appJwt(app: Pick<AppSecrets, "clientId" | "privateKey">, nowMs =
 }
 
 export async function call(base: string, path: string, token: string | null, method = "GET", body?: unknown): Promise<unknown> {
+  effect("http");
   const r = await fetch(`${base}${path}`, {
     method,
     headers: {

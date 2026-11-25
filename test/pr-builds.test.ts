@@ -6,8 +6,7 @@ import { setFeature } from "../src/build/features.ts";
 import { collectPrBuilds, prBuildDue, runPrBuilds } from "../src/prbuild/index.ts";
 import { selectPrBuilds, setPerDay, setScope } from "../src/prbuild/select.ts";
 import { prBuildView } from "../src/prbuild/view.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { cols } from "../src/db/kx.ts";
 
 const sha = (c: string) => c.repeat(40);

@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "n
 import { join } from "node:path";
 import { test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { compileTimeChanges, DIFF_FLAGS, MAX_IMPLEMENTATION_FILES, MAX_IMPLEMENTATION_LINES, validateImplementation } from "../src/implement/diff.ts";
 import { implBranch, implPrBody, implTitle } from "../src/implement/template.ts";
 import { openImplementationPr } from "../src/implement/pr.ts";

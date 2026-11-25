@@ -16,7 +16,6 @@ export const PERMANENT: readonly string[] = [
   "src/db/",
   "src/db.ts",
   "src/data/views/snapshot.ts",
-  "src/itemtools/index.ts",
   "src/itemtools/server/tools.ts",
   "src/data/external/",
 ];

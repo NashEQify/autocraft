@@ -18,7 +18,7 @@ import { linkRepeatedFindings, runScan, type Ask, type ScanDeps } from "../src/s
 import { securityRepo } from "../src/security/rules.ts";
 import { autoFixConfirmed } from "../src/security/actions.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

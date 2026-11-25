@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { scanChunk } from "../src/dupes/scan.ts";
 import type { VectorIndex } from "../src/embed/vectors.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";

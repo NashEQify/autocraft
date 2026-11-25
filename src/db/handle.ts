@@ -3,6 +3,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Compilable, CompiledQuery, DatabaseConnection, Kysely, OperationNode, OperationNodeSource, SelectQueryNode, TransactionBuilder } from "kysely";
 import type { DatabaseSync } from "node:sqlite";
+import { bytesRead } from "./bytes-read.ts";
 import type { DB, DbEvent, DbStats, Dialect, NamedParams, Param, QueryOpts, Row, RunResult, Statement, Subscription, WriteOptions } from "./index.ts";
 import type { QueryDb } from "./query-db.ts";
 
@@ -123,8 +124,29 @@ export function withoutInsertId(changes: number): RunResult {
   }) as RunResult;
 }
 
-/** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
-const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
+/** Whether this process runs under the test runner, where a misuse throws; in production it is logged instead. */
+export const testing = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
+
+/** The handles with a meter, a transaction or a `together` scope open, with how many: the ones an effect may concern. */
+const busy = new Map<Handle, number>();
+
+async function whileBusy<T>(h: Handle, fn: () => Promise<T>): Promise<T> {
+  busy.set(h, (busy.get(h) ?? 0) + 1);
+  try {
+    return await fn();
+  } finally {
+    const n = busy.get(h)! - 1;
+    if (n) busy.set(h, n);
+    else busy.delete(h);
+  }
+}
+
+/** The transaction or `together` wave open in this async context, on any handle, as text; `count` counts an effect in its meters. */
+export function busyScopes(count: boolean): string | undefined {
+  let scope: string | undefined;
+  for (const h of busy.keys()) scope = h.effectScope(count) ?? scope;
+  return scope;
+}
 
 /** The most statements one shareReads scope keeps. */
 const SHARED_READS_MAX = 2000;
@@ -232,7 +254,7 @@ export class Handle implements QueryDb {
     const tx = this.#als.getStore();
     if (!tx || tx.state !== "closed") return tx?.state === "open" ? tx : undefined;
     const msg = "database call after its transaction ended: a promise started inside db.write/db.read was left running";
-    if (strayThrows()) throw new Error(msg);
+    if (testing()) throw new Error(msg);
     const site = callSite(siteError());
     if (!this.#warned.has(site)) {
       this.#warned.add(site);
@@ -305,6 +327,10 @@ export class Handle implements QueryDb {
     }
     // A locking read (FOR UPDATE) or an EXPLAIN cannot be a subquery.
     const alone = !!o?.alone || !!node.endModifiers?.length || !!node.explain;
+    if (!alone && (this.#engine.fuse || testing())) {
+      const bytes = bytesRead(node, c.sql);
+      if (bytes) throw new Error(`${o?.label ? `${o.label}: ` : ""}a read of bytes (${bytes}) inside db.together must be marked \`alone\`: a fused wave would return them as hex text`);
+    }
     const site = this.#observers.size ? (o?.label ?? callSite(siteError())) : undefined;
     const members = wave.members;
     return new Promise((resolve, reject) => members.push({ node, c, alone, label: o?.label, site, resolve, reject }));
@@ -474,7 +500,7 @@ export class Handle implements QueryDb {
     if (this.#together.getStore()?.open) return await fn();
     const store: Together = { open: true, waves: new Map() };
     try {
-      return await this.#together.run(store, fn);
+      return await whileBusy(this, () => this.#together.run(store, fn));
     } finally {
       store.open = false;
     }
@@ -484,7 +510,7 @@ export class Handle implements QueryDb {
     const parent = this.#meters.getStore();
     const stats: DbStats = { statements: 0, roundTrips: 0, rows: 0, ms: 0, effects: 0 };
     try {
-      const value = await this.#meters.run(stats, fn);
+      const value = await whileBusy(this, () => this.#meters.run(stats, fn));
       return { value, stats: { ...stats } };
     } finally {
       if (parent) {
@@ -503,10 +529,12 @@ export class Handle implements QueryDb {
     else void runAfterCommit(fn);
   }
 
-  /** Counts an external effect in the current meter: `effect()` in src/db/effects.ts. */
-  noteEffect(): void {
+  /** For `effect()` (src/db/effects.ts): the transaction or wave open in this async context; `count` counts an effect in its meter. */
+  effectScope(count: boolean): string | undefined {
     const m = this.#meters.getStore();
-    if (m) m.effects++;
+    if (m && count) m.effects++;
+    if (this.#als.getStore()?.state === "open") return "a database transaction";
+    return this.#together.getStore()?.open ? "a db.together wave" : undefined;
   }
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
@@ -598,7 +626,7 @@ export class Handle implements QueryDb {
     let lockedAt: number | undefined;
     let value: T;
     try {
-      value = await this.#als.run(tx, () =>
+      value = await whileBusy(this, () => this.#als.run(tx, () =>
         this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
           tx.trx = trx as unknown as Kysely<DB>;
           tx.state = "open";
@@ -609,7 +637,7 @@ export class Handle implements QueryDb {
             tx.state = "closed";
           }
         }),
-      );
+      ));
     } finally {
       tx.state = "closed";
       if (settingsWriteHook && this.#settingsTx.has(tx)) settingsWriteHook(this);

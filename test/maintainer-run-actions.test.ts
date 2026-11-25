@@ -1,7 +1,7 @@
 // Per-repo and per-item actions are for whoever runs the repo (operator, or maintainer with GitHub write); instance-wide ones stay with operators.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { reviewItemAgain } from "../src/dash/api/operator.ts";
 import { mergeHoldPr } from "../src/dash/api/queue-page.ts";
 import { release, releaseAll } from "../src/dash/api/outside.ts";

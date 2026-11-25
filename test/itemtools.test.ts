@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import type { SnapshotStats } from "../src/itemtools/snapshot.ts";
 import { writeTestSnapshot } from "./test-db.ts";
 import { callTool, openDb } from "../src/itemtools/server/tools.ts";

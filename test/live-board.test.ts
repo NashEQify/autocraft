@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { buildKind, live } from "../src/dash/api/live.ts";
 import { insertRun } from "../src/agents/runs.ts";
 import type { Req } from "../src/dash/types.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setSettings } from "../src/dash/api/user-settings.ts";
 

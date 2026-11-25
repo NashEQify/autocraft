@@ -4,7 +4,7 @@ import { breakerTripped, classifyPush, requiredResult } from "../src/core/push-o
 import { join } from "node:path";
 import { tmpdir } from "./world-db.ts";
 import { addPushOutcomes, pushesUnsettled, resolvePushes, UNSETTLED_PUSHES_MAX } from "../src/data/control/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 test("push outcome: green to red is broke, red to green is fixed, optional checks are ignored", () => {
   const green = [{ name: "gate", state: "success" }, { name: "sonar", state: "failure" }];

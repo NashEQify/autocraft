@@ -1,7 +1,6 @@
 // Run records: write and lifecycle (`agent_runs`, `agent_run_items`, `agent_run_texts`, `agent_run_tools`). No writer opens a transaction or a named lock.
 // reads: runners.remote_calls
 import type { Db } from "../../db/index.ts";
-import { effect } from "../../db/effects.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { keptRuns } from "../runners/fragments.ts";
@@ -178,12 +177,4 @@ export async function pruneRuns(db: Db, nowMs: number): Promise<{ texts: number;
   await q.run(q.k.deleteFrom("main.agent_run_items").where("run_id", "<=", old));
   const runs = Number((await q.run(q.k.deleteFrom("main.agent_runs").where("id", "<=", old))).changes);
   return { texts, runs };
-}
-
-/** Guard, not a query: counts a model call in the meter and reports it when a transaction is open. */
-export function enterModelCall(db: Db, kind: "claude" | "jev" | "workspace"): void {
-  const where = db.inTransaction()
-    ? (new Error().stack ?? "").split("\n").slice(2).map((l) => l.trim()).find((l) => !/node_modules|\(node:|at node:/.test(l))?.replace(/^at (async )?/, "") ?? ""
-    : undefined;
-  effect(db, "model-call", where === undefined ? undefined : `${kind} call: ${where}`);
 }

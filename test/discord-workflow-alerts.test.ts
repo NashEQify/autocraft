@@ -9,7 +9,7 @@ import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import { createLinkCode, redeemLinkCode } from "../src/discord/links.ts";
 import type { EditBody, MessageBody } from "../src/discord/rest.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

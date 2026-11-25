@@ -8,7 +8,7 @@ import { setFeature } from "../src/build/features.ts";
 import { LANES } from "../src/runner/autopilot.ts";
 import { nightlyDue, nightlyRepos, openNightlyIssue, runNightly, setSelection, recentRuns, benchSeries, parseBench, pruneBench, type NightlyDeps } from "../src/nightly/index.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

@@ -3,7 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Generated } from "kysely";
-import type { Db, Dialect } from "../src/db/index.ts";
+import type { Dialect } from "../src/db/index.ts";
+import { queryDb } from "../src/db/query-db.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 import { namedKeys, registerKeySource, resolveKeys, type KeySource } from "../src/data/keys.ts";
 import { parseSearch } from "../src/db/search.ts";
@@ -323,7 +325,7 @@ test("chunks slices a list, 10,000 by default", () => {
   assert.equal(kx.chunks(Array.from({ length: 25_000 }, (_, i) => i)).length, 3);
 });
 
-registerKeySource("test.repoKeys", (d, args: { repo: string }) => d.k.withTables<T>().selectFrom("r").select(["repo", "number"]).where("repo", "=", args.repo) as never);
+registerKeySource("test.repoKeys", (d, args: { repo: string }) => queryDb(d).k.withTables<T>().selectFrom("r").select(["repo", "number"]).where("repo", "=", args.repo) as never);
 
 both("resolveKeys turns a ref list or a registered descriptor into a (repo, number) table", async (db) => {
   const keys = async (ks: KeySource) => await db.all(k(db).selectFrom(resolveKeys(db, ks, "ks")).select(["ks.repo", "ks.number"]).orderBy("ks.repo").orderBy("ks.number"));

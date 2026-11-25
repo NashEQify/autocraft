@@ -3,8 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import type { Db, Param } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import type { Param } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { hiddenTestExpr, type HiddenRepos } from "../src/hidden-sql.ts";
 import { quietPrExpr } from "../src/data/security/fragments.ts";
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";

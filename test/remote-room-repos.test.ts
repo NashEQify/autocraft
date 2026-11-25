@@ -12,7 +12,7 @@ import { setUserRepos } from "../src/remote/my-repos.ts";
 import { setUserTasks, TASK_CHOICES } from "../src/remote/my-tasks.ts";
 import { remoteRoom } from "../src/remote/room.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 import { dropQueueCache } from "../src/data/runners/calls-shared.ts";
 import { markHelperIdle } from "../src/data/runners/index.ts";

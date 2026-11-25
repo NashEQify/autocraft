@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Kysely } from "kysely";
-import { effect, effectsInTx } from "../src/db/effects.ts";
+import { effect, effectsInTx, note } from "../src/db/effects.ts";
 import { queryDb } from "../src/db/query-db.ts";
 import { expectFlat } from "./helpers/query-count.ts";
 import { testDatabase } from "./test-db.ts";
@@ -10,7 +10,7 @@ type T = { t: { id: number; v: string | null } };
 
 const SCHEMA = "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)";
 
-test("a meter counts its own context's statements, rows and effects; an inner meter adds to it; an effect inside a transaction is reported", async () => {
+test("a meter counts its own context's statements, rows and effects; an inner meter adds to it; an effect inside a transaction or a wave throws in tests and is counted in production", async () => {
   const tdb = await testDatabase(SCHEMA);
   try {
     const db = queryDb(await tdb.open());
@@ -26,20 +26,22 @@ test("a meter counts its own context's statements, rows and effects; an inner me
       const rows = await db.all(k.selectFrom("t").selectAll());
       const inner = await db.meter(async () => {
         await db.prepare("SELECT 1 AS x").get();
-        effect(db, "http", "test outside a transaction");
+        effect("http", "test outside a transaction");
       });
       await db.write(async () => {
         await db.run(k.updateTable("t").set({ v: "c" }).where("id", "=", 1));
-        effect(db, "github-write", "test inside a transaction");
+        assert.throws(() => effect("github-write", "test inside a transaction"), /inside a database transaction \(test inside a transaction\)/);
       });
       return { rows: rows.length, stats: inner.stats };
     });
     await outside;
+    await db.together(async () => assert.throws(() => effect("model-call"), /inside a db\.together wave/));
+    note("github-write", "a database transaction", "test in production", false);
     assert.ok(stats.statements > inner.stats.statements, "the outer meter counts the inner one's statements and its own");
     assert.equal(stats.effects, inner.stats.effects + 1);
     assert.ok(stats.rows >= inner.rows + inner.stats.rows);
-    assert.equal(effectsInTx().count, reported + 1, "only the effect inside the transaction is reported");
-    assert.ok(effectsInTx().sites.some((s) => s.site === "test inside a transaction" && s.kind === "github-write"));
+    assert.equal(effectsInTx().count, reported + 1);
+    assert.ok(effectsInTx().sites.some((s) => s.site === "test in production" && s.kind === "github-write"));
   } finally {
     await tdb.close();
   }
@@ -56,7 +58,7 @@ test("expectFlat fails a unit that reads per item and passes a set-based one, al
       if (style === "per-item") return await Promise.all(ids.map((id) => db.get(k.selectFrom("t").selectAll().where("id", "=", id))));
       const rows = await db.all(k.selectFrom("t").selectAll().where("id", "in", ids));
       if (style === "set with writes") for (const r of rows) {
-        effect(db, "github-write", "test");
+        effect("github-write", "test");
         await db.run(k.updateTable("t").set({ v: "b" }).where("id", "=", r.id));
       }
       return rows;

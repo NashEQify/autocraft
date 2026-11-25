@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cacheReport, type StoredCaches } from "../src/build/caches.ts";
 import { warmKeyOf } from "../src/build/tasks.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { saveWarmReport } from "../src/data/build/index.ts";
 import type { HiddenRepos } from "../src/hidden-sql.ts";
 

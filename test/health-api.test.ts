@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { health } from "../src/dash/api/health.ts";
 import type { Req } from "../src/dash/types.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 
 const req = (role: "operator" | "viewer"): Req => ({

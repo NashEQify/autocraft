@@ -1,7 +1,8 @@
 // Shared setup of the mirror data-layer tests: a database with the app schema on SQLite, and on Postgres too when AUTOCRAFT_TEST_PG_URL names a server.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Db, Dialect } from "../../src/db/index.ts";
+import type { Dialect } from "../../src/db/index.ts";
+import type { Db } from "../helpers/raw-db.ts";
 import type { FlatUnit } from "../helpers/query-count.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";

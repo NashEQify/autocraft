@@ -9,7 +9,7 @@ import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { mergeFixFields, type Lint } from "../src/replylint.ts";
 import { fakeTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "lint-fix-"));

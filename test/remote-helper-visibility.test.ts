@@ -8,7 +8,7 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { computeChecks, THRESHOLDS } from "../src/health-checks.ts";
 import { listHelpers, parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 

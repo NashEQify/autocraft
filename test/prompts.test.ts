@@ -12,7 +12,7 @@ import { JEV_ARGS, claudeArgs, claudeParts, renderClaude, renderJev, untrustedJs
 import { SAMPLE_ITEMS } from "../src/prompts/samples.ts";
 import { SAMPLE_VERIFY_PLAN } from "../src/verify/types.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "prompts-test-")), "t.db"));

@@ -2,8 +2,7 @@
 // it again changes nothing. Runs on either engine (connectDb).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
 import { loadEvents, loadLastEventKinds, loadMergeApprovals } from "../src/data/workflow/index.ts";

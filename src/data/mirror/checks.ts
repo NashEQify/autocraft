@@ -33,7 +33,7 @@ export async function saveChecks(db: Db, rows: PrChecksRow[], at: string): Promi
   const q = queryDb(db);
   await db.write(async () => {
     for (const part of kx.batches(last)) {
-      await db.run(q.k.insertInto("pr_checks").values(part.map((r) => ({
+      await q.run(q.k.insertInto("pr_checks").values(part.map((r) => ({
         repo: r.repo, number: r.number, head_oid: r.head_oid, state: r.state, is_draft: r.is_draft, overall: r.overall, checks: r.checks,
         mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify, fetched_at: at,
       }))).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
@@ -111,7 +111,7 @@ export async function saveGates(db: Db, rows: GateRead[]): Promise<void> {
   const q = queryDb(db);
   await db.write(async () => {
     for (const part of kx.batches(last)) {
-      await db.run(q.k.insertInto("review_gates").values(part.map((r) => ({ repo: r.repo, number: r.number, blocked: r.blocked, by_login: r.by_login, read_at: r.read_at, failures: 0 })))
+      await q.run(q.k.insertInto("review_gates").values(part.map((r) => ({ repo: r.repo, number: r.number, blocked: r.blocked, by_login: r.by_login, read_at: r.read_at, failures: 0 })))
         .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["blocked", "by_login", "read_at", "failures"]))));
     }
   });
@@ -125,7 +125,7 @@ export async function markGateFailures(db: Db, keys: RefKey[]): Promise<void> {
   const q = queryDb(db);
   await db.write(async () => {
     for (const part of kx.batches([...counts])) {
-      await db.run(q.k.insertInto("review_gates").values(part.map(([k, n]) => ({ ...splitKey(k), failures: n })))
+      await q.run(q.k.insertInto("review_gates").values(part.map(([k, n]) => ({ ...splitKey(k), failures: n })))
         .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({ failures: eb("review_gates.failures", "+", eb.ref("excluded.failures")) }))));
     }
   });
@@ -163,7 +163,7 @@ export async function saveDiffFacts(db: Db, rows: DiffFactsRow[], mode: "upsert-
   await db.write(async () => {
     for (const part of kx.batches(last)) {
       const ins = q.k.insertInto("diff_facts").values(part.map((r) => ({ repo: r.repo, number: r.number, head_oid: r.head_oid, reasons: r.reasons, lines: r.lines, pending: r.pending, last_read: r.last_read })));
-      await db.run(mode === "insert-ignore" ? ins.onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doNothing())
+      await q.run(mode === "insert-ignore" ? ins.onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doNothing())
         : ins.onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet(kx.excluded(["reasons", "lines", "pending", "last_read"]))
           .where((eb) => eb.or(["reasons", "lines", "pending", "last_read"].map((c) => eb(`diff_facts.${c}` as "diff_facts.lines", "is distinct from", eb.ref(`excluded.${c}` as "excluded.lines")))))));
     }
@@ -181,7 +181,7 @@ export async function setDiffFactsIf(db: Db, rows: { key: DiffFactsKey; was: Dif
     let changed = 0;
     const fresh = rows.filter((r) => !r.was).map((r) => r.to);
     for (const part of kx.batches(fresh)) {
-      changed += (await db.run(q.k.insertInto("diff_facts").values(part.map((r) => ({ repo: r.repo, number: r.number, head_oid: r.head_oid, reasons: r.reasons, lines: r.lines, pending: r.pending, last_read: r.last_read })))
+      changed += (await q.run(q.k.insertInto("diff_facts").values(part.map((r) => ({ repo: r.repo, number: r.number, head_oid: r.head_oid, reasons: r.reasons, lines: r.lines, pending: r.pending, last_read: r.last_read })))
         .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doNothing()))).changes;
     }
     const guarded = rows.filter((r) => r.was).map((r) => ({
@@ -190,7 +190,7 @@ export async function setDiffFactsIf(db: Db, rows: { key: DiffFactsKey; was: Dif
     }));
     for (const part of kx.chunks(guarded)) {
       const v = kx.valuesTable(db, part, { repo: "text", number: "bigint", head_oid: "text", reasons: "text", lines: "bigint", pending: "bigint", last_read: "bigint", w_reasons: "text", w_lines: "bigint", w_pending: "bigint", w_last_read: "bigint" }, "v");
-      changed += (await db.run((q.k.updateTable("diff_facts") as any).from(v)
+      changed += (await q.run((q.k.updateTable("diff_facts") as any).from(v)
         .set((eb: kx.AnyEb) => ({ reasons: eb.ref("v.reasons"), lines: eb.ref("v.lines"), pending: eb.ref("v.pending"), last_read: eb.ref("v.last_read") }))
         .where((eb: kx.AnyEb) => eb.and([
           eb("diff_facts.repo", "=", eb.ref("v.repo")), eb("diff_facts.number", "=", eb.ref("v.number")), eb("diff_facts.head_oid", "=", eb.ref("v.head_oid")),
@@ -206,12 +206,12 @@ export async function setDiffFactsIf(db: Db, rows: { key: DiffFactsKey; was: Dif
 export async function markDiffRead(db: Db, heads: DiffFactsKey[], at: number): Promise<void> {
   if (!heads.length) return;
   const q = queryDb(db);
-  await db.write(async () => { for (const c of kx.chunks(heads)) await db.run(q.k.updateTable("diff_facts").set({ last_read: at }).where(headIn(db, "diff_facts", c))); });
+  await db.write(async () => { for (const c of kx.chunks(heads)) await q.run(q.k.updateTable("diff_facts").set({ last_read: at }).where(headIn(db, "diff_facts", c))); });
 }
 
 /** Batched delete. */
 export async function removeDiffFacts(db: Db, heads: DiffFactsKey[]): Promise<void> {
   if (!heads.length) return;
   const q = queryDb(db);
-  await db.write(async () => { for (const c of kx.chunks(heads)) await db.run(q.k.deleteFrom("diff_facts").where(headIn(db, "diff_facts", c))); });
+  await db.write(async () => { for (const c of kx.chunks(heads)) await q.run(q.k.deleteFrom("diff_facts").where(headIn(db, "diff_facts", c))); });
 }

@@ -20,8 +20,7 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { allocation } from "../src/agents/call.ts";
 import { setEnabled } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const quiet = () => {};

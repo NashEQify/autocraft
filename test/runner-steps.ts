@@ -1,6 +1,7 @@
 // Fake pipeline steps for the runner and API tests (AUTOCRAFT_EXTRA_STEPS).
 // They call no model and touch nothing outside the test database.
 import { setTimeout as sleep } from "node:timers/promises";
+import { queryDb } from "../src/db/query-db.ts";
 import type { StepDef } from "../src/runner/steps.ts";
 
 export const FAKE_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
@@ -24,7 +25,7 @@ export const steps: StepDef[] = [
       if (ctx.params.mode === "fail") throw new Error("echo failed on purpose");
       ctx.usageRun("test-run");
       const t = new Date().toISOString();
-      await ctx.db.prepare(`INSERT INTO token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd)
+      await queryDb(ctx.db).prepare(`INSERT INTO token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd)
         VALUES ('test-run', ?, 'test', 'fake', 1, 100, 10, 0, 0, ?, ?, 0.01)`).run(`echo-${ctx.job.id}`, t, t);
       return `echo ${ctx.params.n}`;
     },

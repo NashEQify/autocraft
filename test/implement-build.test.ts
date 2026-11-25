@@ -73,7 +73,7 @@ function withCallRows(s: Awaited<ReturnType<typeof setup>>) {
   const queue = s.deps.calls.queue;
   s.deps.calls.queue = async (db, r) => {
     const id = await queue(db, r), now = Date.now();
-    await db.run(db.k.insertInto("main.remote_calls").values({
+    await s.db.run(s.db.k.insertInto("main.remote_calls").values({
       id, step: "implement", stage: 0, prompt_id: r.promptId, prompt_version: r.promptVersion, tier: r.tier, effort: r.effort, asked_model: r.model, bundle: "{}",
       state: "queued", since: now, seen_at: now, max_attempts: 2, timeout_ms: 1000, parent_id: r.parentId ?? null,
     } as never));
@@ -127,7 +127,7 @@ test("a restart after a turn's reply was read asks the same session for the repo
   const normal = s.deps.calls.await;
   s.deps.calls.await = async (db, id) => {
     // The reply is read (and dropped from the call) and the runner stops before the round is written.
-    await db.run(db.k.updateTable("main.remote_calls").set({ state: "done", reply: null, consumed_at: Date.now() }).where("id", "=", id));
+    await s.db.run(s.db.k.updateTable("main.remote_calls").set({ state: "done", reply: null, consumed_at: Date.now() }).where("id", "=", id));
     throw new Error(RESTART);
   };
   await assert.rejects(runBuild(s.run, "app", 7, s.deps), new RegExp(RESTART));

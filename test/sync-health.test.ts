@@ -8,7 +8,7 @@ import { computeChecks, serveChecks } from "../src/health-checks.ts";
 import { GithubError, reconcileNext, runSync } from "../src/mirror.ts";
 import { reloadRepoOwners } from "../src/repos.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 import { sqliteOnly } from "./test-db.ts";
 import { saveSyncState, loadSyncState } from "../src/data/mirror/index.ts";

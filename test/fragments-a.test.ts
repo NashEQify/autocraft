@@ -2,7 +2,7 @@
 // finding is not published, with the NULL handling of the rows it is joined to.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import type { Db } from "../src/db/index.ts";
+import type { Db } from "./helpers/raw-db.ts";
 import { quietPrExpr } from "../src/data/security/fragments.ts";
 import { testDatabase, type TestDatabase } from "./test-db.ts";
 

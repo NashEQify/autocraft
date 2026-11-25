@@ -19,7 +19,7 @@ import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 import { sqliteOnly } from "./test-db.ts";
 

@@ -90,3 +90,34 @@ test("a write inside together goes after the reads issued before it; a wave insi
     await tdb.close();
   }
 });
+
+test("a read of bytes inside together must be alone, whatever it goes through; a value made from the bytes may join a wave", async () => {
+  const tdb = await testDatabase();
+  try {
+    const db = queryDb(await tdb.open({ app: true }));
+    const { k } = db;
+    await db.run(k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN" }));
+    await db.run(k.insertInto("main.item_embeddings").values({ repo: "app", number: 1, model: "m", hash: "h", vec: new Uint8Array([1, 2, 3, 4]), at: "2026-01-01T00:00:00Z" }));
+    const refused = [
+      k.selectFrom("main.item_embeddings").select("vec"),
+      k.selectFrom("item_embeddings as e").selectAll(),
+      k.selectFrom("items as i").innerJoin("item_embeddings as e", (j) => j.onRef("e.repo", "=", "i.repo").onRef("e.number", "=", "i.number")).select(["i.number", "e.vec as bytes"]),
+      k.with("v", (w) => w.selectFrom("item_embeddings").select(["repo", "vec"])).selectFrom("v").selectAll("v"),
+      k.selectFrom(k.selectFrom("item_embeddings").select((eb) => eb.fn.coalesce("vec", "vec").as("x")).as("s")).select("s.x"),
+      k.selectFrom("items as i").select((eb) => eb.selectFrom("item_embeddings as e").select("e.vec").limit(1).as("v")),
+    ];
+    for (const q of refused) {
+      await assert.rejects(db.together(() => db.all(q as never, { label: "test.bytes" })), /^Error: test\.bytes: a read of bytes \(item_embeddings\.vec\)/, (q as { compile(): { sql: string } }).compile().sql);
+    }
+    const [alone, made, other] = await db.together(() => Promise.all([
+      db.all(k.selectFrom("item_embeddings").select("vec"), { alone: true }),
+      db.get(k.selectFrom("item_embeddings").select((eb) => eb.fn<number>("length", ["vec"]).as("n"))),
+      db.all(k.selectFrom("items as i").innerJoin("item_embeddings as e", "e.repo", "i.repo").selectAll("i")),
+    ]));
+    assert.deepEqual([...alone[0]!.vec], [1, 2, 3, 4]);
+    assert.equal(made!.n, 4);
+    assert.equal(other.length, 1);
+  } finally {
+    await tdb.close();
+  }
+});

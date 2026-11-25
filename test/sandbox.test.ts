@@ -16,7 +16,7 @@ import { REPO_PATH, sandboxCommand } from "../src/sandbox/command.ts";
 import type { SessionAsk } from "../src/prepush/resume.ts";
 import { fakeTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });

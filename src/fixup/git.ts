@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { envVar } from "../env.ts";
 import { APP_CREDENTIAL_ARGS } from "../github/install-token.ts";
 import { readEnvFor } from "../github/read.ts";
+import { effect } from "../db/effects.ts";
 
 /** `sent: false`: the command failed before any request went out (the app lane could not get its token), so nothing reached GitHub. */
 export type ExecResult = { code: number; stdout: string; stderr: string; sent?: false };
@@ -19,6 +20,7 @@ export type ExecOpts = { cwd?: string; env?: Record<string, string>; input?: str
 export type Exec = (cmd: string, args: string[], opts?: ExecOpts) => Promise<ExecResult>;
 
 export const exec: Exec = async (cmd, args, opts = {}) => {
+  effect("process", `${cmd} ${args[0] ?? ""}`);
   // A command that brings its own whole environment (a write lane) or asks to inherit keeps it. Any other gh command and
   // the network reads of git (fetch, ls-remote, clone, pull) read as the current identity: the app's installation token
   // under `app`, the inherited login under `box`. Local git commands and pushes get no token.

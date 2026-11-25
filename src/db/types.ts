@@ -3151,3 +3151,6 @@ export const COLUMNS = {
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],
   workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit"],
 } as const;
+
+/** The columns that hold bytes: BLOB on SQLite, bytea on Postgres. */
+export const BYTES_COLUMNS = ["agent_run_texts.prompt", "agent_run_texts.output", "item_embeddings.vec", "owner_statements.embedding", "workspaces.checkpoint"] as const;

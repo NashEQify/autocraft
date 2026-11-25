@@ -11,7 +11,7 @@ import { closeItem } from "../src/github/write.ts";
 import type { GuardedItem } from "../src/core/guard.ts";
 import type { Querier } from "../src/mirror.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
 
 const grant = (as: string): GuardedItem => ({ scope: "item", action: { kind: "act" }, repo: "app", number: 7, as }) as unknown as GuardedItem;

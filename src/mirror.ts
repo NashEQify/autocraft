@@ -20,6 +20,7 @@ import { isFenced } from "./db/fence.ts";
 import type { Db } from "./db/index.ts";
 import { dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos } from "./data/control/index.ts";
+import { effect } from "./db/effects.ts";
 import {
   advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan, loadSyncState,
   markReposReconciled, markReposRead, markReposSyncedByError, saveItems, saveRepoList, saveSyncState, startSyncRun,
@@ -179,6 +180,8 @@ export class Client {
   }
 
   async query(query: string, variables: object): Promise<Node> {
+    // Mutations are counted where they are recorded (src/github/write.ts).
+    if (!/^\s*mutation\b/.test(query)) effect("github-read");
     const { env, key } = await this.childEnv(ownerOfVariables(variables));
     this.useRate(key);
     if (this.remaining !== null && this.remaining < this.reserve) {

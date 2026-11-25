@@ -5,6 +5,7 @@ import type { Expression, SelectQueryBuilder, SqlBool } from "kysely";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { queryDb, type QueryDb } from "../../db/query-db.ts";
 import { privateStepExpr } from "../build/fragments.ts";
 import { runVisible } from "../inference/fragments.ts";
 import type { Scope, TraceKind } from "./types.ts";
@@ -22,14 +23,14 @@ const T = "t";
 
 type Def = {
   id: SourceId; kinds: TraceKind[]; table: string; time: string;
-  q: (db: Db, c: Ctx) => SelectQueryBuilder<any, any, any>;
+  q: (db: QueryDb, c: Ctx) => SelectQueryBuilder<any, any, any>;
   repoCol?: string | null; tie?: () => kx.Ex; one?: (r: any) => string;
   /** With Only AutoCraft: null skips the source (its events are people's), a condition narrows it to AutoCraft's rows, EVERY means every row is AutoCraft's. */
   only?: (c: Ctx) => Cond | null;
   /** Rows without a repo column (audit targets) name their item here; null drops the row. */
   of?: (r: any, c: Ctx) => { repo: string; number: number } | null;
 };
-type Ctx = ActivityScope & { db: Db; only: boolean; repo: string | null; limit: number; before: ActivityQuery["before"]; writeActions: string[] | null };
+type Ctx = ActivityScope & { db: QueryDb; only: boolean; repo: string | null; limit: number; before: ActivityQuery["before"]; writeActions: string[] | null };
 
 const byOwn = (col: string): Def["only"] => (c) => (c.own.size ? () => kx.inList(c.db, col, [...c.own]) : null);
 
@@ -126,17 +127,18 @@ async function newest(c: Ctx, s: Def): Promise<{ source: SourceId; rows: Activit
 
 /** One round: every wanted source's newest rows before the cursor, in one wave. */
 export async function loadActivityRound(db: Db, scope: ActivityScope, q: ActivityQuery): Promise<ActivityRows> {
-  const c: Ctx = { ...scope, db, only: q.only, repo: q.repo, limit: q.limit, before: q.before, writeActions: q.writeActions };
+  const c: Ctx = { ...scope, db: queryDb(db), only: q.only, repo: q.repo, limit: q.limit, before: q.before, writeActions: q.writeActions };
   return { bySource: await db.together(() => Promise.all(sourcesOf(q.kinds).map((s) => newest(c, s)))) };
 }
 
 /** The newest time of each wanted source's table and the counts of running calls, active jobs and active tasks, in one statement. */
 export async function loadActivityStamp(db: Db, key: ActivityStampKey): Promise<unknown[]> {
+  const { k } = queryDb(db);
   const probes = [
-    ...sourcesOf(key.kinds).map((s) => db.k.selectFrom(s.table as "items").select((eb) => eb.fn.max<string | null>(kx.ref(s.time.replace(/^\w+\./, ""))).as("m"))),
-    db.k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running"),
-    db.k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("state", "in", ["queued", "running"]),
-    db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["queued", "claimed", "running"]),
+    ...sourcesOf(key.kinds).map((s) => k.selectFrom(s.table as "items").select((eb) => eb.fn.max<string | null>(kx.ref(s.time.replace(/^\w+\./, ""))).as("m"))),
+    k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running"),
+    k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("state", "in", ["queued", "running"]),
+    k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["queued", "claimed", "running"]),
   ];
   return (await kx.rowValues(db, probes as SelectQueryBuilder<any, any, any>[]));
 }

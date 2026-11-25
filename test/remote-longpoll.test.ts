@@ -9,7 +9,7 @@ import { after, describe, test } from "node:test";
 // Every user-local window, the hold included, at a fifth: a 25 s hold is 5 s, the full retry every second. Read on import.
 process.env.AUTOCRAFT_REMOTE_TIME_SCALE = "0.2";
 const { SCRATCH } = await import("./scratch.ts");
-const { connectDb } = await import("../src/db/open.ts");
+const { connectDb } = await import("./helpers/raw-db.ts");
 const { addLogin } = await import("../src/access.ts");
 const { apiRoutes } = await import("../src/dash/api/index.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");

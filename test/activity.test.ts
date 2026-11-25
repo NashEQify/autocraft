@@ -4,8 +4,7 @@ import { insertRun } from "../src/agents/runs.ts";
 import { activity } from "../src/dash/api/activity.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ActivityPage } from "../web/src/api/types.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 const as = (role: "viewer" | "operator", query: Record<string, string> = {}): Req => ({
   method: "GET", path: "", params: {}, query: new URLSearchParams(query), form: new URLSearchParams(), csrf: "", nonce: "",

@@ -10,8 +10,7 @@ import { mainFixDue, onCodeVerdict, runMainFix, setMainFixApproval, type FixRow,
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "mainfix-pr-"));

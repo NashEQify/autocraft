@@ -13,6 +13,7 @@ import { planChangesSql } from "./plan-triggers.ts";
 import { PIN_SEARCH_PATH, withMigrationLock, readCatalog, type MigrationOpts, type PgClient } from "./pg-migrate.ts";
 import { PG_COLUMNS_SQL, pgColumns, pgTriggerParts } from "./pg-triggers.ts";
 import { pgConnectionString } from "./postgres.ts";
+import { queryDb } from "./query-db.ts";
 import { pgScopeViews, SCOPED_SCHEMA } from "./scoped.ts";
 import { COPIED_SETTINGS } from "./state-copy.ts";
 import { archiveActions, archiveDecisions, SWITCH_KEY, type SwitchReport } from "./switch-over.ts";
@@ -42,8 +43,8 @@ function columnsLeft(has: (column: string) => boolean): Map<string, string[]> {
  */
 export async function dropRetired(db: Db, o: { force?: boolean; target?: string; now?: string } & MigrationOpts = {}): Promise<string[]> {
   if (!DROP_RETIRED && !o.force) return [];
-  const k = db.k as any;
-  const marker = (await db.get(k.selectFrom("main.settings").select("value").where("key", "=", SWITCH_KEY))) as { value: string } | undefined;
+  const q = queryDb(db), k = q.k as any;
+  const marker = (await q.get(k.selectFrom("main.settings").select("value").where("key", "=", SWITCH_KEY))) as { value: string } | undefined;
   if (!marker) return [];
   const now = o.now ?? new Date().toISOString();
   const sweep = async (left: Set<string>): Promise<void> => {
@@ -54,7 +55,7 @@ export async function dropRetired(db: Db, o: { force?: boolean; target?: string;
   };
   let dropped: string[];
   if (db.dialect === "sqlite") {
-    const sync = db.sync!;
+    const sync = q.sync!;
     const tables = sqliteTables(sync);
     await sweep(new Set(RETIRED_TABLES.filter((t) => tables.has(t))));
     dropped = dropSqlite(sync);
@@ -73,15 +74,15 @@ export async function dropRetired(db: Db, o: { force?: boolean; target?: string;
     }
   }
   await db.write(async () => {
-    const w = db.k as any;
-    await db.run(w.deleteFrom("main.settings").where((eb: any) => eb.or([eb("key", "in", SETTING_KEYS),
+    const w = q.k as any;
+    await q.run(w.deleteFrom("main.settings").where((eb: any) => eb.or([eb("key", "in", SETTING_KEYS),
       ...SETTING_PREFIXES.map((p) => eb(eb.fn("substr", ["key", eb.lit(1), eb.lit(p.length)]), "=", p))])));
     // The older release took "started" for all items, so the value is renamed only now; the reader takes both (src/data/runners/user-settings.ts).
-    await db.run(w.updateTable("main.user_settings").set({ value: "started", updated_at: now }).where("key", "=", "task_items").where("value", "=", "fast"));
+    await q.run(w.updateTable("main.user_settings").set({ value: "started", updated_at: now }).where("key", "=", "task_items").where("value", "=", "fast"));
     // The older runner's heartbeat is gone with the rest, and no older release can run again: the switch stays done.
     const at = (JSON.parse(marker.value) as { at?: string }).at ?? now;
-    await db.run(w.updateTable("main.settings").set({ value: JSON.stringify({ at, heartbeat: null }) }).where("key", "=", SWITCH_KEY));
-    if (dropped.length) await db.run(w.insertInto("main.audit").values({ at: now, login: "pipeline", action: "retired-drop", target: null, details: JSON.stringify({ dropped }) }));
+    await q.run(w.updateTable("main.settings").set({ value: JSON.stringify({ at, heartbeat: null }) }).where("key", "=", SWITCH_KEY));
+    if (dropped.length) await q.run(w.insertInto("main.audit").values({ at: now, login: "pipeline", action: "retired-drop", target: null, details: JSON.stringify({ dropped }) }));
   });
   return dropped;
 }

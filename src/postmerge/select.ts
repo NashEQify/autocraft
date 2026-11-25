@@ -26,6 +26,13 @@ export async function selectPostmerge(db: Db, repo: string, now = Date.now(), ru
     .sort((a, b) => (a.merged_at < b.merged_at ? -1 : a.merged_at > b.merged_at ? 1 : 0) || a.number - b.number);
 }
 
+/** The repos with a merged PR to review, from a pass's Plans. */
+export async function postmergeRepos(db: Db, plans: PlanSet, now: number, run: string | null): Promise<string[]> {
+  const due = await planned(db, "postmerge", { now, run, plans });
+  const merged = due.length ? await loadMergedInfo(db, due.map((p) => ({ repo: p.facts.repo, number: p.facts.number }))) : new Map<string, unknown>();
+  return [...new Set(due.filter((p) => merged.has(`${p.facts.repo}#${p.facts.number}`)).map((p) => p.facts.repo))];
+}
+
 /** The PRs among `numbers` that the pipeline merged, by number. */
 async function mergedPrs(db: Db, repo: string, numbers: number[]): Promise<Map<number, MergedPr>> {
   const out = new Map<number, MergedPr>();

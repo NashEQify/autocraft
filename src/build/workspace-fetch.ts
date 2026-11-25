@@ -16,6 +16,7 @@ import {
   FETCH_CONTAINER, FETCH_DEADLINE_SEC, FETCH_LIMIT_SEC, FETCH_LOG_TAIL, FETCH_START_MS, fetchPodName, fetchSelector, workspaceFetchPodSpec,
 } from "./workspace-pods.ts";
 import { cleanOutput, execInWorkspace, getWorkspace, type WorkspaceRow } from "./workspaces.ts";
+import { effect } from "../db/effects.ts";
 
 /** How long the call may take in all: the pod's start, its deadline and the diff, as the call row's deadline. */
 export const FETCH_CALL_MS = FETCH_START_MS + FETCH_DEADLINE_SEC * 1000 + 60_000;
@@ -52,6 +53,7 @@ export async function fetchDependencies(db: Db, api: KubeApi, workspaceId: numbe
   const prior = (await api.listPods(ns, fetchSelector(w.id))).find((p) => p.metadata.name === name && !p.metadata.deletionTimestamp);
   if (!prior) {
     const ci = ciLayoutOf(w) ?? undefined;
+    effect("build-launch");
     await api.createPod(ns, workspaceFetchPodSpec({ s, envId: w.env_id, id: w.id, ...images, name, pvc: w.pvc, ...(ci ? { ci } : {}), dir }));
   }
   try {

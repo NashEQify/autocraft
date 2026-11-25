@@ -28,8 +28,7 @@ import { STARTED_HOLD_MS } from "../src/remote/started.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { excluded, like } from "../src/db/kx.ts";
 
 /** A started item: the workflow row a maintainer's start command writes. */

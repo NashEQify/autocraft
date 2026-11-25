@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { home } from "../src/dash/api/maintain.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { addEvent, insertWorkflow } from "../src/workflow/store.ts";
 
 const T = "2026-11-01T00:00:00.000Z";

@@ -7,7 +7,7 @@ import { phaseOf, statusFromItem, statusOf, type StatusInput } from "../src/core
 import { writePlanCache, type PlanView } from "../src/core/plan-cache.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 const input = (p: Partial<StatusInput>): StatusInput => ({ state: null, itemState: null, wait: null, next: null, ...p });
 

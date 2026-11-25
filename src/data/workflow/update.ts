@@ -2,6 +2,7 @@
 import type { Expression, SqlBool } from "kysely";
 import type { Db, Param } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { queryDb } from "../../db/query-db.ts";
 
 type Types = Record<string, kx.ElemType>;
 
@@ -14,12 +15,13 @@ export async function patchRows(
   db: Db, table: string, key: Types, set: Types, rows: readonly Record<string, Param>[],
   o: { also?: (eb: kx.AnyEb) => Record<string, Expression<any>>; when?: (eb: kx.AnyEb) => Expression<SqlBool>; guard?: Types } = {},
 ): Promise<number> {
+  const qdb = queryDb(db);
   let changed = 0;
   for (const part of kx.chunks(rows)) {
-    const q = (db as any).k.updateTable(table).from(kx.valuesTable(db, part, { ...key, ...set, ...o.guard }, "v"))
+    const q = (qdb.k as any).updateTable(table).from(kx.valuesTable(db, part, { ...key, ...set, ...o.guard }, "v"))
       .set((eb: kx.AnyEb) => ({ ...Object.fromEntries(Object.keys(set).map((c) => [c, eb.ref(`v.${c}`)])), ...o.also?.(eb) }))
       .where((eb: kx.AnyEb) => eb.and([...Object.keys(key).map((c) => eb(`${table}.${c}`, "=", eb.ref(`v.${c}`))), ...(o.when ? [o.when(eb)] : [])]));
-    changed += (await db.run(q)).changes;
+    changed += (await qdb.run(q)).changes;
   }
   return changed;
 }

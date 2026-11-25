@@ -73,7 +73,7 @@ export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ chang
       const moved = base.filter((p) => was.has(refKey(p.repo, p.number)) && was.get(refKey(p.repo, p.number)) !== p.baseRef);
       const dropped = base.filter((p) => !p.keepDiff);
       if (dropped.length) {
-        for (const c of kx.chunks(dropped)) await db.run(q.k.deleteFrom("main.diff_facts").where(kx.tupleIn(db, ["repo", "number", "head_oid"], c.map((p) => [p.repo, p.number, p.head] as const), ["text", "bigint", "text"])));
+        for (const c of kx.chunks(dropped)) await q.run(q.k.deleteFrom("main.diff_facts").where(kx.tupleIn(db, ["repo", "number", "head_oid"], c.map((p) => [p.repo, p.number, p.head] as const), ["text", "bigint", "text"])));
       }
       if (moved.length) {
         add(await updateItemsFrom(db, moved.map((p) => ({ repo: p.repo, number: p.number, base: p.baseRef })), { ...ONE, base: "text" }, (eb) => ({ base_ref: eb.ref("v.base") })));
@@ -156,7 +156,7 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
         return !s || !ITEM_COLUMNS.every((c) => (s[c] ?? null) === ((e.row as Record<string, unknown>)[c] ?? null));
       });
       if (changed.length) {
-        await db.run(q.k.insertInto("main.items").values(changed.map((e) => Object.fromEntries(ITEM_COLUMNS.map((c) => [c, (e.row as Record<string, unknown>)[c] ?? null])) as never))
+        await q.run(q.k.insertInto("main.items").values(changed.map((e) => Object.fromEntries(ITEM_COLUMNS.map((c) => [c, (e.row as Record<string, unknown>)[c] ?? null])) as never))
           .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({ ...kx.excluded(ITEM_UPSERT)(eb), mergeable: keepKnownMergeableExpr(eb, "items") }))));
         stored += changed.length;
         // After the upsert, which clears the stored refs of a row whose text was written (schema trigger items_text_refs_stale).
@@ -171,18 +171,18 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
         const unbound = new Set((await q.all(q.k.selectFrom("main.items").select("author").distinct().where(kx.inList(db, "author", [...ids.keys()]))
           .where("kind", "=", "pr").where("state", "in", ["MERGED", "CLOSED"]).where("author_id", "is", null), { label: "mirror.saveItems" })).map((r) => r.author));
         const bind = [...ids].filter(([login]) => !unbound.has(login)).map(([login, id]) => ({ login, id }));
-        for (const b of kx.batches(bind)) await db.run(q.k.insertInto("main.author_ids").values(b).onConflict((oc) => oc.doNothing()));
+        for (const b of kx.batches(bind)) await q.run(q.k.insertInto("main.author_ids").values(b).onConflict((oc) => oc.doNothing()));
       }
       const full = changed.filter((e) => e.detail === "full");
       if (full.length) {
         const comments = [...new Map(full.flatMap((e) => e.comments).map((c) => [c.id, c])).values()];
         // A forced re-read of an unchanged item upserts in place: an identical comment bumps no topic. Comments the read no longer lists go.
-        if (o.force) await db.run(q.k.deleteFrom("main.comments").where(isRef(full)).where((eb) => eb.not(kx.tupleIn(db, ["repo", "number", "id"], full.flatMap((e) => e.comments.map((c) => [e.repo, e.row.number, c.id] as const)), ["text", "bigint", "text"]))));
-        else await db.run(q.k.deleteFrom("main.comments").where(isRef(full)));
-        for (const b of kx.batches(comments)) await db.run(q.k.insertInto("main.comments").values(b as never).onConflict((oc) => oc.column("id").doUpdateSet(kx.excluded(COMMENT_UPSERT))));
+        if (o.force) await q.run(q.k.deleteFrom("main.comments").where(isRef(full)).where((eb) => eb.not(kx.tupleIn(db, ["repo", "number", "id"], full.flatMap((e) => e.comments.map((c) => [e.repo, e.row.number, c.id] as const)), ["text", "bigint", "text"]))));
+        else await q.run(q.k.deleteFrom("main.comments").where(isRef(full)));
+        for (const b of kx.batches(comments)) await q.run(q.k.insertInto("main.comments").values(b as never).onConflict((oc) => oc.column("id").doUpdateSet(kx.excluded(COMMENT_UPSERT))));
       }
       if (current.length) {
-        await db.run(q.k.insertInto("main.item_reads").values(current.map((e) => ({ repo: e.repo, number: e.row.number, synced_at: readAt(e) })))
+        await q.run(q.k.insertInto("main.item_reads").values(current.map((e) => ({ repo: e.repo, number: e.row.number, synced_at: readAt(e) })))
           .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["synced_at"]))
             .where((eb) => eb(eb.fn<number>("julianday", [eb.ref("excluded.synced_at")]), ">=", eb.fn<number>("julianday", [eb.ref("main.item_reads.synced_at")])))));
       }

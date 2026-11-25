@@ -6,7 +6,7 @@ import { addLogin } from "../src/access.ts";
 import { setTestRepo } from "../src/data/control/index.ts";
 import { requireSessionOperator } from "../src/security/cli.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 
 test("the session refuses a repo that is not a test repo and a login that is not an operator", async () => {
   const db = await connectDb(join(SCRATCH, "cli.db"));

@@ -42,6 +42,7 @@ import { resolveGate, resolveI18nRev } from "../worker/gate.ts";
 import { EXT_ARCHIVE_MAX_BYTES, gateStepEnv } from "../worker/environment.ts";
 import { changedFrom, parseLsTree, type CopyMark } from "../worker/warm-copy.ts";
 import { describeHeader, execInWorkspace, execWs, getCheckpoint, getWorkspace, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, RESUME_TRIES, resumeWorkspace, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
+import { effect } from "../db/effects.ts";
 
 export const SEED_LIMIT_MS = 10 * 60_000;
 export const IDLE_PARK_MS = 30 * 60_000;
@@ -393,6 +394,7 @@ async function create(c: Ctx, row: WorkspaceRow, images: Images): Promise<boolea
     await c.api.createPvc(ns, workspacePvcSpec(c.s, c.env.id, w.id, w.pvc ?? undefined, warmOf(w)?.storageBytes)).catch((e: unknown) => {
       if (!conflict(e)) throw e;
     });
+    effect("build-launch");
     await c.api.createPod(ns, workspacePodSpec({ s: c.s, envId: c.env.id, id: w.id, ...images, limits: limitsOf(w), pod: w.pod ?? undefined, pvc: w.pvc ?? undefined, ci: ciLayoutOf(w) ?? undefined })).catch(async (e: unknown) => {
       if (!conflict(e)) throw e;
       const old = (await c.api.listPods(ns, workspaceSelector(w.id))).find((p) => p.metadata.name === w.pod);

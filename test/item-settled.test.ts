@@ -2,8 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ensureSettled, loadSettled } from "../src/data/triage/index.ts";
 import { connect } from "../src/db.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb, dbFor } from "../src/db/open.ts";
+import { connectDb, dbFor, type Db } from "./helpers/raw-db.ts";
 
 const RUN = "r1";
 

@@ -5,9 +5,8 @@ import { refreshOutsideHolds, releaseOutside, setOutsideLimits } from "../src/ou
 import { held, releaseAll } from "../src/dash/api/outside.ts";
 import type { Req } from "../src/dash/types.ts";
 import { resumeStage } from "../src/data/control/index.ts";
-import type { Db } from "../src/db/index.ts";
+import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { everySeq, mapSeq } from "../src/async-seq.ts";
-import { connectDb } from "../src/db/open.ts";
 
 /** The item is in the pipeline's scope (the workflow scope fragment), read as the planner reads it. */
 const inPilot = async (db: Db, repo: string, number: number): Promise<boolean> =>

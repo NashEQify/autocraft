@@ -37,6 +37,7 @@ import type { Db } from "../db/index.ts";
 import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts";
 import { loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
 import { saveJevChunk, saveVerdicts as saveVerdictRows, type JevFailed, type VerdictInput } from "../data/triage/index.ts";
+import { effect } from "../db/effects.ts";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
   const out: { repo: string; number: number }[] = [];
@@ -395,6 +396,7 @@ async function lintTail(reply: Reply, lint: Lint, canFix: boolean, fixTurn: (mes
 }
 
 export async function askClaude<K extends ClaudePromptId>(id: K, model: string, input: ClaudeInput[K], db: Db, opts: AskOptions = {}): Promise<LintedReply | null> {
+  effect("model-call", id);
   const ses = opts.session;
   if (ses?.resume) {
     const r = await askRemote(id, model, input, db, opts);
@@ -526,6 +528,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
 
 /** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
 export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupePair), perCallUsage = true): Promise<Proc> {
+  effect("model-call", id);
   const runId = await startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
   const start = now();
   try {
