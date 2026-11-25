@@ -11,7 +11,7 @@ import { AT, openApp, planRow, seedPrs } from "./planner-helpers.ts";
 // The wave stays far under the 40 reads past which a Postgres wave stops being one snapshot.
 const sizes = (n: number) => ({ prs: n, repos: n > 2 ? 4 : 1 });
 
-for (const dialect of ["sqlite", ...(TEST_PG_URL ? ["postgres" as const] : [])]) {
+for (const dialect of ["sqlite" as const, ...(TEST_PG_URL ? ["postgres" as const] : [])]) {
   for (const mode of ["full", "changed"] as const) {
     test(`planner pass inputs: statements do not grow with PRs or repos, ${mode} pass (${dialect})`, async () => {
       await expectFlat(async (n) => {
