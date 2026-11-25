@@ -861,7 +861,7 @@ The dashboard computes the checks below from the database on each request; nothi
 
 | Id | Fails or warns when |
 |---|---|
-| `runner` | `runner_heartbeat` is missing or older than 2 minutes (fail) |
+| `runner` | the runner's heartbeat is missing or older than 2 minutes, or its reads, its cancels or the whole pass have failed on every pass for a minute (fail); another part of its work has (warn) |
 | `runner-leader`, `periodic-leader` | Postgres with leader election only (see [Two replicas](#two-replicas)): no leader has written its status (`leader:<role>` in `settings`) for 1 minute (fail). While it is `ok`, `since` is when the leader took over and `count` is the number of standbys waiting; a missing standby is not a problem. Warn when a standby runs while the leader or a standby has `AUTOCRAFT_RUNNER_REPLICAS` 1 |
 | `worker:<env id>` (`workers` in the endpoint) | an enabled build environment has not reported (`last_seen_at`) for 5 minutes, or never (fail) |
 | `build-queue` | a build task has been queued for over 10 minutes: fail when no enabled environment has reported in 5 minutes, else warn (a security task while no confidential environment is ready counts under `confidential-env` instead) |

@@ -9,7 +9,7 @@ import { allocation } from "../src/agents/call.ts";
 import { addLogin } from "../src/access.ts";
 import { queueWorkspaceCall } from "../src/build/workspace-call.ts";
 import { createHash } from "node:crypto";
-import { IMAGE_KEEP_MS, KEPT_IMAGES, pruneWorkspaceImages, relayWorkspaceCall, type ToolSession } from "../src/build/workspace-relay.ts";
+import { IMAGE_KEEP_MS, KEPT_IMAGES, pruneWorkspaceImages, relayWorkspaceCall, WorkspaceServer, type ToolSession } from "../src/build/workspace-relay.ts";
 import { calls, image } from "../src/dash/api/workspaces.ts";
 import type { Req } from "../src/dash/types.ts";
 import { mcpReply } from "../src/dash/mcp/index.ts";
@@ -133,6 +133,29 @@ describe("workspace relay", async () => {
     assert.ok(await pruneWorkspaceImages(db) >= KEPT_IMAGES);
     assert.equal((await image(db, op({ id: String(s.ws), call: String(kept!.id) }))).status, 404, "kept bytes are dropped once the workspace has long ended");
     assert.ok((await calls(db, op({ id: String(s.ws) }))).calls.every((c) => c.notKept !== null));
+  });
+
+  test("a tool call whose claim fails half way stays queued and runs at the next poll", { timeout: 20_000 }, async (t) => {
+    const s = await session();
+    const fake: ToolSession = { call: async () => ({ text: "ran" }) };
+    const server = (await WorkspaceServer.open(db, s.id, () => fake))!;
+    const write = db.write.bind(db);
+    let failed = false;
+    t.mock.method(db, "write", (async (fn: () => Promise<unknown>) => {
+      if (!failed && new Error().stack!.includes("markCalls")) {
+        failed = true;
+        throw new Error("the second write failed");
+      }
+      return await write(fn);
+    }) as typeof db.write);
+    const relayed = relayWorkspaceCall(db, s, "shell", { command: "ls" }, { live: async () => true });
+    while (!await db.get(db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", s.ws))) await new Promise((r) => setTimeout(r, 5));
+    for (let i = 0; i < 100 && !failed; i++) await server.serve().catch(() => new Promise((r) => setTimeout(r, 5)));
+    assert.ok(failed);
+    await server.serve();
+    assert.equal((await relayed).text, "ran");
+    await server.end();
+    await submitCall(db, s.secret, { ok: false, error: "done", durationMs: 1 });
   });
 
   test("a tool call still queued when the remote call ends is refused", { timeout: 20_000 }, async () => {

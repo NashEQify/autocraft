@@ -65,10 +65,33 @@ test("a job pulse merges writes and answers cancel and deadline questions withou
     const q = queryDb(db);
     await q.run(q.k.updateTable("jobs").set({ cancel_requested_at: "2026-01-01T00:00:00.000Z" }).where("id", "=", id!));
     assert.equal(await pulse.cancelled(), false, "the flag is the cached one");
-    await pulse.flush();
+    await recordResult(db, id!, { patch: await pulse.end() });
     const r = (await loadJobs(db, [id!])).get(id!)!;
     assert.deepEqual([r.items, r.progress], [4 + 19, "p19"], "a resumed job's count adds to its earlier runs");
     assert.equal((await pulseJob(db, id!, {})).cancel_requested_at !== null, true);
+  });
+});
+
+test("counts and items noted last are stored a little later without another note, also from inside a transaction", async () => {
+  const { withDb } = await import("./jobs-fixture.ts");
+  await withDb("sqlite", async (db) => {
+    const [id] = await seedJobs(db, [{ state: "running" }]);
+    const pulse = await openJobPulse(db, { id: id!, items: 0, resumes: 0 }, { minMs: 50 });
+    await pulse.cancelled();
+    await db.write(async () => {
+      pulse.handled(5);
+      await noteJobItem(db, id!, "app", 3, "merged", () => {});
+    });
+    const until = async (cond: () => Promise<boolean>) => {
+      const end = Date.now() + 10_000;
+      while (!await cond()) {
+        assert.ok(Date.now() < end, "not stored");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    await until(async () => (await loadJobs(db, [id!])).get(id!)!.items === 5);
+    await until(async () => (await loadJobItems(db, [id!])).get(id!)?.length === 1);
+    await pulse.end();
   });
 });
 

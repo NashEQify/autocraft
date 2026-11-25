@@ -1,9 +1,10 @@
 // State writers; the cross-table orchestration is feature code `src/runner/lifecycle.ts` (M07 jobs).
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { MAX_RESUMES, MAX_TOTAL_RESUMES } from "../../runner/resuming.ts";
-import { flushJobItems } from "./items.ts";
+import { drainJobItems } from "./items.ts";
 import { nowIso } from "./sql.ts";
 import type { JobFlags, JobPatch, JobPulse, JobResult, PulseRow } from "./types.ts";
 
@@ -122,8 +123,8 @@ export async function recordResult(db: Db, id: number, r: JobResult): Promise<vo
 }
 
 /**
- * In-process cache over `pulseJob`: writes merge into the next pulse; `cancelled()` and `timeUp()` return the last flags
- * when younger than `minMs`. `handled` and `acted` take the job's own count; a resumed job's counts add to those of its
+ * In-process cache over `pulseJob`: writes merge into the next pulse, at most `minMs` later; `cancelled()` and `timeUp()`
+ * return the last flags when younger than `minMs`. `handled` and `acted` take the job's own count; a resumed job's counts add to those of its
  * earlier runs, which `row` carries.
  */
 export async function openJobPulse(db: Db, row: PulseRow, o: { minMs: number }): Promise<JobPulse> {
@@ -151,19 +152,34 @@ export async function openJobPulse(db: Db, row: PulseRow, o: { minMs: number }):
     return p;
   };
   const fresh = async (): Promise<JobFlags> => (flags && Date.now() - flagsAt < o.minMs ? flags : await pulse());
-  const lazyWrite = async (): Promise<void> => { if (Date.now() - flagsAt >= o.minMs) await pulse(); };
+  // A note is stored within `minMs`, also when the step says nothing after it. Outside the note's async context: a transaction open there has ended by then.
+  const apart = AsyncLocalStorage.snapshot();
+  let timer: NodeJS.Timeout | null = null, writing = false, ended = false;
+  const later = (ms: number): void => { if (!ended) timer ??= apart(() => setTimeout(() => { timer = null; write(); }, ms).unref()); };
+  const write = (): void => {
+    if (writing || !Object.keys(pending).length) return;
+    writing = true;
+    void apart(pulse).catch(() => {}).finally(() => {
+      writing = false;
+      // Notes made meanwhile, or put back by a write that failed.
+      if (Object.keys(pending).length) later(o.minMs);
+    });
+  };
+  const lazyWrite = (): void => {
+    const due = flagsAt + o.minMs - Date.now();
+    if (due > 0) later(due);
+    else write();
+  };
   return {
-    progress(text) { pending.progress = text; void lazyWrite().catch(() => {}); },
-    handled(n) { pending.items = itemsBefore + n; void lazyWrite().catch(() => {}); },
-    acted(n) { pending.acted = actedBefore + n; void lazyWrite().catch(() => {}); },
+    progress(text) { pending.progress = text; lazyWrite(); },
+    handled(n) { pending.items = itemsBefore + n; lazyWrite(); },
+    acted(n) { pending.acted = actedBefore + n; lazyWrite(); },
     cancelled: async () => { const f = await fresh(); return !!f.cancel_requested_at || DEADLINE_ERROR.test(f.error ?? ""); },
     timeUp: async (sliceMs) => { const f = await fresh(); return Date.now() - Date.parse(f.started_at ?? claimedAt) >= sliceMs; },
-    async flush() {
-      await flushJobItems(db, row.id);
-      if (Object.keys(pending).length) await pulse();
-    },
     async end() {
-      await flushJobItems(db, row.id);
+      ended = true;
+      if (timer) clearTimeout(timer);
+      await drainJobItems(db, row.id);
       // A pulse under way that fails puts its patch back.
       await chain;
       const patch = pending;

@@ -38,7 +38,7 @@ export type QueuedCall = {
 /** `calls` holds the follow-ups first (oldest first), then the other calls oldest first; the pure `sortQueue` of feature code puts them in claim order. */
 export type QueueSnapshot = { signature: string; calls: QueuedCall[]; running: { repoN: Map<string, number>; stepN: Map<string, number> } };
 export type PollRow = {
-  id: number; state: CallState; reply: string | null; error: string | null; runId: number | null; leasedAt: number | null; attempt: number;
+  id: number; state: CallState; reply: string | null; error: string | null; progress: string | null; runId: number | null; leasedAt: number | null; attempt: number;
   consumedAt: number | null; usage: string | null; turns: number | null; sessionId: string | null;
 };
 /** `parentLive`: for a queued follow-up, the helper that ran its parent holds a lease that heartbeats. */

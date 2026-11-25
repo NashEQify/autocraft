@@ -128,12 +128,11 @@ export function takeFromQueueCache(db: Db, id: number): void {
   for (const h of dropHooks) h(db);
 }
 
-/** The parsed parts of queued calls by id; they change only when a call is refused (`forgetParsed`). */
-export type Parsed = { refs: import("./types.ts").QueuedCall["refs"]; repos: string[]; authors: ReadonlySet<string>; forLogin: string | null; boundSlot: boolean; refusedToken: number | null; timeoutMs: number };
+/** The parsed texts of queued calls by id; they never change. */
+export type Parsed = { refs: import("./types.ts").QueuedCall["refs"]; repos: string[]; authors: ReadonlySet<string> };
 const parsedCalls = new WeakMap<Db, Map<number, Parsed>>();
-export const parsedOf = (db: Db): Map<number, Parsed> => parsedCalls.get(db) ?? new Map();
+export const parsedOf = (db: Db): ReadonlyMap<number, Parsed> => parsedCalls.get(db) ?? new Map();
 export const keepParsed = (db: Db, m: Map<number, Parsed>): void => void parsedCalls.set(db, m);
-export const forgetParsed = (db: Db, ids: number[]): void => { const m = parsedCalls.get(db); if (m) for (const id of ids) m.delete(id); };
 
 /** SET value of `queued_ms` for a call that ends or leaves the queue at `now`: the time it waited since `queued_since` is added. */
 export function queuedMsAfter(db: Db, eb: Eb, now: number): Expression<number> {

@@ -24,7 +24,7 @@ import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
 import { drainCommands, pruneCommands } from "../github/commands.ts";
 import { checkPendingUpdate } from "../build/worker-update.ts";
-import { JOB_KEEP_MS, now, pruneJobs } from "./jobs.ts";
+import { JOB_KEEP_MS, now, pruneJobs, scrub } from "./jobs.ts";
 import { endJob, recoverJobs } from "./lifecycle.ts";
 import { advanceSecurityFixes, autoFixConfirmed, loadSecurityFixWork } from "../security/actions.ts";
 import { advanceScanTests, loadScanTestWork } from "../security/scantest.ts";
@@ -57,6 +57,8 @@ export function runnerLockPath(): string {
 
 /** The lane_state mark the runner writes on every tick. */
 export const HEARTBEAT_MARK = "heartbeat";
+/** The failure of the runner's passes as JSON TickFailure, written with the heartbeat; "" once a pass went through. */
+export const TICK_FAILURE_MARK = "tick_failure";
 /** How often queued webhook items are read again from GitHub. */
 export const WEBHOOK_DRAIN_MS = 5_000;
 /** How often the runner checks for a repo due for its daily reconcile. */
@@ -102,6 +104,9 @@ function isJobProcess(pid: number, id: number): boolean {
   }
 }
 
+/** An error as the health check shows it: one scrubbed line. */
+const errorText = (e: unknown): string => scrub(((e as Error)?.message ?? String(e)).replace(/\s+/g, " ").trim()).slice(0, 200);
+
 function killGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -116,6 +121,12 @@ function numberOfParams(params: string): number | null {
 }
 
 type TickReads = Awaited<ReturnType<Runner["load"]>>;
+
+/**
+ * Since when every pass of the runner failed in some part, and the latest pass's error: `fail` when its reads, its cancels or
+ * the pass itself failed, `warn` when only another part did (one that reads GitHub fails with it).
+ */
+export type TickFailure = { since: string; state: "warn" | "fail"; error: string };
 
 export class Runner {
   readonly db: Db;
@@ -133,6 +144,10 @@ export class Runner {
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
   private detected: Detected | null = null;
+  /** How the passes fail now, and what is stored of it (undefined: what an earlier runner left). */
+  private tickFailure: TickFailure | null = null;
+  private storedFailure: string | undefined;
+  private passErrors: Omit<TickFailure, "since">[] = [];
   /** Jobs were queued at the last look: the next tick reads the model queue's room with the rest. */
   private jobsWaited = false;
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
@@ -178,14 +193,23 @@ export class Runner {
 
   /**
    * One pass: heartbeat, cancels, autopilot, new jobs. Everything it decides on is read in one wave; a part that changed
-   * something (a job's end recorded, proposals applied) makes the parts after it read again. The heartbeat and the jobs' new
-   * log lines are written beside it: it ends once they have landed.
+   * something (a job's end recorded, proposals applied) makes the parts after it read again, and so does a wave that failed:
+   * one broken read then stops its own part only. The heartbeat and the jobs' new log lines are written beside it: it ends
+   * once they have landed. The heartbeat carries how the passes before it failed, for the health check.
    */
   async tick(): Promise<void> {
-    const beside = [saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: now() }])];
+    const failure = this.tickFailure ? JSON.stringify(this.tickFailure) : "";
+    const beside = [saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: now() }, ...(failure !== this.storedFailure ? [{ kind: "mark" as const, step: TICK_FAILURE_MARK, value: failure }] : [])])
+      .then(() => { this.storedFailure = failure; })];
+    this.passErrors = [];
     try {
       await this.pass(beside);
+    } catch (e) {
+      this.passErrors.push({ state: "fail", error: errorText(e) });
+      throw e;
     } finally {
+      const worst = this.passErrors.find((e) => e.state === "fail") ?? this.passErrors[0];
+      this.tickFailure = worst ? { since: this.tickFailure?.since ?? now(), ...worst } : null;
       const ends = await Promise.allSettled(beside);
       const failed = ends.find((e) => e.status === "rejected");
       // A pass that failed has its own error on the way.
@@ -202,20 +226,26 @@ export class Runner {
       }
     }
     const read = await this.load();
-    await this.checkRunning(read.jobs.running);
-    beside.push(this.copyRunningLogs());
+    const { wave } = read;
+    try {
+      if (wave) {
+        await this.checkRunning(wave.jobs.running);
+        beside.push(this.copyRunningLogs());
+      } else await this.cancels();
+    } catch (e) { this.fault("cancels", e, "fail"); }
     if (await this.recordEnds()) read.stale = true;
     if (this.stopping) return;
     try {
-      const lost = await reapLost(this.db, read.at, read.staleTasks);
+      const lost = await reapLost(this.db, read.at, wave?.staleTasks);
       if (lost) {
         read.stale = true;
         this.o.log(`${lost} build tasks lost their worker`);
       }
-    } catch (e) {
-      this.o.log(`build tasks: ${(e as Error).message}`);
-    }
-    if (read.webhooks) this.webhookTick(...read.webhooks);
+    } catch (e) { this.fault("build tasks", e); }
+    try {
+      const hooks = wave ? wave.webhooks : read.webhooksDue ? await this.webhookWork() : null;
+      if (hooks) this.webhookTick(...hooks);
+    } catch (e) { this.fault("webhooks", e); }
     this.reconcileTick();
     await this.pruneTick();
     this.workerUpdateTick();
@@ -223,18 +253,36 @@ export class Runner {
     await this.startJobs(read);
   }
 
-  /** What a tick reads, in one wave. `stale`: a part of the tick wrote since, so what follows it reads again. */
+  /** Logs the failure of a part of the pass; the pass goes on and counts as failed (TickFailure). */
+  private fault(part: string, e: unknown, state: TickFailure["state"] = "warn"): void {
+    this.passErrors.push({ state, error: `${part}: ${errorText(e)}` });
+    this.o.log(`${part}: ${(e as Error)?.message ?? String(e)}`);
+  }
+
+  /**
+   * What a tick reads, in one wave. `stale`: a part of the tick wrote since, so what follows it reads again. `wave` is null
+   * when the wave failed (on Postgres one broken read fails all of them): every part then reads its own, as after a write.
+   */
   private async load() {
     const db = this.db, at = Date.now();
-    const webhooks = !this.webhooking && at - this.webhookAt >= WEBHOOK_DRAIN_MS;
-    if (webhooks) this.webhookAt = at;
-    const [start, staleTasks, fixes, scanTests, seqs, plan, hooks] = await db.together(() => Promise.all([
-      this.loadStart(at), loadStaleTasks(db, at), loadSecurityFixWork(db), loadScanTestWork(db), db.seqs(), this.planning ? null : loadPlanDue(db, at),
-      // Commands in comments, autorepins whose pull request was merged or closed or whose lockfile task ended (src/repin), webhook re-reads.
-      webhooks ? Promise.all([hasCommandWork(db), anyRepinDue(db), hasSyncRequests(db)]) : null,
-      refreshReadIdentity(db).catch((e: unknown) => this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`)),
-    ]));
-    return { at, ...start, staleTasks, fixes, scanTests, seqs, plan, webhooks: hooks, stale: false };
+    const webhooksDue = !this.webhooking && at - this.webhookAt >= WEBHOOK_DRAIN_MS;
+    if (webhooksDue) this.webhookAt = at;
+    try {
+      const [start, staleTasks, fixes, scanTests, seqs, plan, webhooks] = await db.together(() => Promise.all([
+        this.loadStart(at), loadStaleTasks(db, at), loadSecurityFixWork(db), loadScanTestWork(db), db.seqs(), this.planning ? null : loadPlanDue(db, at),
+        webhooksDue ? this.webhookWork() : null,
+        refreshReadIdentity(db).catch((e: unknown) => this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`)),
+      ]));
+      return { at, wave: { ...start, staleTasks, fixes, scanTests, seqs, plan, webhooks }, webhooksDue, stale: false };
+    } catch (e) {
+      this.fault("the pass's reads, now made one by one", e, "fail");
+      return { at, wave: null, webhooksDue, stale: true };
+    }
+  }
+
+  /** Commands in comments, autorepins whose pull request was merged or closed or whose lockfile task ended (src/repin), webhook re-reads. */
+  private async webhookWork(): Promise<[boolean, boolean, boolean]> {
+    return await Promise.all([hasCommandWork(this.db), anyRepinDue(this.db), hasSyncRequests(this.db)]);
   }
 
   /** What startJobs reads: the jobs, the switch and the cap, and (when jobs waited at the last tick, so some likely wait now) the model queue's room. */
@@ -326,27 +374,33 @@ export class Runner {
           const fixes = await autoFixConfirmed(this.db);
           if (fixes) this.o.log(`autopilot: started the private fix of ${fixes} confirmed security findings`);
         }
-      } catch (e) {
-        this.o.log(`autopilot: ${(e as Error).message}`);
-      }
+      } catch (e) { this.fault("autopilot", e); }
     }
+    // What a part reads while nothing wrote since the wave.
+    const wave = (): TickReads["wave"] => (read.stale ? null : read.wave);
     // A private fix waits for its build without a job; the next job starts when the build tasks end, for operator-started fixes with the pipeline off too.
     try {
-      const next = await (read.stale ? advanceSecurityFixes(this.db, await isEnabled(this.db)) : advanceSecurityFixes(this.db, read.on, read.fixes));
+      const w = wave();
+      const next = await (w ? advanceSecurityFixes(this.db, w.on, w.fixes) : advanceSecurityFixes(this.db, await isEnabled(this.db)));
       if (next) read.stale = true;
       if (next) this.o.log(`security: continued the private fix of ${next} findings after their builds`);
-    } catch (e) { this.o.log(`security fixes: ${(e as Error).message}`); }
+    } catch (e) { this.fault("security fixes", e); }
     // The build task of a scan test is read here (database only); a finding whose test ended can then start its automatic fix.
     try {
-      for (const t of await advanceScanTests(this.db, read.stale ? undefined : read.scanTests)) {
+      for (const t of await advanceScanTests(this.db, wave()?.scanTests)) {
         read.stale = true;
         this.o.log(`security: scan test of ${t.repo} finding ${t.number}: ${t.state}`);
         if (await isEnabled(this.db) && t.state !== "not-shown") await autoFixConfirmed(this.db, t.repo, t.number);
       }
-    } catch (e) { this.o.log(`security scan tests: ${(e as Error).message}`); }
+    } catch (e) { this.fault("security scan tests", e); }
     // Pre-approved merges move on rows other steps wrote; they are read here, not on a timer of their own.
-    try { await this.preapprovals(read); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
-    if (this.planning || !await planDue(this.db, read.at, read.stale || !read.plan ? undefined : read.plan)) return;
+    try { await this.preapprovals(read); } catch (e) { this.fault("preapprovals", e); }
+    try {
+      if (this.planning || !await planDue(this.db, read.at, wave()?.plan ?? undefined)) return;
+    } catch (e) {
+      this.fault("autopilot", e);
+      return;
+    }
     this.planning = this.detect(Date.now())
       .then((d) => { this.detected = d; }, (e) => this.o.log(`autopilot: detection failed: ${(e as Error).message}`))
       .finally(() => (this.planning = null));
@@ -359,15 +413,15 @@ export class Runner {
    */
   private async preapprovals(read: TickReads): Promise<void> {
     const t = Date.now();
-    const sig = preapprovalInputs(read.stale ? await this.db.seqs() : read.seqs);
+    const sig = preapprovalInputs(read.stale || !read.wave ? await this.db.seqs() : read.wave.seqs);
     const m = this.preapprovalMark;
     if (m && m.sig === sig && t < m.wakeAt) return;
     this.preapprovalMark = null;
     read.stale = true;
     const next = { sig, wakeAt: Infinity };
     // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on.
-    try { await advanceWorkflows(this.db, this.o.log); } catch (e) { this.o.log(`workflows: ${(e as Error).message}`); }
-    try { await endGoneCloses(this.db); } catch (e) { this.o.log(`closes: ${(e as Error).message}`); }
+    try { await advanceWorkflows(this.db, this.o.log); } catch (e) { this.fault("workflows", e); }
+    try { await endGoneCloses(this.db); } catch (e) { this.fault("closes", e); }
     await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < next.wakeAt) next.wakeAt = at; });
     this.preapprovalMark = next;
   }
@@ -506,7 +560,7 @@ export class Runner {
    */
   private async startJobs(read: TickReads): Promise<void> {
     const steps = await loadSteps();
-    const { jobs: tick, live, on, draining, cap, room: state } = read.stale ? await this.loadStart(Date.now()) : read;
+    const { jobs: tick, live, on, draining, cap, room: state } = read.stale || !read.wave ? await this.loadStart(Date.now()) : read.wave;
     const queued = tick.queued.sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
     this.jobsWaited = queued.length > 0;
     if (!queued.length) return;
@@ -516,7 +570,7 @@ export class Runner {
     const room = new Map<number, Map<string, number>>();
     const pass = await queueRoomPass(this.db, undefined, state);
     let started = 0;
-    const pids: { id: number; pid: number }[] = [];
+    const pids: Promise<unknown>[] = [];
     const failed: { id: number; error: string }[] = [];
     try {
       for (const q of queued) {
@@ -550,7 +604,8 @@ export class Runner {
         }
         const spawned = await this.start(q, step, steps, cap, tick.logCursors.get(q.id));
         if (spawned) {
-          if (spawned.pid !== null) pids.push({ id: q.id, pid: spawned.pid });
+          // Written at once, beside the next starts: a runner that takes over stops what the process left running by its pid (recover).
+          if (spawned.pid !== null) pids.push(setPids(this.db, [{ id: q.id, pid: spawned.pid }]).catch((e: unknown) => this.fault(`job ${q.id}: pid not stored`, e)));
           running.push({ id: q.id, step: step.name, state: "running", repo: q.repo, number: numberOfParams(q.params), params: q.params, items: null, requested_by: q.requested_by, resumes: q.resumes, cancel_requested_at: null, started_at: null, pid: spawned.pid });
           if (claude) {
             byRepo.set(key, await roomOf());
@@ -560,8 +615,8 @@ export class Runner {
         }
       }
     } finally {
+      await Promise.all(pids);
       await failQueued(this.db, failed);
-      if (pids.length) await setPids(this.db, pids);
     }
   }
 

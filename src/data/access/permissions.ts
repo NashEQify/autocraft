@@ -124,6 +124,20 @@ export async function loadPermissionDenials(db: Db, logins: Login[] | { runners:
   return out;
 }
 
+/** The (login, repo) pairs of `logins` with a cached write permission checked within `PERM_READ_TTL`. */
+export async function loadFreshWrites(db: Db, logins: readonly Login[], nowMs: number): Promise<Set<PermKey>> {
+  const out = new Set<PermKey>();
+  if (!logins.length) return out;
+  const since = new Date(nowMs - PERM_READ_TTL).toISOString();
+  const q = queryDb(db);
+  for (const part of kx.chunks(logins)) {
+    const rows = await q.all(q.k.selectFrom("main.repo_permissions").select(["login", "repo"]).where(kx.inList(db, "login", part, "citext"))
+      .where("checked_at", ">", since).where("permission", "in", [...WRITE_PERMISSIONS]));
+    for (const r of rows) out.add(permKey(r.login, r.repo));
+  }
+  return out;
+}
+
 /** One LEFT JOIN of the pairs to `access` and `repo_permissions`; the only database read of the act rule. */
 export async function loadActFacts(db: Db, pairs: { login: string | null; repo: string }[]): Promise<Map<PermKey, ActFacts>> {
   const out = new Map<PermKey, ActFacts>();

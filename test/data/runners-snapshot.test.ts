@@ -22,7 +22,7 @@ for (const dialect of dialects()) {
       assert.equal(s.runners.length, n);
       assert.equal(s.runners[0]!.leased, 1);
       assert.equal(s.leasedByLogin.get("u0")?.leased, 1);
-      assert.ok(s.denied.has("u1\norg/a"));
+      assert.ok(s.denied.has("u0\norg/a"));
       assert.equal(s.started.live[0]!.started_by, "u0");
     }), 1, 4);
     assert.ok(large.statements > 0);
@@ -33,6 +33,8 @@ for (const dialect of dialects()) {
       const sig = await loadTakerSignature(db, NOW, deps);
       assert.equal(sig.split("|")[0]!.split(";").length, n);
       assert.match(sig, /2026-06-01T11:59:00/);
+      const other = { ...deps, denials: async () => new Map([["not-a-taker\norg/a", { checkedAt: "2026-06-01T11:58:00.000Z" }]]) };
+      assert.doesNotMatch(await loadTakerSignature(db, NOW, other), /11:58:00/, "a denial of a login that takes nothing now does not change it");
     }), 1, 4);
   });
 

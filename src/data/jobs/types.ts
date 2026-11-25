@@ -26,7 +26,6 @@ export interface JobPulse {
   acted(n: number): void;
   cancelled(): Promise<boolean>;
   timeUp(sliceMs: number): Promise<boolean>;
-  flush(): Promise<void>;
   /** Writes the buffered job items and waits for a pulse under way; the progress and counts not written yet, for the final write. */
   end(): Promise<JobPatch>;
 }

@@ -21,6 +21,8 @@ import { loadHealthFacts, loadTakerRows, type HealthEnv, type HealthFacts, type 
 export const THRESHOLDS = {
   /** The runner writes its heartbeat every few seconds. */
   runnerStaleMs: 2 * 60_000,
+  /** A pass that failed is followed by the next within seconds; passes that keep failing this long show. */
+  runnerFailingMs: 60_000,
   /** The leader of the runner and of the periodic chores writes its status every BEAT_MS; standbys too. */
   leaderStaleMs: 6 * BEAT_MS,
   /** The leader rewrites the worker API's EndpointSlice at its next beat; past this it names another address for real. */
@@ -80,7 +82,12 @@ const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n -
 async function runnerCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
   const hb = f.heartbeat;
   const beat = hb ? Date.parse(hb) : NaN;
-  if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) return [ok("runner", "/pipeline")];
+  if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) {
+    const t = f.tickFailure;
+    if (!t || nowMs - Date.parse(t.since) < THRESHOLDS.runnerFailingMs) return [ok("runner", "/pipeline")];
+    const brief = "Parts of the runner's work have failed on every pass";
+    return [{ id: "runner", state: t.state, text: `${brief} for ${minutes(nowMs - Date.parse(t.since))}: ${t.error}`, brief, since: t.since, to: "/pipeline" }];
+  }
   const text = Number.isNaN(beat) ? "The runner has not reported" : `The runner has not reported for ${minutes(nowMs - beat)}`;
   return [{ id: "runner", state: "fail", text, brief: text, since: hb, to: "/pipeline" }];
 }

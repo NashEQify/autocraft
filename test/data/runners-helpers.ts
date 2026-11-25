@@ -58,7 +58,7 @@ export async function seedCall(db: Db, o: { id?: number; state?: string; tier?: 
 // The workflow and access modules have their own tests; the snapshot's reads of them are replaced by fixed answers.
 export const fakeDeps: SnapshotDeps = {
   started: async () => ({ live: [{ repo: "org/a", number: 1, entry: "review", state: "running", startedBy: "u0", approvedBy: null }], prs: [] }),
-  denials: async () => new Map([["u1\norg/a", { checkedAt: "2026-06-01T11:59:00.000Z" }]]),
+  denials: async () => new Map([["u0\norg/a", { checkedAt: "2026-06-01T11:59:00.000Z" }]]),
 };
 
 /** Puts the snapshot (read with `fakeDeps`) in the handle's cache, for loaders that read it without taking dependencies. */
