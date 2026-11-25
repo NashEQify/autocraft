@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
 import { LOGIN, checkGithubId, getAccess } from "../../access.ts";
 import { audit, auditRefusedSignIn } from "../audit.ts";
-import type { Res, Role, Route } from "../types.ts";
+import type { Res, Role, Route, User } from "../types.ts";
 import { isLoopbackHost, type Config } from "./config.ts";
 import { resealLegacyValues } from "./reseal.ts";
 import { pkceChallenge, randomToken, safeEqual, TokenBox } from "./crypto.ts";
@@ -741,16 +741,18 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) return reply(400, rpcError(-32600, "send one JSON-RPC message as an object; batches are not supported"));
     const m = msg as McpMsg;
     let perm: ReturnType<typeof claimPermission> | undefined;
-    const answer = async () => handleMcp({
+    const answer = async (fresh: boolean, reader?: User) => handleMcp({
       db, baseUrl: config.baseUrl, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: caller.canAnswer && (caller.role === "operator" || caller.role === "maintainer"),
-      user: async (forWrite) => await userForLogin(db, box, provider, caller.login, caller.role, forWrite),
+      user: async (forWrite) => reader && !forWrite ? reader : await userForLogin(db, box, provider, caller.login, caller.role, forWrite),
       // The task tools are offered while one of the login's Task Runners reports in; they never lease.
-      ...(await hasFreshRunner(db, caller.login) && { run: { canWrite: async (repo: string) => (await (perm ??= claimPermission(caller.login, caller.role))).canWrite(repo) } }),
+      ...(fresh && { run: { canWrite: async (repo: string) => (await (perm ??= claimPermission(caller.login, caller.role))).canWrite(repo) } }),
     }, m);
     // As on the dashboard: a call that only reads takes its settings from one reading, shares its rows and sends side-by-side reads as one.
-    const out = mcpWrites(m) ? await answer() : await db.shareReads(() => db.together(async () => {
-      const [settings] = await Promise.all([readSettingsSnapshot(db), loadVisibilityInputs(db)]);
-      return await withSettingsSnapshot(db, answer, Promise.resolve(settings));
+    const out = mcpWrites(m) ? await answer(await hasFreshRunner(db, caller.login)) : await db.shareReads(() => db.together(async () => {
+      const [settings, reader, fresh] = await Promise.all([
+        readSettingsSnapshot(db), userForLogin(db, box, provider, caller.login, caller.role, false), hasFreshRunner(db, caller.login), loadVisibilityInputs(db),
+      ]);
+      return await withSettingsSnapshot(db, () => answer(fresh, reader), Promise.resolve(settings));
     }));
     if (mcpWrites(m)) await live.poke();
     // A notification or a response from the client: accepted, nothing to say.

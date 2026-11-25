@@ -1,7 +1,6 @@
 // reads: (none; composes loaders)
 // The Queue page and the batch page: what each page reads, in waves that do not grow with the number of rows.
 import type { Db } from "../../db/index.ts";
-import type { PlanView } from "../../core/plan-cache.ts";
 import { loadTasks } from "../build/tasks-load.ts";
 import type { TaskRecord } from "../build/types.ts";
 import { listAudit, loadAuditActions } from "../control/audit.ts";
@@ -16,12 +15,12 @@ import { loadHolds } from "../workflow/holds.ts";
 import { loadLegPass } from "../workflow/legs.ts";
 import { loadQueuePositions, loadWorkScores } from "../workflow/rows.ts";
 import type { Preapproval, QueuePosition } from "../workflow/types.ts";
-import { loadMergeQueue, loadOpenPlanViews, type CachedEntry } from "./merge-queue.ts";
+import { loadMergeQueue, loadPipelineScope, type CachedEntry } from "./merge-queue.ts";
 import { loadRankedOpen, type WorkListRow } from "./work.ts";
 
 export type QueuePageFacts = {
-  /** The cached views of open plans; null unless the pipeline scope is asked for. */
-  views: Map<string, PlanView> | null;
+  /** The open items in the pipeline's scope; null unless that scope is asked for. */
+  scope: Set<string> | null;
   holds: Set<string>;
   positions: Map<string, QueuePosition>;
   entries: CachedEntry[];
@@ -60,8 +59,8 @@ export function closingOf(links: OpenPrRow[]): Map<string, number[]> {
 
 /** Wave 1 reads the page's own sets; wave 2 the items, ranks and audit rows of the pre-approved PRs. */
 export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: boolean; visible: string[]; hidden: HiddenRepos }): Promise<QueuePageFacts> {
-  const [views, holds, positions, entries, ranked, legPass, links, page, scores, work] = await db.together(() => Promise.all([
-    o.pipelineScope ? loadOpenPlanViews(db) : null,
+  const [scope, holds, positions, entries, ranked, legPass, links, page, scores, work] = await db.together(() => Promise.all([
+    o.pipelineScope ? loadPipelineScope(db) : null,
     loadHolds(db),
     loadQueuePositions(db),
     loadMergeQueue(db, { merged: "exclude" }),
@@ -80,7 +79,7 @@ export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: 
     legs.length ? loadAuditActions(db, [...new Set(legs.map((l) => refOf(l.repo, l.number)))], ["preapproval"]) : new Map<string, AuditRow[]>(),
   ]));
   return {
-    views, holds: new Set(holds.keys()), positions, entries, ranked, closes: closingOf(links), legs, pending, ranks, carried,
+    scope, holds: new Set(holds.keys()), positions, entries, ranked, closes: closingOf(links), legs, pending, ranks, carried,
     batches: page?.batches ?? [], scores, work,
   };
 }

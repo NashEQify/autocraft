@@ -90,19 +90,17 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const reposParam = (req.query.get("repos") || "pipeline") as QueueRepos;
   const limit = Math.min(Math.max(Number(req.query.get("limit")) || 100, 1), 500);
   const offset = Math.max(Number(req.query.get("offset")) || 0, 0);
-  const visible = await visibleRepos(db, req);
+  const [visible, reader] = await Promise.all([visibleRepos(db, req), readerOf(db, req)]);
   const visibleSet = new Set(visible);
   if (reposParam !== "pipeline" && reposParam !== "all" && !visibleSet.has(reposParam)) throw new HttpError(404, `${reposParam} is not a tracked repo`);
   const internals = canSeeInternals(req);
-  const reader = await readerOf(db, req);
   // The page's reads do not depend on each other, so they run together.
   const [facts, slots] = await db.together(() => Promise.all([
     loadQueuePage(db, { pipelineScope: reposParam === "pipeline", merge: tab === "merge", visible, hidden: reader.hidden }),
     queueSlots(db, visible),
   ]));
-  const { views, holds: held, ranked, closes: closesOf, positions } = facts;
+  const { scope: scoped, holds: held, ranked, closes: closesOf, positions } = facts;
   const allEntries = facts.entries;
-  const scoped = views ? new Set([...views].filter(([, v]) => v.scope).map(([k]) => k)) : null;
   const places = new Map<string, WeightPlace>([...positions].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))).map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
   // The default view is the pipeline's scope (src/rank/position.ts), the same one the position badges count.
   const inScope = (repo: string, number: number): boolean =>

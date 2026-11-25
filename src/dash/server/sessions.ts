@@ -99,9 +99,11 @@ export async function accessToken(db: Db, box: TokenBox, provider: Provider, idH
  * unless public, and a pick is shown as `none`.
  */
 export async function userForLogin(db: Db, box: TokenBox, provider: Provider, login: string, role: Role, forWrite: boolean): Promise<User> {
-  const s = (await access.loadLiveSessionsOf(db, login)).find((x) => Date.now() < sessionEndsAt(x.created_at, role));
-  if (s) return makeUser(db, box, provider, { rowid: s.rowid, idHash: s.id_hash, login: s.login, role, csrf: s.csrf, tokenEnc: s.token_enc }, forWrite);
-  const permissions = permissionsOnce(db, login);
+  // A read's checks take every cached permission; a write's are few and read when they come.
+  const [live, cachedAll] = await Promise.all([access.loadLiveSessionsOf(db, login), forWrite ? undefined : access.loadPermissionsOf(db, login)]);
+  const s = live.find((x) => Date.now() < sessionEndsAt(x.created_at, role));
+  if (s) return makeUser(db, box, provider, { rowid: s.rowid, idHash: s.id_hash, login: s.login, role, csrf: s.csrf, tokenEnc: s.token_enc }, forWrite, false, cachedAll);
+  const permissions = permissionsOnce(db, login, cachedAll);
   const cached = async (repo: string): Promise<string | null> => {
     const row = (await permissions()).get(repo);
     return row && Date.now() - Date.parse(row.checkedAt) < (forWrite ? PERM_WRITE_TTL : PERM_READ_TTL) ? row.permission : null;

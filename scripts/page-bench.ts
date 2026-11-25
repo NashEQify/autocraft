@@ -11,6 +11,7 @@
 // writes each answer to DIR. Drops the database at the end. `scripts/pg-test.sh start` gives a throwaway server.
 import { randomBytes } from "node:crypto";
 import { apiRoutes } from "../src/dash/api/index.ts";
+import { live } from "../src/dash/api/live.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { TokenBox } from "../src/dash/server/crypto.ts";
@@ -149,6 +150,8 @@ async function seedCalls(db: Db): Promise<void> {
 
 const ROUTES: [string, Record<string, string>, string?][] = [
   ["/api/me", {}], ["/api/me/settings", {}], ["/api/repos", {}], ["/api/repos/owners", {}], ["/api/progress", {}], ["/api/account/discord", {}], ["/api/mention", {}],
+  // The live board's data: GET /api/live itself is the event stream. And the MCP tools an agent polls (a POST to /mcp).
+  ["/api/bench/live", {}], ["mcp:get_item", { item: "repo1#1" }], ["mcp:my_items", {}], ["mcp:list_merge_queue", {}],
   ["/api/maintain/home", {}], ["/api/maintain/items", {}], ["/api/maintain/items", {}, "q=item"], ["/api/maintain/items/:repo/:n", { repo: "repo1", n: "1" }],
   ["/api/maintain/queue", {}], ["/api/maintain/repos", {}], ["/api/maintain/stats", {}],
   ["/api/items/:repo/:n/page", { repo: "repo1", n: "1" }], ["/api/items/:repo/:n", { repo: "repo1", n: "1" }], ["/api/items/:repo/:n/peek", { repo: "repo1", n: "1" }],
@@ -177,11 +180,12 @@ try {
   await seedCalls(seedDb);
   await refreshPlanCache(seedDb);
   const cookie = `${SESSION_COOKIE}=${await createSession(seedDb, new TokenBox(config.secrets.sessionKey), as, { access: "a", refresh: "r", expiresAt: Date.now() + 3_600_000, refreshExpiresAt: Date.now() + 3_600_000 } as never, "bench")}`;
+  const { token } = await createToken(seedDb, as, "bench agent");
   await seedDb.script("ANALYZE");
   await seedDb.close();
   const db = await connectDb(slow.toString(), { role: "dashboard" });
   const provider = Object.assign(new FakeProvider(null), { permission: async () => { console.log("permission asked of the provider"); return as === "vw" ? "read" : "write"; } });
-  const app = await createApp({ config, db, provider, routes: apiRoutes() });
+  const app = await createApp({ config, db, provider, routes: [...apiRoutes(), { method: "GET", pattern: "/api/bench/live", handler: async (d, r) => ({ json: await live(d, r) }) }] });
   // The stats of the request being served; what the server's timers do meanwhile is not in them.
   let stats: DbStats | undefined;
   const web = createServer((q, r) => void db.meter(() => app.handle(q, r)).then((m) => { stats = m.stats; }));
@@ -196,7 +200,10 @@ try {
     let body = "";
     const call = async (): Promise<DbStats> => {
       stats = undefined;
-      const res = await fetch(base + path, { headers: { cookie }, signal: AbortSignal.timeout(60_000) });
+      const signal = AbortSignal.timeout(60_000);
+      const res = pattern.startsWith("mcp:")
+        ? await fetch(`${base}/mcp`, { method: "POST", signal, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: pattern.slice(4), arguments: params } }) })
+        : await fetch(base + path, { headers: { cookie }, signal });
       body = await res.text();
       // The meter closes after the answer is out.
       while (!stats) await new Promise((r) => setTimeout(r, 1));

@@ -379,9 +379,14 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const staff = user.role !== "viewer";
   const rowsDone = c?.[1] === "x", pendingDone = c?.[2] === "x";
   // Rows done: the pre-approvals are all that is left, so the queue page is not built again.
-  const page = rowsDone
-    ? { total: 0, mergeRows: [], nextMerges: [], batches: [], next: null }
-    : await queuePage(env.db, reqOf(user, { query: { tab: "merge", repos: (a.repo as string | undefined) ?? "pipeline", limit: String(limit), offset: c?.[1] } }));
+  const visibleNames = visibleTo(env.db, user);
+  const [page, merging, legs] = await Promise.all([
+    rowsDone
+      ? { total: 0, mergeRows: [], nextMerges: [], batches: [], next: null }
+      : queuePage(env.db, reqOf(user, { query: { tab: "merge", repos: (a.repo as string | undefined) ?? "pipeline", limit: String(limit), offset: c?.[1] } })),
+    loadMergeQueue(env.db, { merged: "exclude" }),
+    pendingDone ? { rows: [] } : visibleNames.then((repos) => loadLegPass(env.db, { repos })),
+  ]);
   const item = (x: { repo: string; number: number }) => `${x.repo}#${x.number}`;
   const prs = page.mergeRows.map((x) => ({
     item: item(x), title: x.title, author: x.author, state: x.state, mergesBy: x.path, verdict: x.verdict, ci: x.ci, mergeable: x.mergeable,
@@ -392,9 +397,9 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   // Pre-approved merges whose PR is no queue row yet (no take review at its head), so an agent sees what it queued. A PR that is a
   // queue row anywhere, on any page and in any repo, is left out. They are the operators' own picks, so the list covers every
   // visible repo (or the one asked for), not only the pipeline's scope the queue rows default to.
-  const visible = new Set(await visibleTo(env.db, user));
-  const queued = new Set((await loadMergeQueue(env.db, { merged: "exclude" })).map(item));
-  const pendingAll = (pendingDone ? [] : (await loadLegPass(env.db, { repos: [...visible] })).rows)
+  const visible = new Set(await visibleNames);
+  const queued = new Set(merging.map(item));
+  const pendingAll = legs.rows
     .filter((p) => ["fixup", "review", "ci"].includes(p.state) && p.id > Number(c?.[2] ?? 0))
     .filter((p) => visible.has(p.repo) && (a.repo === undefined || p.repo === a.repo) && !queued.has(item(p)));
   const shown = pendingAll.slice(0, limit);
