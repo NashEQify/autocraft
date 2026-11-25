@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { item } from "../src/dash/api/maintain-item.ts";
+import { item, stepsOf } from "../src/dash/api/maintain-item.ts";
+import type { ItemWorkflow } from "../src/workflow/types.ts";
 import type { Req } from "../src/dash/types.ts";
 import { connectDb } from "./helpers/raw-db.ts";
-import { insertWorkflow } from "../src/workflow/store.ts";
+import { listWorkflows } from "../src/data/workflow/index.ts";
+import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { SCRATCH } from "./scratch.ts";
 
 const as = (role: "viewer" | "maintainer"): Req => ({
@@ -34,4 +36,23 @@ test("the item page read gives a viewer no security findings, and a maintainer g
   const maintainer = await item(db, as("maintainer"));
   assert.ok(maintainer.security.length > viewer.security.length);
   assert.equal(maintainer.canAct, true);
+
+  // A blocker's recommendation shows like any other, and a viewer reads none of the landing fix.
+  const id = (await listWorkflows(db, { refs: [{ repo: "open-app", number: 2 }] }))[0]!.id;
+  await updateWorkflow(db, id, { state: "blocked", blocker: "failed-twice", rec: { text: "Try the fix-up again, then merge.", parts: { fix: [], drop: [] }, merges: true, again: "fixup" } });
+  assert.match((await item(db, as("maintainer"))).status!.rec ?? "", /^Try the fix-up again, then merge\. Reply yes/);
+  assert.equal((await item(db, as("viewer"))).status!.rec, null);
+});
+
+test("the steps of a stuck implementation say what Try again runs, and number no fix-up after its option", () => {
+  const question = { implementation: 1, round: 2 };
+  const wf = {
+    kind: "issue", entry: "implement", state: "recommending", step: "implement", approvedBy: null,
+    plan: [{ n: 1, title: "Try again", source: "implement", option: "try-again", question, state: "planned" }],
+    rec: { text: "Start it again.", parts: { fix: [], drop: [] }, merges: false, answer: { question, option: "try-again", label: "Try again" }, question },
+  } as unknown as ItemWorkflow;
+  const notes = (w: ItemWorkflow) => Object.fromEntries(stepsOf(w, null)!.filter((s) => s.note).map((s) => [s.name, s.note]));
+  assert.deepEqual(Object.keys(notes(wf)), ["implement"]);
+  // The parts of a review are the fix-up's.
+  assert.deepEqual(notes({ ...wf, state: "running", step: "fix-up", rec: null, plan: [{ n: 1, title: "Check the length", source: "review", state: "planned" }] }), { "fix-up": "1" });
 });

@@ -53,6 +53,19 @@ const SEEDS: Record<string, Seed> = {
     events: [ev(2, 80, "ochre-fox", "discord", "started", `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply stop to halt.`)],
     breakers: [{ key: "cifix:photocraft", reason: "2 of the last 10 CI-fix pushes broke CI on photocraft", since: ago(35), canResume: false }],
   },
+  "vectorcraft#1388": {
+    status: {
+      headline: "Stopped at a blocker: a stop the review or merge step reported", live: true, entry: "merge", approved: true, weight: null,
+      blocker: "a stop the review or merge step reported: the merge was refused: the branch protection of main asks for a second approving review, and the only reviewer with write access…",
+      lines: [`Merge queue, started by ochre-fox, ${hhmm(ago(60))}`, `Approved for merge by ochre-fox, ${hhmm(ago(60))}`],
+      steps: [{ label: "update from main", state: "done" }, { label: "fix CI and conflicts", state: "done" }, { label: "batch", state: "stopped" }, { label: "merge", state: "next" }],
+      parts: [],
+      rec: "Go on with the merge after this stop: the merge was refused: the branch protection of main asks for a second approving review, and the only reviewer with write access… Reply yes to merge it (after the pre-merge check and green CI).",
+      unclear: null,
+      confirm: `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply stop to halt.`,
+    },
+    events: [ev(5, 60, "ochre-fox", "github", "started", `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply stop to halt.`)],
+  },
   "craft-libs#517": {
     status: {
       headline: "Waiting for an answer", live: true, entry: "review", approved: false, weight: null, blocker: null,

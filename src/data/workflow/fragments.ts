@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
+import { ASKING_STATES } from "../../workflow/types.ts";
 import * as control from "../control/fragments.ts";
 import * as intake from "../intake/fragments.ts";
 
@@ -102,9 +103,9 @@ export function boundToExpr(db: Db, eb: kx.AnyEb, refs: readonly { repo: string;
 export const mergeHeldExpr = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.merge_holds as mh").select(one(eb)).where("mh.repo", "=", kx.exprOf(eb, repo)).where("mh.number", "=", kx.exprOf(eb, number)));
 
-/** A live workflow in `recommending` or `blocked`: it needs a person. */
+/** A live workflow that came back to a person. */
 export const needsPerson = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as np").select(one(eb)).where("np.repo", "=", kx.exprOf(eb, repo)).where("np.number", "=", kx.exprOf(eb, number)).where("np.state", "in", ["recommending", "blocked"]));
+  eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as np").select(one(eb)).where("np.repo", "=", kx.exprOf(eb, repo)).where("np.number", "=", kx.exprOf(eb, number)).where("np.state", "in", ASKING_STATES));
 
 /** The repo has a live workflow. */
 export const startedRepo = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<SqlBool> =>
