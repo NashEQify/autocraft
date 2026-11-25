@@ -345,7 +345,8 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
   }
   for (const a of r.detail.activity) out.push(activityEvent(a, own));
   for (const s of r.stages) out.push(stageEvent(s));
-  for (const p of r.planHistory) out.push(planEventFor(c, { id: once(`${p.at}:${p.newState}`), head: p.head, old_state: p.oldState, new_state: p.newState, wait: p.wait, reasons: JSON.stringify(p.reasons), at: p.at }));
+  // The loader returns the newest first and carries no row id: a change is numbered from the oldest.
+  r.planHistory.forEach((p, i) => out.push(planEventFor(c, { id: r.planHistory.length - 1 - i, head: p.head, old_state: p.oldState, new_state: p.newState, wait: p.wait, reasons: JSON.stringify(p.reasons), at: p.at })));
   for (const j of r.jobTrail) out.push(jobEvent({ id: once(String(j.job_id)) as unknown as number, job_id: j.job_id, outcome: j.outcome, at: j.at, step: j.step, state: j.state, error: j.error }));
   for (const x of r.runs) out.push(runEvent({
     id: x.id, step: x.step, prompt_id: x.promptId, model: x.model, provider: x.provider, state: x.state, started_at: x.startedAt, ended_at: x.endedAt, input_tokens: x.tokens.input,
