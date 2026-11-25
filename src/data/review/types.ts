@@ -38,7 +38,9 @@ export type Finding = { title: string; detail?: string; file?: string; line?: nu
 export type PostmergeRow = { repo: string; number: number; merge_sha: string; at: string; model: string | null; run_id: string | null; findings: Finding[]; error: string | null; tries: number };
 export type Followup = Selectable<DB["postmerge_followups"]>;
 export type FollowupKey = { repo: string; number: number; review_at: string; finding: number };
-export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; attempts: number; note: string | null };
+/** What a claim writes: the follow-up key with the finding's title and the attempt number this try is. */
+export type FollowupClaim = FollowupKey & { title: string; attempts: number };
+export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number; note: string | null };
 export type DiscussionStat = { newest: string; maint: string; counted: { id: string; body: string | null }[] | null };
 export type MirrorEntry = { id: string; kind: string | null; author: string | null; created_at: string | null; body: string | null; review_state: string | null; counted: boolean; maint: boolean };
 
@@ -56,15 +58,30 @@ export type ReviewFacts = {
 };
 export type ReviewRecord = { latest: ReviewRow | null; history: HistoryRow[]; premerge: PremergeRow[]; postmerge: PostmergeRow | null; followups: Followup[]; post: ReviewPost | null };
 export type ReviewSignature = { history: { n: number; newest: string | null }; reviews: { n: number; newest: string | null }; premerge: { n: number; newest: string | null; tries: number }; postmerge: { n: number; newest: string | null }; followups: string };
-export type ReviewEventRow = { kind: "review" | "premerge" | "postmerge"; repo: string; number: number; at: string; verdict: string | null; model: string | null };
+/** The stored columns of one feed row of `dash/api/activity.ts`; JSON columns stay text for the page to parse. */
+export type ReviewEventRow =
+  | { kind: "review"; repo: string; number: number; at: string; model: string | null; rowid: number; head_oid: string; mode: string | null; verdict: string | null; sure: number | null; reason: string | null; risks: string | null; fixes: string | null; claims: string | null }
+  | { kind: "premerge"; repo: string; number: number; at: string; model: string | null; head_oid: string; findings: string | null; error: string | null; searched: string | null }
+  | { kind: "postmerge"; repo: string; number: number; at: string; model: string | null; merge_sha: string; findings: string | null; error: string | null };
 
-/** What the caller loaded for one review save (the module reads no GitHub or model data). */
+/** The parsed model reply of one review, as `opus-parse.ts` gives it (the ref and `blocked_by` are left out: `blockedBy` of the input is the reduced list). */
+export type ReviewInput = {
+  verdict: Verdict; sure: boolean; reason: string; fixes: ReviewFinding[]; risks: string[]; workflow?: ReviewWorkflow | null;
+  summary: string | null; why: string | null; public: unknown | null; conflicts: unknown[]; claims: unknown[];
+};
+/** What the caller loaded for one review save (the module reads no GitHub or model data). `at` defaults to the clock at the call. */
 export type SaveReviewInput = {
-  runId: string; repo: string; number: number; head: string; mode: "full" | "delta" | "carried"; base: string | null; baseRef: string | null;
-  defaultBranch: string | null; model: string | null; review: Record<string, unknown>; snap?: Record<string, unknown>; blockedBy: RefKey[]; jobId: number | null; trigger?: string | null;
+  runId: string | null; repo: string; number: number; head: string; mode: "full" | "delta" | "carried"; base: string | null; baseRef: string | null;
+  defaultBranch: string | null; model: string | null; review: ReviewInput; snap?: { seen: string; hash: string | null }; blockedBy: RefKey[]; jobId: number | null; trigger?: string | null; at?: string;
 };
 export type SaveReviewResult = { repo: string; number: number; head: string; saved: boolean; rebased: boolean };
-export type PremergeSave = { repo: string; number: number; head: string; at: string; run_id: string | null; model: string | null; findings: unknown; searched: unknown; error: string | null; final?: boolean; conflicts: unknown; base_ref: string | null; unsure: boolean; claims: string | null };
-export type PostmergeSave = { repo: string; number: number; merge_sha: string; at: string; model: string | null; run_id: string | null; findings: Finding[]; error: string | null; followups: { finding: number; title: string; state: string; duplicate_of?: number | null }[] };
+/** A stored review has `findings`; without them `error` records a failed try (`final`: no more tries). Empty `conflicts` and `claims` are stored as null. */
+export type PremergeSave = {
+  repo: string; number: number; head: string; at: string; runId?: string | null; model?: string | null;
+  findings?: unknown[]; searched?: string | null; conflicts?: unknown[]; unsure?: boolean; claims?: unknown[]; baseRef?: string | null;
+  error?: string | null; final?: boolean;
+};
+/** `findings` null with an `error`: a failed try. The skipped-minor and skipped-duplicate follow-up rows are derived from the findings. */
+export type PostmergeSave = { repo: string; number: number; merge_sha: string; at: string; model: string | null; run_id: string | null; findings: Finding[] | null; error: string | null };
 export type FollowupRow = Followup;
 export type PostSave = ({ kind: "posted" } & ReviewPost) | { kind: "edited"; repo: string; number: number; head: string; edited_at: string; opus_at: string | null; posted_as: string | null };
