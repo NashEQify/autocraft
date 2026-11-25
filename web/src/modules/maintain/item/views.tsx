@@ -217,7 +217,7 @@ function StatusCard({ m, d }: { m: MaintainItem; d: ItemPageData }) {
       )}
       {s?.rec && <p className="rounded border border-accent/60 bg-accent/10 px-3 py-2 text-lg font-semibold leading-snug">{s.rec}</p>}
       {s?.confirm && s.live && !s.rec && !s.unclear && <p className="text-sm text-ink/80">{s.confirm}</p>}
-      {m.canAct && open && <CommandBox repo={m.repo} number={m.number} placeholder={examples(m)} />}
+      {m.canAct && open && <CommandBox repo={m.repo} number={m.number} placeholder={examples(m)} asked={s?.asked ?? null} />}
       <Controls m={m} />
     </section>
   );

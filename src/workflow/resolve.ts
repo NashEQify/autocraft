@@ -206,7 +206,10 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (!entry && !named.length && merge) {
     if (rec) {
       if (rec.parts.fix.length) return ambiguous({ why: "merge-skips-fixes", parts: rec.parts.fix });
-      return accept(wf, [], rec.parts.drop, weight, true);
+      // On a PR that merges without a review, the word approves the author's commits as they are; a yes has them reviewed.
+      const { again, ...asIs } = rec;
+      const skips = wf.entry === "merge" && wf.blocker === "author-commits" && again === "review";
+      return accept(skips ? { ...wf, rec: asIs } : wf, [], rec.parts.drop, weight, true);
     }
     if (approved && state.mergeWaits) return run({ retryMerge: true, merges: true, weight, how: "approved" });
     if (approved) return refused({ why: "already-approved", by: wf.approvedBy!, at: wf.approvedAt ?? "" });

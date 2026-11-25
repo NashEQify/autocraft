@@ -224,7 +224,7 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
     const area = facts.areas.get(key(p)) as { area: string | null } | undefined;
     return {
       repo: p.repo, number: p.number, kind: p.kind, state: itemState(p.state), title: p.title || `${p.repo}#${p.number}`, author: p.author,
-      group: p.group, line: wfLine(wf, p.unclear), status, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
+      group: p.group, line: wfLine(wf, p.unclear), status, blocked: wf?.state === "blocked", asked: wf?.rec ? wf.recAt : null, weight: wf ? weightLabel(wf.weight) : null,
       startedBy: wf?.startedBy ?? null, approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null,
       duplicate: facts.duplicateGroups.get(key(p))?.role === "close", outside: (facts.holds.get(key(p))?.reason ?? null) !== null, stuck: facts.stuck.has(key(p)), area: area?.area ?? null,
       may: mayRepo.get(p.repo) ?? false, updatedAt: p.updatedAt, ...(p.merged && { merged: p.merged }),

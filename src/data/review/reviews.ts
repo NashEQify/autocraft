@@ -6,7 +6,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
 import { listAudit } from "../control/index.ts";
 import { unclearWrite } from "../../github/unsent.ts";
-import { discussionEntries, followupFixLinks, premergeBase, unreviewedMerges } from "./cross.ts";
+import { discussionEntries, followupFixLinks, mergeEntryReviews, premergeBase, unreviewedMerges } from "./cross.ts";
 import { headRef, headTuples, latestRows, listOf, noKeys, parseHistory, parseReview, pushTo, refKey, reviewSelect, reviewWindow } from "./rows.ts";
 import type { Filing, Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
 
@@ -29,6 +29,14 @@ export async function loadReviewsAt(db: Db, heads: HeadKey[]): Promise<Map<HeadR
       .where(kx.tupleIn(db, ["o.repo", "o.number", "o.head_oid"], headTuples(part), ["text", "bigint", "text"])) as any) as any[];
     for (const r of rows) out.set(headRef(r.repo, r.number, r.head_oid), parseReview(r));
   }
+  return out;
+}
+
+/** The reviewed heads of merge-entry PRs, and when each was reviewed last. 1 statement. */
+export async function loadMergeEntryReviews(db: Db, keys: KeySource): Promise<Map<RefKey, { head: string; at: string }[]>> {
+  const out = new Map<RefKey, { head: string; at: string }[]>();
+  if (noKeys(keys)) return out;
+  for (const r of await queryDb(db).all(mergeEntryReviews(db, keys), { label: "review.loadMergeEntryReviews" })) pushTo(out, refKey(r.repo, r.number), { head: r.head_oid, at: r.at });
   return out;
 }
 

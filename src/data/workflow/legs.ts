@@ -9,13 +9,12 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
-import { LIVE_STATES } from "./fragments.ts";
+import { goOnAt, LIVE_STATES } from "./fragments.ts";
 import type { Entry, FixupRequest, FixupRequestMove, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 /** A leg in one of these states no longer works its request. */
 const LEG_ENDS = ["cancelled", "failed", "merged"];
-const GO_ON_EVENTS = ["started", "answered"];
 const ACTOR = "pipeline";
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -75,8 +74,8 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
       eb.and([eb("p.workflow_id", "is", null), eb("w.repo", "=", eb.ref("p.repo")), eb("w.number", "=", eb.ref("p.number")), eb("w.state", "in", LIVE_STATES)]),
     ])))
     .selectAll("p")
-    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.started_at as wf_started_at",
-      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("wf_go_on")])
+    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.started_at as wf_started_at", "w.review_asked_at as wf_review_asked_at",
+      goOnAt(eb, "w.id").as("wf_go_on")])
     .where("p.state", "in", ACTIVE_LEGS)
     .where((eb: any) => trackedRepo(eb, "p.repo"))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "p.repo", f.repos!)))
@@ -85,15 +84,17 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
     .where("o.preapproval_id", "in", k.selectFrom("main.preapprovals as pl").select("pl.id").where("pl.state", "in", ACTIVE_LEGS))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "o.repo", f.repos!)))
     .orderBy("o.id");
-  type Joined = Preapproval & { wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_started_at: string | null; wf_go_on: string | null };
+  type Joined = Preapproval & { wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_started_at: string | null; wf_review_asked_at: string | null; wf_go_on: string | null };
   const [rows, requests] = await db.together(() => Promise.all([q.all(rowsQ), q.all(requestsQ)])) as [Joined[], FixupRequest[]];
   for (const r of rows) {
-    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_started_at, wf_go_on, ...rest } = r;
+    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_started_at, wf_review_asked_at, wf_go_on, ...rest } = r;
     const p = legOf(rest as Preapproval);
     pass.rows.push(p);
     const live = wf_id !== null && wf_state !== null && LIVE_STATES.includes(wf_state);
     if (!live) { pass.context.set(p.id, p.workflow_id === null ? "unlinked" : "ended"); continue; }
-    const context: LegContext = { workflowId: num(wf_id), entry: wf_entry!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, approvedBy: wf_approved_by };
+    const context: LegContext = {
+      workflowId: num(wf_id), entry: wf_entry!, startedAt: wf_started_at!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, reviewAskedAt: wf_review_asked_at, approvedBy: wf_approved_by,
+    };
     pass.context.set(p.id, context);
   }
   pass.requests = requests.map(requestOf);

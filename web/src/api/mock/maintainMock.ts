@@ -76,7 +76,7 @@ function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
     const started = s.group === "needs" || s.group === "started";
     const { phase, waiting, next, rank: _r, sec: _s, merged, ...rest } = s;
     return {
-      kind: "pr", state: "open", author: null, line: null, status: null, blocked: false, weight: null, startedBy: null, approvedBy: null, stoppedBy: null,
+      kind: "pr", state: "open", author: null, line: null, status: null, blocked: false, asked: null, weight: null, startedBy: null, approvedBy: null, stoppedBy: null,
       duplicate: false, outside: false, area: null, updatedAt: ago(60 + (s.number % 300)), ...rest,
       ...(started ? {} : { status: { phase: phase ?? "Triage", waiting: staff ? (waiting ?? null) : null, next: next ?? null, since: ago(90) } }),
       stuck: staff && !!s.stuck, ...(show === "merged" && { merged }),

@@ -2733,6 +2733,8 @@ export interface MaintainItemRow {
   /** The pipeline's status line of an item nobody started; null for a started item. */
   status: ItemStatus | null;
   blocked: boolean;
+  /** When the open question was asked, sent back with an answer; null when none is open. */
+  asked: string | null;
   /** The weight word or `weight n`; null for the normal weight. */
   weight: string | null;
   startedBy: string | null;
@@ -2797,6 +2799,8 @@ export interface MaintainItemStatus {
   parts: MaintainPart[];
   /** The open recommendation, one sentence; null when none is open. */
   rec: string | null;
+  /** When the open question was asked, sent back with an answer; null when none is open. */
+  asked: string | null;
   /** The last answer was unclear: who wrote it and what AutoCraft replied. */
   unclear: { by: string; at: string; line: string } | null;
   /** The confirmation line of the last accepted command. */

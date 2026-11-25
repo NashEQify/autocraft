@@ -155,7 +155,7 @@ function Group({ group, rows, total, viewer, picking, picked, onPick, onMore }: 
 }
 
 /** The command box: free text in the same words as on GitHub and Discord; the reply lines show what ran and what was unclear. */
-function CommandBox({ text, setText, onDone }: { text: string; setText: (s: string) => void; onDone: (r: MaintainCommandResult) => void }) {
+function CommandBox({ text, setText, rows, onDone }: { text: string; setText: (s: string) => void; rows: MaintainItemRow[]; onDone: (r: MaintainCommandResult) => void }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<MaintainCommandResult | null>(null);
@@ -166,7 +166,7 @@ function CommandBox({ text, setText, onDone }: { text: string; setText: (s: stri
     setBusy(true);
     setError(null);
     try {
-      const r = await api.maintain.command(text);
+      const r = await api.maintain.command(text, Object.fromEntries(rows.flatMap((r) => (r.asked ? [[refOf(r), r.asked]] : []))));
       setResult(r);
       onDone(r);
     } catch (e) {
@@ -313,7 +313,7 @@ export function ItemsView(_: ViewProps) {
             </Button>
           )}
         </div>
-        {writes && cmdOpen && <CommandBox text={cmd} setText={setCmd} onDone={done} />}
+        {writes && cmdOpen && <CommandBox text={cmd} setText={setCmd} rows={data?.rows ?? []} onDone={done} />}
         <div className="flex flex-col gap-2 md:flex-row md:items-center">
           <SearchField value={typed} onChange={setTyped} onSubmit={(v) => url.set("q", v.trim() || null)} label={t("Search items")} placeholder={t("Search issues and pull requests")} />
           <Segmented

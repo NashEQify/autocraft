@@ -128,15 +128,15 @@ export function createHttpApi(): Api {
       queue: () => get("/api/maintain/queue"),
       stats: (period) => get(`/api/maintain/stats${qs({ period })}`),
       items: (q) => get(`/api/maintain/items${qs({ ...q, filters: undefined, filter: q.filters?.join(","), areas: undefined, area: q.areas?.join(","), refs: q.refs?.join(",") })}`),
-      command: (text) => post("/api/commands", { text }),
+      command: (text, asked) => post("/api/commands", { text, asked }),
       repos: () => get("/api/maintain/repos"),
       waiting: () => get("/api/maintain/waiting"),
       control: (input) => post("/api/controls", input),
     },
     maintainItem: {
       get: (repo, number) => get(`/api/maintain/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`),
-      command: async (repo, number, text) => {
-        const r = await post<{ items: { outcome: string }[]; lines: string[] }>(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/command`, { text });
+      command: async (repo, number, text, asked) => {
+        const r = await post<{ items: { outcome: string }[]; lines: string[] }>(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/command`, { text, asked });
         return { ok: r.items.length > 0 && r.items.every((i) => i.outcome === "run"), lines: r.lines };
       },
       control: async (body) => {

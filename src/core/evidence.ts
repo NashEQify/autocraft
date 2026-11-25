@@ -47,16 +47,16 @@ export function ownPushes(edges: readonly PushEdge[], outcomes: readonly Outcome
  * Whether a push is ours: `head` is `base`, or is reached from it through our own pushes alone, step by step. A head whose parent is not
  * recorded, or whose chain passes through a commit we did not push, is not: someone else's commits are under it.
  */
-export function chainsOwn(pushes: readonly OwnPush[], base: string, head: string): boolean {
+export const chainsOwn = (pushes: readonly OwnPush[], base: string, head: string): boolean => ownHeads(pushes, head).has(base);
+
+/** The head and the heads our own pushes alone moved it from. */
+function ownHeads(pushes: readonly OwnPush[], head: string): Set<string> {
   const reached = new Set([head]);
-  for (const h of reached) {
-    if (h === base) return true;
-    for (const p of pushes) if (p.to === h) reached.add(p.from);
-  }
-  return false;
+  for (const h of reached) for (const p of pushes) if (p.to === h) reached.add(p.from);
+  return reached;
 }
 
-/** Our pushes that lead to `head`, made after `since` (when a person last chose to go on with the PR), newest first. */
+/** Our pushes that lead to `head`, made after `since` (up to when a person has seen the PR and chose to go on with it), newest first. */
 export function pushesSince(pushes: readonly RecordedPush[], head: string, since: string): RecordedPush[] {
   const out: RecordedPush[] = [], reached = new Set([head]);
   for (const h of reached) for (const p of pushes) if (p.to === h && p.from !== h && p.at > since) { out.push(p); reached.add(p.from); }
@@ -66,5 +66,34 @@ export function pushesSince(pushes: readonly RecordedPush[], head: string, since
 /** The head the person chose to go on with: `head` without our pushes since. */
 export const approvedHead = (pushes: readonly RecordedPush[], head: string, since: string): string => pushesSince(pushes, head, since).at(-1)?.from ?? head;
 
-/** A push of ours since the person chose to go on changed more than a checked merge does: the head needs a model's review, also of a PR that merges without one. */
-export const reviewOwed = (pushes: readonly RecordedPush[], head: string, since: string): boolean => pushesSince(pushes, head, since).some((p) => !p.small);
+/** A started PR as its person last left it. `since`: up to when they have seen it. `reviewAskedAt`: they asked for a model review newer than this of a PR that merges without one. */
+export type GoneOnPr = { entry: string; startedAt: string; since: string; reviewAskedAt: string | null };
+/** A head a model reviewed, and when. */
+export type HeadReview = { head: string; at: string };
+
+/**
+ * The review a started PR's head merges after, null when it needs none; `from`: only one made after this counts (null: any). Every entry
+ * needs one but the merge entry, which needs:
+ * - the one a person asked for;
+ * - one at every push of ours since its start that changed more than a checked merge does, or at a later head of ours. No answer ends that.
+ *   A push under someone else's commits (its chain to the head is cut) needs one at what followed them;
+ * - then what such a review says, until the person has been asked about it.
+ */
+export function neededReview(w: GoneOnPr, pushes: readonly RecordedPush[], head: string, reviews: readonly HeadReview[]): { from: string | null } | null {
+  if (w.entry !== "merge") return { from: null };
+  const reached = ownHeads(pushes, head);
+  const made = reviews.filter((r) => reached.has(r.head));
+  let from = w.since, owed = false, reviewed = w.reviewAskedAt !== null || w.since > w.startedAt;
+  const owe = (at: string): void => { owed = true; if (at > from) from = at; };
+  if (w.reviewAskedAt !== null && !made.some((r) => r.at > w.reviewAskedAt!)) owe(w.reviewAskedAt);
+  for (const p of pushes) {
+    if (p.small || p.from === p.to || p.at <= w.startedAt) continue;
+    const on = reached.has(p.to);
+    // Made on a head of this chain and not on it: it never landed, or is gone again.
+    if (!on && reached.has(p.from)) continue;
+    reviewed = true;
+    // A head on the push was reviewed after it, whatever the times say; one that followed someone else's commits goes by them.
+    if (!made.some((r) => (on ? chainsOwn(pushes, p.to, r.head) : r.at > p.at))) owe(on ? w.since : p.at);
+  }
+  return owed || (reviewed && made.some((r) => r.at > w.since)) ? { from } : null;
+}

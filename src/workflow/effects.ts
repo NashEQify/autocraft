@@ -58,7 +58,7 @@ export function effectText(message: string): string {
 
 export type Target = { repo: string; number: number; kind: ItemKind; head: string | null };
 /** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a stop ends. */
-export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number };
+export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number; /** The head of the question it answers, when pushes of ours lead from it to the item's. */ shown?: string };
 
 const ref = (t: { repo: string; number: number }): string => `${t.repo}#${t.number}`;
 
@@ -91,7 +91,7 @@ const writeOf = (s: CheckedStep): Write => async (id) => {
 
 /** The merge leg: a pre-approved merge at the current head, or the one already in progress (`had`). */
 async function mergeLeg(c: Ctx, had: Preapproval | null): Promise<Write> {
-  if (had === null) return writeOf(await step(() => checkMergeLeg(c.db, { repo: c.item.repo, number: c.item.number, by: c.by, via: c.via, ...(c.item.head ? { head: c.item.head } : {}) })));
+  if (had === null) return writeOf(await step(() => checkMergeLeg(c.db, { repo: c.item.repo, number: c.item.number, by: c.by, via: c.via, ...(c.item.head ? { head: c.item.head } : {}), ...(c.shown ? { fromHead: c.shown } : {}) })));
   const owner = had.workflow_id;
   if (owner === null) return async (id) => void await adoptLegs(c.db, [{ id: had.id, workflowId: id }]);
   // A merge is made through its own workflow's leg. One of another live workflow (the PR's issue) is already at work; one whose workflow

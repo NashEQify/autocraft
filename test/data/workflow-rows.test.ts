@@ -57,11 +57,16 @@ both("events: oldest first, newest n per item, latest kind, go-on time, answers 
   assert.equal(last.get("o/a#1"), "ambiguous");
   assert.equal(last.get("o/a#2"), "started");
   const goOn = await loadGoOnAt(db, [{ id: w1, startedAt: AT }, { id: 999, startedAt: AT }]);
-  assert.equal(goOn.get(w1), "2026-01-01T03:00:00.000Z");
-  assert.equal(goOn.get(999), AT);
+  assert.deepEqual(goOn.get(w1), { since: "2026-01-01T03:00:00.000Z", said: "2026-01-01T03:00:00.000Z" });
+  assert.deepEqual(goOn.get(999), { since: AT, said: AT });
   assert.deepEqual((await loadAnswers(db, [w1, ids.get("o/a#2")!])).get(w1), { login: "bob", at: "2026-01-01T03:00:00.000Z" });
   assert.equal(await countEventsSince(db, { login: "ann", via: "github", since: "2026-01-01T01:15:00.000Z" }), 2);
   assert.equal(await countEventsSince(db, { login: "ann", via: "cli", since: AT }), 0);
+  // An answer counts from when its question was asked, for every reader.
+  await recordEvents(db, [{ ...ev(1, "answered", "2026-01-01T05:00:00.000Z"), seenAt: "2026-01-01T04:00:00.000Z" }]);
+  assert.deepEqual((await loadGoOnAt(db, [{ id: w1, startedAt: AT }])).get(w1), { since: "2026-01-01T04:00:00.000Z", said: "2026-01-01T05:00:00.000Z" });
+  assert.equal((await loadWorkflowFacts(db, [{ repo: "o/a", number: 1 }])).live.get("o/a#1")!.since, "2026-01-01T04:00:00.000Z");
+  assert.equal((await loadAnswers(db, [w1])).get(w1)!.at, "2026-01-01T05:00:00.000Z", "who answered last goes by when they answered");
 });
 
 both("loadWorkflowFacts: live and implementation-PR workflows, latest ended state, holds and operator work", async ({ db }) => {

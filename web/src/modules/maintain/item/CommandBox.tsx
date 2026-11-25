@@ -9,7 +9,7 @@ import { Button } from "../../../ui/atoms/Button";
 import { Textarea } from "../../../ui/atoms/Textarea";
 import { cn } from "../../../ui/cn";
 
-export function CommandBox({ repo, number, placeholder }: { repo: string; number: number; placeholder: string }) {
+export function CommandBox({ repo, number, placeholder, asked }: { repo: string; number: number; placeholder: string; asked: string | null }) {
   const api = useApi();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -19,7 +19,7 @@ export function CommandBox({ repo, number, placeholder }: { repo: string; number
     if (!said || sending) return;
     setSending(true);
     try {
-      const r = await api.maintainItem.command(repo, number, said);
+      const r = await api.maintainItem.command(repo, number, said, asked);
       setReply(r);
       if (r.ok) setText("");
     } catch (e) {

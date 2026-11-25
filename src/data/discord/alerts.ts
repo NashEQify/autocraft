@@ -78,6 +78,14 @@ export async function addSentAlerts(db: Db, rows: SentAlert[]): Promise<void> {
   }
 }
 
+/** When the newest question a person was shown on each workflow was asked. */
+export async function loadShownQuestions(db: Db, userHash: string): Promise<Map<number, string>> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.discord_alert_msgs").select((eb) => ["workflow_id", eb.fn.max<string | null>("rec_at").as("rec_at")])
+    .where("user_hash", "=", userHash).where("workflow_id", "is not", null).groupBy("workflow_id"), { label: "discord.loadShownQuestions" });
+  return new Map(rows.flatMap((r) => (r.rec_at ? [[Number(r.workflow_id), r.rec_at] as const] : [])));
+}
+
 /** Deletes sent alerts before a time. */
 export async function pruneSentAlerts(db: Db, beforeIso: string): Promise<number> {
   const q = queryDb(db);

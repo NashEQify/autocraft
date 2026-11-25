@@ -2290,7 +2290,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   plan TEXT NOT NULL DEFAULT '[]',
   legacy_preapproval_id INTEGER,
   updated_at TEXT NOT NULL,
-  step TEXT                           -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  review_asked_at TEXT                -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);
@@ -2307,7 +2308,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   kind TEXT NOT NULL,
   parsed TEXT,                        -- JSON Parsed (src/workflow/types.ts)
   line TEXT,                          -- the confirmation line given
-  at TEXT NOT NULL
+  at TEXT NOT NULL,
+  seen_at TEXT                        -- an answer: when its question was asked, the last moment of which the person had been shown anything
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
 CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);

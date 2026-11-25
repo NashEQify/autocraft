@@ -85,6 +85,8 @@ export type ItemWorkflow = {
   plan: PlanPart[];
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */
   step: string | null;
+  /** A merge entry: a person asked for a model review of the head, made after this time. Null: it merges without one (core/evidence.ts neededReview). */
+  reviewAskedAt: string | null;
   legacyPreapprovalId: number | null;
   updatedAt: string;
 };
