@@ -94,6 +94,11 @@ const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 /** The most statements one shareReads scope keeps. */
 const SHARED_READS_MAX = 2000;
 
+/** Statements that write the settings table, which a settings snapshot must notice whoever issues them. */
+const SETTINGS_WRITE = /^\s*(?:insert\s+into|update|delete\s+from)\s+"?(?:main"?\."?)?settings"?(?![\w.])/i;
+let settingsWriteHook: ((db: object) => void) | null = null;
+export const onSettingsWrite = (fn: (db: object) => void): void => { settingsWriteHook = fn; };
+
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
@@ -176,6 +181,24 @@ export class Handle implements Db {
     }
   }
 
+  /**
+   * Runs a statement, telling the settings hook about it before and after it runs (a parallel read between the two must not keep the old
+   * rows), and again once the enclosing transaction ends, since a read inside it may have cached a value that rolled back.
+   */
+  async #settingsWrite<T>(text: string, go: () => Promise<T>): Promise<T> {
+    if (!settingsWriteHook || !SETTINGS_WRITE.test(text)) return await go();
+    const tx = this.#current();
+    if (tx) this.#settingsTx.add(tx);
+    settingsWriteHook(this);
+    try {
+      return await go();
+    } finally {
+      settingsWriteHook(this);
+    }
+  }
+
+  #settingsTx = new WeakSet<Tx>();
+
   async fresh<T>(fn: () => Promise<T>): Promise<T> {
     if (!this.#sharedReads()) return await fn();
     return await this.#shared.run({ open: false, rows: new Map() }, fn);
@@ -193,7 +216,8 @@ export class Handle implements Db {
   }
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
-    const r = await this.#forgetting(() => this.k.executeQuery(q.compile()));
+    const compiled = q.compile();
+    const r = await this.#settingsWrite(compiled.sql, () => this.#forgetting(() => this.k.executeQuery(compiled)));
     const changes = Number(r.numAffectedRows ?? 0n);
     return this.dialect === "postgres" ? withoutInsertId(changes) : { changes, lastInsertRowid: Number(r.insertId ?? 0n) };
   }
@@ -201,7 +225,7 @@ export class Handle implements Db {
   prepare(text: string): Statement {
     const exec = async (op: Op, args: Args) => {
       const go = () => this.#engine.exec(op, text, args, this.#current());
-      return op === "run" ? await this.#forgetting(go) : await go();
+      return op === "run" ? await this.#settingsWrite(text, () => this.#forgetting(go)) : await go();
     };
     async function* iterate(args: Args): AsyncGenerator<Row> {
       yield* (await exec("all", args)) as Row[];
@@ -283,6 +307,7 @@ export class Handle implements Db {
       );
     } finally {
       tx.state = "closed";
+      if (settingsWriteHook && this.#settingsTx.has(tx)) settingsWriteHook(this);
       if (site && lockedAt !== undefined) {
         const holdMs = performance.now() - lockedAt;
         if (holdMs > SLOW_HOLD_MS) console.warn(`db: ${tx.lock ? `lock "${tx.lock}"` : "write lock"} held ${Math.round(holdMs)} ms by ${callSite(site)}`);

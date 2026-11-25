@@ -31,7 +31,7 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 export type Dialect = "sqlite" | "postgres";
 
 /** What a process (or worker thread) uses its handle for; on Postgres it sets the connection pool size. */
-export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "planner" | "periodic" | "cli";
+export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "job" | "planner" | "periodic" | "cli";
 
 /** The table types Kysely queries are checked against, generated from the migrated schema (scripts/gen-db-types.ts). */
 export type { DB } from "./types.ts";

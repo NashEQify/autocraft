@@ -12,8 +12,12 @@ import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, 
 import { plainSchema, SCOPED_SCHEMA } from "./scoped.ts";
 import { fenceSql } from "./fence.ts";
 
-/** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
-export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
+/**
+ * Connections per process role: the database allows 100 direct connections, shared by every process of the instance, and each
+ * process that listens holds one more outside its pool. Up to 32 job processes run at once (DEFAULT_MAX_JOBS): 32 x (1 pool + 1 listener) = 64,
+ * the dashboard 8 + 4 + 2 listeners, runner 4 + 1, planner 2, periodic 2 + 1 come to about 88, leaving room for CLI sessions; a job pool of 2 would reach about 120.
+ */
+export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, job: 1, planner: 2, periodic: 2, cli: 1 };
 
 /** Key of the one writer lock every write takes (a write transaction, or a write statement outside one), so writes run one at a time as on SQLite. */
 const WRITER_LOCK = 0x61637772; // "acwr"
