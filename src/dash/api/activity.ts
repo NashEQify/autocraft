@@ -25,7 +25,7 @@ export const ACTIVITY_DEFAULT_KINDS: TraceKind[] = KINDS.filter((k) => k !== "pl
 const LAST = "~";
 
 type At = { repo: string; number: number };
-type Ctx = { own: Set<string>; staff: boolean };
+type Ctx = { own: Set<string>; staff: boolean; hidden: ActivityScope["hidden"] };
 type Round = { staff: boolean; operator: boolean; hidden: ActivityScope["hidden"]; own: Set<string>; visible: string[]; repo: string | null; limit: number; only: boolean; before: { at: string; id: string } | null };
 
 /** The events of one stored row of each source. */
