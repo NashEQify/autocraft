@@ -24,7 +24,7 @@ import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Events whose line confirms a command that ran. */
-const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped"]);
+const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped", "resumed"]);
 
 /**
  * The item's steps with the current one marked: the step the advance pass recorded on the row. A row with no recorded step yet
@@ -71,6 +71,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
   return {
     headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait),
     live: isLive(wf.state),
+    held: wf.state === "stopped",
     entry: wf.entry,
     lines: attributionLines(wf, answered ? { by: answered.login, at: answered.at } : null),
     approved: wf.approvedBy !== null,

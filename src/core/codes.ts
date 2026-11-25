@@ -51,7 +51,6 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "push approval for the repo": "repo-approval",
   "CI approval for the repo": "repo-approval",
   "merge approval for the repo": "repo-approval",
-  "merge held by an operator": "hold",
   "CI or GitHub's mergeable state": "ci",
   "CI on the latest commit to finish": "ci",
   "CI on the latest commit to pass": "ci",

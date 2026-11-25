@@ -59,12 +59,27 @@ export type QuestionAnswer = { question: QuestionRef; option: string; label?: st
 export const sameQuestion = (a: QuestionRef | null | undefined, b: QuestionRef | null | undefined): boolean =>
   typeof a === "object" && a !== null && typeof b === "object" && b !== null && a.implementation === b.implementation && a.round === b.round;
 
+/**
+ * What a held workflow goes back to when someone resumes it, kept in its `blockerParams` while it is held: the question that was open and
+ * its blocker, and the fix-ups that were asked for and not made. `unstarted`: nobody had started the item, so there is nothing to go back to.
+ */
+export type HeldWork = {
+  unstarted?: true;
+  rec?: Recommendation;
+  blocker?: Blocker;
+  params?: Record<string, unknown>;
+  fixes?: { instructions: string; head: string }[];
+};
+
 /** States in which an item has come back to a person: its recommendation is open, whether its steps are done or a blocker stopped it. */
 export const ASKING_STATES = ["recommending", "blocked"] as const satisfies readonly WorkflowState[];
 
 /** The recommendation that waits for an answer, which every surface shows; null when none is open. */
 export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | null): Recommendation | null =>
   (wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) ? wf.rec : null);
+
+/** What the held workflow goes back to. */
+export const heldWork = (wf: Pick<ItemWorkflow, "blockerParams">): HeldWork => (wf.blockerParams?.held ?? {}) as HeldWork;
 
 export type ItemWorkflow = {
   id: number;
@@ -83,6 +98,7 @@ export type ItemWorkflow = {
   approvedBy: string | null;
   approvedAt: string | null;
   approvedVia: Surface | null;
+  /** Who holds it, and since when (state `stopped`). */
   stoppedBy: string | null;
   stoppedAt: string | null;
   blocker: Blocker | null;
@@ -112,7 +128,7 @@ export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate
 
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
-  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "stop" | "autorepin"; args?: string }
+  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "hold" | "resume" | "autorepin"; args?: string }
   | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string }
   | { word: "weight"; weight: number };
@@ -127,6 +143,6 @@ export type Parsed =
   | { kind: "ambiguous"; understood: string; rest: string };
 
 /** A registered control: a state change a panel needs that is not one of the command words. */
-export type Control = "hold-merge" | "release-merge" | "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";
+export type Control = "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";
 
-export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "weighted" | "closed" | "backlog" | "set";
+export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "resumed" | "weighted" | "closed" | "backlog" | "set";

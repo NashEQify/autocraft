@@ -19,7 +19,7 @@ export type BlockWrite = {
 
 /**
  * Stops the workflow in one transaction. `written`: the row, its event and the leg's end are stored. Nothing is written otherwise. `changed`: a
- * person changed the workflow meanwhile and decides about the leg (a start after a stop has a new one). `merging`: the leg cannot be stopped
+ * person changed the workflow meanwhile and decides about the leg (a start after a hold has a new one). `merging`: the leg cannot be stopped
  * now (an integration batch holds the PR, whose running CI a cancel would undo, a merge of the repo is running, or the leg ended a moment
  * ago), and the next pass looks again.
  */

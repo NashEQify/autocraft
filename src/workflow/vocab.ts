@@ -5,7 +5,7 @@
 import { tk } from "../i18n/index.ts";
 import { WEIGHT_NORMAL, WEIGHT_WORDS, type Control, type Entry, type WeightWord } from "./types.ts";
 
-export type CommandWord = "review" | "fix-up" | "implement" | "merge" | "drop" | "fix" | "backlog" | "close" | "stop" | "autorepin";
+export type CommandWord = "review" | "fix-up" | "implement" | "merge" | "drop" | "fix" | "backlog" | "close" | "hold" | "resume" | "autorepin";
 
 export type CommandDef = {
   word: CommandWord;
@@ -87,11 +87,18 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "close as duplicate of #12",
   },
   {
-    word: "stop", usage: "stop", aliases: [], entry: null,
-    short: tk("Stop all work on the item."),
-    does: tk("Stops every step at once. Nothing runs until someone sends a new command."),
-    back: tk("Never; send any command to start again."),
-    example: "stop",
+    word: "hold", usage: "hold", aliases: ["stop", "pause", "wait", "halt", "hold on", "hold off", "on hold", "not yet"], entry: null,
+    short: tk("End all work on the item, and keep off it until someone resumes it."),
+    does: tk("Ends every step at once and takes the item out of its batch. AutoCraft keeps off it, whether anyone started it or not, and shows who holds it. stop, pause, wait and not yet mean the same."),
+    back: tk("Never; resume or yes goes on, and any other command starts again."),
+    example: "hold",
+  },
+  {
+    word: "resume", usage: "resume", aliases: ["continue"], entry: null,
+    short: tk("Go on with a held item."),
+    does: tk("Goes on with a held item where it was, with its merge approval, now in your name. yes does the same. If the author pushed commits meanwhile, AutoCraft asks first. An item nobody started goes back to how it was."),
+    back: tk("As the plan said before the hold."),
+    example: "resume",
   },
   {
     word: "autorepin", usage: "autorepin <pull request> [via <branch>]", aliases: ["auto-repin", "auto repin"], entry: null,
@@ -129,8 +136,6 @@ export type ControlDef = { control: Control; name: string; short: string };
 
 /** State changes panels need beyond the command words; each is a registered command, so the agent can do it too. */
 export const CONTROLS: readonly ControlDef[] = [
-  { control: "hold-merge", name: tk("Hold merge"), short: tk("Keep an approved item out of the next merge until it is released.") },
-  { control: "release-merge", name: tk("Release merge"), short: tk("Let a held item merge again.") },
   { control: "resume-breaker", name: tk("Resume"), short: tk("Resume a step its circuit breaker paused.") },
   { control: "release-outside", name: tk("Release"), short: tk("Release an outside author's held items.") },
   { control: "set-automatic", name: tk("Automatic"), short: tk("Turn automatic work on a repository on or off.") },

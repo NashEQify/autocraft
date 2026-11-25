@@ -422,7 +422,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
       text: plan ? (next ?? wait ?? note ?? plan.state) : "Not planned yet", waitsOn: wait, reasons: reasonsFor(c, plan?.reasons ?? []), note,
     },
     next: acts.map((a) => ({ kind: a.kind, head: typeof a.head === "string" ? a.head : null })),
-    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), holds: hold ? [{ by: hold.heldBy, at: hold.heldAt }] : [] },
+    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), holds: hold ? [hold] : [] },
   };
 }
 

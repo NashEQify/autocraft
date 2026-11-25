@@ -3,7 +3,7 @@
 // each write event's integration branch is a second, small wave). Building events from the rows stays with the handler.
 import type { Db } from "../../db/index.ts";
 import { listAudit, listPushOutcomes, loadAuditCounts, countPushOutcomes } from "../control/index.ts";
-import { loadHolds as loadMergeHolds, loadEvents } from "../workflow/index.ts";
+import { loadEvents, loadWorkflowHistory } from "../workflow/index.ts";
 import { loadItemTaskEvents, loadTaskHistoryStats } from "../build/index.ts";
 import { loadModelChecksAfter, loadPatchChecks, loadPatchSignature, loadPatchTimeline } from "../changes/index.ts";
 import { loadTurnDigests, loadTurnEvents } from "../conversations/index.ts";
@@ -21,7 +21,6 @@ import type { PatchCheckRow, ModelCheckRow, PatchTimelineRow } from "../changes/
 import type { PlanHistoryRow, StageEvent, StoredPlan } from "../planner/types.ts";
 import type { ReviewRecord } from "../review/types.ts";
 import type { PushOutcomeRow, AuditRow } from "../control/types.ts";
-import type { MergeHold } from "../workflow/types.ts";
 import type { TurnEvent } from "../conversations/types.ts";
 import type { TaskEvent } from "../build/types.ts";
 import type { StoredEvent } from "../workflow/types.ts";
@@ -33,7 +32,7 @@ export type ItemTraceRows = {
   detail: ItemDetail; stages: StageEvent[]; planHistory: PlanHistoryRow[]; jobTrail: ItemJobRow[]; runs: ItemRun[]; modelChecks: ModelCheckRow[]; patchChecks: PatchCheckRow[];
   tasks: TaskEvent[]; pushOutcomes: PushOutcomeRow[]; patches: PatchTimelineRow[]; review: ReviewRecord | null; verifications: VerificationView[]; merges: MergeRow[];
   workflowEvents: StoredEvent[]; turns: TurnEvent[]; writes: AuditRow[]; batches: Map<string, number | undefined>;
-  header: { plan: StoredPlan | null; hold: MergeHold | null };
+  header: { plan: StoredPlan | null; hold: { by: string; at: string } | null };
 };
 
 /** The audit actions of the item's write events; null: every action. */
@@ -43,21 +42,22 @@ export type WriteActions = string[] | null;
 export async function loadItemTrace(db: Db, scope: TraceScope, ref: { repo: string; number: number }, writeActions: WriteActions, parts: ItemDetailPart[] = ["item", "comments", "activity", "commits"]): Promise<ItemTraceRows> {
   const key = `${ref.repo}#${ref.number}`;
   const refs = [ref];
-  const [detail, stages, planHistory, plans, jobTrail, runs, modelChecks, patchChecks, tasks, pushOutcomes, patches, review, verifications, merges, workflowEvents, turns, writes, holds] = await db.together(() => Promise.all([
+  const [detail, stages, planHistory, plans, jobTrail, runs, modelChecks, patchChecks, tasks, pushOutcomes, patches, review, verifications, merges, workflowEvents, turns, writes, history] = await db.together(() => Promise.all([
     loadItemDetail(db, key, parts), loadStageLog(db, [key]), loadPlanHistory(db, [key]), loadPlans(db, refs), loadItemJobTrail(db, refs),
     loadItemRuns(db, [key], { hidden: scope.hidden, staff: scope.staff }), loadModelChecksAfter(db, 0, { repo: ref.repo, number: ref.number }), loadPatchChecks(db, refs),
     loadItemTaskEvents(db, ref, { hiddenRepos: scope.hidden, staff: scope.staff }), listPushOutcomes(db, { refs: [key] }), loadPatchTimeline(db, refs, { internals: scope.staff }),
     loadReviewRecord(db, refs), loadVerifications(db, refs), listMerges(db, { refs }), loadEvents(db, refs, { archived: true }), loadTurnEvents(db, { refs: [key] }),
-    listAudit(db, { targets: [key], ...(writeActions ? { actions: writeActions } : {}), order: "asc" }), loadMergeHolds(db, { refs }),
+    listAudit(db, { targets: [key], ...(writeActions ? { actions: writeActions } : {}), order: "asc" }), loadWorkflowHistory(db, refs),
   ]));
   // A write event links the batch of its integration branch.
   const branches = [...new Set(writes.flatMap((w) => (typeof w.details?.batch === "string" ? [w.details.batch] : [])))];
   const batchIds = await Promise.all(branches.map((b) => loadBatchByBranch(db, ref.repo, b)));
+  const last = history.get(key)?.at(-1);
   return {
     detail, stages: stages.get(key) ?? [], planHistory: planHistory.get(key) ?? [], jobTrail: jobTrail.get(key) ?? [], runs: runs.get(key) ?? [], modelChecks, patchChecks: patchChecks.get(key) ?? [],
     tasks, pushOutcomes, patches: patches.get(key) ?? [], review: review.get(key) ?? null, verifications: [...verifications.values()], merges, workflowEvents: workflowEvents.get(key) ?? [],
     turns, writes, batches: new Map(branches.map((b, i) => [b, batchIds[i]])),
-    header: { plan: plans.get(key) ?? null, hold: holds.get(key) ?? null },
+    header: { plan: plans.get(key) ?? null, hold: last?.state === "stopped" && last.stoppedBy ? { by: last.stoppedBy, at: last.stoppedAt ?? "" } : null },
   };
 }
 
@@ -65,10 +65,10 @@ export async function loadItemTrace(db: Db, scope: TraceScope, ref: { repo: stri
 export async function loadItemTraceStamp(db: Db, scope: TraceScope, ref: { repo: string; number: number }): Promise<unknown[]> {
   const key = `${ref.repo}#${ref.number}`;
   const refs = [ref];
-  const [detail, versions, stages, comments, activity, jobs, runs, tasks, pushes, patches, review, verifications, merges, turns, workflowEvents, holds, audit] = await db.together(() => Promise.all([
+  const [detail, versions, stages, comments, activity, jobs, runs, tasks, pushes, patches, review, verifications, merges, turns, workflowEvents, audit] = await db.together(() => Promise.all([
     loadItemDetail(db, key, ["item"]), loadPlanVersions(db, [key]), loadStageVersions(db, [key]), loadCommentStats(db, refs), loadActivityStats(db, refs), loadItemJobTrail(db, refs),
     loadItemRuns(db, [key], { hidden: scope.hidden, staff: scope.staff }), loadTaskHistoryStats(db, refs), countPushOutcomes(db, [key]), loadPatchSignature(db, refs),
-    loadReviewSignature(db, refs), loadVerifications(db, refs, { tasks: false }), listMerges(db, { refs }), loadTurnDigests(db, [key]), loadEvents(db, refs, { archived: true }), loadMergeHolds(db, { refs }), loadAuditCounts(db, key),
+    loadReviewSignature(db, refs), loadVerifications(db, refs, { tasks: false }), listMerges(db, { refs }), loadTurnDigests(db, [key]), loadEvents(db, refs, { archived: true }), loadAuditCounts(db, key),
   ]));
   const it = detail.item;
   const jobRows = jobs.get(key) ?? [], runRows = runs.get(key) ?? [];

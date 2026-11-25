@@ -48,7 +48,6 @@ function groupTitle(g: MaintainItemGroup, viewer: boolean): string {
 function byLine(r: MaintainItemRow): string | null {
   if (!r.startedBy) return null;
   const started = t("started by {login}", { login: r.startedBy });
-  if (r.stoppedBy) return t("{started}, stopped by {login}", { started, login: r.stoppedBy });
   return t("{started}, {approved}", { started, approved: r.approvedBy ? t("approved by {login}", { login: r.approvedBy }) : t("not approved") });
 }
 

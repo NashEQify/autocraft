@@ -59,7 +59,7 @@ const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFac
 };
 
 /**
- * Who a workflow acts for, the newest first: whoever last answered it, approved its merge or started it. Their command is the authority of
+ * Who a workflow acts for, the newest first: whoever last answered or resumed it, approved its merge or started it. Their command is the authority of
  * its work, an implementation and its PR's revisions among it (src/workflow/work.ts settlerOf picks the one who may act).
  */
 export function workflowActors(w: Pick<ItemWorkflow, "startedBy" | "startedAt" | "approvedBy" | "approvedAt">, answer: { login: string; at: string } | null | undefined): string[] {
@@ -75,6 +75,9 @@ export function workflowActors(w: Pick<ItemWorkflow, "startedBy" | "startedAt" |
 /** Case-insensitive `col IN logins` with a statement text that does not depend on the list. */
 const loginIn = (db: Db, eb: kx.AnyEb, col: string, logins: string[], alias: string) =>
   eb.exists(kx.schemaEb(eb).selectFrom(kx.jsonEach(db, kx.json(logins), alias)).select(one(eb)).where(kx.ciEq(db, col, `${alias}.value`)));
+
+/** The events whose maker a workflow acts for. */
+const SAID_EVENTS = ["answered", "resumed"];
 
 type EndedRow = { repo: string; number: number | string; state: string };
 
@@ -97,21 +100,21 @@ export async function loadEndedWorkflows(db: Db, keys: KeySource): Promise<Map<R
 }
 
 /**
- * The planner pass's set loader: live workflows with the PR an implement workflow works on, latest ended state per item (a PR's own or its issue's), merge holds, queued requests and
- * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`: the
+ * The planner pass's set loader: live workflows with the PR an implement workflow works on, latest ended state per item (a PR's own or its issue's), queued requests and
+ * active legs; four statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`: the
  * app identity, and a write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
  */
 export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: number } = {}): Promise<WorkflowPassFacts> {
-  const out: WorkflowPassFacts = { live: new Map(), ofPr: new Map(), actors: new Map(), ended: new Map(), holds: new Set(), operator: new Map() };
+  const out: WorkflowPassFacts = { live: new Map(), ofPr: new Map(), actors: new Map(), ended: new Map(), operator: new Map() };
   if (isEmpty(keys)) return out;
   const q = queryDb(db);
   const k = q.k as any;
   const after = new Date((o.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const keyed = (alias: string, a: string, b: string) => (eb: any) => eb.exists(k.selectFrom(resolveKeys(db, keys, alias)).select(one(eb)).whereRef(`${alias}.repo`, "=", a).whereRef(`${alias}.number`, "=", b));
 
-  /** A column of the newest answer to a workflow. */
+  /** A column of the newest answer or resume of a workflow. */
   const lastAnswer = (alias: string, col: string) => k.selectFrom(`main.workflow_events as ${alias}`).select(`${alias}.${col}`).whereRef(`${alias}.workflow_id`, "=", "w.id")
-    .where(`${alias}.kind`, "=", "answered").orderBy(`${alias}.id`, "desc").limit(1);
+    .where(`${alias}.kind`, "in", SAID_EVENTS).orderBy(`${alias}.id`, "desc").limit(1);
   const liveQ = k.selectFrom("main.item_workflows as w")
     .leftJoin(linkRows(db, LIVE_STATES).as("l"), "l.wid", "w.id")
     .selectAll("w")
@@ -128,8 +131,6 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
 
   const endedQ = endedQuery(db, keys);
 
-  const holdsQ = k.selectFrom("main.merge_holds as h").innerJoin(resolveKeys(db, keys, "kh"), (j: any) => j.onRef("kh.repo", "=", "h.repo").onRef("kh.number", "=", "h.number")).select(["h.repo", "h.number"]);
-
   const requestsQ = k.selectFrom("main.operator_fixups as o").innerJoin(resolveKeys(db, keys, "kr"), (j: any) => j.onRef("kr.repo", "=", "o.repo").onRef("kr.number", "=", "o.number"))
     .selectAll("o").select((eb: any) => writeCheckedAt(db, eb, "o.by", "o.repo").as("maker_checked_at")).where("o.state", "=", "queued")
     .where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after))
@@ -139,7 +140,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const legsQ = k.selectFrom("main.preapprovals as p").innerJoin(resolveKeys(db, keys, "kl"), (j: any) => j.onRef("kl.repo", "=", "p.repo").onRef("kl.number", "=", "p.number"))
     .selectAll("p").where("p.state", "in", ACTIVE_LEGS).orderBy("p.id");
 
-  const [live, ended, holds, requests, legs] = await db.together(() => Promise.all([q.all(liveQ), q.all(endedQ), q.all(holdsQ), q.all(requestsQ), q.all(legsQ)])) as
+  const [live, ended, requests, legs] = await db.together(() => Promise.all([q.all(liveQ), q.all(endedQ), q.all(requestsQ), q.all(legsQ)])) as
     [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown; answer_by: string | null; answer_at: string | null; go_on: string | null })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], OperatorWork["requests"], Preapproval[]];
 
   for (const r of live) {
@@ -149,7 +150,6 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
     if (flag(r.pr_hit) && w.entry === "implement" && r.pr !== null) out.ofPr.set(refKey(w.repo, Number(r.pr)), factOf(w, false, r.go_on));
   }
   for (const [key, state] of endedOf(ended)) out.ended.set(key, state);
-  for (const r of holds) out.holds.add(refKey(r.repo, Number(r.number)));
   const work = (repo: string, number: number): OperatorWork => {
     const key = refKey(repo, Number(number));
     let w = out.operator.get(key);
@@ -202,6 +202,19 @@ export async function loadPrWorkflows(db: Db, refs: { repo: string; number: numb
   // The best match of a PR comes last and is the one kept.
   for (const { pr, rank: _rank, ...row } of rows) out.set(refKey(row.repo, Number(pr)), workflowOf(row as WorkflowRow));
   return out;
+}
+
+/** The held items: the newest workflow of an open item, when it is held. Of the given repos or items; the latest hold first. */
+export async function loadHeldWorkflows(db: Db, f: { repos: string[] } | { refs: { repo: string; number: number }[] }): Promise<(ItemWorkflow & { title: string | null })[]> {
+  if (("repos" in f ? f.repos : f.refs).length === 0) return [];
+  const q = queryDb(db);
+  const rows = await q.all((q.k as any).selectFrom("main.item_workflows as w").innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
+    .selectAll("w").select("i.title as title").where("w.state", "=", "stopped").where("i.state", "=", "OPEN")
+    .$if("repos" in f, (b: any) => b.where(kx.inList(db, "w.repo", (f as { repos: string[] }).repos)))
+    .$if("refs" in f, (b: any) => b.where(kx.refIn(db, "w", pairs((f as { refs: { repo: string; number: number }[] }).refs))))
+    .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.item_workflows as nw").select(eb.lit(1).as("one")).whereRef("nw.repo", "=", "w.repo").whereRef("nw.number", "=", "w.number").whereRef("nw.id", ">", "w.id"))))
+    .orderBy("w.stopped_at", "desc").orderBy("w.id", "desc")) as (WorkflowRow & { title: string | null })[];
+  return rows.map(({ title, ...r }) => ({ ...workflowOf(r as WorkflowRow), title }));
 }
 
 /** Every workflow of each item, oldest first. */
@@ -264,12 +277,12 @@ export async function loadLastEventKinds(db: Db, keys: KeySource): Promise<Map<R
 }
 
 /** Latest `answered` event per workflow. */
-export async function loadAnswers(db: Db, workflowIds: number[]): Promise<Map<number, { login: string; at: string }>> {
+export async function loadAnswers(db: Db, workflowIds: number[], o: { resumes?: true } = {}): Promise<Map<number, { login: string; at: string }>> {
   const out = new Map<number, { login: string; at: string }>();
   if (workflowIds.length === 0) return out;
   const q = queryDb(db);
   const k = q.k as any;
-  const newest = k.selectFrom("main.workflow_events as m").select((eb: any) => eb.fn.max("m.id").as("id")).where("m.kind", "=", "answered")
+  const newest = k.selectFrom("main.workflow_events as m").select((eb: any) => eb.fn.max("m.id").as("id")).where("m.kind", "in", o.resumes ? SAID_EVENTS : ["answered"])
     .where(kx.inList(db, "m.workflow_id", workflowIds, "bigint")).groupBy("m.workflow_id");
   for (const r of await q.all(k.selectFrom("main.workflow_events as e").select(["e.workflow_id", "e.login", "e.at"]).where("e.id", "in", newest)) as { workflow_id: number; login: string; at: string }[]) {
     out.set(Number(r.workflow_id), { login: r.login, at: r.at });
@@ -395,6 +408,13 @@ export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowP
   });
 }
 
+/** Deletes the rows: the hold of an item nobody started, once it is over. Returns the rows deleted. */
+export async function dropWorkflows(db: Db, ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const q = queryDb(db);
+  return (await q.run((q.k as any).deleteFrom("main.item_workflows").where(kx.inList(db, "id", ids, "bigint")))).changes;
+}
+
 /** Batched insert, 500 rows a statement. */
 export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void> {
   if (rows.length === 0) return;
@@ -488,7 +508,7 @@ export async function loadLiveRepos(db: Db): Promise<Set<string>> {
   return new Set((await q.all(q.k.selectFrom("main.item_workflows").select("repo").distinct().where("state", "in", LIVE_STATES))).map((r) => r.repo));
 }
 
-/** Distinct logins the pipeline acts for with their repo: active leg owners, queued fix-up requesters, `approved_by` or `started_by` of live workflows, and who answered a live implement workflow; one `UNION`. */
+/** Distinct logins the pipeline acts for with their repo: active leg owners, queued fix-up requesters, `approved_by` or `started_by` of live workflows, and who answered or resumed a live workflow; one `UNION`. */
 export async function loadActingPairs(db: Db): Promise<{ login: string; repo: string }[]> {
   const q = queryDb(db);
   const k = q.k as any;
@@ -497,7 +517,7 @@ export async function loadActingPairs(db: Db): Promise<{ login: string; repo: st
   const approvers = k.selectFrom("main.item_workflows as w").select(["w.approved_by as login", "w.repo as repo"]).where("w.state", "in", LIVE_STATES).where("w.approved_by", "is not", null);
   const starters = k.selectFrom("main.item_workflows as w").select(["w.started_by as login", "w.repo as repo"]).where("w.state", "in", LIVE_STATES);
   const answerers = k.selectFrom("main.item_workflows as w").innerJoin("main.workflow_events as e", "e.workflow_id", "w.id").select(["e.login as login", "w.repo as repo"])
-    .where("w.state", "in", LIVE_STATES).where("e.kind", "=", "answered");
+    .where("w.state", "in", LIVE_STATES).where("e.kind", "in", SAID_EVENTS);
   return await q.all(k.selectFrom(legs.union(requests).union(approvers).union(starters).union(answerers).as("a")).select(["a.login", "a.repo"]).orderBy("a.repo").orderBy("a.login")) as { login: string; repo: string }[];
 }
 

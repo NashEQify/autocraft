@@ -72,7 +72,7 @@ import * as inference from "./inference.ts";
 import { localEmbedder, type Embedder } from "../../embed/model.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { batchOne } from "./batch-page.ts";
-import { batchRemovePr, batchStop, mergeHoldPr, queuePage } from "./queue-page.ts";
+import { batchRemovePr, batchStop, queuePage } from "./queue-page.ts";
 import { VectorIndex } from "../../embed/vectors.ts";
 import { mainCiRepos, summarize } from "../../mainci/index.ts";
 import * as commands from "./commands.ts";
@@ -540,8 +540,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     scoped(get("/api/next", next)),
     get("/api/batches/:id", batchOne),
     scoped(get("/api/queue/page", queuePage)),
-    { method: "POST", pattern: "/api/merge/hold", handler: ok(async (db, req) => mergeHoldPr(db, req, true)) },
-    { method: "POST", pattern: "/api/merge/release", handler: ok(async (db, req) => mergeHoldPr(db, req, false)) },
     { method: "POST", pattern: "/api/merge/batch-remove", handler: ok(async (db, req) => batchRemovePr(db, req, opts.exec)) },
     { method: "POST", pattern: "/api/queue/batches/:id/stop", handler: ok(async (db, req) => batchStop(db, req, opts.exec)) },
     get("/api/repos/:repo/security", security.security),

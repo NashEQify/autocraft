@@ -7,7 +7,7 @@
 // A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. While an item waits for its
 // answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end, a stop at a blocker at once with the end
-// of its merge leg (block.ts). A workflow a person changed meanwhile (stopped, answered, approved) keeps what they did: the pass's write
+// of its merge leg (block.ts). A workflow a person changed meanwhile (held, answered, approved) keeps what they did: the pass's write
 // leaves it out and the next pass looks at it again.
 import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
@@ -125,13 +125,17 @@ async function premergeParts(db: Db, repo: string, number: number, head: string,
   return fs.map((f, i) => ({ n: from + i + 1, title: f.title, source: "review" as const, file: f.file, ...(f.severity === "defect" ? { major: true } : {}), state: "planned" as const }));
 }
 
+/** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */
+const HOLD_ENDS = ["person", "workflow-ended"];
+
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
 
-/** The merge leg of the workflow that ended after `since` (and none active), with its reason. */
+/** The merge leg of the workflow that ended after `since` (and none active), with its reason. One a hold ended says nothing once someone resumed the item. */
 function endedLeg(pass: Pass, w: ItemWorkflow, since: string): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
+  if (HOLD_ENDS.includes(r.reason_code ?? "") && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
   return { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
 }
 

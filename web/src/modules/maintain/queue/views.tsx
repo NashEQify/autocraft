@@ -1,4 +1,4 @@
-// Work queue: running now, waiting with the reason, the merge queue (batches, next merges, hold and release), the model call
+// Work queue: running now, waiting with the reason, the merge queue (batches, next merges, hold), the held items, the model call
 // queue and recently merged. Every list updates in place from the live topics.
 import { useMemo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -54,19 +54,20 @@ function Row({ item, line, action }: { item: { repo: string; number: number; kin
 /** Small secondary button; the touch target grows past its box with a transparent overlay, not with its size. */
 const small = "relative h-8 after:absolute after:-inset-x-2 after:-inset-y-2";
 
-function HoldButton({ m, held }: { m: Pick<NextMerge, "repo" | "number">; held: boolean }) {
+/** Holds an item, or resumes a held one, by the command of that name. */
+function HoldButton({ m, held }: { m: Pick<NextMerge, "repo" | "number">; held?: boolean }) {
   const api = useApi();
   const write = useWrite();
   if (!canRun(useUser(), m.repo)) return null;
-  const control = held ? "release-merge" : "hold-merge";
+  const word = held ? "resume" : "hold";
   const go = async () => {
-    const r = await api.controls.run({ control, repo: m.repo, number: m.number });
-    if (!r.ok) throw new Error(r.line);
+    const r = await api.maintainItem.command(m.repo, m.number, word);
+    if (!r.ok) throw new Error(r.lines.join(" "));
   };
   return (
     <span className="flex flex-col items-end gap-1">
-      <Button size="sm" className={small} loading={write.busy === control} onClick={() => void write.run(control, go)}>
-        {held ? t("Release") : t("Hold")}
+      <Button size="sm" className={small} aria-label={t("{word} {ref}", { word: held ? t("Resume") : t("Hold"), ref: key(m) })} loading={write.busy === word} onClick={() => void write.run(word, go)}>
+        {held ? t("Resume") : t("Hold")}
       </Button>
       <ErrorLine error={write.error} className="text-2xs" />
     </span>
@@ -103,7 +104,6 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
   const { pages, error } = usePage("merge", project ?? "pipeline", undefined);
   const live = useQuery("live", (a) => a.live()).data;
   const first = pages?.[0];
-  const held = useMemo(() => new Set((pages?.flatMap((p) => p.mergeRows) ?? []).filter((r) => r.held).map(key).concat((first?.batches ?? []).flatMap((b) => b.prs).filter((r) => (r as { held?: boolean }).held).map(key))), [pages, first]);
   if (!first) return <Pending error={error} />;
   const next = first.nextMerges;
   const batchKeys = new Set(first.batches.flatMap((b) => b.prs.map(key)));
@@ -132,7 +132,7 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
             </div>
             <ul className="divide-y divide-line border-t border-line">
               {b.prs.map((r) => (
-                <Row key={key(r)} item={{ ...r, kind: "pr" as const, state: "open" as const }} line={held.has(key(r)) ? t("Held out of the merge") : lineOf(r, t("Merges with the batch when CI is green"))} action={<HoldButton m={r} held={held.has(key(r))} />} />
+                <Row key={key(r)} item={{ ...r, kind: "pr" as const, state: "open" as const }} line={lineOf(r, t("Merges with the batch when CI is green"))} action={<HoldButton m={r} />} />
               ))}
             </ul>
           </div>
@@ -143,7 +143,7 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
         {inLine.length ? (
           <ul className="divide-y divide-line">
             {inLine.map((m, i) => (
-              <Row key={key(m)} item={{ ...m, kind: "pr" as const, state: "open" as const }} line={<><span className="num mr-1.5 text-ink/60">{i + 1}.</span>{lineOf(m, m.label)}</>} action={<HoldButton m={m} held={m.waitsFor === "held" || held.has(key(m))} />} />
+              <Row key={key(m)} item={{ ...m, kind: "pr" as const, state: "open" as const }} line={<><span className="num mr-1.5 text-ink/60">{i + 1}.</span>{lineOf(m, m.label)}</>} action={<HoldButton m={m} />} />
             ))}
           </ul>
         ) : (
@@ -156,7 +156,7 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
             </p>
             <ul className="divide-y divide-line">
               {queued.map((r) => (
-                <Row key={key(r)} item={{ ...r, kind: r.kind, state: "open" as const }} line={lineOf(r, r.implement ? `${r.implement.text}${r.implement.wait ? ` · ${r.implement.wait}` : ""}` : r.next ?? (r.step === "next" || r.step === "implement" ? t("In progress") : t(PENDING_STEP[r.step])))} action={r.kind === "pr" ? <HoldButton m={r} held={r.held} /> : undefined} />
+                <Row key={key(r)} item={{ ...r, kind: r.kind, state: "open" as const }} line={lineOf(r, r.implement ? `${r.implement.text}${r.implement.wait ? ` · ${r.implement.wait}` : ""}` : r.next ?? (r.step === "next" || r.step === "implement" ? t("In progress") : t(PENDING_STEP[r.step])))} action={<HoldButton m={r} />} />
               ))}
             </ul>
           </>
@@ -168,6 +168,18 @@ function MergeQueue({ project, meta }: { project: string | null; meta: MaintainQ
       </div>
       <ErrorLine error={error?.message} />
     </section>
+  );
+}
+
+function HeldItems({ project, meta }: { project: string | null; meta: MaintainQueueMeta }) {
+  const rows = meta.held.filter((r) => !project || r.repo === project);
+  if (!rows.length) return null;
+  return (
+    <Part title={t("Held")} count={rows.length} empty="">
+      {rows.map((r) => (
+        <Row key={key(r)} item={{ ...r, state: "open" as const }} line={r.line} action={<HoldButton m={r} held />} />
+      ))}
+    </Part>
   );
 }
 
@@ -229,7 +241,7 @@ export function QueueView({ user }: ViewProps) {
   const project = usePageProject();
   const { data, error } = useQuery("next-page", (a) => a.next());
   const live = useQuery("live", (a) => a.live()).data;
-  const meta = useQuery("maintain-queue", (a) => a.maintain.queue()).data ?? { approvedBy: {} };
+  const meta = useQuery("maintain-queue", (a) => a.maintain.queue()).data ?? { approvedBy: {}, held: [] };
   const limits = useQuery("pipeline-state", (a) => a.pipeline.state()).data;
   const health = useQuery("health", (a) => a.health()).data;
   if (!data) return <Pending error={error} />;
@@ -268,6 +280,7 @@ export function QueueView({ user }: ViewProps) {
             ))}
           </Part>
           <MergeQueue project={project} meta={meta} />
+          <HeldItems project={project} meta={meta} />
           <ModelCalls user={user} />
         </div>
       </div>

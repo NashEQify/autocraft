@@ -169,7 +169,7 @@ export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string;
 
 /**
  * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible (the repo's pipeline is on and an outside-author hold does not keep it back). Not ended
- * by a person (stopped, backlog, closed).
+ * by a person (held, backlog, closed).
  */
 export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
@@ -185,10 +185,6 @@ export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): 
     ]),
   ]);
 }
-
-/** The PR has a merge hold. */
-export const mergeHeldExpr = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.merge_holds as mh").select(one(eb)).where("mh.repo", "=", kx.exprOf(eb, repo)).where("mh.number", "=", kx.exprOf(eb, number)));
 
 /** A live workflow that came back to a person. */
 export const needsPerson = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>

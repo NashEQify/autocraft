@@ -11,7 +11,6 @@ import { listBatchPage, loadBatchPage } from "../merge/batches.ts";
 import type { BatchListRow, BatchPageView } from "../merge/types.ts";
 import { loadRanks } from "../triage/rank.ts";
 import type { RankRow } from "../triage/types.ts";
-import { loadHolds } from "../workflow/holds.ts";
 import { loadLegPass } from "../workflow/legs.ts";
 import { loadQueuePositions, loadWorkScores } from "../workflow/rows.ts";
 import type { Preapproval, QueuePosition } from "../workflow/types.ts";
@@ -21,7 +20,6 @@ import { loadRankedOpen, type WorkList, type WorkListFilter } from "./work.ts";
 export type QueuePageFacts = {
   /** Of the items the merge tab can show, those in the pipeline's scope; null unless that scope is asked for. */
   scope: Set<string> | null;
-  holds: Set<string>;
   positions: Map<string, QueuePosition>;
   entries: CachedEntry[];
   work: WorkList;
@@ -59,9 +57,8 @@ export function closingOf(links: { repo: string; number: number; closing_issues:
 
 /** Wave 1 reads the page's own sets; wave 2 the items, ranks and audit rows of the pre-approved PRs. */
 export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: boolean; visible: string[]; hidden: HiddenRepos; list: WorkListFilter }): Promise<QueuePageFacts> {
-  const [scope, holds, positions, entries, work, legPass, queued, page, workScores] = await db.together(() => Promise.all([
+  const [scope, positions, entries, work, legPass, queued, page, workScores] = await db.together(() => Promise.all([
     o.pipelineScope ? loadPipelineScope(db) : null,
-    loadHolds(db),
     loadQueuePositions(db),
     loadMergeQueue(db, { merged: "exclude" }),
     loadRankedOpen(db, o.list),
@@ -78,7 +75,7 @@ export async function loadQueuePage(db: Db, o: { pipelineScope: boolean; merge: 
     legs.length ? loadAuditActions(db, [...new Set(legs.map((l) => refOf(l.repo, l.number)))], ["preapproval"]) : new Map<string, AuditRow[]>(),
   ]));
   return {
-    scope, holds: new Set(holds.keys()), positions, entries, work, closes: closingOf(queued), legs, pending, ranks, carried,
+    scope, positions, entries, work, closes: closingOf(queued), legs, pending, ranks, carried,
     batches: page?.batches ?? [], scores: new Map(queued.flatMap((r) => (r.score === null ? [] : [[refOf(r.repo, r.number), r.score] as const]))), workScores,
   };
 }

@@ -40,8 +40,6 @@ export type QueueEntry = {
   noCi: boolean;
   refusedReason: string | null;
   reviewedAt: string;
-  /** An operator holds the PR's merge (src/merge/controls.ts): it is reviewed and fixed as usual but does not merge, alone or in a batch. */
-  held: boolean;
   /** A line on the state: why a maintainer's review blocks it, or that its reviews cannot be read. */
   note: string | null;
   /** The block (state changes-requested) comes from a live read newer than the PR's last update, not from the mirrored reviews alone. */
@@ -92,7 +90,7 @@ function entryOf(f: PrFacts, plan: ReturnType<typeof decidePr>, title: string, p
     verdict: r ? r.verdict as "take" | "take-fix" : null, reason: r?.reason ?? "", fixes: r?.fixes ?? 0, ci: f.ci, mergeable: f.mergeable,
     state: plan.state as QueueState, eligible: plan.eligible, path: plan.path, outsideRule: plan.reasons,
     runsWaiting: f.runs?.waiting ?? 0, runsBlocked: f.runs?.blocked ?? null, noCi: x.noCi, refusedReason: x.refusedReason,
-    reviewedAt: r?.at ?? f.workflow?.startedAt ?? "", held: f.mergeHeld, note: plan.note, blockedLive: plan.state === "changes-requested" && !!f.changesRequested?.live,
+    reviewedAt: r?.at ?? f.workflow?.startedAt ?? "", note: plan.note, blockedLive: plan.state === "changes-requested" && !!f.changesRequested?.live,
     verify: f.verification, ...(plan.conflictNote !== null ? { conflictNote: plan.conflictNote } : {}), ...(f.mainFix ? { mainFix: true } : {}), premerge,
   };
 }

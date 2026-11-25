@@ -6,16 +6,17 @@
 // words must match exactly one planned part; a weight alone needs a started item. While an implementation's question is open, its
 // options are the parts, and a reply that is only an option's number or words answers it.
 import { describe } from "./parse.ts";
-import { sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
+import { heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
 /**
- * `closing`: a close of the item is queued or waits for its person, which a stop takes back. `mergeWaits`: the merge the sender approved
+ * `held`: the item is held, and what it goes on with when it is resumed; no live workflow works on it. `closing`: a close of the item is
+ * queued or waits for its person, which a hold takes back. `mergeWaits`: the merge the sender approved
  * waits for their own sign-in or access.
  */
-export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; closing?: boolean; mergeWaits?: boolean };
+export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; held?: ItemWorkflow | null; closing?: boolean; mergeWaits?: boolean };
 
 /** How the confirmation line attributes the run: "approved by", "started by", ...; null: "by". */
-export type How = "started" | "approved" | "answered" | "stopped" | "set" | null;
+export type How = "started" | "approved" | "answered" | "held" | "resumed" | "set" | null;
 
 export type Run = {
   how: How;
@@ -33,7 +34,9 @@ export type Run = {
   /** The steps end in a merge (approved now or before); false: they end in a recommendation. */
   merges: boolean;
   weight: number | null;
-  end: "backlog" | "close" | "stop" | null;
+  end: "backlog" | "close" | "hold" | null;
+  /** Goes on with the held item: its steps, its open question, or as an item nobody started. */
+  resume: "steps" | "question" | "unstarted" | null;
   /** Why it closes, when the command says. */
   close?: CloseReason;
   /** The autorepin arguments, as written. */
@@ -65,7 +68,8 @@ export type Refusal =
   | { why: "not-issue-step"; word: "review" | "fix-up" }
   | { why: "issue-merge-queue" }
   | { why: "autorepin-not-pr" }
-  | { why: "nothing-running" }
+  | { why: "already-held"; by: string; at: string }
+  | { why: "not-held" }
   | { why: "already-started"; entry: Entry; by: string; at: string }
   | { why: "already-approved"; by: string; at: string }
   /** A ready plan's part: the implementation is built from the whole plan, so a part can't be fixed or dropped on its own. */
@@ -78,12 +82,12 @@ export type Resolved =
 
 const LIVE: ReadonlySet<WorkflowState> = new Set(["running", "waiting", "blocked", "recommending"]);
 
-/** A workflow that still runs or waits; a stopped, finished, closed or backlogged one counts as not started. */
+/** A workflow that still runs or waits; a held, finished, closed or backlogged one counts as not started. */
 export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && LIVE.has(wf.state);
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, autorepin: null, answers: false, pick: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, pick: null, ...r },
 });
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
@@ -112,6 +116,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   }
   if (parsed.kind === "yes") {
     const understood = "yes";
+    if (!live && state.held) return goOn(state.held, parsed.weight ?? null);
     if (!live || !wf.rec) return { kind: "ambiguous", understood, ambiguity: { why: "nothing-to-answer" } };
     // A recommendation a yes cannot run (a question only an option's name or a comment answers) needs other words.
     if (runsNothing(wf.rec)) return { kind: "ambiguous", understood, ambiguity: { why: "needs-words", text: wf.rec.text } };
@@ -126,19 +131,20 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const weight = parts.find((p) => p.word === "weight")?.weight ?? null;
   const entries = [...new Set(parts.map((p) => p.word).filter(isEntryWord))];
   const merge = has("merge");
-  const end = (["backlog", "close", "stop"] as const).filter((w) => has(w));
+  const end = (["backlog", "close", "hold"] as const).filter((w) => has(w));
   const repin = parts.find((p): p is Extract<CommandPart, { args?: string }> => p.word === "autorepin");
   const named = parts.filter((p): p is Extract<CommandPart, { part: unknown }> => "part" in p);
 
   // Words that end the work or stand apart run alone; two entry points can't both start.
-  if (((end.length || repin) && parts.length > 1) || entries.length > 1) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
+  if (((end.length || repin) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || entries.length > 1) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
 
   if (end.length) {
     const e = end[0]!;
-    if (e === "stop" && !live && !state.closing) return refused({ why: "nothing-running" });
+    if (e === "hold" && !live && state.held && !state.closing) return refused({ why: "already-held", by: state.held.stoppedBy ?? "", at: state.held.stoppedAt ?? "" });
     const close = e === "close" ? parts.find((p): p is Extract<CommandPart, { word: "close" }> => p.word === "close")?.reason : undefined;
-    return run({ end: e, ...(close && { close }), how: e === "stop" ? "stopped" : live && wf.rec ? "answered" : null, answers: live && !!wf.rec });
+    return run({ end: e, ...(close && { close }), how: e === "hold" ? "held" : live && wf.rec ? "answered" : null, answers: live && !!wf.rec });
   }
+  if (has("resume")) return !live && state.held ? goOn(state.held, weight) : refused({ why: "not-held" });
   if (repin) {
     if (state.kind !== "pr") return refused({ why: "autorepin-not-pr" });
     return run({ autorepin: repin.args ?? "", how: "set" });
@@ -232,7 +238,7 @@ const optionsOf = (wf: ItemWorkflow): PlanPart[] =>
   (wf.rec?.question ? wf.plan.filter((p) => p.option !== undefined && sameQuestion(p.question, wf.rec!.question)) : []);
 
 /** Words that reverse or postpone an answer: a reply holding one names no option. */
-const HEDGE = new Set(["no", "not", "never", "don", "dont", "wait", "hold", "later", "unless", "but", "if", "instead", "or"]);
+const HEDGE = new Set(["no", "not", "never", "don", "dont", "wait", "hold", "stop", "pause", "later", "unless", "but", "if", "instead", "or"]);
 
 /**
  * The option of the open question a reply names on its own ("2", "option 2", "go with per document"): by its number, or by words that
@@ -260,6 +266,12 @@ function pick(wf: ItemWorkflow, chosen: PlanPart, o: { drop?: number[]; merge?: 
     answers: true, how: approve ? "approved" : "answered",
   });
 }
+
+/** Goes on with the held item. */
+const goOn = (held: ItemWorkflow, weight: number | null): Resolved => {
+  const { unstarted, rec } = heldWork(held);
+  return run({ resume: unstarted ? "unstarted" : rec ? "question" : "steps", how: "resumed", merges: held.approvedBy !== null, weight });
+};
 
 /** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
 const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges;

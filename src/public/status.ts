@@ -24,7 +24,7 @@ export type PublicStatus = {
 //   issue: no item_stage row                                      -> New
 //   issue: any other                                              -> Triaged
 //   PR plan state in-batch, batch-checking, ready,
-//     decision-answered-merge, and not held (view.queue.held)     -> In the merge queue (#n of m)
+//     decision-answered-merge                                     -> In the merge queue (#n of m)
 //   PR plan state needs-fix-up, or view.fixup = fix,
 //     or view.cifix = cifix-queued | cifix-rerun                  -> Fix-up in progress
 //   PR plan state waiting-ci, waiting-premerge, waiting-verify,
@@ -64,7 +64,7 @@ function statusOf(repo: string, row: PublicStatusRow, place: () => { position: n
     // An unreadable cached view counts as no view.
   }
   const plan = row.planState ?? "";
-  if (PUBLIC_QUEUED.includes(plan) && !view.queue?.held) {
+  if (PUBLIC_QUEUED.includes(plan) ) {
     const q = place();
     if (q) return { ...open, step: "In the merge queue", queue: q };
   }

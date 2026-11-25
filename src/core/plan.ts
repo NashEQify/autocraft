@@ -211,8 +211,6 @@ export type PrFacts = {
   heldBacklog: boolean;
   /** The quiet pull request of a security fix that is not yet public: nothing is posted about it on GitHub. */
   quiet?: boolean;
-  /** An operator holds its merge. */
-  mergeHeld: boolean;
   /** The score of its live workflow (weight, then age), else the rank score; null when unranked. Lanes order by it, highest first, then by number. */
   score: number | null;
   repoFacts: {

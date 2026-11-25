@@ -23,7 +23,7 @@ const PR_PHASE = {
   "ci-failed": "Fixing", conflict: "Fixing", "needs-fix-up": "Fixing", "verify-failed": "Fixing", "batch-failed": "Fixing", pushed: "Fixing",
   "waiting-verify": "Verifying", "verify-error": "Verifying",
   "needs-decision": "Waiting for a person", "changes-requested": "Waiting for a person", "not-started": "Waiting for a person",
-  "opus-hold": "Held", "held-backlog": "Held", backlog: "Held", draft: "Held",
+  "opus-hold": "Waiting for a person", "held-backlog": "Held", backlog: "Held", draft: "Held",
   "out-of-scope": "Pipeline off", "opus-close": "Out of scope",
   "not-reviewed": "Review", "review-stale": "Review",
   merged: "Merged", closed: "Closed",

@@ -1,9 +1,10 @@
 // The lines every surface shows for a started item: its steps, the state line, the open recommendation, who started, approved,
-// answered or stopped it, its place in line, and the one-line confirmation and reply to each command. GitHub, Discord, the
+// answered or holds it, its place in line, and the one-line confirmation and reply to each command. GitHub, Discord, the
 // agent and the dashboard all build their text here, so the same words appear everywhere. All text goes through t().
 import { t, tk } from "../i18n/index.ts";
 import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
+import { heldWork } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend";
@@ -114,7 +115,7 @@ export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcCl
     case "blocked": return wf.blocker ? t("Stopped at a blocker: {blocker}", { blocker: blockerLabel(wf.blocker) }) : t("Stopped at a blocker");
     case "recommending": return t("Waiting for an answer");
     case "done": return t("Done");
-    case "stopped": return wf.stoppedBy ? t("Stopped by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }) : t("Stopped");
+    case "stopped": return wf.stoppedBy ? t("Held by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }) : t("Held");
     case "closed": return t("Closed");
     case "backlog": return t("In the backlog");
   }
@@ -147,12 +148,12 @@ export const recommendationText = (rec: Recommendation): string =>
 export const recommendationLine = (rec: Recommendation | null): string | null =>
   rec ? t("Recommendation: {text}", { text: recommendationText(rec) }) : null;
 
-/** Who started, approved, answered and stopped the item; `answered` is the latest answer, from the item's events. */
+/** Who started, approved, answered and holds the item; `answered` is the latest answer, from the item's events. */
 export function attributionLines(wf: ItemWorkflow, answered?: { by: string; at: string } | null, clock: Clock = utcClock): string[] {
-  const out = [t("{entry}, started by {login}, {time}", { entry: t(ENTRY_LABEL[wf.entry]), login: wf.startedBy, time: clock(wf.startedAt) })];
+  const out = wf.state === "stopped" && heldWork(wf).unstarted ? [] : [t("{entry}, started by {login}, {time}", { entry: t(ENTRY_LABEL[wf.entry]), login: wf.startedBy, time: clock(wf.startedAt) })];
   if (wf.approvedBy) out.push(t("Approved for merge by {login}, {time}", { login: wf.approvedBy, time: clock(wf.approvedAt ?? "") }));
   if (answered) out.push(t("Answered by {login}, {time}", { login: answered.by, time: clock(answered.at) }));
-  if (wf.stoppedBy) out.push(t("Stopped by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }));
+  if (wf.stoppedBy) out.push(t("Held by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }));
   return out;
 }
 
@@ -172,7 +173,8 @@ function byText(how: Run["how"], login: string, time: string): string {
     case "started": return t("(started by {login}, {time})", p);
     case "approved": return t("(approved by {login}, {time})", p);
     case "answered": return t("(answered by {login}, {time})", p);
-    case "stopped": return t("(stopped by {login}, {time})", p);
+    case "held": return t("(held by {login}, {time})", p);
+    case "resumed": return t("(resumed by {login}, {time})", p);
     case "set": return t("(set by {login}, {time})", p);
     default: return t("(by {login}, {time})", p);
   }
@@ -180,12 +182,14 @@ function byText(how: Run["how"], login: string, time: string): string {
 
 /**
  * The one-line confirmation of an accepted command, the same on every surface:
- * "Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply stop to halt."
+ * "Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply hold to halt."
  * `waits`: who has to resolve the PR's conflict with its base branch before anything is fixed or merged.
  */
 export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock, waits: Recommendation["waits"] | null = null): string {
   const who = byText(r.how, by, clock(at));
-  if (r.end === "stop") return t("Stopped {by}. Nothing more runs.", { by: who });
+  if (r.end === "hold") return t("On hold {by}. AutoCraft keeps off it. Reply resume to go on.", { by: who });
+  if (r.resume === "unstarted") return t("No longer held {by}. Nobody had started it, so AutoCraft treats it as it did before.", { by: who });
+  if (r.resume === "question") return t("No longer held {by}. Its question is open again.", { by: who });
   if (r.end === "close") {
     if (!r.close) return t("Closing {by}.", { by: who });
     if (r.close.as === "duplicate") return t("Closing as a duplicate of {ref} {by}.", { ref: `${r.close.of.repo ?? ""}#${r.close.of.number}`, by: who });
@@ -204,6 +208,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  if (r.resume) did.push(t("going on where it was held"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {
@@ -219,7 +224,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
   const what = cap(did.length ? t("{done}, then {end}", { done: did.join(", "), end }) : end);
-  return t("{what}{weight} {by}. Reply stop to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
+  return t("{what}{weight} {by}. Reply hold to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
 }
 
 /** The reply when nothing ran: what was understood, and why it waits. */
@@ -228,12 +233,12 @@ export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = 
 }
 
 /** Words that reverse or postpone a command: a reply holding one is never read back as that command. */
-const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
+const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|stop|pause|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
 
 /** The one start-or-approve command a leftover text names, or null when it names none, several, or is hedged. */
 function singleCommand(rest: string): string | null {
   if (MEANING_WORDS.test(rest) || /(?<![\w-])duplicate(?![\w-])/i.test(rest)) return null;
-  const found = COMMANDS.filter((c) => !c.answer && c.word !== "autorepin" && [c.word, ...c.aliases].some((w) => new RegExp(`(?<![\\w-])${w.replace(/[- ]/g, "[-\\s]?")}(?![\\w-])`, "i").test(rest)));
+  const found = COMMANDS.filter((c) => !c.answer && c.word !== "autorepin" && c.word !== "hold" && c.word !== "resume" && [c.word, ...c.aliases].some((w) => new RegExp(`(?<![\\w-])${w.replace(/[- ]/g, "[-\\s]?")}(?![\\w-])`, "i").test(rest)));
   return found.length === 1 ? found[0]!.word : null;
 }
 
@@ -269,9 +274,10 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "not-issue-step": return t("{word} is for pull requests. Use implement for an issue.", { word: r.word });
     case "issue-merge-queue": return t("An issue can't go in the merge queue. Use implement and merge.");
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
-    case "nothing-running": return t("Nothing is running on this item.");
+    case "already-held": return t("Already held by {login}, {time}. Reply resume to go on.", { login: r.by, time: clock(r.at) });
+    case "not-held": return t("This item is not held.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
-    case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or stop.", { parts: listText(r.parts) });
+    case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or hold it.", { parts: listText(r.parts) });
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }
 }

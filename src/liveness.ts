@@ -21,7 +21,7 @@ export type ItemFlags = { question: boolean; started: boolean };
 
 /** Plan states a person parks on purpose, or that wait for one to pick the item: nothing is due and nobody is asked. */
 const PARKED_STATES: ReadonlySet<string> = new Set(["backlog", "held-backlog", "draft", "out-of-scope", "not-started"]);
-const PARKED_WAITS: ReadonlySet<string> = new Set(["merge held by an operator", "stays open as a plugin candidate", "a Backlog hold", TRIAGE_WAIT]);
+const PARKED_WAITS: ReadonlySet<string> = new Set(["stays open as a plugin candidate", "a Backlog hold", TRIAGE_WAIT]);
 /** Waits on a pipeline step that has no action due: nothing is working on them. */
 const INTERNAL_WAITS: ReadonlySet<string> = new Set(["the label referee", "Haiku's second opinion"]);
 /** Person waits whose person acts on GitHub, not in a question. */

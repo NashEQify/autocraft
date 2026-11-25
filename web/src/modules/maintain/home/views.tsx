@@ -46,7 +46,7 @@ function RunnerLine({ r }: { r: MaintainRunnerLine }) {
 function byLine(r: MaintainRow): string {
   const started = t("started by {login}", { login: r.startedBy });
   const approved = r.approvedBy ? t("approved by {login}", { login: r.approvedBy }) : t("not approved");
-  return r.stoppedBy ? t("{started}, stopped by {login}", { started, login: r.stoppedBy }) : t("{started}, {approved}", { started, approved });
+  return t("{started}, {approved}", { started, approved });
 }
 
 function ItemRow({ r, by }: { r: MaintainRow; by?: boolean }) {

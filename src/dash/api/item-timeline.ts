@@ -15,7 +15,7 @@ const modelCall = (e: Ev): HistoryCall => ({
   label: `${e.call?.step ?? e.summary} (${e.call?.model ?? e.actor.name})`, kind: "model", costUsd: e.call?.costUsd ?? null,
   ...(e.call?.via && { via: e.call.via }), ...(validRunId(e.ref.runId) && { runId: e.ref.runId }),
 });
-const VERDICT: Record<string, string> = { take: "take", "take-fix": "take with fixes", hold: "hold", close: "close" };
+const VERDICT: Record<string, string> = { take: "take", "take-fix": "take with fixes", hold: "not ready", close: "close" };
 const VERDICT_TONE: Record<string, TimelineTone> = { take: "ok", "take-fix": "warn", hold: "warn", close: "bad" };
 const BAD = /fail|error|refus|reject|broke|too-large/i;
 const toneOf = (s: string): TimelineTone => (BAD.test(s) ? "bad" : /merged|pushed|passed|ok\b|approve|done|green/i.test(s) ? "ok" : "neutral");
