@@ -46,7 +46,7 @@ both("review gates: a read resets the failure counter, failures add up", async (
   await saveGates(db, [{ repo: "app", number: 1, blocked: 1, by_login: "rev", read_at: "t" }]);
   g = await loadGates(db, refs(2));
   assert.deepEqual([g.get("app#1")!.failures, g.get("app#1")!.blocked, g.get("app#2")!.failures], [0, 1, 1]);
-  return [...g.values()].map((r) => [r.number, r.failures]);
+  return refs(2).map((r) => g.get(`${r.repo}#${r.number}`)!.failures);
 });
 
 both("diff facts: upsert only when a fact changed, compare-and-set, read mark and removal", async (db) => {

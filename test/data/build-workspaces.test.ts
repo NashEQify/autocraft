@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import {
-  addSession, addWorkspaceCalls, claimQueuedCalls, claimSession, countKeptImages, failStuckCalls, IMAGE_KEEP_MS, loadCallResult, loadRunningCalls, loadToolCalls,
+  addSession, addWorkspaceCalls, claimQueuedCalls, claimSession, countKeptImages, failStuckCalls, IMAGE_KEEP_MS, loadCallAccounting, loadCallResult, loadRunningCalls, loadToolCalls,
   loadWorkspaceCallSince, markCalls, pruneWorkspaceImageBatch, refuseQueuedCalls, stubImages, loadCacheReport, loadCheckpoint, loadSessions, loadWorkspaceCalls, loadWorkspacePage, loadWorkspacePass, loadWorkspaces, loadWorkspaceWarm,
   moveWorkspaces, patchSessions, patchWorkspaces, requestWorkspaces, takeCallNumber, WorkspaceError,
 } from "../../src/data/build/index.ts";
@@ -60,6 +60,37 @@ both("requestWorkspaces refuses a warm writer or a bad row as a whole, and moveW
   const stale = await moveWorkspaces(db, [{ id: ids[0]!, from: ["requested"], to: "ended" }, { id: ids[1]!, from: ["ready"], to: "ended" }], LATER);
   assert.deepEqual([...stale], [ids[1]], "a row no longer in `from` does not move");
   assert.ok((await loadWorkspaces(db, { ids: [ids[1]!] })).get(ids[1]!)!.ended_at);
+});
+
+both("patchWorkspaces with `where` is a compare-and-set on the stored values, NULL included", async ({ db }) => {
+  await seedEnv(db);
+  const ids = await requestWorkspaces(db, [req("a"), req("b"), req("c")], AT);
+  assert.equal(await patchWorkspaces(db, ids.map((id, i) => ({ id, set: { pvc: `v${i}` } }))), 3);
+  const n = await patchWorkspaces(db, [
+    { id: ids[0]!, where: { pvc: "v0", pod: null }, set: { pod: "p0", pvc: null } }, { id: ids[1]!, where: { pvc: "other" }, set: { pod: "p1" } },
+    { id: ids[2]!, whereState: ["requested"], where: { pod: null }, set: { pod: "p2", create_tries: 4 } },
+  ]);
+  assert.equal(n, 2);
+  assert.equal(await patchWorkspaces(db, [{ id: ids[0]!, where: { pod: null }, set: { pod: "again" } }]), 0, "the pod is set now");
+  const rows = await loadWorkspaces(db, { ids });
+  assert.deepEqual(ids.map((id) => [rows.get(id)!.pod, rows.get(id)!.pvc, Number(rows.get(id)!.create_tries)]), [["p0", null, 0], [null, "v1", 0], ["p2", "v2", 4]]);
+});
+
+both("loadCallAccounting reads the bookkeeping in a call's result and the limits in its arguments, whatever text they hold", async ({ db }) => {
+  await seedEnv(db);
+  const [w] = await requestWorkspaces(db, [req("a")], AT);
+  const call = (tool: string, args: string, result: string | null, state = "done") => ({ workspace_id: w!, tool, args, state, created_at: AT, run_id: null, n: 1, result, started_at: AT, deadline_at: null, finished_at: null });
+  const ids = await addWorkspaceCalls(db, [
+    call("shell", '{"background":true,"timeout_sec":90}', '{"text":"x","acct":{"ms":12.5,"bytes":2147483648,"bg":1,"limit":600,"ref":7,"ended":1,"images":2}}'),
+    call("shell", '{"background":false}', "cut off {", "failed"), call("shell", "not json", null, "running"), call("seed", "{}", '{"acct":{"ms":1}}'),
+  ]);
+  const none = { ms: null, bytes: null, bg: null, lim: null, ref: null, ended: null, images: null, timeout: null };
+  assert.deepEqual(await loadCallAccounting(db, w!, ["seed"]), [
+    { id: ids[0], n: 1, tool: "shell", state: "done", started_at: AT, ms: 12.5, bytes: 2147483648, bg: 1, lim: 600, ref: 7, ended: 1, images: 2, background: 1, timeout: 90 },
+    { id: ids[1], n: 1, tool: "shell", state: "failed", started_at: AT, ...none, background: 0 },
+    { id: ids[2], n: 1, tool: "shell", state: "running", started_at: AT, ...none, background: 0 },
+  ]);
+  assert.equal((await loadCallAccounting(db, w!, [])).length, 4);
 });
 
 both("patchWorkspaces sets different values per row in one call, keeps the checkpoint out of plain loads, and takeCallNumber counts", async ({ db }) => {
@@ -184,47 +215,44 @@ test("loadCacheReport and loadWorkspaceCalls: statements do not grow with the nu
   }, 2, 12);
 });
 
-test("workspace calls: a claim takes only the live lease's queued calls, refusal needs no lease, stuck and image rows settle by their rules", async () => {
-  const { db, close } = await fresh();
-  try {
-    await seedEnv(db);
-    const [w] = await requestWorkspaces(db, [req("a")], AT);
-    const q = queryDb(db);
-    const remote = async (state: string, runId: number, since: number) => Number((await q.get(q.k.insertInto("main.remote_calls").values({
-      step: "s", stage: 0, prompt_id: "p", prompt_version: "1", tier: "mid", effort: "medium", asked_model: "m", bundle: "{}", state, since, seen_at: since, max_attempts: 1, timeout_ms: 1000, run_id: runId,
-    }).returning("id")))!.id);
-    const since = Date.parse(LATER);
-    const leased = await remote("leased", 7, since), ended = await remote("done", 8, since);
-    const [mine, old, other] = await addWorkspaceCalls(db, [
-      { workspace_id: w!, tool: "shell", args: '{"cmd":"ls"}', state: "queued", created_at: LATER, run_id: 7, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
-      { workspace_id: w!, tool: "seed", args: "{}", state: "done", created_at: AT, run_id: 7, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
-      { workspace_id: w!, tool: "shell", args: "{}", state: "queued", created_at: LATER, run_id: 8, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
-    ]);
-    assert.deepEqual(await claimQueuedCalls(db, w!, ended), [], "a call with no live lease claims nothing");
-    assert.deepEqual(await claimQueuedCalls(db, w!, leased), [{ id: mine, tool: "shell", args: '{"cmd":"ls"}' }]);
-    assert.deepEqual((await loadRunningCalls(db, w!, leased)).map((r) => r.id), [mine]);
-    assert.deepEqual(await refuseQueuedCalls(db, w!, ended, '{"text":"over"}'), [other]);
-    assert.equal((await loadCallResult(db, other!, w!))!.state, "failed");
-    assert.equal(await loadCallResult(db, other!, w! + 1), null);
+both("workspace calls: a claim takes only the live lease's queued calls, refusal needs no lease, stuck and image rows settle by their rules", async ({ db }) => {
+  await seedEnv(db);
+  const [w] = await requestWorkspaces(db, [req("a")], AT);
+  const q = queryDb(db);
+  const remote = async (state: string, runId: number, since: number) => Number((await q.get(q.k.insertInto("main.remote_calls").values({
+    step: "s", stage: 0, prompt_id: "p", prompt_version: "1", tier: "mid", effort: "medium", asked_model: "m", bundle: "{}", state, since, seen_at: since, max_attempts: 1, timeout_ms: 1000, run_id: runId,
+  }).returning("id")))!.id);
+  const since = Date.parse(LATER);
+  const leased = await remote("leased", 7, since), ended = await remote("done", 8, since);
+  const [mine, old, other] = await addWorkspaceCalls(db, [
+    { workspace_id: w!, tool: "shell", args: '{"cmd":"ls"}', state: "queued", created_at: LATER, run_id: 7, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
+    { workspace_id: w!, tool: "seed", args: "{}", state: "done", created_at: AT, run_id: 7, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
+    { workspace_id: w!, tool: "shell", args: "{}", state: "queued", created_at: LATER, run_id: 8, n: null, result: null, started_at: null, deadline_at: null, finished_at: null },
+  ]);
+  assert.deepEqual(await claimQueuedCalls(db, w!, ended), [], "a call with no live lease claims nothing");
+  assert.deepEqual(await claimQueuedCalls(db, w!, leased), [{ id: mine, tool: "shell", args: '{"cmd":"ls"}' }]);
+  assert.deepEqual((await loadRunningCalls(db, w!, leased)).map((r) => r.id), [mine]);
+  assert.deepEqual(await refuseQueuedCalls(db, w!, ended, '{"text":"over"}'), [other]);
+  assert.equal((await loadCallResult(db, other!, w!))!.state, "failed");
+  assert.equal(await loadCallResult(db, other!, w! + 1), null);
 
-    const since1 = await loadWorkspaceCallSince(db, w!, leased, ["seed"]);
-    assert.equal(since1.firstWorkAt, LATER, "the own tool and calls before the call was queued are left out");
-    assert.equal(since1.stats.length, 2);
+  const since1 = await loadWorkspaceCallSince(db, w!, leased, ["seed"]);
+  assert.equal(since1.firstWorkAt, LATER, "the own tool and calls before the call was queued are left out");
+  assert.equal(since1.stats.length, 2);
 
-    assert.deepEqual([...await markCalls(db, [{ id: mine!, where: ["running"], set: { n: 3, deadline_at: AT } }, { id: other!, where: ["running"], set: { n: 4 } }])], [mine]);
-    assert.equal(await failStuckCalls(db, LATER), 1);
-    assert.equal((await loadToolCalls(db, w!, { tool: "shell", n: 3 }))[0]!.state, "failed");
+  assert.deepEqual([...await markCalls(db, [{ id: mine!, where: ["running"], set: { n: 3, deadline_at: AT } }, { id: other!, where: ["running"], set: { n: 4 } }])], [mine]);
+  assert.equal(await failStuckCalls(db, LATER), 1);
+  assert.equal((await loadToolCalls(db, w!, { tool: "shell", n: 3 }))[0]!.state, "failed");
 
-    const image = { text: "", images: [{ data: Buffer.from("png").toString("base64"), mimeType: "image/png" }] };
-    const [shot] = await addWorkspaceCalls(db, [{ workspace_id: w!, tool: "screenshot", args: "{}", state: "done", created_at: LATER, run_id: 7, n: null, result: JSON.stringify(image), started_at: null, deadline_at: null, finished_at: null }]);
-    assert.equal(await countKeptImages(db, w!, 7, shot! + 1), 1);
-    assert.equal(await countKeptImages(db, w!, null, shot! + 1), 0);
-    assert.equal(await stubImages(db, [{ id: shot!, stored: "not what is stored", stubbed: "{}" }]), 0, "compare-and-set on the stored result");
-    assert.deepEqual(await pruneWorkspaceImageBatch(db, Date.parse(LATER) + IMAGE_KEEP_MS * 2, 0), { rows: 0, last: 0 }, "the workspace has not ended");
-    await q.run(q.k.updateTable("main.workspaces").set({ ended_at: LATER }).where("id", "=", w!));
-    assert.deepEqual(await pruneWorkspaceImageBatch(db, Date.parse(LATER) + IMAGE_KEEP_MS * 2, 0), { rows: 1, last: shot });
-    assert.equal(await countKeptImages(db, w!, 7, shot! + 1), 0);
-    const stub = JSON.parse((await loadCallResult(db, shot!))!.result!) as { images: { bytes: number; sha256: string }[] };
-    assert.equal(stub.images[0]!.bytes, 3);
-  } finally { await close(); }
+  const image = { text: "", images: [{ data: Buffer.from("png").toString("base64"), mimeType: "image/png" }] };
+  const [shot] = await addWorkspaceCalls(db, [{ workspace_id: w!, tool: "screenshot", args: "{}", state: "done", created_at: LATER, run_id: 7, n: null, result: JSON.stringify(image), started_at: null, deadline_at: null, finished_at: null }]);
+  assert.equal(await countKeptImages(db, w!, 7, shot! + 1), 1);
+  assert.equal(await countKeptImages(db, w!, null, shot! + 1), 0);
+  assert.equal(await stubImages(db, [{ id: shot!, stored: "not what is stored", stubbed: "{}" }]), 0, "compare-and-set on the stored result");
+  assert.deepEqual(await pruneWorkspaceImageBatch(db, Date.parse(LATER) + IMAGE_KEEP_MS * 2, 0), { rows: 0, last: 0 }, "the workspace has not ended");
+  await q.run(q.k.updateTable("main.workspaces").set({ ended_at: LATER }).where("id", "=", w!));
+  assert.deepEqual(await pruneWorkspaceImageBatch(db, Date.parse(LATER) + IMAGE_KEEP_MS * 2, 0), { rows: 1, last: shot });
+  assert.equal(await countKeptImages(db, w!, 7, shot! + 1), 0);
+  const stub = JSON.parse((await loadCallResult(db, shot!))!.result!) as { images: { bytes: number; sha256: string }[] };
+  assert.equal(stub.images[0]!.bytes, 3);
 });

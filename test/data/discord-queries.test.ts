@@ -83,7 +83,7 @@ both("saveMessageMentions removes the named rows, adds the new ones and counts o
   const rows = (await loadMessageMentions(db, ["m1"])).get("m1")!;
   assert.deepEqual(rows.map((r) => r.number).sort(), [2, 3]);
   await setSignals(db, [{ msgHash: "m1", repo: "r", number: 3, signal: true }, { msgHash: "gone", repo: "r", number: 9, signal: true }]);
-  assert.deepEqual([...(await loadMentionCounts(db, ["r#2", "r#3", "r#4"]))], [["r#2", { count: 1, signals: 0 }], ["r#3", { count: 1, signals: 1 }]]);
+  assert.deepEqual([...(await loadMentionCounts(db, ["r#2", "r#3", "r#4"]))].sort(), [["r#2", { count: 1, signals: 0 }], ["r#3", { count: 1, signals: 1 }]]);
 });
 
 both("reserveFiling refuses once the person's or the repo's daily limit is reached, and a released slot frees it", async ({ db }) => {

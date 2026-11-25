@@ -35,16 +35,16 @@ async function seed(db: Db, n: number): Promise<void> {
 
 both("the diff lists closed items with a missing or stale vector; saving replaces and a replaced row streams last", async (db) => {
   await seed(db, 4);
-  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number), [2, 4]);
-  assert.deepEqual((await listEmbedDiff(db, M, true)).map((r) => r.number), [1, 2, 3, 4]);
+  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number).sort(), [2, 4]);
+  assert.deepEqual((await listEmbedDiff(db, M, true)).map((r) => r.number).sort(), [1, 2, 3, 4]);
   assert.equal(await hasEmbedDiff(db, M), true);
 
   await saveEmbeddings(db, [put(1), put(2), put(4)]);
-  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number), []);
+  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number).sort(), []);
   assert.equal(await hasEmbedDiff(db, M), false);
-  assert.deepEqual((await listEmbedDiff(db, "m2", false)).map((r) => r.number), [2, 4], "a vector of another model does not count");
+  assert.deepEqual((await listEmbedDiff(db, "m2", false)).map((r) => r.number).sort(), [2, 4], "a vector of another model does not count");
   await queryDb(db).run((queryDb(db).k as any).updateTable("items").set({ embed_hash: "new" }).where("number", "=", 4));
-  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number), [4], "a vector at another hash is stale");
+  assert.deepEqual((await listEmbedDiff(db, M, false)).map((r) => r.number).sort(), [4], "a vector at another hash is stale");
 
   const first = await streamEmbeddings(db, M, 0, 10);
   assert.deepEqual(first.map((r) => r.number), [1, 2, 4]);
