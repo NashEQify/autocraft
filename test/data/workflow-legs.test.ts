@@ -38,7 +38,6 @@ both("loadLegs: oldest first, active only, latest only; loadLegPass reads each l
   const ctx = (n: number) => pass.context.get(pass.rows.find((r) => r.number === n)!.id);
   assert.equal((ctx(2) as { since: string }).since, "2026-03-01T00:00:00.000Z");
   assert.equal((ctx(3) as { since: string }).since, AT);
-  assert.equal((ctx(2) as { approvedBy: string | null }).approvedBy, "ann");
   // PR 1's leg has no workflow id yet: it reads the live workflow of its PR until adoptLegs links it.
   assert.equal((ctx(1) as { workflowId: number }).workflowId, ids.get("o/a#1"));
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 1)!.id, workflowId: ids.get("o/a#1")! }]), 1);

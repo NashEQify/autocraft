@@ -7,7 +7,7 @@ import type { Db } from "../db/index.ts";
 import { exec } from "../fixup/git.ts";
 import { guardItem } from "../core/guard.ts";
 import { byOfJob } from "../core/gates.ts";
-import { commentApprovalOf } from "../act/approval.ts";
+import { repoApproved } from "../core/repo-approvals.ts";
 import { textHash } from "../core/open-prs.ts";
 import { permKey, standings } from "../data/access/index.ts";
 import { loadGuidanceTurns } from "../data/conversations/index.ts";
@@ -332,7 +332,7 @@ async function moveOn(ctx: StepContext, impl: Implementation, p: { round: number
   let state: Implementation["state"];
   try {
     state = await finishPlan(db, impl, p, {
-      commentsApproved: await commentApprovalOf(db, impl.repo) !== null && !("refused" in g),
+      commentsApproved: await repoApproved(db, impl.repo, "comment") && !("refused" in g),
       postComment: async (text) => {
         if ("refused" in g) throw new Error(g.refused);
         const r = await ghComment({ db, login: IMPLEMENT_ASKER }, g, exec, "implement-question", { repo: impl.repo, number: impl.number, pr: false }, { by: "model", kind: "comment", model: PROMPT.models[0] }, text, { call: p.callId, round: p.round });

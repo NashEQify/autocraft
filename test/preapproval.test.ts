@@ -275,12 +275,12 @@ describe("pre-approved merge", () => {
     assert.deepEqual([p.state, p.head], ["review", "sha50c"]);
   });
 
-  test("a queued PR leaves the queue for a failed verification, and not for a transient refusal, a batch or a running merge", async () => {
+  test("a queued PR leaves the queue for the question of a failed verification, and not for a transient refusal, a batch or a running merge", async () => {
     const w = await (await take(await fresh(), 51)).review(51, { verdict: "take-fix" });
     await inCi(w, 51);
     await (await w.premerge(51, "clean")).verified(51);
     await settle(w);
-    const state = async () => { await settle(w); return (await preapprovalOf(w.db, "app", 51))?.state; };
+    const state = async () => { await untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 5); return (await preapprovalOf(w.db, "app", 51))?.state; };
     await w.db.run(w.db.k.insertInto("merges").values({ repo: "app", number: 51, head_oid: "sha51b", run_id: "r", at: new Date(Date.now() + 1000).toISOString(), path: "operator", method: "squash", outcome: "refused", reason: "safe-merge: HTTP 502 bad gateway", ci: "success", mergeable: "MERGEABLE" }));
     assert.equal(await state(), "queued");
     assert.ok((await kindsOf(w, 51)).some((k) => k.startsWith("merge")), "a transient refusal is tried again");
@@ -293,8 +293,9 @@ describe("pre-approved merge", () => {
     const job = (await w.db.get(w.db.k.insertInto("jobs").values({ step: "merge", params: "{}", requested_by: "pipeline", requested_at: T0, state: "running", repo: "app" }).returning("id")))!;
     assert.equal(await state(), "queued", "a merge of the repo runs");
     await w.db.run(w.db.k.updateTable("jobs").set({ state: "done" }).where("id", "=", job.id));
-    assert.equal(await state(), "failed");
-    assert.match((await preapprovalOf(w.db, "app", 51))!.reason!, /verification failed/);
+    assert.equal(await state(), "cancelled");
+    const wf = (await liveWorkflow(w.db, "app", 51))!;
+    assert.deepEqual([wf.state, wf.blocker, wf.blockerParams?.code, wf.rec?.merges], ["blocked", "major-finding", "verification-failed", true]);
   });
 
   test("a leg on a draft waits where it is until the PR is ready for review", async () => {

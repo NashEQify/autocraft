@@ -90,7 +90,8 @@ function asItStands(rec: Recommendation, f: PrFacts): Recommendation {
 
 /** The question of the PR whose facts are `f` and whose plan is `p`; null when nothing is to be asked. `parts`: the workflow's plan; `conflict`: the conflict with the base branch. */
 export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
-  if (o.approved && (isGone(f.standing?.merge) || f.mergeLacksAccess)) return goneQuestion(f.repo, f.standing?.merge?.login ?? f.may.workflow?.approvedBy ?? "", o, !isGone(f.standing?.merge));
+  const approver = o.approved ? f.standing?.merge : null;
+  if (approver && (isGone(approver) || f.mergeLacksAccess)) return goneQuestion(f.repo, approver.login, o, !isGone(approver));
   const busy = p.actions.some((a) => worksOn(a) && moves(a));
   // Whoever answers takes the place of a person who is gone.
   if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f) };

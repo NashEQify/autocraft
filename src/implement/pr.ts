@@ -14,6 +14,7 @@ import { diffStat } from "../build/workspaces.ts";
 import { guardItem, guardRepo, type GuardedItem, type ItemWant } from "../core/guard.ts";
 import { implementMay } from "./gate.ts";
 import type { By } from "../core/gates.ts";
+import { mergesFor } from "../core/may.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
 import { closedByOpenPr } from "../core/open-prs.ts";
 import { EMPTY_TREE, exec as realExec, fixupDir, Git, type Exec } from "../fixup/git.ts";
@@ -365,12 +366,12 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
     let notPreapproved: string | null = null;
     if (pushed.compileTime.length) notPreapproved = `a maintainer decides on its compile-time changes: ${pushed.compileTime.map((c) => `${c.path} ${c.what}`).join("; ")}`;
     else {
-      const wf = (await listWorkflows(db, { live: true, refs: [{ repo, number }] }))[0] ?? null;
+      const wf = (await listWorkflows(db, { live: true, refs: [{ repo, number }] }))[0], by = mergesFor(wf);
       // The PR merges only when its issue's workflow is approved; otherwise its review ends in a recommendation.
-      if (!wf?.approvedBy) notPreapproved = "the merge is not approved: the review ends in a recommendation";
+      if (!wf || by === null) notPreapproved = "the merge is not approved: the review ends in a recommendation";
       // The approver's merge leg belongs to the issue's workflow (src/workflow/advance.ts).
       else try {
-        await preapproveMerge(db, { repo, number: prNumber, by: wf.approvedBy, via: "implement", head: pushed.commit, workflowId: wf.id });
+        await preapproveMerge(db, { repo, number: prNumber, by, via: "implement", head: pushed.commit, workflowId: wf.id });
       } catch (e) {
         const why = oneLine(String((e as Error).message ?? e));
         if (!(e instanceof PreapprovalRefused)) return fail(`#${prNumber} could not be pre-approved: ${why}`, true);

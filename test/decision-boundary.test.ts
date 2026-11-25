@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-// Whether work may run is decided in src/core (an action's `permission`), from facts the data layer loads. A file elsewhere that reads a
+// Whether work may run is decided in src/core (an action's `permission`, and src/core/repo-approvals.ts for work of a repo as a whole), from facts the data layer loads. A file elsewhere that reads a
 // repo's step approvals, or a workflow's approver, starter, blocker or head, can decide the same question by itself: the lists name every
 // file that reads them today. A file leaves its list when it reads permission instead; none joins.
 
@@ -17,40 +17,31 @@ const READS = {
 } as const;
 type Kind = keyof typeof READS;
 
-/** The files that decide with what they read, and those that store a workflow or run a person's command on it. */
+/** The files that decide with what they read: the workflow's own, which store it and run a person's command on it. */
 const DECIDES: Record<Kind, readonly string[]> = {
-  approvals: [
-    "src/act/approval.ts",
-    "src/conversations/act.ts",
-    "src/fixup/index.ts",
-    "src/implement/approval.ts",
-    "src/implement/plan.ts",
-    "src/labels/approval.ts",
-    "src/mainfix/approval.ts",
-    "src/mainfix/index.ts",
-    "src/merge/ci-approval.ts",
-    "src/postmerge/file.ts",
-    "src/prstatus/approval.ts",
-    "src/runner/autopilot.ts",
-    "src/runner/steps.ts",
-  ],
+  approvals: [],
   workflow: [
-    "src/implement/pr.ts",
-    "src/preapproval/index.ts",
     "src/workflow/advance.ts",
     "src/workflow/apply.ts",
     "src/workflow/resolve.ts",
     "src/workflow/store.ts",
   ],
 };
-/** The files that only show what they read, on a page, in a command's output, a comment or a model's context. */
+/** The files that only read for showing, on a page, in a command's output, a comment or a model's context. */
 const SHOWS: Record<Kind, readonly string[]> = {
   approvals: [
+    "src/act/approval.ts",
     "src/act/index.ts",
     "src/dash/api/admin.ts",
+    "src/fixup/index.ts",
+    "src/implement/approval.ts",
     "src/implement/cli.ts",
+    "src/labels/approval.ts",
     "src/labels/index.ts",
+    "src/mainfix/approval.ts",
+    "src/mainfix/index.ts",
     "src/mainfix/status.ts",
+    "src/merge/ci-approval.ts",
   ],
   workflow: [
     "src/conversations/store.ts",

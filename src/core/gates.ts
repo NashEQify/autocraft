@@ -153,9 +153,6 @@ export const mergeMay = (f: PrFacts): MayResult => mayMerge(mergeInputs(f));
 /** Whether the merge of the PR at its head is approved, handed over or not, on whose say (`mergeApproved`, src/core/may.ts). */
 export const mergeApproval = (f: PrFacts): MayResult => mergeApproved(mergeInputs(f));
 
-/** `mergeMay` as a yes or no. */
-export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f).ok;
-
 /** `mergeApproval` as a yes or no. */
 export const mergeAllowed = (f: PrFacts): boolean => mergeApproval(f).ok;
 

@@ -27,6 +27,7 @@ import { jevUsable } from "../agents/jev.ts";
 import { PACE_MAX_WAIT_MS, pipelineWriteWaits } from "../github/write.ts";
 import { embedDue } from "../embed/store.ts";
 import { selectFixups } from "../fixup/select.ts";
+import { approvedRepos } from "../core/repo-approvals.ts";
 import { ciApproveRepos } from "../merge/ci-approval.ts";
 import { batchesDue } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
@@ -56,7 +57,7 @@ import { loadSteps, type Params, type StepDef } from "./steps.ts";
 import { repoInScope, type RepoScope, type ScopeFor } from "../core/scope.ts";
 import { loadRepoScopes } from "../data/workflow/index.ts";
 import { refreshOutsideHolds } from "../outside.ts";
-import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
+import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
 import { prLease } from "../prepush/settle.ts";
 import { enqueueJobs, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
@@ -575,7 +576,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
       const first = { weight: Infinity, at: "" }, repos = reposFor(ctx, "cards");
-      const [approved, head, wakes, held] = await db.together(() => Promise.all([loadStepApprovals(db, repos, ["comment"]), queueHead(db), filingWakes(db), heldDue(db)]));
+      const [approved, head, wakes, held] = await db.together(() => Promise.all([approvedRepos(db, repos, "comment"), queueHead(db), filingWakes(db), heldDue(db)]));
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
       else if (head && approved.has(head.repo)) best.set(head.repo, first);
@@ -752,7 +753,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      const [tracked, approved] = await db.together(() => Promise.all([ctx.scopes ? reposFor(ctx, "cleanup") : trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
+      const [tracked, approved] = await db.together(() => Promise.all([ctx.scopes ? reposFor(ctx, "cleanup") : trackedNames(db), approvedRepos(db, "all", "prstatus")]));
       const repos = tracked.filter((repo) => approved.has(repo));
       const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
       for (const at of retries.values()) ctx.wake?.push(at);
@@ -799,7 +800,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     scope: "cleanup",
     detect: async (db, ctx) => {
       const tracked = reposFor(ctx, "cleanup"), { wake } = ctx;
-      const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), loadStepApprovals(db, tracked, ["comment"])]));
+      const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), approvedRepos(db, tracked, "comment")]));
       wake?.push(...stuck.wakes);
       const pending = new Set([...defects.map((d) => d.repo), ...stuck.due.map((x) => x.row.repo)]);
       return tracked.filter((repo) => approved.has(repo) && pending.has(repo)).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));

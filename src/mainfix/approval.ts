@@ -5,10 +5,6 @@ import type { Db } from "../db/index.ts";
 
 export type MainFixApproval = { by: string; at: string };
 
-export async function mainFixApprovalOf(db: Db, repo: string): Promise<MainFixApproval | null> {
-  return (await loadStepApprovals(db, [repo], ["mainfix"])).get(repo)?.mainfix ?? null;
-}
-
 /** The approvals of many repos in one read; repos without one are left out. */
 export async function mainFixApprovals(db: Db, repos: string[]): Promise<Map<string, MainFixApproval | null>> {
   const out = new Map<string, MainFixApproval | null>();

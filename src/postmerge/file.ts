@@ -8,7 +8,7 @@
 import { jobItem } from "../runner/job-items.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo, type GuardedRepo } from "../core/guard.ts";
-import { commentApprovalOf } from "../act/approval.ts";
+import { repoApproved } from "../core/repo-approvals.ts";
 import { audit } from "../dash/audit.ts";
 import { exec, type Exec } from "../fixup/git.ts";
 import { createIssue, IssueError, type Writer } from "../github/write.ts";
@@ -131,7 +131,7 @@ async function settleStuck(db: Db, repo: string, now: Date, log: (line: string) 
 export async function runPostmergeFile(db: Db, params: FileParams, log: (line: string) => void = console.log, deps: FileDeps = defaultFileDeps()): Promise<FileSummary> {
   const { repo } = params;
   const s: FileSummary = { repo, candidates: 0, filed: [], limited: 0, failed: [], unknown: [], skipped: 0, note: null, settled: 0 };
-  if (!await commentApprovalOf(db, repo)) {
+  if (!await repoApproved(db, repo, "comment")) {
     s.note = `commenting in ${repo} is not approved`;
     log(`postmerge-file ${repo}: ${s.note}; nothing filed`);
     return s;
@@ -191,7 +191,7 @@ export async function fileFinding(db: Db, ref: string, index: number, log: (line
   const f = r.findings[index];
   if (!f) throw new Error(`${ref} has no finding ${index}; its review has ${r.findings.length} (counted from 0)`);
   if (f.severity !== "defect") throw new Error(`finding ${index} of ${ref} is minor; only defects are filed`);
-  if (!await commentApprovalOf(db, repo)) throw new Error(`commenting in ${repo} is not approved`);
+  if (!await repoApproved(db, repo, "comment")) throw new Error(`commenting in ${repo} is not approved`);
   if ((await loadQuiet(db, [`${repo}#${number}`])).size > 0) throw new Error(`${ref} is a quiet pull request: its fix is not public yet, so no issue is filed about it`);
   if (!(await filedFor(db, { repo, number })).length) throw new Error(`${ref} is outside the pipeline's scope`);
   await settleStuck(db, repo, deps.now(), log);

@@ -8,7 +8,8 @@ import { readLive } from "../act/live.ts";
 import { stillActs } from "../act/still.ts";
 import type { RefreshDeps } from "../preapproval/permissions.ts";
 import { loadAccess } from "../data/access/index.ts";
-import { addAudit, loadActBlocked } from "../data/control/index.ts";
+import { actBlocked } from "../core/repo-approvals.ts";
+import { addAudit } from "../data/control/index.ts";
 import { addHeld, failCards, loadActRoom, loadCards, loadQueue, markCard, sweepRunningCards as sweepCards, type CardRow } from "../data/conversations/index.ts";
 import { applyLocal, loadItems, type ItemOf } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
@@ -312,7 +313,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
       // Refusals a press that has to wait would only meet at the drain are given now.
       const g = await guardRepo(db, c.repo, params.kind === "label" ? "labels" : "comment", { operator: by }, by);
       if ("refused" in g) throw new Error(g.refused);
-      const block = (await loadActBlocked(db, [c.repo])).get(c.repo);
+      const block = await actBlocked(db, c.repo);
       if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);
       const args: QueueArgs = { ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) };
       if (!await markCard(db, id, ["proposed"], { state: "queued", acted_by: by, acted_at: at, queued_at: at, queue_args: JSON.stringify(args), error: null })) return "lost" as const;
@@ -406,8 +407,7 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
     const params = readParams(c.kind, c.params);
     if (!params) { await failQueued(db, c, RETIRED, deps); continue; }
     const need = needOf(c), key = ref(c.repo, c.number);
-    const [blocked, room, items] = await db.together(() => Promise.all([loadActBlocked(db, [c.repo]), loadActRoom(db, nowOf(deps)), loadItems(db, [{ repo: c.repo, number: c.number }], "ref")]));
-    const block = blocked.get(c.repo);
+    const [block, room, items] = await db.together(() => Promise.all([actBlocked(db, c.repo), loadActRoom(db, nowOf(deps)), loadItems(db, [{ repo: c.repo, number: c.number }], "ref")]));
     if (block) { await failQueued(db, c, `Act cannot run for ${c.repo} now: ${block}`, deps); continue; }
     if (!roomFor(room, need) || (o.writes !== undefined && used + need > o.writes)) break;
     const item = items.get(key);

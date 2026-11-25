@@ -88,10 +88,10 @@ export type StepDef = {
 
 /** Creating a repo's labels, a repo-level write, is for repos in the pipeline scope that an operator approved for labelling on the Repos page. */
 async function checkApproved(db: Db, p: Params): Promise<string | null> {
-  const { approvalOf } = await import("../labels/approval.ts");
+  const { repoApproved } = await import("../core/repo-approvals.ts");
   const { inRepoScope } = await import("./scope.ts");
   if (!await inRepoScope(db, String(p.repo), "work")) return `${p.repo} is not in the pipeline scope`;
-  return await approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
+  return await repoApproved(db, String(p.repo), "labels") ? null : `labelling ${p.repo} is not approved`;
 }
 
 export function modelsOf(step: StepDef | undefined, params: Params): string[] {
@@ -109,14 +109,14 @@ async function checkNightlyOn(db: Db, p: Params): Promise<string | null> {
 
 /** Acting on a red default branch is opt-in per repo. */
 async function checkMainFixApproved(db: Db, p: Params): Promise<string | null> {
-  const { mainFixApprovalOf } = await import("../mainfix/approval.ts");
-  return await mainFixApprovalOf(db, String(p.repo)) ? null : `fixing a red main in ${p.repo} is not approved`;
+  const { repoApproved } = await import("../core/repo-approvals.ts");
+  return await repoApproved(db, String(p.repo), "mainfix") ? null : `fixing a red main in ${p.repo} is not approved`;
 }
 
 /** Comments and closes are opt-in per repo: tracked repos include ones we do not maintain. */
 async function checkCommentApproved(db: Db, p: Params): Promise<string | null> {
-  const { commentApprovalOf } = await import("../act/approval.ts");
-  return await commentApprovalOf(db, String(p.repo)) ? null : `commenting in ${p.repo} is not approved`;
+  const { repoApproved } = await import("../core/repo-approvals.ts");
+  return await repoApproved(db, String(p.repo), "comment") ? null : `commenting in ${p.repo} is not approved`;
 }
 
 /** The `implement` buckets this build carries out. */
@@ -886,8 +886,8 @@ export const STEPS: StepDef[] = [
       { name: "limit", label: "At most", kind: "int", min: 1, max: 2000, default: 100, help: "comments to post or edit in this job" },
     ],
     check: async (db, p) => {
-      const { statusApprovalOf } = await import("../prstatus/approval.ts");
-      return await statusApprovalOf(db, String(p.repo)) ? null : `PR status comments are off for ${p.repo}`;
+      const { repoApproved } = await import("../core/repo-approvals.ts");
+      return await repoApproved(db, String(p.repo), "prstatus") ? null : `PR status comments are off for ${p.repo}`;
     },
     run: async (ctx) => {
       const { runPrStatus } = await import("../prstatus/index.ts");
