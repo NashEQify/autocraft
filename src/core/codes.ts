@@ -86,6 +86,7 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "a person: the CI fix comment failed": "ask-failed",
   "a person: the comment to the contributor failed": "ask-failed",
   "a person: the ask comment failed": "ask-failed",
+  "a person: its base is not the default branch, and AutoCraft merges only into that": "base-off-default",
   "a person: CI is red at the head and has nothing for the implementation session to fix": "revision-failed",
   "a person: the implementation session ended without the review's fixes": "revision-failed",
   "the pull request to be marked ready for review": "draft",

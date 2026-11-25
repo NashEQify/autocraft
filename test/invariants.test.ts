@@ -147,7 +147,7 @@ const OWN_WAITS: Record<string, (c: Case) => boolean> = {
   "the pre-merge review": ({ w, f }) => (!!f.premerge && !f.premerge.hasFindings) || underWay(w),
   verification: ({ f }) => ["planned", "running"].includes(f.verification?.state ?? ""),
   "the approved merge to be handed over to its approver": ({ w }) => underWay(w) || w.legs.length > 0,
-  "its pre-approved merge": ({ w }) => w.legs.length > 0 || w.request !== null,
+  "its pre-approved merge": ({ w }) => underWay(w) || w.legs.length > 0 || w.request !== null,
   "the review's fixes to be applied": ({ f }) => f.lint.length > 0 || f.implementation?.state === "revising",
   "the formatter or lint run of the CI fix": ({ f }) => (f.cifix?.formattingTask != null && !f.cifix.formatterEnded) || f.lint.some((l) => l.step === "cifix" && !l.ended),
   "the lint run of the conflict resolution": ({ f }) => f.lint.some((l) => l.step === "conflict" && !l.ended),
