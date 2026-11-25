@@ -112,13 +112,16 @@ const isOperator = async (db: Db, login: string | null, repo: string, held?: Rea
 const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): boolean => !!head && m.attempts.get(`${refOf(repo, n)}@${head}`)?.outcome === "merged";
 
 /**
- * Whether the merge leg may merge at `head`: the workflow's approval (mayMerge, src/core/may.ts), else the repo's merge approval.
- * The leg's own head rules decide which heads it may merge (a push that is not ours cancels it), so the gate takes `head` as the base.
+ * Whether the merge leg may merge at `head` (mayMerge, src/core/may.ts): with a live workflow, as the person who approved it; a leg is
+ * itself that person's approval (the merge command and the approval start it before the workflow row records the approval), so
+ * `by` stands in until the row has it. With no live workflow, the repo's merge approval. The leg's own head rules decide which heads it
+ * may merge (a push that is not ours cancels it), and the workflow stops its leg at a blocker, so the gate takes `head` as the base
+ * and no blocker.
  */
-function mergeGate(approval: StepApproval | null, wf: WorkflowFact | null, head: string): { ok: true } | { ok: false; why: string } {
+function mergeGate(approval: StepApproval | null, wf: WorkflowFact | null, head: string, by: string): { ok: true } | { ok: false; why: string } {
   const workflow: WorkflowGate | null = wf ? {
-    live: true, entry: wf.entry as WorkflowGate["entry"], state: wf.state, startedBy: wf.startedBy, approvedBy: wf.approvedBy, approvedAt: null,
-    blocker: wf.state === "blocked" ? "the workflow is blocked" : null, baseHead: head, fixupAsked: false,
+    live: true, entry: wf.entry as WorkflowGate["entry"], state: wf.state, startedBy: wf.startedBy, approvedBy: wf.approvedBy ?? by, approvedAt: null,
+    blocker: null, baseHead: head, fixupAsked: false,
   } : null;
   const r = mayMerge({ repoApproval: approval, workflow, head, ownHeads: new Set([head]) });
   return r.ok ? { ok: true } : { ok: false, why: r.why };
@@ -190,7 +193,7 @@ export async function runPipelineStep(db: Db, o: { repo: string; number: number;
   let workflowId: number | undefined;
   if (merge) {
     const g = await gateFacts(db, repo, number);
-    const ok = mergeGate(g.approval, g.wf, head);
+    const ok = mergeGate(g.approval, g.wf, head, by);
     if (!ok.ok) throw new Error(g.wf ? ok.why : `merging is not approved for ${repo}`);
     workflowId = g.wf?.id;
     await activeCheck();
@@ -249,7 +252,7 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
   if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
   const g = await gateFacts(db, repo, number);
   const wf = o.workflowId !== undefined && g.wf?.id !== o.workflowId ? null : g.wf;
-  const ok = mergeGate(g.approval, wf, head);
+  const ok = mergeGate(g.approval, wf, head, by);
   if (!ok.ok) throw new PreapprovalRefused(wf ? ok.why : `merging is not approved for ${repo}`);
   const busy = () => new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
   if ((await loadLegs(db, [{ repo, number }], { activeOnly: true })).has(ref)) throw busy();
@@ -495,7 +498,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended", held: Readonly
     return await stop(r.why);
   }
 
-  const gate = mergeGate(pf.approvals.get(p.repo) ?? null, leg ? pf.workflows.get(leg.workflowId) ?? null : null, head);
+  const gate = mergeGate(pf.approvals.get(p.repo) ?? null, leg ? pf.workflows.get(leg.workflowId) ?? null : null, head, leg?.approvedBy ?? p.by);
   if (!gate.ok) return p.state === "queued" ? cancel("merging is no longer approved") : await stop("merging is no longer approved");
 
   if (p.state === "ci") {

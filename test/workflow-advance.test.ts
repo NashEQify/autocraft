@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
+import { setStepApproval } from "../src/data/control/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { mergeDecisionId } from "../src/core/rules.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
@@ -37,6 +38,7 @@ const later = (): string => new Date(Date.now() + 5_000).toISOString();
 async function approvedReview(): Promise<World> {
   const w = current = await (await world()).repo();
   const db = w.db;
+  await setStepApproval(db, [{ repo: "app", step: "merge", on: true }], MAINT);
   await db.run(db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
   await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
   await db.run(db.k.insertInto("main.access").values({ login: MAINT, role: "maintainer" }));
@@ -133,6 +135,22 @@ test("an approved review entry with minor findings is fixed, reviewed again and 
   await db.run(db.k.updateTable("main.items").set({ state: "MERGED" }).where("number", "=", 1));
   await advanceWorkflows(db);
   assert.equal(await liveWorkflow(db, "app", 1), null);
+});
+
+test("a queued merge leg whose workflow ended with the merge is recorded merged, not cancelled", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await review(w, { head: "sha1", verdict: "take" });
+  await w.premerge(1, "clean");
+  await advanceWorkflows(db);
+  for (let i = 0; i < 3; i++) await advancePreapprovals(db);
+  assert.equal(await legState(w), "queued");
+  // The merge lands and the workflow ends on it before the leg's pass sees the merge.
+  await db.run(db.k.updateTable("main.items").set({ state: "MERGED" }).where("number", "=", 1));
+  await advanceWorkflows(db);
+  assert.equal(await liveWorkflow(db, "app", 1), null);
+  await advancePreapprovals(db);
+  assert.equal(await legState(w), "merged");
 });
 
 test("an approved merge goes on past an unsure pre-merge review with no defect; a defect stops it as a major finding", async () => {
