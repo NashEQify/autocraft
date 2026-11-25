@@ -13,6 +13,9 @@ export { implementOffWait };
 /** The wait of a queued issue whose latest attempt ended without a merged PR and whose text has not changed since. */
 export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again";
 
+/** The wait of started work while GitHub writes go out as the box account: nobody's started work counts then (data/access standing). */
+export const BOX_IDENTITY_WAIT = "an operator to switch AutoCraft to its GitHub App: started work runs as the person who started it only through the app";
+
 /**
  * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no live implement
  * workflow) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
@@ -25,6 +28,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   if (f.kind !== "issue" || !f.open || !f.inScope || f.held || im.queuedBy === null) return null;
   const state = row?.state as ImplementationState | undefined;
   const ended = !row || ENDED_STATES.has(state!);
+  if (im.standing === "unknown" && im.boxIdentity) return { wait: BOX_IDENTITY_WAIT, waitKind: "person" };
   if (im.standing === "unknown") return { wait: `GitHub's answer on ${im.queuedBy}'s access to ${f.repo}`, waitKind: "system" };
   if (im.standing === "no") return ended ? null : { wait: `a person who settles on ${f.repo} to queue it again`, waitKind: "person" };
   const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "system" as const });

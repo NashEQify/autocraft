@@ -1,7 +1,7 @@
 // The gates on writes: the repo approvals each action needs and the global pipeline switch. Pure. The planner and the
 // guard (guard.ts) both use it; decide() does not (it shows what would run, approved or not).
 import type { ActionKind, ItemFacts, PrFacts } from "./plan.ts";
-import { mayMerge, mayPush, type MayResult } from "./may.ts";
+import { mayMerge, mayPush, mergeApproved, type MayResult, type MergeInputs } from "./may.ts";
 import { tripStageOf } from "./push-outcome.ts";
 
 /** Who asks for a write: the pipeline itself (the autopilot), or an operator (a job they requested, or a command they ran). */
@@ -73,14 +73,20 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
 }
 
-/** Whether a merge of the PR at its head is approved (src/core/may.ts); null on facts built without the approval inputs. */
+const mergeInputs = (f: PrFacts): MergeInputs | null =>
+  f.may ? { repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, head: f.head ?? "", pushes: f.may.pushes } : null;
+
+/** Whether the PR may be merged at its head (src/core/may.ts); null on facts built without the approval inputs. */
 export function mergeMay(f: PrFacts): MayResult | null {
-  if (!f.may) return null;
-  return mayMerge({ repoApproval: f.may.repoMerge, workflow: f.may.workflow, head: f.head ?? "", ownHeads: new Set(f.may.ownHeads) });
+  const m = mergeInputs(f);
+  return m && mayMerge(m);
 }
 
-/** The merge approval as a yes or no: `mayMerge` where the facts carry its inputs, else the repo's merge approval. */
-export const mergeAllowed = (f: PrFacts): boolean => mergeMay(f)?.ok ?? f.repoFacts.mergeApproved;
+/** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts); the repo's merge approval on facts without its inputs. */
+export function mergeAllowed(f: PrFacts): boolean {
+  const m = mergeInputs(f);
+  return m ? mergeApproved(m).ok : f.repoFacts.mergeApproved;
+}
 
 type PushKind = "fixup" | "cifix" | "conflict";
 

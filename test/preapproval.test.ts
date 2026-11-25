@@ -138,8 +138,9 @@ describe("pre-approved merge", () => {
   });
 
   test("a sure take review does not let the queue merge or ask while the pre-approval waits", async () => {
-    const w = await (await (await (await take(await fresh(), 8)).review(8)).verified(8)).premerge(8, "clean");
+    const w = await (await (await (await (await fresh()).pr(8)).review(8)).verified(8)).premerge(8, "clean");
     assert.ok((await kindsOf(w, 8)).some((k) => k.startsWith("merge")), (await kindsOf(w, 8)).join());
+    await w.workflow(8);
     await start(w, 8);
     assert.ok(!(await kindsOf(w, 8)).some((k) => k.startsWith("merge") || k.startsWith("ask-merge")), (await kindsOf(w, 8)).join());
   });

@@ -111,7 +111,7 @@ export function lintOf(facts: PatchFacts, head: string, opts: { cifixHead: strin
 }
 
 /** The head and the earlier heads our pushes moved it from, newest first. Takes one PR's edges. */
-export function pushChainOf(edges: readonly PushEdge[], head: string): string[] {
+export function pushChainOf(edges: readonly Pick<PushEdge, "from" | "to">[], head: string): string[] {
   const from = new Map<string, string[]>();
   for (const e of edges) {
     const list = from.get(e.to) ?? from.set(e.to, []).get(e.to)!;

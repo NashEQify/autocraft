@@ -61,7 +61,7 @@ test("a private-org member's PR is pushable once the author's permission is read
 });
 
 test("a PR aimed at a non-default branch is planned as a single merge only", () => {
-  const plan = decidePr(prFacts({ baseOffDefault: true }));
+  const plan = decidePr(prFacts({ workflow: null, baseOffDefault: true }));
   const merge = plan.actions.find((a) => a.kind === "merge");
   assert.ok(merge);
   assert.equal(merge.params?.singleOnly, true);

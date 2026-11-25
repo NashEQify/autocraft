@@ -69,7 +69,7 @@ export type OpusPr = {
   earlier_opus: EarlierOpus | null;
   /** Present only when an earlier take-fix's fixes were never applied; the reply must keep or explain each. */
   unapplied_fixes?: UnappliedFix[];
-  /** Present only when a person's keep-in-core scope answer stands for this PR: the review does not reopen scope. */
+  /** Present only when a person settled that the change belongs in the app (src/review/opus.ts scopeSettled): the review does not reopen scope. */
   scope_settled?: { answer: string; by: string | null; note: string | null };
   /** Present only when our pipeline pushed commits to the PR since `earlier_opus`'s head: kind, sha, note and the fixes each was meant to make. */
   pipeline_commits?: { kind: string; sha: string; note: string; fixes_meant: string[] }[];

@@ -112,9 +112,10 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: boolean): QueueSta
   if (held) return "held-backlog";
   const mx = mergeEntry(f);
   if (!mx && f.review!.verdict === "take-fix") return "needs-fix-up";
-  // A merge-entry PR merges on its approval, as its approver once the merge is handed over; a blocking pre-merge review stops it.
+  // A started PR merges on its approval, as its approver once the merge is handed over: the rule merges only what nobody started.
+  // A merge entry's blocking pre-merge review stops it.
   if (mx) e.path = e.handed ? "operator" : e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" ? null : "maintainer";
-  else if (!e.reasons.length) e.path = "rule";
+  else if (!e.reasons.length) e.path = workflowOf(f) && !e.handed ? "maintainer" : "rule";
   else if (e.handed) e.path = "operator";
   if (f.mergeable === "CONFLICTING") return "conflict";
   if (f.ci === "failure") return "ci-failed";

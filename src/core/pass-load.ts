@@ -113,9 +113,10 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
     for (const [key, m] of mirror) {
       const { repo, number } = asRef(key);
       const head = m.item.head_oid;
-      if (head) for (const h of pushChainOf(patches.get(key)?.pushes ?? [], head)) pairs.push({ repo, sha: h });
+      const moves = [...(patches.get(key)?.pushes ?? []), ...(pushes.get(key)?.moves ?? [])];
+      if (head) for (const h of pushChainOf(moves, head)) pairs.push({ repo, sha: h });
       const latest = review.latest.get(key);
-      if (latest) for (const h of pushChainOf(patches.get(key)?.pushes ?? [], latest.head)) pairs.push({ repo, sha: h });
+      if (latest) for (const h of pushChainOf(moves, latest.head)) pairs.push({ repo, sha: h });
       const eh = o.mergeEntryHead(data, key);
       if (eh) entryHeads.push({ repo, number, head: eh });
       const qh = eh ?? latest?.head;
