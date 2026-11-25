@@ -619,7 +619,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       // runs alongside the session read; routes that return before it leave it running on its own.
       const revocations = sessions.hasFreshRevocation(db)
         .then((fresh) => { if (fresh) void vault.sweepRevocations(true).catch(() => {}); });
-      revocations.catch(() => {});
+      void revocations.catch(() => {});
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
       if (config.devAuth && (req.headers["x-forwarded-for"] !== undefined || !isLoopbackHost(req.headers.host))) {
@@ -652,7 +652,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       if (method === "GET" && PUBLIC_FILES.has(url.pathname)) return await sendWeb(res, nonce, url.pathname);
       // A read request's settings snapshot is read with the session (handleApi).
       const snapshot = method === "GET" && url.pathname.startsWith("/api/") && url.pathname !== "/api/live" ? readSettingsSnapshot(db) : undefined;
-      snapshot?.catch(() => {});
+      void snapshot?.catch(() => {});
       const [session] = await Promise.all([loadSession(db, cookies.get(SESSION_COOKIE)), revocations, snapshot]);
       if (!session) {
         const wantsPage = method === "GET" && /text\/html/.test(String(req.headers.accept ?? ""));

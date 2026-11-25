@@ -17,13 +17,14 @@ const SINCE = "2025-12-31T00:00:00.000Z";
 const ids = (n: number, p: string) => Array.from({ length: n }, (_, i) => `${p}${i}`);
 
 for (const dialect of ["sqlite" as const, ...(TEST_PG_URL ? ["postgres" as const] : [])]) {
-  const flat = (name: string, prepare: (db: Db, n: number) => Promise<() => Promise<unknown>>) =>
+  const flat = (name: string, prepare: (db: Db, n: number) => Promise<() => Promise<unknown>>): void => {
     test(`${name}: statements do not grow with the key count (${dialect})`, async () => {
       await expectFlat(async (n) => {
         const o = await openApp(dialect);
         return { db: o.db, close: () => o.t.close(), run: await prepare(o.db, n) };
       }, 2, 40);
     });
+  };
 
   flat("mention loaders and counts", async (db, n) => {
     const q = queryDb(db);

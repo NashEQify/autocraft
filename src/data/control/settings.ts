@@ -333,7 +333,7 @@ export function loadLiveConfig(db: Db): Promise<LiveConfig> {
     return { pipelineEnabled: c.pipelineEnabled, drain: c.pipelineDraining, changedBy: c.pipelineChangedBy, changedAt: c.pipelineChangedAt, jevParallel: c.jevParallel, usagePause: c.usagePause, stepParallel: c.stepParallel };
   });
   liveCache.set(db, { at: Date.now(), value });
-  value.catch(() => { if (liveCache.get(db)?.value === value) liveCache.delete(db); });
+  void value.catch(() => { if (liveCache.get(db)?.value === value) liveCache.delete(db); });
   return value;
 }
 
