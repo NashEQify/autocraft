@@ -21,13 +21,12 @@ import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadMaintainStats } from "../../data/views/stats.ts";
 import { loadItemRowFacts, loadItemsBase } from "../../data/views/maintain-items.ts";
 import type { ItemBase } from "../../data/views/types.ts";
-import { statusFromItem } from "../../core/item-status.ts";
+import { statusFromItem, type ItemPhase, type ItemStatus } from "../../core/item-status.ts";
 import type { PlanView } from "../../core/plan-cache.ts";
 import { WEIGHT_NORMAL } from "../../workflow/types.ts";
 import { HttpError } from "../server/util.ts";
 import { itemState } from "./shown.ts";
 import { readerOf, statusFor } from "./reader.ts";
-import { type ItemPhase, type ItemStatus } from "./home-types.ts";
 import type { Db } from "../../db/index.ts";
 
 type HomeRow = ItemWorkflow & { title: string | null; author: string | null; lastEvent: WorkflowEventKind | null };

@@ -7,7 +7,6 @@ import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { loadSteps } from "../../runner/steps.ts";
 import * as control from "../../data/control/index.ts";
 import type { AttentionFacts } from "../../data/views/types.ts";
-import type { Req } from "../types.ts";
 import { healthProblems, type ProblemFacts } from "./health.ts";
 import { stepTitle } from "./trace.ts";
 import type { Db } from "../../db/index.ts";

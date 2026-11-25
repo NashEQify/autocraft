@@ -52,7 +52,7 @@ export function createConversationMock(me: User, changed: () => void): Pick<Api,
         return wait(view(repo, number), 200);
       },
       withdraw: (repo, number) => wait(view(repo, number)),
-      editCard: (id, edit) => set(id, { ...(edit.text !== undefined && { text: edit.text }), edited: true, editedBy: me.login, digest: `d${id}-${nextId++}` }),
+      editCard: (id, edit) => set(id, { text: edit.text, edited: true, editedBy: me.login, digest: `d${id}-${nextId++}` }),
       doCard: (id, digest) => {
         if (find(id).digest !== digest) return Promise.reject(new Error("the card changed; look at it again"));
         return set(id, { state: "done", by: me.login, at: new Date(NOW).toISOString(), done: { at: new Date(NOW).toISOString(), link: "", label: "Done" } });

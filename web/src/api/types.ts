@@ -2139,10 +2139,10 @@ export interface QueuePage {
 
 // ---- conversations with Opus (src/dash/api/conversations.ts) ----
 
-/** "replaced": a later Opus reply proposed a new set; the card can no longer run. */
-/** A proposed card's drafts as an operator edited them; a field left out stays as it is. */
-export type CardEdit = { text?: string; issue?: { title: string; body: string }; instructions?: string };
+/** A proposed comment card's text as a person edited it. */
+export type CardEdit = { text: string };
 
+/** "replaced": a later Opus reply proposed a new set; the card can no longer run. */
 export type ConversationCardState = "proposed" | "queued" | "running" | "done" | "failed" | "dismissed" | "replaced";
 
 /**
@@ -2179,7 +2179,7 @@ export interface ConversationCard {
   writes?: string;
   state: ConversationCardState;
   /** Set when state is queued: the press found no room under the daily GitHub write limit; `place` counts from 1 in the order the cards run. */
-  queued?: { place: number | null; reason: string; dispute?: null };
+  queued?: { place: number | null; reason: string };
   /** Set when state is done; `link` is empty when the action wrote nothing on GitHub. */
   done?: { at: string; link: string; label: string };
   /** Set when state is failed. */
@@ -2273,8 +2273,6 @@ export interface Conversation {
   progress?: string[];
   startedBy: string | null;
   turns: ConversationTurn[];
-  /** The item's open bound decision's answer choices; null or absent when it has none. */
-  choices?: DecisionChoices | null;
 }
 
 // ---- Areas -------------------------------------------------------------------

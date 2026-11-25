@@ -1,6 +1,5 @@
 // The dashboard's access list. The Access API and the CLI both write through
 // these functions, so every change ends the login's sessions and is audited.
-import { audit } from "./dash/audit.ts";
 import type { Role } from "./dash/types.ts";
 import * as access from "./data/access/index.ts";
 import { AccessRefused } from "./data/access/index.ts";

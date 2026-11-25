@@ -8,7 +8,6 @@
 // first 160 characters, counted); --dump DIR writes each answer to DIR. Drops the database at the end.
 // `scripts/pg-test.sh start` gives a throwaway server.
 import { randomBytes } from "node:crypto";
-import { ask } from "../src/decisions.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import type { Req } from "../src/dash/types.ts";
 import { countQueries } from "../src/db/counter.ts";
@@ -76,15 +75,14 @@ async function seed(db: Db): Promise<void> {
   await insertAll(db, "classifications", classes);
   await insertAll(db, "pr_checks", checks);
   await insertAll(db, "pr_files", files);
-  const qs: Record<string, unknown>[] = [];
-  for (let i = 0; i < 300; i++) {
-    const repo = repos[i % REPOS]!, number = (i % ITEMS) + 1;
-    qs.push({ id: `${repo}#${number}:merge`, kind: i % 2 ? "merge" : "scope", repo, number, question: `Merge ${repo}#${number}?`, asked_at: iso(i * 11),
-      options: [{ key: "merge", label: "Merge" }, { key: "close", label: "Close" }, { key: "backlog", label: "Backlog" }], recommended: "merge", recommended_reason: "Looks right." });
+  const workflows: Record<string, unknown>[] = [];
+  for (let i = 0; i < Math.min(300, REPOS * ITEMS); i++) {
+    const repo = repos[i % REPOS]!, number = Math.floor(i / REPOS) + 1;
+    const pr = number % 5 !== 0, rec = i % 3 !== 0;
+    workflows.push({ repo, number, kind: pr ? "pr" : "issue", entry: pr ? "review" : "implement", state: rec ? "recommending" : "running", started_by: "op", started_at: iso(i * 11 + 5), started_via: "dashboard",
+      rec: rec ? JSON.stringify({ text: "Looks right.", parts: { fix: [], drop: [] }, merges: pr }) : null, rec_at: rec ? iso(i * 11) : null, updated_at: iso(i * 11) });
   }
-  await ask(db, qs);
-  // A third answered, the rest open.
-  await db.run(db.k.updateTable("decisions").set({ answer: "merge", answered_by: "op", answered_at: iso(1), answered_role: "operator" }).where((eb) => kx.like(db, "id", eb.val("%0#%"))));
+  await insertAll(db, "item_workflows", workflows);
   const jobs: Record<string, unknown>[] = [];
   for (let i = 0; i < 2000; i++) {
     const running = i < 8;
@@ -118,11 +116,10 @@ const req = (params: Record<string, string> = {}, query = ""): Req => ({
 } as unknown as Req);
 
 const ROUTES: [string, Record<string, string>, string?][] = [
-  ["/api/me", {}], ["/api/repos", {}], ["/api/progress", {}], ["/api/decisions/open-counts", {}], ["/api/account/discord", {}],
-  ["/api/home", {}], ["/api/now", {}], ["/api/now/feed", {}],
+  ["/api/me", {}], ["/api/repos", {}], ["/api/progress", {}], ["/api/account/discord", {}], ["/api/health", {}], ["/api/live", {}],
+  ["/api/maintain/home", {}], ["/api/maintain/items", {}], ["/api/maintain/items/:repo/:n", { repo: "repo1", n: "1" }], ["/api/maintain/queue", {}], ["/api/maintain/repos", {}],
   ["/api/items/:repo/:n/page", { repo: "repo1", n: "1" }], ["/api/items/:repo/:n", { repo: "repo1", n: "1" }],
-  ["/api/items/:repo/:n/decision", { repo: "repo1", n: "1" }], ["/api/items/:repo/:n/trace", { repo: "repo1", n: "1" }],
-  ["/api/decisions", {}], ["/api/decisions/:id", { id: "repo1#2:merge" }], ["/api/decisions/:id/thread", { id: "repo1#2:merge" }], ["/api/needs", {}],
+  ["/api/items/:repo/:n/trace", { repo: "repo1", n: "1" }],
   ["/api/repos/all", {}], ["/api/repos/pipeline", {}], ["/api/envs", {}], ["/api/tasks", {}], ["/api/stuck", {}],
 ];
 

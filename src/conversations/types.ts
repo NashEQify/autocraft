@@ -28,8 +28,6 @@ export const NOTE_MAX = 500;
 export const RESOLVE_MAX = 200;
 /** Longest title of an issue the open_issue step creates. */
 export const ISSUE_TITLE_MAX = 120;
-/** Longest instructions text of a fixup step. */
-export const INSTRUCTIONS_MAX = 1500;
 export const MESSAGE_MAX = 4000;
 export const OPENING_MAX = 1500;
 export const ITEM_BODY_LIMIT = 8000;

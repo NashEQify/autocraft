@@ -153,7 +153,6 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
     case "unclassified": case "waiting-haiku": return "Classify";
     default:
   }
-  const c = f.classification;
   if (item.state === "classified" && pluginPr(f)) return "Stays open as a plugin candidate";
   if (f.kind === "issue") {
     const im = f.implement, s = im.row?.state;

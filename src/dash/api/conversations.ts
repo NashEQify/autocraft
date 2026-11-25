@@ -1,7 +1,7 @@
 // Opus conversations on items. Everyone who may see the repo reads them. Operators write to Opus, and so do maintainers with
 // write access to the repo, whose messages run on their own Task Runners; cards are run, edited and dismissed by those who settle.
-import type { CardEdit, Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
-import { buttonLabel, cardEffect, cardLines, cardRepos, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
+import type { Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
+import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandText, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
 import { queueReason } from "../../conversations/queue.ts";
 import { cardDigest, cardOf, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
 import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
@@ -9,6 +9,7 @@ import { ConversationError, loadQueue, loadThreads, type Queue, type Thread } fr
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
+import { listWorkflows } from "../../data/workflow/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
 import { PERM_READ_TTL } from "../server/sessions.ts";
@@ -19,18 +20,18 @@ import type { Db } from "../../db/index.ts";
 import { tierOfModel } from "../../remote/mode.ts";
 import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
 import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
+import { ownTaker } from "../../remote/takers.ts";
 
 const CONVERSATION_PROMPT_ID = "conversation.turn";
 /** The step that answers maintainers' messages (src/runner/steps.ts). */
 const MAINTAINER_STEP = "conversation-maintainer";
-import { ownTaker } from "../../remote/takers.ts";
 
 const isOperator = (req: Req): boolean => req.user.role === "operator";
 
 /**
  * Whether the user may write to Opus on an item of `repo`: an operator, or a maintainer with write permission on the repo, read
- * live as canSettle reads it (the act rule), while model calls run on users' own Task Runners, since a maintainer's turn runs
- * on theirs. Talking writes nothing to GitHub, so the app-identity and maintainer-writes conditions of settling do not apply.
+ * live as the act rule reads it. A maintainer's turn runs on their own Task Runner. Talking writes nothing to GitHub, so the act
+ * rule's app-identity condition does not apply.
  */
 export async function canTalk(db: Db, user: Pick<User, "role" | "canWrite">, repo: string): Promise<boolean> {
   if (user.role === "operator") return true;
@@ -50,8 +51,13 @@ async function guard<T>(f: () => Promise<T>): Promise<T> {
 }
 
 type Viewer = { login: string; role: string };
+const refOf = (x: { repo: string; number: number }): string => `${x.repo}#${x.number}`;
 /** What the views of several cards share. */
-type CardsView = { queue: Queue; stale: Map<number, Stale> };
+type CardsView = {
+  queue: Queue; stale: Map<number, Stale>;
+  /** Items ("repo#n") whose pull request is quiet, and when each item's live recommendation was written. */
+  quiet: ReadonlySet<string>; recAt: Map<string, string | null>;
+};
 
 /** Whether `login` may act on every one of `repos` by the act rule, from cached write permissions. */
 async function mayAct(db: Db, login: string, repos: string[]): Promise<boolean> {
@@ -61,11 +67,16 @@ async function mayAct(db: Db, login: string, repos: string[]): Promise<boolean> 
 }
 
 const cardsView = async (db: Db, cards: CardRow[]): Promise<CardsView> => {
-  const [queue, stale] = await Promise.all([loadQueue(db), loadStale(db, cards.filter((c) => c.state === "proposed"))]);
-  return { queue, stale };
+  const proposed = cards.filter((c) => c.state === "proposed");
+  const keys = [...new Set(proposed.map(refOf))];
+  const refs = [...new Map(proposed.map((c) => [refOf(c), { repo: c.repo, number: c.number }])).values()];
+  const [queue, stale, quiet, flows] = await Promise.all([
+    loadQueue(db), loadStale(db, proposed), keys.length ? loadQuiet(db, keys) : [], refs.length ? listWorkflows(db, { live: true, refs }) : [],
+  ]);
+  return { queue, stale, quiet: new Set(quiet), recAt: new Map(flows.map((w) => [refOf(w), w.recAt])) };
 };
 
-/** One card's view. A card of the retired decision system shows its stored lines only. */
+/** One card's view. A card of the retired decision system shows its stored line and its result only. */
 export const cardView = async (db: Db, c: CardRow, who?: Viewer): Promise<ConversationCard> => await viewOf(db, c, await cardsView(db, [c]), who);
 
 /** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer from cached permissions). */
@@ -73,39 +84,38 @@ async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<C
   const params = readParams(c.kind, c.params);
   const effect = params ? cardEffect(params) : null;
   const issue = params ? issueOf(params) : undefined;
+  const command = params ? commandText(params) : undefined;
+  const refusal = params && c.state === "proposed" ? actionRefusal(params, { quiet: v.quiet.has(refOf(c)), recAt: v.recAt.get(refOf(c)) ?? null }) : null;
   const stale = c.state === "proposed" ? v.stale.get(c.id) : undefined;
   const one = (t: string) => t.replace(/\s+/g, " ").trim();
   const preview = c.text && one(c.text) ? `Comment: ${one(c.text)}` : issue ? `Issue: ${one(issue.title)}` : undefined;
   const place = c.state === "queued" ? v.queue.rows.find((r) => r.id === c.id)?.place ?? null : null;
   return {
-    steps: params ? cardLines(params) : [],
-    ...(params?.kind === "comment" && { commentStep: 0 }),
-    ...(issue && { issue }),
+    steps: params ? cardLines(params) : [c.description],
+    ...(command !== undefined && { command }),
+    ...(refusal && { refusal }),
     ...(stale && { stale }),
     label: params ? buttonLabel(params) : c.description,
     headline: params ? headline(params) : c.description,
     ...(preview && { preview }),
     canSettle: !!who && params !== null && await mayAct(db, who.login, cardRepos(c.repo, params)),
-    id: c.id, kind: c.kind as ConversationCard["kind"], title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
+    id: c.id, kind: params?.kind ?? "comment", title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
     ...(c.text !== null && { text: c.text }),
     ...(effect && { writes: effect }),
     ...(c.state === "done" && { done: { at: c.acted_at ?? "", link: c.result_url ?? "", label: c.result ?? "Done" } }),
     ...(c.state === "failed" && c.error && { error: c.error }),
-    ...(c.state === "queued" && { queued: { place, reason: queueReason(place), dispute: null } }),
+    ...(c.state === "queued" && { queued: { place, reason: queueReason(place) } }),
     ...(c.acted_by && { by: c.acted_by }),
     ...(c.acted_at && { at: c.acted_at }),
     ...(c.edited_by && { edited: true, editedBy: c.edited_by }),
   };
 }
 
-/** The issue draft a card carries (the first a merge holds, or the one it would open), with its place among the card's lines. */
-function issueOf(p: CardParams): ConversationCard["issue"] {
-  const held = followupsOf(p)[0];
-  if (held) return { step: 1, ...held };
-  return p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue" ? { step: 0, repo: p.command.repo, title: p.command.title, body: p.command.body } : undefined;
+/** The issue draft a card carries: the first a merge holds, or the one it would open. */
+function issueOf(p: CardParams): { title: string } | undefined {
+  return followupsOf(p)[0] ?? (p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue" ? p.command : undefined);
 }
 
-/** `includes` and `choices` are retired: always empty. */
 export type ConversationView = Conversation;
 
 async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promise<{ thread: Thread | undefined; view: Omit<ConversationView, "canTalk" | "canWithdraw"> }> {
@@ -113,7 +123,7 @@ async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promis
   await sweepRunningCards(db);
   const key = `${repo}#${n}`;
   const thread = (await loadThreads(db, [key])).get(key);
-  if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [], includes: [], choices: null } };
+  if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [] } };
   const shared = await cardsView(db, thread.cards);
   const actions = new Map<number, ConversationCard[]>();
   for (const c of thread.cards) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(await viewOf(db, c, shared, who));
@@ -126,7 +136,7 @@ async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promis
   }));
   const wait = thread.waiting;
   const progress = wait?.status === "answering" && wait.progress ? (JSON.parse(wait.progress) as string[]) : [];
-  return { thread, view: { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: thread.conversation.created_by, turns, includes: [], choices: null } };
+  return { thread, view: { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: thread.conversation.created_by, turns } };
 }
 
 export const conversationView = async (db: Db, repo: string, n: number, who?: Viewer): Promise<Omit<ConversationView, "canTalk" | "canWithdraw">> => (await threadView(db, repo, n, who)).view;
@@ -135,22 +145,6 @@ function itemOf(req: Req): { repo: string; n: number } {
   const n = Number(req.params.n);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "the item number must be a whole number");
   return { repo: req.params.repo!, n };
-}
-
-/** The edit a card-edit request carries: any of text, issue ({title, body}) and instructions. */
-function cardEdit(req: Req): CardEdit {
-  const b = req.json as Record<string, unknown> | null;
-  if (!b || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "the body must be an object");
-  const edit: CardEdit = {};
-  if (b.text !== undefined) { if (typeof b.text !== "string") throw new HttpError(400, "text must be a string"); edit.text = b.text; }
-  if (b.instructions !== undefined) { if (typeof b.instructions !== "string") throw new HttpError(400, "instructions must be a string"); edit.instructions = b.instructions; }
-  if (b.issue !== undefined) {
-    const i = b.issue as Record<string, unknown> | null;
-    if (!i || typeof i !== "object" || typeof i.title !== "string" || typeof i.body !== "string") throw new HttpError(400, "issue must be an object with a title and a body");
-    edit.issue = { title: i.title, body: i.body };
-  }
-  if (Object.keys(edit).length === 0) throw new HttpError(400, "the body must have a text, an issue or instructions");
-  return edit;
 }
 
 function text(req: Req): string {
@@ -184,7 +178,7 @@ export async function getConversation(db: Db, req: Req): Promise<ConversationVie
 /** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, and cards go. */
 function veilConversation(v: ConversationView): ConversationView {
   const { progress: _p, ...rest } = v;
-  return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })), includes: [], choices: null };
+  return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })) };
 }
 
 /** Why a maintainer's message to Opus would not be answered now, or null: the pipeline is off or draining, its step is paused, or none of their Task Runners is ready. */
@@ -229,8 +223,8 @@ async function needCard(db: Db, req: Req): Promise<CardRow> {
 
 export async function editCardText(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
-  const edit = cardEdit(req);
-  return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, edit)), req.user);
+  const edit = text(req);
+  return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, { text: edit })), req.user);
 }
 
 /** A queued press is the presser's: only they and operators dismiss it. */

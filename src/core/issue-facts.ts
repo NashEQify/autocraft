@@ -1,7 +1,7 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, labels, implementation.
 // Built for a whole pass or a slice of it from the module loads of core/pass-load.ts. Reads only: a text hash sync has not written
 // yet is computed here.
-import { permKey, stillCounts, type ActFacts } from "../data/access/index.ts";
+import { permKey, stillCounts } from "../data/access/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { openItemKeys } from "../data/mirror/index.ts";

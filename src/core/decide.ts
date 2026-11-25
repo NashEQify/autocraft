@@ -15,7 +15,7 @@ import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState
 const excerpt = (t: string): string => { const s = t.replace(/\s+/g, " ").trim(); return s.length > 80 ? `${s.slice(0, 79).trimEnd()}…` : s; };
 
 type PremergeState = "none" | "clean" | "fix" | "defect" | "unsure" | "failed" | "retry";
-export type Entry = { state: QueueState; path: MergePath; reasons: string[]; note: string | null; conflictNote: string | null; premerge: PremergeState | null; premergeDefects: number; answer: string | null; noCi: boolean; refusedReason: string | null };
+export type Entry = { state: QueueState; path: MergePath; reasons: string[]; note: string | null; conflictNote: string | null; premerge: PremergeState | null; premergeDefects: number; handed: boolean; noCi: boolean; refusedReason: string | null };
 
 const verifyState = (f: PrFacts): QueueState | null => {
   const s = f.verification?.state;
@@ -73,6 +73,8 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (open && refusalStuck(f)) reasons.push(`the merge was refused: ${excerpt(f.lastMerge!.reason!)}`);
   const stuckUnknown = open ? unknownStuck(f) : null;
   if (stuckUnknown) reasons.push(stuckUnknown);
+  // The approver's leg handed the PR to the merge queue at this head; at an unsure head only a hand-over after the review counts.
+  const handed = f.decision.answer === "merge" && (!r?.unsure || f.decision.mergeAnswerAfterReview);
 
   // The pre-merge review gates what the rule would merge, and every merge-entry PR; its blocking reasons count before the path is decided.
   let premerge: PremergeState | null = null;
@@ -84,7 +86,8 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
     else if (!row.hasFindings) premerge = row.tries >= PREMERGE_MAX_TRIES ? "failed" : "retry";
     else if (!row.defects) premerge = row.unsure ? "unsure" : "clean";
     else {
-      const fixable = row.defectsAllFixable && !f.premergeFixUsed && pushAllowed(f, "fixup") && f.pushable;
+      // A PR already handed over gets no fix-up.
+      const fixable = !handed && row.defectsAllFixable && !f.premergeFixUsed && pushAllowed(f, "fixup") && f.pushable;
       premerge = fixable ? "fix" : "defect";
     }
     if (premerge === "defect") reasons.push(PREMERGE_DEFECT_REASON);
@@ -93,7 +96,7 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
     // The pre-merge review caches the diff, so a diff still unchecked after it is a reason; before it the PR waits for it.
     else if (premerge === "clean" && f.sensitive === null) reasons.push(UNCHECKED_REASON);
   }
-  const e: Entry = { state: "needs-decision", path: null, reasons, note: null, conflictNote: null, premerge, premergeDefects: defects, answer: null, noCi, refusedReason: null };
+  const e: Entry = { state: "needs-decision", path: null, reasons, note: null, conflictNote: null, premerge, premergeDefects: defects, handed, noCi, refusedReason: null };
 
   if (open && f.gateFailureNote) e.note = f.gateFailureNote;
   // A maintainer's formal block comes before everything else.
@@ -115,8 +118,9 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: "backlog" | "dupli
   const mx = mergeEntry(f);
   if (!mx && f.review!.verdict === "take-fix") return "needs-fix-up";
   // A merge-entry PR merges on its approval, as its approver once the merge is handed over; a blocking pre-merge review stops it.
-  if (mx) e.path = e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" ? null : "maintainer";
+  if (mx) e.path = e.handed ? "operator" : e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" ? null : "maintainer";
   else if (!e.reasons.length) e.path = "rule";
+  else if (e.handed) e.path = "operator";
   if (f.mergeable === "CONFLICTING") return "conflict";
   if (f.ci === "failure") return "ci-failed";
   if ((f.runs?.waiting ?? 0) > 0) return "ci-approval";
@@ -137,7 +141,7 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: "backlog" | "dupli
     e.refusedReason = f.lastMerge.reason;
     return "refused";
   }
-  return "ready";
+  return e.path === "operator" ? "decision-answered-merge" : "ready";
 }
 
 /**

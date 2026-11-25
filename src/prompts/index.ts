@@ -6,7 +6,7 @@
 //
 // No Node imports: the web mockup imports this file too.
 import type { PromptInfo, PromptsReport } from "../../web/src/api/types.ts";
-import { BODY_LIMIT, COMMENTS_PER_ITEM, SUMMARY_MIN, itemInput, refOf, type Item } from "../classify/parse.ts";
+import { BODY_LIMIT, itemInput, refOf, type Item } from "../classify/parse.ts";
 import { AREAS_MAX, AREAS_MIN, AREA_DESCRIPTION_MAX, AREA_NAME_MAX, AREA_PATHS_MAX, AREA_SUGGEST_BODY, AREA_SURE, NONE_OF_THESE, PROPOSE_TITLES, SAMPLE_AREAS, SAMPLE_AREA_ASK, SAMPLE_AREA_ITEM, SAMPLE_AREA_PROPOSE, SAMPLE_AREA_SUGGEST, SUGGEST_ITEMS, SUGGEST_MAX, type Area, type AreaAsk, type AreaItem, type AreaProposeInput, type AreaSuggestInput } from "../areas/types.ts";
 import { LABELS, LABEL_MEANING, RULES, UNTRUSTED_NOTE } from "../classify/rules.ts";
 import { CHECK_MAX_CALLS, CHECK_MAX_WALL_MS, CHECK_OUTPUT_LINES } from "../core/rules.ts";
@@ -18,7 +18,7 @@ import { AGENTS_PATH, DENIED_READS, REFERENCE_PATH, REPO_DOCS_PATH, REPOS_ROOT, 
 import { CLAIM_CHARS, CLAIM_EVIDENCE_CHARS, MAX_CLAIMS, OPUS_MAX_FIXES, OPUS_REASON_WORDS, PART_TITLE_CHARS, STATEMENT_PROMPT_CHARS, statementsList, type OpusPr } from "../review/opus-parse.ts";
 import { BODY_CHARS, MAX_FINDINGS, MAX_MERGED_DIFF_CHARS, SAMPLE_POSTMERGE_PRS, TITLE_CHARS, type PostmergePr } from "../postmerge/parse.ts";
 import { PREMERGE_MAX_FINDINGS, PREMERGE_SCENARIO_CHARS, PREMERGE_TITLE_CHARS } from "../premerge/parse.ts";
-import { COMMENT_TEMPLATES, REASON_MAX } from "../act/templates.ts";
+import { COMMENT_TEMPLATES } from "../act/templates.ts";
 import { ISSUE_TEMPLATE } from "../postmerge/template.ts";
 import { ASK_TEMPLATE, CARRY_ASK_TEMPLATE, CARRY_COMMENT_TEMPLATE, COMMENT_TEMPLATE, CONFLICT_ASK_TEMPLATE, CONFLICT_COMMENT_TEMPLATE, LATER_COMMENT_TEMPLATE } from "../fixup/template.ts";
 import { MAX_CHANGED_LINES, type ConflictPr, type FixupPr } from "../fixup/patch.ts";
@@ -28,7 +28,7 @@ import { SUMMARY_MAX_WORDS, WHY_MAX_WORDS } from "../prose.ts";
 import { GROUP_BODY_LIMIT, GROUP_DIFF_CHARS, GROUP_MAX, GROUP_MAX_POINTS, GROUP_REASON_WORDS, type CompareIssues, type ComparePrs } from "../dupes/group.ts";
 import { JEV_ACCEPT, JEV_REJECT, PAIR_BODY_LIMIT, VERDICTS as PAIR_VERDICTS, pairView, type DupePair } from "../dupes/pair.ts";
 import { CHECK_MAX_PROBLEMS, CHECK_REASON_WORDS, SAMPLE_FIXUP_CHECK, type FixupCheckInput } from "../patchcheck/types.ts";
-import { COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, SAMPLE_CONVERSATION, type ConversationInput } from "../conversations/types.ts";
+import { COMMENT_MAX, ISSUE_TITLE_MAX, SAMPLE_CONVERSATION, type ConversationInput } from "../conversations/types.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { SAMPLE_COMPARE_ISSUES, SAMPLE_COMPARE_PRS, SAMPLE_CONFLICT_PRS, SAMPLE_DUPE_PAIRS, SAMPLE_FIXUP_PRS, SAMPLE_ITEMS, SAMPLE_OPUS_PRS, SAMPLE_PREMERGE_PRS } from "./samples.ts";
 import { QUOTE_WORDS, REFERENCE_JEV_ACCEPT, REFERENCE_JEV_REJECT, SAMPLE_REFERENCE_LINT, type ReferenceLintInput } from "../replylint.ts";
@@ -936,45 +936,6 @@ Every issue except the kept one appears once in others.
   validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON. The object is kept only when keep is the number of one of the asked issues, reason is text, and every other asked issue appears once in others; adds is cut to ${GROUP_MAX_POINTS} points of 400 characters, reason to ${GROUP_REASON_WORDS} words. ${SUMMARY_VALIDATION} This call has no sandbox and so no fix turn. No kept object counts as no answer: the call is repeated once, then the group is decided by the canonical rule and the decision says so. A group of more than ${GROUP_MAX} members is compared in rounds of up to ${GROUP_MAX}. A member that is already closed wins without a call.`,
   limits: { perCall: GROUP_MAX, attempts: 2, timeoutSeconds: 900 },
 };
-
-/** The steps a resolution or an extra can take: shared word for word by the choices and actions formats. */
-const STEP_CATALOGUE = `Steps, in this order, each at most once except labels:
-- {"kind": "comment"}: post "text" on the item, at most ${COMMENT_MAX} characters. Write one or two short factual lines for the contributor: no offers, no maintainer tone, no mention of AI or of this conversation, no @mentions, no URLs unless needed.
-- {"kind": "label", "label": "<name>"}: add one of the labels the pipeline manages: bugfix, performance, missing feature, small extra, plugin candidate, infra, security, needs decision.
-- {"kind": "close", "reason": "completed" | "not_planned"} or {"kind": "duplicate", "of": <number of another item in the same repository>}: an ending step, at most one of close, duplicate and transfer (see Order). A close closes the item on GitHub (a pull request is closed without a reason). Use "completed" when the work is already on the default branch (cite the pull request or commit in the comment); use "not_planned" when the project clearly does not want it. A duplicate comments "Duplicate of #<number>." and closes the item.
-- {"kind": "unlabel", "label": "<name>"}: remove one of the managed labels the item has. Repeatable like label.
-- {"kind": "reopen"}: first step only, on a closed item (not a merged PR).
-- {"kind": "open_issue", "repo": "<tracked repository name, without the owner>", "title": "<at most ${ISSUE_TITLE_MAX} characters>", "body": "<at most ${COMMENT_MAX} characters>"}: open a new issue in this repository or another tracked one. Write it like a comment: short, factual, no @mentions, no URLs unless needed. Use it for "Merge #n and, after the merge, open a follow-up issue for ..." (settle with the merge option; with the merge option or a fixup that merges, our code opens the issue only once the PR merged) or to file work that belongs elsewhere. Draft one only for a defect or missing piece you confirmed in the checkout, and put the file and line it rests on in the body. Do not draft one for an open question (ask it in the reply or the ask card), a measurement, a "consider" or "revisit" idea, a claim you could not confirm yourself, or behaviour the PR did not change and does not touch.
-- {"kind": "assign", "login": "<login>"}: assign the item's author or a person with write access to the repository.
-- {"kind": "request_reviewers", "logins": ["<login>", ...]}: pull requests only; one to three people with write access, never the PR's author.
-- {"kind": "review"}: pull requests only; a fresh review of the current head, after which the pipeline decides again. Use it when the operator wants a second look or the diff changed. Settles as handled.
-- {"kind": "fixup", "instructions": "<what to change, at most ${INSTRUCTIONS_MAX} characters>", "merge": true | false}: open pull requests only; the fix-up step pushes the described change to the PR branch. The instructions are for the fix-up model and are never posted. With "merge": true it is a pre-approved merge: after the push the PR is reviewed and checked again and merges only when both pass; otherwise a new question comes back. Use merge true only on a card for a merge or scope decision, for "Fix up ... then merge". Settles as handled; give no answer settle with it, except on a scope decision, where the settle is the answer "take" or "small-extra" (the PR stays in core, the answer is recorded before the fix-up runs).
-- {"kind": "transfer", "to": "<another tracked repository name, without the owner>"}: issues only; moves the issue to that repository, e.g. "Move to storytold/<repo>" (write only <repo>). It ends the item here (see Order). Settles as handled.
-Order: reopen first; then comment, labels, unlabels, assign, request_reviewers, open_issue, review or fixup; close, duplicate or transfer last, at most one of the three. A review or fixup step does not go with a close or duplicate step.
-Use only the steps listed under steps in the item block; a later <steps> line in a turn replaces that list.`;
-
-const MAX_ADDED_CORES = 3;
-const PREPARE_REASON_MAX = 200;
-
-/** The choices block of a reply about an item that has an open decision: the pick, drafts per core, added cores, a question to the author. Used by conversation.turn. */
-const CHOICES_FORMAT = `Choices. An open decision is answered with one core action plus extras. The decision in the item block lists its cores: each has a key, a label and the kinds of extras it takes (extras). The maintainer picks one core, ticks the extras that go with it, and presses one button. End your reply with exactly one fenced block named choices:
-{"pick": {"core": "<core key, or null>", "reason": "<one sentence, at most ${PREPARE_REASON_MAX} characters, saying why>"},
- "cores": [{"core": "<core key>", "reason": "<closing cores only>", "instructions": "<fix-up cores only>", "extras": [<extra>, ...]}, ...],
- "add": [{"end": <end>, "instructions": "<fix-up only>", "extras": [<extra>, ...]}, ...],
- "drop": ["<key of a core you added earlier>", ...],
- "ask": {"text": "<question to the author>"}}
-Extras (the kinds a core lists under extras; "on": true means you would tick it for that core):
-- {"kind": "comment", "on": true, "text": "<the comment>"}: posted on the item before the core runs; see the comment step below.
-- {"kind": "open_issue", "on": true, "repo": "<tracked repository name>", "title": "<title>", "body": "<body>"}: see the open_issue step below.
-- {"kind": "label", "on": true, "label": "<name>"}, {"kind": "unlabel", "on": true, "label": "<name>"}, {"kind": "assign", "on": true, "login": "<login>"}, {"kind": "request_reviewers", "on": true, "logins": ["<login>", ...]}: as the steps of the same name below.
-Rules.
-- pick is required in every block. core is the key of one core of the decision (one of the listed cores, or one you add) or null when the facts do not point one way. Say why in reason.
-- Draft params and extras for every core worth drafting, not only the pick: what you would do if the maintainer chose that core instead. Tick (on: true) the extras you would run; leave the ones you only offer unticked. A core you leave out gets no draft. A core's entry replaces its earlier draft whole, so repeat what you keep.
-- A closing core (its params has a reason) takes "reason": one plain sentence of at most ${REASON_MAX} characters saying why, for the author; it is posted in the closing comment, so such a core offers no comment extra. A fix-up core (its params has instructions) takes "instructions" for the fix-up model (at most ${INSTRUCTIONS_MAX} characters; never posted). Leave both out for other cores. A comment extra on a merge core is posted before the merge. On a scope question these cores also keep the PR in core: they record the answer small-extra when the ticked extras add the label "small extra" (or the PR has it), else take.
-- add: up to ${MAX_ADDED_CORES} cores that no listed core covers, each with an end: {"close": "completed" | "not_planned"}, {"duplicate": <number of another item of the repository>}, {"transfer": "<repository name>"}, {"fixup": true} (with "instructions"; a fix-up that does not merge) or {"review": true}. Only when applicable (the item block lists the steps that apply). Name an added core in pick by its key: x:close:<reason>, x:duplicate:<number>, x:transfer:<repository>, x:fixup, x:review. In a later turn, repeat an added core in cores to change its draft, or list its key in drop to remove it.
-- Use only extra kinds the core lists; our code drops the others, and drops a core whose card does not validate. Do not draft a comment, open_issue or transfer on a quiet pull request.
-- ask: a question for the author that keeps the decision open; posted as a comment on the item, at most one, only when the answer would change the decision. Write it like a comment.
-- Keep the text of drafts true to what you checked. Do not repeat an action that was already run unless the operator asks. Propose nothing the operator did not need.`;
 
 /** The actions block of a conversation reply: what each resolution holds. Our code turns its steps into buttons. */
 const ACTIONS_FORMAT = `Actions. When you propose something the maintainer can run, end your reply with at most one fenced block named actions that holds a JSON array of resolutions; leave it out when you propose nothing. Each resolution is

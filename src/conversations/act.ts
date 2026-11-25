@@ -21,9 +21,9 @@ import type { CardEdit } from "../../web/src/api/types.ts";
 import { repoLabels } from "../labels/github.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { cardRepos, dependsOnCode, followupsOf, isRegistry, itemLabels, otherTypeLabel, postsText, readParams, type CardParams, type FollowUp, type OtherAction, type RegistryCommand } from "./cards.ts";
+import { actionRefusal, cardRepos, dependsOnCode, isRegistry, itemLabels, otherTypeLabel, readParams, type CardParams, type FollowUp, type OtherAction, type RegistryCommand } from "./cards.ts";
 import { ConversationError, insertTurn, prChanged, seenHead, systemBlock, type StoreDeps } from "./store.ts";
-import { COMMENT_MAX, ISSUE_TITLE_MAX, NOTE_MAX } from "./types.ts";
+import { COMMENT_MAX, NOTE_MAX } from "./types.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { parse } from "../workflow/parse.ts";
 import { runCommand } from "../workflow/apply.ts";
@@ -79,34 +79,16 @@ const nowOf = (d?: StoreDeps): Date => d?.now?.() ?? new Date();
 /** What a press is bound to: the card's text and parameters as the presser's screen showed them. Any edit gives a new digest. */
 export const cardDigest = (c: Pick<CardRow, "text" | "params">): string => createHash("sha256").update(JSON.stringify([c.text, c.params])).digest("hex").slice(0, 16);
 
-/** Replaces the drafts of a card that has not run: the comment text, or the issue's title and body. A field left out stays. */
+/** Replaces the comment text of a card that has not run. */
 export async function editCard(db: Db, id: number, by: string, edit: CardEdit, deps?: StoreDeps): Promise<CardRow> {
   const c = await need(db, id);
-  if (edit.text === undefined && edit.issue === undefined && edit.instructions === undefined) throw new ConversationError(400, "nothing to edit");
-  const p = paramsOf(c);
-  let text: string | null = c.text;
-  if (edit.text !== undefined) {
-    if (p.kind !== "comment") throw new ConversationError(400, "only a comment card has text to edit");
-    const t = edit.text.trim();
-    if (!t) throw new ConversationError(400, "the comment is empty");
-    if (t.length > COMMENT_MAX) throw new ConversationError(400, `the comment is longer than ${COMMENT_MAX} characters`);
-    text = t;
-  }
-  if (edit.instructions !== undefined) throw new ConversationError(400, "a fix-up command has no instructions to edit");
-  let params = c.params;
-  if (edit.issue !== undefined) {
-    const title = String(edit.issue.title ?? "").replace(/\s+/g, " ").trim(), body = String(edit.issue.body ?? "").trim();
-    if (!title || !body) throw new ConversationError(400, "the issue needs a title and a body");
-    if (title.length > ISSUE_TITLE_MAX) throw new ConversationError(400, `the issue title is longer than ${ISSUE_TITLE_MAX} characters`);
-    if (body.length > COMMENT_MAX) throw new ConversationError(400, `the issue body is longer than ${COMMENT_MAX} characters`);
-    const [first, ...rest] = followupsOf(p);
-    if (p.kind === "command" && isRegistry(p.command) && first) params = JSON.stringify({ ...p, command: { ...p.command, followups: [{ ...first, title, body }, ...rest] } });
-    else if (p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue") params = JSON.stringify({ ...p, command: { ...p.command, title, body } });
-    else throw new ConversationError(400, "the card opens no issue");
-  }
+  if (paramsOf(c).kind !== "comment") throw new ConversationError(400, "only a comment card has text to edit");
+  const text = edit.text.trim();
+  if (!text) throw new ConversationError(400, "the comment is empty");
+  if (text.length > COMMENT_MAX) throw new ConversationError(400, `the comment is longer than ${COMMENT_MAX} characters`);
   const at = nowOf(deps).toISOString();
   await db.write(async () => {
-    if (!await markCard(db, id, ["proposed"], { text, params, edited_by: by, edited_at: at })) throw new ConversationError(409, `the card is already ${c.state}`);
+    if (!await markCard(db, id, ["proposed"], { text, edited_by: by, edited_at: at })) throw new ConversationError(409, `the card is already ${c.state}`);
     await addAudit(db, [{ login: by, action: "conversation-card-edit", target: ref(c.repo, c.number), details: { card: id } }]);
   });
   return await need(db, id);
@@ -311,11 +293,11 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   const item = items.get(key);
   const cmd = params.kind === "command" ? params.command : null;
   if (dependsOnCode(params) && item && prChanged(item, c.seen)) throw new ConversationError(409, "the PR changed since this was proposed");
-  if (cmd && isRegistry(cmd) && cmd.parts && (live.at(-1)?.recAt ?? null) !== cmd.parts.recAt) throw new ConversationError(409, "the plan changed since this was proposed");
+  // The plan may have moved, or the PR become quiet (a security fix not yet published), after the card was drafted.
+  const refused = actionRefusal(params, { quiet: quiet.size > 0, recAt: live.at(-1)?.recAt ?? null });
+  if (refused) throw new ConversationError(409, refused);
   const note = deps.note?.trim() || undefined;
   if (note && note.length > NOTE_MAX) throw new ConversationError(400, `the note is longer than ${NOTE_MAX} characters`);
-  // A card drafted before the PR became quiet (a security fix not yet published) must not post model-written text any more.
-  if (quiet.size > 0 && postsText(params)) throw new ConversationError(409, "this card posts text, and the pull request is quiet until its fix is published");
   const now = nowOf(deps), at = now.toISOString();
   const needW = cardWriteCount(params);
   if (draining && needW > 0) await presserStill(db, by, cardRepos(c.repo, params), deps);

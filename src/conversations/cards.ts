@@ -13,6 +13,7 @@ import type { NewCard as StoredCard } from "../data/conversations/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import { closeText, describe as describeParts, parse } from "../workflow/parse.ts";
 import { resolve } from "../workflow/resolve.ts";
+import { t } from "../i18n/index.ts";
 import type { CloseReason, ItemWorkflow } from "../workflow/types.ts";
 import { COMMENT_MAX, ISSUE_TITLE_MAX } from "./types.ts";
 import type { Db } from "../db/index.ts";
@@ -166,6 +167,17 @@ export const describe = (repo: string, n: number, p: CardParams): string => `On 
 /** Whether the card rests on the code as it was: a drafted public text, a merge, or parts of the plan. Refused after a push until Opus writes it again. */
 export const dependsOnCode = (p: CardParams): boolean => p.kind === "comment" || holdsIssues(p)
   || (p.kind === "command" && (isRegistry(p.command) ? !!p.command.merges || !!p.command.parts : p.command.word === "open_issue"));
+
+/** What a press runs, as a person types it; undefined for an action without a registered command. */
+export const commandText = (p: CardParams): string | undefined => (p.kind === "command" && isRegistry(p.command) ? p.command.text : undefined);
+
+/** Why a press runs nothing as the item stands, or null. `recAt`: when the item's current recommendation was written. */
+export function actionRefusal(p: CardParams, f: { quiet: boolean; recAt: string | null }): string | null {
+  const parts = p.kind === "command" && isRegistry(p.command) ? p.command.parts : undefined;
+  if (parts && f.recAt !== parts.recAt) return t("The plan changed since this was proposed.");
+  if (f.quiet && postsText(p)) return t("This card posts text, and the pull request is quiet until its fix is published.");
+  return null;
+}
 
 /** Whether the card puts model-written text on GitHub: refused on a quiet pull request until its fix is published. */
 export const postsText = (p: CardParams): boolean =>

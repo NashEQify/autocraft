@@ -201,7 +201,7 @@ describe("Do it", () => {
     await db.run(db.k.insertInto("item_workflows").values({ repo: "app", number: 2, kind: "pr", entry: "review", weight: 5, state: "recommending", started_by: "mira", started_at: T0, started_via: "github", plan, rec, rec_at: T0, rec_head: "sha2", updated_at: T0 } as never));
     const id = await propose(db, 2, [{ kind: "command", text: "drop 2" }]);
     await db.run(db.k.updateTable("item_workflows").set({ rec_at: "2026-01-02T00:00:00Z" }));
-    await assert.rejects(() => doCard(db, id, "mira", { canWrite: async () => true }), /the plan changed/);
+    await assert.rejects(() => doCard(db, id, "mira", { canWrite: async () => true }), /plan changed/);
     assert.equal(await stateOf(db, id), "proposed");
   });
 

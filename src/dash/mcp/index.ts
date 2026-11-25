@@ -35,7 +35,6 @@ import { loadUserRuns } from "../../data/inference/index.ts";
 import { loadHeldFixups } from "../../data/views/held-fixups.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-const BODY_MAX = 20_000;
 const LIST_MAX = 25;
 
 export type McpEnv = {
@@ -261,7 +260,6 @@ export const SETTINGS_TOOLS = [
 ] as const;
 
 const link =(env: McpEnv, path: string): string => `${env.baseUrl ?? ""}${path}`;
-const cut = (s: string | null | undefined, n: number): string | null => (s == null ? null : s.length > n ? `${s.slice(0, n)}\n[cut: ${s.length - n} more characters]` : s);
 const show = (header: string, label: string, data: unknown): ToolResult => ({ text: `${header}\n\n${frame(label, JSON.stringify(data, null, 1))}` });
 
 async function listRepos(env: McpEnv): Promise<ToolResult> {
