@@ -9,6 +9,7 @@ import type { AssignFacts } from "../src/core/plan.ts";
 import { claimForWork } from "../src/github/claim.ts";
 import { setFeature } from "../src/build/features.ts";
 import { runUnassign } from "../src/unassign/index.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import { world } from "./world-db.ts";
 import { itemFacts, prFacts } from "./world.ts";
 
@@ -66,16 +67,16 @@ test("an issue is unassigned when its implementation waits on a person, kept whi
   assert.equal(unassigns(decideItem(itemFacts({ assignment: ours, implement: queued("stuck") }))), true);
   assert.equal(unassigns(decideItem(itemFacts({ assignment: ours, implement: queued("implementing") }))), false);
   assert.equal(unassigns(decideItem(itemFacts({ assignment: { login: "bot", assignees: ["bot", "alice"], ours: true }, implement: queued("stuck") }))), false);
-  // An issue queued by an operator is planned for Implement once the repo's switch is on; it is not assigned: only a stage starting work does that.
+  // An issue whose implement workflow an operator started is planned for Implement once the repo's switch is on; it is not assigned: only a stage starting work does that.
   const w = await (await (await world()).repo()).issue(5, { impact: "P2" });
-  await w.db.run(w.db.k.insertInto("fast_track").values({ repo: "app", number: 5, added_by: "op", added_at: "2026-11-04T08:00:00.000Z" }));
+  await insertWorkflow(w.db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-11-04T08:00:00.000Z", startedVia: "dashboard" });
   const plan = async () => (await w.plan()).items.find((i) => i.facts.number === 5)!.plan;
   const implement = async () => (await plan()).actions.filter((a) => a.kind === "implement" || a.kind === "unassign").map((a) => [a.kind, a.params?.bucket]);
   assert.deepEqual(await implement(), [], "Implement off: nothing is planned");
   await setFeature(w.db, "implement", true, "op", "app");
   assert.deepEqual(await implement(), [["implement", "plan"]]);
-  // Queued by someone who does not settle on the repo: not queued for Implement.
-  await w.db.run(w.db.k.updateTable("fast_track").set({ added_by: "viewer" }).where("number", "=", 5));
+  // Started by someone who may not act on the repo: nothing is planned for Implement.
+  await w.db.run(w.db.k.updateTable("item_workflows").set({ started_by: "viewer" }).where("number", "=", 5));
   assert.deepEqual(await implement(), []);
 });
 
@@ -100,6 +101,8 @@ test("the unassign step releases what the planner says and only our own assignme
   await mark(2, ["pipeline-bot", "alice"]);
   w.gh.live(1, { assignees: ["pipeline-bot"] });
   w.gh.live(2, { assignees: ["pipeline-bot", "alice"] });
+  // Started with review and done: both wait for a person's answer to the recommendation.
+  for (const n of [1, 2]) await insertWorkflow(w.db, { repo: "app", number: n, kind: "pr", entry: "review", state: "recommending", startedBy: "op", startedAt: "2026-11-04T00:00:00Z", startedVia: "dashboard" });
   const r = await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: asPipelineBot });
   assert.deepEqual(r.due, 1);
   assert.deepEqual(r.unassigned, ["app#1"]);

@@ -9,6 +9,8 @@ import { addLogin } from "../src/access.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
+import { live } from "../src/dash/api/live.ts";
+import type { Req } from "../src/dash/types.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { insertRun } from "../src/agents/runs.ts";
@@ -326,9 +328,10 @@ describe("security deep scan", () => {
     const steps = (c: Client) => c.get<{ jobs: { step: string; params: { repo?: string } }[] }>("/api/pipeline/jobs").then((r) => r.jobs.filter((j) => j.step === "security-scan" && j.params.repo === "secret").length);
     assert.equal(await steps(boss), 1);
     assert.equal(await steps(maint), 0);
-    const nowJobs = (c: Client) => c.get<{ entries: { kind: string; title: string }[] }>("/api/now").then((r) => r.entries.filter((e) => e.kind === "job" && e.title === "Security deep scan").length);
-    assert.equal(await nowJobs(boss), 1);
-    assert.equal(await nowJobs(maint), 0);
+    const lanes = async (role: "operator" | "maintainer", sees: boolean) => (await live(db, { query: new URLSearchParams(), user: { role, login: role, canRead: async (r: string) => sees || r !== "secret" } } as unknown as Req))
+      .lanes.filter((l) => l.title === "Security deep scan" && l.repo === securityRepo("secret")).length;
+    assert.equal(await lanes("operator", true), 1);
+    assert.equal(await lanes("maintainer", false), 0);
     await maint.get("/api/repos/secret/security", 404);
     const audit = await maint.get<{ entries: { action: string; target: string }[] }>("/api/audit");
     assert.ok(!audit.entries.some((e) => e.target?.startsWith("secret:")));
