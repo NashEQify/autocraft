@@ -27,6 +27,8 @@ export type TakerRow = { id: number; login: string; role: string; slots: string 
 
 export type HealthFacts = {
   heartbeat: string | null;
+  /** The runner's passes fail since then (src/runner/runner.ts TickFailure). */
+  tickFailure: { since: string; state: "warn" | "fail"; error: string } | null;
   leaders: LeaderFacts[];
   endpoint: EndpointStatus | null;
   envs: HealthEnv[];
@@ -67,6 +69,10 @@ export async function loadTakerRows(db: Db, nowMs: number): Promise<TakerRow[]> 
     .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("a.role", "=", "operator"))) as unknown as TakerRow[];
 }
 
+function failureOf(value: string | undefined): HealthFacts["tickFailure"] {
+  try { return value ? JSON.parse(value) as HealthFacts["tickFailure"] : null; } catch { return null; }
+}
+
 export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): Promise<HealthFacts> {
   const q = queryDb(db);
   const cutoff = new Date(nowMs - o.taskQueuedMs).toISOString();
@@ -103,7 +109,7 @@ export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): 
   const unbound = syncState.author_ids_error ? new Set((await mirror.loadUnboundLoginPrs(db)).map((r) => r.login)).size : 0;
   const ackAt = ack?.at ?? null;
   return {
-    heartbeat: lanes.get("mark|heartbeat|")?.value ?? null,
+    heartbeat: lanes.get("mark|heartbeat|")?.value ?? null, tickFailure: failureOf(lanes.get("mark|tick_failure|")?.value),
     leaders, endpoint, envs: envs as HealthEnv[],
     queued: { all: queuedAll, withoutPrivate: queuedPublic }, confidentialReadyAt, privateQueued, envWaits,
     syncRuns, syncState, tracked, repoErrors, deadlines, stepRuns, liveness,

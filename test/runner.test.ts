@@ -2,7 +2,7 @@
 // success, failure and usage, honours cancels, recovers jobs an earlier runner
 // left running, runs one job per step and repo at a time.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -15,6 +15,7 @@ process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", i
 
 const { connect } = await import("../src/db.ts");
 const { enqueue, getJob, jobDetail, requestCancel } = await import("../src/runner/jobs.ts");
+const { computeChecks } = await import("../src/health-checks.ts");
 const { DEFAULT_MAX_JOBS, Runner } = await import("../src/runner/runner.ts");
 const { STEPS } = await import("../src/runner/steps.ts");
 const { FAKE_TOKEN } = await import("./runner-steps.ts");
@@ -186,6 +187,59 @@ describe("runner", () => {
     const written = await states();
     assert.ok(written.length >= 1 && written.every((s) => s === "done"), `the write in flight finished and was recorded: ${written.join(", ")}`);
     await requestCancel(db, job.id, "boss");
+  });
+
+  test("a job stopped by its runner keeps the items and counts it held in memory", async () => {
+    const stopper = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 5000, log: () => {} });
+    const job = await enqueue(db, "test-notes", {}, "boss");
+    const noted = async () => { try { return readFileSync(join(dir, "logs", `job-${job.id}.log`), "utf8").includes("handled before the stop"); } catch { return false; } };
+    for (let i = 0; i < 1000 && !await noted(); i++) {
+      await stopper.tick();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(await noted(), "the step noted its item");
+    await stopper.stop();
+    const row = (await db.get(db.k.selectFrom("jobs").select(["state", "items", "acted"]).where("id", "=", job.id)))!;
+    assert.deepEqual({ ...row }, { state: "queued", items: 3, acted: 2 });
+    assert.deepEqual((await db.all(db.k.selectFrom("job_items").select(["repo", "number", "outcome"]).where("job_id", "=", job.id))).map((r) => ({ ...r })), [{ repo: "app", number: 3, outcome: "handled before the stop" }]);
+    await requestCancel(db, job.id, "boss");
+  });
+
+  test("a read of the tick that keeps failing stops neither cancels nor the recording of ends, and the health check shows it", async (t) => {
+    const lines: string[] = [];
+    const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });
+    const job = await enqueue(db, "test-sleep", { ms: 600_000 }, "boss");
+    const tickUntil = async (cond: () => Promise<boolean>) => {
+      for (let i = 0; i < 600 && !await cond(); i++) {
+        await r.tick();
+        await new Promise((ok) => setTimeout(ok, 30));
+      }
+      assert.ok(await cond());
+    };
+    await tickUntil(async () => await state(job.id) === "running");
+    const check = async () => (await computeChecks(db, Date.now() + 90_000)).find((c) => c.id === "runner")!;
+    await r.tick();
+    assert.equal((await check()).state, "ok");
+    // A job whose end could not be recorded when its process exited.
+    const left = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-other", params: "{}", requested_by: "boss", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString() }).returning("id")))!.id);
+    (r as unknown as { unrecorded: Map<number, object> }).unrecorded.set(left, { code: 0, signal: null, spawnError: null });
+    const broken = t.mock.method(db, "seqs", async () => { throw new Error("no such column"); });
+    try {
+      await requestCancel(db, job.id, "boss");
+      await tickUntil(async () => await state(job.id) === "cancelled" && await state(left) === "done");
+      await r.tick();
+      assert.ok(lines.some((l) => l.includes("no such column")), lines.join("\n"));
+      const bad = await check();
+      assert.equal(bad.state, "fail");
+      assert.match(bad.text, /no such column/);
+      assert.doesNotMatch(bad.brief, /no such column/, "viewers do not read the error");
+    } finally {
+      broken.mock.restore();
+    }
+    await r.tick();
+    await r.tick();
+    assert.equal((await check()).state, "ok");
+    await r.stop();
   });
 
   test("a resumed job does not post again a comment its earlier run posted", async () => {

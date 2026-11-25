@@ -48,6 +48,25 @@ export const steps: StepDef[] = [
     },
   },
   {
+    name: "test-notes",
+    title: "Notes",
+    description: "Test step: records an item, counts and progress side by side, then sleeps.",
+    stage: 2,
+    requires: "operator",
+    params: [],
+    run: async (ctx) => {
+      const { jobItem } = await import("../src/runner/job-items.ts");
+      await ctx.handled(1);
+      await sleep(300);
+      // The first count was written at once; these wait in memory.
+      await ctx.handled(3);
+      await ctx.acted(2);
+      await jobItem(ctx.db, "app", 3, "handled before the stop", ctx.log);
+      await sleep(600_000);
+      return "slept";
+    },
+  },
+  {
     name: "test-slices",
     title: "Slices",
     description: "Test step: works through a backlog in 50 ms units until its time slice is used.",

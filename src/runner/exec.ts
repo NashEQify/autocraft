@@ -53,34 +53,41 @@ export async function execJob(id: number): Promise<number> {
     const all = u && before ? { calls: before.calls + u.calls, input: before.input + u.input, output: before.output + u.output, costUsd: before.costUsd === null && u.costUsd === null ? null : (before.costUsd ?? 0) + (u.costUsd ?? 0) } : u;
     return all ? JSON.stringify(all) : undefined;
   };
-  const saveUsage = async () => await recordResult(db, id, { usage: await usageJson() });
   const fail = async (msg: string): Promise<Ended> => {
     console.error(`failed: ${msg}`);
     return { code: 1, result: { usage: await usageJson(), error: oneLine(msg) } };
   };
   // The runner signals this process alone: GitHub writes in flight finish and are recorded, and a write asked for now is
-  // not made (its caller waits, and a resumed run makes it); then the rest of the job's process group (model calls,
-  // builds) is stopped. The process exits 143, or with the step's own code when the step returned during the stop.
-  const ran: { code: number | null; stop: Promise<void> | null } = { code: null, stop: null };
+  // not made (its caller waits, and a resumed run makes it); then what the job handled, counted and used so far is stored and
+  // the rest of its process group (model calls, builds) is stopped. The process exits 143, or with the step's own code when
+  // the step returned during the stop.
+  const ran: { code: number | null; ending: Promise<void> | null; stop: Promise<void> | null } = { code: null, ending: null, stop: null };
   let stepEnded = (): void => {};
   const ended = new Promise<void>((r) => { stepEnded = r; });
   process.once("SIGTERM", () => {
     ran.stop = (async () => {
       const left = await stopWrites("the job is stopping", WRITE_SETTLE_MS, ended);
       if (left) console.log(`${left} GitHub writes still running at the stop; their outcome is unknown`);
-      if (ran.code === null) {
-        await saveUsage();
-        console.log("stopped");
-      }
+      try {
+        if (ran.ending) await ran.ending;
+        else {
+          const patch = await pulse.end();
+          await recordResult(db, id, { patch, usage: await usageJson() });
+          console.log("stopped");
+        }
+      } catch (e) { console.error(`the stopped job's counts are not stored: ${(e as Error).message}`); }
       process.on("SIGTERM", () => {});
       try { process.kill(-process.pid, "SIGTERM"); } catch { /* not a group leader (a command-line run) */ }
       process.exit(ran.code ?? 143);
     })();
   });
   const { value: { code, result }, stats } = await db.meter(() => runJob(db, id, row, { runs, usageJson, fail, pulse, tracked, settings }));
-  const patch = await pulse.end();
   // The outcome, the last progress and counts, and what the job cost the database, in one write.
-  await recordResult(db, id, { ...result, patch, stats: { statements: loaded.statements + stats.statements, roundTrips: loaded.roundTrips + stats.roundTrips, ms: loaded.ms + stats.ms, effects: stats.effects } });
+  ran.ending = (async () => {
+    const patch = await pulse.end();
+    await recordResult(db, id, { ...result, patch, stats: { statements: loaded.statements + stats.statements, roundTrips: loaded.roundTrips + stats.roundTrips, ms: loaded.ms + stats.ms, effects: stats.effects } });
+  })();
+  await ran.ending;
   ran.code = code;
   stepEnded();
   // Stopping: the handler exits once the writes in flight are recorded.
