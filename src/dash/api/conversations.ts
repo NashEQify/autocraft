@@ -5,8 +5,7 @@ import { buttonLabel, cardEffect, cardLines, decisionStamp, dependsOnCode, headl
 import { applyDrafts, choicesById, compose, coresFor, currentChoices, seenJson, type ComposeExtra, type Core } from "../../decide/choices.ts";
 import { parseCoreKey, type ChoicesRow, type CoreKey } from "../../decide/choices-types.ts";
 import { getDecision } from "../../decisions.ts";
-import { disputeCard, keepCard, queuePlace, queueReason } from "../../conversations/queue.ts";
-import { audit } from "../audit.ts";
+import { queuePlace, queueReason } from "../../conversations/queue.ts";
 import * as kx from "../../db/kx.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
 import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
@@ -63,8 +62,8 @@ async function guardAsync<T>(f: () => Promise<T>): Promise<T> {
 }
 
 async function queuedView(db: Db, c: CardRow, staff: boolean): Promise<NonNullable<ConversationCard["queued"]>> {
-  const place = c.dispute_by ? null : await queuePlace(db, c.id);
-  return { place, reason: queueReason(place), dispute: c.dispute_by ? { by: c.dispute_by, reason: staff ? (c.dispute_reason ?? "") : "", at: c.dispute_at ?? "" } : null };
+  const place = await queuePlace(db, c.id);
+  return { place, reason: queueReason(place), dispute: null };
 }
 
 /** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer under the rule of src/settlers.ts, from cached permissions). */
@@ -275,38 +274,20 @@ export async function editCardText(db: Db, req: Req): Promise<ConversationCard> 
   return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, edit)), req.user);
 }
 
-/** A queued press is the presser's: only they and operators dismiss, keep or take it back; anyone who settles may dispute it. */
+/** A queued press is the presser's: only they and operators dismiss it. */
 function ownsPress(req: Req, c: CardRow): boolean {
   return isOperator(req) || c.acted_by?.toLowerCase() === req.user.login.toLowerCase();
 }
 
 export async function dismiss(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
-  if (c.state === "queued" && !ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, dismisses a queued press; dispute it instead");
+  if (c.state === "queued" && !ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, dismisses a queued press");
   return await cardView(db, await guard(async () => await dismissCard(db, c.id, req.user.login, { role: req.user.role })), req.user);
 }
 
-/** Someone else who settles disputes a queued press: it stays queued, the drain skips it, and the presser or an operator keeps or dismisses it. A reason is required. */
-export async function disputePress(db: Db, req: Req): Promise<ConversationCard> {
-  const c = await needCard(db, req);
-  const reason = typeof (req.json as { reason?: unknown } | null)?.reason === "string" ? ((req.json as { reason: string }).reason).trim() : "";
-  if (!reason) throw new HttpError(400, "a dispute needs a reason");
-  if (reason.length > NOTE_MAX) throw new HttpError(400, `the reason is longer than ${NOTE_MAX} characters`);
-  if (c.state !== "queued") throw new HttpError(409, "only a queued press can be disputed");
-  if (c.acted_by?.toLowerCase() === req.user.login.toLowerCase()) throw new HttpError(409, "you pressed this: dismiss it instead");
-  if (!await disputeCard(db, c.id, req.user.login, reason, new Date().toISOString())) throw new HttpError(409, c.dispute_by ? `already disputed by ${c.dispute_by}` : "the press ran a moment ago");
-  await audit(db, req.user.login, "dispute", `card:${c.id}`, { reason, queuedBy: c.acted_by ?? undefined });
-  return await cardView(db, (await cardOf(db, c.id))!, req.user);
-}
-
-/** The presser, or an operator, keeps a disputed queued press: the drain takes it up again. */
-export async function keepPress(db: Db, req: Req): Promise<ConversationCard> {
-  const c = await needCard(db, req);
-  if (!ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, keeps a disputed press");
-  if (!await keepCard(db, c.id)) throw new HttpError(409, "that press is not disputed");
-  await audit(db, req.user.login, "dispute-resolve", `card:${c.id}`, { resolution: "keep", disputedBy: c.dispute_by ?? undefined });
-  return await cardView(db, (await cardOf(db, c.id))!, req.user);
-}
+/** Disputes of queued presses are retired; the routes stay until the web code drops them. */
+export const disputePress = async (_db: Db, _req: Req): Promise<ConversationCard> => { throw new HttpError(410, "queued presses are no longer disputed: dismiss the press instead"); };
+export const keepPress = disputePress;
 
 /**
  * Runs the card once; a second press returns the card as it is. The press carries the digest of the card it was made on,

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setFeature } from "../src/build/features.ts";
 import { LANES } from "../src/runner/autopilot.ts";
-import { nightlyDue, nightlyRepos, runNightly, setSelection, recentRuns, benchSeries, parseBench, pruneBench, type NightlyDeps } from "../src/nightly/index.ts";
+import { nightlyDue, nightlyRepos, openNightlyIssue, runNightly, setSelection, recentRuns, benchSeries, parseBench, pruneBench, type NightlyDeps } from "../src/nightly/index.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 import { like } from "../src/db/kx.ts";
@@ -86,7 +86,7 @@ test("a check with no registered toolchain is skipped; miri without crates is sk
   assert.equal(await count(db, "build_tasks"), 1);
 });
 
-test("a failure two nights running asks one decision; open-issue opens one issue and no second one until green", async () => {
+test("Open issue opens one issue for a failing check and no second one until a green night", async () => {
   const { db, f } = await setup();
   await setFeature(db, "nightly", true, "op", "a");
   await setSelection(db, "a", "audit", true);
@@ -95,36 +95,25 @@ test("a failure two nights running asks one decision; open-issue opens one issue
     const id = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.max<number>("id").as("id"))))!.id;
     if (advisories) f.artifacts.set(`${id}:audit.json`, advisories);
     await finishTasks(db, f, fail ? ["audit"] : []);
-    const s = await runNightly(db, { repo: "a" }, quiet, f.deps); // collect
+    await runNightly(db, { repo: "a" }, quiet, f.deps); // collect
     f.t += DAY + 60_000;
-    return s;
   };
-  const decisions = async () => await db.all(db.k.selectFrom("decisions").select(["id", "answer"]).where((eb) => like(db, "id", eb.val("a:nightly:%"))));
-  assert.equal((await night(true, '{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-2024-0001","description":"secret details"}}]}}')).asked, 0);
-  assert.equal(await resultState(db, "audit"), "fail");
-  assert.equal((await decisions()).length, 0, "one night is not a streak");
-  assert.equal((await night(true)).asked, 1);
-  assert.equal((await decisions()).length, 1);
-  assert.equal(await count(db, "nightly_runs"), 2);
-  assert.equal((await night(true)).asked, 0, "the same streak asks nothing more");
-  assert.equal((await decisions()).length, 1);
-
-  await db.run(db.k.updateTable("decisions").set({ answer: "open-issue", answered_by: "op", answered_at: new Date(f.t).toISOString() }).where((eb) => like(db, "id", eb.val("a:nightly:%"))));
-  assert.equal(await nightlyDue(db, "a", f.t - DAY / 2), true, "an answered decision is work");
-  const r = await runNightly(db, { repo: "a" }, quiet, f.deps);
-  assert.equal(r.issues, 1);
+  const by = { operator: "op" };
+  await night(true, '{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-2024-0001","description":"secret details"}}]}}');
+  await night(true);
+  assert.equal(f.issues.length, 0, "nothing opens an issue unasked");
+  await openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps);
   assert.equal(f.issues.length, 1);
   assert.match(f.issues[0]!.body, /two nights in a row/);
   assert.doesNotMatch(f.issues[0]!.body, /secret details/);
+  await assert.rejects(openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps), /already open/);
   await night(true);
-  assert.equal(f.issues.length, 1, "no repeat while red");
-  assert.equal((await db.get(db.k.selectFrom("nightly_results").select("issue_number as n")
-    .where("run_id", "=", (eb) => eb.selectFrom("nightly_results").select((e) => e.fn.max<number>("run_id").as("m")))))!.n, 101);
-
+  await assert.rejects(openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps), /already open/, "no repeat while red");
   await night(false);
-  assert.equal(await resultState(db, "audit"), "pass");
+  await assert.rejects(openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps), /not failing/);
   await night(true); await night(true);
-  assert.equal((await decisions()).length, 2, "a new streak after a green night asks again");
+  await openNightlyIssue(db, { repo: "a", checkId: "audit", by }, f.deps);
+  assert.equal(f.issues.length, 2, "a new streak after a green night can open another");
 });
 
 test("an audit failure lists advisory ids only; experimental checks ask nothing", async () => {

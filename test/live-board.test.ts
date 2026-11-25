@@ -50,7 +50,7 @@ test("viewers see no account label and no progress line that names a repo hidden
   const job = (await db.get(db.k.insertInto("jobs").values({ step: "review", params: "{}", requested_by: "pipeline", requested_at: ago(5), state: "running", started_at: ago(5), progress: "Reviewing app#7" }).returning("id")))!.id;
   await db.run(db.k.insertInto("job_items").values({ job_id: job, repo: "app", number: 7, at: ago(5) }));
   const run = async (jobId: number | null, progress: string) => {
-    const id = await insertRun(db, { jobId, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: "acc", items: [{ repo: "app", number: 7 }], prompt: "p" });
+    const id = await insertRun(db, { jobId, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "app", number: 7 }], prompt: "p" });
     await db.run(db.k.updateTable("agent_runs").set({ state: "running", started_at: ago(4), progress }).where("id", "=", id));
   };
   await run(job, "Reading app/src/main.rs");
@@ -91,7 +91,7 @@ test("the worker view: staff see shared runners with owner, slots and models, pr
   assert.ok(await db.get(db.k.selectFrom("audit").select("at").where("action", "=", "runner-private").where("login", "=", "bob")), "the switch is audited");
 
   const call = async (o: { account?: string; runner?: { token: number; login: string }; repo?: string; started: number; ended?: number }) => {
-    const id = await insertRun(db, { jobId: null, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: o.account ?? null, items: [{ repo: o.repo ?? "app", number: 7 }], prompt: "p" });
+    const id = await insertRun(db, { jobId: null, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: o.repo ?? "app", number: 7 }], prompt: "p" });
     const ended = o.ended === undefined ? null : ago(o.ended);
     await db.run(db.k.updateTable("agent_runs").set({ state: ended ? "done" : "running", started_at: ago(o.started), ended_at: ended, input_tokens: 100, user_login: o.runner?.login ?? null }).where("id", "=", id));
     if (o.runner) await db.run(db.k.insertInto("remote_calls").values({

@@ -11,7 +11,9 @@ import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
-import { excluded, inList, refPairs } from "../db/kx.ts";
+import { loadTrackedRepos } from "../data/control/index.ts";
+import { keepEarlierUsage, loadUnsure, pruneUnsure, saveUnsure } from "../data/inference/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
 import { createHash } from "node:crypto";
 
 /** What a parser knows about the reply it reads. */
@@ -166,12 +168,14 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     const items = u.items ? u.items(ok, total, rest === undefined ? 0 : sizeOf(step, rest)) : total - (rest === undefined ? 0 : sizeOf(step, rest));
     const model = u.model ?? reg.models[0]!;
     const saved = step.provider === "jev" ? { ...usage, cost: usage.input * JEV_USD_PER_INPUT_TOKEN } : usage;
-    if (u.keepEarlier) await db.run(db.k.updateTable("main.token_usage")
-      .set((eb) => ({ agent: eb(eb("agent", "||", eb.val("@")), "||", eb.fn.coalesce("started_at", eb.val(""))) }))
-      .where("run_id", "=", u.run).where("agent", "=", u.agent));
     const row = { runId: u.run, agent: u.agent, stage: u.stage, model, items, u: saved, start, end: new Date().toISOString() };
-    if (u.sink) u.sink.push(row);
-    else await saveUsages(db, [row]);
+    if (u.sink) {
+      if (u.keepEarlier) await keepEarlierUsage(db, u.run, [u.agent]);
+      u.sink.push(row);
+    } else if (u.keepEarlier) {
+      // The rename and the new row commit together: a crash between them would leave the old row renamed and no new one.
+      await db.write(async () => { await keepEarlierUsage(db, u.run, [u.agent]); await saveUsages(db, [row]); });
+    } else await saveUsages(db, [row]);
   }
   if (untaken) throw untaken;
   const runId = opts.usage?.run;
@@ -302,8 +306,8 @@ async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
   };
   const rows = new Map<string, { hash: string; answer: JV }>();
   if (!items.length) return { rows, hashOf };
-  for (const r of await db.all(db.k.selectFrom("jev_unsure").select(["ref", "input_hash", "answer"]).where("prompt_id", "=", tier.jev.id).where(inList(db, "ref", items.map(tier.ref))))) {
-    try { rows.set(r.ref, { hash: r.input_hash, answer: JSON.parse(r.answer) as JV }); } catch { /* asked again */ }
+  for (const [ref, r] of await loadUnsure(db, tier.jev.id, items.map(tier.ref))) {
+    try { rows.set(ref, { hash: r.hash, answer: JSON.parse(r.answer) as JV }); } catch { /* asked again */ }
   }
   return { rows, hashOf };
 }
@@ -318,27 +322,17 @@ async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
     const ref = tier.ref(x), jv = out.jev.get(ref) ?? null;
     if (!out.skipped.has(ref) || jv === null) return [];
     const hash = kept.hashOf(x);
-    return kept.rows.get(ref)?.hash === hash ? [] : [{ prompt_id: tier.jev.id, ref, input_hash: hash, answer: JSON.stringify(jv), at }];
+    return kept.rows.get(ref)?.hash === hash ? [] : [{ ref, hash, answer: JSON.stringify(jv), at }];
   });
   const drop = [...kept.rows.keys()].filter((ref) => !out.skipped.has(ref));
-  if (keep.length) await db.run(db.k.insertInto("jev_unsure").values(keep).onConflict((oc) => oc.columns(["prompt_id", "ref"]).doUpdateSet(excluded(["input_hash", "answer", "at"]))));
-  if (drop.length) await db.run(db.k.deleteFrom("jev_unsure").where("prompt_id", "=", tier.jev.id).where(inList(db, "ref", drop)));
+  await saveUnsure(db, { promptId: tier.jev.id, keep, drop });
 }
 
-/** How long a kept unsure Jev answer is reused before it is dropped and Jev is asked again. */
-const JEV_UNSURE_KEEP_MS = 30 * 24 * 3600_000;
-
-/** Drops kept unsure Jev answers older than JEV_UNSURE_KEEP_MS and those of items that are closed, gone or in untracked repos. */
+/** Drops kept unsure Jev answers older than the keep time and those of items that are closed, gone or in untracked repos. */
 export async function pruneJevUnsure(db: Db, nowMs: number = Date.now()): Promise<number> {
-  const rows = await db.all(db.k.selectFrom("main.jev_unsure").select(["prompt_id", "ref", "at"]));
-  if (!rows.length) return 0;
-  const open = new Set((await db.all(db.k.selectFrom(refPairs(db, new Set(rows.map((r) => r.ref)), "rp"))
-    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "rp.repo").onRef("i.number", "=", "rp.number"))
-    .innerJoin("main.tracked_repos as t", "t.name", "i.repo").select(["i.repo", "i.number"]).where("i.state", "=", "OPEN"))).map((r) => `${r.repo}#${r.number}`));
-  const cutoff = new Date(nowMs - JEV_UNSURE_KEEP_MS).toISOString();
-  const drop = new Map<string, string[]>();
-  for (const r of rows) if (r.at < cutoff || !open.has(r.ref)) drop.set(r.prompt_id, [...drop.get(r.prompt_id) ?? [], r.ref]);
-  let n = 0;
-  for (const [id, refs] of drop) n += Number((await db.run(db.k.deleteFrom("main.jev_unsure").where("prompt_id", "=", id).where(inList(db, "ref", refs)))).changes);
-  return n;
+  return await pruneUnsure(db, nowMs, async (refs) => {
+    const keys = refs.map((r) => { const i = r.lastIndexOf("#"); return { repo: r.slice(0, i), number: Number(r.slice(i + 1)) }; });
+    const [items, tracked] = await db.together(() => Promise.all([loadItems(db, keys, "card"), loadTrackedRepos(db, [...new Set(keys.map((k) => k.repo))])]));
+    return new Set([...items].filter(([, i]) => i.state === "OPEN" && tracked.has(i.repo)).map(([k]) => k));
+  });
 }

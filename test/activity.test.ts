@@ -20,7 +20,7 @@ test("the stream merges the sources of every item newest first, pages by cursor 
   for (const [repo, n] of [["photocraft", 1], ["photocraft", 2], ["secret", 3]] as const)
     await db.run(db.k.insertInto("items").values({ repo, number: n, kind: "pr", state: "OPEN", title: `Item ${n}`, author: "dev", created_at: "2026-01-01T00:00:00Z" }));
   await db.run(db.k.insertInto("comments").values({ repo: "photocraft", number: 1, id: "c1", kind: "comment", author: "dev", created_at: "2026-01-01T01:00:00Z", body: "hi" }));
-  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 2 }, { repo: "photocraft", number: 1 }], prompt: "p" });
+  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "photocraft", number: 2 }, { repo: "photocraft", number: 1 }], prompt: "p" });
   await db.run(db.k.updateTable("agent_runs").set({ started_at: "2026-01-01T02:00:00Z" }));
   await db.run(db.k.insertInto("opus_review_history").values({ repo: "photocraft", number: 2, head_oid: "a".repeat(40), at: "2026-01-01T03:00:00Z", model: "opus", mode: "full", verdict: "take", sure: 1, reason: "ok" }));
   await db.run(db.k.insertInto("audit").values([

@@ -61,7 +61,7 @@ before(async () => {
   })));
   await ask(db, [{ id: "batch", kind: "scope", repo: null, number: null, items: [{ repo: "open-app", number: 1 }, { repo: "vault", number: 1 }], question: "Batch?", options: OPTS, recommended: "a", summary: "s" }] as never);
   for (const repo of ["open-app", "vault"]) {
-    const id = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo, number: 1 }], prompt: `prompt for ${repo}` });
+    const id = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo, number: 1 }], prompt: `prompt for ${repo}` });
     await finishRun(db, id, { state: "done", output: `output for ${repo}` });
   }
   await refreshPlanCache(db);
@@ -292,7 +292,7 @@ describe("repo visibility", () => {
     const rows = async (repo: string) => {
       const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", repo }).returning("id")))!.id;
       const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo, number: 7, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: now, patch: "diff", log_bytes: 0 }).returning("id")))!.id;
-      const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo, number: 7 }], prompt: `prompt for ${repo}` });
+      const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo, number: 7 }], prompt: `prompt for ${repo}` });
       await finishRun(db, run, { state: "done", output: `output for ${repo}` });
       return { job, task, run };
     };
@@ -361,7 +361,7 @@ describe("repo visibility", () => {
 
   test("an ever-tracked repo stays hidden when only its work rows remain; hidden names match whole names in free text", async () => {
     await db.run(db.k.insertInto("ever_tracked_repos").values({ name: "ghost-app" }).onConflict((oc) => oc.doNothing()));
-    const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo: "ghost-app", number: 3 }], prompt: "p" });
+    const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo: "ghost-app", number: 3 }], prompt: "p" });
     await finishRun(db, run, { state: "done", output: "o" });
     await db.run(db.k.deleteFrom("main.repos").where("name", "=", "ghost-app"));
     assert.equal(await (await signedIn("boss")).status(`/api/agents/${run}`), 200);
