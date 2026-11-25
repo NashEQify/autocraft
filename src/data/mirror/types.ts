@@ -28,6 +28,7 @@ export type OpenItemsArgs = { repos?: string[]; kind?: ItemKind; tracked?: boole
 
 export type ItemFilter = {
   repos?: string[]; kind?: ItemKind; states?: ItemState[]; numbers?: number[]; author?: string; labelsAny?: string[];
+  /** Ranges are [from, to): `from` included, `to` excluded. `updatedSince` includes its time. */
   createdBetween?: [string, string]; updatedSince?: string; closedBetween?: [string, string]; mergedBetween?: [string, string];
   headOid?: string;
   /** Embeds the workflow scope fragment (replaces `pilotExpr`). */
@@ -37,20 +38,33 @@ export type ItemFilter = {
 };
 
 export type PrChecksRow = Selectable<DB["pr_checks"]>;
-export type PrMirror = { item: ItemOf<"pr">; checks: PrChecksRow | null };
+/** A checks row whose `checks` text is null when the loader was asked to read it only for a failing PR and `overall` is not "failure". */
+export type PrChecksView = Omit<PrChecksRow, "checks"> & { checks: string | null };
+export type PrMirror = { item: ItemOf<"pr">; checks: PrChecksView | null };
 export type OpenPrRow = { repo: string; number: number; author: string | null; closing_issues: string | null; text_refs: string | null; title?: string | null; body?: string | null };
 export type AuthorHistory = { login: string; author_id: number | null; merged: number; closed: number; open: number; lastMerge: string | null; repos: string[] };
+/** `score`: lower is better. `snippets` holds the title and body snippets that contain a match. */
 export type ItemHit = { ref: RefKey; score?: number; snippets?: string[] };
-export type CommentHit = { ref: RefKey; id: string; author: string | null; snippet?: string };
+export type CommentHit = { ref: RefKey; id: string; author: string | null; score?: number; snippet?: string };
+/** Marks around a match in a snippet. */
+export type SnippetMarks = { open: string; close: string; words: number };
 
 export type CommentRow = Selectable<DB["comments"]>;
+/** A comment as a loader returns it: `body` only when the loader was asked for it. */
+export type CommentOut = Omit<CommentRow, "body"> & { body?: string | null };
+/**
+ * `after`: created after this time. `authors`: only these logins. `excludeBots`: leaves out logins ending in "[bot]" (a comment with no
+ * author stays). `order: "created"` is `created_at` ascending with nulls first, then rowid; "rowid" is insertion order.
+ */
 export type CommentFilter = { kinds?: string[]; counted?: boolean; after?: string; authors?: string[]; excludeBots?: boolean; order: "rowid" | "created"; body?: boolean };
+/** `authors`: the distinct logins, in no set order. `length`: total body length. */
 export type CommentStats = { n: number; newest: string | null; length: number; hasUrls: boolean; authors: string[] };
-export type ReviewFact = { id: string; author: string; state: string; created_at: string | null; body: string | null };
+export type ReviewFact = { id: string; author: string; association: string | null; state: string; at: string | null };
 
 export type GateRow = Selectable<DB["review_gates"]>;
 export type Gate = GateRow;
-export type GateRead = Omit<GateRow, never>;
+/** A successful live read; storing it resets the failure counter. */
+export type GateRead = Pick<GateRow, "repo" | "number" | "blocked" | "by_login" | "read_at">;
 export type DiffFactsRow = Selectable<DB["diff_facts"]>;
 export type DiffFactsKey = { ref: RefKey; head: string };
 export type RepoCiSignals = { known: boolean; noCi: boolean };
@@ -72,12 +86,17 @@ export type LivePr = {
 export type LocalPatch =
   | { kind: "merged"; repo: string; number: number; at: string }
   | { kind: "state"; repo: string; number: number; state: "CLOSED" | "MERGED"; at?: string }
-  | { kind: "labels"; repo: string; number: number; labels: string[] }
+  /** `stage` is the log row of the label write (`planner.addStageEvents`), written in the same transaction. */
+  | { kind: "labels"; repo: string; number: number; labels: string[]; stage?: { at: string; actor: string | null; note: string | null } }
   | { kind: "base"; repo: string; number: number; baseRef: string; by?: string; head: string; keepDiff?: boolean }
   | { kind: "live"; repo: string; number: number; pr: LivePr; at: string };
 
 export type CommentInsert = Selectable<DB["comments"]>;
-export type ItemRowInput = Omit<ItemFull, never>;
+/** An item row as the sync writes it: `text_refs` is set for pull requests, the hash columns are filled. */
+export type ItemRowInput = ItemFull;
+/** The item columns the hash functions read. */
+export type HashFields = Pick<ItemFull, "repo" | "number" | "kind" | "title" | "body" | "additions" | "deletions" | "changed_files" | "author_association">;
+export type ItemHashes = { embed_hash: string | null; class_hash: string | null; class_scheme: string | null };
 export type ItemEntry = { repo: string; kind: ItemKind; detail: "full" | "light"; row: ItemRowInput; comments: CommentInsert[]; readAt?: string };
 export type SaveItemsOptions = { readAt: string; force?: boolean; advanceOrgHighWater?: string };
 
