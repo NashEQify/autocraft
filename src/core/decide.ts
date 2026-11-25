@@ -353,7 +353,6 @@ export const fixedAfterMerge = (f: PrFacts | null): boolean => f?.mergeable === 
 const stuckWait = (f: PrFacts): Wait | null => {
   // A started PR nobody approved gets no fix work: what stops it is a maintainer's to settle.
   if (unapprovedStop(f)) return person(MAINTAINER_ANSWER_WAIT);
-  if (workflowOf(f) && !fixAllowed(f) && f.ci === "failure" && f.repoFacts.mainRed) return system(WAITS["waiting-main-ci"]!);
   const approval = person("comment approval for the repo");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped") return system("conflict merge cap for today reached; next merge tomorrow");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") return unsentWait("the comment asking the contributor to resolve the conflict", f.conflict.until);
