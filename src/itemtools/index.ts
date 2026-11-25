@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { listSnapshotRepos } from "../data/external/snapshot-file.ts";
+import { listSnapshotRepos } from "../data/external/index.ts";
 import { diffCacheDir } from "../review/diff.ts";
 import { buildSnapshot, snapshotFile } from "./snapshot.ts";
 import { openDb, TOOLS } from "./server/tools.ts";

@@ -23,6 +23,9 @@ export async function loadChecks(db: Db, keys: KeySource, o?: { checksOnlyIfFail
   return out;
 }
 
+/** Rows `saveChecks` writes in one statement: callers flush their pending rows at this count. */
+export const SAVE_CHECKS_ROWS = kx.BATCH_ROWS;
+
 /** Batched upsert, one `db.write`; a known `mergeable` at the same head survives UNKNOWN. The follow-ups (`recordRuns`, `resolvePushes`, `noteMergeable`) stay calls of their own modules. A PR given twice keeps its last row. */
 export async function saveChecks(db: Db, rows: PrChecksRow[], at: string): Promise<void> {
   const last = [...new Map(rows.map((r) => [refKey(r.repo, r.number), r])).values()];

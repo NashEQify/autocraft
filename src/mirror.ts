@@ -26,7 +26,6 @@ import {
   type CommentInsert, type ItemEntry, type ItemRowInput, type SyncState,
 } from "./data/mirror/index.ts";
 
-export { keepKnownMergeableExpr } from "./data/mirror/fragments.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
 const FULL_PAGE = 30;
