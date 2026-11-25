@@ -1,9 +1,8 @@
-// The Security list and the finding page. Staff only; everyone else gets 404, as the other security endpoints do. A
-// finding's open question is built here from its state (never stored as a decision), and answers go to
-// `POST /api/security/findings/:repo/:n`.
+// The Security list and the finding page. Staff only; everyone else gets 404, as the other security endpoints do. A finding's open
+// question and its actions are built here from its state; a press goes to `POST /api/security/findings/:repo/:n`.
 import { OPERATOR_ACTIONS } from "./security.ts";
 import { mayRunRepo } from "../repo-access.ts";
-import type { ChoiceCore, Decision, DecisionChoices, FindingAction, FindingSeverity, FindingState, FindingView } from "../../../web/src/api/types.ts";
+import type { FindingAction, FindingQuestion, FindingSeverity, FindingState, FindingView } from "../../../web/src/api/types.ts";
 import { FIX_ROUNDS } from "../../security/rules.ts";
 import { findingDetail, reconcile, type FindingRow as StoredFinding } from "../../security/store.ts";
 import { loadFindingBoard, type FindingBoardRow, type LiveRound, type LogRound } from "../../data/security/index.ts";
@@ -20,7 +19,7 @@ export type SecurityGroup = "Needs a person" | "Fixing" | "Ready to land" | "Lan
 export interface SecurityList { groups: { group: SecurityGroup; rows: FindingRow[] }[] }
 export interface HistoryEntry { id: string; at: string; step: string; outcome: string; model: string | null; costUsd: number | null; kind: "model" | "write" | "decision" | "event"; calls: { label: string; kind: "model" | "tool"; costUsd: number | null }[]; writeId: string | null }
 export interface FixRound { round: number; outcome: "passed" | "failed"; why: string; at: string; costUsd: number }
-export interface FindingPageData { finding: FindingView; decision: Decision | null; choices: DecisionChoices | null; status: ItemStatus; attempts: number; rounds: FixRound[]; history: HistoryEntry[]; costUsd: number }
+export interface FindingPageData { finding: FindingView; question: FindingQuestion | null; status: ItemStatus; attempts: number; rounds: FixRound[]; history: HistoryEntry[]; costUsd: number }
 
 const GROUPS: SecurityGroup[] = ["Needs a person", "Fixing", "Ready to land", "Landing", "Landed or published", "Dismissed or backlog"];
 const GROUP: Record<FindingState, SecurityGroup> = {
@@ -67,14 +66,14 @@ export function findingActions(f: { state: FindingState; urgent: boolean }): Fin
   }
 }
 
-const CORE: Record<FindingAction, { label: string; autocraft: string; writes: ChoiceCore["writes"] }> = {
-  fix: { label: "Fix", autocraft: "starts a private fix, up to three rounds", writes: [] },
-  dismiss: { label: "Dismiss", autocraft: "closes the finding with your reason", writes: [] },
-  backlog: { label: "Backlog", autocraft: "keeps it for later", writes: [] },
-  reopen: { label: "Reopen", autocraft: "puts it back to a decision", writes: [] },
-  land: { label: "Land", autocraft: "opens a quiet pull request with the fix", writes: ["push"] },
-  advisory: { label: "Advisory", autocraft: "opens a private fix in a security advisory", writes: [] },
-  publish: { label: "Publish", autocraft: "publishes the advisory", writes: [] },
+const ACTION: Record<FindingAction, { label: string; does: string; writes?: true }> = {
+  fix: { label: "Fix", does: "starts a private fix, up to three rounds" },
+  dismiss: { label: "Dismiss", does: "closes the finding with your reason" },
+  backlog: { label: "Backlog", does: "keeps it for later" },
+  reopen: { label: "Reopen", does: "puts it back to be decided" },
+  land: { label: "Land", does: "opens a quiet pull request with the fix", writes: true },
+  advisory: { label: "Advisory", does: "opens a private fix in a security advisory" },
+  publish: { label: "Publish", does: "publishes the advisory" },
 };
 
 /** Rounds the last attempt ran, from the log; null when the log has none. */
@@ -128,24 +127,19 @@ function rounds(f: FindingView, log: LogRound[], live: LiveRound[]): FixRound[] 
   return out;
 }
 
-/** The finding's open question in the shape decisions use, built from its state. The recommendation stays empty: no model gives one. */
-function synthesize(f: FindingView, row: StoredFinding, status: ItemStatus, rounds: number | null, canSettle: boolean, operator: boolean): { decision: Decision | null; choices: DecisionChoices | null } {
+/** What a person can do with the finding now; null when nothing is open to anyone. `operator` false leaves out the operators' actions. */
+function questionOf(f: FindingView, row: StoredFinding, rounds: number | null, canAct: boolean, operator: boolean): FindingQuestion | null {
   const actions = findingActions({ state: f.state, urgent: f.urgent }).filter((a) => operator || !OPERATOR_ACTIONS.includes(a));
-  if (!actions.length) return { decision: null, choices: null };
+  if (!actions.length) return null;
   const again = f.state === "new" && row.fix_attempts > 0;
-  const id = `${f.repo}:finding:${f.number}:security`;
-  const question = again ? `The fix gave up after ${rounds ?? FIX_ROUNDS} rounds. What next?` : f.state === "ready" ? "How should the fix land?" : "What should happen to this finding?";
-  const decision: Decision = {
-    id, kind: "other", repo: f.repo, number: f.number, items: [], shown: null, title: f.title, question, summary: "", summaryBy: "", summaryAt: f.updatedAt, body: null, context: [], facts: [status.waiting ?? ""].filter(Boolean),
-    options: actions.map((a) => ({ key: a, label: a === "fix" && again ? "Fix again with a note" : CORE[a].label })), recommended: "", recommendedReason: "", group: [], risks: [], undoable: false, canSettle, preparing: false, snoozed: null,
-    publicText: null, optionTexts: [], askedAt: f.updatedAt, askedBy: "autocraft", docket: null, answer: null, answerNote: null, answeredBy: null, answeredAt: null, appliedAt: null, exec: null, adoptedOpinion: null,
-    opinions: [], exceptions: [], claim: null, commentCount: 0, related: [], classifications: [],
+  return {
+    text: again ? `The fix gave up after ${rounds ?? FIX_ROUNDS} rounds. What next?` : f.state === "ready" ? "How should the fix land?" : "What should happen to this finding?",
+    canAct,
+    actions: actions.map((a) => ({
+      action: a, label: a === "fix" && again ? "Fix again with a note" : ACTION[a].label, does: ACTION[a].does, writes: ACTION[a].writes === true,
+      note: a === "dismiss" ? "required" : "optional",
+    })),
   };
-  const cores: ChoiceCore[] = actions.map((a) => ({
-    key: a === "backlog" ? "backlog" : `o:${a}`, label: a === "fix" && again ? "Fix again with a note" : CORE[a].label, autocraft: CORE[a].autocraft, writes: CORE[a].writes, drafted: false, extras: [],
-    ...(a === "dismiss" ? { params: { reason: "" } } : {}),
-  }));
-  return { decision, choices: { id: `ch-f-${f.repo}-${f.number}-${f.state}`, decisionId: id, pick: null, cores, source: "prepare", at: f.updatedAt } };
 }
 
 export async function findingPage(db: Db, req: Req): Promise<FindingPageData> {
@@ -158,9 +152,9 @@ export async function findingPage(db: Db, req: Req): Promise<FindingPageData> {
   if (!detail) throw new HttpError(404, NOT_FOUND);
   const { view: finding, row: stored, log, rounds: live } = detail;
   const row = rowOf(stored, roundsOf(stored, log, live));
-  const { decision, choices } = synthesize(finding, stored, row.status, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), await mayRunRepo(req.user, repo), req.user.role === "operator");
+  const question = questionOf(finding, stored, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), await mayRunRepo(req.user, repo), req.user.role === "operator");
   return {
-    finding, decision, choices, status: row.status, attempts: stored.fix_attempts, rounds: rounds(finding, log, live), history: history(finding),
+    finding, question, status: row.status, attempts: stored.fix_attempts, rounds: rounds(finding, log, live), history: history(finding),
     costUsd: finding.timeline.reduce((s, c) => s + (c.costUsd ?? 0), 0),
   };
 }

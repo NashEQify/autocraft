@@ -53,7 +53,7 @@ export function ModelQueueView({ user }: ViewProps) {
   );
   return (
     <Page title="Model call queue">
-      {user.inference === "user-local" && <RunsQueueSwitch value="queue" />}
+      <RunsQueueSwitch value="queue" />
       <Block
         className="mt-4"
         flush

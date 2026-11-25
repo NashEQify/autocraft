@@ -12,7 +12,7 @@ import { Badge } from "../../../ui/atoms/Badge";
 import { ItemIcon } from "../../../ui/atoms/ItemIcon";
 import { Pending } from "../../../ui/atoms/Pending";
 import { cn } from "../../../ui/cn";
-import { LiveBoard } from "../../home/LiveBoard";
+import { LiveBoard } from "./LiveBoard";
 import type { ViewProps } from "../../../registry/types";
 
 const calls = (n: number) => (n === 1 ? t("1 call running") : t("{n} calls running", { n }));
@@ -191,7 +191,7 @@ export function HomeView(_: ViewProps) {
           </>
         )}
         <div className="mt-4">
-          <LiveBoard to="/now" />
+          <LiveBoard />
         </div>
       </div>
     </div>

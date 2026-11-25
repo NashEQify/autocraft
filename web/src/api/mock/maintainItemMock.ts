@@ -7,10 +7,8 @@ import { NOW } from "./fixtures";
 
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
 const hhmm = (iso: string) => `${iso.slice(11, 16)} UTC`;
-/** Repos on the maintainer workflow in the mock; items of any other repo get the classic page. */
-const NEW_REPOS = new Set(["designcraft", "photocraft", "craft-libs", "deckcraft"]);
 
-type Seed = { status: MaintainItemStatus | null; events: MaintainEvent[] } & Partial<Pick<MaintainItem, "duplicates" | "withdrawn" | "security" | "outside" | "breakers">>;
+type Seed = { status: MaintainItemStatus | null; events: MaintainEvent[] } & Partial<Pick<MaintainItem, "duplicates" | "security" | "outside" | "breakers">>;
 
 const ev = (id: number, min: number, login: string, via: MaintainEvent["via"], kind: string, line: string | null): MaintainEvent => ({ id, at: ago(min), login, via, kind, line });
 
@@ -37,7 +35,6 @@ const SEEDS: Record<string, Seed> = {
     events: [
       ev(1, 190, "kiri-n", "github", "started", `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply stop to halt.`),
     ],
-    withdrawn: [{ id: "designcraft#1484:merge@9f3a1c2~replaced-flip-1", kind: "merge", question: "Merge this PR?", summary: "Opus took the change with two fixes: cache the hyphenation table, and check the installer size.", at: ago(400) }],
     duplicates: [{ repo: "designcraft", number: 1302, kind: "issue", state: "open", title: "Hungarian spellchecking", canonical: true }],
     security: [{ number: 31, title: "Dictionary loader follows symlinks outside the assets folder", severity: "medium", state: "landing" }],
   },
@@ -90,9 +87,9 @@ export function createMaintainItemMock(me: User, changed: () => void): Pick<Api,
         const s = state.get(ref);
         const staff = me.role !== "viewer";
         const out: MaintainItem = {
-          repo, number, kind: "pr", workflowRepo: NEW_REPOS.has(repo), canAct: may(repo),
+          repo, number, kind: "pr", canAct: may(repo),
           status: s?.status ?? null, events: s?.events ?? [], duplicates: s?.duplicates ?? [],
-          withdrawn: staff ? s?.withdrawn ?? [] : [], security: staff ? s?.security ?? [] : [],
+          security: staff ? s?.security ?? [] : [],
           outside: s?.outside ? { ...s.outside, canRelease: may(repo) } : null,
           breakers: (s?.breakers ?? []).map((b) => ({ ...b, canResume: may(repo) })),
         };

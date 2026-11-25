@@ -11,7 +11,7 @@ import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { TimeAgo } from "../../../ui/atoms/TimeAgo";
 import { Segmented } from "../../../ui/molecules/Segmented";
 import { TimelineEvent } from "../../../ui/molecules/TimelineEvent";
-import { TraceEventBody } from "../../item/TraceEventBody";
+import { TraceEventBody } from "../../activity/TraceEventBody";
 
 const MAIN: ReadonlySet<TraceKind> = new Set(["github", "review", "decision", "write", "conversation"]);
 const VIA: Record<MaintainEvent["via"], string> = { github: "GitHub", discord: "Discord", agent: "agent", dashboard: "AutoCraft", cli: "CLI" };

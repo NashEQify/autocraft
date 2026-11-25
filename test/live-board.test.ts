@@ -67,11 +67,8 @@ test("viewers see no account label and no progress line that names a repo hidden
   assert.doesNotMatch((await live(db, as("maintainer"))).lanes[0]!.ops[0]!.detail ?? "", / on /);
 });
 
-test("the worker view: staff see shared runners with owner, slots and models, private runners as one neutral row, box accounts for operators; never a hostname", async () => {
+test("the worker view: staff see shared runners with owner, slots and models, private runners as one neutral row; never a hostname", async () => {
   const db = await connectDb(":memory:");
-  setupBox(["acc"]);
-  await syncAccounts(db);
-  await db.run(db.k.updateTable("claude_accounts").set({ enabled: 1, label: "Box account" }).where("id", "=", "acc"));
   await db.run(db.k.insertInto("repos").values([{ name: "app", visibility: "public" }, { name: "secret", visibility: "private" }]));
   await db.run(db.k.insertInto("tracked_repos").values([{ name: "app" }, { name: "secret" }]).onConflict((oc) => oc.doNothing()));
   const token = async (login: string, label: string, hostname: string) => (await db.get(db.k.insertInto("mcp_tokens").values({
@@ -90,7 +87,7 @@ test("the worker view: staff see shared runners with owner, slots and models, pr
   await setSettings(db, as("maintainer", "bob", { runnerPrivate: true }));
   assert.ok(await db.get(db.k.selectFrom("audit").select("at").where("action", "=", "runner-private").where("login", "=", "bob")), "the switch is audited");
 
-  const call = async (o: { account?: string; runner?: { token: number; login: string }; repo?: string; started: number; ended?: number }) => {
+  const call = async (o: { runner?: { token: number; login: string }; repo?: string; started: number; ended?: number }) => {
     const id = await insertRun(db, { jobId: null, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: o.repo ?? "app", number: 7 }], prompt: "p" });
     const ended = o.ended === undefined ? null : ago(o.ended);
     await db.run(db.k.updateTable("agent_runs").set({ state: ended ? "done" : "running", started_at: ago(o.started), ended_at: ended, input_tokens: 100, user_login: o.runner?.login ?? null }).where("id", "=", id));
@@ -105,7 +102,6 @@ test("the worker view: staff see shared runners with owner, slots and models, pr
   await call({ runner: { token: alice, login: "alice" }, started: 300, ended: 200 }); // before the window
   await call({ runner: { token: alice, login: "alice" }, repo: "secret", started: 9, ended: 8 });
   const bobs = await call({ runner: { token: bob, login: "bob" }, started: 5 });
-  await call({ account: "acc", started: 30, ended: 25 });
 
   assert.equal((await live(db, as("viewer"))).workers, undefined, "viewers get no workers");
   const board = await live(db, as("maintainer"));
@@ -118,11 +114,9 @@ test("the worker view: staff see shared runners with owner, slots and models, pr
   assert.deepEqual([p.name, p.login, p.harness, p.slots, p.models, p.calls.map((c) => c.id)], ["Private Task Runner", null, null, null, [], [bobs]]);
   assert.ok(!rows.some((w) => w.login === "bob" || w.key === `runner:${bob}`), "no row names the private runner's owner");
   assert.doesNotMatch(JSON.stringify(rows), /bob/, "the private runner's login and label go nowhere");
-  assert.ok(!rows.some((w) => w.kind === "account"), "maintainers get no box account rows");
   assert.equal(rows.find((w) => w.key === `runner:${bob}`), undefined);
   const own = (await live(db, as("maintainer", "bob"))).workers!.find((w) => w.key === `runner:${bob}`)!;
   assert.deepEqual([own.login, own.calls.map((c) => c.id)], ["bob", [bobs]], "the owner sees their own private runner");
   const op = await live(db, as("operator"));
-  assert.deepEqual(op.workers!.find((w) => w.key === "account:acc")!.calls.length, 1);
   for (const r of [board, op, await live(db, as("maintainer", "bob"))]) assert.doesNotMatch(JSON.stringify(r), /alice-host|carol-box|bob-host/, "no hostname in any reply");
 });

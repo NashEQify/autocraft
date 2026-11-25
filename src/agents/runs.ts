@@ -52,7 +52,7 @@ function toRun(r: RunRow, shown: Map<string, ItemShown>, staff: boolean): AgentR
   const none: ItemShown = { kind: null, state: null, title: null };
   return {
     id: r.id, jobId: r.jobId, step: r.step, stage: r.stage, promptId: r.promptId, promptVersion: r.promptVersion,
-    provider: r.provider, model: r.model, accountId: null, accountLabel: null,
+    provider: r.provider, model: r.model,
     items: r.items.map((x) => ({ ...x, ...(shown.get(`${x.repo}#${x.number}`) ?? none) })), itemCount: r.itemCount, state: r.state, startedAt: r.startedAt, endedAt: r.endedAt,
     inputTokens: r.tokens.input, outputTokens: r.tokens.output, cacheReadTokens: r.tokens.cacheRead, cacheWriteTokens: r.tokens.cacheWrite, costUsd: r.costUsd, summary: r.summary,
     ...(staff && r.userLogin && { via: { login: r.userLogin, harness: r.harness ?? "", model: r.reportedModel ?? "" } }),
@@ -139,7 +139,7 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
   const names = [...new Set([...steps.keys(), ...byStep.keys()])];
   const stages = names.map((s) => ({ step: s, title: steps.get(s)?.title ?? s, buckets: [...bucketsOf(s).values()] }))
     .sort((a, b) => (steps.get(a.step)?.stage ?? 99) - (steps.get(b.step)?.stage ?? 99) || a.step.localeCompare(b.step));
-  return { window, bucket: hourly ? "hour" : "day", stages, accounts: [] };
+  return { window, bucket: hourly ? "hour" : "day", stages };
 }
 
 // ---- retention -----------------------------------------------------------------

@@ -30,13 +30,13 @@ function parseJson<T>(s: string | null, fallback: T): T {
 }
 
 /** `waiting`: why the queued job does not start (see `toJobs` for a page of jobs). `accounts` is empty: server accounts are retired. */
-export function toJob(r: JobRow, accounts: string[] = [], waiting: string | null = null): Job {
+export function toJob(r: JobRow, waiting: string | null = null): Job {
   const params = parseJson<JobParams>(r.params, {});
   return {
     id: r.id, step: r.step, params, requestedBy: r.requested_by, requestedAt: r.requested_at,
     state: r.state, startedAt: r.started_at, endedAt: r.ended_at, progress: r.progress, summary: r.summary, error: r.error,
     cancelRequested: r.cancel_requested_at !== null, usage: parseJson<JobUsage | null>(r.usage, null),
-    models: modelsOf(knownStep(r.step), params), accounts, waiting,
+    models: modelsOf(knownStep(r.step), params), waiting,
   };
 }
 
@@ -44,7 +44,7 @@ export function toJob(r: JobRow, accounts: string[] = [], waiting: string | null
 export async function toJobs(db: Db, rows: JobRow[]): Promise<Job[]> {
   let untaken: UntakenTest | undefined;
   const out: Job[] = [];
-  for (const r of rows) out.push(toJob(r, [], r.state === "queued" ? await (untaken ??= await untakenTest(db))(r) : null));
+  for (const r of rows) out.push(toJob(r, r.state === "queued" ? await (untaken ??= await untakenTest(db))(r) : null));
   return out;
 }
 
@@ -174,7 +174,7 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   const hidden = view.hidden ?? [];
   const d = await loadJobDetail(db, id, { hidden, logs: view.logs !== false });
   if (!d) throw new JobError(404, `no job ${id}`);
-  const items = d.items.map((i) => ({ repo: i.repo, number: i.number, ...(d.shown.get(`${i.repo}#${i.number}`) ?? { kind: null, state: null, title: null }), outcome: i.outcome, decision: null }));
+  const items = d.items.map((i) => ({ repo: i.repo, number: i.number, ...(d.shown.get(`${i.repo}#${i.number}`) ?? { kind: null, state: null, title: null }), outcome: i.outcome }));
   const job = (await toJobs(db, [d.row]))[0]!;
   if (view.logs === false) return { ...job, items, log: null, logTruncated: false, canCancel: false };
   const tail = await jobLogTail(db, id, d.row.log_path);

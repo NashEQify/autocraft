@@ -465,8 +465,6 @@ export interface ItemPremerge {
 }
 
 export type FixupState = "pushed" | "failed" | "refused" | "cannot-push" | "too-large" | "asked" | "rejected" | "push-denied" | "superseded" | "infra" | "rerun" | "rerunning" | "formatting" | "pushing" | "skipped" | "capped" | "comment-failed" | "comment-unsent";
-/** The operator releases of an item: the last path segment of POST /api/items/:repo/:n/<action>. */
-export type ReleaseAction = "review-again" | "verify-again" | "batch-again";
 
 /** Operator releases that apply to an item right now. */
 export interface ItemReleases {
@@ -747,26 +745,8 @@ export interface User {
 export type InferenceMode = "server" | "user-local";
 export type InferenceTier = "top" | "mid" | "small";
 export type InferenceEffort = "low" | "medium" | "high" | "xhigh" | "max";
-export type InferenceSettings = { mode: InferenceMode; /** Accepted model families per tier. */ models: Record<InferenceTier, string[]>; /** The lowest effort a helper may declare per tier; a tier without one takes any. */ minEffort: Partial<Record<InferenceTier, InferenceEffort>> };
+export type InferenceSettings = { /** Accepted model families per tier. */ models: Record<InferenceTier, string[]>; /** The lowest effort a helper may declare per tier; a tier without one takes any. */ minEffort: Partial<Record<InferenceTier, InferenceEffort>> };
 
-export interface DecisionFilter {
-  repo?: RepoName[];
-  kind?: DecisionKind[];
-  /** minimum age in days */
-  minAge?: number;
-  /** Every open question, not only the ones the person can settle (and the disputes they resolve). */
-  all?: boolean;
-  /** with exactly one `repo`: only decisions about this item (its own, or a group that lists it) */
-  number?: number;
-  /** "opinions": open decisions that have at least one opinion */
-  /** "open" leaves out snoozed decisions; "snoozed" lists only them. */
-  status?: "open" | "opinions" | "answered" | "backlog" | "snoozed";
-  /** page size (server default 100, at most 500); `total` counts every match */
-  limit?: number;
-  /** the `next` of the previous page */
-  after?: string;
-  offset?: number;
-}
 
 export interface DecisionList {
   decisions: Decision[];
@@ -783,14 +763,6 @@ export interface OpenDecisionCounts {
   byRepo: Record<string, number>;
 }
 
-export interface AnswerInput {
-  /** An option key, or "handled" (operators; `note` required): closes the question with the note and writes nothing to GitHub. */
-  answer: string;
-  note?: string;
-  exceptions?: (ItemRef & { answer: string })[];
-  /** Group decisions: the hash of the shown comments for this answer. */
-  textsHash?: string;
-}
 
 // ---- Contributors, Repos and Access (docs/dashboard-spec.md, Pages) ----
 
@@ -1237,16 +1209,13 @@ export interface Job {
   usage: JobUsage | null;
   /** Models the job's step uses, e.g. ["jev", "haiku"]; known before any call is made. */
   models: string[];
-  /** Labels of the Claude accounts used by the job's agent runs, running or finished. */
-  accounts: string[];
   /** Why the queued job does not start, e.g. "No Task Runner takes photocraft"; null otherwise. */
   waiting: string | null;
 }
 
-/** An item a job handled: what happened to it, and the decision the job asked about it (null when none). */
+/** An item a job handled and what happened to it. */
 export interface JobItem extends ItemRef, ItemShown {
   outcome: string | null;
-  decision: string | null;
 }
 
 export interface JobDetail extends Job {
@@ -1281,7 +1250,7 @@ export type StageLimit = { step: string; title: string; perDay: number | null; u
   trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
-export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState; /** Thresholds of the workflow blockers for large fixes and for changes outside a PR's purpose. */ blockers: { largeFixLines: number; outsidePurposeMin: number } };
+export type PipelineState = { enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; outside: OutsideState; /** Thresholds of the workflow blockers for large fixes and for changes outside a PR's purpose. */ blockers: { largeFixLines: number; outsidePurposeMin: number } };
 
 export interface PipelineStep {
   name: string;
@@ -1542,8 +1511,6 @@ export interface QueueRow {
   path: "rule" | "operator" | "maintainer" | null;
   /** Why the merge-without-asking rule doesn't cover it. */
   outsideRule: string[];
-  decisionId: string | null;
-  answer: string | null;
   refusedReason: string | null;
   /** Why a maintainer's review blocks the PR, or that its reviews cannot be read; null otherwise. */
   note: string | null;
@@ -1562,8 +1529,6 @@ export interface QueueFilter {
   repo?: RepoName;
   /** "merged" lists merged PRs; without a state they are left out. */
   state?: QueueState;
-  /** `merge.<branch>` of the flowchart: lists that branch's PRs and ignores `state`. */
-  flow?: string;
   /** page size (server default 100, at most 500) and the `next` cursor of the previous page */
   limit?: number;
   after?: string;
@@ -1743,7 +1708,6 @@ export type AccountLogin = { state: AccountLoginState; url: string | null; messa
 export type UsagePause = { fiveHour: number; weekly: number };
 /** Whether Jev is in use; `unavailable` says why not (Haiku then does its work) and since when. */
 export type JevStatus = { enabled: boolean; unavailable: { reason: string; since: string } | null };
-export type AccountInput = { label?: string; enabled?: boolean; maxConcurrent?: number };
 
 export type AgentRunState = "running" | "done" | "failed";
 export type AgentRun = {
@@ -1755,8 +1719,6 @@ export type AgentRun = {
   promptVersion: string;     // registry version or content hash
   provider: "claude" | "jev";
   model: string;             // e.g. "sonnet", "haiku", "jev"
-  accountId: string | null;  // null for Jev
-  accountLabel: string | null;
   items: (ItemRef & ItemShown)[];   // at most 50
   itemCount: number;         // all items in the call
   state: AgentRunState;
@@ -1789,13 +1751,12 @@ export type AgentRunTool = {
   check: { id: number; command: string; crate: string | null; testName: string | null; outcome: string | null } | null;
 };
 export type AgentRunPage = { runs: AgentRun[]; nextCursor: string | null };
-export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; account?: string; repo?: string; cursor?: string; limit?: number };
+export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; repo?: string; cursor?: string; limit?: number };
 
 export type RateBucket = { t: string; items: number; runs: number; failed: number };
 export type Rates = {
   window: "24h" | "7d"; bucket: "hour" | "day";
   stages: { step: string; title: string; buckets: RateBucket[] }[];
-  accounts: { id: string; label: string; samples: { t: string; fiveHourPct: number | null; weeklyPct: number | null }[] }[];
 };
 
 // ---- Build environments and tasks -----------------------------------------------------------------------
@@ -2060,7 +2021,7 @@ export interface QueueSlot {
   place: number;
 }
 
-/** Place of a fast-tracked item among the open fast-tracked items, first to run first. */
+/** Place of an item started with a weight among those items, first to run first. */
 export interface FastPosition {
   /** From 1. */
   position: number;
@@ -2069,7 +2030,7 @@ export interface FastPosition {
   weight?: number;
 }
 
-/** One row of the All, Review, Fix and Verify tabs: a work row with its fast-track place. */
+/** One row of the All, Review, Fix and Verify tabs: a work row with its place by weight. */
 export interface QueueWorkRow extends WorkRow {
   queue?: QueueSlot | null;
   fast: FastPosition | null;
@@ -2078,18 +2039,16 @@ export interface QueueWorkRow extends WorkRow {
 }
 
 /**
- * How a PR came into the merge queue: `review` (a take review; the merge rule or a Merge? question decides), `answer` (an operator
- * answered Merge?), `queued` (an operator added it with Queue items), `preapproved` (an operator pre-approved the merge with a fix-up);
- * for an issue, `fast` (fast-tracked, with Queue items or the fast-track control).
- * `by` is the operator, null for `review` and for anyone but staff; `at` is when.
+ * How a PR came into the merge queue: `review` (a take review the merge rule covers), `answer` (an approval carried to a new head),
+ * `queued` (a maintainer queued it), `preapproved` (the merge was approved with a fix-up). `by` is who, null for `review` and for anyone but staff; `at` is when.
  */
 export interface QueueOrigin {
-  how: "review" | "answer" | "queued" | "preapproved" | "fast";
+  how: "review" | "answer" | "queued" | "preapproved";
   by: string | null;
   at: string | null;
 }
 
-/** One row of the Merge tab: a merge queue row with its fast-track place, hold and how it came in. */
+/** One row of the Merge tab: a merge queue row with its place by weight, hold and how it came in. */
 export interface QueueMergeRow extends QueueRow {
   fast: FastPosition | null;
   held: boolean;
@@ -2099,8 +2058,7 @@ export interface QueueMergeRow extends QueueRow {
 /**
  * A PR queued with Queue items or pre-approved that is no merge queue row yet: `fixup` (the operator's fix-up runs first), `review`
  * (waits for a take review at its head), `ci` (reviewed take; becomes a queue row on the next plan).
- * Or an open fast-tracked issue whose PR is not in the queue: `build` (Fix builds its PR; no open PR closes it yet), `pr` (open PRs close it,
- * none queued), `next` (no open PR closes it and Fix is not its next step: `next` says what is).
+ * Or a started issue whose PR is not in the queue: `implement` (its attempt), `build`, `pr` (open PRs close it, none queued), `next` (`next` says what is).
  */
 export interface QueuePendingRow {
   repo: RepoName;
@@ -2145,7 +2103,7 @@ export interface QueuePageCounts {
   merge: number;
 }
 
-/** `pipeline`: repos with the pipeline on, plus fast-tracked items of any repo; `all`: every repo; otherwise one repo. */
+/** `pipeline`: repos with the pipeline on; `all`: every repo; otherwise one repo. */
 export type QueueRepos = "pipeline" | "all" | RepoName;
 
 export interface QueuePageFilter {
@@ -2171,7 +2129,7 @@ export interface QueuePage {
   nextMerges: NextMerge[];
   /** Merge tab only: batches in flight, with their PRs. */
   batches: QueueBatch[];
-  /** Merge tab only: PRs queued or pre-approved that wait for their fix-up or review before they join the queue, then fast-tracked issues whose PR is not in the queue yet. */
+  /** Merge tab only: PRs approved for merge that wait for their fix-up or review before they join the queue. */
   pending?: QueuePendingRow[];
   /** Rows matching the tab, every page. */
   total: number;
@@ -2194,39 +2152,34 @@ export type ConversationCardState = "proposed" | "queued" | "running" | "done" |
  */
 export interface ConversationCard {
   id: number;
-  /** Digest of the card's text and steps: a press sends it back, so it runs only the card as shown. */
+  /** Digest of the card's text and parameters: a press sends it back, so it runs only the card as shown. */
   digest: string;
-  /** "command", "comment" or "label"; the other kinds are cards of the retired decision system on older turns. */
-  kind: "command" | "resolution" | "comment" | "answer" | "label" | "backlog" | "duplicate" | "resolve" | "close";
+  /** "command", "comment" or "label". A card of a retired kind arrives as "comment" with canSettle false. */
+  kind: "command" | "comment" | "label";
   title: string;
-  /** The viewer may press, edit and dismiss this card (same rule as `Decision.canSettle`, over every repo the card writes to). */
+  /** The viewer may press, edit and dismiss this card (the act rule, over every repo the card writes to). */
   canSettle: boolean;
-  /** What runs, in order, one plain line each (e.g. "Post the comment below", "Close the issue as completed"); empty for a card that only settles the question. */
+  /** A command card: what a press runs, as a person would type it (e.g. "fix-up and merge"). Absent: an action without a registered command. */
+  command?: string;
+  /** What runs, in order, one plain line each (e.g. "Fix up the PR, then merge it if the review and CI pass"). */
   steps: string[];
-  /** The open decision's option this card settles with: the card is Opus's draft for that option's row. Absent: an outcome of its own (handled, a close, a step-only action). */
-  option?: string;
+  /** Why a press would run nothing (an action without a registered command). Absent: it can be pressed. */
+  refusal?: string;
   /** Why a proposed card may be out of date: "pr-changed" (a push since it was proposed; it refuses to run) or "new-comments" (GitHub comments since; it still runs). */
   stale?: "pr-changed" | "new-comments";
-  /** Index in `steps` of the comment step, whose text is `text`. Absent: the card has no comment. */
-  commentStep?: number;
-  /** The open-issue step's draft (at most one per card), editable like `text`; `step` is its index in `steps`. `repo` is where it opens. */
-  issue?: { step: number; repo: RepoName; title: string; body: string };
-  /** The fix-up step's instructions to the fix-up model (at most one per card), editable like `text`; `step` is its index in `steps`. `merge`: a pre-approved merge follows. Never posted to GitHub. */
-  fixup?: { step: number; instructions: string; merge: boolean };
-  /** How the open question ends when the card runs, e.g. 'Answers the scope question with "Small extra"', "Closes the scope question as handled". Absent: the question stays open. */
-  settles?: string;
   /** The primary button: the action in a few words, written by the server from the card's parameters. */
   label: string;
-  /** The card's first line: the action with its key parameter, e.g. "Close issue as completed", "Close as duplicate of #12". */
+  /** The card's first line: the action with its key parameter, e.g. "Fix up and merge", "Close as duplicate of #12". */
   headline: string;
-  /** One line under the headline: "Comment: …", "Reason: …", "Issue: …" or "Instructions: …". Absent: the card has no text. */
+  /** One line under the headline, e.g. "Comment: …". Absent: the card has no text. */
   preview?: string;
+  /** A comment card's text. */
   text?: string;
-  /** An answer or close card that writes to GitHub: what it does, e.g. "closes the PR on GitHub". The button asks for a second confirmation. */
+  /** What the command leads to on GitHub, e.g. "closes the PR on GitHub". The button asks for a second press. */
   writes?: string;
   state: ConversationCardState;
-  /** Set when state is queued: the press found no room under the daily GitHub write limit; `place` counts from 1 in the order the cards run (null while disputed). */
-  queued?: { place: number | null; reason: string; dispute: { by: string; reason: string; at: string } | null };
+  /** Set when state is queued: the press found no room under the daily GitHub write limit; `place` counts from 1 in the order the cards run. */
+  queued?: { place: number | null; reason: string; dispute?: null };
   /** Set when state is done; `link` is empty when the action wrote nothing on GitHub. */
   done?: { at: string; link: string; label: string };
   /** Set when state is failed. */
@@ -2234,11 +2187,7 @@ export interface ConversationCard {
   /** Who pressed the button or dismissed the card, and when. */
   by?: string;
   at?: string;
-  /** Run from a decision's choices (`conversations.doChoice`), not proposed by Opus as a card. */
-  fromChoice?: boolean;
-  /** The text was edited by an operator before it ran. */
   edited?: boolean;
-  /** Who edited the text, when `edited`. */
   editedBy?: string;
 }
 
@@ -2292,14 +2241,6 @@ export interface DecisionChoices {
   after?: string;
 }
 
-/** Body of `conversations.doChoice`. */
-export interface DoChoiceBody {
-  core: CoreKey;
-  params?: { reason?: string; instructions?: string };
-  /** Ticked extras only, with the user's own text edits. */
-  extras: { id: string; text?: string; title?: string; body?: string }[];
-  note?: string;
-}
 
 export interface ConversationTurn {
   id: number;
@@ -2331,8 +2272,6 @@ export interface Conversation {
   /** While a reply is being written: what Opus did last, up to five plain lines, newest last. */
   progress?: string[];
   startedBy: string | null;
-  /** Maintainer posts an operator included for Opus. `source` is "decision-comment:<id>" or "decision-opinion:<id>"; `sent` once Opus has been given it (it can no longer be removed). */
-  includes: { source: string; by: string; at: string; sent: boolean }[];
   turns: ConversationTurn[];
   /** The item's open bound decision's answer choices; null or absent when it has none. */
   choices?: DecisionChoices | null;
@@ -2408,7 +2347,7 @@ export type TraceEvent = {
   call?: {
     /** The prompt the call ran; calls of one step and prompt family are grouped on the item page. */
     promptId?: string; /** The step's display name. */ step?: string;
-    model: string; provider: string; account: string | null; state: string;
+    model: string; provider: string; state: string;
     inputTokens: number | null; outputTokens: number | null; costUsd: number | null; toolCalls: number; endedAt: string | null; via?: RemoteVia;
   };
 };
@@ -2418,7 +2357,6 @@ export type ItemTraceHeader = {
   next: { kind: string; head: string | null }[];
   who: {
     assignees: string[]; autocraftAssigned: boolean;
-    openDecisions: { id: string; kind: string; question: string }[];
     holds: { by: string; at: string }[];
   };
 };
@@ -2518,13 +2456,13 @@ export interface NextPage {
   waiting: NextWaiting[];
   waitingTotal: number;
 }
-// ---- Now page (GET /api/now) ---------------------------------------------------
+// ---- Health (GET /api/health) ---------------------------------------------------
 
 /** A thing that needs attention; `to` is the page where it is fixed. `info` problems do not break "all healthy". */
-export type NowProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install"; /** `to` is a server page (an authorization flow), opened with a full page load that returns here. */ fullPage?: true };
-export type NowHealth = {
+export type HealthProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install"; /** `to` is a server page (an authorization flow), opened with a full page load that returns here. */ fullPage?: true };
+export type Health = {
   pipeline: { enabled: boolean; by: string | null; at: string | null };
-  problems: NowProblem[];
+  problems: HealthProblem[];
 };
 export type NowEntryKind = "job" | "call" | "task" | "batch" | "write" | "merge" | "decision" | "failure";
 /**
@@ -2626,20 +2564,19 @@ export interface LiveWorkerCall {
 }
 /**
  * Who does the model calls, one row each on the Live board's worker view: a person's Task Runner (with their own tokens), the runners
- * their owners keep private (one row, no owner), one of the box's Claude accounts, or Jev. Runners go to operators and maintainers, box
- * accounts to operators only, as the call pages show them.
+ * their owners keep private (one row, no owner), or Jev. For operators and maintainers.
  */
 export interface LiveWorker {
-  /** "runner:<token id>", "login:<login>" (a runner no longer known), "private", "account:<id>" or "jev". */
+  /** "runner:<token id>", "login:<login>" (a runner no longer known), "private" or "jev". */
   key: string;
-  kind: "runner" | "private" | "account" | "jev";
-  /** The runner's label ("Task Runner" without one), "Private Task Runner", the account's label, or "Jev". */
+  kind: "runner" | "private" | "jev";
+  /** The runner's label ("Task Runner" without one), "Private Task Runner", or "Jev". */
   name: string;
   /** A runner's owner. */
   login: string | null;
   /** A runner's harness ("claude", "codex"). */
   harness: string | null;
-  /** online: takes calls; held: online but not taking any (`note` says why); offline: no fresh status, or a disabled account. */
+  /** online: takes calls; held: online but not taking any (`note` says why); offline: no fresh status. */
   status: "online" | "held" | "offline";
   note: string | null;
   /** Calls running now, against `slots` (null when not known). */
@@ -2653,7 +2590,9 @@ export interface LiveWorker {
 /** `GET /api/live`: running and queued work and what ended in the last minutes, for the Live timeline on Home. `workers` only for staff. */
 export interface LiveBoard { lanes: LiveLane[]; workers?: LiveWorker[] }
 
-export type Now = { health: NowHealth; /** Titles of housekeeping jobs that are running, shown as one line. */ alsoRunning: string[] } & NowFeed;
+export type NowHealth = Health;
+export type NowProblem = HealthProblem;
+export type Now = { health: Health; /** Titles of housekeeping jobs that are running, shown as one line. */ alsoRunning: string[] } & NowFeed;
 
 // ---- security deep scan (operators and maintainers only; viewers get 404) ----------------------------------
 
@@ -2776,7 +2715,7 @@ export interface ScanDetail {
 /** One of the signed-in user's agent tokens for the Inbox MCP server; the token itself is shown only when made. `canAnswer`: an operator's token whose agent may answer decisions. */
 export type McpToken = { id: number; label: string | null; /** `connector`: the MCP Connector; `runner`: a Task Runner credential. */ kind: "connector" | "runner"; canAnswer: boolean; /** The token's helper may claim model calls in the user-local inference mode. */ canRun: boolean; createdAt: string; lastUsedAt: string | null; expiresAt: string };
 /** The user's live tokens, the most they may hold, and the server's MCP path (on the dashboard's own origin). */
-export type McpTokens = { tokens: McpToken[]; max: number; path: string; /** Whether an operator may make a token that answers decisions. */ answering: boolean };
+export type McpTokens = { tokens: McpToken[]; max: number; path: string; /** Whether a token that sends commands can be made. */ answering: boolean };
 /** After making a token: the list, the new token's id, and its value, shown this once. */
 export type McpTokenCreated = McpTokens & { id: number; token: string };
 
@@ -2788,13 +2727,13 @@ export type { HelperInfo as RemoteHelper, Readiness as HelperReadiness, UsageWin
  * the task does, `models` which Claude models its calls ask for.
  */
 /**
- * `taskItems`: the items the runners take work on: every item, fast-tracked items only, or items the user fast-tracked.
+ * `taskItems`: the items the runners take work on: every item, started items only, or items the user started.
  * `runnerPrivate`: the Live board shows the runners' calls to others under one "Private Task Runner" row, without the user's login,
  * the runners' labels, slots or models.
  */
-export type TaskItems = "all" | "fast" | "mine";
-export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
-export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; uiV2: boolean };
+export type TaskItems = "all" | "started" | "mine";
+export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean; };
+export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
 export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
@@ -2836,7 +2775,7 @@ export type ItemPhase = "Triage" | "Waiting for a person" | "Review" | "Fixing" 
 /** Where an item is, what it waits for and what happens next; every page draws the same line. */
 export interface ItemStatus {
   phase: ItemPhase;
-  /** What it waits for, in words ("CI on a1b2c3d", "a Merge? answer"); null when it does not wait. */
+  /** What it waits for, in words ("CI on a1b2c3d", "a maintainer"); null when it does not wait. */
   waiting: string | null;
   /** What happens when the wait ends. */
   next: string | null;
@@ -2940,7 +2879,6 @@ export interface ItemPageHeader {
   pipelineOn: boolean;
   discord: DiscordInfo | null;
   queue: QueueSlot | null;
-  fastTracked: boolean;
   held: boolean;
   preapproval: Preapproval | null;
   releases: ItemReleases;
@@ -3012,8 +2950,6 @@ export interface TimelineEntry {
   markdown: boolean;
   /** More detail, one per line: reasons, files, findings. */
   lines: string[];
-  /** A maintainer's or operator's post on a question: its include-for-Opus source, the question and the option picked. */
-  feedback: { source: string; decisionId: string; pick: string | null; write: boolean; open: boolean } | null;
 }
 /** The screenshot run of a pull request's latest head: images at the base ("before") and at the head ("after"), served by the task artifact route. */
 export interface ScreenshotRun {
@@ -3075,9 +3011,7 @@ export interface ImplementationQuestion {
   at: string;
   audience: "author" | "maintainer";
   text: string;
-  /** A maintainer question's decision. */
-  decision: { id: string; path: string } | null;
-  /** The decision's chosen option, or the first reply on the issue after an author question. */
+  /** The answer, or the first reply on the issue after an author question. */
   answer: { by: string; at: string; text: string } | null;
 }
 /** The plan call's reply. */
@@ -3116,8 +3050,6 @@ export interface ItemImplementation {
   pr: (ItemRef & ItemShown & { url: string | null }) | null;
   /** Screenshots the session took, copied out by AutoCraft. */
   shots: { n: number; what: string; url: string; width: number; height: number }[];
-  /** The stuck decision. */
-  decision: { id: string; path: string } | null;
   costUsd: number;
 }
 export interface ItemPageData {
@@ -3181,7 +3113,6 @@ export interface ItemPeek {
 }
 /** A PR's merge checks as the merge queue shows them. */
 export type ItemChecks = Pick<QueueRow, "verdict" | "ci" | "mergeable" | "verify" | "size" | "prBuild">;
-export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Area names, `none` for the items without one. */ area?: string[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
 /** `byPhase` and `total` count every row that matches the filter except `phase`; `nextCursor` is null on the last page. */
 export interface ItemStatusList { rows: ItemStatusRow[]; byPhase: Record<ItemPhase, number>; total: number; nextCursor: string | null }
 
@@ -3190,7 +3121,9 @@ export interface FindingRow { repo: RepoName; number: number; title: string; sev
 export type SecurityGroup = "Needs a person" | "Fixing" | "Ready to land" | "Landing" | "Landed or published" | "Dismissed or backlog";
 export interface SecurityList { groups: { group: SecurityGroup; rows: FindingRow[] }[] }
 export interface FixRound { round: number; outcome: "passed" | "failed"; why: string; at: string; costUsd: number }
-export interface FindingPageData { finding: FindingView; /** The finding's open question and its choices, in the shape decisions use; null when nothing is open. */ decision: Decision | null; choices: DecisionChoices | null; status: ItemStatus; attempts: number; rounds: FixRound[]; history: HistoryEntry[]; costUsd: number }
+/** What a person can do with a finding in its state. `canAct`: the viewer may (they run the repo). A press with `writes` writes to GitHub; `note` says whether it takes a reason. */
+export interface FindingQuestion { text: string; canAct: boolean; actions: { action: FindingAction; label: string; does: string; writes: boolean; note: "required" | "optional" }[] }
+export interface FindingPageData { finding: FindingView; question: FindingQuestion | null; status: ItemStatus; /** Fix attempts so far. */ attempts: number; rounds: FixRound[]; history: HistoryEntry[]; costUsd: number }
 
 export type DownloadsRange = "all" | "today" | "yesterday" | "7d" | "30d" | "90d" | "12m" | "1h" | "3h" | "6h" | "12h";
 
@@ -3295,7 +3228,7 @@ export type WorkspaceCalls = { calls: WorkspaceCall[]; older: string | null };
 /** Untrusted text, shown as text: the first 4000 and the last 20000 characters of a longer output; `chars` is the full length. */
 export type WorkspaceCallOutput = { output: string | null; chars: number };
 
-/** One started item on the new Home (GET /api/maintain/home), from its live workflow row (src/workflow/). */
+/** One started item on Home (GET /api/maintain/home), from its live workflow row (src/workflow/). */
 export interface MaintainRow {
   repo: RepoName;
   number: number;
@@ -3324,15 +3257,13 @@ export interface MaintainRunnerLine {
 }
 
 /**
- * The new Home. `needs` holds items waiting for an answer on repos the reader may act on (operators: every repo; maintainers:
+ * Home. `needs` holds items waiting for an answer on repos the reader may act on (operators: every repo; maintainers:
  * repos with GitHub write; viewers: none). Viewers get `waiting` (every waiting item) and `running`; others get `mine` (items
  * they started, approved or stopped). `runner` is null for viewers and when model calls run on the server's own accounts.
  */
 /** One tracked repo on the Repos page: its counts, whether automatic work is on, and the breakers that paused a step. */
 export interface MaintainRepo {
   name: RepoName;
-  /** `new` repos change through the workflow controls, `legacy` repos through the classic switches. */
-  workflow: "new" | "legacy";
   automatic: boolean;
   /** The reader runs the repo: an operator, or a maintainer with write access. */
   canRun: boolean;
@@ -3352,9 +3283,8 @@ export interface MaintainHome {
   attention: HomeProblem[];
 }
 
-/** GET /api/maintain/queue: the repos on the new workflow, and who approved each started item for merge (`repo#number` to login). */
+/** GET /api/maintain/queue: who approved each started item for merge (`repo#number` to login). */
 export interface MaintainQueueMeta {
-  newRepos: RepoName[];
   approvedBy: Record<string, string>;
 }
 
@@ -3371,7 +3301,7 @@ export interface MaintainStats {
   perDay: { day: string; n: number }[];
 }
 
-// ---- the new Items page (GET /api/maintain/items) ----
+// ---- the Items page (GET /api/maintain/items) ----
 
 /**
  * Which list an item is in: `needs` (an open recommendation or an unclear last answer), `started` (a live workflow), `automatic`
@@ -3469,24 +3399,21 @@ export interface MaintainFinding { number: number; title: string; severity: Find
 /** An item a duplicate check found to be the same as this one. */
 export interface MaintainDuplicate { repo: RepoName; number: number; kind: "pr" | "issue"; state: ItemState; title: string; canonical: boolean }
 /** A question set aside when the repo moved to the maintainer workflow; its findings stay readable. Operators and maintainers only. */
-export interface MaintainWithdrawn { id: string; kind: string; question: string; summary: string | null; at: string | null }
+
 
 /**
- * The new item page's AutoCraft side (GET /api/maintain/items/:repo/:n). `workflowRepo` false means the repo still runs the decision
- * pipeline: the classic item page serves the item. `canAct`: the reader may send commands and controls here (operators, and
- * maintainers with GitHub write on the repo). Viewers get no security findings and no withdrawn questions.
+ * The item page's AutoCraft side (GET /api/maintain/items/:repo/:n). `canAct`: the reader may send commands and controls here (operators, and
+ * maintainers with GitHub write on the repo). Viewers get no security findings.
  */
 export interface MaintainItem {
   repo: RepoName;
   number: number;
   kind: "pr" | "issue";
-  workflowRepo: boolean;
   canAct: boolean;
   /** Null until someone starts the item. */
   status: MaintainItemStatus | null;
   events: MaintainEvent[];
   duplicates: MaintainDuplicate[];
-  withdrawn: MaintainWithdrawn[];
   security: MaintainFinding[];
   /** Held for model work because its author is outside the team. */
   outside: { reason: "limit" | "surge"; author: string; canRelease: boolean } | null;

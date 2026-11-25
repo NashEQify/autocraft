@@ -21,7 +21,7 @@ const BAD = /fail|error|refus|reject|broke|too-large/i;
 const toneOf = (s: string): TimelineTone => (BAD.test(s) ? "bad" : /merged|pushed|passed|ok\b|approve|done|green/i.test(s) ? "ok" : "neutral");
 
 const base = (id: string, at: string, kind: TimelineEntry["kind"], actor: string, icon: TimelineEntry["icon"], text: string): TimelineEntry => ({
-  id, at, kind, actor, icon, text, tone: "neutral", costUsd: null, major: false, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [], feedback: null,
+  id, at, kind, actor, icon, text, tone: "neutral", costUsd: null, major: false, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [],
 });
 
 /** What a job did, in the page's words; the job's own outcome is internal wording and shows only when it failed. */

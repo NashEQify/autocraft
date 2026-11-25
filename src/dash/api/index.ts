@@ -56,6 +56,7 @@ import { next } from "./next.ts";
 import { work } from "./work.ts";
 import { flow } from "./flow.ts";
 import { now, nowFeed } from "./now.ts";
+import { health } from "./health.ts";
 import { queueSlots } from "../../rank/position.ts";
 import * as items from "./items.ts";
 import { activity } from "./activity.ts";
@@ -506,6 +507,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "PUT", pattern: "/api/merge/single", operator: true, handler: ok(adm.setSingleMerge) },
     { method: "GET", pattern: "/api/settings/inference", operator: true, handler: ok(inference.get) },
     { method: "PUT", pattern: "/api/settings/inference", operator: true, handler: ok(inference.put) },
+    { method: "GET", pattern: "/api/settings/jev", operator: true, handler: ok(inference.getJev) },
+    { method: "PUT", pattern: "/api/settings/jev", operator: true, handler: ok(inference.putJev) },
     post("/api/repos/comment-approve", async (db, req) => await adm.commentApproval(db, req, true)),
     post("/api/repos/comment-revoke", async (db, req) => await adm.commentApproval(db, req, false)),
     post("/api/repos/push-approve", async (db, req) => await adm.pushApproval(db, req, true)),
@@ -626,6 +629,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/flow", flow),
     scoped(get("/api/now", now)),
     scoped(get("/api/live", live)),
+    get("/api/health", health),
     scoped(get("/api/now/feed", nowFeed)),
     heavy(get("/api/similar/:repo/:n", async (db, req) => sim.similar(db, req, vectors))),
     get("/api/security/findings", securityPage.securityFindings),

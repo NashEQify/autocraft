@@ -101,7 +101,7 @@ export const runEvent = (r: { id: number; step: string; prompt_id: string; model
   id: `run:${r.id}`, kind: "model-call", at: r.started_at, head: null, actor: model(r.model, "model"),
   summary: `${PROMPT_TITLES[r.prompt_id] ?? stepTitle(r.step)}: ${r.state === "running" ? "running" : r.state === "failed" ? "failed" : clip(r.summary, 100) || "done"}`,
   ref: { runId: r.id, ...(r.job_id !== null ? { jobId: r.job_id } : {}) },
-  call: { promptId: r.prompt_id, step: stepTitle(r.step), model: r.model, provider: r.provider, account: r.label, state: r.state, inputTokens: r.input_tokens, outputTokens: r.output_tokens, costUsd: r.cost_usd, toolCalls: r.tools, endedAt: r.ended_at, ...(staff && r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }) },
+  call: { promptId: r.prompt_id, step: stepTitle(r.step), model: r.model, provider: r.provider, state: r.state, inputTokens: r.input_tokens, outputTokens: r.output_tokens, costUsd: r.cost_usd, toolCalls: r.tools, endedAt: r.ended_at, ...(staff && r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }) },
 });
 
 
@@ -262,7 +262,6 @@ function veilHeader(h: ItemTraceHeader): ItemTraceHeader {
   return {
     ...h,
     now: { ...h.now, text: h.now.state ?? "Not planned yet", waitsOn: null, reasons: [], note: null },
-    who: { ...h.who, openDecisions: h.who.openDecisions.map((d) => ({ ...d, question: "" })) },
   };
 }
 
@@ -420,7 +419,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
       text: plan ? (next ?? wait ?? note ?? plan.state) : "Not planned yet", waitsOn: wait, reasons: reasonsFor(c, plan?.reasons ?? []), note,
     },
     next: acts.map((a) => ({ kind: a.kind, head: typeof a.head === "string" ? a.head : null })),
-    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), openDecisions: [], holds: hold ? [{ by: hold.heldBy, at: hold.heldAt }] : [] },
+    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), holds: hold ? [{ by: hold.heldBy, at: hold.heldAt }] : [] },
   };
 }
 

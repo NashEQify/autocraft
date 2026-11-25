@@ -179,7 +179,6 @@ type AdminApi = Pick<Api, "contributors" | "repoAdmin" | "access" | "githubApp">
 
 export function createAdminMock(me: User, changed: () => void): AdminApi {
   const authors = buildAuthors();
-  let singleMax = 3;
   let githubIdentity: "box" | "app" = typeof location !== "undefined" && location.search.includes("identity=app") ? "app" : "box";
   const repos = buildRepos(me.role);
   const access = structuredClone(ACCESS);
@@ -362,16 +361,6 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         log("repo-untrack", name);
         changed();
         return this.list();
-      },
-      async singleMerge() {
-        return { max: singleMax };
-      },
-      async setSingleMerge(max) {
-        requireOperator("change the single-merge limit");
-        if (!Number.isInteger(max) || max < 0 || max > 100) throw new Error("the single-merge limit must be a whole number from 0 to 100");
-        singleMax = max;
-        log("single-merge-max", "merge");
-        return { max };
       },
       async approveMerging(name, approved) {
         requireRun(name);

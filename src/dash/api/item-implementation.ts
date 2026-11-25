@@ -92,7 +92,7 @@ function questionsOf(c: Ctx, d: ImplementationData): ImplementationQuestion[] {
       const reply = comments.find((m) => m.created_at! > at && !!m.author && !c.own.has(m.author) && !/\[bot\]$/.test(m.author));
       if (reply) answer = { by: reply.author!, at: reply.created_at!, text: clip(reply.body ?? "", 600) };
     }
-    return { at, audience, text: q!.text!, decision: null, answer };
+    return { at, audience, text: q!.text!, answer };
   });
 }
 
@@ -119,7 +119,7 @@ export function implementationView(c: Ctx, d: ImplementationData | null, pr: Ite
     id: impl.id, attempt: impl.attempt, attempts: d.attempts, state: impl.state, queuedBy: c.staff ? impl.queuedBy : null, createdAt: impl.createdAt, updatedAt: impl.updatedAt,
     reason: c.staff ? impl.reason : causeOf(impl.reason), plan, questions: c.staff ? questionsOf(c, d) : [], calls, checks, diffStat: impl.diffStat,
     pr: impl.prNumber === null ? null : { repo: impl.repo, number: impl.prNumber, kind: "pr", state: pr?.state ?? null, title: pr?.title ?? null, url: impl.prUrl },
-    shots, decision: null,
+    shots,
     costUsd: runCost || calls.reduce((s, x) => s + (x.costUsd ?? 0), 0),
   };
 }
