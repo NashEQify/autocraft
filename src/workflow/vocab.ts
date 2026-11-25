@@ -80,11 +80,11 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "backlog",
   },
   {
-    word: "close", usage: "close", aliases: [], entry: null,
+    word: "close", usage: "close [as completed | as not planned | as duplicate of <item>]", aliases: [], entry: null,
     short: tk("Close the item."),
-    does: tk("Closes the issue or pull request on GitHub. Nothing more runs."),
+    does: tk("Closes the issue or pull request on GitHub as you, with a short comment. The reason is optional: completed, not planned, or the item it duplicates. Nothing more runs."),
     back: tk("Never."),
-    example: "close",
+    example: "close as duplicate of #12",
   },
   {
     word: "stop", usage: "stop", aliases: [], entry: null,

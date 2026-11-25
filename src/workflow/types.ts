@@ -89,9 +89,13 @@ export type ItemWorkflow = {
 /** An item as written in a command: `repo` is `owner/name` or a bare name, resolved against the tracked repos by the caller. */
 export type ItemRef = { repo: string; number: number };
 
+/** Why a close command closes the item. `of`: the item it duplicates; a null repo is the closed item's own. */
+export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate"; of: { repo: string | null; number: number } };
+
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
-  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "close" | "stop" | "autorepin"; args?: string }
+  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "stop" | "autorepin"; args?: string }
+  | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string }
   | { word: "weight"; weight: number };
 

@@ -65,6 +65,12 @@ function queuedOf(d: ItemPassData, ref: string): { by: string; at: string } | nu
  */
 const askedSince = (a: IssueAttempt): string => a.question?.at ?? a.attempt.updatedAt;
 
+/** The item's close to carry out. */
+function closeOf(d: ItemPassData, ref: string): ItemFacts["close"] {
+  const a = d.closes.get(ref);
+  return a ? { id: a.id, by: a.by, weight: a.weight, at: a.created_at } : null;
+}
+
 /** The open tracked items of the load, in repo and number order. */
 function rowsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<string> }) {
   return [...d.items].filter(([ref, i]) => i.state === "OPEN" && d.triage.facts.has(ref) && (!opts.repo || i.repo === opts.repo) && (!opts.refs || opts.refs.has(ref)))
@@ -180,7 +186,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       pairsToCheck: t.pairsToCheck, inGroupToAsk: false, inCompareSet: t.compare ?? false, dupeAnswers: [],
       scope: NO_SCOPE,
       labels: { quietFix: d.quiet.has(ref), existing: json<unknown[]>(r.labels, []).map(String), pluginAnswer: false, labeledNote: d.stages.get(ref)?.labeledNote ?? null },
-      answeredClose: [], closeReview: null,
+      close: closeOf(d, ref),
       fix: {
         attempt: null, publicRepo: d.repos.get(r.repo)?.visibility === "public", notRust: false,
         openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null, impact: t.priority?.impact ?? null, scopeDecision: null,

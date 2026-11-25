@@ -5,9 +5,10 @@
 // and approves the merge of a started item; a yes to a recommendation that ends in a merge records the approval; parts named by
 // words must match exactly one planned part; a weight alone needs a started item.
 import { describe } from "./parse.ts";
-import { sameQuestion, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
+import { sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
-export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null };
+/** `closing`: a close of the item is queued or waits for its person, which a stop takes back. */
+export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; closing?: boolean };
 
 /** How the confirmation line attributes the run: "approved by", "started by", ...; null: "by". */
 export type How = "started" | "approved" | "answered" | "stopped" | "set" | null;
@@ -27,6 +28,8 @@ export type Run = {
   merges: boolean;
   weight: number | null;
   end: "backlog" | "close" | "stop" | null;
+  /** Why it closes, when the command says. */
+  close?: CloseReason;
   /** The autorepin arguments, as written. */
   autorepin: string | null;
   /** It answers the open recommendation, which closes. */
@@ -120,8 +123,9 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
 
   if (end.length) {
     const e = end[0]!;
-    if (e === "stop" && !live) return refused({ why: "nothing-running" });
-    return run({ end: e, how: e === "stop" ? "stopped" : live && wf.rec ? "answered" : null, answers: live && !!wf.rec });
+    if (e === "stop" && !live && !state.closing) return refused({ why: "nothing-running" });
+    const close = e === "close" ? parts.find((p): p is Extract<CommandPart, { word: "close" }> => p.word === "close")?.reason : undefined;
+    return run({ end: e, ...(close && { close }), how: e === "stop" ? "stopped" : live && wf.rec ? "answered" : null, answers: live && !!wf.rec });
   }
   if (repin) {
     if (state.kind !== "pr") return refused({ why: "autorepin-not-pr" });
