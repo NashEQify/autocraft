@@ -14,10 +14,10 @@ import { config } from "../data/control/index.ts";
 import { loadChangeCursor, pruneChanges, readChanges, recordPass, type ChangeCursor, type PassCount, type ShadowDiff } from "../data/planner/index.ts";
 import { decideItem } from "./decide-item.ts";
 import { decidePr } from "./decide.ts";
-import { loadPass, loadPrFacts } from "./facts.ts";
-import { loadItemFacts } from "./issue-facts.ts";
+import { loadPass } from "./facts.ts";
+import { loadPassBase } from "./pass-load.ts";
 import type { ItemFacts, PrFacts } from "./plan.ts";
-import { loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
+import { loadFacts, loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
@@ -128,7 +128,11 @@ function shadowDiffs(inc: PlanSet, full: PlanSet): Diff[] {
 const sameFacts = (a: object, b: object): boolean => compare(a as Record<string, unknown>, b as Record<string, unknown>, "", ["now", "refreshAt"]).fields.length === 0;
 
 export type PlanPassOptions = {
-  now: number; run: string | null; model?: string;
+  now: number; model?: string;
+  /** The classification run (default: read with the change log). */
+  run?: string | null;
+  /** Reads of the caller that go out with the change log, ahead of the loads. */
+  first?: () => Promise<unknown>;
   /** The floor full load: a pass at least this long after the last full load loads everything. */
   fullEveryMs: number;
 };
@@ -138,22 +142,26 @@ export type PlanPassOptions = {
  * loads and the shadow's full load see one state of the database.
  */
 export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
-  const { now, run } = o;
+  const { now } = o;
   const model = o.model ?? embedderId(modelName());
-  const shadow = shadowMode(db);
-  const print = fingerprint(run, model);
   // The meter counts the pass's loads and decisions; the writes of `finish` are not in their own row.
   const { value: loaded, stats } = await db.meter(async () => {
   let state = states.get(db);
-  const changes = state ? await readChanges(db, state.cursor) : null;
+  // The log first: the snapshot holds the rows the loads below read with it.
+  const [changes, start, base] = await db.together(() => Promise.all([
+    state ? readChanges(db, state.cursor) : null, state ? null : loadChangeCursor(db), loadPassBase(db, o.run), o.first?.(),
+  ]));
+  const run = base.run;
+  const shadow = shadowMode(db);
+  const print = fingerprint(run, model);
   const reason: FullReason | null = !state || !changes ? "start" : changes.full ? (changes.cause ?? "marker") : state.fingerprint !== print ? "global" : now - state.fullAt >= o.fullEveryMs ? "floor" : null;
-  const load = { now, run };
+  const load = { now, run, model, base };
   let refs: number;
   let refreshUnchanged = 0;
   if (reason) {
-    // The log first: the snapshot holds the rows the loads below read with it. readChanges read every row it covers already.
-    const cursor = changes?.cursor ?? await loadChangeCursor(db);
-    const prs = await loadPrFacts(db, load), items = await loadItemFacts(db, { ...load, model });
+    // readChanges read every row its cursor covers already.
+    const cursor = changes?.cursor ?? start!;
+    const { prs, items } = await loadFacts(db, load);
     state = { prs: new Map(prs.map((f) => [refOf(f), f])), items: new Map(items.map((f) => [refOf(f), f])), cursor, fullAt: now, fingerprint: print };
     states.set(db, state);
     refs = new Set([...state.prs.keys(), ...state.items.keys()]).size;
@@ -165,7 +173,7 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
     for (const [ref, f] of s.items) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { ...due.get(ref), item: f });
     const reload = [...logged, ...due.keys()];
     if (reload.length) {
-      const prs = await loadPrFacts(db, { ...load, refs: reload }), items = await loadItemFacts(db, { ...load, model, refs: reload });
+      const { prs, items } = await loadFacts(db, { ...load, refs: reload });
       for (const ref of reload) { s.prs.delete(ref); s.items.delete(ref); }
       for (const f of prs) s.prs.set(refOf(f), f);
       for (const f of items) s.items.set(refOf(f), f);
@@ -214,7 +222,7 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       const add = (k: string, n: number, ms = 0, dbs = { statements: 0, roundTrips: 0, ms: 0 }): void => {
         const c = rec.counts.get(k) ?? { kind: k, passes: 0, refs: 0, at, ms: 0, maxMs: 0, dbStatements: 0, dbRoundTrips: 0, dbMs: 0, hour };
         // A count carried over from an earlier hour keeps that hour's bucket.
-        rec.counts.set(k, { ...c, passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms), dbStatements: c.dbStatements + dbs.statements, dbRoundTrips: c.dbRoundTrips + dbs.roundTrips, dbMs: c.dbMs + dbs.ms });
+        rec.counts.set(k, { ...c, passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms), dbStatements: c.dbStatements + dbs.statements, dbRoundTrips: c.dbRoundTrips + dbs.roundTrips, dbMs: c.dbMs + Math.round(dbs.ms) });
       };
       add(kind, refs, Math.round(passMs), stats);
       if (shadowRan) add(diffs.length ? "shadow:different" : "shadow:same", diffs.length);

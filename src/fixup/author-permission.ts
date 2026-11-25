@@ -56,15 +56,14 @@ export async function authorWrites(db: Db, repo: string, number: number): Promis
 }
 
 /**
- * authorWrites() for many PRs, from their items rows, at `nowMs`: the pipeline login and the cache are read once. `change` is told
- * when the answer would change with the clock alone (an entry aging past the TTL after its refresh failed).
+ * authorWrites() for many PRs, from their items rows and the stored permissions, at `nowMs`; `me` is the pipeline's login. `change` is
+ * told when the answer would change with the clock alone (an entry aging past the TTL after its refresh failed).
  */
-export async function authorWritesOf(db: Db, nowMs: number = Date.now()): Promise<(repo: string, r: Row, change?: (at: number) => void) => AuthorWrite> {
-  const me = await setting(db, PIPELINE_LOGIN_KEY);
-  const entries = entriesOf(await loadAuthorPermissions(db));
+export function authorWritesIn(me: string | null | undefined, permissions: Awaited<ReturnType<typeof loadAuthorPermissions>>, nowMs: number): (repo: string, r: Row, change?: (at: number) => void) => AuthorWrite {
+  const entries = entriesOf(permissions);
   return (repo, r, change) => {
     if (!r.author) return "no";
-    if (writesByRole(me, r)) return "yes";
+    if (writesByRole(me ?? undefined, r)) return "yes";
     const c = ownEntry(entries.get(`${repo}\n${r.author.toLowerCase()}`), r);
     const w = writesFrom(c, nowMs);
     if (c && w !== "no") change?.(noFrom(c));

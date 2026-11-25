@@ -4,7 +4,7 @@
 // All text here is written by outsiders and is passed on as untrusted data.
 import { createHash } from "node:crypto";
 import { isBotCommand, isBotLogin } from "./bots.ts";
-import { BLOCKED_EXPIRES_MS, activeFrom, loadBlockerReads } from "./blockers.ts";
+import { BLOCKED_EXPIRES_MS, activeFrom, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import type { Querier } from "../mirror.ts";
 import { FORMAL_REVIEWS, recordGate, recordGateFailure, type ReviewFact } from "../merge/changes-requested.ts";
 import { ENTRY_LIMIT, TOTAL_LIMIT, type DiscussionEntry } from "./parse.ts";
@@ -309,14 +309,25 @@ const cappedToday = (facts: ReviewFacts, ref: string, now: number): boolean => {
  * `now` is the time of the decision (default: the clock); `refresh` is told, per "repo#number", when the answer changes with the clock
  * alone (a blocker list expiring, the daily cap ending at UTC midnight). Open PRs only.
  */
-export async function staleReviews(db: Db, repo?: string, respectCap = false, opts: { now?: number; refresh?: (ref: string, at: number) => void } = {}): Promise<Set<string>> {
-  const now = opts.now ?? Date.now();
+export async function staleReviews(db: Db, repo?: string, respectCap = false, opts: StaleOpts = {}): Promise<Set<string>> {
   const keys = prKeys(repo);
   const [facts, items, repos] = await db.together(() => Promise.all([
-    loadReviewFacts(db, keys, { now }), loadItems(db, keys, "pr"), loadRepos(db, repo !== undefined ? { names: [repo] } : { all: true }),
+    loadReviewFacts(db, keys, { now: opts.now ?? Date.now() }), loadItems(db, keys, "pr"), loadRepos(db, repo !== undefined ? { names: [repo] } : { all: true }),
   ]));
-  const state = discussionStateOf(facts);
   const reads = await loadBlockerReads(db, [...facts.latest.values()].flatMap((r) => r.blocked_by));
+  return await staleFrom({ facts, items, repos, reads }, respectCap, opts);
+}
+
+type StaleOpts = { now?: number; refresh?: (ref: string, at: number) => void };
+
+/** staleReviews() from its loads: `items` are the open PRs to judge, `reads` the blockers their latest reviews name. */
+export async function staleFrom(
+  d: { facts: ReviewFacts; items: ReadonlyMap<string, { base_ref: string | null }>; repos: ReadonlyMap<string, { default_branch: string | null }>; reads: BlockerReads },
+  respectCap: boolean, opts: StaleOpts = {},
+): Promise<Set<string>> {
+  const { facts, items, repos, reads } = d;
+  const now = opts.now ?? Date.now();
+  const state = discussionStateOf(facts);
   const marked = staleMarksOf(facts);
   const out = new Set<string>();
   for (const [ref, r] of facts.latest) {

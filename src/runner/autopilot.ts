@@ -169,19 +169,17 @@ export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => 
   if (incremental) {
     // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
     return await inReadSnapshot(db, async () => {
-      await rereadSettingsSnapshot(db);
-      const scope = await scopeRepos(db);
-      const run = await classifyRun(db);
-      const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
+      let scope = new Set<string>(), names: string[] = [];
+      const first = async (): Promise<void> => { [scope, names] = await Promise.all([scopeRepos(db), trackedNames(db), rereadSettingsSnapshot(db)]); };
+      const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
       wakeAtRefresh(pass.plans, wake);
-      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
+      return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
     });
   }
-  const scope = await scopeRepos(db);
-  const run = await classifyRun(db);
-  const plans = await loadPlanSet(db, { run });
+  const [scope, names] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db)]));
+  const plans = await loadPlanSet(db);
   wakeAtRefresh(plans, wake);
-  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
+  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope };
 };
 
 /**

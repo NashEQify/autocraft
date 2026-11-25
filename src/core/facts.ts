@@ -7,12 +7,10 @@ import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
 import { fullPass, repoPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
-import { authorWritesOf } from "../fixup/author-permission.ts";
-import { longLivedAll, pushable, sameRepo } from "../fixup/pushable.ts";
+import { pushable, sameRepo } from "../fixup/pushable.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
-import { refereeClosed, settle, type Settled } from "../classify/settled.ts";
-import { classifyRun, loadSettled } from "../data/triage/index.ts";
-import { redMainRepos, MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
+import { refereeClosed, settle } from "../classify/settled.ts";
+import { MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
 import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/changes-requested.ts";
 import { effectiveCiWith } from "../optional-checks.ts";
 import { parseFixes } from "../fixup/candidates.ts";
@@ -22,16 +20,15 @@ import { parsePublic } from "../review/opus-parse.ts";
 import { rereadPaceAt } from "../review/diff.ts";
 import { slugOf } from "../owners.ts";
 import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
-import { CARRIED, carriedReview } from "../review/carry.ts";
-import { postSourcesOf } from "../review/post-source.ts";
-import { staleReviews } from "../review/discussion.ts";
-import { nextUtcMidnight, reviewHolds } from "../review/gate.ts";
+import { CARRIED, carriedReviews } from "../review/carry.ts";
+import { staleFrom } from "../review/discussion.ts";
+import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { legHeadOf, mergeWaits, workflowGate } from "./may.ts";
-import { loadPrPass, type PrPassData } from "./pass-load.ts";
+import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
 
@@ -49,6 +46,8 @@ export type LoadOptions = {
   appSlug?: string | null;
   /** The classification run for labels (default: latestRun). */
   run?: string | null;
+  /** Our logins and the run, when the caller read them. */
+  base?: PassBase;
 };
 
 type Mirrored = PrPassData["mirror"] extends Map<string, infer V> ? V : never;
@@ -113,49 +112,56 @@ export const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string
 
 /** Facts of every open PR (and merged PRs with a take or take-fix review, merged by us, or of a live implementation) of the keys given. One load for all PRs. */
 export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
+  return await db.read(async () => {
+    const base = opts.base ?? await loadPassBase(db, opts.run);
+    return (await inStep<[PrFacts[]]>(db, (endWave) => prFacts(db, { ...opts, base }, endWave)))[0];
+  });
+}
+
+/** loadPrFacts() as one load of a group that runs in step. */
+export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase }, endWave: EndWave): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
-  const refs = opts.refs ? [...opts.refs] : undefined;
-  const keys: KeySource = opts.keys ?? (refs ? refs.map(asRef) : opts.repo ? repoPass(opts.repo) : fullPass());
+  const refs = opts.refs ? new Set(opts.refs) : undefined;
+  const keys: KeySource = opts.keys ?? (refs ? [...refs].map(asRef) : opts.repo ? repoPass(opts.repo) : fullPass());
   const mergeEntryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;
     return workflowFactOf(d, ref)?.entry === "merge" ? currentHead(m) : null;
   };
+  const keep = (ref: string): boolean => (!opts.repo || asRef(ref).repo === opts.repo) && (!refs || refs.has(ref));
+  const rowsOf = (d: PrPassData) => {
+    const all = [...d.mirror].filter(([ref, m]) => keep(ref) && m.item.kind === "pr" && inUniverse(d, ref, m.item.state)).map(([ref]) => ref);
+    return { all, scoped: all.filter((ref) => d.inScope.has(ref) && !integrationOf(d, ref)) };
+  };
   // Clock-driven changes the facts below do not show as a time of their own (expiries, daily counts, cache lifetimes), per PR.
   const refresh = refreshTimes(now);
-  return await db.read(async () => {
-    const [d, run, stale, staleActionable, mainRed, quiet, authorWrites, longLived, holdOf] = await Promise.all([
-      loadPrPass(db, keys, { now, mergeEntryHead }),
-      opts.run !== undefined ? Promise.resolve(opts.run) : classifyRun(db),
-      staleReviews(db, opts.repo, false, { now, refresh: refresh.soon }),
-      staleReviews(db, opts.repo, true, { now, refresh: refresh.soon }),
-      redMainRepos(db), listQuietPrs(db, { repo: opts.repo }), authorWritesOf(db, now), longLivedAll(db), reviewHolds(db, now, refs),
-    ]);
-    const keep = (ref: string): boolean => (!opts.repo || asRef(ref).repo === opts.repo) && (!refs || refs.includes(ref));
-    const rows = [...d.mirror].filter(([ref, m]) => keep(ref) && m.item.kind === "pr" && inUniverse(d, ref, m.item.state));
-    const scoped = rows.filter(([ref]) => d.inScope.has(ref) && !integrationOf(d, ref)).map(([ref]) => ref);
-    const ownPrs = ownPrSet(d.mainFixPrs, quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
-    const authors = rows.filter(([ref, m]) => scoped.includes(ref) && m.item.author).map(([, m]) => ({ login: m.item.author!, id: m.item.author_id ?? null }));
-    const [settled, tiers, postSource] = await Promise.all([
-      loadSettled(db, scoped.map(asRef), run).then((m) => async (repo: string, number: number): Promise<Settled> => m.get(`${repo}#${number}`) ?? settle(null, null)), tiersOf(db, authors),
-      postSourcesOf(db, rows.filter(([ref]) => d.review.latest.get(ref)?.mode === CARRIED).map(([ref]) => ref)),
-    ]);
-    const ctx: Ctx = { now, refresh, stale, staleActionable, mainRed, quiet, ownPrs, authorWrites, longLived, holdOf, settled, tiers, postSource };
-    return await withConfig(db, async () => {
-      const out: PrFacts[] = [];
-      for (const [ref, m] of rows) {
-        const f = await buildPr(db, d, ref, m, ctx);
-        if (f) out.push(f);
-      }
-      // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
-      const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
-      for (const f of out) {
-        const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent));
-        if (at !== undefined) f.refreshAt = at;
-      }
-      return out;
-    }, { preload: d.control });
-  });
+  const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, mergeEntryHead, rows: rowsOf }, endWave);
+  const ownPrs = ownPrSet(d.mainFixPrs, d.quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
+  const openPrs = new Map([...d.mirror].filter(([, m]) => m.item.kind === "pr" && m.item.state === "OPEN").map(([ref, m]) => [ref, m.item] as const));
+  const staleOf = (respectCap: boolean): Promise<Set<string>> => staleFrom({ facts: d.review, items: openPrs, repos: d.repos, reads: d.blockers }, respectCap, { now, refresh: refresh.soon });
+  return await withConfig(db, async () => {
+    const cfg = config(db);
+    const ctx: Ctx = {
+      now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, toCarry: new Map(),
+      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])) }, now),
+    };
+    const out: PrFacts[] = [];
+    for (const ref of rowsOf(d).all) {
+      const f = await buildPr(db, d, ref, d.mirror.get(ref)!, ctx);
+      if (f) out.push(f);
+    }
+    if (ctx.toCarry.size) {
+      const carried = await carriedReviews(db, [...ctx.toCarry.values()], ctx.stale);
+      for (const f of out) if (carried.has(`${f.repo}#${f.number}`)) f.carriable = true;
+    }
+    // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
+    const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
+    for (const f of out) {
+      const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent));
+      if (at !== undefined) f.refreshAt = at;
+    }
+    return out;
+  }, { preload: d.control });
 }
 
 /** Facts of one PR, or null when it is not an open PR (or a merged one with a take review). */
@@ -165,9 +171,9 @@ export async function loadPrFact(db: Db, repo: string, number: number, opts: Omi
 export type { PrTier };
 
 type Ctx = {
-  now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; mainRed: Set<string>; quiet: Set<string>; ownPrs: Set<string>;
-  authorWrites: Awaited<ReturnType<typeof authorWritesOf>>; longLived: Awaited<ReturnType<typeof longLivedAll>>; holdOf: Awaited<ReturnType<typeof reviewHolds>>;
-  settled: (repo: string, number: number) => Promise<Settled>; tiers: Awaited<ReturnType<typeof tiersOf>>; postSource: Awaited<ReturnType<typeof postSourcesOf>>;
+  now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; ownPrs: Set<string>; holdOf: HoldCheck;
+  /** The PRs whose earlier review may carry to their head, which is read for all of them at once. */
+  toCarry: Map<string, { repo: string; number: number; head_oid: string }>;
 };
 
 function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"] {
@@ -193,7 +199,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const repoRow = d.repos.get(repo);
   const rf: PrFacts["repoFacts"] = {
     mergeApproved: !!approvals.merge, pushApproved: !!approvals.push, commentApproved: !!approvals.comment, ciApproved: !!approvals.ci,
-    noCi: !!d.ciSignals.get(repo)?.noCi, mainRed: c.mainRed.has(repo), fixIssueApproved: !!approvals.fixissue,
+    noCi: !!d.ciSignals.get(repo)?.noCi, mainRed: d.mainRed.has(repo), fixIssueApproved: !!approvals.fixissue,
     implementOn: cfg.repo(repo).buildFeature("implement"),
   };
   const pub = repoRow?.visibility === "public";
@@ -228,7 +234,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     tripped: tripsOfRepo(trips, repo), ghState: state, head, draft: fresh ? ch!.state !== "OPEN" || !!ch!.is_draft : !!i.is_draft,
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
-    heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: c.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
+    heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: d.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
     score: weightScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
     review: null, post: { postable: false, posted: null },
     checksHere: false, checksOpen: false, ci: "unknown", mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
@@ -258,12 +264,12 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     return base;
   }
 
-  const s = await c.settled(repo, number);
+  const s = d.settled.get(ref) ?? settle(null, null);
   base.label = s.label ?? null;
   base.needsDecisionFlag = s.flags.includes("needs decision");
   base.labelUnsure = s.status === "settled" && !!s.referee && !s.referee.sure && refereeClosed(s.referee);
   const tierOf = (h: string | null): PrTier => {
-    const t = (i.author ? c.tiers.get(tierKey({ login: i.author, id: i.author_id ?? null })) : undefined) ?? "not";
+    const t = (i.author ? d.tiers.get(tierKey({ login: i.author, id: i.author_id ?? null })) : undefined) ?? "not";
     // The pipeline's own fix PRs count as whitelisted at a head the pipeline itself pushed (others may push to the branch); an operator's deny still wins.
     return t === "not" && isOwn(i.author) && c.ownPrs.has(ref) && !!h && ownHead(h) ? "whitelisted" : t;
   };
@@ -275,8 +281,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const checksAtHead = ch?.head_oid === (mxh ?? latest?.head ?? head);
   base.mergeable = (checksAtHead ? ch?.mergeable : i.mergeable) ?? "UNKNOWN";
   // An author whose permission has not been read yet counts as able to write: the job that pushes reads it first.
-  base.pushable = pushable(i.head_repo, repo, checksAtHead ? ch?.maintainer_can_modify : i.maintainer_can_modify, i.head_ref, c.longLived(repo), false,
-    sameRepo(i.head_repo, repo) && c.authorWrites(repo, { author: i.author, author_type: i.author_type, author_id: i.author_id ?? null }, (t) => refresh.soon(ref, t)) !== "no");
+  base.pushable = pushable(i.head_repo, repo, checksAtHead ? ch?.maintainer_can_modify : i.maintainer_can_modify, i.head_ref, d.longLived(repo), false,
+    sameRepo(i.head_repo, repo) && d.authorWrites(repo, { author: i.author, author_type: i.author_type, author_id: i.author_id ?? null }, (t) => refresh.soon(ref, t)) !== "no");
   if (operator && state === "OPEN") {
     const legs = operator.legs;
     base.operator = {
@@ -313,7 +319,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     };
     // Our own plain fix-up, or a base merge that left the diff the same, made the head: the review of the earlier head may carry to it.
     const ours = patch.pushes.some((e) => e.to === head && ((e.kind === "fixup" && e.source === null && e.state === "pushed") || (e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same")));
-    if (state === "OPEN" && head && head !== qh && ours && await carriedReview(db, { repo, number, head_oid: head }, c.stale)) base.carriable = true;
+    if (state === "OPEN" && head && head !== qh && ours) c.toCarry.set(ref, { repo, number, head_oid: head });
   }
   base.pushChain = chain;
   if (state === "OPEN" && (chain.length > 1 || (!!head && !!push?.pushed.has(head)))) base.inFlight = true;
@@ -328,7 +334,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.statementConflicts = statementConflicts(d, [mx ? null : latest!.conflicts, safeJson(pmRow?.conflicts)]);
   const p = d.review.posts.get(ref);
   // A carried review has no text of its own: the post uses the text of the review it was carried from.
-  const src = !mx && latest!.mode === CARRIED ? await c.postSource(repo, number, qh) : null;
+  const src = !mx && latest!.mode === CARRIED ? await d.postSource(repo, number, qh) : null;
   const hasPublic = src ? src.hasPublic : !mx && latest!.public_summary !== null;
   const pubText = src ? src.public : !hasPublic ? { ok: true } : parsePublic({ summary: latest!.public_summary ?? "", points: [] });
   base.post = { postable: (hasPublic || !!p?.review_id) && !!pubText, posted: p ? { head: p.head, at: p.posted_at, opusAt: p.opus_at } : null };

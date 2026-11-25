@@ -23,9 +23,9 @@ export async function longLivedOf(db: Db, repo: string): Promise<LongLived> {
   return longLived((await loadLongLivedBranches(db, [repo])).get(repo));
 }
 
-/** longLivedOf() for every repo, from one reading of the default branches and PR branches. */
-export async function longLivedAll(db: Db): Promise<(repo: string) => LongLived> {
-  const names = await loadLongLivedBranches(db);
+/** longLivedOf() for `repos` (every repo without them), from one reading of the default branches and PR branches. */
+export async function longLivedAll(db: Db, repos?: string[]): Promise<(repo: string) => LongLived> {
+  const names = await loadLongLivedBranches(db, repos);
   return (repo) => longLived(names.get(repo));
 }
 
