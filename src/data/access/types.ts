@@ -22,18 +22,21 @@ export type ActVerdict =
   | { ok: false; why: ActRefusal | "stale" };
 export type ActIdentity = "app" | "box";
 
-export type SessionRow = Selectable<DB["sessions"]> & { role: Role | null };
+/** `rowid` is how the Access page addresses a session; it stays inside access and the dashboard. */
+export type SessionRow = Selectable<DB["sessions"]> & { rowid: number; role: Role | null };
 export type AdminSession = SessionRow;
 export type NewSession = { idHash: string; login: string; csrf: string; sealedTokens: Sealed | null; now: string; expiresAt: string; userAgent: string | null };
 export type OauthState = Selectable<DB["oauth_states"]>;
 export type NewOauthState = { state: string; verifier: string; returnTo: string | null; identity: string; createdAt: string };
 
-export type McpTokenRow = Selectable<DB["mcp_tokens"]>;
+/** The columns loaders return: no hash, and none of the helper columns that moved to `runners.remote_helpers`. */
+export type McpTokenRow = Pick<Selectable<DB["mcp_tokens"]>, "id" | "login" | "label" | "kind" | "can_answer" | "can_agent" | "can_run" | "created_at" | "last_used_at" | "expires_at">;
 export type TokenScopes = { canAnswer?: boolean; canAgent?: boolean; canRun?: boolean };
-export type NewToken = { login: string; hash: string; label: string; kind: string; scopes: TokenScopes; expiresAt?: string };
+export type NewToken = { login: string; hash: string; label: string | null; kind: string; scopes: TokenScopes; expiresAt: string };
 export type RunnerTokenRow = Pick<McpTokenRow, "id" | "label" | "created_at" | "expires_at" | "can_agent" | "can_answer">;
 export type McpCaller = McpTokenRow & { role: Role | null };
 export type RunnerLoginRow = Selectable<DB["runner_logins"]>;
+export type NewRunnerLogin = Pick<RunnerLoginRow, "user_code" | "secret_hash" | "label" | "machine" | "ip" | "helper_version" | "created_at" | "expires_at" | "want_agent" | "want_answer">;
 export type LoginState = { state: string; token?: string };
 
 export type UserTokenStatus = "ok" | "refresh-failed";
@@ -45,6 +48,7 @@ export type ReporterSealed = { login: string; sealed: Sealed; version: number; s
 export type AppSealed = { appId: number; slug: string; sealed: Sealed };
 export type AppState = Selectable<DB["github_app_states"]>;
 export type SetupLink = Selectable<DB["github_setup_links"]>;
+export type NewSetupLink = Pick<SetupLink, "id" | "org" | "created_by" | "hash" | "created_at" | "expires_at">;
 export type AllowedOwner = Selectable<DB["app_allowed_owners"]>;
 export type LinkRow = Selectable<DB["discord_links"]>;
 export type OverrideRow = Selectable<DB["whitelist_overrides"]>;
