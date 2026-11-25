@@ -8,5 +8,6 @@
   "src/agents/status.ts",
   "src/agents/token.ts",
   "src/build/tasks.ts",
+  "src/dash/api/related.ts",
   "src/itemtools/server/tools.ts"
 ]
