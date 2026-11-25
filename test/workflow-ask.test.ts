@@ -288,7 +288,7 @@ test("CI fixes that failed twice are the contributor's first, and a question onc
   assert.equal((await wf(w)).state, "running");
   const p = await w.prPlan(1);
   assert.equal(p.waitCode, "ci-contributor");
-  await w.db.run(w.db.k.insertInto("main.item_plans").values({ repo: "app", number: 1, kind: "pr", head: "sha1", state: p.state, actions: "[]", wait: p.wait, reasons: "[]", note: null, view: JSON.stringify({ waitKind: p.waitKind }), planned_at: T0 }));
+  await w.db.run(w.db.k.insertInto("main.item_plans").values({ repo: "app", number: 1, kind: "pr", head: "sha1", state: p.state, actions: "[]", wait: p.wait, reasons: "[]", note: null, view: JSON.stringify({ waitKind: p.waitKind, waitCode: p.waitCode }), planned_at: T0 }));
   assert.match((await legWait(w.db, await wf(w)))!, /contributor/);
 
   // A push of ours, whose CI fix fails as well: they were asked already.
@@ -309,6 +309,7 @@ test("an implementation that ended without a pull request is asked about, and a 
   await pause();
   await startAttempt(w.db, { repo: "app", number: 7, textHash: textHash("Panic when the slice is empty", "first() indexes element 0."), queuedBy: MAINT });
   await w.db.run(w.db.k.updateTable("main.implementations").set({ state: "failed", updated_at: new Date().toISOString() }));
+  await pause();
   await settle(w);
   const x = await wf(w, 7);
   assert.deepEqual([x.state, x.rec?.goes], ["recommending", "on"]);
