@@ -80,6 +80,31 @@ export type DbEvent =
   /** A write transaction ended; `holdMs` is how long it held the write lock. */
   | { kind: "write-lock"; holdMs: number; site: string };
 
+/** Options of a QueryDb read. */
+export interface QueryOpts {
+  /**
+   * Runs the statement on its own inside `together`, never fused into a wave: for loaders of blobs (`bytea` comes back
+   * from JSON as hex text), of more than about 10,000 rows, of ids above 2^53, or that can be slow (embedding scans).
+   */
+  alone?: boolean;
+  /** The loader's name: an error of the statement starts with it, and observers see it as the site of a fused statement. */
+  label?: string;
+}
+
+/** What `db.meter` counted. */
+export interface DbStats {
+  /** Logical statements: each Kysely query, raw statement and script, and each member of a fused wave. BEGIN and COMMIT are not statements. */
+  statements: number;
+  /** Postgres round trips (every query sent, BEGIN, locks and COMMIT included); 0 on SQLite, which runs in-process. */
+  roundTrips: number;
+  /** Rows the statements returned (a fused wave counts its members' rows). */
+  rows: number;
+  /** Time spent in the database: Postgres round trips, SQLite statements. */
+  ms: number;
+  /** External effects (`effect()` in src/db/effects.ts): GitHub calls, model calls, build launches. */
+  effects: number;
+}
+
 /** One `Db.listen` registration. */
 export interface Subscription {
   /** Whether the channel's notifications arrive now. */
@@ -89,15 +114,30 @@ export interface Subscription {
 
 export interface Db {
   readonly dialect: Dialect;
-  /** Kysely, routed to the transaction open in the current async context. */
+  /**
+   * Kysely, routed to the transaction open in the current async context.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   readonly k: Kysely<DB>;
-  /** Runs a Kysely query: its first row. */
+  /**
+   * Runs a Kysely query: its first row.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   get<O>(q: Compilable<O>): Promise<O | undefined>;
-  /** Runs a Kysely query: all rows. */
+  /**
+   * Runs a Kysely query: all rows.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   all<O>(q: Compilable<O>): Promise<O[]>;
-  /** Runs a Kysely write. */
+  /**
+   * Runs a Kysely write.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   run(q: Compilable<unknown>): Promise<RunResult>;
-  /** Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters. */
+  /**
+   * Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   prepare(text: string): Statement;
   /**
    * Runs `fn` with its Kysely SELECTs outside a transaction shared: one with the same text and parameters as an earlier
@@ -119,10 +159,27 @@ export interface Db {
    */
   write<T>(fn: () => Promise<T>, opts?: WriteOptions): Promise<T>;
   /**
+   * Runs `fn` with its Kysely SELECTs gathered into waves: the ones issued in the same event-loop turn go out together.
+   * Postgres sends a wave as one statement, which reads one snapshot (each read a JSON array column of it; top-level
+   * booleans come back as 1/0 as on the plain path); past 40 reads, and for `alone` reads, it sends more statements at
+   * once, each its own snapshot outside a transaction. SQLite runs a wave's reads one after another in one read
+   * transaction. Load with `Promise.all` inside it: each `await` on an earlier result starts another wave. Works
+   * inside `read` and `write` (the wave runs in the transaction). A write inside `fn` first sends the reads issued before
+   * it, then runs at once, so they see the state before it. A failed fused statement fails every read in it. Reads that
+   * shareReads already holds are served from it and join no wave.
+   */
+  together<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Runs `fn` and counts what it did in the database (statements, round trips, rows, time) and its external effects, in
+   * this async context at any depth of awaits. A meter inside another adds its counts to the outer one when it ends.
+   */
+  meter<T>(fn: () => Promise<T>): Promise<{ value: T; stats: DbStats }>;
+  /**
    * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
    * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
    * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
    * Attempts in one transaction run one at a time, like its statements.
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
    */
   attempt<T>(fn: () => Promise<T>): Promise<T>;
   /** Whether a transaction is open in the current async context; with `mode`, one of that kind (a read snapshot or a write). */
@@ -134,7 +191,10 @@ export interface Db {
    * opening, outside any transaction.
    */
   scope(): Promise<void>;
-  /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
+  /**
+   * Runs several statements with no parameters (schema scripts, PRAGMAs).
+   * @deprecated Queries belong in the data modules, which reach them through `queryDb` (src/db/query-db.ts).
+   */
   script(text: string): Promise<void>;
   /**
    * Postgres: NOTIFY `channel` with `payload` for every process listening; inside a write transaction it is sent when the
