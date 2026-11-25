@@ -11,16 +11,13 @@ import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mir
 import { withdrawItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, holdMerges, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { authorWrites } from "../fixup/author-permission.ts";
-import { BASE_NAME, conflictBucket } from "../fixup/conflict-state.ts";
 import type { Exec } from "../fixup/git.ts";
-import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
-import { byHand, conflictPath, settlesConflict, type ConflictPath } from "../core/decide.ts";
+import { conflictAhead } from "../core/conflict-ahead.ts";
+import { byHand, conflictPath, type ConflictPath } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
-import type { PrFacts } from "../core/plan.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
@@ -118,23 +115,6 @@ export async function checkMerges({ db, item }: Ctx): Promise<void> {
 
 /** What a confirmation says of a PR's conflict with its base branch once the merge is approved. */
 type ConflictSaid = { note?: string; waits?: "contributor" | "person" };
-
-/** Who settles the PR's conflict once its merge is approved, also while no review says it is wanted yet; null when it does not conflict. */
-async function conflictAhead(db: Db, item: Target, read?: PrFacts | null): Promise<ConflictPath | null> {
-  const { repo, number } = item, one = [{ repo, number }];
-  const [items, checks] = await db.together(() => Promise.all([loadItems(db, one, "pr"), loadChecks(db, one)]));
-  const it = items.get(ref(item)), ch = checks.get(ref(item));
-  if (it?.mergeable !== "CONFLICTING" && ch?.mergeable !== "CONFLICTING") return null;
-  const f = read === undefined ? await loadPrFact(db, repo, number) : read;
-  if (f?.mergeable !== "CONFLICTING" || !it) return null;
-  const known = conflictPath(f);
-  if (known !== null || !f.head) return known;
-  const [longLived, writes] = await db.together(() => Promise.all([longLivedOf(db, repo), authorWrites(db, repo, number)]));
-  // An author whose permission has not been read yet counts as able to write, as in the plan.
-  const can = pushable(it.head_repo, repo, ch?.head_oid === f.head ? ch?.maintainer_can_modify : it.maintainer_can_modify, it.head_ref, longLived, false, writes !== "no");
-  const bucket = await conflictBucket(db, { repo, number, head: f.head, pushable: can }, { push: true, comment: f.repoFacts.commentApproved });
-  return settlesConflict({ conflict: { bucket, base: it.base_ref ?? "", baseOk: BASE_NAME.test(it.base_ref ?? "") }, pushable: can });
-}
 
 function conflictSaid(item: Target, path: ConflictPath | null): ConflictSaid {
   if (byHand(path)) return { waits: path, note: t("New commits come back to you.") };
