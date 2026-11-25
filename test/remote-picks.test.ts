@@ -26,12 +26,16 @@ import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
 import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { STARTED_HOLD_MS } from "../src/remote/started.ts";
-import { addFastTrack } from "../src/fasttrack.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import type { Db } from "../src/db/index.ts";
 import { excluded, like } from "../src/db/kx.ts";
+
+/** A started item: the workflow row a maintainer's start command writes. */
+const startedItem = (db: Db, by: string, repo: string, number: number): Promise<unknown> =>
+  insertWorkflow(db, { repo, number, kind: "issue", entry: "review", state: "running", startedBy: by, startedAt: "2026-01-01T00:00:00Z", startedVia: "dashboard" });
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-picks-"));
@@ -247,7 +251,7 @@ describe("picks and Manual only", async () => {
     const a = await q();
     await pickCall(db, user("bob"), a);
     const b = await q();
-    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0 });
+    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, canAnswer: false, expensive: () => 0 });
     const rpc = async (login: string, role: Role, method: string, params?: Record<string, unknown>) => (await handleMcp(env(login, role), { jsonrpc: "2.0", id: 1, method, ...(params && { params }) }))!.result as any;
     const names = async (login: string, role: Role) => (await rpc(login, role, "tools/list")).tools.map((t: { name: string }) => t.name).filter((n: string) => n.includes("model_call"));
     assert.deepEqual(await names("eve", "viewer"), ["list_model_calls"]);
@@ -311,8 +315,8 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");
     assert.equal(await remoteRoom(db, 0), 0, "no open fast-tracked item at all: no room, even for a question about no repo or task");
 
-    await addFastTrack(db, "bob", "photocraft#11");
-    await addFastTrack(db, "alice", "photocraft#12");
+    await startedItem(db, "bob", "photocraft", 11);
+    await startedItem(db, "alice", "photocraft", 12);
     assert.ok(await remoteRoom(db, 0, Date.now(), undefined, "opus-review") > 0, "room for the task: the fast-tracked items are on a repo alice takes");
     await setUserRepos(db, "alice", ["deckcraft"]);
     assert.equal(await remoteRoom(db, 0, Date.now(), undefined, "opus-review"), 0, "no room once alice takes only a repo without fast-tracked items");
@@ -349,7 +353,7 @@ describe("picks and Manual only", async () => {
 
     const units = [21, 22, 23, 20];
     for (const n of units) await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: n, kind: "issue", state: "OPEN", title: "x", author: "dev", created_at: "2026-01-01T00:00:00Z" }).onConflict((oc) => oc.doNothing()));
-    await addFastTrack(db, "bob", "photocraft#20");
+    await startedItem(db, "bob", "photocraft", 20);
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "fast" } }));
     await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "<>", "alice"));
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");

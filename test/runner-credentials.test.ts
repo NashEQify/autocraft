@@ -9,7 +9,6 @@ import type { RunnersReply } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
 import { splitRunnerTokens } from "../src/db.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
-import { answering } from "../src/dash/mcp/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { randomToken, sha256hex } from "../src/dash/server/crypto.ts";
@@ -18,7 +17,6 @@ import { FakeProvider } from "../src/dash/server/provider.ts";
 import { HttpError, RateLimiter } from "../src/dash/server/util.ts";
 import { parseClaim } from "../src/remote/calls.ts";
 import { addressKey, MAX_PENDING_PER_ADDRESS, startLogin } from "../src/remote/device-login.ts";
-import { setMaintainerWrites } from "../src/settlers.ts";
 import { PROTOCOL_VERSION, ROUTES, type LoginStartReply, type PendingRunnerLogin } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -80,7 +78,7 @@ describe("over HTTP", async () => {
     await addLogin(db, "cli", "boss", "operator", null);
     const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: file, AUTOCRAFT_DEV_PERMS: perms });
     const limiter = new RateLimiter(60, 3600_000);
-    const s = await startServer({ config, db, provider: new FakeProvider(perms), feedbackLimiter: limiter, routes: apiRoutes({ limiter }) });
+    const s = await startServer({ config, db, provider: new FakeProvider(perms), routes: apiRoutes() });
     base = s.url;
     close = s.close;
   });
@@ -149,7 +147,6 @@ describe("over HTTP", async () => {
   });
 
   test("a runner's scopes: agent access opens /mcp, answering adds the answer tools, and the owner changes both", async () => {
-    answering.enabled = true;
     try {
       const boss = await signedIn("boss");
       const { token, row } = await createToken(db, "boss", "studio", { kind: "runner", canAgent: true });
@@ -165,27 +162,18 @@ describe("over HTTP", async () => {
       assert.equal((await post("/mcp", { jsonrpc: "2.0", id: 1, method: "ping" }, token)).status, 403);
       await (await signedIn("maint"))("POST", "/api/runners/scopes", { id: row.id, agent: true, answer: false }, 404);
     } finally {
-      answering.enabled = false;
     }
   });
 
-  test("approving with answering needs a login that settles decisions", async () => {
-    answering.enabled = true;
-    try {
-      const credential = `acrun_${randomToken(32)}`;
-      const { userCode } = await start(credential, { answer: true });
-      const maint = await signedIn("maint");
-      const card = await maint<PendingRunnerLogin>("GET", `/api/runners/pending?code=${userCode}`);
-      assert.deepEqual(card.scopes, { agent: true, answer: true });
-      await maint("POST", "/api/runners/approve", { code: userCode, agent: true, answer: true }, 403);
-      await setMaintainerWrites(db, true);
-      const list = await maint<RunnersReply>("POST", "/api/runners/approve", { code: userCode, agent: true, answer: true });
-      assert.ok(list.runners.some((r) => r.label === "laptop" && r.agent && r.answer));
-      assert.ok((await toolNames(credential)).includes("answer_decision"));
-    } finally {
-      answering.enabled = false;
-      await setMaintainerWrites(db, false);
-    }
+  test("a maintainer approves a Task Runner that sends commands; a viewer cannot", async () => {
+    const credential = `acrun_${randomToken(32)}`;
+    const { userCode } = await start(credential, { answer: true });
+    const maint = await signedIn("maint");
+    const card = await maint<PendingRunnerLogin>("GET", `/api/runners/pending?code=${userCode}`);
+    assert.deepEqual(card.scopes, { agent: true, answer: true });
+    const list = await maint<RunnersReply>("POST", "/api/runners/approve", { code: userCode, agent: true, answer: true });
+    assert.ok(list.runners.some((r) => r.label === "laptop" && r.agent && r.answer));
+    assert.ok((await toolNames(credential)).includes("command"));
   });
 
   test("device login: the runner starts, a maintainer looks up the code and approves, the runner polls and claims", async () => {

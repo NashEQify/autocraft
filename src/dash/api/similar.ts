@@ -11,7 +11,7 @@ import { HttpError } from "../server/util.ts";
 import { classifyRun, loadSettled } from "../../data/triage/index.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import type { Req } from "../types.ts";
-import { itemState } from "./decisions.ts";
+import { itemState } from "./shown.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
 

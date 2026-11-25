@@ -36,7 +36,7 @@ import { pipelineState } from "../../runner/autopilot.ts";
 import { canSeeInternals } from "./staff.ts";
 import { mapLimit, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-import { setting } from "../../settings-read.ts";
+import { setting } from "../../data/control/index.ts";
 
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;

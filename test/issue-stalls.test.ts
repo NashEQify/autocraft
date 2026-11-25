@@ -8,17 +8,6 @@ import { connectDb } from "../src/db/open.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 
-test("a labelled issue with the needs-decision flag and no scope decision is asked", () => {
-  const p = decideItem(itemFacts({ ...needsDecision, labels: { existing: ["bugfix", "needs decision"], labeledNote: "added: bugfix" } }));
-  assert.equal(p.state, "scope-due");
-  assert.deepEqual(p.actions.map((a) => a.kind), ["decide"]);
-});
-
-test("a draft waits for its scope question and says so", () => {
-  const p = decideItem(itemFacts({ ...needsDecision, draft: true }));
-  assert.equal(p.wait, "the scope question to be asked");
-});
-
 const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", settles: true, featureOn: true, liveInRepo: 0,
   row: { state, attempt: 1, textChanged: o.textChanged ?? false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false } });
 
@@ -64,49 +53,4 @@ test("only closing references, and a person's bare mention, hold an issue; links
   for (const r of await db.all(db.k.selectFrom("items").select(["number", "title", "body"])))
     await db.run(db.k.updateTable("items").set({ text_refs: textRefs(r.title, r.body) }).where("number", "=", r.number));
   assert.deepEqual(await issuesWithOpenPr(db, "app"), m);
-});
-
-test("a lapsed maintainer scope answer is set aside and asked once; an open duplicate group covers its members", async () => {
-  const { connect } = await import("../src/db.ts");
-  const { ask } = await import("../src/decisions.ts");
-  const { setAsideLapsedScope } = await import("../src/merge/withdraw.ts");
-  const { loadItemFact } = await import("../src/core/issue-facts.ts");
-  const db = await connectDb(":memory:");
-  const t = new Date().toISOString();
-  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: t, pipeline: 1 }));
-  await db.prepare("INSERT INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-  for (const n of [5, 6]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title: "T", body: "", author: "a", created_at: t, updated_at: t }));
-  const q = (id: string, number: number) => ({ id, kind: "scope", repo: "app", number, question: "Scope?", facts: [], options: [{ key: "take", label: "Take" }, { key: "close", label: "Close" }], asked_at: t, asked_by: "decide" });
-  await ask(db, [q("app#5:scope", 5)]);
-  await db.prepare("UPDATE decisions SET answer = 'take', answered_by = 'maint', answered_at = ?, applied_at = ? WHERE id = 'app#5:scope'").run(t, t);
-  assert.equal((await loadItemFact(db, "app", 5))?.scope.covered, false, "a lapsed answer covers nothing");
-  assert.equal(await setAsideLapsedScope(db, "app#5:scope", t), true);
-  await ask(db, [q("app#5:scope", 5)]);
-  const open = await db.prepare("SELECT id FROM decisions WHERE repo = 'app' AND number = 5 AND answer IS NULL").all();
-  assert.equal(open.length, 1);
-  assert.equal((await loadItemFact(db, "app", 5))?.scope.covered, true, "the next Decide run asks nothing");
-  assert.equal(await setAsideLapsedScope(db, "app#5:scope", t), false, "an open question is not set aside");
-
-  await ask(db, [{ id: "app#6:dupegroup:g", kind: "duplicate", question: "Duplicates?", facts: [], options: [{ key: "a", label: "A" }, { key: "b", label: "B" }], asked_at: t, asked_by: "dupes", items: [{ repo: "app", number: 6 }, { repo: "app", number: 7 }] }]);
-  assert.equal((await loadItemFact(db, "app", 6))?.scope.covered, true);
-});
-
-test("Close and Backlog on a stopped fix are scope answers by the operator, once", async () => {
-  const { connect } = await import("../src/db.ts");
-  const { stopFixItem } = await import("../src/dash/api/operator.ts");
-  const db = await connectDb(":memory:");
-  const t = new Date().toISOString();
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: t, pipeline: 1 }));
-  await db.run(db.k.insertInto("items").values({ repo: "app", number: 5, kind: "issue", state: "OPEN", title: "T" }));
-  await db.run(db.k.insertInto("fix_attempts").values({ repo: "app", number: 5, main_sha: "m", text_hash: "h", state: "skipped", created_at: t, updated_at: t }));
-  const req = (answer: string) => ({
-    method: "POST", path: "", params: { repo: "app", n: "5" }, query: new URLSearchParams(), form: new URLSearchParams(), json: { answer },
-    user: { login: "op", role: "operator", canWrite: async () => true, canRead: async () => true }, csrf: "", nonce: "",
-  }) as never;
-  await stopFixItem(db, req("close"));
-  const d = await db.prepare("SELECT kind, answer, answered_by FROM decisions WHERE repo = 'app' AND number = 5").get();
-  assert.deepEqual({ ...d }, { kind: "scope", answer: "close", answered_by: "op" });
-  await assert.rejects(() => stopFixItem(db, req("backlog")), /already decided/);
 });

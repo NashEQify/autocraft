@@ -8,20 +8,6 @@ let current: World | null = null;
 afterEach(() => current?.close());
 const kindsOf = async (w: World, n: number) => (await w.prPlan(n)).actions.map((a) => a.kind);
 
-test("a Merge answer carries across a base merge that left the diff unchanged, not across a CI fix or a changed-diff merge", async () => {
-  const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(1)).review(1, { verdict: "take" })).answer(1, "merge")).pr(2)).review(2, { verdict: "take" })).answer(2, "merge")).pr(3)).review(3, { verdict: "take" })).answer(3, "merge"));
-  const merge = (number: number, from_head: string, to_head: string, own_diff: string) =>
-    w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number, from_head, to_head, state: "merged", attempt: 1, created_at: T0, own_diff }));
-  await merge(1, "sha1", "sha1m", "same");
-  await merge(2, "sha2", "sha2m", "changed");
-  await w.db.prepare("INSERT INTO ci_fixes (repo, number, head, to_head, kind, state, attempt, created_at) VALUES ('app', 3, 'sha3', 'sha3c', 'code', 'pushed', 1, ?)").run(T0);
-  await (await (await w.synced(1, "sha1m")).synced(2, "sha2m")).synced(3, "sha3c");
-  await advancePreapprovals(w.db);
-  assert.equal((await preapprovalOf(w.db, "app", 1))?.by, OPERATOR);
-  assert.equal(await preapprovalOf(w.db, "app", 2), null);
-  assert.equal(await preapprovalOf(w.db, "app", 3), null);
-});
-
 test("code carried from a closed duplicate by an author who is not whitelisted needs a Merge answer at the head", async () => {
   const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(5)).review(5, { verdict: "take" })).verified(5)).premerge(5, "clean")).pr(6)).pr(7, { author: "regular" })).review(7, { verdict: "take" })).verified(7)).premerge(7, "clean"));
   await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED", author: "stranger" }).where("number", "=", 6));

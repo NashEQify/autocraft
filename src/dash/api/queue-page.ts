@@ -1,5 +1,5 @@
-// The Queue page: tabs All, Review, Fix, Verify and Merge over one repo filter, with fast-tracked items first, plus
-// the operator's fast-track, hold and batch controls. Reads are for anyone signed in, limited to the repos the
+// The Queue page: tabs All, Review, Fix, Verify and Merge over one repo filter, ordered by workflow weight, plus
+// the hold and batch controls. Reads are for anyone signed in, limited to the repos the
 // requester may see; every write is for operators (the route says so) and audited.
 import { canSeeInternals } from "./staff.ts";
 import type { FastPosition, ItemPrBuild, MergeWait, NextMerge, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRepos, QueueTab, QueueWorkRow, TypeLabel } from "../../../web/src/api/types.ts";
@@ -11,7 +11,7 @@ import { loadItems, loadOpenPrLinks } from "../../data/mirror/index.ts";
 import { featureOn } from "../../build/features.ts";
 import { ownerOf } from "../../owners.ts";
 import { HEAD_CHANGED, preapproveMerge } from "../../preapproval/index.ts";
-import { requireSettle } from "../../settlers.ts";
+import { actRefusal } from "../../github/identity.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { ControlError, holdMerge, releaseMerge, removeFromBatch, stopBatch } from "../../merge/controls.ts";
 import { loadBatches } from "../../data/merge/index.ts";
@@ -228,11 +228,6 @@ export async function pipelineRepoNames(db: Db, req: Req): Promise<string[]> {
   return (await visibleRepos(db, req)).filter((r) => tracked.get(r)?.pipeline === true);
 }
 
-/** Fast track is retired: the workflow's weight orders the queue, so no item is listed. */
-export async function fastTrackRefs(_db: Db, _req: Req): Promise<string[]> {
-  return [];
-}
-
 /** PRs whose merge an operator holds, as `repo#number`, in visible repos. */
 export async function heldMergeRefs(db: Db, req: Req): Promise<string[]> {
   const visible = new Set(await visibleRepos(db, req));
@@ -240,7 +235,7 @@ export async function heldMergeRefs(db: Db, req: Req): Promise<string[]> {
 }
 
 /** `https://github.com/<owner>/<repo>/pull/<n>` (or `/issues/<n>`), `<repo>#<n>` or `<owner>/<repo>#<n>`. */
-function parseItemRef(input: unknown): { repo: string; number: number } {
+export function parseItemRef(input: unknown): { repo: string; number: number } {
   const t = typeof input === "string" ? input.trim() : "";
   const m = /^https?:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:pull|issues)\/([1-9][0-9]*)(?:[/?#].*)?$/.exec(t)
     ?? /^(?:([A-Za-z0-9._-]+)\/)?([A-Za-z0-9._-]+)#([1-9][0-9]*)$/.exec(t);
@@ -274,19 +269,6 @@ async function guarded<T>(f: () => Promise<Promise<T> | T>): Promise<T> {
   }
 }
 
-const RETIRED = "fast track is retired: start the item with a command and set its weight with the weight command";
-
-async function retiredRoute(db: Db, req: Req): Promise<never> {
-  const r = item(req);
-  await needVisible(db, req, r.repo);
-  await needRunner(req, r.repo);
-  throw new HttpError(410, RETIRED);
-}
-
-export const fastTrackAdd = async (db: Db, req: Req): Promise<string[]> => retiredRoute(db, req);
-export const fastTrackWeight = async (db: Db, req: Req): Promise<string[]> => retiredRoute(db, req);
-export const fastTrackRemove = async (db: Db, req: Req): Promise<string[]> => retiredRoute(db, req);
-
 /** Queuing an issue is the start of its workflow: the row that carries the queuer and the weight is written by the command, so nothing is stored here. */
 export async function queueIssue(_db: Db, _by: string, _repo: string, _number: number, _w: number | null, _via?: string): Promise<void> {}
 
@@ -307,11 +289,11 @@ function closingIndex(links: Awaited<ReturnType<typeof loadOpenPrLinks>>): Map<s
   return out;
 }
 
-/** What Queue items does, as the refusal of `settleRefusal` names it. */
+/** What Queue items does, as the refusal names it. */
 export const queueWhat = (repo: string): string => `queues items on ${repo}`;
 
 /**
- * "Queue items", one line, for an operator or a maintainer who settles on the repo. A PR is pre-approved at its current head (it merges
+ * "Queue items", one line, for an operator or a maintainer who may act on the repo. A PR is pre-approved at its current head (it merges
  * once the review says take, the pre-merge review is clean and CI is green). An issue is queued for Fix; when exactly one open PR closes
  * it, that PR is queued as above. Several closing PRs are only listed: a person picks one.
  * `pin` (a command in a comment) names the one head each PR may be pre-approved at, or null for a PR that may not be queued: one
@@ -320,8 +302,8 @@ export const queueWhat = (repo: string): string => `queues items on ${repo}`;
 export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number) => string | null): Promise<{ label: string; fast: string[] }> {
   const r = item(req);
   await needVisible(db, req, r.repo);
-  // A pre-approved merge is a Merge answer given ahead, so it takes the rule of an answer (src/settlers.ts): an operator with write access, or a maintainer where they settle decisions.
-  await requireSettle(db, req.user, [r.repo], queueWhat(r.repo));
+  // A pre-approved merge is a merge approval given ahead, so it takes the act rule: an AutoCraft login with write access on the repo.
+  if (await actRefusal(db, req.user, r.repo)) throw new HttpError(403, `only an operator, or a maintainer with write access where the app acts for them, ${queueWhat(r.repo)}`);
   const by = req.user.login;
   const kind = (await loadItems(db, [r], "ref")).get(refText(r))?.kind;
   if (kind === "issue") {

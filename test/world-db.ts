@@ -10,14 +10,12 @@ import { join } from "node:path";
 import { fakeTaskRunner } from "./fake-runner.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
-import { ask } from "../src/decisions.ts";
 import type { ActDeps } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { setFixIssueApproval } from "../src/implement/approval.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { setMergeApproval } from "../src/merge/approval.ts";
 import { setCiApproval } from "../src/merge/ci-approval.ts";
-import { MERGE_OPTIONS, mergeDecisionId, HEAD_FACT } from "../src/core/rules.ts";
 import type { BatchDeps } from "../src/merge/batch.ts";
 import type { CommandResult, MergeDeps } from "../src/merge/index.ts";
 import type { Querier } from "../src/mirror.ts";
@@ -225,22 +223,6 @@ export async function world() {
       await recordDiffFacts(db, "app", n, await headOf(n));
       return w;
     },
-    /** The operator's answer to the PR's Merge? question at its head (asks it first when nobody did). */
-    async answer(n: number, key: "merge" | "hold" | "close") {
-      const id = mergeDecisionId("app", n, await headOf(n));
-      await ask(db, [{
-        id, kind: "merge", repo: "app", number: n, question: "Merge this PR?", facts: [`${HEAD_FACT}${await headOf(n)}`],
-        options: Object.values(MERGE_OPTIONS).map((x) => ({ ...x })), asked_by: "merge", asked_at: T0,
-      }]);
-      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
-      return w;
-    },
-    /** An operator's answer to a decision asked earlier (by id). */
-    async answerDecision(id: string, key: string) {
-      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
-      return w;
-    },
-
     // ---- models ----
     /** Starts a fake Task Runner (test/fake-runner.ts): it gets each call's prompt text and returns the reply text, or undefined for "no reply". */
     async models(reply: (input: string) => string | undefined) {

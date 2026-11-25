@@ -13,7 +13,7 @@ const as = (role: "viewer" | "maintainer"): Req => ({
   user: { login: role === "viewer" ? "v" : "m", role, canWrite: async () => role === "maintainer", canRead: async () => true },
 });
 
-test("the item page read gives a viewer no security findings, and a maintainer theirs", async () => {
+test("the item page read gives a viewer no security findings, and a maintainer gets them", async () => {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "maintain-item-")), "dash.db"));
   const now = new Date().toISOString();

@@ -44,6 +44,14 @@ export const ciAllows = (path: "rule" | "operator" | "maintainer" | null, ci: st
   ci === "success" || (path === "operator" && ci === "none" && noCi);
 
 export type Size = "S" | "M" | "L";
+
+/**
+ * The PR's head commit as best known: the checks table's when it was fetched after the mirror last saw the PR change, else the mirror's.
+ */
+export function headOf(r: { head_oid: string | null; updated_at: string | null; c_head: string | null; c_at: string | null }): string | null {
+  if (r.c_head && r.c_at && (!r.updated_at || r.c_at > r.updated_at)) return r.c_head;
+  return r.head_oid ?? r.c_head;
+}
 /** Same S and M bounds as the dashboard's size column; its L and XL are both L here. */
 export function sizeOf(linesChanged: number): Size {
   return linesChanged <= 50 ? "S" : linesChanged <= 300 ? "M" : "L";

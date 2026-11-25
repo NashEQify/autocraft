@@ -63,7 +63,7 @@ before(async () => {
   await addLogin(db, "cli", "pal", "maintainer", null);
   await scopeToTracked(db);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
-  const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes({ writesPerHour: LIMIT }) });
+  const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });
   base = s.url;
   close = s.close;
 });

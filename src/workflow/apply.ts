@@ -1,11 +1,12 @@
 // The command core: every surface (GitHub, Discord, the agent, the dashboard, the CLI) parses text with parse.ts and hands the
-// result here. For each item it checks the repo is tracked and that the person may act (src/settlers.ts actRefusal), resolves
+// result here. For each item it checks the repo is tracked and that the person may act (actRefusal in src/github/identity.ts), resolves
 // the text against the item's workflow (resolve.ts), carries the run out on the existing machinery (effects.ts), writes the
 // workflow row with its event in one write and returns the line every surface shows (status.ts).
 //
 // A list of items runs item by item: one that is refused or fails leaves the others running, and the reply lists it. GitHub takes
 // one item per comment. Each person has an hourly number of items per surface, counted from the recorded events so every
 // process and replica shares it.
+import * as access from "../data/access/index.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
@@ -18,7 +19,7 @@ import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { claimLevels } from "../remote/level.ts";
-import { actRefusal, type ActRefusal } from "../settlers.ts";
+import { actRefusal } from "../github/identity.ts";
 import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
@@ -56,7 +57,7 @@ const HOUR_MS = 3_600_000;
 
 const refText = (repo: string, n: number): string => `${slugOf(repo)}#${n}`;
 
-function refusalLine(r: ActRefusal, login: string | null, repo: string): string {
+function refusalLine(r: access.ActRefusal, login: string | null, repo: string): string {
   switch (r) {
     case "no-login": return login ? t("{login} has no AutoCraft login. Sign in to AutoCraft to send commands.", { login }) : t("Sign in to AutoCraft to send commands.");
     case "no-role": return t("Only maintainers and operators send commands to AutoCraft.");

@@ -1,7 +1,6 @@
 // The typed settings registry and the snapshot (M05 control-a). `settings` holds configuration only; each key is declared
 // once in `SETTINGS`/`REPO_SETTINGS` with its type, default and the rule that reads a stored value, so feature code reads
-// typed properties of `config(db)` and never key strings. The functions after the registry are the string-keyed reads of
-// `src/settings-read.ts`, which stays as a re-export shim until its callers move to `config`.
+// typed properties of `config(db)` and never key strings. The functions after the registry are the string-keyed reads.
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Db } from "../../db/index.ts";
 import { onSettingsWrite } from "../../db/handle.ts";

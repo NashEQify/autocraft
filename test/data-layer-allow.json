@@ -1,26 +1,5 @@
 [
-  "src/answers/hold.ts",
-  "src/answers/sweep.ts",
   "src/build/tasks.ts",
-  "src/dash/api/decisions.ts",
-  "src/decide/choices-convert.ts",
-  "src/decide/choices-parse.ts",
-  "src/decide/choices.ts",
-  "src/decide/decision.ts",
-  "src/decide/index.ts",
-  "src/decide/judgement.ts",
-  "src/decide/prepare.ts",
-  "src/decide/prepared.ts",
-  "src/decisions-used.ts",
-  "src/decisions.ts",
-  "src/dupes/held.ts",
-  "src/dupes/texts.ts",
-  "src/fasttrack.ts",
-  "src/itemtools/server/tools.ts",
-  "src/merge/verify-override.ts",
-  "src/merge/withdraw.ts",
-  "src/review/candidates.ts",
-  "src/review/summary.ts",
-  "src/settlers.ts",
-  "src/workflow/flip.ts"
+  "src/dash/api/related.ts",
+  "src/itemtools/server/tools.ts"
 ]

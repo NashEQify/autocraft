@@ -1,7 +1,6 @@
 // HTTP server: sign-in, sessions, CSRF, rate limits, security headers and
 // routing for the dashboard. Handlers only ever see authenticated requests.
 import { AppKeys, bindSecrets, useAppKeys } from "../../github/app-keys.ts";
-import { maintainerWritesOn } from "../../settlers.ts";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -37,7 +36,7 @@ import { appPermission } from "../../remote/permission.ts";
 import { cachedWrite, createSession, deleteSession, loadSession, makeUser, PERM_READ_TTL, pruneExpired, SESSION_TTL, userForLogin, type Session } from "./sessions.ts";
 import { readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../../data/control/index.ts";
 import * as sessions from "../../data/access/index.ts";
-import { answering, handleMcp, mcpReply, writes as mcpWrites, type Msg as McpMsg, type Reply as McpReply } from "../mcp/index.ts";
+import { handleMcp, mcpReply, writes as mcpWrites, type Msg as McpMsg, type Reply as McpReply } from "../mcp/index.ts";
 import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
 import * as remote from "../../remote/calls.ts";
@@ -107,8 +106,6 @@ export type AppOptions = {
   routes?: Route[];          // default: the JSON API
   images?: ImageProxy;       // default: fetches with global fetch and the bot's gh token
   live?: LiveOptions;        // GET /api/live timing; defaults suit production
-  // Opinions and comments per login per hour. The dashboard's routes and the MCP server's feedback must share one instance.
-  feedbackLimiter?: RateLimiter;
   githubUserId?: (login: string) => Promise<number | null>; // numeric GitHub id of a login for new access entries; default: GitHub's API
   githubApi?: string;        // base URL of the GitHub API for the GitHub App calls; default: api.github.com
 };
@@ -116,9 +113,9 @@ export type AppOptions = {
 type Compiled = Route & { parts: string[] };
 
 
-export async function defaultRoutes(feedbackLimiter?: RateLimiter, githubUserId?: AppOptions["githubUserId"]): Promise<Route[]> {
+export async function defaultRoutes(githubUserId?: AppOptions["githubUserId"]): Promise<Route[]> {
   const { apiRoutes } = await import("../api/index.ts");
-  return apiRoutes({ limiter: feedbackLimiter, ...(githubUserId && { githubUserId }) });
+  return apiRoutes({ ...(githubUserId && { githubUserId }) });
 }
 
 function compile(routes: Route[]): Compiled[] {
@@ -285,7 +282,6 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const loginPollLimit = new RateLimiter(share(30), 60_000);
   const webhookLimitIp = new RateLimiter(share(5000), 60_000);  // flood guard only; the periodic sync still runs. Before the body is read or the signature checked
   // Feedback shares the dashboard's limiter, so the two doors together stay within one budget per login.
-  const mcpFeedback = opts.feedbackLimiter ?? new RateLimiter(share(60), 3600_000);
   // list_repos, list_fixups and list_merge_queue aggregate the mirror like the dashboard's expensive GETs: a burst, then 30 a minute, per login.
   const mcpExpensive = new TokenBucket(share(20), shareRate(0.5));
   const callbackUrl = `${config.baseUrl ?? ""}/auth/callback`;
@@ -738,7 +734,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) return reply(400, rpcError(-32600, "send one JSON-RPC message as an object; batches are not supported"));
     const m = msg as McpMsg;
     const out = await handleMcp({
-      db, baseUrl: config.baseUrl, limiter: mcpFeedback, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: answering.enabled && caller.canAnswer && (caller.role === "operator" || (caller.role === "maintainer" && await maintainerWritesOn(db))),
+      db, baseUrl: config.baseUrl, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: caller.canAnswer && (caller.role === "operator" || caller.role === "maintainer"),
       user: async (forWrite) => await userForLogin(db, box, provider, caller.login, caller.role, forWrite),
       // The task tools are offered while one of the login's Task Runners reports in; they never lease.
       ...(await hasFreshRunner(db, caller.login) && { run: { canWrite: (await claimPermission(caller.login, caller.role)).canWrite } }),
@@ -1072,8 +1068,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
 const REQUEST_STATEMENTS_LOGGED = 100;
 
 export async function startServer(opts: AppOptions): Promise<{ server: Server; url: string; app: Awaited<ReturnType<typeof createApp>>; close(): Promise<void> }> {
-  const feedbackLimiter = opts.feedbackLimiter ?? new RateLimiter(share(60), 3600_000);
-  const app = await createApp({ ...opts, feedbackLimiter, routes: opts.routes ?? (await defaultRoutes(feedbackLimiter, opts.githubUserId)) });
+  const app = await createApp({ ...opts, routes: opts.routes ?? (await defaultRoutes(opts.githubUserId)) });
   const server = createServer({ requestTimeout: 30_000, headersTimeout: 15_000 }, (req, res) => void app.handle(req, res));
   // Job processes expire user-local leases only while this process stamps that it serves (src/remote/liveness.ts). The
   // stamp uses the helper routes' short busy timeout: a busy database skips a tick rather than stalling the event loop.

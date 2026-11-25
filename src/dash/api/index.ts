@@ -26,16 +26,15 @@ import { trackedNames } from "../../repos.ts";
 import { hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } from "./visible.ts";
 import { contributors } from "../../whitelist.ts";
 import { doneByRepo, funnelByRepo, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
-import { HttpError, RateLimiter, share } from "../server/util.ts";
+import { HttpError } from "../server/util.ts";
+import { githubIdentity } from "../../github/identity.ts";
 import type { Req, Res, Route } from "../types.ts";
 import * as adm from "./admin.ts";
 import { githubUserId } from "../../github/users.ts";
-import { maintainersSettle } from "../../settlers.ts";
 import * as discord from "./discord.ts";
 import * as agents from "./agents.ts";
 import * as build from "./build.ts";
 import * as workspaces from "./workspaces.ts";
-import * as dec from "./decisions.ts";
 import * as conv from "./conversations.ts";
 import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
@@ -70,23 +69,20 @@ import { actionsOf as releasesOf } from "../../operator-actions.ts";
 import { settle, unflagged } from "../../classify/settled.ts";
 import { classifyRun, loadItemAreas, loadSettled } from "../../data/triage/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
-import { classificationsOf, itemState, relatedOf } from "./decisions.ts";
+import { classificationsOf, relatedOf } from "./related.ts";
+import { itemState } from "./shown.ts";
 import * as sim from "./similar.ts";
 import * as inference from "./inference.ts";
 import { localEmbedder, type Embedder } from "../../embed/model.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { batchOne } from "./batch-page.ts";
-import { batchRemovePr, batchStop, fastTrackAdd, fastTrackRefs, fastTrackRemove, fastTrackWeight, queueAdd, heldMergeRefs, mergeHoldPr, pipelineRepoNames, queuePage } from "./queue-page.ts";
+import { batchRemovePr, batchStop, queueAdd, heldMergeRefs, mergeHoldPr, pipelineRepoNames, queuePage } from "./queue-page.ts";
 import { VectorIndex } from "../../embed/vectors.ts";
 import { mainCiRepos, summarize } from "../../mainci/index.ts";
 import * as commands from "./commands.ts";
 import type { Db } from "../../db/index.ts";
 
 export type ApiOptions = {
-  // Opinions and comments by non-operators, per login per hour.
-  writesPerHour?: number;
-  // The limiter itself, when the Inbox MCP server's feedback must share it (see AppOptions.feedbackLimiter); overrides writesPerHour.
-  limiter?: RateLimiter;
   // Embeds search queries and items without a stored vector; default: the local model, loaded on first use.
   embedder?: Embedder;
   // Runs `gh` for the batch controls that close a PR; default: the real one. Tests fake it.
@@ -125,7 +121,7 @@ async function me(db: Db, req: Req): Promise<User> {
     writeRepos: await writeRepos(db, req),
     runRepos: await runRepos(db, req),
     maintainerWrites: false,
-    maintainerSettles: await maintainersSettle(db),
+    maintainerSettles: await githubIdentity(db) === "app",
     inference: "user-local",
     uiV2: await uiV2(db, req.user.login),
   };
@@ -380,7 +376,6 @@ async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
 // ---- routes --------------------------------------------------------------
 
 export function apiRoutes(opts: ApiOptions = {}): Route[] {
-  const limiter = opts.limiter ?? new RateLimiter(share(opts.writesPerHour ?? 60), 3600_000);
   const vectors = new VectorIndex(opts.embedder ?? localEmbedder({ threads: 2 }));
   const get = (pattern: string, fn: (db: Db, req: Req) => Promise<unknown>): Route => ({ method: "GET", pattern, handler: ok(fn) });
   const post = (pattern: string, fn: (db: Db, req: Req) => Promise<unknown>): Route => ({ method: "POST", pattern, handler: ok(fn) });
@@ -391,29 +386,11 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/me", me),
     get("/api/repos", allVisibleRepos),
     get("/api/repos/owners", repoOwners),
-    scoped(get("/api/decisions", async (db, req) => dec.listDecisions(db, req))),
-    get("/api/decisions/open-counts", dec.openCounts),
-    get("/api/decisions/:id", dec.getOne),
-    get("/api/decisions/:id/thread", dec.thread),
-    post("/api/decisions/:id/answer", dec.answer),
-    post("/api/decisions/:id/undo", dec.undo),
-    post("/api/decisions/:id/retry", dec.retry),
-    post("/api/decisions/:id/dispute", dec.dispute),
-    post("/api/decisions/:id/keep", dec.keepAnswer),
-    { method: "POST", pattern: "/api/decisions/:id/snooze", handler: ok(dec.snooze) },
-    { method: "POST", pattern: "/api/decisions/:id/reprepare", handler: ok(dec.reprepare) },
-    post("/api/decisions/:id/reopen", dec.reopen),
-    post("/api/items/:repo/:n/backlog", dec.backlogItemRoute),
     // The maintainer workflow's commands and controls (src/workflow/apply.ts).
     post("/api/items/:repo/:n/command", commands.itemCommand),
     get("/api/mention", (db) => commands.mention(db)),
     post("/api/commands", commands.listCommand),
     post("/api/controls", commands.control),
-    { method: "POST", pattern: "/api/decisions/backlog", handler: ok(dec.backlogBulk) },
-    post("/api/decisions/:id/adopt", dec.adopt),
-    post("/api/decisions/:id/feedback", async (db, req) => dec.feedback(db, req, limiter)),
-    post("/api/decisions/:id/retract", async (db, req) => dec.retract(db, req, limiter)),
-    post("/api/decisions/:id/claim", dec.claim),
     get("/api/mcp/tokens", mcp.tokens),
     post("/api/mcp/tokens", mcp.create),
     post("/api/mcp/tokens/revoke", mcp.revoke),
@@ -444,7 +421,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/downloads", downloads),
     get("/api/items/:repo/:n/trace", itemTrace),
     get("/api/items/:repo/:n/trace/event", itemTraceDetail),
-    get("/api/items/:repo/:n/decision", dec.forItem),
     get("/api/conversations/:repo/:n", conv.getConversation),
     { method: "POST", pattern: "/api/conversations/:repo/:n/messages", handler: ok(async (db, req) => conv.postMessage(db, req)) },
     { method: "POST", pattern: "/api/conversations/:repo/:n/withdraw", handler: ok(async (db, req) => conv.postWithdraw(db, req)) },
@@ -586,11 +562,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     scoped(get("/api/work", work)),
     scoped(get("/api/queue/page", queuePage)),
     get("/api/repos/pipeline", pipelineRepoNames),
-    get("/api/fast-track", fastTrackRefs),
     get("/api/merge/held", heldMergeRefs),
-    { method: "POST", pattern: "/api/fast-track", handler: ok(fastTrackAdd) },
-    { method: "POST", pattern: "/api/fast-track/remove", handler: ok(fastTrackRemove) },
-    { method: "POST", pattern: "/api/fast-track/weight", handler: ok(fastTrackWeight) },
     post("/api/queue/add", queueAdd),
     { method: "POST", pattern: "/api/merge/hold", handler: ok(async (db, req) => mergeHoldPr(db, req, true)) },
     { method: "POST", pattern: "/api/merge/release", handler: ok(async (db, req) => mergeHoldPr(db, req, false)) },

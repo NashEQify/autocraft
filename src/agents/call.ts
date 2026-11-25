@@ -31,7 +31,7 @@ const PROMPT_STEP: Record<string, { step: string; stage: number }> = {
   "dupes.jev": { step: "dupes", stage: 3 }, "dupes.haiku": { step: "dupes", stage: 3 },
   "review.opus": { step: "opus-review", stage: 5 }, "postmerge.opus": { step: "postmerge", stage: 8 }, "premerge.opus": { step: "premerge", stage: 6 },
   "dupes.compare-prs.opus": { step: "dupes-compare", stage: 3 }, "dupes.compare-issues.sonnet": { step: "dupes-compare", stage: 3 },
-  "decide.prepare": { step: "decide", stage: 3 }, "fixup.check": { step: "fixup", stage: 6 },
+  "fixup.check": { step: "fixup", stage: 6 },
   "conversation.turn": { step: "conversation", stage: 3 },
   "areas.jev": { step: "classify-new", stage: 2 }, "areas.haiku": { step: "classify-new", stage: 2 },
   "areas.propose": { step: "areas-propose", stage: 2 }, "areas.suggest": { step: "areas-suggest", stage: 2 },

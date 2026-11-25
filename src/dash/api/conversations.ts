@@ -11,7 +11,9 @@ import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
-import { canSettleCached, requireSettle, settleMemo, type SettleMemo } from "../../settlers.ts";
+import { PERM_READ_TTL } from "../server/sessions.ts";
+import { actRefusal, githubIdentity } from "../../github/identity.ts";
+import { canActMany, permKey } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
 import { tierOfModel } from "../../remote/mode.ts";
@@ -27,7 +29,7 @@ const isOperator = (req: Req): boolean => req.user.role === "operator";
 
 /**
  * Whether the user may write to Opus on an item of `repo`: an operator, or a maintainer with write permission on the repo, read
- * live as canSettle reads it (src/settlers.ts), while model calls run on users' own Task Runners, since a maintainer's turn runs
+ * live as canSettle reads it (the act rule), while model calls run on users' own Task Runners, since a maintainer's turn runs
  * on theirs. Talking writes nothing to GitHub, so the app-identity and maintainer-writes conditions of settling do not apply.
  */
 export async function canTalk(db: Db, user: Pick<User, "role" | "canWrite">, repo: string): Promise<boolean> {
@@ -49,17 +51,24 @@ async function guard<T>(f: () => Promise<T>): Promise<T> {
 
 type Viewer = { login: string; role: string };
 /** What the views of several cards share. */
-type CardsView = { queue: Queue; stale: Map<number, Stale>; memo: SettleMemo };
+type CardsView = { queue: Queue; stale: Map<number, Stale> };
+
+/** Whether `login` may act on every one of `repos` by the act rule, from cached write permissions. */
+async function mayAct(db: Db, login: string, repos: string[]): Promise<boolean> {
+  if (!repos.length) return false;
+  const verdicts = await canActMany(db, repos.map((repo) => ({ login, repo })), { identity: await githubIdentity(db), mode: "cached", maxAgeMs: PERM_READ_TTL });
+  return repos.every((repo) => verdicts.get(permKey(login, repo))?.ok === true);
+}
 
 const cardsView = async (db: Db, cards: CardRow[]): Promise<CardsView> => {
   const [queue, stale] = await Promise.all([loadQueue(db), loadStale(db, cards.filter((c) => c.state === "proposed"))]);
-  return { queue, stale, memo: settleMemo() };
+  return { queue, stale };
 };
 
 /** One card's view. A card of the retired decision system shows its stored lines only. */
 export const cardView = async (db: Db, c: CardRow, who?: Viewer): Promise<ConversationCard> => await viewOf(db, c, await cardsView(db, [c]), who);
 
-/** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer under the rule of src/settlers.ts, from cached permissions). */
+/** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer from cached permissions). */
 async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<ConversationCard> {
   const params = readParams(c.kind, c.params);
   const effect = params ? cardEffect(params) : null;
@@ -76,7 +85,7 @@ async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<C
     label: params ? buttonLabel(params) : c.description,
     headline: params ? headline(params) : c.description,
     ...(preview && { preview }),
-    canSettle: !!who && params !== null && await canSettleCached(db, who.login, who.role, cardRepos(c.repo, params), v.memo),
+    canSettle: !!who && params !== null && await mayAct(db, who.login, cardRepos(c.repo, params)),
     id: c.id, kind: c.kind as ConversationCard["kind"], title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
     ...(c.text !== null && { text: c.text }),
     ...(effect && { writes: effect }),
@@ -206,13 +215,15 @@ export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> 
   return await viewFor(db, req, repo, n);
 }
 
-/** The card, for someone who settles it on every repo it writes to (src/settlers.ts: an operator with write access, or a maintainer under its rule). */
+/** The card, for someone who settles it on every repo it writes to (the act rule: an AutoCraft login with write access). */
 async function needCard(db: Db, req: Req): Promise<CardRow> {
   const id = Number(req.params.id);
   const c = Number.isInteger(id) ? await cardOf(db, id) : undefined;
   if (!c) throw new HttpError(404, `no card ${req.params.id}`);
   await needVisible(db, req, c.repo);
-  await requireSettle(db, req.user, cardRepos(c.repo, readParams(c.kind, c.params)), "runs cards");
+  for (const repo of cardRepos(c.repo, readParams(c.kind, c.params))) {
+    if (await actRefusal(db, req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access where the app acts for them, runs cards");
+  }
   return c;
 }
 

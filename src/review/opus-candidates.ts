@@ -2,7 +2,7 @@
 // the current head commit, or one older than a comment or review by someone else).
 import { planned } from "../core/select.ts";
 import type { PrFacts } from "../core/plan.ts";
-import { type Size } from "./candidates.ts";
+import { type Size } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 

@@ -13,7 +13,7 @@ import { jevCloudflareConfig } from "./jev-cloudflare.ts";
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
 import { loadRecentJevSummaries } from "../data/inference/index.ts";
-import { deleteSetting, setting, writeSetting } from "../settings-read.ts";
+import { deleteSetting, setting, writeSetting } from "../data/control/index.ts";
 
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
@@ -26,7 +26,7 @@ export const JEV_UNREADABLE_SUMMARY = "unreadable answer";
 
 export type JevOutage = { kind: "off" | "missing" | "account" | "format"; reason: string; since: string; at: string };
 
-// Through settings-read, so a planner pass reads them from its snapshot.
+// Through the control module, so a planner pass reads them from its snapshot.
 const get = setting;
 const put = writeSetting;
 

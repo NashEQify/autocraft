@@ -950,12 +950,6 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
       await saveSyncState(db, { author_ids_error: `${iso(new Date())} ${(e as { type?: string })?.type ?? ""} ${msg}` });
     }
   }
-  // Questions about items this sync found closed or merged no longer apply. Writes decisions only.
-  const { withdrawClosedQuestions, setAsideSupersededQuestions } = await import("./merge/withdraw.ts");
-  const withdrawn = await withdrawClosedQuestions(db, iso(new Date()));
-  if (withdrawn) console.log(`withdrew ${withdrawn} decision${withdrawn === 1 ? "" : "s"} about closed items`);
-  const aside = await setAsideSupersededQuestions(db, iso(new Date()));
-  if (aside) console.log(`set aside ${aside} superseded decision${aside === 1 ? "" : "s"}`);
   return { mode, items };
 }
 

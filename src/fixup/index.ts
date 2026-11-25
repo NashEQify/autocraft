@@ -9,7 +9,6 @@
 //
 // Without --apply it is a dry run: local tables only, nothing called or written.
 // The checkout is untrusted data: nothing from it is ever run (see git.ts).
-import { duplicateHeld } from "../dupes/held.ts";
 import { commitIdentity, ownLogins, type CommitIdentity } from "../github/identity.ts";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -310,7 +309,6 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const ident = (): Promise<CommitIdentity> => (identP ??= commitIdentity(db, repo, () => (whoP ??= whoAmI(d.exec))));
   /** The stage starts work on a PR: the pipeline's account is assigned when nobody is. */
   const claim = async (c: { number: number }): Promise<void> => {
-    if (await duplicateHeld(db, repo, c.number)) { log(`  ${repo}#${c.number}: not assigned: held`); return; }
     const g = await guardRepo(db, repo, "push", params.by ?? CLI_BY);
     if ("refused" in g) { log(`  ${repo}#${c.number}: not assigned: ${g.refused}`); return; }
     await claimForWork(gw, g, d.querier, repo, c.number, "pr", async () => { const who = await (whoP ??= whoAmI(d.exec)); return { id: who.nodeId, login: who.login }; }, { run: runId }, log);
