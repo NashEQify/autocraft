@@ -128,11 +128,8 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
 export async function batchOne(db: Db, req: Req): Promise<BatchDetail> {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) throw new HttpError(404, `no batch ${req.params.id}`);
-  // Read alongside the checks, which decide whether it counts.
-  const detail = batchDetail(db, id, canSeeInternals(req));
-  void detail.catch(() => {});
   const row = (await loadBatches(db, [id])).get(id);
   if (!row) throw new HttpError(404, `no batch ${req.params.id}`);
   await needVisible(db, req, row.repo);
-  return await detail;
+  return await batchDetail(db, id, canSeeInternals(req));
 }

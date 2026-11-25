@@ -131,8 +131,8 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   const ref = `${repo}#${n}`;
   // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
-  const [, found] = await Promise.all([needVisible(db, req, repo), loadItems(db, [{ repo, number: n }], "full")]);
-  const it = found.get(ref);
+  await needVisible(db, req, repo);
+  const it = (await loadItems(db, [{ repo, number: n }], "full")).get(ref);
   if (!it) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   let labels: string[] = [];
   try {
@@ -523,8 +523,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/tasks", build.tasks),
     get("/api/tasks/:id", build.task),
     { method: "POST", pattern: "/api/tasks/:id/cancel", handler: ok(build.cancel) },
-    { method: "GET", pattern: "/api/tasks/:id/artifacts/:name", handler: build.artifact },
-    { method: "GET", pattern: "/api/implementations/:id/shots/:file", handler: build.implementationShot },
+    { method: "GET", pattern: "/api/tasks/:id/artifacts/:name", external: true, handler: build.artifact },
+    { method: "GET", pattern: "/api/implementations/:id/shots/:file", external: true, handler: build.implementationShot },
     get("/api/nightly", nightly.grid),
     get("/api/nightly/bench/:repo/:bench", nightly.series),
     { method: "POST", pattern: "/api/nightly/select", handler: ok(nightly.select) },

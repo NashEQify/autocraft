@@ -139,6 +139,18 @@ describe("repo visibility", () => {
     assert.equal(await c.status("/api/agents/2"), 404);
   });
 
+  test("a refused request for an item of a hidden repo reads nothing of the item", async () => {
+    const c = await signedIn("outsider");
+    const read: string[] = [];
+    const stop = db.observe((e) => { if (e.kind === "query" && /\bitems\b|\bworkflows\b|\bopus_reviews\b/.test(e.sql)) read.push(e.sql); });
+    try {
+      for (const path of ["/api/items/vault/1", "/api/items/vault/1/page", "/api/items/vault/1/trace"]) assert.equal(await c.status(path), 404, path);
+    } finally {
+      stop();
+    }
+    assert.deepEqual(read, []);
+  });
+
   test("the Security list and the finding page are staff only", async () => {
     await db.run(db.k.insertInto("security_scans").values({ id: 900, repo: "open-app", state: "done", started_by: "boss", started_at: "2026-01-01T00:00:00Z" }));
     await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 1, scan_id: 900, area: "a", title: "t", severity: "high", urgent: 0, state: "new", refs: "[]", reach: "r", impact: "i", fingerprint: "fp1", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
