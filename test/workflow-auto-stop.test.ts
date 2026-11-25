@@ -32,8 +32,14 @@ test("the automatic merge rule's unsure stop asks once, the answer makes the mer
   }));
   await (await w.verified(1)).premerge(1, "clean");
   await (await (await (await w.pr(2, { ci: "pending" })).review(2)).verified(2)).premerge(2, "clean");
+  const stops = async () => (await w.db.seqs())["auto-stops"] ?? 0;
+  const before = await stops();
   await writePlanCache(w.db, await w.plan());
   assert.equal((await w.prPlan(1)).waitCode, "answer");
+  assert.ok(await stops() > before, "storing the stop wakes the workflow pass");
+  const stored = await stops();
+  await writePlanCache(w.db, await w.plan());
+  assert.equal(await stops(), stored, "the same plans again wake nothing");
 
   await advanceWorkflows(w.db);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
