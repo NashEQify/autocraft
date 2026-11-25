@@ -30,7 +30,7 @@ import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { operatorTriesLeft, queuedOperatorFix } from "./state.ts";
 import { refreshSettlers, settlesNow, type RefreshDeps } from "./permissions.ts";
-import { addAudit, listAudit, listPushOutcomes, loadAuditActions, loadStepApprovals, withConfig, type StepApproval } from "../data/control/index.ts";
+import { addAudit, listAudit, listPushOutcomes, loadAuditActions, withConfig } from "../data/control/index.ts";
 import { loadChecks, loadItems, loadRepos, type PrChecksView } from "../data/mirror/index.ts";
 import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
 import { loadOperatorFixResults, loadPushEdges, ownPushKind, type PushEdge } from "../data/changes/index.ts";
@@ -99,16 +99,16 @@ const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): 
 
 /**
  * Whether the merge leg may go on towards a merge at `head` (mergeApproved, src/core/may.ts), as the person who approved its workflow;
- * a leg is itself that person's approval, so `by` stands in when the row has none. The leg's own head rules decide which heads it
+ * a leg is itself that person's approval, so `by` stands in when the row has none, and the repo's approval plays no part. The leg's own head rules decide which heads it
  * may merge (a push that is not ours cancels it), and the workflow stops its leg at a blocker, so the gate takes `head` as the base
  * and no blocker.
  */
-function mergeGate(approval: StepApproval | null, wf: WorkflowFact | null, head: string, by: string): { ok: true } | { ok: false; why: string } {
+function mergeGate(wf: WorkflowFact | null, head: string, by: string): { ok: true } | { ok: false; why: string } {
   const workflow: WorkflowGate | null = wf ? {
     live: true, entry: wf.entry as WorkflowGate["entry"], state: wf.state, startedBy: wf.startedBy, approvedBy: wf.approvedBy ?? by, approvedAt: null,
     blocker: null, baseHead: head, fixupAsked: false, leg: null,
   } : null;
-  const r = mergeApproved({ repoApproval: approval, workflow, ended: null, head, pushes: [] });
+  const r = mergeApproved({ repoApproval: null, workflow, ended: null, head, pushes: [] });
   return r.ok ? { ok: true } : { ok: false, why: r.why };
 }
 
@@ -274,7 +274,6 @@ type PassFacts = {
   implPushes: Map<string, Map<string, string>>;
   /** `ref` -> autorepins that are waiting, locking or pushed. */
   repins: Map<string, { head: string | null; to_head: string | null }[]>;
-  approvals: Map<string, StepApproval | null>;
   workflows: Map<number, WorkflowFact>;
   reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string }>;
 };
@@ -284,10 +283,10 @@ async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
   const repos = [...new Set(rows.map((r) => r.repo))];
   const heads = rows.flatMap((r) => (r.head ? [{ repo: r.repo, number: r.number, head: r.head }] : []));
   const fixIds = rows.flatMap((r) => (r.fix_id !== null ? [r.fix_id] : []));
-  const [items, checks, repoRows, merge, fixResults, edges, outcomes, repins, approvals, wfFacts, reviews] = await db.together(() => Promise.all([
+  const [items, checks, repoRows, merge, fixResults, edges, outcomes, repins, wfFacts, reviews] = await db.together(() => Promise.all([
     loadItems(db, refs, "pr"), loadChecks(db, refs), loadRepos(db, { names: repos }), loadMergeFacts(db, refs), loadOperatorFixResults(db, fixIds),
     loadPushEdges(db, refs), listPushOutcomes(db, { refs: refs.map((r) => refOf(r.repo, r.number)) }), loadRepins(db, refs, { states: ["waiting", "locking", "pushed"] }),
-    loadStepApprovals(db, repos, ["merge"]), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads),
+    loadWorkflowFacts(db, refs), loadReviewsAt(db, heads),
   ]));
   const implPushes = new Map<string, Map<string, string>>();
   for (const o of outcomes) {
@@ -301,7 +300,6 @@ async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
     items, checks, merge, fixResults, edges, implPushes, workflows,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
     repins: new Map([...repins].map(([k, v]) => [k, v.map((x) => ({ head: x.head, to_head: x.to_head }))])),
-    approvals: new Map(repos.map((r) => [r, approvals.get(r)?.merge ?? null])),
     reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at }])),
   };
 }
@@ -495,7 +493,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     return await stop(r.why);
   }
 
-  const gate = mergeGate(pf.approvals.get(p.repo) ?? null, leg ? pf.workflows.get(leg.workflowId) ?? null : null, head, leg?.approvedBy ?? p.by);
+  const gate = mergeGate(leg ? pf.workflows.get(leg.workflowId) ?? null : null, head, leg?.approvedBy ?? p.by);
   if (!gate.ok) return p.state === "queued" ? cancel("merging is no longer approved") : await stop("merging is no longer approved");
 
   if (p.state === "ci") {
