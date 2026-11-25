@@ -17,7 +17,6 @@ import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
 import { findingsOf } from "../premerge/store.ts";
 import { parsePublic } from "../review/opus-parse.ts";
 import { rereadPaceAt } from "../review/diff.ts";
-import { slugOf } from "../owners.ts";
 import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
 import { CARRIED } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";

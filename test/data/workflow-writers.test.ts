@@ -2,7 +2,7 @@
 // (SQLite; Postgres when AUTOCRAFT_TEST_PG_URL is set). They write audit rows through control.addAudit.
 import assert from "node:assert/strict";
 import { queryDb } from "../../src/db/query-db.ts";
-import { addFixupRequests, addLegs, endFixupRequests, holdMerges, loadHolds, loadLegs, moveLegs, releaseMerges, startWorkflows } from "../../src/data/workflow/index.ts";
+import { addFixupRequests, addLegs, endFixupRequests, holdMerges, loadLegs, moveLegs, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT });
@@ -70,12 +70,8 @@ both("addFixupRequests writes nothing when a merge request meets an active leg; 
   assert.deepEqual(ended.map((x) => x.details.reason).sort(), ["no longer open", "the head moved"]);
 });
 
-both("holdMerges and releaseMerges return only the PRs they changed", async ({ db }) => {
+both("holdMerges returns and audits only the PRs newly held", async ({ db }) => {
   assert.deepEqual(await holdMerges(db, [{ repo: "o/a", number: 1, by: "ann", details: { batch: "b1" } }, { repo: "o/a", number: 2, by: "ann" }]), ["o/a#1", "o/a#2"]);
   assert.deepEqual(await holdMerges(db, [{ repo: "o/a", number: 2, by: "bob" }, { repo: "o/a", number: 3, by: "bob" }]), ["o/a#3"]);
-  assert.equal((await loadHolds(db, { repo: "o/a" })).get("o/a#2")!.heldBy, "ann", "a hold keeps its first holder");
-  assert.deepEqual(await releaseMerges(db, [{ repo: "o/a", number: 1 }, { repo: "o/a", number: 9 }], "cat"), ["o/a#1"]);
-  assert.deepEqual([...(await loadHolds(db, {})).keys()], ["o/a#2", "o/a#3"]);
   assert.deepEqual((await audits(db, "merge-hold")).map((a) => a.target), ["o/a#1", "o/a#2", "o/a#3"]);
-  assert.deepEqual((await audits(db, "merge-release")).map((a) => a.login), ["cat"]);
 });

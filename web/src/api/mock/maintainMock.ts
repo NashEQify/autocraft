@@ -1,4 +1,5 @@
 // The new Home's and Items page's mock reads: started items of several repos, so each role sees what it may act on.
+import { heldItems } from "./heldMock";
 import type { Api } from "../client";
 import type { ItemPhase, MaintainCommandResult, MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsQuery, MaintainRepo, MaintainRow, MaintainStats, User } from "../types";
 import { requestProject } from "../scope";
@@ -90,7 +91,7 @@ function commandFor(me: User, text: string): MaintainCommandResult {
   const m = /^([^:\n]+):([\s\S]*)$/.exec(text.trim());
   const refs = m ? m[2]!.split(/[\s,]+/).filter(Boolean) : [];
   const words = (m ? m[1]! : text).trim();
-  if (!m || !refs.length || !/^(review|fix-up|implement|merge|backlog|close|stop)\b/i.test(words)) {
+  if (!m || !refs.length || !/^(review|fix-up|implement|merge|backlog|close|hold|resume|stop)\b/i.test(words)) {
     const line = `Not run: "${text.trim().split("\n")[0]}" is not clear. Write a command, then a colon and the items, e.g. "merge: photocraft#123".`;
     return { items: [], lines: [line] };
   }
@@ -114,7 +115,9 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
   return {
     maintain: {
       async queue() {
-        return { approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" } };
+        return { approvedBy: { "designcraft#307": "ochre-fox", "designcraft#744": "kiri-n", "designcraft#779": "ochre-fox" },
+          held: [...heldItems].map(([ref, h]) => ({ repo: ref.split("#")[0]!, number: Number(ref.split("#")[1]), ...h })),
+        };
       },
       async stats(period): Promise<MaintainStats> {
         const n = period === "30d" ? 30 : 7;

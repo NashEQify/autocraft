@@ -5,7 +5,7 @@ import { guardRepo } from "../core/guard.ts";
 import { type Exec, exec as defaultExec } from "../fixup/git.ts";
 import { ghClosePr } from "../github/write.ts";
 import { ACTIVE_BATCH, cancelBuild, updateBatch } from "./batch-store.ts";
-import { ownerOf, slugOf } from "../owners.ts";
+import { slugOf } from "../owners.ts";
 import { addAudit } from "../data/control/index.ts";
 import { endBatches, getBatch, loadBatchRun } from "../data/merge/index.ts";
 import type { Db } from "../db/index.ts";

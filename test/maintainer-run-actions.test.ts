@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connectDb } from "./helpers/raw-db.ts";
 import { reviewItemAgain } from "../src/dash/api/operator.ts";
-import { mergeHoldPr } from "../src/dash/api/queue-page.ts";
+import { batchRemovePr } from "../src/dash/api/queue-page.ts";
 import { release, releaseAll } from "../src/dash/api/outside.ts";
 import { edit } from "../src/dash/api/areas.ts";
 
@@ -27,7 +27,7 @@ test("a maintainer with write runs one action per area; without write, or as a v
   const item = { repo: "app", n: "1" };
   const actions: [string, (req: never) => Promise<unknown>, Record<string, string>, unknown?][] = [
     ["review again", (r) => reviewItemAgain(db, r), item],
-    ["hold", (r) => mergeHoldPr(db, r, true), {}, { item: "app#1" }],
+    ["remove from batch", (r) => batchRemovePr(db, r), {}, { item: "app#1" }],
     ["release outside", (r) => release(db, r), item],
     ["area edit", (r) => edit(db, r), { repo: "app" }, { op: "add", name: "Canvas", description: "drawing" }],
   ];
@@ -39,7 +39,6 @@ test("a maintainer with write runs one action per area; without write, or as a v
     await assert.doesNotReject(run(as("maintainer", ["app"], params, json)).catch((e: { status?: number }) => { if (e.status === 403) throw e; }), `${what}: maintainer with write`);
   }
   assert.equal((await db.all(db.k.selectFrom("opus_reviews").select("head_oid"))).length, 0);
-  assert.ok(await db.get(db.k.selectFrom("main.merge_holds").select("repo").where("repo", "=", "app")));
 });
 
 test("release-all of outside authors stays with operators", async () => {

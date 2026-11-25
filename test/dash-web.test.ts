@@ -37,15 +37,16 @@ async function fresh(): Promise<Db> {
   return db;
 }
 
-test("Hold and Release answer the body the web sends", async () => {
+test("the Work queue's Hold and Resume: the held item is listed until it is resumed", async () => {
   const db = await fresh();
-  const held = async () => (await db.all(db.k.selectFrom("merge_holds").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`);
-  const press = (control: string) => call<{ ok: boolean; line: string }>(db, "POST", "/api/controls", { control, repo: "app", number: 7 });
-  const on = await press("hold-merge");
-  assert.ok(on.ok, on.line);
-  assert.deepEqual(await held(), ["app#7"]);
-  const off = await press("release-merge");
-  assert.ok(off.ok, off.line);
+  const held = async () => (await call<{ held: { repo: string; number: number; line: string }[] }>(db, "GET", "/api/maintain/queue")).held;
+  const press = async (text: string) => call<{ ok: boolean; lines: string[] }>(db, "POST", "/api/items/app/7/command", { text });
+  const on = await press("hold");
+  assert.ok(on.ok, on.lines.join(" "));
+  assert.deepEqual((await held()).map((h) => `${h.repo}#${h.number}`), ["app#7"]);
+  assert.match((await held())[0]!.line, /Held by op/);
+  const off = await press("resume");
+  assert.ok(off.ok, off.lines.join(" "));
   assert.deepEqual(await held(), []);
 });
 

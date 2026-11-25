@@ -131,9 +131,28 @@ describe("workflow commands", () => {
     assert.deepEqual(dup.kind === "run" && [dup.run.end, dup.run.close], ["close", { as: "duplicate", of: { repo: null, number: 12 } }]);
   });
 
-  test("a stop needs something running, or a close that is still to be made", () => {
-    assert.equal(run("stop", pr()).kind, "refused");
-    assert.equal(run("stop", { ...pr(), closing: true }).kind, "run");
+  test("hold works on any item that is not held yet; resume and yes only on a held one", () => {
+    const held: ItemState = { ...pr(), held: started({ state: "stopped", stoppedBy: "mira", stoppedAt: "2026-11-24T09:30:00Z", blockerParams: { held: {} } }) };
+    for (const s of [pr(), pr(started()), { ...held, closing: true }]) assert.equal(run("hold", s).kind, "run");
+    assert.equal(run("hold", held).kind, "refused");
+    for (const text of ["resume", "continue", "yes", "go", "resume, urgent"]) {
+      const r = run(text, held);
+      assert.ok(r.kind === "run" && r.run.resume === "steps", text);
+    }
+    assert.equal(run("resume", pr()).kind, "refused");
+    assert.equal(run("resume, then merge", held).kind, "ambiguous");
+    const start = run("merge", held);
+    assert.ok(start.kind === "run" && start.run.start === "merge", "a start command starts it as ever");
+  });
+
+  test("a message that only says to wait is a hold; one that asks for something else runs nothing", () => {
+    for (const text of ["hold", "stop", "pause", "wait", "Hold on.", "not yet", "ok, wait please", "please stop", "hold off"]) {
+      assert.deepEqual(parse(text), { kind: "commands", items: [], parts: [{ word: "hold" }] }, text);
+    }
+    for (const text of ["merge after CI, wait", "wait for #12, then merge", "don't hold", "hold the merge until Friday", "stop merging, fix 1"]) {
+      const p = parse(text, { repo: "app" });
+      assert.notEqual(p.kind === "ambiguous" ? "nothing" : resolve(p, pr(started())).kind, "run", text);
+    }
   });
 
   test("a weight word alone needs a started item", () => {

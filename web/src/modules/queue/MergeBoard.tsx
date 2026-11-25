@@ -101,7 +101,7 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
           </span>
         ),
         added: <Added r={r} />,
-        actions: <RowMenu repo={r.repo} number={r.number} held={!!r.held} pr inBatch={r.batch !== undefined} backlog={r.state !== "held-backlog"} />,
+        actions: <RowMenu repo={r.repo} number={r.number} inBatch={r.batch !== undefined} backlog={r.state !== "held-backlog"} />,
       }}
     />
   );

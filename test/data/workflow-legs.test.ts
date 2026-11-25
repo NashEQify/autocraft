@@ -4,7 +4,7 @@ import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import { permKey, standings } from "../../src/data/access/index.ts";
-import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLandedApprovals, loadLegPass, loadLegs, loadPrWorkflows, loadWorkflowFacts, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
+import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadLandedApprovals, loadLegPass, loadLegs, loadPrWorkflows, loadWorkflowFacts, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number, o: Record<string, unknown> = {}) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT, ...o });
@@ -103,15 +103,6 @@ both("a request's maker counts in SQL exactly when standing says yes: role, perm
   }
 });
 
-both("loadHolds reads the held PRs of a repo or of refs", async ({ db }) => {
-  const q = queryDb(db);
-  await q.run((q.k as any).insertInto("main.merge_holds").values([{ repo: "o/a", number: 2, held_by: "ann", held_at: AT }, { repo: "o/b", number: 1, held_by: "bob", held_at: AT }]));
-  assert.deepEqual([...await loadHolds(db)].map(([key]) => key), ["o/a#2", "o/b#1"]);
-  assert.deepEqual([...await loadHolds(db, { repo: "o/b" })], [["o/b#1", { heldBy: "bob", heldAt: AT }]]);
-  assert.equal((await loadHolds(db, { refs: [{ repo: "o/a", number: 2 }, { repo: "o/a", number: 3 }] })).size, 1);
-  assert.equal((await loadHolds(db, { refs: [] })).size, 0);
-});
-
 async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; close(): Promise<void> }> {
   const o = await openApp("sqlite");
   const q = queryDb(o.db);
@@ -125,7 +116,6 @@ async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; clo
       await loadLandedApprovals(o.db, keys);
       await loadLegPass(o.db);
       await loadFixupRequests(o.db, { open: true });
-      await loadHolds(o.db, { refs: keys });
     },
   };
 }

@@ -214,8 +214,8 @@ function After() {
   return (
     <Page id="after">
       <Part title={t("The confirmation")}>
-        <p>{t("Every accepted command gets one line back, the same on every surface. It says what runs next, who sent it, and ends with how to stop.")}</p>
-        <p className="rounded border border-line bg-sunken px-3 py-2 text-sm">{t("Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply stop to halt.")}</p>
+        <p>{t("Every accepted command gets one line back, the same on every surface. It says what runs next, who sent it, and ends with how to halt it.")}</p>
+        <p className="rounded border border-line bg-sunken px-3 py-2 text-sm">{t("Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply hold to halt.")}</p>
       </Part>
       <Part title={t("On GitHub")}>
         <p>{t("One status comment per started item, edited in place: the steps, the state, the open recommendation and who approved.")}</p>
@@ -246,10 +246,19 @@ function After() {
           <li>{t("Anything unclear runs nothing. AutoCraft says what it understood and waits.")}</li>
         </ul>
       </Part>
-      <Part title={t("Stopping")}>
-        <p>
-          <Code>stop</Code> {t("halts all work on the item at once. Any command starts it again.")}
-        </p>
+      <Part title={t("Holding and resuming")}>
+        <ul className="flex list-disc flex-col gap-1 pl-5">
+          <li>
+            <Code>hold</Code> {t("ends all work on the item at once, its place in a batch included. AutoCraft keeps off it and shows who holds it. It works on any open item, started or not.")}
+          </li>
+          <li>
+            {t("On their own,")} <Code>stop</Code>, <Code>pause</Code>, <Code>wait</Code>, <Code>hold on</Code>, <Code>not yet</Code> {t("mean the same. In a longer message that asks for something else they run nothing.")}
+          </li>
+          <li>
+            <Code>resume</Code>, <Code>continue</Code>, <Code>yes</Code> {t("on a held item go on with its plan, merge approval included, in the name of whoever wrote it. If the author pushed commits meanwhile, AutoCraft asks first.")}
+          </li>
+          <li>{t("Any other command starts the item again as usual.")}</li>
+        </ul>
       </Part>
     </Page>
   );
@@ -343,7 +352,7 @@ function Workflows() {
 function Roles() {
   const rows: [string, string[]][] = [
     [t("Viewer"), [t("Reads items, Work queue, Stats, Prompts, Environments, Repos and Scans, without security findings."), t("Sends no commands.")]],
-    [t("Maintainer (write access on the repo)"), [t("Starts, answers, approves the merge, stops and closes any item in that repo."), t("Turns the repo's automatic handling on or off, resumes paused steps and releases holds."), t("Starts security scans with a spend cap and sees their findings."), t("Connects a Task Runner.")]],
+    [t("Maintainer (write access on the repo)"), [t("Starts, answers, approves the merge, holds, resumes and closes any item in that repo."), t("Turns the repo's automatic handling on or off, resumes paused steps and releases outside authors' items."), t("Starts security scans with a spend cap and sees their findings."), t("Connects a Task Runner.")]],
     [t("Operator"), [t("Everything a maintainer can, on every repo."), t("Admin: users and access, accounts, inference, GitHub App, Discord, limits, health, sweeps, audit log.")]],
     [t("Outside contributor"), [t("Sees the status of their own issues and pull requests.")]],
   ];

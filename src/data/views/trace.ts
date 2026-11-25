@@ -78,6 +78,6 @@ export async function loadItemTraceStamp(db: Db, scope: TraceScope, ref: { repo:
     [runRows.length, runRows[runRows.length - 1]?.id ?? null, runRows.filter((r) => r.endedAt !== null).length, runRows.filter((r) => r.costUsd !== null).length],
     tasks.get(key) ?? null, pushes.get(key) ?? null, patches.get(key) ?? null, review.get(key) ?? null,
     [...verifications.values()].map((v) => [v.headSha, v.state, v.finishedAt ?? v.createdAt]), [merges.length, merges[merges.length - 1]?.at ?? null],
-    turns.get(key) ?? null, (workflowEvents.get(key) ?? []).map((e) => e.id), holds.get(key)?.heldAt ?? null, audit,
+    turns.get(key) ?? null, (workflowEvents.get(key) ?? []).map((e) => e.id), audit,
   ];
 }

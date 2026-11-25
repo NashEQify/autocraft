@@ -332,7 +332,7 @@ The move (`autocraft migrate`, also run at the first start of 1.3.0, before the 
 
 | Command | Tool | What it does |
 |---|---|---|
-| `do <item> "<command>"` | `command` | Sends AutoCraft a command on an item, as on GitHub: "fix-up and merge", "yes", "stop". |
+| `do <item> "<command>"` | `command` | Sends AutoCraft a command on an item, as on GitHub: "fix-up and merge", "yes", "hold". |
 | `item <item>` | `get_item` | An item's workflow: state, open recommendation, who started and approved it. |
 | `items` | `my_items` | Items waiting for your answer, and the ones you started or approved. |
 | `commands` | `help` | The commands AutoCraft takes, what each does and when it comes back to you. |

@@ -47,7 +47,7 @@ describe("public status", async () => {
   const plan = (repo: string, number: number, state: string, view: string) => db.run(db.k.insertInto("item_plans").values({ repo, number, kind: "pr", state, actions: "[]", reasons: "[]", view, planned_at: "x" }));
   await db.run(db.k.insertInto("repos").values([{ name: "openrepo", visibility: "PUBLIC" }, { name: "secret", visibility: "PRIVATE" }]));
   await db.run(db.k.insertInto("tracked_repos").values([{ name: "openrepo" }, { name: "secret" }]));
-  const queued = JSON.stringify({ gh: "OPEN", queue: { held: false } });
+  const queued = JSON.stringify({ gh: "OPEN", queue: {} });
   await item("openrepo", 1, "First", "https://github.com/o/openrepo/pull/1");
   await item("openrepo", 2, "Second", "https://github.com/o/openrepo/pull/2");
   await item("openrepo", 3, "Fix", "https://github.com/o/openrepo/pull/3");

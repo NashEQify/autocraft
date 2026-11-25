@@ -116,7 +116,7 @@ export function traceRunDetail(id: number): AgentRunDetail | null {
 const FIELDS: Record<string, Record<string, unknown>> = {
   "review:opus:5": { verdict: "take-fix", sure: false, reason: "The change is **correct**, but two spots need care.\n\n- The overset check ignores locked frames.", fixes: [{ file: "crates/app-core/src/frame.rs", change: "skip locked frames in the overset pass" }, { file: "crates/app-core/src/lib.rs", change: "export the new helper" }], risks: ["Frames with negative leading may flicker."] },
   "plan:41": { from: "reviewing", to: "verifying", wait: "CI at 9b8c7d6", reasons: ["review took the fix", "no open conflicts"] },
-  "workflow:1": { text: "Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n). Reply stop to halt." },
+  "workflow:1": { text: "Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n). Reply hold to halt." },
   "workflow:31": { text: "Merge the Hungarian dictionary with this change? Answer: Review first." },
   "task:905": {},
   "audit:77": { action: "review-post", by: "autocraft", state: "done", textLength: 1480 },

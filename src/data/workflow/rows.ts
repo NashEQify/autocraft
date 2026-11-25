@@ -141,7 +141,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
     .selectAll("p").where("p.state", "in", ACTIVE_LEGS).orderBy("p.id");
 
   const [live, ended, requests, legs] = await db.together(() => Promise.all([q.all(liveQ), q.all(endedQ), q.all(requestsQ), q.all(legsQ)])) as
-    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown; answer_by: string | null; answer_at: string | null; go_on: string | null })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], OperatorWork["requests"], Preapproval[]];
+    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown; answer_by: string | null; answer_at: string | null; go_on: string | null })[], { repo: string; number: number; state: string }[], OperatorWork["requests"], Preapproval[]];
 
   for (const r of live) {
     const w = workflowOf(r);
