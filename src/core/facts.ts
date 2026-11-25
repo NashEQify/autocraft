@@ -248,7 +248,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);
-  base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads } : null;
+  base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads, queuedBy: d.workflow.ofPr.get(ref)?.startedBy ?? null } : null;
   base.workflow = wfFact;
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {

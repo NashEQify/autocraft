@@ -199,7 +199,7 @@ Hand-off, by final verdict: take goes to Verify, take-fix to Fix-up (with Opus's
 
 ## Implement
 
-Implements an issue a maintainer queued and opens a pull request for it. Needs the repo's **issue implementations approval**, the repo's `implement` build feature (Repos page, Build features; an operator, or a maintainer with GitHub write permission on the repo, switches it), and a person who may act on the repo to queue it.
+Implements an issue a maintainer queued and opens a pull request for it. Needs the repo's `implement` build feature (Repos page, Build features; an operator, or a maintainer with GitHub write permission on the repo, switches it), and a person who may act on the repo to queue it.
 
 - **Queued.** An issue is queued by the `implement` command of a person who may act on its repo. Nothing is picked up automatically. A queued issue waits while an open PR closes or mentions it.
 - **Task Runner.** Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots. When that runner is not ready, the item shows the wait.
@@ -406,7 +406,7 @@ The merge leg of an approved workflow. A `fix-up` command queues the fix-up of t
 
 ## Act
 
-Carries out the closes people command, on any surface, and the queued presses of conversation cards. No model. Needs the repo's **comment approval**; daily limit 20 items.
+Carries out the closes people command, on any surface, and the queued presses of conversation cards. No model. The command is the approval; a card press needs the repo's approval for its write. Daily limit 20 items.
 
 | Command | Action |
 |---|---|
@@ -537,7 +537,7 @@ Untrusted code (a PR's build and tests) never runs where the GitHub token or a C
 
 ### What AutoCraft does on its own
 
-Each write needs the repo's approval (Repos page) and stays within the stage's daily limit (see Daily limits). The merge and push approvals are for pull requests nobody started: on a started one the person's command is the approval for that PR (`src/core/may.ts`), in any repo. The pipeline's on/off switch stops all of them except the security deep scan.
+Each write needs the repo's approval (Repos page) and stays within the stage's daily limit (see Daily limits). The approvals are for work nobody commanded: on a pull request a person started, their command is the approval for its merge and pushes (`src/core/may.ts`), and an `implement` or `close` command is the approval for the implementation or the close, in any repo. The pipeline's on/off switch stops all of them except the security deep scan.
 
 | Action | Stage | Approval and limit |
 |---|---|---|
@@ -549,9 +549,9 @@ Each write needs the repo's approval (Repos page) and stays within the stage's d
 | Format, rerun or patch a failing check | CI fix | Push approval for the push, comment approval for a patch comment, CI approval for the rerun. Two tries a head; reruns 30 a day |
 | Merge the base branch into a conflicting PR, and comment | Fix-up | Push approval, comment approval. Two tries a PR; counted with Fix-up |
 | Fix a red default branch: rerun, open a fix PR | CI fix (`main-fix`) | Fix red main approval, off by default. 20 a day |
-| Open a PR that implements a queued issue | Implement | Issue implementations approval. No daily limit |
+| Open a PR that implements a queued issue | Implement | The person's `implement` command. No daily limit |
 | Merge: singly, or in an integration batch of up to 50 PRs | Merge queue | Merge approval. The merge rule or a maintainer's merge approval. 10 a day |
-| Comment, then close, after a command | Act | Comment approval. 20 a day |
+| Comment, then close, after a command | Act | The person's command. 20 a day |
 | Post and edit one status comment per PR | Merge queue (`pr-status`) | PR status comment switch, off by default. 2,000 posts and edits a day, at half the GitHub write budget |
 | Open a follow-up issue for each defect of a post-merge review | Post-merge review | Comment approval. 20 a day |
 | Private fix of a confirmed security finding | Security deep scan | Starts when Verify confirms the finding. Writes nothing to GitHub: Land, Advisory and Publish are operator presses. Pipeline switch and daily limits do not apply |
@@ -562,7 +562,7 @@ Each write needs the repo's approval (Repos page) and stays within the stage's d
 - Only the operator's answers are acted on. The pipeline reads the chosen option, never free text.
 - Comments and picks by other people are shown here but never reach a model's prompt.
 - All GitHub text is untrusted data: models judge it and never follow instructions in it.
-- Every GitHub write (labels, comments, closes, pushes, fix PRs, merges) needs the operator's approval for that repo, given on the Repos page (merges and pushes of a pull request a person started need that person's command instead); the CLI reads approvals and cannot set them. Approvals are audited.
+- Every GitHub write (labels, comments, closes, pushes, fix PRs, merges) needs the operator's approval for that repo, given on the Repos page (the merges and pushes of a pull request a person started, an implementation and a close need that person's command instead); the CLI reads approvals and cannot set them. Approvals are audited.
 - Model calls run without tools, except a prompt that registers a sandbox mode (the Opus review, Fix-up patch and check, CI fix patch, Verify planner, the duplicate-PR comparison and conversation replies). Claude Code's file tools could otherwise read anything this user can, such as tokens and other accounts' logins, and untrusted text could steer a model into echoing it. Two layers keep that from happening, plus a backstop:
   1. Claude Code allows only `Read`, `Grep` and `Glob`, denies everything else without asking (`dontAsk`, no prompts), allows reads of the checkout path only, is confined to the working directory and the checkout (`--restricted`), loads no MCP servers, skills, slash commands or user and project settings, and stops after a registered number of turns.
   2. bubblewrap runs the call in new namespaces (network shared, the API needs it) with an empty home and a clean environment. Only these are visible: the claude binary, `/usr`, the TLS certificates and resolver config, the checkout read-only at `/repo`, and the used account's credentials file, read-only (the rest of its config directory is not). The working directory is an empty `/work` and the checkout is added with `--add-dir`, so instructions and settings inside the checkout are never loaded as project memory; `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and every `.claude/` path are also left out of the checkout.

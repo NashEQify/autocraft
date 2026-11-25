@@ -101,7 +101,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
     cardWrites = drained.writes;
     summary.cards = drained.ran;
     if (drained.ran) log(`act: ${drained.ran} queued card press${drained.ran === 1 ? "" : "es"} carried out`);
-    // Issues the cards held until the PR merged: filed once it merged, dropped once it closed or its merge path ended. Before the approval check: each guards the repo it opens in.
+    // Issues the cards held until the PR merged: filed once it merged, dropped once it closed or its merge path ended. Each guards the repo it opens in.
     const { fileHeldFollowups } = await import("../conversations/held.ts");
     const held = await fileHeldFollowups(db, repo, { now: deps?.now, exec: deps?.exec, permission: deps?.permission }, params.limit === undefined ? {} : { writes: Math.max(0, params.limit - cardWrites) });
     cardWrites += held.writes;
@@ -111,11 +111,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
     if (held.filed || held.dropped) log(`act: ${held.filed} held follow-up issue${held.filed === 1 ? "" : "s"} filed, ${held.dropped} dropped`);
     if (held.unknown) log(`act: a held follow-up issue was being created when the answer was lost; it may exist, check GitHub`);
   }
-  if (!await commentApprovalOf(db, repo)) {
-    summary.note = `commenting in ${repo} is not approved`;
-    log(`act ${repo}: ${summary.note}; nothing done`);
-    return summary;
-  }
+  // Each close is a person's command, which is its approval in any repo (gates); they must still be able to act on it.
   // Heaviest workflow first, then in the order of the commands.
   let todo = await loadActionsDue(db, { repos: [repo], kinds: CLOSE_KINDS });
   if (params.limit !== undefined) todo = todo.slice(0, Math.max(0, params.limit - cardWrites));

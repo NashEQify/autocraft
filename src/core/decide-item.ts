@@ -117,9 +117,9 @@ export function decideItem(f: ItemFacts): ItemPlan {
     if (add && add.length && !alreadyLabeled(f.labels.labeledNote, add)) actions.push(act("label", null, { add }));
   }
 
-  // act: a person's close, whatever the item's scope (sending the item to the backlog takes it back). Selecting applies nothing; the repo's comment approval is applied by gates().
+  // act: a person's close, whatever the item's scope (sending the item to the backlog takes it back). The command is its approval in any repo.
   if (f.close && !f.held) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
-  // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
+  // implement: a queued issue's next step (implementStep); the breaker is applied by gates().
   const step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
 

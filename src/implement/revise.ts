@@ -24,6 +24,7 @@ import type { CiFailure } from "../cifix/types.ts";
 import { reviseOf } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
 import { guard, guardRepo } from "../core/guard.ts";
+import { implementMay } from "./gate.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
 import { parseFixes, type Fix } from "../fixup/candidates.ts";
 import { exec as realExec, fixupDir, Git, type Exec } from "../fixup/git.ts";
@@ -528,7 +529,7 @@ export async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, 
     const who = await pipelineAccount(d.exec);
     await setPipelineLogin(db, who.login);
     if (!await git.fetchBranch(ownerOf(repo), repo, await branchOf(db, repo), impl.baseSha)) return fail("the base commit is no longer in the repository", false);
-    const rg = await guardRepo(db, repo, "fix-issue", by);
+    const rg = await guardRepo(db, repo, "fix-issue", by, undefined, { members: [await implementMay(db, repo, number)] });
     if ("refused" in rg) return fail(rg.refused, true);
     const fork = await forkOnce(repo, () => forkOf(w, rg, d.exec, who.login, repo));
     const [forkOwner, forkName] = fork.split("/") as [string, string];

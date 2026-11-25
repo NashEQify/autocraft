@@ -161,7 +161,7 @@ export const STAGES: StageDef[] = [
       { name: "Fix landing poll", why: "A deep-scan fix that went out as a pull request waits for its merge, which the mirror reports; a fix that went the advisory way waits for a repository admin to merge it, which shows as the patch reaching the default branch", howLong: "2 minutes, read by the sync run, with the pipeline on or off", showsAs: "The finding's state: landing, awaiting admin, then landed or advisory", kind: "external" },
     ],
     writes: [{ what: "Branch and pull request", approval: "fix" }, { what: "A question to the author on the issue, and on a maintainer's close a comment and the close", approval: "comment" }],
-    person: "Starting an issue, per-repo approval, questions the plan leaves open, stuck implementations",
+    person: "Starting an issue, questions the plan leaves open, stuck implementations",
   },
   {
     id: "fixup", title: "Fix-up", order: 9, runStage: 6, docSection: "Fix-up", mode: "steps",

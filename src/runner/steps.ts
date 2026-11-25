@@ -327,11 +327,9 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 20, help: "items to act on in this job" },
     ],
-    check: checkCommentApproved,
+    // No repo check: a close is a person's command, and every card press and held issue is guarded by itself.
     run: async (ctx) => {
       const { runAct } = await import("../act/index.ts");
-      const refused = await checkCommentApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runAct(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.done.length + r.skipped.length + r.failed.length + (r.cards ?? 0) + (r.held ?? 0));
       const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;

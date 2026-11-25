@@ -11,6 +11,8 @@ import * as kx from "../src/db/kx.ts";
 import { loadActions, queueActions, startWorkflows } from "../src/data/workflow/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { authFailure, retryWaiting, type LaneDeps } from "../src/github/user-lane.ts";
+import { LANES, planCtx } from "../src/runner/autopilot.ts";
+import { checkRequest } from "../src/runner/jobs.ts";
 import { scopeRepos } from "../src/runner/scope.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
@@ -23,7 +25,7 @@ let current: World | null = null;
 afterEach(() => { current?.close(); current = null; });
 
 /** The tracked repo under the app's identity with a maintainer. `signedIn`: the maintainer has a stored token. */
-async function fresh(o: { signedIn?: boolean; off?: "comment"[] } = {}): Promise<World> {
+async function fresh(o: { signedIn?: boolean; off?: Parameters<World["repo"]>[0] } = {}): Promise<World> {
   const w = current = await (await world()).repo(o.off ?? []);
   await w.db.prepare("INSERT INTO access (login, role) VALUES (?, 'maintainer')").run(MIRA);
   await setGithubIdentity(w.db, OPERATOR, "app");
@@ -120,19 +122,27 @@ describe("a close command", () => {
     assert.equal((await loadActions(w.db, {})).size, 0);
   });
 
-  test("needs the repo's comment approval, and the guard needs the close to be due", async () => {
-    const w = await fresh({ off: ["comment"] });
-    await w.issue(5);
+  test("a person's close runs in a repo with no approvals, and only theirs: the guard needs the close to be due", async () => {
+    const w = await fresh({ off: ["merge", "push", "comment", "ci", "fixissue"] });
+    await (await w.issue(5)).issue(6);
+    const grant = (n: number, id: number) => guardItem(w.db, { repo: "app", number: n }, { kind: "act", bucket: "close", id }, "pipeline", MIRA);
+    const jobs = async () => await LANES.find((l) => l.name === "act")!.detect(w.db, await planCtx(w.db));
+    assert.deepEqual(await jobs(), []);
+    await send(w, "close", 5);
+    const a = await actionOf(w, 5);
+    assert.ok(!("refused" in await grant(5, a.id)));
+    // Nobody told AutoCraft to close #6.
+    assert.match((await grant(6, a.id) as { refused: string }).refused, /Comments in app are not approved/);
+    const found = await jobs();
+    assert.deepEqual(found.map((c) => [c.step, c.params.repo]), [["act", "app"]]);
+    await checkRequest(w.db, found[0]!.step, found[0]!.params);
+    await send(w, "stop", 5);
+    assert.ok("refused" in await grant(5, a.id));
+    assert.deepEqual(await jobs(), []);
     await send(w, "close", 5);
     const g = github(w);
-    assert.match((await run(w, g)).note ?? "", /not approved/);
-    const a = await actionOf(w, 5);
-    const grant = () => guardItem(w.db, { repo: "app", number: 5 }, { kind: "act", bucket: "close", id: a.id }, "pipeline", MIRA);
-    assert.match((await grant() as { refused: string }).refused, /Comments in app are not approved/);
-    await w.repo();
-    assert.ok(!("refused" in await grant()));
-    await send(w, "stop", 5);
-    assert.match((await grant() as { refused: string }).refused, /plan no longer has act:close/);
+    assert.deepEqual((await run(w, g)).done, ["app#5"]);
+    assert.deepEqual(g.sent.map((s) => s.what), ["comment", "close"]);
   });
 });
 

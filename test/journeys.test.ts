@@ -5,8 +5,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
-import { CLI_BY } from "../src/core/gates.ts";
-import { guard, liveOf } from "../src/core/guard.ts";
+import { withConfig } from "../src/data/control/index.ts";
+import { MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../src/core/decide.ts";
+import { CLI_BY, gates } from "../src/core/gates.ts";
+import { guard, guardItem, guardRepo, liveOf } from "../src/core/guard.ts";
+import { writePlanCache } from "../src/core/plan-cache.ts";
+import { implementMay, implementRefusal } from "../src/implement/gate.ts";
+import { computeLiveness } from "../src/liveness.ts";
+import { afterSteps } from "../src/workflow/recommend.ts";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
@@ -508,6 +514,51 @@ describe("a repo with no step approvals", () => {
     await w.workflow(3, { by: "mira" });
     assert.deepEqual(await actions(w, 3), ["fixup:fix:premerge"]);
     assert.deepEqual((await selectFixups(w.db, "app")).fix.map((c) => [c.number, c.source]), [[3, "premerge"]]);
+  });
+
+  test("a person's implement command reaches its job; an issue nobody queued does not, and the implementation's PR is revised on the command", async () => {
+    const w = await unapproved();
+    await setFeature(w.db, "implement", true, OPERATOR, "app");
+    await (await w.issue(4)).issue(5);
+    assert.deepEqual(await jobs(w, "implement"), []);
+    assert.match(await implementRefusal(w.db, "app", 5) ?? "", /not queued/);
+    await say(w, "implement", 5);
+    const found = await LANES.find((l) => l.name === "implement")!.detect(w.db, await planCtx(w.db));
+    assert.deepEqual(found.map((c) => [c.step, c.params.number, c.params.bucket]), [["implement", 5, "plan"]]);
+    await checkRequest(w.db, found[0]!.step, found[0]!.params);
+    const grant = async (n: number) => await guardItem(w.db, { repo: "app", number: n }, { kind: "implement", bucket: "plan" }, "pipeline");
+    assert.ok(!("refused" in await grant(5)));
+    assert.match((await grant(4) as { refused: string }).refused, /Issue implementations in app are not approved/);
+    const repoGrant = async (n: number) => await guardRepo(w.db, "app", "fix-issue", "pipeline", undefined, { members: [await implementMay(w.db, "app", n)] });
+    assert.ok(!("refused" in await repoGrant(5)));
+    assert.ok("refused" in await repoGrant(4));
+
+    // Its PR came back with fixes: the session revises it.
+    await (await w.pr(6, { author: "pipeline-bot" })).review(6, { verdict: "take-fix" });
+    await w.db.run(w.db.k.insertInto("implementations").values({ repo: "app", number: 5, pr_number: 6, state: "pr-opened", text_hash: "h", attempt: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), queued_by: "mira" }));
+    const f = (await w.plan()).prs.find((p) => p.facts.number === 6)!.facts;
+    assert.equal(gates(f, { kind: "implement", bucket: "revise" }, "pipeline"), null);
+    assert.match(gates({ ...f, implementation: { ...f.implementation!, queuedBy: null } }, { kind: "implement", bucket: "revise" }, "pipeline") ?? "", /not approved/);
+  });
+
+  test("a started PR nobody approved that conflicts or has red CI comes back with one recommendation", async () => {
+    const w = await unapproved();
+    await w.pr(1, { mergeable: "CONFLICTING" });
+    await w.pr(2, { ci: "failure" });
+    for (const n of [1, 2]) {
+      await (await (await w.review(n)).verified(n)).workflow(n, { by: "mira", approved: false });
+      assert.deepEqual([(await w.prPlan(n)).wait, (await w.prPlan(n)).waitKind], [MAINTAINER_ANSWER_WAIT, "person"]);
+    }
+    await advanceWorkflows(w.db);
+    for (const n of [1, 2]) {
+      const wf = await liveWorkflow(w.db, "app", n);
+      assert.equal(wf?.state, "recommending");
+      assert.ok(wf?.rec?.merges);
+    }
+    await writePlanCache(w.db, await w.plan());
+    assert.deepEqual((await withConfig(w.db, () => computeLiveness(w.db))).items.filter((i) => i.verdict === "stuck"), []);
+    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 1)!.facts)).text, /conflicts/);
+    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 2)!.facts)).text, /CI fails/);
   });
 
   test("a repo whose fix-up selection fails leaves the lane to the others", async () => {

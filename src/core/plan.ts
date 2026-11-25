@@ -289,7 +289,7 @@ export type PrFacts = {
    * heads its revisions started from. Absent or null for every other PR. A live one takes the PR's review fixes and red CI
    * itself (implement{revise}) instead of the fix-up and the CI fix.
    */
-  implementation?: { issue: number; state: string; revisedHeads: string[] } | null;
+  implementation?: { issue: number; state: string; revisedHeads: string[]; /** Who started the issue's live implement workflow. */ queuedBy?: string | null } | null;
   /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
   baseOffDefault: boolean;
   /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */

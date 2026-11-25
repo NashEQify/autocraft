@@ -86,7 +86,7 @@
 
 **What.** Implements a queued issue in a workspace: plans it, asks when facts or choices are open, writes the change and its tests, runs the checks and opens a pull request.
 
-**When.** For issues a maintainer queued, in repos with the issue implementations approval and the `implement` feature.
+**When.** For issues a maintainer queued, in repos with the `implement` feature.
 
 **Model.** Opus plans and writes, on the queuer's own Task Runner.
 

@@ -30,7 +30,7 @@ export function gateRepo(a: RepoApprovals, need: RepoNeed, by: By, repo: string)
 /** The approval an action's GitHub write needs, or null for an action that writes nothing there. */
 export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null {
   switch (a.kind) {
-    // Item actions. Closing and commenting need the comment approval: a person's close always comments first.
+    // Item actions, for work nobody commanded (commandedBy). Closing and commenting need the comment approval: a close comments first.
     case "label": return "labels";
     case "act": return "comment";
     case "implement": return "fix-issue";
@@ -55,6 +55,12 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
 const endsAttempt = (f: PrFacts | ItemFacts): boolean =>
   "ghState" in f ? f.ghState !== "OPEN" : f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
 
+/** Who commanded the implementation (and with it its PR's revisions) or the close; null for other work. Their command is the approval, in any repo. */
+function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
+  if (a.kind === "implement") return ("ghState" in f ? f.implementation?.queuedBy : f.implement.queuedBy) ?? null;
+  return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
+}
+
 /** Why the write is refused, or null. */
 export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (by === "pipeline" && !f.pipelineOn) return "The pipeline is off";
@@ -66,6 +72,7 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (tripped) return `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`;
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;
+  if (commandedBy(f, a) !== null) return null;
   const may = "may" in f && f.may && (need === "merge" || need === "push") ? (need === "merge" ? mergeMay(f as PrFacts) : pushMay(f as PrFacts, a)) : null;
   if (may) return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
   const r = f.repoFacts as Partial<Record<"mergeApproved" | "pushApproved" | "commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;

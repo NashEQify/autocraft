@@ -334,8 +334,14 @@ const system = (text: string): Wait => ({ text, kind: "system" });
 const unsentWait = (what: string, until?: number): Wait => system(`${what} again ${until === undefined ? "later" : `after ${new Date(until).toISOString().slice(11, 16)}`}: the last one did not reach GitHub`);
 const unsentUntil = (u: UnsentAsk | undefined): number | undefined => (u && u !== "final" ? u.until : undefined);
 
+/** What stops a started PR whose fixes nobody approved: a conflict or red CI (not a red main's). */
+export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
+  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && !f.repoFacts.mainRed ? "ci" : null;
+
 /** What a PR waits on when its conflict or CI fix is left to the contributor. */
 const stuckWait = (f: PrFacts): Wait | null => {
+  // A started PR nobody approved gets no fix work: what stops it is a maintainer's to settle.
+  if (unapprovedStop(f)) return person(MAINTAINER_ANSWER_WAIT);
   const approval = person("comment approval for the repo");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped") return system("conflict merge cap for today reached; next merge tomorrow");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") return unsentWait("the comment asking the contributor to resolve the conflict", f.conflict.until);
