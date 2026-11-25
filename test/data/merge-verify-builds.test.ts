@@ -6,7 +6,7 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  addScreenshotRuns, listReposWithQueuedBuilds, listVerifications, loadLateDisagreements, loadLatestVerification, loadPendingPrBuilds, loadPendingScreenshotRuns,
+  addScreenshotRuns, listVerifications, loadLateDisagreements, loadLatestVerification, loadPendingPrBuilds, loadPendingScreenshotRuns,
   loadPendingVerifications, loadPrBuildState, loadPrBuildViews, loadRunApprovals, loadScreenshotConfigs, loadScreenshotRuns, loadVerifications, loadVerifyDue,
   markRereads, markVerificationsStale, restartPrBuilds, restartVerifications, saveRunResults, saveVerifications, settlePrBuilds, settleScreenshotRuns,
   settleVerifications, skipQueuedFeatureRuns,
@@ -62,7 +62,7 @@ flat("verification loaders issue the same statements at 2 and 12 PRs", async (db
 flat("PR build and screenshot loaders issue the same statements at 2 and 12 PRs", async (db, n) => {
   await Promise.all([
     loadPrBuildViews(db, refs(n).map((r) => ({ ref: `${r.repo}#${r.number}`, head: `h${r.number}` }))), loadPendingPrBuilds(db, "app"), loadLateDisagreements(db, "app"),
-    loadPrBuildState(db, "app", 0), listReposWithQueuedBuilds(db), loadScreenshotRuns(db, refs(n)), loadPendingScreenshotRuns(db), loadScreenshotConfigs(db),
+    loadPrBuildState(db, "app", 0), loadScreenshotRuns(db, refs(n)), loadPendingScreenshotRuns(db), loadScreenshotConfigs(db),
   ]);
 });
 flat("run approval reads and writers issue the same statements at 2 and 12 PRs", async (db, n) => {
@@ -176,7 +176,6 @@ both("screenshot runs: settle with a state guard, skip queued runs, add ignores 
   assert.equal((await loadPendingScreenshotRuns(db)).length, 0);
   assert.equal((await loadScreenshotRuns(db, refs(2))).get("app#2@h2")!.state, "skipped");
   await skipQueuedFeatureRuns(db, "pr-builds");
-  assert.deepEqual(await listReposWithQueuedBuilds(db), []);
   return null;
 });
 

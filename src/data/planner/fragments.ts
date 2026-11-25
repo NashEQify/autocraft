@@ -39,8 +39,6 @@ const passUniverse = (db: Db, repos?: readonly string[], prsOnly = false) =>
     ])) as unknown as SelectQueryBuilder<any, any, KeyRow>;
 
 registerKeySource<undefined>(PASS_SOURCES.full, (db) => passUniverse(db));
-/** The pass universe of one repo (planner.repoPass). */
-registerKeySource<{ repo: string }>("planner.repoPass", (db, args) => passUniverse(db, [args.repo]));
 /** The PRs of the pass universe, of every repo or one (planner.prPass). */
 registerKeySource<{ repo?: string }>("planner.prPass", (db, args) => passUniverse(db, args.repo === undefined ? undefined : [args.repo], true));
 

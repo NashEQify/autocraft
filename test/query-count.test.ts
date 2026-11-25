@@ -16,9 +16,11 @@ import { trace } from "../src/dash/api/trace.ts";
 import type { Req } from "../src/dash/types.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { awaitCall, claimCall, enqueueCall } from "../src/remote/calls.ts";
-import { detectAutopilot } from "../src/runner/autopilot.ts";
+import { planned } from "../src/core/select.ts";
+import { applyProposals, detectAutopilot } from "../src/runner/autopilot.ts";
 import { JobLogCopy } from "../src/runner/job-log.ts";
 import { Runner } from "../src/runner/runner.ts";
+import { loadSteps } from "../src/runner/steps.ts";
 import { addEvent, insertWorkflow } from "../src/workflow/store.ts";
 import { expectFlat, type FlatUnit } from "./helpers/query-count.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
@@ -113,6 +115,46 @@ test("a full planner pass, and one over the items that changed, read in sets", a
     await addRepos(w, numbers(n - 1).map((i) => `app${i}`));
     return () => detectAutopilot(w.db);
   }), 2, 5);
+});
+
+test("the lanes of repos with the write steps on, and the queueing of a pass's proposals, read in sets", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const repos = (n: number): string[] => ["app", ...numbers(n - 1).map((i) => `app${i}`)];
+  const seeded = async (w: World, n: number): Promise<void> => {
+    await seedPrs(w, 2);
+    for (const i of numbers(4, 100)) await w.issue(i);
+    await addRepos(w, repos(n).slice(1));
+    const k = w.db.k as unknown as Kysely<Record<string, Record<string, unknown>>>;
+    for (const repo of repos(n)) {
+      for (const step of ["prstatus", "labels"]) await w.db.run(k.insertInto("repo_step_approvals").values({ repo, step, by: "op", at: iso(60) }));
+      await w.db.run(k.insertInto("settings").values({ key: `build_feature:pr-builds:${repo}`, value: "on" }));
+      for (const pr of numbers(POINTS.length)) {
+        await w.db.run(k.insertInto("item_stage").values({ repo, number: pr, stage: "reviewed", at: iso(90), reviewed: 1 }));
+        // A started issue's line names what its workflow waits for, read for every started item of every repo at once.
+        await w.db.run(k.insertInto("item_workflows").values({ repo, number: 100 + (pr % 4), kind: "issue", entry: "implement", state: "done", started_by: "op", started_at: iso(50), started_via: "github", updated_at: iso(50) }));
+      }
+      await w.db.run(k.insertInto("item_workflows").values({ repo, number: 1, kind: "pr", entry: "review", state: "waiting", started_by: "op", started_at: iso(50), started_via: "github", updated_at: iso(50) }));
+    }
+  };
+  await expectFlat(unit(async (w, n) => {
+    await seeded(w, n);
+    return () => detectAutopilot(w.db);
+  }), 2, 5);
+  await expectFlat(unit(async (w, n) => {
+    await seeded(w, n);
+    // The steps' own request checks read per proposal (in shared waves); the rest of queueing does not.
+    const steps = await loadSteps(), free = (await detectAutopilot(w.db)).proposals.filter((p) => !steps.get(p.step)!.check);
+    assert.ok(free.length > 1, "several proposals, or the count below says nothing");
+    return () => applyProposals(w.db, n === 2 ? free.slice(0, 1) : free, {});
+  }), 2, 5);
+});
+
+test("a job's start decides the PRs and items that can be due in sets", async () => {
+  await expectFlat(unit(async (w, n) => {
+    await seedPrs(w, n);
+    for (const i of numbers(n, 100)) await w.issue(i);
+    return () => planned(w.db, "review", { repo: "app" });
+  }), 2, 12);
 });
 
 const bundle = { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 600, maxTurns: 10, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } as const;

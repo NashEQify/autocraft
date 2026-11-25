@@ -88,12 +88,6 @@ export async function loadLateDisagreements(db: Db, repo?: string): Promise<Late
   return rows.map((r) => ({ repo: r.repo, number: r.number, head: r.head_sha, summary: r.summary }));
 }
 
-/** Repos with a queued build. */
-export async function listReposWithQueuedBuilds(db: Db): Promise<string[]> {
-  const q = queryDb(db);
-  return (await q.all(q.k.selectFrom("pr_builds").select("repo").distinct().where("state", "=", "queued"))).map((r) => r.repo);
-}
-
 /**
  * In one `db.write`: inserts a row per head with no task, creates the build tasks of the rows that were new, and links them.
  * Heads that already have a row are left alone. Returns the task id per head newly queued.

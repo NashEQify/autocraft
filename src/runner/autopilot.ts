@@ -671,7 +671,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => {
       const waiting = await pendingConversations(db, undefined, "maintainer");
       const logins = [...new Set(waiting.map((c) => c.login.toLowerCase()))].sort();
-      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leaseTurnover(db, l)}`)).join(",")}`;
+      return `${waiting.map((c) => c.turnId).join(",")}|${(await Promise.all(logins.map(async (l) => `${l}:${await leaseTurnover(db, l)}`))).join(",")}`;
     },
     detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },
@@ -1004,7 +1004,7 @@ async function stepStatus(db: Db, step: string, why: string | undefined): Promis
 
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
   const steps = await loadSteps();
-  return await withPassReads(db, Date.now(), async () => {
+  return await withPassReads(db, { reads: await loadReads(db, Date.now()) }, async () => {
     const why = await stageStatus(db);
     const trips = [...(await loadTrips(db, { active: true })).values()].flatMap((t) => { const k = tripOf(t.stage); return k ? [{ ...t, tripStage: k.stage, repo: k.repo }] : []; });
     return await mapSeq(LIMIT_STEPS, async (step) => {
@@ -1282,13 +1282,20 @@ async function acceptProposals(db: Db, proposals: Proposal[], log: (line: string
   const reserved: Active[] = [];
   const asActive = (step: string, params: Params, state: string): Active => ({ id: 0, step, state, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null });
   const blocked = (step: string, params: Params): Promise<string | null> => jobBlock(db, steps, { step, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { reserved, untaken, active, cap });
+  // The checks of the requests go out together; a refusal is told when its proposal's turn comes.
+  const checks = new Map<Proposal, Promise<Awaited<ReturnType<typeof checkRequest>>>>();
+  await db.together(async () => {
+    for (const p of proposals) checks.set(p, checkRequest(db, p.step, p.params, names));
+    await Promise.allSettled(checks.values());
+  });
   await withPassReads(db, { reads }, async () => {
     for (const p of proposals) {
       const slot = `${p.lane}\0${repoOf(p) ?? ""}`;
       if (done.has(slot)) continue;
       try {
         if (await blocked(p.step, p.params) || (p.gate && await blocked(p.gate.step, p.gate.params))) continue;
-        const { step, params: checked } = await checkRequest(db, p.step, p.params, names);
+        // A failed read of one check fails its whole wave: the check then runs by itself.
+        const { step, params: checked } = await checks.get(p)!.catch((e: unknown) => { if (e instanceof JobError) throw e; return checkRequest(db, p.step, p.params, names); });
         let params: Params = checked;
         // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
         if (typeof params.limit === "number") {
