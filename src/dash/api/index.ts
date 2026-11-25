@@ -5,21 +5,28 @@
 import { live } from "./live.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
-import * as kx from "../../db/kx.ts";
 import { prBuildView } from "../../prbuild/view.ts";
+import { loadItems, loadComments, loadFiles, loadChecks, loadRepos, loadSyncState, listItems } from "../../data/mirror/index.ts";
+import { loadStageLog, loadStageFacts, loadStageVersion } from "../../data/planner/index.ts";
+import { loadTrackedRepos } from "../../data/control/index.ts";
+import { loadReviewRecord } from "../../data/review/index.ts";
+import type { ReviewRecord } from "../../data/review/index.ts";
+import type { PatchTimelineRow } from "../../data/changes/index.ts";
+import type { VerificationView } from "../../data/merge/index.ts";
+import { loadPatchTimeline } from "../../data/changes/index.ts";
+import { loadLatestVerification } from "../../data/merge/index.ts";
+import { loadStatementViews } from "../../data/conversations/index.ts";
 import { checksOf } from "../../patchcheck/index.ts";
 import { priorityOf } from "../../priority/read.ts";
 import { preapprovalOf } from "../../preapproval/index.ts";
 import type {
-  CiState, DecisionKind, Done, Funnel, Item, ItemAction, ItemComment, ItemFixup, ItemPremerge, ItemReviews, ItemState, ItemVerification, ReviewSide, Mergeable, Progress, RepoProgress, Tier, User,
+  CiState, Done, Funnel, Item, ItemComment, ItemFixup, ItemPremerge, ItemReviews, ItemState, ItemVerification, ReviewSide, Mergeable, Progress, RepoProgress, Tier, User,
 } from "../../../web/src/api/types.ts";
 import { trackedNames } from "../../repos.ts";
-import { excludeHiddenExpr, hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } from "./visible.ts";
-import { withoutHiddenExpr } from "./decisions.ts";
+import { hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } from "./visible.ts";
 import { contributors } from "../../whitelist.ts";
-import { doneByRepo, funnelByRepo, latestCteExpr, trackedExpr, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
+import { doneByRepo, funnelByRepo, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
 import { HttpError, RateLimiter, share } from "../server/util.ts";
-import { findingsOf, type PremergeRow } from "../../premerge/store.ts";
 import type { Req, Res, Route } from "../types.ts";
 import * as adm from "./admin.ts";
 import { githubUserId } from "../../github/users.ts";
@@ -61,7 +68,6 @@ import { canSeeInternals } from "./staff.ts";
 import * as operator from "./operator.ts";
 import * as stuck from "./stuck.ts";
 import { actionsOf as releasesOf } from "../../operator-actions.ts";
-import { verificationOf } from "../../verify/results.ts";
 import { areaNameOf } from "../../areas/store.ts";
 import { settledOf, unflagged } from "../../classify/settled.ts";
 import { isQuiet } from "../../security/quiet.ts";
@@ -117,13 +123,12 @@ async function runRepos(db: Db, req: Req): Promise<string[]> {
 }
 
 async function me(db: Db, req: Req): Promise<User> {
-  const mw = await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "maintainer_writes"));
   return {
     login: req.user.login,
     role: req.user.role,
     writeRepos: await writeRepos(db, req),
     runRepos: await runRepos(db, req),
-    maintainerWrites: mw?.value === "1",
+    maintainerWrites: false,
     maintainerSettles: await maintainersSettle(db),
     inference: await inferenceMode(db),
     uiV2: await uiV2(db, req.user.login),
@@ -140,8 +145,10 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
+  const ref = `${repo}#${n}`;
   // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
-  const [, it] = await Promise.all([needVisible(db, req, repo), db.get(db.k.selectFrom("items").select(kx.cols("items")).where("repo", "=", repo).where("number", "=", n))]);
+  const [, found] = await Promise.all([needVisible(db, req, repo), loadItems(db, [{ repo, number: n }], "full")]);
+  const it = found.get(ref);
   if (!it) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   let labels: string[] = [];
   try {
@@ -150,33 +157,33 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   } catch { /* malformed: no labels */ }
   const internals = canSeeInternals(req);
   const pr = it.kind === "pr";
+  const key = [{ repo, number: n }];
   // The parts read independently, so they run together.
-  const [c, stages, comments, decisionIds, quiet, files, ciChecks, tracked, related, classifications, area, discordOf, settled, priority, work, checks, reviews, premerge, postmerge, actions, releases, slots, preapproval] = await Promise.all([
+  const [c, stageLog, commentRows, quiet, files, checkRows, tracked, related, classifications, area, discordOf, settled, priority, checks, record, timeline, verification, postmerge, releases, slots, preapproval, hidden] = await db.together(() => Promise.all([
     it.author ? contributors(db, { login: it.author }).then((cs) => cs.find((x) => x.login === it.author)) : undefined,
-    db.all(db.k.selectFrom("stages").select(["stage", "at", "actor as by", "note"]).where("repo", "=", repo).where("number", "=", n)
-      .orderBy("at").orderBy(kx.rowid("stages")).$narrowType<{ stage: Item["stages"][number]["stage"] }>()),
-    db.all(db.k.selectFrom("comments").select(["id", "author", "created_at as at", "body", "kind", "review_state as reviewState"])
-      .where("repo", "=", repo).where("number", "=", n)
-      .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "=", "")])))
-      .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] | null }>()),
-    db.all(db.k.selectFrom("decisions").select("id").where((eb) => eb.or([
-      eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
-      eb.and([eb("number", "is", null), eb.exists(
-        db.k.selectFrom(kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end(), "j")).select(eb.lit(1).as("one"))
-          .where((e) => e.and([e(kx.jsonText(db, "j.value", "$.repo"), "=", repo), e(kx.jsonNum(db, "j.value", "$.number"), "=", n)])))]),
-    ])).orderBy("asked_at")).then((rows) => rows.map((r) => r.id)),
+    loadStageLog(db, [ref]),
+    loadComments(db, key, { order: "created", body: true }),
     isQuiet(db, repo, n),
-    pr ? filesOf(db, repo, n) : [], pr ? ciChecksOf(db, repo, n) : [],
-    db.get(db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo)),
+    pr ? loadFiles(db, key) : new Map<string, never[]>(),
+    pr ? loadChecks(db, key) : new Map<string, never>(),
+    loadTrackedRepos(db, [repo]),
     relatedOf(db, repo, n), classificationsOf(db, repo, n), areaNameOf(db, repo, n), discord.discordOf(db, repo, n), settledOf(db, repo, n), priorityOf(db, repo, n),
-    pr ? prWork(db, repo, n, internals) : { verification: null, fixups: [], prBuild: null },
     checksOf(db, repo, n),
-    pr ? hiddenRepos(db, req).then((hidden) => reviewsOf(db, repo, n, internals, hidden)) : null,
-    pr ? premergeOf(db, repo, n) : [], pr ? postmergeOf(db, repo, n, internals) : null,
-    actionsOf(db, repo, n), releasesOf(db, repo, n),
+    pr ? loadReviewRecord(db, key) : new Map<string, ReviewRecord>(),
+    pr ? loadPatchTimeline(db, key, { internals }) : new Map(),
+    pr ? loadLatestVerification(db, key) : new Map(),
+    pr ? postmergeOf(db, repo, n, internals) : null,
+    releasesOf(db, repo, n),
     visibleRepos(db, req).then((v) => queueSlots(db, v)),
     pr ? preapprovalOf(db, repo, n) : null,
-  ]);
+    pr ? hiddenRepos(db, req) : [],
+  ]));
+  const rec = record.get(ref);
+  const [work, reviews] = pr ? await Promise.all([
+    prWork(db, repo, n, it.head_oid, internals, timeline.get(ref) ?? [], verification.get(ref)),
+    reviewsOf(db, rec, it.head_oid, internals, hidden),
+  ]) : [{ verification: null, fixups: [], prBuild: null }, null];
+  const premerge = pr ? premergeOf(rec) : [];
   // The quiet pull request of a security fix: viewers get none of the model text about it.
   const veil = !internals && quiet;
   const out: Item = {
@@ -186,18 +193,21 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     additions: it.additions ?? 0, deletions: it.deletions ?? 0,
     changedFiles: it.kind === "pr" ? it.changed_files : null,
     // Per-check states of the head come from pr_checks and per-file rows from pr_files (src/activity.ts).
-    files, ciChecks,
+    files: (files.get(ref) ?? []).map((f) => ({ path: f.path, additions: f.additions, deletions: f.deletions })), ciChecks: ciChecksOf(it.head_oid, checkRows.get(ref)),
     ci: it.kind === "pr" ? (CI[it.ci_state ?? ""] ?? "none") : "none",
     mergeable: MERGEABLE[it.mergeable ?? ""] ?? "unknown",
     labels, createdAt: it.created_at ?? "", updatedAt: it.updated_at ?? "",
     closedAt: it.closed_at, mergedAt: it.merged_at, mergedBy: it.merged_by,
-    pipelineOn: tracked?.pipeline === 1,
+    pipelineOn: tracked.get(repo)?.pipeline === true,
     related, classifications, area,
     // Stage notes quote review reasons, verification summaries and fix-up reasons: staff only.
-    stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: internals ? s.note : null })),
+    stages: (stageLog.get(ref) ?? []).map((s) => ({ stage: s.stage as Item["stages"][number]["stage"], at: s.at, by: s.actor ?? "", note: internals ? s.note : null })),
     discord: discordOf,
-    comments: comments.map((x) => ({ ...x, author: x.author ?? "", body: x.body ?? "" })),
-    decisionIds, settled: unflagged(settled, quiet, !veil) as Item["settled"], priority,
+    comments: (commentRows.get(ref) ?? []).filter((x) => !(x.kind === "review" && (x.body ?? "").trim() === "")).map((x) => ({
+      id: x.id, author: x.author ?? "", at: x.created_at, body: x.body ?? "", kind: x.kind as ItemComment["kind"] | null, reviewState: x.review_state,
+    })),
+    // The decision system is retired: its ids, actions and the settled-question list stay empty.
+    decisionIds: [], settled: unflagged(settled, quiet, !veil) as Item["settled"], priority,
     ...work,
     // The reviewer's reasons quote the patch, so viewers get the verdict only.
     patchChecks: checks.map(({ kind, subject, patchHash, round, verdict, reasons, problems, model, createdAt }) =>
@@ -205,7 +215,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     reviews,
     premerge,
     postmerge,
-    actions, releases,
+    actions: [], releases,
     queue: slots.get(`${repo}#${n}`) ?? null,
     // The operator's instructions are shown to those who see the internals only.
     ...(pr ? { preapproval: preapproval && !internals ? { ...preapproval, instructions: "" } : preapproval } : {}),
@@ -220,102 +230,68 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   };
 }
 
-/** The changed files the activity sync stored for the current head; empty until the sync has read the PR. */
-async function filesOf(db: Db, repo: string, n: number): Promise<Item["files"]> {
-  return db.all(db.k.selectFrom("pr_files as f")
-    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").onRef("i.head_oid", "=", "f.head"))
-    .select(["f.path", "f.additions", "f.deletions"]).where("f.repo", "=", repo).where("f.number", "=", n).orderBy("f.path"));
-}
-
 /** The head's check contexts as the checks sync stored them; empty when they belong to an older head. */
-async function ciChecksOf(db: Db, repo: string, n: number): Promise<Item["ciChecks"]> {
-  const r = await db.get(db.k.selectFrom("pr_checks as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number"))
-    .select("c.checks").where("c.repo", "=", repo).where("c.number", "=", n)
-    .where((eb) => eb.or([eb("i.head_oid", "is", null), eb("i.head_oid", "=", eb.ref("c.head_oid"))])));
-  if (!r) return [];
+function ciChecksOf(head: string | null, row: { head_oid: string | null; checks: string | null } | undefined): Item["ciChecks"] {
+  if (!row || (head !== null && head !== row.head_oid)) return [];
   let list: unknown = [];
-  try { list = JSON.parse(r.checks); } catch { /* malformed: none */ }
+  try { list = JSON.parse(row.checks ?? "[]"); } catch { /* malformed: none */ }
   return (Array.isArray(list) ? (list as ({ name?: unknown; state?: unknown } | null)[]) : []).flatMap((c) =>
     c && typeof c.name === "string" ? [{ name: c.name, state: CI[typeof c.state === "string" ? c.state.toUpperCase() : ""] ?? "none", minutes: null }] : []);
 }
 
+const jsonList = <T>(s: string | null | undefined): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
+
 /** Pre-merge review rows of the PR, newest first. */
-async function premergeOf(db: Db, repo: string, n: number): Promise<ItemPremerge[]> {
-  const rows: PremergeRow[] = await db.all(db.k.selectFrom("premerge_reviews").select(kx.cols("premerge_reviews")).where("repo", "=", repo).where("number", "=", n)
-    .orderBy("at", "desc").orderBy("head_oid", "desc"));
-  return rows.map((r) => ({ head: r.head_oid, at: r.at, model: r.model, findings: findingsOf(r), searched: r.searched, error: r.error, tries: r.tries }));
+function premergeOf(rec: ReviewRecord | undefined): ItemPremerge[] {
+  return [...(rec?.premerge ?? [])].sort((a, b) => (a.at === b.at ? (a.head_oid < b.head_oid ? 1 : -1) : a.at < b.at ? 1 : -1))
+    .map((r) => ({ head: r.head_oid, at: r.at, model: r.model, findings: jsonList<ItemPremerge["findings"][number]>(r.findings), searched: r.searched, error: r.error, tries: r.tries }));
 }
 
-/** The Opus review of the newest reviewed head, which is also the final verdict. */
 /**
  * The owner statements the Opus or the pre-merge review at the head named as conflicts, with the reviews' reasons and the item each
  * was said about. A statement made in a repo hidden from the reader is left out; viewers (`internals` false) get no excerpt or reason.
  */
-async function conflictsNamed(db: Db, repo: string, n: number, head: string, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews["conflicts"]> {
-  const stored = [
-    (await db.get(db.k.selectFrom("opus_reviews").select("conflicts").where("repo", "=", repo).where("number", "=", n).where("head_oid", "=", head)))?.conflicts,
-    (await db.get(db.k.selectFrom("premerge_reviews").select("conflicts").where("repo", "=", repo).where("number", "=", n).where("head_oid", "=", head)))?.conflicts,
+async function conflictsNamed(db: Db, rec: ReviewRecord, head: string, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews["conflicts"]> {
+  const stored: { id?: unknown; reason?: unknown }[][] = [
+    rec.latest?.conflicts ?? [],
+    jsonList(rec.premerge.find((p) => p.head_oid === head)?.conflicts),
   ];
+  const named = stored.flat().filter((h): h is { id: number; reason?: unknown } => typeof h?.id === "number");
+  const statements = await loadStatementViews(db, named.map((h) => h.id));
   const out: ItemReviews["conflicts"] = [];
-  for (const raw of stored) {
-    let v: unknown = [];
-    try { v = JSON.parse(raw ?? "[]"); } catch { /* unreadable: none */ }
-    for (const h of Array.isArray(v) ? (v as { id?: unknown; reason?: unknown }[]) : []) {
-      if (typeof h?.id !== "number" || out.some((d) => d.id === h.id)) continue;
-      const d = await db.get(db.k.selectFrom("owner_statements as s").leftJoin("items as i", (j) => j.onRef("i.repo", "=", "s.repo").onRef("i.number", "=", "s.number"))
-        .select(["s.repo", "s.number", "s.text", "s.item_title", "i.kind", "i.state", "i.title"]).where("s.id", "=", h.id)
-        .$narrowType<{ kind: "pr" | "issue" | null }>());
-      if (!d || isHiddenRepo(hidden, d.repo)) continue;
-      out.push({
-        id: h.id, repo: d.repo, number: d.number, kind: d.kind, state: d.state ? (d.state.toLowerCase() as ItemState) : null, title: d.title ?? (d.item_title || null),
-        excerpt: internals ? d.text.replace(/\s+/g, " ").trim().slice(0, 200) : "", reason: internals && typeof h.reason === "string" ? h.reason : "",
-      });
-    }
+  for (const h of named) {
+    if (out.some((d) => d.id === h.id)) continue;
+    const d = statements.get(h.id);
+    if (!d || isHiddenRepo(hidden, d.repo)) continue;
+    out.push({
+      id: h.id, repo: d.repo, number: d.number as number, kind: d.kind as "pr" | "issue" | null, state: d.state ? (d.state.toLowerCase() as ItemState) : null, title: d.title,
+      excerpt: internals ? d.text.replace(/\s+/g, " ").trim().slice(0, 200) : "", reason: internals && typeof h.reason === "string" ? h.reason : "",
+    });
   }
   return out.sort((a, b) => a.id - b.id);
 }
 
 /** `internals` false (viewers): the verdict only; the reviewer's reason, fixes and risks quote the patch. */
-async function reviewsOf(db: Db, repo: string, n: number, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews | null> {
-  // The view holds the rows of opus_reviews that have a verdict; its head, time and mode columns are NOT NULL there.
-  const o = await db.get(db.k.selectFrom("final_reviews").select(["head_oid", "at", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks"])
-    .where("repo", "=", repo).where("number", "=", n).orderBy("at", "desc").orderBy("head_oid", "desc").limit(1)
-    .$narrowType<{ head_oid: string; at: string; mode: "full" | "delta"; verdict: ReviewSide["verdict"] }>());
-  if (!o) return null;
-  const list = <T>(s: string | null): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
-  const head = (await db.get(db.k.selectFrom("items").select("head_oid").where("repo", "=", repo).where("number", "=", n)))?.head_oid ?? null;
+async function reviewsOf(db: Db, rec: ReviewRecord | undefined, head: string | null, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews | null> {
+  const o = rec?.latest;
+  if (!rec || !o) return null;
   return {
-    head: o.head_oid, current: o.head_oid === head, conflicts: await conflictsNamed(db, repo, n, o.head_oid, internals, hidden),
-    opus: { verdict: o.verdict, reason: internals ? o.reason ?? "" : "", fixes: internals ? list(o.fixes) : [], risks: internals ? list(o.risks) : [], at: o.at, sure: o.sure === 1, mode: o.mode, baseHead: o.base_head },
-    final: { verdict: o.verdict, reason: internals ? o.reason ?? "" : "", decided: true },
+    head: o.head, current: o.head === head, conflicts: await conflictsNamed(db, rec, o.head, internals, hidden),
+    opus: { verdict: o.verdict as ReviewSide["verdict"], reason: internals ? o.reason : "", fixes: internals ? o.fixes as unknown[] : [], risks: internals ? o.risks : [], at: o.at, sure: o.sure, mode: o.mode as "full" | "delta", baseHead: o.base_head },
+    final: { verdict: o.verdict as ReviewSide["verdict"], reason: internals ? o.reason : "", decided: true },
   };
 }
 
 /** `internals` false (viewers): states only, without job errors or model output. */
-async function prWork(db: Db, repo: string, n: number, internals: boolean): Promise<Pick<Item, "verification" | "fixups" | "prBuild">> {
-  const head = (await db.get(db.k.selectFrom("items").select("head_oid").where("repo", "=", repo).where("number", "=", n)))?.head_oid ?? null;
-  const latest = await db.get(db.k.selectFrom("verifications").select("head_sha").where("repo", "=", repo).where("number", "=", n)
-    .$if(head !== null, (q) => q.orderBy((eb) => eb("head_sha", "=", head!), "desc")).orderBy("created_at", "desc").limit(1));
-  const v = latest ? await verificationOf(db, repo, n, latest.head_sha) : null;
+async function prWork(db: Db, repo: string, n: number, head: string | null, internals: boolean, timeline: PatchTimelineRow[], latest: { head: string; view: VerificationView } | undefined): Promise<Pick<Item, "verification" | "fixups" | "prBuild">> {
+  const v = latest?.view ?? null;
   const plan = (v?.plan ?? null) as Record<string, unknown> | null;
   const strings = (x: unknown): string[] => (Array.isArray(x) ? x.filter((s): s is string => typeof s === "string") : []);
-  const fixups = (await db.all(db.k.selectFrom("fixups").select(["from_head", "to_head", "state", "reason", "files", "attempt", "created_at"])
-    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy(kx.rowid("fixups"))))
-    .map((f): ItemFixup => {
-      let files: string[] = [];
-      try { files = strings(JSON.parse(f.files ?? "[]")); } catch { /* malformed: none */ }
-      return { fromHead: f.from_head, toHead: f.to_head, state: f.state as ItemFixup["state"], reason: internals ? f.reason : null, files: internals ? files : [], attempt: f.attempt, createdAt: f.created_at };
-    });
-  // CI fix tries are listed with the fix-ups, oldest first.
-  const ciFixes = (await db.all(db.k.selectFrom("ci_fixes").select(["head", "to_head", "state", "reason", "files", "attempt", "created_at"])
-    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy(kx.rowid("ci_fixes"))))
-    .map((f): ItemFixup => {
-      let files: string[] = [];
-      try { files = strings(JSON.parse(f.files ?? "[]")); } catch { /* malformed: none */ }
-      return { kind: "ci-fix", fromHead: f.head, toHead: f.to_head, state: f.state as ItemFixup["state"], reason: internals ? f.reason : null, files: internals ? files : [], attempt: f.attempt, createdAt: f.created_at };
-    });
-  fixups.push(...ciFixes);
-  fixups.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // Fix-ups and CI fix tries are listed together, oldest first.
+  const fixups = timeline.filter((r) => r.kind === "fixup" || r.kind === "cifix").map((f): ItemFixup => ({
+    ...(f.kind === "cifix" ? { kind: "ci-fix" as const } : {}),
+    fromHead: f.head, toHead: f.toHead, state: f.state as ItemFixup["state"], reason: internals ? f.reason : null, files: internals ? f.files : [], attempt: f.attempt, createdAt: f.createdAt,
+  }));
   return {
     fixups,
     prBuild: await prBuildView(db, repo, n, head, internals),
@@ -326,13 +302,6 @@ async function prWork(db: Db, repo: string, n: number, internals: boolean): Prom
       tasks: v.tasks.map((t) => ({ id: t.id, role: t.role, state: t.state, results: internals ? t.results : [], endedAt: t.endedAt })),
     },
   };
-}
-
-async function actionsOf(db: Db, repo: string, n: number): Promise<ItemAction[]> {
-  return (await db.all(db.k.selectFrom("actions").select(["decision_id", "kind", "state", "comment_url", "reason", "created_at"])
-    .select((eb) => eb.selectFrom("decisions as d").select("d.kind").whereRef("d.id", "=", "actions.decision_id").limit(1).as("decision_kind"))
-    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy("id")))
-    .map((a): ItemAction => ({ decisionId: a.decision_id, decisionKind: a.decision_kind as DecisionKind | null, kind: a.kind, state: a.state as ItemAction["state"], commentUrl: a.comment_url, reason: a.reason, createdAt: a.created_at }));
 }
 
 // ---- progress ----------------------------------------------------------------
@@ -359,13 +328,11 @@ const PROGRESS_MAX_AGE = 60_000;
 // the mirror, the stages or the tracked repos change, or for a minute at most
 // (classifier verdicts and the hourly counts show within that minute).
 async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
-  const sig = await db.get(db.k.selectNoFrom((eb) => [
-    eb.selectFrom("main.repos").select((e) => e.fn.max<string | null>("synced_at").as("m")).as("synced"),
-    eb.selectFrom("main.settings").select("value").where("key", "=", "org_high_water").as("hw"),
-    eb.selectFrom("main.stages").select((e) => e.fn.countAll<number>().as("c")).as("st_count"),
-    eb.selectFrom("main.stages").select((e) => e.fn.max<number | null>(kx.rowid("main.stages")).as("m")).as("st_max"),
-    eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("g")).as("tr"),
-  ]));
+  const [repoRows, sync, stages, trackedRepos] = await db.together(() => Promise.all([loadRepos(db, { all: true }), loadSyncState(db), loadStageVersion(db), loadTrackedRepos(db)]));
+  const sig = {
+    synced: [...repoRows.values()].reduce<string | null>((m, r) => (r.synced_at !== null && (m === null || r.synced_at > m) ? r.synced_at : m), null),
+    hw: sync.org_high_water, st_count: stages.count, st_max: stages.maxRowid, tr: [...trackedRepos.keys()].sort().join(","),
+  };
   const key = JSON.stringify(sig);
   const cache = progressCache.get(db) ?? progressCache.set(db, new Map()).get(db)!;
   const slot = JSON.stringify([hidden, hidden.visible ?? null]);
@@ -378,13 +345,9 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
   const perHour = new Array<number>(24).fill(0);
   const perHourPipeline = new Array<number>(24).fill(0);
   const since = now - 24 * 3600_000;
-  for (const r of await db.all(latestCteExpr(db).selectFrom("main.items as i")
-    .leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
-    .select((eb) => ["i.closed_at", eb("l.stage", "in", ["merged", "closed", "fixed-by-us"]).as("ours")])
-    .where("i.closed_at", ">=", new Date(since).toISOString()).where("i.state", "<>", "OPEN")
-    .where((eb) => trackedExpr(db, eb, "i.repo"))
-    .where((eb) => excludeHiddenExpr(db, "i.repo", hidden) ?? eb.lit(true))
-    .$narrowType<{ closed_at: string }>())) {
+  const closed = await listItems(db, { repos: [...trackedRepos.keys()], states: ["CLOSED", "MERGED"], closedBetween: [new Date(since).toISOString(), new Date(now + 3600_000).toISOString()], hidden }, "card");
+  const latest = await loadStageFacts(db, closed.map((r) => ({ repo: r.repo, number: r.number })));
+  for (const r of closed.map((i) => ({ closed_at: i.closed_at!, ours: ["merged", "closed", "fixed-by-us"].includes(latest.get(`${i.repo}#${i.number}`)?.stage ?? "") }))) {
     const h = Math.floor((Date.parse(r.closed_at) - since) / 3600_000);
     if (h >= 0 && h < 24) {
       perHour[h]!++;
@@ -410,26 +373,10 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
 
 async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
   const heavy = await progressItems(db, hidden);
-  const openDec = new Map<string, number>();
-  let decisionsOpen = 0;
-  for (const r of await db.all(db.k.selectFrom("decisions").select(["repo", "number", "items"]).where("answer", "is", null)
-    .where((eb) => withoutHiddenExpr(db, eb, hidden) ?? eb.lit(true)))) {
-    decisionsOpen++;
-    let repos = r.number !== null && r.repo ? [r.repo] : [];
-    if (r.number === null) {
-      try {
-        repos = [...new Set((JSON.parse(r.items ?? "[]") as { repo: string }[]).map((x) => x.repo))];
-      } catch { /* malformed batch: counted for no repo */ }
-    }
-    for (const x of repos) openDec.set(x, (openDec.get(x) ?? 0) + 1);
-  }
-  const today = new Date().toISOString().slice(0, 10);
-  const answeredToday = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where("answered_at", ">=", `${today}T00:00:00`)
-    .where((eb) => withoutHiddenExpr(db, eb, hidden) ?? eb.lit(true))))!.n;
   return {
     ...heavy,
-    repos: heavy.repos.map((r) => ({ ...r, decisionsOpen: openDec.get(r.repo) ?? 0 })),
-    decisionsOpen, decisionsAnsweredToday: answeredToday,
+    repos: heavy.repos.map((r) => ({ ...r, decisionsOpen: 0 })),
+    decisionsOpen: 0, decisionsAnsweredToday: 0,
     mainCi: summarize(await mainCiRepos(db, hidden)),
   };
 }
