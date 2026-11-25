@@ -58,6 +58,7 @@ import { loadItems, loadMainCiAt } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadItemAreas } from "../data/triage/index.ts";
 import { loadPrWorkflows, loadRepoScopes, loadWorkScores } from "../data/workflow/index.ts";
+import { afterBatch } from "./controls.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -275,13 +276,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   const asCands = (ms: BatchMember[]): Cand[] => ms.map((m) => ({ number: m.number, head: m.head_oid, size: "S", lines: 0 }));
 
-  /** The batch's PRs are rebuilt on the current default branch head, leaving out `members` that changed. */
-  async function supersede(b: BatchView, keep: BatchMember[], why: string): Promise<void> {
+  /** Closes the batch; `keep` is rebuilt on the current default branch head. `named`: the members its closing comment speaks of. */
+  async function supersede(b: BatchView, keep: BatchMember[], why: string, named = keep): Promise<void> {
     // A control may have ended the batch while the caller's GitHub calls ran.
     if (!ACTIVE_BATCH.includes((await getBatch(db, b.id)).state)) return;
     await cancelBuild(db, b, ACTOR);
     await updateBatch(db, b.id, at(), { state: "superseded", summary: why });
-    await closePr(b, `Closing: ${why}. The PRs are rebuilt in a new batch.`);
+    await closePr(b, `Closing: ${why}.${await afterBatch(db, repo, named.map((m) => m.number), named.length < b.members.length)}`);
     s.superseded.push(b.branch);
     log(`  ${b.branch}: ${why}`);
     if (keep.length && left() > 0) await startBatch(asCands(keep), left(), b.id);
@@ -741,7 +742,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     for (const b of first.mine) await advance(b.id, q);
   }
   // A batch in a repo whose pipeline is off loses its place when a PR in it has no live workflow any more: it is only closed, never advanced, also in a repo with no work left.
-  for (const b of first.outside) await supersede(b, [], "a PR in the batch has no live workflow and the repo's pipeline is off");
+  for (const b of first.outside) await supersede(b, [], "a PR in the batch has no live workflow and the repo's pipeline is off", b.members);
 
   if (repoInScope(scope, "work") && !(await batchesNow()).mine.length && (params.limit === undefined || params.limit > 0)) {
     // PRs in a repo Verify cannot build are left to the single-PR merge (the plan's merge action is not batchable).

@@ -2,12 +2,14 @@
 // (src/workflow/batch.ts). Both close the batch's integration PR through src/github/write.ts (audited, on the GitHub activity page);
 // the exec that runs `gh` is injectable.
 import { guardRepo } from "../core/guard.ts";
+import { repoInScope } from "../core/scope.ts";
 import { type Exec, exec as defaultExec } from "../fixup/git.ts";
 import { ghClosePr } from "../github/write.ts";
 import { ACTIVE_BATCH, cancelBuild, updateBatch } from "./batch-store.ts";
 import { slugOf } from "../owners.ts";
 import { addAudit } from "../data/control/index.ts";
 import { endBatches, getBatch, loadBatchRun } from "../data/merge/index.ts";
+import { loadPrWorkflows, loadRepoScopes } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 
 export class ControlError extends Error {
@@ -20,15 +22,26 @@ export class ControlError extends Error {
 
 const refOf = (repo: string, number: number): string => `${repo}#${number}`;
 
+/** What becomes of pull requests whose batch closes, as a sentence of its closing comment: in a repo whose Pipeline is off only started ones go on. `others`: the batch had more. */
+export async function afterBatch(db: Db, repo: string, numbers: readonly number[], others: boolean): Promise<string> {
+  if (!numbers.length) return "";
+  const rebuilt = `${others ? "The other pull requests" : "The pull requests"} are rebuilt in a new batch.`;
+  const [scopes, live] = await db.together(() => Promise.all([loadRepoScopes(db, [repo]), loadPrWorkflows(db, numbers.map((number) => ({ repo, number })))]));
+  const idle = repoInScope(scopes.get(repo), "builds") ? [] : numbers.filter((n) => !live.has(refOf(repo, n)));
+  if (!idle.length) return ` ${rebuilt}`;
+  const wait = `The repo's pipeline is off, so ${idle.map((n) => `#${n}`).join(", ")} ${idle.length === 1 ? "waits until someone starts it" : "wait until someone starts them"} or the pipeline is on again`;
+  return ` ${wait}${idle.length < numbers.length ? "; the others are rebuilt in a new batch" : ""}.`;
+}
+
 /** Marks the batch superseded and closes its integration PR, when it has one; the row goes back to its state if the close fails, so a later Stop, Remove or merge run retries. The PRs go back to the queue; the next merge run builds batches from what is eligible. */
-async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec): Promise<{ closed: number | null }> {
+async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec, after = ""): Promise<{ closed: number | null }> {
   const b = (await getBatch(db, id))!;
   await cancelBuild(db, b, by);
   await updateBatch(db, id, new Date().toISOString(), { state: "superseded", summary: why });
   if (b.pr_number === null) return { closed: null };
   const g = await guardRepo(db, b.repo, null, { operator: by });
   const r = "refused" in g ? { code: 1, stdout: "", stderr: g.refused }
-    : await ghClosePr({ db, login: by }, g, run, { repo: b.repo, number: b.pr_number }, { by: "fixed-operator" }, `Closing: ${comment}.`, { batch: b.branch });
+    : await ghClosePr({ db, login: by }, g, run, { repo: b.repo, number: b.pr_number }, { by: "fixed-operator" }, `Closing: ${comment}.${after}`, { batch: b.branch });
   if (r.code !== 0) {
     const state = await run("gh", ["pr", "view", String(b.pr_number), "--repo", `${slugOf(b.repo)}`, "--json", "state", "--jq", ".state"]);
     if (state.code === 0 && state.stdout.trim() === "MERGED") {
@@ -68,10 +81,11 @@ export async function endStoppedBatch(db: Db, by: string, b: { id: number; repo:
   return await endBatch(db, by, b.id, `stopped in AutoCraft by ${by}`, `the batch was stopped in AutoCraft by ${by}. Its pull requests are on hold`, run);
 }
 
-/** Ends the PR's batch: the others go back to the queue and the next merge run builds a batch without it. A hold has ended the PR's workflow before, so that batch leaves it out. */
+/** Ends the PR's batch: the others go back to the queue, and the next merge run builds a batch of those it works. A hold has ended the PR's workflow before, so that batch leaves it out. */
 export async function removeFromBatch(db: Db, by: string, repo: string, number: number, run: Exec = defaultExec): Promise<{ batch: string; closed: number | null }> {
   const b = await batchOf(db, repo, number);
   await addAudit(db, [{ login: by, action: "batch-remove", target: refOf(repo, number), details: { batch: b.branch } }]);
-  const { closed } = await endBatch(db, by, b.id, `${refOf(repo, number)} was removed in AutoCraft by ${by}`, `${refOf(repo, number)} was removed from the batch in AutoCraft by ${by}. The other pull requests are rebuilt in a new batch`, run);
+  const after = await afterBatch(db, repo, b.members.map((m) => m.number).filter((n) => n !== number), true);
+  const { closed } = await endBatch(db, by, b.id, `${refOf(repo, number)} was removed in AutoCraft by ${by}`, `${refOf(repo, number)} was removed from the batch in AutoCraft by ${by}`, run, after);
   return { batch: b.branch, closed };
 }
