@@ -5299,7 +5299,7 @@ const section = (title, lines) => [title, ...lines.map(([c, s]) => {
   return c.length < HELP_COLUMN ? `  ${c.padEnd(HELP_COLUMN)}${text}` : `  ${c}${pad}${text}`;
 })].join("\n");
 
-const SERVER_NOTE = `Inbox, merge queue, model call and other server commands need Agent access for this Task Runner (the dashboard's Connect page).
+const SERVER_NOTE = `Item, merge queue, model call and other server commands need Agent access for this Task Runner (the dashboard's Connect page).
 Options of a command's tool that are not shown pass through as --<argument>; \`autocraft call <tool> --help\` lists them.
 Add --json for the raw result. Exit 0 done, 1 refused or failed, 2 wrong command line.`;
 

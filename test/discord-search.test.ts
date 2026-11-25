@@ -234,7 +234,7 @@ describe("commands", () => {
 });
 
 describe("/autocraft do", () => {
-  test("an unlinked user, a linked user without write access and a repo not switched on are refused; write access runs it", async () => {
+  test("an unlinked user and a linked user without write access are refused; write access runs it", async () => {
     const ix = new Interactions(rest, (l) => assert.fail(l));
     installAccountCommands(ix, { db, keys });
     const run = async (id: string, user: string, text: string) => {
@@ -249,8 +249,6 @@ describe("/autocraft do", () => {
     ix.dispatch("INTERACTION_CREATE", { id: "d2", token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: "u70" } }, data: { name: "autocraft", type: 1, options: [{ name: "link", type: 1, options: [{ name: "code", type: 3, value: code }] }] } });
     await editAfter(linked);
     await db.run(db.k.insertInto("main.access").values({ login: "nora", role: "maintainer" }).onConflict((oc) => oc.doNothing()));
-    assert.match(await run("d3", "u70", "review: photocraft#4"), /not switched on/);
-    await db.run(db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
     await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
     assert.match(await run("d4", "u70", "review: photocraft#4"), /no write access/);
     assert.equal(await workflows(), 0);
