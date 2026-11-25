@@ -20,7 +20,6 @@ import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
 import type { StopCode } from "../core/codes.ts";
-import { decideItem } from "../core/decide-item.ts";
 import { conflictPath, decidePr } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
@@ -385,7 +384,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const asked = await comeBack(base, null);
     if (asked) return asked.to;
     const issueFacts = pass.issues.get(key(w.repo, w.number));
-    const question = issueFacts ? itemQuestion(issueFacts, decideItem(issueFacts), { approved: w.approvedBy !== null, parts: w.plan }) : null;
+    const question = issueFacts ? itemQuestion(issueFacts, { approved: w.approvedBy !== null, parts: w.plan }) : null;
     if (question) return await comeWith(question, base, null);
     if (!attempt) return settle(base);
     // A ready plan's parts; an answered question's options are no plan any more.

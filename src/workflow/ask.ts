@@ -2,7 +2,8 @@
 // people it acts for can no longer act. Pure.
 import { needsQuestion, type WaitCode } from "../core/codes.ts";
 import { unapprovedStop, worksOn } from "../core/decide.ts";
-import type { Action, ItemFacts, ItemPlan, Plan, PrFacts, StandingFact } from "../core/plan.ts";
+import { implementStep } from "../core/decide-item.ts";
+import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
 import { afterSteps, droppedOf, onConflict, planned, textFor, type Conflict, type ReviewView } from "./recommend.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
@@ -74,9 +75,9 @@ function recFor(code: WaitCode, f: PrFacts, p: Plan, o: Asked): Recommendation {
   return { text: `${why} ${textFor({ fix, merges, ...again })}`, parts: { ...parts, fix }, merges, ...again };
 }
 
-/** An end recommendation of a PR that no approval merges as it is: the base and the missing CI come first, and its screenshots are named. */
+/** An end recommendation of a PR that no approval merges as it is: the base and the missing CI (which a conflict may have kept from running) come first, and its screenshots are named. */
 function asItStands(rec: Recommendation, f: PrFacts): Recommendation {
-  const code = f.baseOffDefault ? "base-off-default" : f.ci === "none" && f.repoFacts.noCi ? "no-ci" : null;
+  const code = f.baseOffDefault ? "base-off-default" : f.ci === "none" && f.repoFacts.noCi && f.mergeable !== "CONFLICTING" ? "no-ci" : null;
   if (code === null) return f.screenshots && rec.merges ? { ...rec, text: regression(f, rec.text) } : rec;
   if (!rec.merges) return rec;
   const text = ON_GITHUB[code]!(), { parts } = rec;
@@ -103,18 +104,22 @@ export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
   };
 }
 
-/** The question of an issue whose implementation has no pull request yet; null when nothing is to be asked. The implementation's own questions come back by themselves (question.ts). */
-export function itemQuestion(f: ItemFacts, p: ItemPlan, o: Pick<Asked, "approved" | "parts">): Question | null {
+/**
+ * The question of an issue whose implementation has no pull request yet (what holds its next step); null when nothing is to be asked. The
+ * implementation's own questions come back by themselves (question.ts).
+ */
+export function itemQuestion(f: ItemFacts, o: Pick<Asked, "approved" | "parts">): Question | null {
   const gone = o.approved && isGone(f.standing?.merge) ? f.standing!.merge! : isGone(f.standing?.work) ? f.standing!.work! : null;
   if (gone) return goneQuestion(f.repo, gone.login, o);
-  const code = p.waitCode;
-  if (!code || !p.waitKind || !needsQuestion(code, p.waitKind) || code === "implement-question" || code === "implement-stuck") return null;
-  if (p.actions.some((a) => a.kind === "implement" && moves(a))) return null;
+  const step = implementStep(f);
+  if (!step || !("wait" in step)) return null;
+  const { code, who, text: wait } = step.wait;
+  if (!needsQuestion(code, who) || code === "implement-question" || code === "implement-stuck") return null;
   const ended = code === "implement-ended";
   return {
-    blocker: "other", params: { code, reason: p.wait ?? code },
+    blocker: "other", params: { code, reason: wait },
     rec: {
-      text: ended ? t("The implementation ended without a merged pull request: implement it again.") : waitText(p.wait ?? ""),
+      text: ended ? t("The implementation ended without a merged pull request: implement it again.") : waitText(wait),
       parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: ended ? "on" : "look",
     },
   };
