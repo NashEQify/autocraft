@@ -175,9 +175,11 @@ export function pgColumns(rows: { t: string; c: string }[]): Map<string, string[
   return out;
 }
 
+let stamp: string | undefined;
+
 /** The schema stamp a migrated Postgres database stores in settings: the schema file's stamp and the trigger and view generators. */
 export function pgStamp(): string {
-  return createHash("sha256").update(pgSchemaStamp()).update(pgTriggerSql()).update(JSON.stringify(pgScopeViews("app"))).update(PIN_SEARCH_PATH)
+  return stamp ??= createHash("sha256").update(pgSchemaStamp()).update(pgTriggerSql()).update(JSON.stringify(pgScopeViews("app"))).update(PIN_SEARCH_PATH)
     .update(JSON.stringify(BOOKKEEPING_COLUMNS)).update(`trip-split ${TRIP_SPLIT_VERSION}`).update(`features-repo-only ${FEATURES_REPO_ONLY_VERSION}`).digest("hex").slice(0, 16);
 }
 

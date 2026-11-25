@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb, dbFor, type Db } from "./helpers/raw-db.ts";
 import { connect } from "../src/db.ts";
-import { pgSuite } from "./pg-suite.ts";
+import { createFromTemplate, pgSuite } from "./pg-suite.ts";
 
 /** The Postgres server tests run against, if any. */
 export const TEST_PG_URL = process.env.AUTOCRAFT_TEST_PG_URL || undefined;
@@ -65,12 +65,23 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
   await server.script(`CREATE DATABASE ${name}`);
   const url = new URL(admin);
   url.pathname = `/${name}`;
-  const open = async ({ app, ...opts }: { busyTimeoutMs?: number; app?: boolean; idleInTransactionMs?: number; rowWrites?: boolean } = {}) =>
-    track(await connectDb(url.toString(), { role: "dashboard", migrate: !!app, ...opts }));
+  // Whether anything may have touched the database: until then, opening it as the app replaces it with a copy of the
+  // migrated template, which costs a tenth of the migration.
+  let touched = schema !== "";
+  let replaced: Promise<void> | undefined;
+  const open = async ({ app, ...opts }: { busyTimeoutMs?: number; app?: boolean; idleInTransactionMs?: number; rowWrites?: boolean } = {}) => {
+    if (app && !touched) replaced = server.script(`DROP DATABASE ${name}`).then(() => createFromTemplate(name));
+    touched = true;
+    await replaced;
+    return track(await connectDb(url.toString(), { role: "dashboard", migrate: !!app, ...opts }));
+  };
   if (schema) await (await open()).script(schema);
   return {
     dialect,
-    target: url.toString(),
+    get target() {
+      touched = true;
+      return url.toString();
+    },
     open,
     close: async () => {
       await closeAll();

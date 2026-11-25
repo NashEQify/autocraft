@@ -121,7 +121,8 @@ const LOCAL_HOSTS = new Set(["", "localhost", "[::1]"]);
  */
 export function pgConnectionString(url: string): string {
   const u = new URL(url);
-  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || u.searchParams.get("sslmode") === "disable") return url;
+  // A host that is a path (%2F...) names a Unix socket's directory.
+  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || /^%2f/i.test(u.hostname) || u.searchParams.get("sslmode") === "disable") return url;
   u.searchParams.set("sslmode", "verify-full");
   // libpq's "use the system CAs"; pg would read it as a file name. Node verifies against the system CAs by default.
   if (u.searchParams.get("sslrootcert") === "system") u.searchParams.delete("sslrootcert");
