@@ -151,7 +151,7 @@ describe("askClaude in tool mode", async () => {
     try {
       const r = await askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db, { checkout });
       const [call] = runner.calls;
-      assert.ok(call!.mounts.some((m) => m.path === REPO_PATH && m.sha === "b".repeat(40)), "the checkout is mounted at the repo path");
+      assert.ok(call!.mounts.some((m) => m.path === REPO_PATH && "sha" in m && m.sha === "b".repeat(40)), "the checkout is mounted at the repo path");
       assert.ok(call!.hints.claude!.args.includes("--allowedTools") && call!.hints.claude!.args.includes("--no-session-persistence"), "tools on, and no session kept");
       assert.equal(r!.turns, 4);
       assert.ok(!r!.text.includes(leak));

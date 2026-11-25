@@ -241,7 +241,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const dbAppKeys = await new AppKeys(db, box, config.secretsFile).load();
   bindSecrets(config.secrets, dbAppKeys);
   useAppKeys(dbAppKeys);
-  // Without the runner's disk, build artifacts and the Claude accounts are asked of the runner (src/remote/runner-client.ts).
+  // Without the runner's disk, build artifacts are asked of the runner (src/remote/runner-client.ts).
   const runnerBase = runnerUrl();
   useRunnerClient(runnerBase ? { url: runnerBase, sessionKey: config.secrets.sessionKey } : null);
   // The GitHub App's own provider: it signs users in under login=github-app, and always makes and refreshes their user tokens (the "act as you" authorization).

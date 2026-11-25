@@ -6,7 +6,7 @@
 //
 // - Answers cannot be read (JEV_UNREADABLE_LIMIT in a row, counted from the recorded Jev runs): same hourly retry; one readable answer ends it.
 //
-// The state is one settings row, settings.jev_unavailable, shown on the Accounts page.
+// The state is one settings row, settings.jev_unavailable, shown to operators.
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { jevCloudflareConfig } from "./jev-cloudflare.ts";

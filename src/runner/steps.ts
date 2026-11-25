@@ -99,7 +99,7 @@ export function modelsOf(step: StepDef | undefined, params: Params): string[] {
   return typeof m === "function" ? m(params) : (m ?? []);
 }
 
-/** Models served through a Claude account (everything but Jev, which has none). */
+/** Models that run on a Task Runner (everything but Jev). */
 export const usesClaude = (models: string[]): boolean => models.some((m) => m !== "jev");
 
 /** Merging is opt-in per repo: tracked repos include ones we do not maintain. */

@@ -111,7 +111,7 @@ async function serve(): Promise<void> {
   if (lease.lost.aborted) fenced();
   lease.lost.addEventListener("abort", fenced, { once: true });
   console.log(`runner: started on ${(await loadSteps()).size} steps`);
-  // The session key signs the dashboard's requests for the runner's files (build artifacts, Claude accounts).
+  // The session key signs the dashboard's requests for the runner's files (build artifacts).
   let internalKey: string | null = null;
   try { internalKey = readSecrets(envVar("SECRETS_FILE")).sessionKey; } catch { /* logged at the first dashboard request, when a split install makes it matter */ }
   const fenceGuard = async () => {
