@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { parseAreaReply } from "../src/areas/parse.ts";
-import { choicesTexts } from "../src/decide/choices-parse.ts";
 import { parsePairReply } from "../src/dupes/pair.ts";
 import { parseIssueComparison, parsePrComparison } from "../src/dupes/group.ts";
 import { parseVerdicts } from "../src/mainfix/index.ts";
@@ -17,18 +16,6 @@ import { parseGateCall } from "../src/worker/gate.ts";
 const fence = (o: unknown) => "Here is my answer.\n```json\n" + JSON.stringify(o) + "\n```\n";
 
 describe("model replies", () => {
-  test("choices block: the public texts are read from drafted extras, closing reasons and the ask, not from the pick's reason", () => {
-    const block = { pick: { core: "o:merge", reason: "internal" }, cores: [
-      { core: "o:close", reason: "Out of scope.", extras: [{ kind: "open_issue", on: true, repo: "app", title: "A  title", body: "Body." }] },
-      { core: "o:merge", extras: [{ kind: "comment", on: true, text: "Thanks." }, { kind: "label", on: false, label: "bugfix" }] },
-    ], add: [{ end: { review: true }, extras: [{ kind: "comment", on: false, text: "Please retest." }] }], ask: { text: "Which version?" } };
-    const texts = choicesTexts(`Summary.\n\`\`\`choices\n${JSON.stringify(block)}\n\`\`\``);
-    assert.deepEqual(texts.map((t) => [t.field, t.text]), [
-      ["cores[0].reason", "Out of scope."], ["cores[0].extras[0].title", "A title"], ["cores[0].extras[0].body", "Body."],
-      ["cores[1].extras[0].text", "Thanks."], ["add[0].extras[0].text", "Please retest."], ["ask.text", "Which version?"],
-    ]);
-    assert.deepEqual(choicesTexts("No block here."), []);
-  });
 
   test("main-fix verdicts: a check the reply leaves out or mislabels is code; a reply without checks is no reply", () => {
     const v = parseVerdicts(fence({ checks: [{ check: "lint", verdict: "flaky", reason: "timeout" }, { check: "test", verdict: "banana" }] }), ["lint", "test", "build"])!;

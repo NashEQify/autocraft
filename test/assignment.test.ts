@@ -100,7 +100,6 @@ test("the unassign step releases what the planner says and only our own assignme
   await mark(2, ["pipeline-bot", "alice"]);
   w.gh.live(1, { assignees: ["pipeline-bot"] });
   w.gh.live(2, { assignees: ["pipeline-bot", "alice"] });
-  await (await w.answer(1, "hold")).answer(2, "hold");
   const r = await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: asPipelineBot });
   assert.deepEqual(r.due, 1);
   assert.deepEqual(r.unassigned, ["app#1"]);

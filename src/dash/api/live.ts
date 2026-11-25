@@ -1,6 +1,6 @@
 // The Live board on Home: every running and queued unit of the pipeline's work (jobs, model calls and build tasks of their own, open
 // integration batches) on one time axis, with the model calls and build steps inside it and how long the same work took before. Jobs that
-// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); account
+// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out ; account
 // labels are for operators only. Staff also get the worker view: one row per Task Runner (a person's own tokens; private ones share one
 // neutral row), box account (operators only) and Jev, with the model calls each ran in the last hour.
 import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker } from "../../../web/src/api/types.ts";
@@ -11,7 +11,8 @@ import type { TaskCard } from "../../data/build/index.ts";
 import type { RunnerRow } from "../../data/runners/index.ts";
 import { loadLiveView, type LiveView } from "../../data/views/live.ts";
 import type { Req } from "../types.ts";
-import { QUIET_STEPS } from "./now.ts";
+/** Steps that run all the time: listed only when they fail. */
+const QUIET_STEPS = new Set(["rank", "embed", "checks", "main-ci", "labels-ensure", "review-carry", "verify-collect", "fixissue-collect"]);
 import { canSeeInternals } from "./staff.ts";
 import { stepTitle } from "./trace.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";

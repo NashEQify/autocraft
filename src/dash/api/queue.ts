@@ -6,7 +6,6 @@ import { listActiveBatches, listBatchPage, type BatchListRow } from "../../data/
 import { QUEUE_STATES } from "../../core/plan.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
-import { flowMembers } from "./flow.ts";
 import { queueTextFor, readerOf, type Reader } from "./reader.ts";
 import { isHiddenRepo } from "../../data/control/index.ts";
 import type { Db } from "../../db/index.ts";
@@ -48,20 +47,6 @@ export async function queue(db: Db, req: Req): Promise<QueueList> {
   const hidden = reader.hidden;
   if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
   if (state && !(QUEUE_STATES as readonly string[]).includes(state)) throw new HttpError(400, `state must be one of ${QUEUE_STATES.join(", ")}`);
-  // A flowchart branch lists exactly its own PRs, whatever their state.
-  const flowKey = req.query.get("flow");
-  if (flowKey) {
-    const refs = /^merge\.[a-z-]+$/.test(flowKey) ? await flowMembers(db, flowKey) : null;
-    if (!refs) throw new HttpError(400, "flow must name a Merge queue branch");
-    const entries = await loadMergeQueue(db, { repo, merged: "all", hidden, refs });
-    const from = after ? entries.findIndex((e) => e.repo > after.repo || (e.repo === after.repo && e.number > after.number)) : 0;
-    const rest = from < 0 ? [] : entries.slice(from);
-    const rows = rest.slice(0, limit);
-    return {
-      rows: rows.map((e) => toRow(e, reader)), counts: countStates(entries), total: entries.length,
-      next: rest.length > limit ? cursorOf(rows[rows.length - 1]!) : null,
-    };
-  }
   const open = await loadMergeQueue(db, { repo, merged: "exclude", hidden });
   const merged = await countMergedQueue(db, repo, hidden);
   // An open PR that we merged and the mirror has not seen merged yet counts as merged.

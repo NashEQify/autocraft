@@ -6,10 +6,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { ItemPageData } from "../src/dash/api/item-page.ts";
-import type { AgentRunDetail, BuildTaskDetail, Item, JobDetail, Decision as DecisionOne, AgentRunPage, DecisionList, Flow, ItemList, Progress, QueueList, SearchHit } from "../web/src/api/types.ts";
+import type { AgentRunDetail, BuildTaskDetail, Item, JobDetail, AgentRunPage, ItemList, Progress, QueueList, SearchHit } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
-import { ask } from "../src/decisions.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { blankIfHidden } from "../src/dash/api/visible.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
@@ -39,7 +38,6 @@ const fakeFetch = (async (input: string | URL | Request) => {
   fetched.push(String(input));
   return new Response(new Uint8Array(PNG), { status: 200, headers: { "content-type": "image/png" } });
 }) as typeof fetch;
-const OPTS = [{ key: "a", label: "A" }, { key: "b", label: "B" }];
 
 before(async () => {
   const now = new Date().toISOString();
@@ -56,10 +54,6 @@ before(async () => {
   }
   await db.run(db.k.updateTable("items").set({ body: `![a](${VAULT_IMG}) ![b](${BOTH_IMG})` }).where("repo", "=", "vault"));
   await db.run(db.k.updateTable("items").set({ body: `![b](${BOTH_IMG})` }).where("repo", "=", "open-app"));
-  await ask(db, ["open-app", "vault"].map((repo) => ({
-    id: `${repo}#1:scope`, kind: "scope", repo, number: 1, question: "A or B?", options: OPTS, recommended: "a", summary: "s",
-  })));
-  await ask(db, [{ id: "batch", kind: "scope", repo: null, number: null, items: [{ repo: "open-app", number: 1 }, { repo: "vault", number: 1 }], question: "Batch?", options: OPTS, recommended: "a", summary: "s" }] as never);
   for (const repo of ["open-app", "vault"]) {
     const id = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo, number: 1 }], prompt: `prompt for ${repo}` });
     await finishRun(db, id, { state: "done", output: `output for ${repo}` });
@@ -127,18 +121,11 @@ describe("repo visibility", () => {
     assert.equal(await c.status("/api/items/vault/1"), 404);
     assert.equal(await c.status("/api/items/vault/1/page"), 404);
     assert.equal(await c.status("/api/similar/vault/1"), 404);
-    const decisions = await c.get<DecisionList>("/api/decisions");
-    assert.deepEqual(decisions.decisions.map((d) => d.id), ["open-app#1:scope"]);
-    assert.equal(decisions.total, 1);
-    assert.equal(await c.status(`/api/decisions/${encodeURIComponent("vault#1:scope")}`), 404);
-    assert.equal(await c.status("/api/decisions/batch"), 404);
     assert.deepEqual((await c.get<QueueList>("/api/queue")).rows.map((r) => r.repo), ["open-app"]);
     assert.equal(await c.status("/api/queue?repo=vault"), 404);
-    assert.equal(await c.status("/api/flow?repo=vault"), 404);
     const p = await c.get<Progress>("/api/progress");
     assert.deepEqual(p.repos.map((r) => r.repo), ["open-app"]);
     assert.equal(p.funnel.open, 1);
-    assert.equal(p.decisionsOpen, 0);
     const runs = await c.get<AgentRunPage>("/api/agents");
     assert.equal(runs.runs.length, 1);
     assert.equal(runs.runs[0]!.items[0]!.repo, "open-app");
@@ -164,18 +151,13 @@ describe("repo visibility", () => {
       assert.deepEqual(await c.get<string[]>("/api/repos"), ["open-app", "vault"], login);
       assert.deepEqual(refs((await c.get<ItemList>("/api/items?state=all")).rows), ["open-app#1", "vault#1"], login);
       assert.equal(await c.status("/api/items/vault/1"), 200, login);
-      assert.equal((await c.get<DecisionList>("/api/decisions")).total, 3, login);
       assert.deepEqual((await c.get<QueueList>("/api/queue")).rows.map((r) => r.repo), ["open-app", "vault"], login);
       assert.equal((await c.get<Progress>("/api/progress")).funnel.open, 2, login);
-      assert.equal(await c.status("/api/flow?repo=vault"), 200, login);
-      assert.equal((await c.get<Flow>("/api/flow")).repo, null, login);
     }
   });
 
 
   test("operators and maintainers see prompts and answer notes; viewers do not; access stays operator-only", async () => {
-    await db.run(db.k.updateTable("main.decisions").set({ answer: "a", answer_note: "private note", answered_by: "boss", answered_at: new Date().toISOString() }).where("id", "=", "vault#1:scope"));
-    const note = async (login: string) => (await (await signedIn(login)).get<DecisionOne>("/api/decisions/vault%231%3Ascope")).answerNote;
     for (const login of ["reader", "maint", "boss"]) {
       const c = await signedIn(login);
       const run = await c.get<AgentRunDetail>("/api/agents/2");
@@ -186,7 +168,6 @@ describe("repo visibility", () => {
         assert.match(run.prompt ?? "", /prompt for vault/);
         assert.match(run.output ?? "", /output for vault/);
       }
-      assert.equal(await note(login), staff ? "private note" : null, login);
       assert.equal(await c.status("/api/access"), login === "boss" ? 200 : 403, login);
     }
     await db.prepare("INSERT INTO audit (at, login, action, target) VALUES (?, 'boss', 'access-add', 'someone'), (?, 'boss', 'repo-track', 'vault')").run(new Date().toISOString(), new Date().toISOString());
@@ -209,7 +190,6 @@ describe("repo visibility", () => {
     const reader = await signedIn("reader");
     for (const path of ["/api/repos/all", "/api/audit"]) assert.equal(await reader.status(path), 403, path);
     await db.prepare("DELETE FROM audit WHERE target IN ('someone', 'vault', 'account:a') AND login = 'boss' AND action IN ('access-add', 'repo-track', 'account-change')").run();
-    await db.run(db.k.updateTable("main.decisions").set({ answer: null, answer_note: null, answered_by: null, answered_at: null }).where("id", "=", "vault#1:scope"));
   });
 
   test("the item page gives viewers verdicts without review text, and answers since with unchanged", async () => {
@@ -256,34 +236,14 @@ describe("repo visibility", () => {
     await db.prepare("DELETE FROM patch_checks").run();
   });
 
-  test("Home gives viewers counts and no named needs; staff get the oldest ones", async () => {
-    const viewer = await (await signedIn("reader")).get<{ needs: { total: number; oldest: unknown[] } }>("/api/home");
-    const maint = await (await signedIn("boss")).get<{ needs: { total: number; oldest: unknown[] } }>("/api/home");
-    assert.deepEqual(viewer.needs.oldest, []);
-    assert.ok(maint.needs.oldest.length > 0);
-    assert.equal(viewer.needs.total, maint.needs.total);
-  });
-
   test("the project scope narrows lists to one repo; pages reached by their own link show every repo; a scope the user cannot see is ignored", async () => {
     const scope = (repo: string) => ({ "x-autocraft-scope": repo });
     const boss = await signedIn("boss");
-    const scoped = await boss.get<DecisionList>("/api/decisions", scope("open-app"));
-    assert.ok(scoped.decisions.length > 0);
-    assert.ok(scoped.decisions.every((d) => d.repo === "open-app"));
-    const home = await boss.get<{ needs: { oldest: { repo: string }[] } }>("/api/home", scope("open-app"));
-    assert.ok(home.needs.oldest.length > 0);
-    assert.ok(home.needs.oldest.every((n) => n.repo === "open-app"));
     // Another repo's item page and decision open with their decision and reviews; the picker's list and counts name every repo.
-    assert.equal((await boss.get<DecisionOne>(`/api/decisions/${encodeURIComponent("vault#1:scope")}`, scope("open-app"))).repo, "vault");
-    assert.equal((await boss.get<DecisionOne | null>("/api/items/vault/1/decision", scope("open-app")))?.id, "vault#1:scope");
     assert.ok((await boss.get<ItemPageData>("/api/items/vault/1/page", scope("open-app"))).reviews.latest);
     assert.deepEqual((await boss.get<string[]>("/api/repos", scope("open-app"))).sort(), ["open-app", "vault"]);
-    assert.ok((await boss.get<{ byRepo: Record<string, number> }>("/api/decisions/open-counts", scope("open-app"))).byRepo.vault! > 0);
     // A scope the user cannot see is ignored: the outsider gets the open-app list, never vault's.
     const outsider = await signedIn("outsider");
-    const out = await outsider.get<DecisionList>("/api/decisions", scope("vault"));
-    assert.ok(out.decisions.some((d) => d.repo === "open-app"));
-    assert.ok(!out.decisions.some((d) => d.repo === "vault"));
     assert.equal(await outsider.status("/api/items/vault/1", scope("vault")), 404);
   });
 
@@ -382,7 +342,6 @@ describe("repo visibility", () => {
       await db.run(db.k.insertInto("main.stages").values({ repo: "open-app", number: n, stage: "hold", at: now, actor: "review", note: "SECRET stage note" }));
       await db.run(db.k.insertInto("main.job_items").values({ job_id: job.id, repo: "open-app", number: n, outcome: "failed: SECRET job reason", at: now }));
       await db.run(db.k.insertInto("main.fixups").values({ repo: "open-app", number: n, from_head: "h", state: "failed", reason: "SECRET fixup reason", files: "[]", attempt: 1, created_at: now }));
-      await db.run(db.k.insertInto("main.decisions").values({ id: `wd${n}`, kind: "scope", repo: "open-app", number: n, question: "q", options: "[]", asked_at: now, asked_by: "decide", answer: "withdrawn", answered_at: now, answer_note: "SECRET withdrawal" }));
     }
     for (const login of ["reader", "maint"]) {
       const c = await signedIn(login);
@@ -395,7 +354,7 @@ describe("repo visibility", () => {
       }
       const feed = JSON.stringify(await c.get<unknown>("/api/activity?limit=500&kinds=github,plan,job,model-call,check,review,decision,write,step,conversation"));
       const trace = JSON.stringify(await c.get<unknown>("/api/items/open-app/1/trace"));
-      for (const text of ["SECRET stage note", "SECRET job reason", "SECRET fixup reason", "SECRET withdrawal"]) {
+      for (const text of ["SECRET stage note", "SECRET job reason", "SECRET fixup reason"]) {
         assert.equal(feed.includes(text), staff, `${login} activity ${text}`);
         assert.equal(trace.includes(text), staff, `${login} trace ${text}`);
       }
@@ -403,7 +362,6 @@ describe("repo visibility", () => {
     await db.run(db.k.deleteFrom("main.stages"));
     await db.run(db.k.deleteFrom("main.job_items"));
     await db.run(db.k.deleteFrom("main.fixups"));
-    await db.run(db.k.deleteFrom("main.decisions").where((eb) => like(db, "id", eb.val("wd%"))));
     await db.run(db.k.deleteFrom("main.security_findings").where("number", "=", 902));
   });
 

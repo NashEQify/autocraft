@@ -26,33 +26,9 @@ const startPushed = async (w: World, n: number, to: string) => {
 const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePreapprovals(w.db); };
 
 describe("pre-approval and review holds", () => {
-  test("the fix-up push lifts a blocked hold; a review that failed for good asks a Merge question", async () => {
-    const w = await (await (await (await (await (await fresh()).pr(1)).review(1, { verdict: "take-fix" })).pr(2)).pr(3)).review(3, { verdict: "take-fix" });
-    await w.db.run(w.db.k.updateTable("opus_reviews").set({ verdict: "hold" }).where("number", "=", 1));
-    await save(w, 1, "sha1", "hold", true, ["app#2"]);
-    await startPushed(w, 1, "sha1b");
-    await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 1))?.state, "review", String((await preapprovalOf(w.db, "app", 1))?.reason));
-    assert.equal(await reviewHold(w.db, "app", 1, "sha1b"), null);
-
-    await startPushed(w, 3, "sha3b");
-    for (let i = 0; i < 4; i++) await recordReviewFailure(w.db, "app", 3, "sha3b");
-    await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "asked");
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = ?", mergeDecisionId("app", 3, "sha3b"))).length, 1);
-  });
 });
 
 describe("a re-review at the same head", () => {
-  test("keeps an answered, unapplied merge answer while sure take, and withdraws it with the reason on a hold", async () => {
-    const w = await (await (await (await fresh()).pr(1)).review(1)).answer(1, "merge");
-    const id = mergeDecisionId("app", 1, "sha1");
-    await save(w, 1, "sha1", "take", true);
-    assert.equal((await w.rows("SELECT answer FROM decisions WHERE id = ?", id))[0]?.answer, "merge");
-    await save(w, 1, "sha1", "hold", true);
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = ?", id)).length, 0);
-    assert.match(String((await w.rows("SELECT answer_note FROM decisions WHERE id LIKE ?", `${id}~replaced-%`))[0]?.answer_note), /new review is a hold/);
-  });
 });
 
 describe("a review that failed for good", () => {

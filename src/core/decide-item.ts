@@ -1,21 +1,13 @@
 // decideItem: the triage rules of one open item (issue or PR) in one place: classify, referee, prioritize, embed, duplicates,
-// scope decision, label. Pure: no database, no clock (facts carry `now`). The rules are ported from the step selectors named at each rule.
+// label. Pure: no database, no clock (facts carry `now`). The rules are ported from the step selectors named at each rule.
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
 import { decidePr, implementOffWait, notStarted } from "./decide.ts";
-import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
+import { RECOMMEND_RETRY_MS, alreadyLabeled, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
-
-/** Why the item would become a scope decision, or null. */
-export function scopeReason(f: ItemFacts): "needs-decision" | "scope-disagreement" | null {
-  const c = f.classification;
-  if (c.status === "settled" && c.flags.includes("needs decision")) return "needs-decision";
-  if (c.status === "disagree" && isScope(c.jevLabel) && isScope(c.haikuLabel)) return "scope-disagreement";
-  return null;
-}
 
 export { implementOffWait };
 /** The wait of a queued issue whose latest attempt ended without a merged PR and whose text has not changed since. */
@@ -56,14 +48,8 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   return row!.prOpen ? null : { bucket: "revise" };
 }
 
-/** Jev and Haiku chose different labels and it is not a scope call: a referee (Sonnet, then Opus when Sonnet was unsure) still has to settle it. An unsure Opus settles the label too and flags a scope decision. */
-const labelDisagreement = (f: ItemFacts): boolean => f.classification.status === "disagree" && scopeReason(f) !== "scope-disagreement";
-
-/**
- * A scope decision should be asked: the reason holds and no open decision, scope decision or Backlog answer covers the item. Labelling or a later stage does not suppress it.
- * Never in a repo on the maintainer workflow, where a maintainer picks what enters.
- */
-const scopeNeeded = (f: ItemFacts): boolean => scopeReason(f) !== null && !f.scope.covered && f.repoFacts.workflow !== "new";
+/** Jev and Haiku chose different labels: a referee (Sonnet, then Opus when Sonnet was unsure) settles it. */
+const labelDisagreement = (f: ItemFacts): boolean => f.classification.status === "disagree";
 
 /** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
 export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
@@ -76,8 +62,8 @@ export const TRIAGE_WAIT = "an open request for a person to pick up";
 export const fixStoppedWait = (state: string): string => `a person to retry the ${state} fix`;
 
 const PLUGIN_WAIT = "stays open as a plugin candidate";
-/** A PR settled as a plugin candidate is not reviewed or merged: it stays open with its label (no question) unless a scope decision about it is open. */
-const pluginPr = (f: ItemFacts): boolean => f.kind === "pr" && f.classification.status === "settled" && f.classification.label === "plugin candidate" && !f.scope.open;
+/** A PR settled as a plugin candidate is not reviewed or merged: it stays open with its label. */
+const pluginPr = (f: ItemFacts): boolean => f.kind === "pr" && f.classification.status === "settled" && f.classification.label === "plugin candidate";
 
 export function itemState(f: ItemFacts): ItemState {
   if (f.held) return f.held === "backlog" ? "held-backlog" : "held-duplicate";
@@ -85,13 +71,12 @@ export function itemState(f: ItemFacts): ItemState {
   if (labelDisagreement(f)) return "referee-due";
   if (c.status === "unclassified") return "unclassified";
   if (c.status === "waiting") return "waiting-haiku";
-  if (f.scope.open) return "scope-open";
-  return scopeNeeded(f) ? "scope-due" : "classified";
+  return "classified";
 }
 
 const WAITS: Partial<Record<ItemState, string>> = {
-  "held-duplicate": "a Duplicate? answer", "held-backlog": "a Backlog hold", "referee-due": "the label referee",
-  "waiting-haiku": "Haiku's second opinion", "scope-open": "a scope answer", "scope-due": "the scope question to be asked",
+  "held-duplicate": "a duplicate check", "held-backlog": "a Backlog hold", "referee-due": "the label referee",
+  "waiting-haiku": "Haiku's second opinion",
 };
 
 /** The item has no priority row at its current text hash; the prioritize step asks it unless a classify request does. */
@@ -122,15 +107,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // dupes: items to scan, pairs to check, groups to ask.
   const scan = live && f.embeddedHash === f.embedHash && f.scannedHash !== f.embedHash;
   if (scan || f.pairsToCheck > 0 || f.inGroupToAsk) actions.push(act("dupes", null, { scan, pairs: f.pairsToCheck, group: f.inGroupToAsk }));
-  // dupe-answer: operator answers to duplicate decisions that change no GitHub state. The pilot test is in the loader.
-  if (f.dupeAnswers.length) actions.push(act("dupe-answer", null, { decisions: f.dupeAnswers }));
   if (f.inCompareSet) actions.push(act("dupes-compare", null));
-  // decide: a new scope decision, or the prepare step for an open decision of the item (any kind, held or not; in scope only) that has no prepare for its current state.
-  // A repo on the maintainer workflow asks no scope question and prepares no decision: a maintainer picks what enters, and the workflow's own steps write the recommendation.
-  const newRepo = f.repoFacts.workflow === "new";
-  if (!newRepo && f.run && live && !f.draft && state === "scope-due") actions.push(act("decide", null, { source: "new" }));
-  else if (!newRepo && live && f.scope.recommend && f.scope.recommend.failures < RECOMMEND_MAX_FAILURES
-    && (f.scope.recommend.failedAt === null || Date.parse(f.scope.recommend.failedAt) < f.now - RECOMMEND_RETRY_MS)) actions.push(act("decide", null, { source: "prepare" }));
   // label: the repo's labelling approval is applied by gates().
   if (f.run && live && f.held !== "backlog") {
     const settled = c.status === "settled" && c.label ? { type: c.label, security: c.flags.includes("security") && !f.labels.quietFix, needsDecision: c.flags.includes("needs decision") } : null;
@@ -139,14 +116,6 @@ export function decideItem(f: ItemFacts): ItemPlan {
   }
 
   const backlog = f.held === "backlog";
-  // act: answers that close the item (in scope, or asked by a security scan; not held by Backlog; no final action row yet)
-  // and Close? questions for PRs the final review says close (asked once per head). Selecting applies nothing; the repo's comment approval is applied by gates().
-  for (const t of f.answeredClose) {
-    // A Close answer that ended an item's workflow (`closed`) is carried out whatever the item's scope.
-    if ((f.inScope || t.security || t.group || (f.repoFacts.workflow === "new" && f.endedWorkflow === "closed")) && !backlog && !t.waiting && (t.action === null || t.action === "failed")) actions.push(act("act", null, { bucket: t.kind, decisionId: t.decisionId, security: t.security, ...(t.group ? { group: true } : {}) }));
-  }
-  // Not in a repo on the maintainer workflow, which asks no Close? question: the close review is a blocker of the item's workflow.
-  if (live && !backlog && !newRepo && f.kind === "pr" && f.closeReview && f.closeReview.atHead && !f.closeReview.asked) actions.push(act("act", f.closeReview.head, { bucket: "close", ask: true }));
   // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
   const fix = f.fix, step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
@@ -160,11 +129,11 @@ export function decideItem(f: ItemFacts): ItemPlan {
     actions.push(...unassignActions(f.assignment, f.open, !f.inScope || !!f.held || !running));
   }
 
-  // A closed item is here for its unapplied answered close only.
-  if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act" && !a.params?.ask));
+  // A closed item has nothing left to do.
+  if (!f.open) actions.length = 0;
   const base = actions.some(isWork) ? null : !f.inScope ? "not in scope" : state === "classified" && pluginPr(f) ? PLUGIN_WAIT : WAITS[state] ?? null;
   // An issue with nothing else due waits on the PR that closes it, or on a person when its fix attempt was skipped or failed.
-  let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : f.inScope && (state === "held-duplicate" || state === "scope-open") ? "person" : "system";
+  let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : f.inScope && state === "held-duplicate" ? "person" : "system";
   // A queued issue waits on what holds its implementation.
   if (step && "wait" in step && f.open && actions.every((x) => !isWork(x))) { wait = step.wait; waitKind = step.waitKind; }
   if (wait === null && f.kind === "issue" && f.open && f.inScope && !backlog && !f.held && actions.every((x) => !isWork(x))) {
@@ -177,16 +146,13 @@ export function decideItem(f: ItemFacts): ItemPlan {
 /** The Work page's next-step text (rank/next.ts nextStepOf), from the item's state and, for a PR, the facts of its review-to-merge path. */
 export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): string {
   switch (item.state) {
-    case "held-duplicate": case "held-backlog": return "Held: waiting for a Duplicate? answer";
+    case "held-duplicate": case "held-backlog": return "Held";
     case "referee-due": return `Referee: waiting for ${f.classification.referee ? "Opus" : "Sonnet"}`;
     case "unclassified": case "waiting-haiku": return "Classify";
-    case "scope-open": return "Decide: waiting for a scope answer";
     default:
   }
   const c = f.classification;
   if (item.state === "classified" && pluginPr(f)) return "Stays open as a plugin candidate";
-  if (item.state === "scope-due" && c.status === "disagree") return "Decide";
-  const needsDecision = c.flags.includes("needs decision") && f.repoFacts.workflow !== "new";
   if (f.kind === "issue") {
     const im = f.implement, s = im.row?.state;
     if (im.queuedBy !== null && im.settles) {
@@ -199,23 +165,22 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
         default: return "Implement";
       }
     }
-    return needsDecision ? "Decide" : "Triage by a person";
+    return "Triage by a person";
   }
   if (pr && pr.ghState === "OPEN" && pr.inScope && notStarted(pr)) return "Waiting for a maintainer to start it";
   const o = pr && !pr.inScope ? pr.outside ?? null : null;
   const r = o ? o.review : pr?.review && pr.review.head === pr.head && !pr.review.stale ? pr.review.verdict : null;
-  if (needsDecision && !r) return "Decide";
   switch (r) {
     case null: return "Review";
     case "take-fix": return "Fix-up";
-    case "hold": return pr?.decision.hold.answer === "wait" ? "Waiting for the author" : pr?.decision.hold.open ? "Hold? decision: waiting for an answer" : "Needs a person";
+    case "hold": return "Needs a person";
     case "close": return "Close";
     default: {
       const v = o ? o.verify : pr?.verification?.state ?? null;
-      if (v === "unavailable") return "Merge? decision: not verified (Verify cannot build this repo)";
-      if ((o ? o.ci : pr?.ci) === "none" && pr?.repoFacts.noCi) return "Merge? decision: the repo has no CI";
+      if (v === "unavailable") return "Needs a person: not verified (Verify cannot build this repo)";
+      if ((o ? o.ci : pr?.ci) === "none" && pr?.repoFacts.noCi) return "Needs a person: the repo has no CI";
       if (v === "passed" || v === "ci-enough") return "Merge queue";
-      if (v === "failed" || v === "error") return pr?.decision.openQuestion || pr?.decision.asked ? "Merge? decision: verification failed" : "Needs a person: verification failed";
+      if (v === "failed" || v === "error") return "Needs a person: verification failed";
       return v ? "Verify: running" : "Verify";
     }
   }

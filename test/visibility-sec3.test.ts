@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { addLogin } from "../src/access.ts";
 import { finishRun, insertRun } from "../src/agents/runs.ts";
-import { ask } from "../src/decisions.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
@@ -23,7 +22,6 @@ writeFileSync(permsFile, JSON.stringify({}));
 const db = await connectDb(dbFile);
 let base = "";
 let close: () => Promise<void>;
-const OPTS = [{ key: "a", label: "A" }, { key: "b", label: "B" }];
 
 before(async () => {
   const now = new Date().toISOString();
@@ -62,10 +60,6 @@ before(async () => {
     db.run(db.k.insertInto("opus_reviews").values({ repo, number, head_oid, run_id: "r", at: now, verdict, reason: "ok", sure: 1, mode: "full", conflicts, blocked_by }));
   await review("open-app", 1, "h1", "take", JSON.stringify([{ id: 1, reason: "MARK-MODEL-REASON" }]), null);
   await review("vault", 9, "h9", "hold", null, JSON.stringify(["open-app#10"]));
-  await ask(db, [
-    { id: "open-app#10:scope", kind: "scope", repo: "open-app", number: 10, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
-    { id: "open-app#2:scope", kind: "scope", repo: "open-app", number: 2, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
-  ]);
   await db.run(db.k.insertInto("decision_comments").values({ id: "c1", decision_id: "open-app#2:scope", login: "maint", at: now, body: "MARK-QUIET-COMMENT" }));
   // A model call recorded without item rows, about the hidden repo.
   await finishRun(db, await insertRun(db, { jobId: null, step: "dupes.compare-prs.opus", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [], prompt: "prompt about vault#7" }), { state: "done", output: "vault" });
@@ -119,17 +113,14 @@ test("viewers read no staff text of queue rows or of a quiet pull request's feed
   assert.doesNotMatch(await reader("/api/work"), /MARK-/);
   const fix = JSON.parse(await reader("/api/queue/page?tab=fix&repos=all")) as { rows: { number: number; next: string }[] };
   assert.deepEqual(fix.rows.map((r) => [r.number, r.next]), [[2, ""]]);
-  const needs = JSON.parse(await reader("/api/needs?feedback=1")) as { feedback: { rows: { item: { number: number } | null; text: string }[] } };
-  assert.equal(needs.feedback.rows.find((r) => r.item?.number === 2)?.text, "");
 });
 
 test("a maintainer who cannot see a repo finds its name in no fact, wait, statement conflict or model call", async () => {
   const boss = await signIn("boss"), maint = await signIn("maint");
-  assert.match(await boss("/api/decisions/open-app%2310%3Ascope"), /Blocks the review of vault#9/);
   assert.match(await boss("/api/agents"), /dupes/);
   assert.match(await boss("/api/pipeline/jobs/1"), /vault#7 failed/);
-  for (const path of ["/api/decisions/open-app%2310%3Ascope", "/api/items/open-app/10/decision", "/api/next", "/api/items/status", "/api/queue",
-    "/api/items/open-app/1", "/api/items/open-app/1/page", "/api/items/open-app/1/trace", "/api/agents", "/api/pipeline", "/api/pipeline/jobs", "/api/pipeline/jobs/1", "/api/now", "/api/now/feed"])
+  for (const path of ["/api/next", "/api/items/status", "/api/queue",
+    "/api/items/open-app/1", "/api/items/open-app/1/page", "/api/items/open-app/1/trace", "/api/agents", "/api/pipeline", "/api/pipeline/jobs", "/api/pipeline/jobs/1"])
     assert.doesNotMatch(await maint(path), /vault/, path);
   assert.match(await maint("/api/items/open-app/1/page"), /another item, which blocks its review/);
 });
