@@ -1,31 +1,27 @@
 // The incremental planner pass: facts kept between passes on one connection, reloaded only for the items the change log
-// names (src/core/plan-changes.ts) and the items whose `refreshAt` has come, and decided again every pass with the pass time.
+// names (data/planner readChanges) and the items whose `refreshAt` has come, and decided again every pass with the pass time.
 // A full load replaces them at start, on a full-pass mark, when an input outside the database changed, and every
 // PLAN_FULL_EVERY_MS (src/runner/autopilot.ts).
 //
 // The shadow check (setting `plan_shadow` = "on") also runs a full load in the same read transaction every incremental
 // pass and records each difference in `plan_shadow_diffs`; on a difference the pass plans from the full load and keeps its
 // facts. AUTOCRAFT_PLAN_SHADOW (on, off, throw) overrides the setting; "throw" fails the pass on a difference (tests).
-// Pass counts and durations per kind are in `plan_pass_stats`, written with the next difference, full load or minute.
+// Pass counts, durations and statement counts per kind and hour are recorded with the next difference, full load or minute (data/planner recordPass).
 import { embedderId, modelName } from "../embed/model.ts";
 import { appSlug } from "../github/identity.ts";
 import { ownersStamp } from "../owners.ts";
-import { setting } from "../settings-read.ts";
+import { config } from "../data/control/index.ts";
+import { loadChangeCursor, pruneChanges, readChanges, recordPass, type ChangeCursor, type PassCount, type ShadowDiff } from "../data/planner/index.ts";
 import { decideItem } from "./decide-item.ts";
 import { decidePr } from "./decide.ts";
 import { loadPass, loadPrFacts } from "./facts.ts";
 import { loadItemFacts } from "./issue-facts.ts";
-import { changeCursor, changesSince, pruneChanges, type ChangeCursor } from "./plan-changes.ts";
 import type { ItemFacts, PrFacts } from "./plan.ts";
 import { loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
 export type FullReason = "start" | "marker" | "cap" | "global" | "floor";
-
-/** Newest rows kept in plan_shadow_diffs. */
-export const SHADOW_ROWS = 2_000;
 
 type State = {
   prs: Map<string, PrFacts>; items: Map<string, ItemFacts>;
@@ -39,8 +35,8 @@ type State = {
 
 const states = new WeakMap<Db, State>();
 
-/** Pass counts not yet written to plan_pass_stats, per connection. */
-const records = new WeakMap<Db, { flushedAt: number; counts: Map<string, { passes: number; refs: number; at: string; ms: number; maxMs: number }> }>();
+/** Pass counts and shadow differences not yet recorded, per connection. */
+const records = new WeakMap<Db, { flushedAt: number; counts: Map<string, PassCount>; diffs: ShadowDiff[] }>();
 /** Quiet passes write their counts at most this often. */
 const RECORD_EVERY_MS = 60_000;
 
@@ -59,10 +55,10 @@ export type PlanPass = {
 };
 
 /** The shadow mode: the environment's (tests, harnesses), else the setting. */
-export async function shadowMode(db: Db): Promise<ShadowMode> {
+export function shadowMode(db: Db): ShadowMode {
   const env = process.env.AUTOCRAFT_PLAN_SHADOW;
   if (env === "on" || env === "off" || env === "throw") return env;
-  return await setting(db, "plan_shadow") === "on" ? "on" : "off";
+  return config(db).planShadow === "on" ? "on" : "off";
 }
 
 /** The fact inputs that are not database rows: the owners cache, the GitHub App's slug, the classification run and the embedding model. */
@@ -144,17 +140,19 @@ export type PlanPassOptions = {
 export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
   const { now, run } = o;
   const model = o.model ?? embedderId(modelName());
-  const shadow = await shadowMode(db);
+  const shadow = shadowMode(db);
   const print = fingerprint(run, model);
+  // The meter counts the pass's loads and decisions; the writes of `finish` are not in their own row.
+  const { value: loaded, stats } = await db.meter(async () => {
   let state = states.get(db);
-  const changes = state ? await changesSince(db, state.cursor) : null;
+  const changes = state ? await readChanges(db, state.cursor) : null;
   const reason: FullReason | null = !state || !changes ? "start" : changes.full ? (changes.cause ?? "marker") : state.fingerprint !== print ? "global" : now - state.fullAt >= o.fullEveryMs ? "floor" : null;
   const load = { now, run };
   let refs: number;
   let refreshUnchanged = 0;
   if (reason) {
-    // The log first: the snapshot holds the rows the loads below read with it. changesSince read every row it covers already.
-    const cursor = changes?.cursor ?? await changeCursor(db);
+    // The log first: the snapshot holds the rows the loads below read with it. readChanges read every row it covers already.
+    const cursor = changes?.cursor ?? await loadChangeCursor(db);
     const prs = await loadPrFacts(db, load), items = await loadItemFacts(db, { ...load, model });
     state = { prs: new Map(prs.map((f) => [refOf(f), f])), items: new Map(items.map((f) => [refOf(f), f])), cursor, fullAt: now, fingerprint: print };
     states.set(db, state);
@@ -187,7 +185,6 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
   const prs = [...kept.prs.values()].sort(byRef).map((facts): PrPlan => { facts.now = now; return { facts, plan: decidePr(facts, pass) }; });
   const items = [...kept.items.values()].sort(byRef).map((facts): ItemPlanned => { facts.now = now; return { facts, plan: decideItem(facts) }; });
   let plans: PlanSet = { run, now, pass, prs, items };
-  const kind = reason ? `full:${reason}` : "incremental";
   const shadowRan = !reason && shadow !== "off";
   const diffs: Diff[] = [];
   if (shadowRan) {
@@ -204,39 +201,42 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       kept.items = new Map(full.items.map((e) => [refOf(e.facts), e.facts]));
     }
   }
-  const cursor = kept.cursor;
+  return { plans, reason, refs, refreshUnchanged, shadowRan, diffs, cursor: kept.cursor };
+  });
+  const { plans, reason, refs, refreshUnchanged, shadowRan, diffs, cursor } = loaded;
+  const kind = reason ? `full:${reason}` : "incremental";
   return {
     plans, kind, refs, diffs,
     finish: async (passMs = 0) => {
-      const rec = records.get(db) ?? records.set(db, { flushedAt: 0, counts: new Map() }).get(db)!;
+      const rec = records.get(db) ?? records.set(db, { flushedAt: 0, counts: new Map(), diffs: [] }).get(db)!;
       const at = new Date(now).toISOString();
-      const add = (k: string, n: number, ms = 0): void => {
-        const c = rec.counts.get(k) ?? { passes: 0, refs: 0, at, ms: 0, maxMs: 0 };
-        rec.counts.set(k, { passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms) });
+      const hour = at.slice(0, 13);
+      const add = (k: string, n: number, ms = 0, dbs = { statements: 0, roundTrips: 0, ms: 0 }): void => {
+        const c = rec.counts.get(k) ?? { kind: k, passes: 0, refs: 0, at, ms: 0, maxMs: 0, dbStatements: 0, dbRoundTrips: 0, dbMs: 0, hour };
+        // A count carried over from an earlier hour keeps that hour's bucket.
+        rec.counts.set(k, { ...c, passes: c.passes + 1, refs: c.refs + n, at, ms: c.ms + ms, maxMs: Math.max(c.maxMs, ms), dbStatements: c.dbStatements + dbs.statements, dbRoundTrips: c.dbRoundTrips + dbs.roundTrips, dbMs: c.dbMs + dbs.ms });
       };
-      add(kind, refs, Math.round(passMs));
+      add(kind, refs, Math.round(passMs), stats);
       if (shadowRan) add(diffs.length ? "shadow:different" : "shadow:same", diffs.length);
       if (refreshUnchanged) add("refresh:unchanged", refreshUnchanged);
+      for (const d of diffs) rec.diffs.push({ at, ref: d.ref, side: d.side, fields: d.fields.join(","), detail: d.detail });
       // The stored Plans cover the rows this pass read once its writes succeeded: the log keeps only changes no stored Plan
-      // covers yet, which is what a step outside the planner decides again (plan-read.ts dueCandidates).
-      // A failed delete leaves the rows for the next pass to prune; the counts are written first, then the error is thrown.
+      // covers yet, which is what a step outside the planner decides again (data/planner loadDueRefs).
+      // A failed delete leaves the rows for the next pass to prune; the counts are recorded first, then the error is thrown.
       let pruneError: unknown = null;
-      if (cursor.seen.size) { try { await pruneChanges(db, cursor); } catch (e) { pruneError = e; } }
-      // A quiet pass writes no counts: they wait for a difference, a full load or the next minute.
+      if (cursor.seen.size) {
+        try {
+          await pruneChanges(db, cursor);
+          // After the commit: a rolled-back pass must not forget rows it never deleted.
+          db.afterCommit(() => cursor.seen.clear());
+        } catch (e) { pruneError = e; }
+      }
+      // A quiet pass records nothing: its counts wait for a difference, a full load or the next minute.
       if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) { if (pruneError) throw pruneError; return; }
-      for (const [k, c] of rec.counts) {
-        await db.run(db.k.insertInto("main.plan_pass_stats").values({ kind: k, passes: c.passes, refs: c.refs, last_at: c.at, ms: c.ms, max_ms: c.maxMs })
-          .onConflict((oc) => oc.column("kind").doUpdateSet((eb) => ({
-            passes: eb("main.plan_pass_stats.passes", "+", eb.ref("excluded.passes")), refs: eb("main.plan_pass_stats.refs", "+", eb.ref("excluded.refs")), last_at: eb.ref("excluded.last_at"),
-            ms: eb("main.plan_pass_stats.ms", "+", eb.ref("excluded.ms")), max_ms: eb.case().when("excluded.max_ms", ">", eb.ref("main.plan_pass_stats.max_ms")).then(eb.ref("excluded.max_ms")).else(eb.ref("main.plan_pass_stats.max_ms")).end(),
-          }))));
-      }
+      await recordPass(db, [...rec.counts.values()], rec.diffs);
       rec.counts.clear();
+      rec.diffs = [];
       rec.flushedAt = Date.now();
-      if (diffs.length) {
-        for (const d of diffs) await db.run(db.k.insertInto("main.plan_shadow_diffs").values({ at, ref: d.ref, side: d.side, fields: d.fields.join(","), detail: d.detail.slice(0, 2000) }));
-        await db.run(db.k.deleteFrom("main.plan_shadow_diffs").where(kx.rowid("plan_shadow_diffs"), "<=", (eb) => eb(eb.selectFrom("main.plan_shadow_diffs").select((s) => s.fn.max<number>(kx.rowid("plan_shadow_diffs")).as("m")), "-", SHADOW_ROWS)));
-      }
       if (pruneError) throw pruneError;
     },
   };

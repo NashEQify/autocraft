@@ -1,7 +1,7 @@
 // The work of the item steps (classify, referee, prioritize, embed, dupes, decide, label, act, fix issue and their collect), taken from
 // the item Plans: facts are loaded once, decideItem decides, and the items whose plan holds the action come back in the order the
 // step works in. The steps keep their own work; none of them selects items on its own any more.
-// A step outside the planner's pass loads facts only for the items that can be due (plan-read.ts dueCandidates) and decides them
+// A step outside the planner's pass loads facts only for the items that can be due (planner.loadDueRefs) and decides them
 // again, so an item that is no longer due drops out.
 import type { Item } from "../classify/parse.ts";
 import { latestRun } from "../classify/settled.ts";
@@ -9,11 +9,11 @@ import { embedderId, modelName } from "../embed/model.ts";
 import { decideItem } from "./decide-item.ts";
 import { inFlightNow } from "./select.ts";
 import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
-import { dueCandidates } from "./plan-read.ts";
+import { loadDueRefs } from "../data/planner/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
 import type { ItemPlanned, PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
 
@@ -44,10 +44,8 @@ const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind =
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */
 async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
-  const rows = await db.all(db.k.selectFrom("items as i")
-    .innerJoin(kx.refPairs(db, items.map((x) => [x.repo, x.number] as const), "j"), (j) => j.onRef("j.repo", "=", "i.repo").onRef("j.number", "=", "i.number"))
-    .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", kx.exprOf(eb, "i.number")).as("ref"), eb.fn.coalesce("i.created_at", eb.val("")).as("created"), eb.fn.coalesce("i.updated_at", eb.val("")).as("updated")]));
-  return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
+  const rows = await loadItems(db, items.map((x) => ({ repo: x.repo, number: x.number })), "card");
+  return new Map([...rows].map(([ref, r]) => [ref, { created: r.created_at ?? "", updated: r.updated_at ?? "" }]));
 }
 
 /**
@@ -81,7 +79,7 @@ async function planSortKeys(db: Db, plans: ItemPlans, items: { repo: string; num
 }
 
 /**
- * The items that can be due for `kind` now (plan-read.ts dueCandidates), or null when the stored Plans do not stand for the facts
+ * The items that can be due for `kind` now (planner.loadDueRefs), or null when the stored Plans do not stand for the facts
  * asked: none is stored yet, or the caller asks for another decision time, run or embedding model.
  */
 async function candidateRefs(db: Db, kind: ActionKind, opts: ItemLoadOptions): Promise<string[] | null> {
@@ -89,7 +87,7 @@ async function candidateRefs(db: Db, kind: ActionKind, opts: ItemLoadOptions): P
   // A run of null reads no verdicts, which only takes actions away; another run's verdicts change what is due.
   if (typeof opts.run === "string" && opts.run !== await latestRun(db)) return null;
   if (opts.model !== undefined && opts.model !== embedderId(modelName())) return null;
-  return await dueCandidates(db, kind, "item", opts.repo);
+  return await loadDueRefs(db, kind, "item", opts.repo);
 }
 
 /** Facts and fresh Plans of the items that can be due for `kind` (all of `opts.refs` when given), to pass as `plans` to plannedItems. */
@@ -133,27 +131,25 @@ export async function plannedItems(db: Db, kind: ActionKind, opts: PlannedOption
   return out.sort(then(flight, cmp));
 }
 
-const itemCols = (eb: kx.AnyEb) => [eb.ref("i.repo").as("repo"), eb.ref("i.number").as("number"), eb.ref("i.kind").as("kind"), eb.fn.coalesce("i.title", eb.val("")).as("title"),
-  eb.fn.coalesce("i.body", eb.val("")).as("body"), eb(eb.ref("i.additions"), "+", eb.ref("i.deletions")).as("lines_changed"), eb.ref("i.changed_files").as("files_changed"),
-  eb.ref("i.author_association").as("author_association")];
+const itemOfRow = (r: { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null }): Item => ({
+  repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", body: r.body ?? "",
+  lines_changed: r.additions === null || r.deletions === null ? null : Number(r.additions) + Number(r.deletions), files_changed: r.changed_files === null ? null : Number(r.changed_files), author_association: r.author_association,
+});
 
 /** The item as the model steps read it. */
 export async function itemOf(db: Db, repo: string, number: number): Promise<Item> {
-  const r = await db.get(db.k.selectFrom("items as i").select((eb) => itemCols(eb)).$narrowType<Item>().where("i.repo", "=", repo).where("i.number", "=", number));
+  const r = (await loadItems(db, [{ repo, number }], "text")).get(`${repo}#${number}`);
   if (!r) throw new Error(`${repo}#${number} is not in the database`);
-  return r;
+  return itemOfRow(r);
 }
 
 /** The items as the model steps read them, with their stored classifier input hash, in the order given: one query. */
 export async function itemsOf(db: Db, refs: readonly { repo: string; number: number }[]): Promise<(Item & { classHash: string | null })[]> {
   if (!refs.length) return [];
-  const rows = await db.all(db.k.selectFrom("items as i")
-    .innerJoin(kx.refPairs(db, refs.map((x) => [x.repo, x.number] as const), "j"), (j) => j.onRef("j.repo", "=", "i.repo").onRef("j.number", "=", "i.number"))
-    .select((eb) => [...itemCols(eb), eb.ref("i.class_hash").as("classHash")]).$narrowType<Item & { classHash: string | null }>());
-  const byRef = new Map(rows.map((r) => [`${r.repo}#${r.number}`, r]));
+  const rows = await loadItems(db, refs.map((x) => ({ repo: x.repo, number: x.number })), "text");
   return refs.map((x) => {
-    const r = byRef.get(`${x.repo}#${x.number}`);
+    const r = rows.get(`${x.repo}#${x.number}`);
     if (!r) throw new Error(`${x.repo}#${x.number} is not in the database`);
-    return r;
+    return { ...itemOfRow(r), classHash: r.class_hash };
   });
 }

@@ -1,4 +1,5 @@
 // The planner's change log: which writes re-decide which items, and which force a full pass.
+import { withConfig } from "../src/data/control/index.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { inReadSnapshot, planPass } from "../src/core/plan-engine.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";
-import { dueCandidates } from "../src/core/plan-read.ts";
+import { loadDueRefs } from "../src/data/planner/index.ts";
 import { planned } from "../src/core/select.ts";
 import { latestRun } from "../src/classify/settled.ts";
 import { setReviewMinInterval } from "../src/review/gate.ts";
@@ -208,7 +209,7 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
     const w = await (await (await (await (await (await (await world()).repo()).pr(1)).pr(2)).issue(3)).review(1)).review(2, { verdict: "take-fix" });
     let now = Date.parse(T) + 3600_000;
     const pass = async () => {
-      const p = await inReadSnapshot(w.db, async () => await planPass(w.db, { now, run: await latestRun(w.db), fullEveryMs: 30 * 60_000 }));
+      const p = await withConfig(w.db, () => inReadSnapshot(w.db, async () => await planPass(w.db, { now, run: await latestRun(w.db), fullEveryMs: 30 * 60_000 })));
       await p.finish();
       return { kind: p.kind, refs: p.refs };
     };
@@ -236,11 +237,11 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
 test("a step outside the planner decides the items its stored Plans hold and the changes no stored Plan covers yet", async () => {
   const w = await (await (await (await (await world()).repo()).pr(1)).pr(2)).review(1);
   const pass = async () => {
-    const p = await inReadSnapshot(w.db, async () => await planPass(w.db, { now: Date.now(), run: await latestRun(w.db), fullEveryMs: 30 * 60_000 }));
+    const p = await withConfig(w.db, () => inReadSnapshot(w.db, async () => await planPass(w.db, { now: Date.now(), run: await latestRun(w.db), fullEveryMs: 30 * 60_000 })));
     await writePlanCache(w.db, p.plans);
     await p.finish();
   };
-  const candidates = async () => (await dueCandidates(w.db, "verify", "pr"))!.sort();
+  const candidates = async () => (await loadDueRefs(w.db, "verify", "pr"))!.sort();
   const due = async () => (await planned(w.db, "verify")).map((p) => p.facts.number);
   // A pass that writes the Plan of an item with an open decision logs the item (item_plans is its input); the next pass covers that.
   await pass();
