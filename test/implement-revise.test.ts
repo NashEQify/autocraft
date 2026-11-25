@@ -16,7 +16,7 @@ import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.t
 import { DIFF_FLAGS } from "../src/implement/diff.ts";
 import { lastPush, openImplementationPr } from "../src/implement/pr.ts";
 import { pushRevision, type ReviseDeps } from "../src/implement/revise.ts";
-import { implementationById, setImplementationState, startImplementation } from "../src/implement/store.ts";
+import { implementationById, setImplementationState, startImplementation } from "./implement-rows.ts";
 import type { Implementation, ReviseRound } from "../src/implement/types.ts";
 
 const kinds = (f: Parameters<typeof prFacts>[0]) =>

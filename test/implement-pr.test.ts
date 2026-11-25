@@ -10,7 +10,7 @@ import { connectDb } from "../src/db/open.ts";
 import { compileTimeChanges, DIFF_FLAGS, MAX_IMPLEMENTATION_FILES, MAX_IMPLEMENTATION_LINES, validateImplementation } from "../src/implement/diff.ts";
 import { implBranch, implPrBody, implTitle } from "../src/implement/template.ts";
 import { openImplementationPr } from "../src/implement/pr.ts";
-import { implementationById, setImplementationState, startImplementation } from "../src/implement/store.ts";
+import { implementationById, setImplementationState, startImplementation } from "./implement-rows.ts";
 import type { Implementation } from "../src/implement/types.ts";
 import { setFeature } from "../src/build/features.ts";
 import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
