@@ -1,13 +1,13 @@
 // The planner pass's PR inputs: every module's set loader for the pass keys, loaded inside one read snapshot. The first wave
 // carries every loader keyed by the pass keys; the second only what needs the first one's rows (task states of stored patches,
-// our own commits on the push chains, stacked heads, the pre-merge rows of merge-entry heads); the third the owner statements
+// our own commits on the push chains, stacked heads, operators' retries of refused merges, the pre-merge rows of merge-entry heads); the third the owner statements
 // the reviews name, and only when one does.
 import type { Db } from "../db/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type TaskStates } from "../data/changes/index.ts";
-import { loadAssignments, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
+import { loadAssignments, loadAuditMax, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
@@ -20,6 +20,7 @@ import { loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { loadRanks, type RankRow } from "../data/triage/index.ts";
 import { listWorkflows, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
+import { mergeDecisionId } from "./rules.ts";
 
 type RefKey = `${string}#${number}` | string;
 
@@ -53,6 +54,8 @@ export type PrPassData = {
   ownCommits: Set<string>;
   stacked: Map<string, number[]>;
   statements: Map<number, Statement>;
+  /** An operator's latest Retry of a refused merge, by the retry target of the queue head (`mergeDecisionId`). */
+  retries: Map<string, string>;
 };
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -96,11 +99,12 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
     const data: PrPassData = {
       now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow,
       workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins,
-      inScope: new Set(scoped.map((r) => refKey(r.repo, r.number))), tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(),
+      inScope: new Set(scoped.map((r) => refKey(r.repo, r.number))), tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
     };
 
     const pairs: { repo: string; sha: string }[] = [];
     const entryHeads: { repo: string; number: number; head: string }[] = [];
+    const retryTargets: string[] = [];
     for (const [key, m] of mirror) {
       const { repo, number } = asRef(key);
       const head = m.item.head_oid;
@@ -109,14 +113,18 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
       if (latest) for (const h of pushChainOf(patches.get(key)?.pushes ?? [], latest.head)) pairs.push({ repo, sha: h });
       const eh = o.mergeEntryHead(data, key);
       if (eh) entryHeads.push({ repo, number, head: eh });
+      const qh = eh ?? latest?.head;
+      if (qh && merge.attempts.get(`${key}@${qh}`)?.outcome === "refused") retryTargets.push(mergeDecisionId(repo, number, qh));
     }
-    const [tasks, ownCommits, stacked, entryReview] = await db.together(() => Promise.all([
+    const [tasks, ownCommits, stacked, retries, entryReview] = await db.together(() => Promise.all([
       loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs), loadStackedHeads(db, [...new Set([...mirror.values()].map((m) => m.item.repo))]),
+      retryTargets.length ? loadAuditMax(db, "retry", retryTargets) : Promise.resolve(new Map<string, string>()),
       entryHeads.length ? loadReviewFacts(db, entryHeads.map((h) => ({ repo: h.repo, number: h.number })), { now: o.now, own: [...ownLogins], premergeHeads: entryHeads }) : Promise.resolve(null),
     ]));
     data.tasks = tasks;
     data.ownCommits = ownCommits;
     data.stacked = stacked;
+    data.retries = retries;
     if (entryReview) for (const [k, v] of entryReview.premerge) data.review.premerge.set(k, v);
     const ids = statementIds(data.review, []);
     if (ids.length) data.statements = await loadStatements(db, ids);

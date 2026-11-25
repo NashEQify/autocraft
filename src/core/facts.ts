@@ -27,7 +27,7 @@ import { postSourcesOf } from "../review/post-source.ts";
 import { staleReviews } from "../review/discussion.ts";
 import { nextUtcMidnight, reviewHolds } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, pipelineWrites, sizeOf } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import type { WorkflowGate } from "./may.ts";
@@ -363,7 +363,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const ownHere = isOwn(i.author) && c.ownPrs.has(ref) && !!head && ownHead(head);
 
   const last = d.merge.attempts.get(`${ref}@${qh}`);
-  if (last) {
+  // An operator's Retry after a refusal asks for another try now, without waiting for CI or the mergeable state to change.
+  const retried = last?.outcome === "refused" && (d.retries.get(mergeDecisionId(repo, number, qh)) ?? "") > last.at;
+  if (last && !retried) {
     base.lastMerge = { outcome: last.outcome, reason: last.reason, ci: last.ci, mergeable: last.mergeable, refusals: last.refusals };
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;
   }
