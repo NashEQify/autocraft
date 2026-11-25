@@ -1,11 +1,13 @@
-// The vocabulary of a Plan: what state an item is in and which actions are due. No imports: the web build may use it.
+// The vocabulary of a Plan: what state an item is in and which actions are due. It imports types only: the web build may use it.
+
+import type { Refusal, WaitCode } from "./codes.ts";
 
 /** A repo step approval (control StepApproval). */
 export type MayApproval = { by: string; at: string };
 /** A live workflow as src/core/may.ts reads it (its WorkflowGate). */
 export type MayWorkflow = {
   live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
-  blocker: string | null; baseHead: string | null; fixupAsked: boolean; leg: { state: string; head: string | null } | null;
+  blocker: string | null; baseHead: string | null; accepted?: readonly string[]; fixupAsked: boolean; leg: { state: string; head: string | null } | null;
 };
 
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
@@ -49,7 +51,19 @@ export type ActionKind =
 /** Who an item is assigned to as mirrored, and whether the last successful assign or unassign in the audit is our assignment of the pipeline account. `login`: the pipeline account (null when unknown: nothing is released). */
 export type AssignFacts = { login: string | null; assignees: string[]; ours: boolean };
 
-export type Action = { kind: ActionKind; head: string | null; params?: Record<string, unknown> };
+/**
+ * Whether an action that is due may run, on whose say (`by`; null when nobody's is needed or the facts do not name them) and as whom its
+ * write is made. Without the global pipeline switch, which holds back the pipeline's own jobs only (src/core/authority.ts mayRun).
+ */
+export type Permission =
+  | { ok: true; as: "app" | `user:${string}`; by: { kind: "person" | "repo"; login: string } | null }
+  | { ok: false; why: Refusal };
+
+/** `permission` is set by decidePr and decideItem, and no stored row carries it: without one it is judged again (mayRun), never taken as a yes. */
+export type Action = { kind: ActionKind; head: string | null; params?: Record<string, unknown>; permission?: Permission };
+
+/** Who started work acts for, and whether they count on the repo (data/access standing). `boxIdentity`: GitHub writes go out as the box account, under which nobody's standing is known. */
+export type StandingFact = { login: string; standing: "yes" | "no" | "unknown"; boxIdentity?: true };
 
 /** Where a head's unsent ask comments leave the next ask (src/core/rules.ts unsentAsk); absent when it is due. */
 export type UnsentAsk = { until: number } | "final";
@@ -74,6 +88,8 @@ export type Plan = {
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
+  /** What `wait` is, as a code; null exactly when `wait` is. Absent in stored rows. */
+  waitCode?: WaitCode | null;
   /** The merge rule or an operator's answer lets it merge now (a refused PR still counts while its retry waits for a change). */
   eligible: boolean;
 };
@@ -177,6 +193,8 @@ export type PrFacts = {
   outsideHold?: OutsideHoldInfo;
   /** The item's live maintainer workflow; null when nobody started it. */
   workflow?: WorkflowFact | null;
+  /** Who the live workflow's merge and its other work act for, and whether they count on the repo; absent when nothing loaded it. */
+  standing?: { merge: StandingFact | null; work: StandingFact | null };
   /** Without a live one, how the item's latest workflow ended; loaded like `workflow`. */
   endedWorkflow?: EndedWorkflow | null;
   /** An integration batch PR the pipeline opened itself. */
@@ -370,6 +388,8 @@ export type ItemFacts = {
   repoFacts: { labelsApproved: boolean; commentApproved: boolean; fixIssueApproved: boolean };
   /** As on PrFacts. */
   workflow?: WorkflowFact | null;
+  /** As on PrFacts. */
+  standing?: { merge: StandingFact | null; work: StandingFact | null };
   /** As on PrFacts; a workflow ended `closed` lets its person's close through outside the scope. */
   endedWorkflow?: EndedWorkflow | null;
 
@@ -459,6 +479,8 @@ export type ItemPlan = {
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
+  /** What `wait` is, as a code; null exactly when `wait` is. Absent in stored rows. */
+  waitCode?: WaitCode | null;
 };
 
 /** The item's plans together: the triage plan, and for a PR the review-to-merge Plan; `actions` lists both, triage first. */

@@ -3,6 +3,8 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
+import { permitted } from "./authority.ts";
+import { waitCodeOf } from "./codes.ts";
 import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, standingWait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
@@ -142,7 +144,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
     if (f.openPr !== null) { wait = openPrWait(f.openPr.number, f.openPr.closes); waitKind = "system"; }
     else if (state === "classified") { wait = TRIAGE_WAIT; waitKind = "system"; }
   }
-  return { repo: f.repo, number: f.number, kind: f.kind, state, actions, wait, waitKind };
+  return { repo: f.repo, number: f.number, kind: f.kind, state, actions: permitted(f, actions), wait, waitKind, waitCode: wait === null ? null : waitCodeOf(wait) };
 }
 
 /** The Work page's next-step text (rank/next.ts nextStepOf), from the item's state and, for a PR, the facts of its review-to-merge path. */

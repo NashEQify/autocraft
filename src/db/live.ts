@@ -23,7 +23,7 @@ export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
   duplicate_scans: ["at"],
   item_plans: ["planned_at"],
   lane_next: ["at"],
-  item_workflows: ["updated_at"],
+  item_workflows: ["updated_at", "version"],
   classify_state: ["at"],
 };
 

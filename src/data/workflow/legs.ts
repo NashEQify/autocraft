@@ -170,11 +170,11 @@ export async function moveLegs(db: Db, moves: LegMove[]): Promise<LegMoved[]> {
     const moved: (LegMoved & { fixId: number | null; headNow: string | null })[] = [];
     for (const chunk of kx.chunks([...first.values()])) {
       // The row set's columns avoid the leg's own names: SQLite's RETURNING takes bare column names only, and a clash would make them ambiguous on Postgres.
-      const v = kx.valuesTable(db, chunk.map((m) => ({ mid: m.id, from_state: m.from, to_state: m.to, new_head: m.head ?? null, has_head: m.head != null ? 1 : 0, new_reason: m.reason ?? null })),
-        { mid: "bigint", from_state: "text", to_state: "text", new_head: "text", has_head: "bigint", new_reason: "text" }, "v");
+      const v = kx.valuesTable(db, chunk.map((m) => ({ mid: m.id, from_state: m.from, to_state: m.to, new_head: m.head ?? null, has_head: m.head != null ? 1 : 0, new_reason: m.reason ?? null, new_code: m.code ?? null, new_params: m.params ? JSON.stringify(m.params) : null })),
+        { mid: "bigint", from_state: "text", to_state: "text", new_head: "text", has_head: "bigint", new_reason: "text", new_code: "text", new_params: "text" }, "v");
       const got = await q.all(k.updateTable("main.preapprovals as p").from(v)
         .set((eb: any) => ({
-          state: eb.ref("v.to_state"), reason: eb.ref("v.new_reason"), updated_at: now,
+          state: eb.ref("v.to_state"), reason: eb.ref("v.new_reason"), reason_code: eb.ref("v.new_code"), reason_params: eb.ref("v.new_params"), updated_at: now,
           head: eb.case().when(eb("v.has_head", "=", 1)).then(eb.ref("v.new_head")).else(eb.ref("p.head")).end(),
         }))
         .where((eb: any) => eb.and([eb("p.id", "=", eb.ref("v.mid")), eb("p.state", "=", eb.ref("v.from_state"))]))

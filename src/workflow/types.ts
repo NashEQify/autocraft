@@ -71,6 +71,8 @@ export type ItemWorkflow = {
   startedAt: string;
   startedVia: Surface;
   baseHead: string | null;
+  /** The PR head a person accepted, for a PR the same head as `baseHead`; null where only `baseHead` and the merge legs say it (src/core/evidence.ts acceptedHeads). */
+  acceptedHead: string | null;
   approvedBy: string | null;
   approvedAt: string | null;
   approvedVia: Surface | null;
@@ -88,6 +90,8 @@ export type ItemWorkflow = {
   /** An implement workflow's PR as `linkWorkflows` stored it (data/workflow/link.ts); null before an attempt opened one. */
   prNumber: number | null;
   legacyPreapprovalId: number | null;
+  /** How often the row was written, for the writers that raise it. */
+  version: number;
   updatedAt: string;
 };
 

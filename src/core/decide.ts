@@ -6,6 +6,8 @@ import {
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
+import { permitted } from "./authority.ts";
+import { waitCodeOf } from "./codes.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
 import { liveAttempt, ownImplementation } from "./implementation.ts";
 import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind, WorkflowFact } from "./plan.ts";
@@ -53,6 +55,16 @@ export const fixAllowed = (f: PrFacts): boolean => {
   return w ? w.entry === "fixup" || w.entry === "implement" || w.approved : onAutoPath(f);
 };
 
+/**
+ * Where the one fix-up round of a pre-merge review's defects is at the head: it can be made, it is under way, it is used up, or there is
+ * none to make (no defect, a defect no fix-up may apply, a PR already handed over, a branch or approval that takes no push).
+ */
+export function premergeFix(f: PrFacts): "fix" | "running" | "used" | "none" {
+  const row = f.premerge;
+  // A PR already handed over gets no fix-up.
+  return row?.hasFindings && row.defects > 0 && !f.handOver && row.defectsAllFixable && row.fixesSafe && !f.premergeFixUsed && pushAllowed(f, "fixup") && f.pushable ? "fix" : "none";
+}
+
 /** The queue entry of a PR that has a take or take-fix review at its head (or merged at the reviewed head), or of a merge-entry PR (no review needed). */
 export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   const mx = mergeEntry(f);
@@ -91,11 +103,7 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
     if (!row) premerge = "none";
     else if (!row.hasFindings) premerge = row.tries >= PREMERGE_MAX_TRIES ? "failed" : "retry";
     else if (!row.defects) premerge = row.unsure ? "unsure" : "clean";
-    else {
-      // A PR already handed over gets no fix-up.
-      const fixable = !handed && row.defectsAllFixable && row.fixesSafe && !f.premergeFixUsed && pushAllowed(f, "fixup") && f.pushable;
-      premerge = fixable ? "fix" : "defect";
-    }
+    else premerge = premergeFix(f) === "fix" ? "fix" : "defect";
     if (premerge === "defect") reasons.push(PREMERGE_DEFECT_REASON);
     else if (premerge === "unsure") reasons.push(PREMERGE_UNSURE_REASON);
     else if (premerge === "failed") reasons.push(PREMERGE_FAILED_REASON);
@@ -489,7 +497,10 @@ export const MAINTAINER_ANSWER_WAIT = "a maintainer's answer";
 export const NO_PASS: PassFacts = { rereadPaceAt: 0 };
 
 export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
-  const plan = (state: PlanState, p: Partial<Plan> = {}): Plan => ({ repo: f.repo, number: f.number, head: f.head, state, path: null, reasons: [], note: null, actions: [], wait: null, waitKind: null, eligible: false, conflictNote: null, ...p });
+  const plan = (state: PlanState, p: Partial<Plan> = {}): Plan => ({
+    repo: f.repo, number: f.number, head: f.head, state, path: null, reasons: [], note: null, wait: null, waitKind: null, eligible: false, conflictNote: null, ...p,
+    actions: permitted(f, p.actions ?? []), waitCode: p.wait == null ? null : waitCodeOf(p.wait),
+  });
   const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
   const r = f.review;
   const open = f.ghState === "OPEN";

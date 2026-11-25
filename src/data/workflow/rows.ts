@@ -12,7 +12,7 @@ import { linkRows, LIVE_STATES, notArchived, prIssueWorkflows, workScore } from 
 import { linkWorkflows } from "./link.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
-  SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
+  SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
 import type { Parsed } from "../../workflow/types.ts";
 
@@ -33,19 +33,19 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null; pr_number: number | string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
 export function workflowOf(r: WorkflowRow): ItemWorkflow {
   return {
     id: Number(r.id), repo: r.repo, number: Number(r.number), kind: r.kind as ItemKind, entry: r.entry as Entry, weight: Number(r.weight), state: r.state as WorkflowState,
-    startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head,
+    startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head, acceptedHead: r.accepted_head,
     approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null,
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), updatedAt: r.updated_at,
+    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
   };
 }
 
@@ -330,7 +330,7 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
 
 type Cell = string | number | null;
 const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell] } = {
-  entry: (v) => ["entry", v], weight: (v) => ["weight", v], state: (v) => ["state", v], baseHead: (v) => ["base_head", v],
+  entry: (v) => ["entry", v], weight: (v) => ["weight", v], state: (v) => ["state", v], baseHead: (v) => ["base_head", v], acceptedHead: (v) => ["accepted_head", v],
   approvedBy: (v) => ["approved_by", v], approvedAt: (v) => ["approved_at", v], approvedVia: (v) => ["approved_via", v],
   stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], blocker: (v) => ["blocker", v],
   blockerParams: (v) => ["blocker_params", v ? JSON.stringify(v) : null], rec: (v) => ["rec", v ? JSON.stringify(v) : null], recAt: (v) => ["rec_at", v],
@@ -373,7 +373,7 @@ export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowP
  * `saveWorkflows` for rows read before this write: one that changed since (`was`: the state and `updated_at` it was read with) is left as it
  * is. One patch per id. Returns the ids written. Joins the caller's `db.write`.
  */
-export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at: string; was: { state: WorkflowState; updatedAt: string } }[]): Promise<Set<number>> {
+export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at: string; was: WorkflowRead }[]): Promise<Set<number>> {
   if (rows.length === 0) return new Set();
   const q = queryDb(db);
   return await db.write(async () => {

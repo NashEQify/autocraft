@@ -1152,6 +1152,8 @@ export interface ItemWorkflows {
   updated_at: string;
   step: string | null;
   pr_number: number | null;
+  version: Generated<number>;
+  accepted_head: string | null;
 }
 
 export interface Items {
@@ -1782,6 +1784,8 @@ export interface Preapprovals {
   updated_at: string;
   fix_id: number | null;
   workflow_id: number | null;
+  reason_code: string | null;
+  reason_params: string | null;
 }
 
 export interface PremergeReviews {
@@ -3043,7 +3047,7 @@ export const COLUMNS = {
   item_settled_dirty: ["run_id", "repo", "number", "n"],
   item_settled_runs: ["run", "refreshed_at"],
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
-  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number"],
+  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number", "version", "accepted_head"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "jev_failed_hash", "text_refs", "author_id"],
   jev_unsure: ["prompt_id", "ref", "input_hash", "answer", "at"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
@@ -3094,7 +3098,7 @@ export const COLUMNS = {
   pr_commits: ["repo", "number", "oid", "committed_at", "author", "first_seen_at", "co_authors", "message"],
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
-  preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id"],
+  preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at", "lines"],
   release_apps: ["repo", "name", "stars", "updated_at"],
