@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 
 IMAGE="${AUTOCRAFT_TEST_PG_IMAGE:-postgres:18}"
 # Size limit of the tmpfs the data lives on. The suite's databases, 20 MB each, are dropped when their test file ends.
-TMPFS_SIZE="${AUTOCRAFT_TEST_PG_TMPFS:-8g}"
+TMPFS_SIZE="${AUTOCRAFT_TEST_PG_TMPFS:-12g}"
 DEFAULT_TESTS=(test/pg-db.test.ts test/itemtools-pg.test.ts test/pg-copy.test.ts test/kx.test.ts test/portable.test.ts test/pg-upgrade.test.ts)
 
 # Rootless Docker listens on a per-user socket; use it when DOCKER_HOST is unset and it exists.

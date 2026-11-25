@@ -18,7 +18,11 @@ export function noDatabaseFiles(): string[] {
 export function guardNoDatabase(): void {
   const main = process.argv[1] ? relative(join(TEST_DIR, ".."), process.argv[1]) : "";
   if (!process.env.AUTOCRAFT_TEST_NO_DATABASE && !(main.endsWith(".test.ts") && noDatabaseFiles().includes(main))) return;
-  process.env.AUTOCRAFT_TEST_NO_DATABASE = "1";
+  if (!process.env.AUTOCRAFT_TEST_NO_DATABASE) {
+    process.env.AUTOCRAFT_TEST_NO_DATABASE = "1";
+    const preload = `--import=${join(TEST_DIR, "suite-preload.ts")}`;
+    if (!process.env.NODE_OPTIONS?.includes(preload)) process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, preload].filter(Boolean).join(" ");
+  }
   let opened = false;
   const refuse = (what: string): never => {
     opened = true;
