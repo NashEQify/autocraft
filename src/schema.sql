@@ -2868,6 +2868,22 @@ CREATE TABLE IF NOT EXISTS liveness_state (
   checked_at TEXT,
   open INTEGER                        -- open items the check found
 );
+-- Planner passes per kind (full, changed, ...) and UTC hour (`YYYY-MM-DDTHH`): count, refs, time and the database work the
+-- pass did, a series for the query-growth check. Kept 14 days.
+CREATE TABLE IF NOT EXISTS plan_pass_hours (
+  kind TEXT NOT NULL,
+  hour TEXT NOT NULL,
+  passes INTEGER NOT NULL DEFAULT 0,
+  refs INTEGER NOT NULL DEFAULT 0,
+  last_at TEXT NOT NULL,
+  ms INTEGER NOT NULL DEFAULT 0,
+  max_ms INTEGER NOT NULL DEFAULT 0,
+  db_statements INTEGER NOT NULL DEFAULT 0,
+  db_round_trips INTEGER NOT NULL DEFAULT 0,
+  db_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (kind, hour)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS plan_pass_hours_hour ON plan_pass_hours(hour);
 
 CREATE INDEX IF NOT EXISTS agent_runs_step_model ON agent_runs(step, model, id);
 

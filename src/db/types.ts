@@ -1645,6 +1645,19 @@ export interface PlanHistory {
   at: string;
 }
 
+export interface PlanPassHours {
+  kind: string;
+  hour: string;
+  passes: Generated<number>;
+  refs: Generated<number>;
+  last_at: string;
+  ms: Generated<number>;
+  max_ms: Generated<number>;
+  db_statements: Generated<number>;
+  db_round_trips: Generated<number>;
+  db_ms: Generated<number>;
+}
+
 export interface PlanPassStats {
   kind: string;
   passes: number;
@@ -2650,6 +2663,7 @@ export interface DB {
   plan_full: PlanFull;
   plan_full_causes: PlanFullCauses;
   plan_history: PlanHistory;
+  plan_pass_hours: PlanPassHours;
   plan_pass_stats: PlanPassStats;
   plan_shadow_diffs: PlanShadowDiffs;
   postmerge_followups: PostmergeFollowups;
@@ -2855,6 +2869,7 @@ export interface DB {
   "main.plan_full": PlanFull;
   "main.plan_full_causes": PlanFullCauses;
   "main.plan_history": PlanHistory;
+  "main.plan_pass_hours": PlanPassHours;
   "main.plan_pass_stats": PlanPassStats;
   "main.plan_shadow_diffs": PlanShadowDiffs;
   "main.postmerge_followups": PostmergeFollowups;
@@ -3064,6 +3079,7 @@ export const COLUMNS = {
   plan_full: ["id", "seq"],
   plan_full_causes: ["source", "n", "last_seq"],
   plan_history: ["id", "repo", "number", "head", "old_state", "new_state", "old_wait", "wait", "reasons", "at"],
+  plan_pass_hours: ["kind", "hour", "passes", "refs", "last_at", "ms", "max_ms", "db_statements", "db_round_trips", "db_ms"],
   plan_pass_stats: ["kind", "passes", "refs", "last_at", "ms", "max_ms"],
   plan_shadow_diffs: ["at", "ref", "side", "fields", "detail"],
   postmerge_followups: ["repo", "number", "review_at", "finding", "title", "issue_number", "url", "state", "at", "duplicate_of", "attempts", "note"],
