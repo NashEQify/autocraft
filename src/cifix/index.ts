@@ -10,15 +10,20 @@
 import { duplicateHeld } from "../dupes/held.ts";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { commentApprovalOf } from "../act/approval.ts";
 import { absolute } from "../build/artifacts.ts";
-import { createTask, getTask, TERMINAL, warmKeyOf } from "../build/tasks.ts";
+import { createTask, warmKeyOf } from "../build/tasks.ts";
 import { askClaude, POOL_MAX, pool } from "../classify/run.ts";
 import { isHalt, poolRoom, takersCut } from "../agents/call.ts";
-import { pushesUnsettled } from "../push-outcomes.ts";
+import { pushesAreUnsettled } from "../fixup/unsettled.ts";
 import { audit } from "../dash/audit.ts";
 import { optionalChecks } from "../optional-checks.ts";
-import { pushApprovalOf } from "../fixup/approval.ts";
+import { loadStepApprovals } from "../data/control/index.ts";
+import { finishInfraRerun, finishPatch, loadPatchFacts, recordPushing, startInfraRerun, storePatch } from "../data/changes/index.ts";
+import { loadTaskStates } from "../data/build/index.ts";
+import { loadArtifactFiles } from "../data/build/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { dropUnlistedPatches } from "../prepush/drop.ts";
+import { currentJobId } from "../agents/call.ts";
 import { Git, exec, fixupDir, type Exec } from "../fixup/git.ts";
 import { DIFF_CAP, FILE_CAP, PR_QUERY, TOTAL_CAP, noteLive, scrubReason, whoAmI, type PrNode } from "../fixup/index.ts";
 import { commitIdentity } from "../github/identity.ts";
@@ -26,7 +31,6 @@ import { outsideShown, shownSize, viewFile } from "../fixup/excerpt.ts";
 import { buildScriptsAt, editable, validatePatch } from "../fixup/patch.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { patchGiveaway, QUIET_PATCH_REFUSAL } from "../security/rules.ts";
-import { COMMENT_UNSENT_DELAYS_MS } from "../core/rules.ts";
 import { readGate } from "../merge/changes-requested.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
 import { longLivedOf, pushable } from "../fixup/pushable.ts";
@@ -60,7 +64,6 @@ import { jobItem } from "../runner/job-items.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { leaseItem } from "../runner/leases.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
 
 export { MAX_TRIES, type CifixCandidate } from "./candidates.ts";
@@ -183,41 +186,19 @@ class Recorder {
     this.at = at;
   }
 
-  private async open(c: CifixCandidate): Promise<{ id: number } | undefined> {
-    return await this.db.get(this.db.k.selectFrom("ci_fixes").select(kx.rowid("ci_fixes").as("id")).where("repo", "=", c.repo).where("number", "=", c.number).where("head", "=", c.head)
-      .where("state", "in", ["formatting", "pushing", "linting"]).orderBy(kx.rowid("ci_fixes"), "desc").limit(1));
-  }
-
   /** Written before the push: the commit about to be pushed, so a crash between the push and its record leaves the head in the push chain. */
   async pushing(c: CifixCandidate, kind: "format" | "code", commit: string, files: string[]): Promise<void> {
-    const open = await this.open(c);
-    if (open) await this.db.run(this.db.k.updateTable("ci_fixes").set({ state: "pushing", to_head: commit, files: JSON.stringify(files) }).where(kx.rowid("ci_fixes"), "=", open.id));
-    else {
-      await this.db.run(this.db.k.insertInto("ci_fixes").values({ repo: c.repo, number: c.number, head: c.head, to_head: commit, kind, state: "pushing", reason: null, files: JSON.stringify(files), attempt: c.attempt, created_at: this.at() }));
-    }
+    await recordPushing(this.db, { kind: "cifix", repo: c.repo, number: c.number, head: c.head, commit, files, attempt: c.attempt, ciKind: kind, at: this.at() });
   }
 
   /** The model patch waits for its lint task: a first row, or the same row with the next round's patch and task. No task: a patch without a Rust file kept for posting again. */
   async linting(c: CifixCandidate, patch: string, files: string[], task: number | null, lintState: "pending" | "requeued", round: number, session: string | null): Promise<void> {
-    if (c.lint) {
-      await this.db.run(this.db.k.updateTable("ci_fixes").set({ patch, files: JSON.stringify(files), lint_task: task, lint_round: round, lint_state: lintState, session }).where(kx.rowid("ci_fixes"), "=", c.lint.rowid));
-      return;
-    }
-    await this.db.run(this.db.k.insertInto("ci_fixes").values({ repo: c.repo, number: c.number, head: c.head, to_head: null, kind: "code", state: "linting", reason: null, files: JSON.stringify(files), attempt: c.attempt, created_at: this.at(), patch, lint_task: task, lint_round: round, lint_state: lintState, session }));
+    await storePatch(this.db, { kind: "cifix", storedId: c.lint?.rowid, repo: c.repo, number: c.number, head: c.head, patch, files, lintTask: task, lintRound: round, lintState, session, attempt: c.attempt, at: this.at() });
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
   async dropUnlisted(repo: string, listed: CifixCandidate[]): Promise<void> {
-    const keep = new Set(listed.map((c) => c.lint!.rowid));
-    const rows = await this.db.all(this.db.k.selectFrom("ci_fixes").select([kx.rowid("ci_fixes").as("id"), "number", "head", "lint_task"]).where("repo", "=", repo).where("state", "=", "linting"));
-    for (const r of rows) {
-      const t = r.lint_task != null ? await getTask(this.db, r.lint_task) : null;
-      if (t && !TERMINAL.includes(t.state)) continue;
-      // A patch whose comment did not reach GitHub is kept until its retries are used: the plan lists it again when its backoff ends.
-      const n = (await this.db.get(this.db.k.selectFrom("ci_fixes").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", repo).where("number", "=", r.number).where("head", "=", r.head).where("state", "=", "comment-unsent")))!.n;
-      if (n > 0 && n <= COMMENT_UNSENT_DELAYS_MS.length) continue;
-      if (!keep.has(r.id)) await this.db.run(this.db.k.updateTable("ci_fixes").set({ state: "superseded", reason: "the plan no longer lists the push of the stored patch", patch: null }).where(kx.rowid("ci_fixes"), "=", r.id));
-    }
+    await dropUnlistedPatches(this.db, "cifix", repo, new Set(listed.map((c) => c.lint!.rowid)));
   }
 
   /**
@@ -226,20 +207,15 @@ class Recorder {
    */
   async set(c: CifixCandidate, kind: "format" | "code" | "infra", state: string, reason: string | null, o: { files?: string[]; toHead?: string | null; task?: number | null; runs?: number[] } = {}): Promise<void> {
     const at = this.at();
-    const files = JSON.stringify(o.files ?? []);
-    // A comment that did not reach GitHub leaves the open row (a try, holding the stored patch or formatter task) for the retry: its own row times the backoff.
-    const open = state === "comment-unsent" ? undefined : await this.open(c);
-    if (open && state !== "formatting") {
-      await this.db.run(this.db.k.updateTable("ci_fixes").set({ state, reason, files, to_head: o.toHead ?? null }).where(kx.rowid("ci_fixes"), "=", open.id));
-    } else {
-      await this.db.run(this.db.k.insertInto("ci_fixes").values({ repo: c.repo, number: c.number, head: c.head, to_head: o.toHead ?? null, kind, state, reason, files, attempt: c.attempt, task_id: o.task ?? null, runs: o.runs ? JSON.stringify(o.runs) : null, created_at: at }));
-    }
-    if (state === "infra" || state === "formatting" || state === "rerun" || state === "rerunning") return;
+    const quiet = state === "infra" || state === "formatting" || state === "rerun" || state === "rerunning";
     const note = state === "pushed" ? `CI fix pushed at ${short(c.head)}: ${(o.files ?? []).join(", ")}`
       : state === "skipped" ? `CI fix skipped at ${short(c.head)}: ${reason}`
       : state === "asked" ? `posted a CI fix at ${short(c.head)}: ${(o.files ?? []).join(", ")}` : `CI fix ${state} at ${short(c.head)}: ${reason}`;
-    await this.db.run(this.db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "take", at, actor: ACTOR, note }));
-    await jobItem(this.db, c.repo, c.number, note, () => {});   // the callers log the outcome themselves
+    await finishPatch(this.db, {
+      kind: "cifix", repo: c.repo, number: c.number, head: c.head, state, reason, files: o.files ?? [], toHead: o.toHead ?? null, task: o.task ?? null, runs: o.runs ?? null, attempt: c.attempt, ciKind: kind, at,
+      note: quiet ? null : { repo: c.repo, number: c.number, stage: "take", at, actor: ACTOR, note },
+      jobNote: quiet ? null : note, jobId: currentJobId(),
+    });
   }
 }
 
@@ -403,8 +379,10 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   await rec.dropUnlisted(repo, sel.lint);
   const gw: Writer = { db, login: ACTOR };
   const git = new Git(d.exec, d.root, repo);
-  const approved = await pushApprovalOf(db, repo) !== null;
-  const commenting = await commentApprovalOf(db, repo) !== null;
+  const approvals = (await loadStepApprovals(db, [repo], ["push", "comment"])).get(repo) ?? {};
+  const approved = !!approvals.push, commenting = !!approvals.comment;
+  const titles = new Map([...await loadItems(db, [...sel.work, ...sel.collect.map((x) => x.c), ...sel.lint].map((c) => ({ repo: c.repo, number: c.number })), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
+  const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   let whoP: ReturnType<typeof whoAmI> | undefined;
   let handled = 0;
 
@@ -551,14 +529,14 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   const collectFormat = async (c: CifixCandidate, taskId: number): Promise<void> => {
     const ref = refOf(c);
     const scripts = await buildScriptsAt(git, c.head);
-    const t = await getTask(db, taskId);
+    const t = (await loadTaskStates(db, [taskId])).get(taskId);
     const fail = async (state: "failed" | "refused", reason: string) => { await rec.set(c, "format", state, reason); summary.failed.push({ ref, reason }); log(`  ${ref}: ${state}: ${reason}`); };
     if (!t || t.state !== "done") { await fail("failed", `the formatter task ${t?.state ?? "is gone"}`); return; }
     // The files the formatter was told to format: the PR's files that the log's `Diff in` lines name.
-    const row = await db.get(db.k.selectFrom("ci_fixes").select("files").where("repo", "=", c.repo).where("number", "=", c.number).where("head", "=", c.head).where("state", "=", "formatting").limit(1));
-    const allowed = JSON.parse(row?.files ?? "[]") as string[];
-    const art = await db.get(db.k.selectFrom("build_artifacts").select("file").where("task_id", "=", taskId).where("name", "=", FORMAT_ARTIFACT));
-    const path = art ? absolute(art.file) : null;
+    const [facts, artifacts] = await db.together(() => Promise.all([loadPatchFacts(db, [{ repo: c.repo, number: c.number }]), loadArtifactFiles(db, [{ taskId, name: FORMAT_ARTIFACT }])]));
+    const allowed = facts.get(refOf(c))?.cifixes.find((r) => r.head === c.head && r.state === "formatting")?.files ?? [];
+    const file = artifacts.get(`${taskId}/${FORMAT_ARTIFACT}`);
+    const path = file ? absolute(file) : null;
     if (!path) { await fail("failed", "the formatter changed nothing, so the failure is not formatting"); return; }
     const text = gitFormatDiff(readFileSync(path, "utf8"));
     const v = validatePatch(text, allowed, (x) => editable(x, scripts));
@@ -591,7 +569,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     const diff = await cachedDiff(db, repo, c.number, head, d.fetchDiff);
     if (!diff.ok) { await fail("failed", `no diff: ${oneLine(diff.error)}`); return; }
     if (diff.text.length > DIFF_CAP) { await fail("failed", `the PR diff is over the ${DIFF_CAP} character limit`); return; }
-    const made = await patchFromFailure(db, d, { git, ref, title: ((await db.get(db.k.selectFrom("items").select("title").where("repo", "=", repo).where("number", "=", c.number)))?.title ?? "").slice(0, 300),
+    const made = await patchFromFailure(db, d, { git, ref, title: titleOf(c),
       repo, number: c.number, head, base: pr.baseRefOid ?? null, round: c.attempt, failure, diffText: diff.text, ...(previous ? { previous } : {}), session: ses, runId, actor: ACTOR, at, checkout: async () => d.checkout?.(repo, c.number, head) });
     ledger.hold(ses.kept);
     if (c.lint) dropSessions(c.lint.session, ses.kept ? { "": ses.kept } : {});
@@ -720,7 +698,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         log(`  ${ref}: formatter task ${id} queued for ${names.join(", ")}`);
         return;
       }
-      if (await pushesUnsettled(db, repo, log)) return;
+      if (await pushesAreUnsettled(db, repo, log)) return;
       await fixCode(c, pr, failure);
     } catch (e) {
       if (isHalt(e)) throw e;
@@ -835,14 +813,15 @@ export async function runRerun(db: Db, params: CifixParams, log: (line: string) 
       if ("refused" in g) { log(`  ${ref}: skipped: ${g.refused}`); out.skipped.push(ref); continue; }
       params.onHandled?.(++n);
       // Recorded before the calls: one rerun per head, even if this process dies in the middle of them.
-      await db.run(db.k.insertInto("ci_fixes").values({ repo, number: c.number, head: c.head, kind: "infra", state: "rerunning", reason: null, files: "[]", attempt: 0, runs: JSON.stringify(runs), created_at: d.now().toISOString() }));
+      const rerun = { repo, number: c.number, head: c.head, runs, at: d.now().toISOString() };
+      await startInfraRerun(db, [rerun]);
       const errors: string[] = [];
       for (const run of runs) {
         const res = await ghRerunFailed(w, d.exec, g, run, { head: c.head });
         if (res.code !== 0) errors.push(oneLine(res.stderr || res.stdout));
       }
       // One rerun per head, whether or not GitHub took every run.
-      await db.run(db.k.updateTable("ci_fixes").set({ state: "rerun", reason: errors.length ? errors[0]!.slice(0, 200) : null }).where("repo", "=", repo).where("number", "=", c.number).where("head", "=", c.head).where("state", "=", "rerunning"));
+      await finishInfraRerun(db, [{ ...rerun, state: "rerun", reason: errors.length ? errors[0]!.slice(0, 200) : null }]);
       out.reran.push(ref);
       log(`  ${ref}: reran ${runs.length} runs${errors.length ? ` (${errors.length} refused)` : ""}`);
     } catch (e) {

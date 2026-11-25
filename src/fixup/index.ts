@@ -14,7 +14,6 @@ import { commitIdentity, ownLogins, type CommitIdentity } from "../github/identi
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getTask, TERMINAL } from "../build/tasks.ts";
 import { askClaude } from "../classify/run.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
@@ -22,9 +21,12 @@ import { audit } from "../dash/audit.ts";
 import { withNote } from "../github/note.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
-import { unsentAsk } from "../core/rules.ts";
 import { ghAskComment, ghComment, ghEditComment, pushBranch, type Note, type Writer } from "../github/write.ts";
-import { rowid } from "../db/kx.ts";
+import { loadAuditActions, loadStepApprovals, loadTrackedRepos } from "../data/control/index.ts";
+import { finishPatch, loadPatchFacts, recordPushing, storePatch } from "../data/changes/index.ts";
+import { applyLocal, loadItems, loadPrMirror } from "../data/mirror/index.ts";
+import { loadReviewsAt } from "../data/review/index.ts";
+import { dropUnlistedPatches } from "../prepush/drop.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { isQuiet } from "../security/quiet.ts";
@@ -51,13 +53,12 @@ import { defaultSemanticDeps, referenceProblems } from "../reference-lint.ts";
 import { dropTexts } from "../replylint.ts";
 import { buildScriptsAt, fixupEditable, operatorEditable, quotesText, splitChanges, validatePatch, type ConflictPr, type FixupPr } from "./patch.ts";
 import { outsideShown, shownSize, viewFile } from "./excerpt.ts";
-import { HOLD_CANNOT_PUSH, askText, carryCommentText, commentText, commitMessage, fixupCommentEdited, fixupCommentLines, operatorCommentText } from "./template.ts";
-import { commentApprovalOf } from "../act/approval.ts";
+import { HOLD_CANNOT_PUSH, askText, commentText, commitMessage, fixupCommentEdited, fixupCommentLines, operatorCommentText } from "./template.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf } from "../owners.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { isHalt, poolRoom, takersCut, takersFirst } from "../agents/call.ts";
-import { pushesUnsettled } from "../push-outcomes.ts";
+import { pushesAreUnsettled } from "./unsettled.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
 
 export { MAX_ATTEMPTS, type FixCandidate, type FixSelection } from "./candidates.ts";
@@ -117,6 +118,7 @@ export type FixupSummary = {
 };
 
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
+const refPair = (c: { repo: string; number: number }) => ({ repo: c.repo, number: c.number });
 const short = (sha: string) => sha.slice(0, 7);
 /** Reasons are shown on the dashboard: first line only, known directories and any absolute path removed. */
 export function scrubReason(text: string, root: string): string {
@@ -140,38 +142,20 @@ export type PrNode = {
   headRepository: { nameWithOwner: string } | null; headRef?: { branchProtectionRule?: { id: string } | null } | null; assignees?: { nodes?: { login: string }[] };
 };
 
-/**
- * Writes what the live read found into pr_checks, as the checks sync would, so a PR the live read shows is no candidate
- * (conflicting, closed, a draft, head moved) is not selected again until the checks data changes.
- */
+/** The mergeable value stored for the PR at this head: the checks row's, or the item's; a conflict in either wins. */
 async function storedMergeable(db: Db, repo: string, number: number, head: string): Promise<string | null> {
-  const r = (await db.get(db.k.selectNoFrom((eb) => [
-    eb.selectFrom("pr_checks").select("mergeable").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).as("c"),
-    eb.selectFrom("main.items").select("mergeable").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).as("i"),
-  ])))!;
-  return r.c === "CONFLICTING" || r.i === "CONFLICTING" ? "CONFLICTING" : r.c ?? r.i;
+  const m = (await loadPrMirror(db, [{ repo, number }])).get(`${repo}#${number}`);
+  const c = m?.checks?.head_oid === head ? m.checks.mergeable : null, i = m?.item.head_oid === head ? m.item.mergeable : null;
+  return c === "CONFLICTING" || i === "CONFLICTING" ? "CONFLICTING" : c ?? i;
 }
 
+/**
+ * Writes what the live read found into the mirror, as the checks sync would, so a PR the live read shows is no candidate
+ * (conflicting, closed, a draft, head moved) is not selected again until the checks data changes.
+ */
 export async function noteLive(db: Db, repo: string, number: number, pr: PrNode | null | undefined, at: string): Promise<void> {
   if (!pr) return;
-  // The planner reads the mirrored value when the checks row is missing or at another head: a conflict seen live must reach it, or the PR keeps planning as a fix-up.
-  if (pr.mergeable === "CONFLICTING" || pr.mergeable === "MERGEABLE") await db.run(db.k.updateTable("main.items").set({ mergeable: pr.mergeable }).where("repo", "=", repo).where("number", "=", number).where("kind", "=", "pr").where("head_oid", "=", pr.headRefOid));
-  const row = await db.get(db.k.selectFrom("pr_checks").select("head_oid").where("repo", "=", repo).where("number", "=", number));
-  if (!row) return;
-  if (row.head_oid === pr.headRefOid) {
-    const known = pr.mergeable === "CONFLICTING" || pr.mergeable === "MERGEABLE";
-    await db.run(db.k.updateTable("pr_checks").set((eb) => ({
-      state: pr.state, is_draft: pr.isDraft ? 1 : 0,
-      mergeable: known ? pr.mergeable : eb.fn.coalesce(eb.fn<string | null>("nullif", ["mergeable", eb.val("UNKNOWN")]), eb.val(pr.mergeable)),
-      maintainer_can_modify: pr.maintainerCanModify ? 1 : 0, fetched_at: at,
-    })).where("repo", "=", repo).where("number", "=", number));
-  } else {
-    // The old head's checks say nothing about the new one: pending until the checks sync reads them.
-    await db.run(db.k.updateTable("pr_checks").set({
-      head_oid: pr.headRefOid, state: pr.state, is_draft: pr.isDraft ? 1 : 0, overall: "pending", checks: "[]", mergeable: pr.mergeable,
-      maintainer_can_modify: pr.maintainerCanModify ? 1 : 0, fetched_at: at,
-    }).where("repo", "=", repo).where("number", "=", number));
-  }
+  await applyLocal(db, [{ kind: "live", repo, number, at, pr: { head: pr.headRefOid, state: pr.state, draft: pr.isDraft, mergeable: pr.mergeable ?? "UNKNOWN", maintainerCanModify: pr.maintainerCanModify } }]);
 }
 
 import { pipelineAccount, type Who } from "../github/pipeline-account.ts";
@@ -180,7 +164,7 @@ import { openDb } from "../db/open.ts";
 export type { Who };
 
 /** The Plan action's source of a candidate. */
-const sourceOf = (c: FixCandidate): string => (c.carry ? "carry" : c.source ?? "review");
+const sourceOf = (c: FixCandidate): string => c.source ?? "review";
 
 export const whoAmI = (run: Exec): Promise<Who> => pipelineAccount(run);
 
@@ -194,91 +178,29 @@ class Recorder {
 
   /** Written before the push: the commit about to be pushed, so a crash between the push and its record leaves the head in the push chain. */
   async pushing(c: FixCandidate, commit: string, files: string[]): Promise<void> {
-    // A stored patch's row (any source) is the record of the push; a carry-over also keeps its own.
-    if (c.lint) await this.db.run(this.db.k.updateTable("fixups").set({ state: "pushing", to_head: commit, files: JSON.stringify(files) }).where(rowid("fixups"), "=", c.lint.rowid));
-    if (c.carry) {
-      await this.db.run(this.db.k.updateTable("dupe_carries").set({ to_head: commit, from_head: c.head, updated_at: this.at() }).where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
-      return;
-    }
-    if (c.lint) return;
-    await this.db.run(this.db.k.insertInto("fixups").values({
-      repo: c.repo, number: c.number, from_head: c.head, to_head: commit, state: "pushing", reason: null, files: JSON.stringify(files), attempt: c.attempt,
-      created_at: this.at(), source: c.source ?? null, operator_fix: c.operator?.id ?? null,
-    }));
+    await recordPushing(this.db, { kind: "fixup", repo: c.repo, number: c.number, head: c.head, commit, files, attempt: c.attempt, source: c.source, operatorFix: c.operator?.id ?? null, storedId: c.lint?.rowid, at: this.at() });
   }
 
   /** The model patch waits for its lint task: a first row, or the same row with the next round's patch and task. */
   async linting(c: FixCandidate, patch: string, files: string[], task: number, lintState: "pending" | "requeued", round: number, session: string | null, changes: string[] = []): Promise<void> {
-    const list = changes.length ? JSON.stringify(changes) : null;
-    if (c.lint) {
-      await this.db.run(this.db.k.updateTable("fixups").set({ patch, files: JSON.stringify(files), lint_task: task, lint_round: round, lint_state: lintState, session, changes: list }).where(rowid("fixups"), "=", c.lint.rowid));
-      return;
-    }
-    await this.db.run(this.db.k.insertInto("fixups").values({
-      repo: c.repo, number: c.number, from_head: c.head, to_head: null, state: "linting", reason: null, files: JSON.stringify(files), attempt: c.attempt,
-      created_at: this.at(), source: c.carry ? "carry" : c.source ?? null, patch, lint_task: task, lint_round: round, lint_state: lintState,
-      carry_decision: c.carry?.decisionId ?? null, session, operator_fix: c.operator?.id ?? null, changes: list,
-    }));
+    await storePatch(this.db, { kind: "fixup", storedId: c.lint?.rowid, repo: c.repo, number: c.number, head: c.head, patch, files, lintTask: task, lintRound: round, lintState, session, changes, source: c.source, operatorFix: c.operator?.id ?? null, attempt: c.attempt, at: this.at() });
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
   async dropUnlisted(repo: string, listed: FixCandidate[]): Promise<void> {
-    const keep = new Set(listed.map((c) => c.lint!.rowid));
-    const rows = await this.db.all(this.db.k.selectFrom("fixups").select([rowid("fixups").as("id"), "lint_task"]).where("repo", "=", repo).where("state", "=", "linting"));
-    for (const r of rows) {
-      const t = r.lint_task != null ? await getTask(this.db, r.lint_task) : null;
-      if (t && !TERMINAL.includes(t.state)) continue;
-      if (!keep.has(r.id)) await this.db.run(this.db.k.updateTable("fixups").set({ state: "superseded", reason: "the plan no longer lists the push of the stored patch", patch: null }).where(rowid("fixups"), "=", r.id));
-    }
+    await dropUnlistedPatches(this.db, "fixup", repo, new Set(listed.map((c) => c.lint!.rowid)));
   }
 
   /** A fixups row and a stages row: `hold` for the two states that need a person, else the PR's `take` stage with a note. */
   async fixup(c: FixCandidate, state: "pushed" | "failed" | "refused" | "rejected" | "cannot-push" | "too-large" | "asked" | "comment-failed" | "comment-unsent" | "push-denied", reason: string | null, files: string[], toHead: string | null = null): Promise<void> {
     const at = this.at();
-    if (c.carry) {
-      // A carry-over keeps its own record; the PR's take-fix tries and stage are not touched.
-      if (state === "comment-unsent") {
-        // Not a try: nothing reached GitHub. Its fixups row times the backoff (src/core/facts.ts); past the last one the carry-over is held.
-        const ats = (await this.db.all(this.db.k.selectFrom("fixups").select("created_at")
-          .where("repo", "=", c.repo).where("number", "=", c.number).where("source", "=", "carry").where("carry_decision", "=", c.carry.decisionId).where("state", "=", "comment-unsent"))).map((x) => x.created_at);
-        await this.db.run(this.db.k.insertInto("fixups").values({
-          repo: c.repo, number: c.number, from_head: c.head, state: "comment-unsent", reason, files: "[]", attempt: c.attempt, created_at: at, source: "carry", carry_decision: c.carry.decisionId,
-        }));
-        const final = unsentAsk([...ats, at], Date.parse(at)) === "final";
-        await this.db.run(this.db.k.updateTable("dupe_carries").set({ state: final ? "held" : "queued", outcome: `${state}: ${reason}`, updated_at: at })
-          .where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
-        return;
-      }
-      const ended = state === "pushed" || state === "asked" || state === "cannot-push" || state === "too-large" || state === "push-denied" || state === "comment-failed";
-      const tried = !ended;
-      const next = ended || c.attempt >= MAX_ATTEMPTS ? (state === "pushed" || state === "asked" ? "done" : "held") : "queued";
-      await this.db.run(this.db.k.updateTable("dupe_carries").set((eb) => ({
-        state: next, attempts: eb("attempts", "+", tried || state === "pushed" ? 1 : 0), outcome: reason ? `${state}: ${reason}` : state,
-        to_head: toHead, from_head: toHead ? c.head : null, updated_at: at,
-      })).where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
-      // The stored patch's row, if the carry-over went through the lint check, ends with it.
-      if (c.lint) await this.db.run(this.db.k.updateTable("fixups").set({ state, reason, files: JSON.stringify(files), to_head: toHead, patch: null }).where(rowid("fixups"), "=", c.lint.rowid));
-      return;
-    }
-    // The candidate's own row: its stored patch, else the open row of its source (and of its operator request).
-    const operatorId = c.operator?.id ?? null;
-    const open = c.lint ? { id: c.lint.rowid } : await this.db.get(this.db.k.selectFrom("fixups").select(rowid("fixups").as("id"))
-      .where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", c.head).where("state", "in", ["pushing", "linting"])
-      .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", c.source ?? "review"))
-      .where((eb) => (operatorId === null ? eb("operator_fix", "is", null) : eb("operator_fix", "=", operatorId)))
-      .orderBy(rowid("fixups"), "desc").limit(1));
-    if (open) {
-      await this.db.run(this.db.k.updateTable("fixups").set({ state, reason, files: JSON.stringify(files), to_head: toHead }).where(rowid("fixups"), "=", open.id));
-    } else {
-      await this.db.run(this.db.k.insertInto("fixups").values({
-        repo: c.repo, number: c.number, from_head: c.head, to_head: toHead, state, reason, files: JSON.stringify(files), attempt: c.attempt, created_at: at,
-        source: c.source ?? null, operator_fix: c.operator?.id ?? null,
-      }));
-    }
     const hold = state === "cannot-push" || state === "too-large" || state === "push-denied";
     const note = state === "pushed" ? `fix-up pushed at ${short(c.head)}: ${files.join(", ")}${reason ? `; ${reason}` : ""}`
       : state === "asked" ? `asked the contributor for changes at ${short(c.head)}: ${files.join(", ")}` : `fix-up ${state} at ${short(c.head)}: ${reason}`;
-    await this.db.run(this.db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: hold ? "hold" : "take", at, actor: ACTOR, note: hold ? reason : note }));
+    await finishPatch(this.db, {
+      kind: "fixup", repo: c.repo, number: c.number, head: c.head, state, reason, files, toHead, storedId: c.lint?.rowid, attempt: c.attempt, source: c.source, operatorFix: c.operator?.id ?? null, at,
+      note: { repo: c.repo, number: c.number, stage: hold ? "hold" : "take", at, actor: ACTOR, note: hold ? reason : note }, jobNote: null,
+    });
   }
 }
 
@@ -322,6 +244,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     return summary;
   }
   const d = deps ?? defaultDeps();
+  const titles = new Map([...await loadItems(db, [...sel.lint, ...sel.fix].map(refPair), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
+  const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   const rec = new Recorder(db, at);
   await rec.dropUnlisted(repo, sel.lint);
 
@@ -332,7 +256,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     log(`  ${refOf(c)}: held: ${HOLD_CANNOT_PUSH}`);
   }
   const handled = { n: 0 };
-  const askOne = async (c: FixCandidate, count = true) => {
+  const askOne = async (c: FixCandidate) => {
     const ref = refOf(c);
     try {
       const r = await d.querier.query(PR_QUERY, { owner: ownerOf(repo), name: repo, n: c.number }) as { repository?: { pullRequest?: PrNode | null } };
@@ -340,14 +264,6 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       await noteLive(db, repo, c.number, pr, at());
       if (!pr || pr.state !== "OPEN" || pr.isDraft) { log(`  ${ref}: skipped: no longer an open, non-draft PR`); return; }
       if (pr.headRefOid !== c.head) { log(`  ${ref}: skipped: head moved to ${short(pr.headRefOid)} since the review`); return; }
-      if (c.carry && !c.carry.suggestion) {
-        // Only the text the operator saw and approved is ever posted.
-        const reason = "no approved suggestion text";
-        await rec.fixup(c, "cannot-push", reason, []);
-        summary.held.push({ ref, reason });
-        log(`  ${ref}: held: ${reason}`);
-        return;
-      }
       if (await isQuiet(db, repo, c.number)) {
         // The review's fix list names what the fix protects against: a quiet pull request is never asked.
         const reason = "a quiet pull request is not asked for changes";
@@ -356,10 +272,10 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         log(`  ${ref}: held: ${reason}`);
         return;
       }
-      const body = c.carry ? c.carry.suggestion! : askText(c.fixes);
+      const body = askText(c.fixes);
       const g = await guard(db, { repo, number: c.number }, { kind: "fixup", bucket: "ask", head: c.head, source: sourceOf(c) }, params.by ?? CLI_BY);
       if ("refused" in g) { log(`  ${ref}: not asked: ${g.refused}`); return; }
-      const note: Note = c.carry ? (c.model ? { by: "operator", model: c.model } : { by: "fixed-operator" }) : { by: "model", kind: "comment", model: c.model };
+      const note: Note = { by: "model", kind: "comment", model: c.model };
       const earlier = await earlierAsk(db, repo, c.number, c.head);
       const cm = earlier
         ? (withNote(note, body) === earlier.text ? { code: 0, stdout: "", stderr: "" } : await ghEditComment(gw, g, d.exec, "fixup-comment-edit", { repo, number: c.number, commentId: earlier.id }, note, body, { run: runId, head: c.head }))
@@ -372,7 +288,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         return;
       }
       await rec.fixup(c, "asked", null, [...new Set(c.fixes.map((f) => f.file))]);
-      if (count) params.onHandled?.(++handled.n);
+      params.onHandled?.(++handled.n);
       summary.asked.push(ref);
       await jobItem(db, repo, c.number, `asked the contributor for changes at ${short(c.head)}`, log);
     } catch (e) {
@@ -432,7 +348,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     // Every exit before the lease is held, a throw included, gives the unit back here; after it, the finally below does.
     let release: (() => Promise<void>) | null = null;
     try {
-      if (await pushesUnsettled(db, repo, log)) return;
+      if (await pushesAreUnsettled(db, repo, log)) return;
       release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
     } finally {
       if (!release) giveBack();
@@ -465,23 +381,13 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const writes = pr.headRepository ? await ensureAuthorWrites(db, repo, c.number, pr.headRepository.nameWithOwner) : "no";
       if (writes === "unknown") { log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
       if (!pr.headRepository || !pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) {
-        // A carry-over we can't push is suggested on the PR instead, when the repo allows comments.
-        if (c.carry && await commentApprovalOf(db, repo)) await askOne(c, false);
-        else await hold("cannot-push", HOLD_CANNOT_PUSH);
+        await hold("cannot-push", HOLD_CANNOT_PUSH);
         return;
-      }
-      let carried: FixupPr["carried_from"];
-      if (c.carry) {
-        const w = await carryWork(db, c, d.fetchDiff);
-        if (!w.ok) { await fail("refused", w.reason); return; }
-        c.fixes = w.fixes;
-        carried = w.carried;
-        files = [...new Set(c.fixes.map((f) => f.file))];
       }
       const head = await git.fetchPr(ownerOf(repo), repo, c.number);
       if (head !== c.head) { log(`  ${ref}: skipped: fetched head ${short(head)} is not the reviewed ${short(c.head)}`); return; }
       const scripts = await buildScriptsAt(git, head);
-      if (!c.carry && files.some((f) => !fixupEditable(f, scripts))) { await hold("too-large", "the fixes name files a fix-up may not edit"); return; }
+      if (files.some((f) => !fixupEditable(f, scripts))) { await hold("too-large", "the fixes name files a fix-up may not edit"); return; }
 
       const diff = await cachedDiff(db, repo, c.number, head, d.fetchDiff);
       if (!diff.ok) { await fail("failed", `no diff: ${oneLine(diff.error)}`); return; }
@@ -508,7 +414,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       }
       if (bad) { await fail("refused", bad); return; }
       if (tooBig) { await hold("too-large", tooBig); return; }
-      if (!c.carry) await claim(c);
+      await claim(c);
       // A stored patch: the lint task's outcome decides whether it is pushed (clean), asked for again (findings) or queued again (lost task).
       let findings: string[] = [];
       let folded: string | null = null;
@@ -538,7 +444,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       // The model's patch: the stored one when it is clean, else a new answer (with the findings on the earlier patch).
       const ses: SessionAsk = c.lint && findings.length ? sessionAsk(c.lint.session, "", findings, new Date(at())) : {};
       if (folded !== null) dropSessions(c.lint!.session);
-      const raw = folded !== null ? c.lint!.patch : await d.ask(db, [{ ref, title: await oneTitle(db, c), fixes: c.fixes, ...(quiet ? { quiet } : {}), files: shown, diff: diff.text, ...(c.operator ? { operator: c.operator.instructions } : {}), ...(carried ? { carried_from: carried } : {}),
+      const raw = folded !== null ? c.lint!.patch : await d.ask(db, [{ ref, title: titleOf(c), fixes: c.fixes, ...(quiet ? { quiet } : {}), files: shown, diff: diff.text, ...(c.operator ? { operator: c.operator.instructions } : {}),
         ...(c.lint && findings.length ? { previous: { patch: c.lint.patch, findings } } : {}), ...repoDir }], checkout,
         new CheckTool({ db, step: "fixup", repo, number: c.number, head, base: pr.baseRefOid ?? null, applies: applyCheck(git, d.root, head, (p) => refusal(c.operator ? validatePatch(splitChanges(p).diff, null, (x) => operatorEditable(x, scripts)) : validatePatch(p, files, (x) => fixupEditable(x, scripts)))) }), ses);
       ledger.hold(ses.kept);
@@ -574,7 +480,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       // Opus checks the validated patch; only an approve goes on. A stored patch that came back clean was checked already (the format changes are whitespace only).
       if (folded === null) {
         if (v.patch.length > CHECK_PATCH_CAP) { await fail("refused", `the patch is over the ${CHECK_PATCH_CAP} character limit for the check`); return; }
-        const checkReply = await d.check(db, [{ ref, title: await oneTitle(db, c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: diff.text.slice(0, CHECK_DIFF_CAP), patch: v.patch, ...(carried ? { carried_from: carried.map((x) => ({ ...x, diff: x.diff.slice(0, Math.floor(CHECK_DIFF_CAP / carried.length)) })) } : {}), ...repoDir }], checkout);
+        const checkReply = await d.check(db, [{ ref, title: titleOf(c), review_reason: c.reason, fixes: c.fixes, ...(c.operator ? { operator: c.operator.instructions } : {}), diff: diff.text.slice(0, CHECK_DIFF_CAP), patch: v.patch, ...repoDir }], checkout);
         if (checkReply === null) { await fail("failed", "the patch check gave no answer"); return; }
         const verdict = parseCheck(checkReply);
         if (!verdict.ok) { await fail("failed", `the patch check gave no valid answer: ${verdict.error}`); return; }
@@ -604,7 +510,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         }
       }
       // The planner may have released the PR while the model worked (our own unassign is no one's final word).
-      if (!c.carry) await claim(c);
+      await claim(c);
       await rec.pushing(c, commit, v.files);
       const push = await pushBranch(gw, git, "fixup-push", g, { remote: pr.headRepository.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: runId, from: head, to: commit, files: v.files, changed: v.changed });
       if (push.code !== 0) {
@@ -618,10 +524,10 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       summary.pushed.push(ref);
       await jobItem(db, repo, c.number, `pushed ${short(commit)} on ${short(head)}: ${v.files.join(", ")}`, log);
 
-      const body = c.carry ? carryCommentText(c.carry.sources.map((x) => x.number), v.files) : c.operator ? operatorCommentText(v.files, quiet ? [] : await postableChanges(db, repo, `${repo}#${c.number}`, split.changes, c.operator.instructions)) : commentText(v.files, c.attempt);
-      const note: Note = c.carry ? { by: "operator", model: PROMPT.models[0] } : c.operator ? { by: "fixed-operator" } : { by: "model", kind: "comment", model: PROMPT.models[0] };
+      const body = c.operator ? operatorCommentText(v.files, quiet ? [] : await postableChanges(db, repo, `${repo}#${c.number}`, split.changes, c.operator.instructions)) : commentText(v.files, c.attempt);
+      const note: Note = c.operator ? { by: "fixed-operator" } : { by: "model", kind: "comment", model: PROMPT.models[0] };
       // A plain review-fix push right after our own review-fix comment extends that comment instead of adding a second one.
-      const prev = c.carry || c.operator ? null : await newestOwnComment(d.querier, new Set([who.login, ...await ownLogins(db, repo)]), repo, c.number);
+      const prev = c.operator ? null : await newestOwnComment(d.querier, new Set([who.login, ...await ownLogins(db, repo)]), repo, c.number);
       const prevLines = prev ? fixupCommentLines(prev.body) : null;
       const cm = prev && prevLines
         ? await ghEditComment(gw, g, d.exec, "fixup-comment-edit", { repo, number: c.number, commentId: prev.id }, note, fixupCommentEdited(prevLines, v.files), { run: runId })
@@ -652,34 +558,6 @@ async function postableChanges(db: Db, repo: string, ref: string, changes: strin
 }
 
 const DIFF_FILE = /^diff --git a\/(\S+) b\/\S+$/gm;
-const CARRY_MAX_FIXES = 8;
-
-/**
- * The fixes and the source diffs for a carry-over: each point is tied to the editable files of the source PR's diff it
- * names, or to all of that PR's editable files when it names none. Reads the source diffs (cached by head).
- */
-async function carryWork(db: Db, c: FixCandidate, fetchDiff: DiffFetcher): Promise<{ ok: true; fixes: FixCandidate["fixes"]; carried: NonNullable<FixupPr["carried_from"]> } | { ok: false; reason: string }> {
-  const fixes: FixCandidate["fixes"] = [];
-  const carried: NonNullable<FixupPr["carried_from"]> = [];
-  for (const src of c.carry!.sources) {
-    if (!src.head) return { ok: false, reason: `#${src.number} has no recorded head` };
-    const diff = await cachedDiff(db, c.repo, src.number, src.head, fetchDiff);
-    if (!diff.ok) return { ok: false, reason: `no diff of #${src.number}: ${oneLine(diff.error)}` };
-    if (diff.text.length > DIFF_CAP) return { ok: false, reason: `the diff of #${src.number} is over the ${DIFF_CAP} character limit` };
-    const paths = [...new Set([...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!))].filter((p) => fixupEditable(p));
-    for (const point of src.points) {
-      const named = paths.filter((p) => point.includes(p));
-      for (const file of named.length ? named : paths) fixes.push({ file, change: `from #${src.number}: ${point}` });
-    }
-    carried.push({ ref: `${c.repo}#${src.number}`, points: src.points, diff: diff.text });
-  }
-  if (!fixes.length) return { ok: false, reason: "the closed pull requests change no file a fix-up may edit" };
-  return { ok: true, fixes: fixes.slice(0, CARRY_MAX_FIXES), carried };
-}
-
-async function oneTitle(db: Db, c: FixCandidate): Promise<string> {
-  return ((await db.get(db.k.selectFrom("items").select("title").where("repo", "=", c.repo).where("number", "=", c.number)))?.title ?? "").slice(0, 300);
-}
 
 const OWN_PUSHES = ["fixup-push", "cifix-push", "conflict-push", "fixissue-push", "batch-push"];
 
@@ -690,17 +568,22 @@ const OWN_PUSHES = ["fixup-push", "cifix-push", "conflict-push", "fixissue-push"
  */
 export async function earlierAsk(db: Db, repo: string, number: number, head: string): Promise<{ id: string; text: string } | null> {
   const target = `${repo}#${number}`;
-  const done = async (actions: string[]): Promise<{ action: string; d: { state?: string; url?: string; text?: string; comment?: string; head?: string; from?: string; to?: string } }[]> =>
-    (await db.all(db.k.selectFrom("audit").select(["action", "details"]).where("target", "=", target).where("action", "in", actions).orderBy(rowid("audit"), "desc")))
-      .map((r) => ({ action: r.action, d: JSON.parse(r.details ?? "null") })).filter((r) => r.d.state === "done");
-  const asked = new Set((await db.all(db.k.selectFrom("fixups").select("from_head").where("repo", "=", repo).where("number", "=", number).where("state", "=", "asked"))).map((r) => r.from_head));
+  type Done = { action: string; d: { state?: string; url?: string; text?: string; comment?: string; head?: string; from?: string; to?: string } };
+  const [facts, audits] = await db.together(() => Promise.all([
+    loadPatchFacts(db, [{ repo, number }]),
+    loadAuditActions(db, [target], ["fixup-comment", "fixup-comment-edit", ...OWN_PUSHES]),
+  ]));
+  // Newest first, as the chain walk below expects.
+  const done = (actions: string[]): Done[] =>
+    (audits.get(target) ?? []).filter((r) => actions.includes(r.action)).reverse().map((r) => ({ action: r.action, d: (r.details ?? {}) as Done["d"] })).filter((r) => r.d.state === "done");
+  const asked = new Set((facts.get(target)?.fixups ?? []).filter((r) => r.state === "asked").map((r) => r.fromHead));
   if (!asked.size) return null;
-  const comments = await done(["fixup-comment", "fixup-comment-edit"]);
+  const comments = done(["fixup-comment", "fixup-comment-edit"]);
   const post = comments.find((r) => r.action === "fixup-comment" && r.d.head && asked.has(r.d.head) && /#issuecomment-\d+$/.test(r.d.url ?? ""));
   if (!post) return null;
   const id = /#issuecomment-(\d+)$/.exec(post.d.url!)![1]!;
   const edit = comments.find((r) => r.action === "fixup-comment-edit" && r.d.comment === id);
-  const pushes = await done(OWN_PUSHES);
+  const pushes = done(OWN_PUSHES);
   let cur = head;
   for (let i = 0; cur !== post.d.head && i <= pushes.length; i++) {
     const p = pushes.find((r) => r.d.to === cur && r.d.from);
@@ -718,18 +601,20 @@ export type RepostResult = { status: "unchanged" | "dry-run" | "edited" | "faile
  * head the ask was made on. Does nothing when the text equals the one last recorded for that comment.
  */
 export async function repostAsk(db: Db, repo: string, number: number, apply: boolean, run: Exec = exec): Promise<RepostResult> {
-  const state = await db.get(db.k.selectFrom("fixups").select(["state", "from_head"]).where("repo", "=", repo).where("number", "=", number).where("source", "is", null)
-    .orderBy("created_at", "desc").orderBy(rowid("fixups"), "desc").limit(1));
+  const target = `${repo}#${number}`;
+  const [facts, audits] = await db.together(() => Promise.all([loadPatchFacts(db, [{ repo, number }]), loadAuditActions(db, [target], ["fixup-comment", "fixup-comment-edit"])]));
+  // The newest review-source row: the rows come oldest first by id; `created_at` then id decides the newest.
+  const state = (facts.get(target)?.fixups ?? []).filter((r) => r.source === null)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : b.id - a.id))[0];
   if (state?.state !== "asked") throw new Error(`${repo}#${number} is not in the asked state`);
-  const rows = await db.all(db.k.selectFrom("audit").select(["action", "details"]).where("target", "=", `${repo}#${number}`).where("action", "in", ["fixup-comment", "fixup-comment-edit"]).orderBy(rowid("audit"), "desc"));
-  const ds = rows.map((r) => ({ action: r.action, d: JSON.parse(r.details ?? "null") as { state?: string; url?: string; text?: string; comment?: string } })).filter((r) => r.d.state === "done");
+  const ds = [...(audits.get(target) ?? [])].reverse().map((r) => ({ action: r.action, d: (r.details ?? {}) as { state?: string; url?: string; text?: string; comment?: string } })).filter((r) => r.d.state === "done");
   const last = ds[0];
   const url = ds.find((r) => r.action === "fixup-comment" && r.d.url)?.d.url;
   const id = /#issuecomment-(\d+)$/.exec(url ?? "")?.[1];
   if (!last || !id) throw new Error(`no recorded ask comment for ${repo}#${number}`);
-  const review = await db.get(db.k.selectFrom("final_reviews").select(["fixes", "model"]).where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", state.from_head).where("verdict", "=", "take-fix"));
-  const fixes = parseFixes(review?.fixes ?? null);
-  if (!fixes.length) throw new Error(`no fix list for ${repo}#${number} at ${state.from_head.slice(0, 7)}`);
+  const review = (await loadReviewsAt(db, [{ repo, number, head: state.fromHead }])).get(`${repo}#${number}@${state.fromHead}`);
+  const fixes = parseFixes(review?.verdict === "take-fix" ? JSON.stringify(review.fixes) : null);
+  if (!fixes.length) throw new Error(`no fix list for ${repo}#${number} at ${state.fromHead.slice(0, 7)}`);
   const old = last.d.text ?? "";
   const note: Note = { by: "model", kind: "comment", model: review?.model };
   const text = askText(fixes);
@@ -738,7 +623,7 @@ export async function repostAsk(db: Db, repo: string, number: number, apply: boo
   if (!apply) return { status: "dry-run", old, text };
   const g = await guardRepo(db, repo, "comment", CLI_BY);
   if ("refused" in g) throw new Error(g.refused);
-  const r = await ghEditComment({ db, login: ACTOR }, g, run, "fixup-comment-edit", { repo, number, commentId: id }, note, text, { head: state.from_head });
+  const r = await ghEditComment({ db, login: ACTOR }, g, run, "fixup-comment-edit", { repo, number, commentId: id }, note, text, { head: state.fromHead });
   return { status: r.code === 0 ? "edited" : "failed", old, text };
 }
 
@@ -783,9 +668,10 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
       const db = await openDb();
-      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
+      const repos = i >= 0 ? [args[i + 1]!] : [...(await loadTrackedRepos(db)).keys()].sort();
+      const approvals = await loadStepApprovals(db, repos, ["push"]);
       for (const r of repos) {
-        const a = await pushApprovalOf(db, r);
+        const a = approvals.get(r)?.push;
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);
       }
     },
