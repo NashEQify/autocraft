@@ -27,6 +27,7 @@ import { holdMs, Ticket, type ClaimTry, type ClaimWaits, type EmptyReply } from 
 import { scaled, scaledS } from "./time-scale.ts";
 import { CALLER_STALE_MS, IDLE_FRESH_MS, SEEN_EVERY_MS } from "./room.ts";
 import { serveChecks, endChecks } from "./check-relay.ts";
+import { loadQueuedWorkspaces } from "../data/build/index.ts";
 import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
 import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
@@ -321,17 +322,15 @@ const memoWrite = (canWrite: (repo: string) => Promise<boolean>): ((repo: string
   };
 };
 
-/** A claim's first wave: the claim facts (wave A of the runners module) with the accepted models, in one round trip. */
-async function claimFacts(db: Db, caller: Caller, nowMs: number, requestId?: string): Promise<{ facts: ClaimFacts; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>> }> {
-  const [facts, models] = await db.together(() => Promise.all([runners.loadClaimFacts(db, caller, { now: nowMs, ...(requestId !== undefined && { requestId }) }), setting(db, REMOTE_MODELS_KEY)]));
-  return { facts, ...modelsOf(models) };
+/** What a claim decides on (runners.loadClaim) with the accepted models, in one wave. */
+async function claimReads(db: Db, caller: Caller, nowMs: number, requestId?: string): Promise<{ facts: ClaimFacts; queue: QueueSnapshot; snapshot: RunnerSnapshot; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>> }> {
+  const [claim, models] = await db.together(() => Promise.all([runners.loadClaim(db, caller, { now: nowMs, ...(requestId !== undefined && { requestId }) }), setting(db, REMOTE_MODELS_KEY)]));
+  return { ...claim, ...modelsOf(models) };
 }
 
-/** A claim's second wave: the queue and the runner snapshot, each cached 2 s per process (no round trip on a hit). */
-async function claimWave(db: Db, caller: Caller, facts: ClaimFacts, nowMs: number, accepted: Record<Tier, string[]>): Promise<{ q: ReturnType<typeof orderedOf>; view: RemoteView; queue: QueueSnapshot }> {
-  const { queue, snapshot } = await runners.loadClaimWave(db, caller, facts, nowMs);
-  return { queue, q: orderedOf(queue, nowMs), view: { now: nowMs, snapshot, accepted } };
-}
+/** The queue in order and the view of the runners, of one claim's reads. */
+const claimView = (x: Awaited<ReturnType<typeof claimReads>>, nowMs: number): { q: ReturnType<typeof orderedOf>; view: RemoteView } =>
+  ({ q: orderedOf(x.queue, nowMs), view: { now: nowMs, snapshot: x.snapshot, accepted: x.accepted } });
 
 /** The tiers a claim's models serve: of an accepted family and at the minimum effort. */
 const claimTiers = (claim: Pick<Claim, "tiers" | "efforts" | "harness">, accepted: Record<Tier, string[]>, floors: Partial<Record<Tier, Effort>>): Set<Tier> =>
@@ -340,13 +339,13 @@ const claimTiers = (claim: Pick<Claim, "tiers" | "efforts" | "harness">, accepte
 /** How many queued calls the caller could claim now (same filters and eligibility as claimCall, nothing is leased), for a session's next_task. Follow-ups of a helper's own sessions are not counted. */
 export async function claimableCalls(db: Db, caller: Caller, opts: { tiers?: readonly Tier[]; models?: Partial<Record<Tier, string>> }, canWrite: (repo: string) => Promise<boolean>, nowMs: number = Date.now()): Promise<number> {
   await expireLeases(db, nowMs);
-  const x = await claimFacts(db, caller, nowMs);
+  const x = await claimReads(db, caller, nowMs);
   const set = x.facts.settings;
   if (x.facts.cooled !== null) return 0;
   if (set.maxCalls !== null && x.facts.leased >= set.maxCalls) return 0;
   // A tier counts when the model the helper would use for it is of an accepted family; without a model, when the tier accepts any.
   const tiers = new Set((opts.tiers ?? TIERS).filter((t) => x.accepted[t].length > 0 && (opts.models?.[t] === undefined || familyOf(opts.models[t]!, x.accepted[t]) !== null)));
-  const w = await claimWave(db, caller, x.facts, nowMs, x.accepted);
+  const w = claimView(x, nowMs);
   const can = memoWrite(canWrite), others = idleOthers(w.view, caller.login);
   let n = 0;
   for (const r of claimOrder(w.q, orderReadsOf(w.view, caller.login), caller, tiers, claimReposOf(set.repos, undefined), [], nowMs)) if (await mayTake(caller, r, can, others)) n++;
@@ -423,18 +422,17 @@ async function claimNew(db: Db, caller: Caller, claim: Claim, canWrite: (repo: s
 
 /**
  * The once-per-claim part of a claim: the helper's version, and a lease of a repeated claim the dashboard no longer remembers.
- * Returns a reply when the claim is answered here, else its tries. A full try reads wave A (the claim facts: role, cool-off,
- * settings, lease counts, queue signature) and wave B (the queue and the runner snapshot, cached 2 s), orders the queue in
- * memory, and leases the first eligible call in one short transaction (runners.leaseCall); it gives null when there is
+ * Returns a reply when the claim is answered here, else its tries. A full try reads one wave (claimReads: role, cool-off,
+ * settings, lease counts, and the queue and the runner snapshot where they are not cached), orders the queue in memory, and leases the first eligible call in one short transaction (runners.leaseCall); it gives null when there is
  * nothing to take and no reason to give.
  */
 async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (repo: string) => Promise<boolean>, nowMs: number):
   Promise<{ reply: ClaimReply } | { attempt: ClaimTry; idle: (nowMs: number) => Promise<void>; empty: (nowMs: number, held: boolean) => Promise<EmptyReply>; slots: () => number }> {
   if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
-  // The first try's wave A carries the repeat's orphan lease and the expiry's lost and gone calls. A repeat the dashboard no
+  // The first try's wave carries the repeat's orphan lease and the expiry's lost and gone calls. A repeat the dashboard no
   // longer remembers (it restarted in between): the lease the first claim took cannot be given out again, as only its secret's
   // hash is stored, so it goes back to the queue unused and this claim is answered afresh.
-  let pending: Awaited<ReturnType<typeof claimFacts>> | null = await claimFacts(db, caller, nowMs, claim.requestId);
+  let pending: Awaited<ReturnType<typeof claimReads>> | null = await claimReads(db, caller, nowMs, claim.requestId);
   const { orphan } = pending.facts;
   if (orphan) {
     await runners.returnOrphanLease(db, orphan, nowMs);
@@ -463,7 +461,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       if (!claimOrder(orderedOf(queue, now), orderReadsOf(v, login), caller, tiers, repos, claim.sessions ?? [], now, { fastLane: fast, bound, lane: mode }).length) return null;
     }
     tooLong = 0;
-    const x = (now === nowMs && pending) || await claimFacts(db, caller, now);
+    const x = (now === nowMs && pending) || await claimReads(db, caller, now);
     pending = null;
     const f = x.facts, set = f.settings;
     const slots = lane ? slotsOf(set.interactiveSlots, caller.role) : 0;
@@ -471,7 +469,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     // A held claim outlives the route's credential check: a credential removed, expired or demoted meanwhile ends the hold untaken.
     if (f.role !== caller.role) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "this Task Runner credential was removed or its user's role changed", reserve: set.reserve };
     accepted = x.accepted;
-    const w = await claimWave(db, caller, f, now, x.accepted);
+    const w = claimView(x, now);
     const reads = orderReadsOf(w.view, login);
     const cooled = f.cooled;
     // A cool-off holds back every call but those for work the user started or approved (started.ts), which a slot or the fast
@@ -723,31 +721,39 @@ export type Outcome =
   /** A follow-up turn that the session's helper did not take in time (STICKY_MS, STICKY_CAP_MS); it was withdrawn. */
   | { state: "unclaimed" };
 
+/** What an await serves while its call is leased: the check relay, the tool calls of its workspace. */
+type Held = { checks: boolean; workspaceId: number | null };
+/** A call's poll, with whether a check or a tool call of it waits to be run. */
+type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
+
 /**
  * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
- * with the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. A lost lease or a gone call among them is ended
- * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields.
+ * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
+ * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
+ * queued call's poll carries the waits' fields.
  */
 class CallPoller {
   readonly #db: Db;
-  #waiting = new Map<number, { resolve: (p: runners.CallPoll) => void; reject: (e: unknown) => void }[]>();
-  /** Calls awaited now, with how many awaits hold each. */
-  #held = new Map<number, number>();
+  #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
+  /** Calls awaited now, with how many awaits hold each and what else they wait for. */
+  #held = new Map<number, Held & { n: number }>();
   #timer: NodeJS.Timeout | null = null;
   #running = false;
   #last = 0;
   #seenAt = 0;
   constructor(db: Db) { this.#db = db; }
 
-  hold(id: number): void { this.#held.set(id, (this.#held.get(id) ?? 0) + 1); }
+  hold(id: number, o: Held): void {
+    const h = this.#held.get(id);
+    this.#held.set(id, { n: (h?.n ?? 0) + 1, checks: o.checks || !!h?.checks, workspaceId: o.workspaceId ?? h?.workspaceId ?? null });
+  }
   release(id: number): void {
-    const n = (this.#held.get(id) ?? 1) - 1;
-    if (n > 0) this.#held.set(id, n);
-    else this.#held.delete(id);
+    const h = this.#held.get(id);
+    if (h && --h.n <= 0) this.#held.delete(id);
   }
 
   /** The next poll of call `id`: the first at once, later ones a poll interval after the one before. */
-  next(id: number): Promise<runners.CallPoll> {
+  next(id: number): Promise<Polled> {
     return new Promise((resolve, reject) => {
       const list = this.#waiting.get(id);
       if (list) list.push({ resolve, reject });
@@ -775,13 +781,18 @@ class CallPoller {
         await runners.markCallersSeen(db, [...this.#held.keys()], now);
         this.#seenAt = now;
       }
-      const polls = await runners.loadCallPolls(db, ids, now);
+      const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
+      const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
+      const [polls, checks, tools] = await db.together(() => Promise.all([
+        runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
+      ]));
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);
       if (ended.length) {
         await runners.expireLeases(db, { now, ids: ended });
         for (const [id, p] of await runners.loadCallPolls(db, ended, now)) polls.set(id, p);
       }
-      for (const [id, list] of batch) for (const w of list) w.resolve(polls.get(id)!);
+      const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
+      for (const [id, list] of batch) for (const w of list) w.resolve({ ...polls.get(id)!, checks: checks.has(id), tools: asked.has(id) });
     } catch (e) {
       for (const list of batch.values()) for (const w of list) w.reject(e);
     } finally {
@@ -810,7 +821,7 @@ const pollerOf = (db: Db): CallPoller => {
 export async function awaitCall(db: Db, id: number, opts: AwaitOptions = {}): Promise<Outcome> {
   const ws = await WorkspaceServer.open(db, id, opts.workspace);
   const poller = pollerOf(db);
-  poller.hold(id);
+  poller.hold(id, { checks: !!opts.check, workspaceId: ws?.workspaceId ?? null });
   try {
     return await pollCall(db, id, opts, ws, poller);
   } finally {
@@ -879,8 +890,8 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
         }
       }
     }
-    if (r.state === "leased" && opts.check) await serveChecks(db, id, opts.check);
-    if (r.state === "leased" && ws) await ws.serve();
+    if (r.state === "leased" && opts.check && poll.checks) await serveChecks(db, id, opts.check);
+    if (r.state === "leased" && ws && poll.tools) await ws.serve();
   }
 }
 

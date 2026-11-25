@@ -105,7 +105,7 @@ export async function pulseJob(db: Db, id: number, patch: JobPatch): Promise<Job
 export async function recordResult(db: Db, id: number, r: JobResult): Promise<void> {
   const q = queryDb(db);
   const s = r.stats;
-  const set: Record<string, unknown> = {};
+  const set: Record<string, unknown> = { ...r.patch };
   if (r.usage !== undefined) set.usage = r.usage;
   if (r.summary !== undefined) set.summary = r.summary;
   if (r.error !== undefined) set.error = r.error;
@@ -161,6 +161,14 @@ export async function openJobPulse(db: Db, row: PulseRow, o: { minMs: number }):
     async flush() {
       await flushJobItems(db, row.id);
       if (Object.keys(pending).length) await pulse();
+    },
+    async end() {
+      await flushJobItems(db, row.id);
+      // A pulse under way that fails puts its patch back.
+      await chain;
+      const patch = pending;
+      pending = {};
+      return patch;
     },
   };
 }

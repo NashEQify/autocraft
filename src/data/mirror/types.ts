@@ -76,7 +76,7 @@ export type RepoCiSignals = { known: boolean; noCi: boolean };
 
 export type RepoRow = Selectable<DB["repos"]>;
 export type RepoMeta = { name: string; owner: string; visibility?: string | null; default_branch?: string | null; open_prs?: number | null; open_issues?: number | null };
-export type SyncPlan = { repos: Map<string, RepoRow>; synced: Set<string>; broken: Set<string>; state: SyncState };
+export type SyncPlan = { repos: Map<string, RepoRow>; synced: Set<string>; broken: Set<string>; /** Every repo with a failure on record. */ failing: Set<string>; state: SyncState };
 
 /** The one `sync_state` row. */
 export type SyncState = Selectable<DB["sync_state"]>;

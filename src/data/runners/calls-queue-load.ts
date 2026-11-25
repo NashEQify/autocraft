@@ -1,4 +1,4 @@
-// The queue read behind `loadQueue` and the claim's wave B (not exported by index.ts).
+// The queue read behind `loadQueue` and the claim (not exported by index.ts).
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { indexedBy, inList, literal } from "../../db/kx.ts";
@@ -16,11 +16,13 @@ export async function loadQueueSignature(db: Db): Promise<string> {
   return queueSignature(Number(r.n), r.m === null ? null : Number(r.m));
 }
 
-/** The queue for a signature already read (`signature`; read here when not given): the cached one on a hit, else one wave of 3 statements. */
+/**
+ * The queue for a signature already read (`signature`; read here, when a cached queue waits for it, if not given): the cached one
+ * on a hit, else one wave of 3 statements.
+ */
 export async function loadQueueFor(db: Db, now: number, signature?: string): Promise<QueueSnapshot> {
-  const sig = signature ?? await loadQueueSignature(db);
-  const hit = cachedQueue(db, sig, now);
-  if (hit) return hit;
+  const hit = cachedQueue(db, now);
+  if (hit && hit.signature === (signature ?? await loadQueueSignature(db))) return hit;
   const q = queryDb(db);
   const known = parsedOf(db);
   const [queued, texts, running] = await db.together(async () => await Promise.all([

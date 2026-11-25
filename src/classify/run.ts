@@ -35,7 +35,7 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts";
-import { loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
+import { keepEarlierUsage, loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
 import { saveJevChunk, saveVerdicts as saveVerdictRows, type JevFailed, type VerdictInput } from "../data/triage/index.ts";
 import { effect } from "../db/effects.ts";
 
@@ -589,9 +589,6 @@ export type JevExtraAnswers = { impact: Map<string, JevImpact>; area: Map<string
 /** `statuses`: the API statuses of the chunk's calls that were not OK, with their counts. */
 export type JevRun = { saved: Set<string>; statuses: Map<string, number> } & JevExtraAnswers;
 
-/** Usage agent names of an item's classify request: classify's row, and the rows of the extra steps it asks for. */
-export const jevAgents = (ref: string, extra?: ClassifyExtras): string[] => [`jev-${ref}`, ...(extra?.impact ? [`priority-jev-${ref}`] : []), ...(extra?.areas ? [`areas-jev-${ref}`] : [])];
-
 /**
  * The usage row of a classify request split into one row per step it asked for, each step's share in proportion to the length of
  * the request it would have sent alone; the classify row keeps the rounding remainder and the cache counts, so the rows add up to the call. A share's
@@ -621,9 +618,10 @@ function splitUsage(row: UsageRow, item: Item, extra: ClassifyExtras, a: Classif
 /**
  * Jev classifies `items`, one request per item. `extras`: the questions of priority.jev and areas.jev due for an item, asked in
  * the same request; their valid answers are returned for the caller to settle and store, and the request's usage is split over
- * the steps (splitUsage).
+ * the steps (splitUsage). `keepEarlier`: usage rows of an earlier pass under the same names are renamed, so their cost stays on
+ * record. The chunk's usage and verdicts are stored in one transaction.
  */
-export async function runJev(db: Db, runId: string, items: Item[], width?: number, hashes?: ReadonlyMap<string, string>, extras?: ReadonlyMap<string, ClassifyExtras>): Promise<JevRun> {
+export async function runJev(db: Db, runId: string, items: Item[], width?: number, hashes?: ReadonlyMap<string, string>, extras?: ReadonlyMap<string, ClassifyExtras>, o: { keepEarlier?: boolean } = {}): Promise<JevRun> {
   if (width === undefined) width = (await loadLiveConfig(db)).jevParallel;
   // Read once per chunk; a failed call reads it again, since a call that fails is how an outage shows.
   let up = await jevAvailable(db);
@@ -649,6 +647,7 @@ export async function runJev(db: Db, runId: string, items: Item[], width?: numbe
   } finally {
     // The Plan stops holding the prioritize step for the failed items until their input changes (src/core/decide-item.ts).
     out.saved = await db.write(async () => {
+      if (o.keepEarlier) await keepEarlierUsage(db, runId, sinkUsage.map((r) => r.agent));
       await recordUsage(db, sinkUsage);
       return await saveJevChunk(db, { verdicts: verdictRows("jev", runId, verdicts), failed });
     });

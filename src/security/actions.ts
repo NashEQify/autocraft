@@ -155,14 +155,22 @@ export async function autoFixConfirmed(db: Db, repo?: string, n?: number): Promi
 /** The longest a round's build tasks may run before the round counts as ended and its tasks are cancelled; the clock waits for a confidential environment (privateClockStart). */
 export const ROUND_BUILD_LIMIT_MS = 4 * 3_600_000;
 
+export type SecurityFixWork = { due: Awaited<ReturnType<typeof sec.loadFixesToAdvance>>; ready: number | null };
+
+/** What advanceSecurityFixes reads, in one wave. */
+export async function loadSecurityFixWork(db: Db): Promise<SecurityFixWork> {
+  const [due, ready] = await db.together(() => Promise.all([sec.loadFixesToAdvance(db), loadConfidentialReadyAt(db)]));
+  return { due, ready };
+}
+
 /**
  * Queues a fix job for each fixing finding whose build round has ended (its tasks are done, or it has been building past
  * ROUND_BUILD_LIMIT_MS, when the tasks are cancelled), or that waited for a confidential build environment that is now ready, and that has no fix job queued or running: the job reads the result and
  * writes the next round or the commit. The job is requested by whoever started the fix; fixes the pipeline started continue
  * only while `pipelineOn` (read by the caller at the same time as the rows here). Returns how many jobs it queued.
  */
-export async function advanceSecurityFixes(db: Db, pipelineOnRead: boolean | Promise<boolean> = true): Promise<number> {
-  const [due, ready, pipelineOn] = await db.together(() => Promise.all([sec.loadFixesToAdvance(db), loadConfidentialReadyAt(db), pipelineOnRead]));
+export async function advanceSecurityFixes(db: Db, pipelineOn = true, work?: SecurityFixWork): Promise<number> {
+  const { due, ready } = work ?? await loadSecurityFixWork(db);
   // A fix that waits for a confidential build environment continues once one is ready.
   const rows = due.filter((r) => r.tasks !== null || ready !== null);
   const ids = rows.flatMap((r) => (r.tasks ? [r.tasks.head, r.tasks.base] : []));

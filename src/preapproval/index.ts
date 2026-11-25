@@ -577,8 +577,7 @@ export type Wake = (at: number) => void;
  * (roles, and the audit table: the GitHub writes that follow a base merge's own-diff mark, which no other topic watches). A pass whose
  * markers are the ones it read before and whose wake time (`Wake`) has not come would move nothing.
  */
-export async function preapprovalInputs(db: Db): Promise<string> {
-  const seqs = await db.seqs();
+export function preapprovalInputs(seqs: Record<string, number>): string {
   return [...INPUT_TOPICS, "access"].map((t) => seqs[t] ?? 0).join(",");
 }
 

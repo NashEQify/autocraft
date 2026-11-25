@@ -7,6 +7,7 @@ import type { HiddenRepos, RunEnd as ModuleRunEnd, RunRow, RunStart as ModuleRun
 import { loadItemsByBucket } from "../data/jobs/index.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import { scrub } from "../runner/scrub.ts";
+import { WriteBatch } from "./batch.ts";
 import type { Db } from "../db/index.ts";
 
 export { MAX_ITEM_REFS, RUN_KEEP_MS, TEXT_KEEP_MS, packText, unpackText } from "../data/inference/index.ts";
@@ -25,13 +26,20 @@ const runEnded = (): void => { for (const f of [...endWakers]) f(); };
 /** A prompt in its stored form (scrubbed, cut and compressed), for a caller that builds it before a write transaction. */
 export const packPrompt = (prompt: string): Uint8Array => inference.packPrompt(prompt, scrub);
 
-/** Inserts the running row, its item refs and its prompt text. Does not open a transaction. */
+const starts = new WriteBatch<RunStart, number>((db, rows) => inference.openRuns(db, rows, scrub));
+const ends = new WriteBatch<ModuleRunEnd, void>(async (db, rows) => {
+  // Of two ends of one run the first counts, as it would written alone.
+  await inference.finishRuns(db, [...rows].reverse(), scrub);
+  return rows.map(() => undefined);
+});
+
+/** Inserts the running row, its item refs and its prompt text; runs begun side by side share one write. */
 export async function insertRun(db: Db, s: RunStart): Promise<number> {
-  return await inference.openRun(db, s, scrub);
+  return await starts.add(db, s);
 }
 
 export async function finishRun(db: Db, id: number, e: RunEnd): Promise<void> {
-  await inference.finishRun(db, { ...e, id }, scrub);
+  await ends.add(db, { ...e, id });
   setImmediate(runEnded); // after the caller's own follow-up claim, which gets the freed slot first
 }
 

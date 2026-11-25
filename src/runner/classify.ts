@@ -11,7 +11,7 @@
 import { refOf, type Item } from "../classify/parse.ts";
 import { takersFirst } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
-import { haikuBatches, jevAgents, runHaiku, runJev, type JevExtraAnswers } from "../classify/run.ts";
+import { haikuBatches, runHaiku, runJev, type JevExtraAnswers } from "../classify/run.ts";
 import { prioritizeAnswered } from "../priority/index.ts";
 import { priorityDue } from "../core/decide-item.ts";
 import type { ClassifyExtras } from "../prompts/index.ts";
@@ -39,7 +39,7 @@ const JEV_CHUNK = 40, HAIKU_PER_CALL = 25;
  * runJev and runHaiku write one token_usage row per agent name (`jev-<ref>`, and
  * `priority-jev-<ref>` and `areas-jev-<ref>` for the questions a classify request
  * carries for those steps; `haiku-NN`) with INSERT OR REPLACE. Rows from earlier passes with those
- * names are renamed first so their cost stays on record.
+ * names are renamed first so their cost stays on record: for Haiku here, for Jev in runJev's own transaction.
  */
 const keepUsage = async (db: Db, run: string, agents: string[]): Promise<void> => void await keepEarlierUsage(db, run, agents);
 
@@ -73,9 +73,8 @@ export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashe
   const out: JevPassResult = { done: new Set(), impact: new Map(), area: new Map() };
   for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db) && await more(); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
-    await keepUsage(db, run, chunk.flatMap((x) => jevAgents(refOf(x), extras?.get(refOf(x)))));
     t.sent(chunk.length);
-    const r = await runJev(db, run, chunk, undefined, hashes, extras);
+    const r = await runJev(db, run, chunk, undefined, hashes, extras, { keepEarlier: true });
     for (const ref of r.saved) out.done.add(ref);
     for (const [ref, a] of r.impact) out.impact.set(ref, a);
     for (const [ref, a] of r.area) out.area.set(ref, a);

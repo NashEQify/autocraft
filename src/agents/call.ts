@@ -1,10 +1,9 @@
 // The context of the model calls a job makes (its job, step and queue class), the claim order of queued calls, and the room
 // and taker questions a step asks before it queues Task Runner calls. Jev runs are recorded here too.
-import type { RunStart } from "./runs.ts";
-import { scrub } from "../runner/scrub.ts";
+import { insertRun, type RunStart } from "./runs.ts";
 import { remoteRoom, roomOf, roomState, type RoomState } from "../remote/room.ts";
 import { batchKey, roomKey, takerTestIn, type TakerCall } from "../remote/takers.ts";
-import { loadRunningCounts, openRun } from "../data/inference/index.ts";
+import { loadRunningCounts } from "../data/inference/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** Set by the job process: which job and step the calls belong to, and whether a cancel was asked. */
@@ -167,9 +166,9 @@ export type RoomPass = {
  * helpers, their permissions and repos are read once. `promptId`: the prompt of the calls asked about, whose step stands in
  * outside a job.
  */
-export async function queueRoomPass(db: Db, promptId?: string): Promise<RoomPass> {
+export async function queueRoomPass(db: Db, promptId?: string, read?: RoomState): Promise<RoomPass> {
   const nowMs = Date.now();
-  let st: RoomState | undefined;
+  let st = read;
   const state = async (): Promise<RoomState> => (st ??= await roomState(db, nowMs));
   // The taker rule of src/remote/takers.ts and the room, over one reading per pass.
   let takes: ((c: TakerCall) => boolean) | undefined;
@@ -247,5 +246,5 @@ export class WaitLimitError extends Error {}
 
 /** Records a Jev call (no account, no slot). */
 export async function startJevRun(db: Db, s: Omit<RunStart, "jobId" | "step" | "stage">): Promise<number> {
-  return await openRun(db, { ...s, ...stepOf(s.promptId) }, scrub);
+  return await insertRun(db, { ...s, ...stepOf(s.promptId) });
 }

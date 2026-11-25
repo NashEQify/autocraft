@@ -249,18 +249,22 @@ export async function loseTasks(db: Db, rows: { id: number; reason: string; canc
   });
 }
 
-/**
- * Loses the claimed or running tasks that have no pod run (the pod launcher owns those) and no heartbeat for LOST_AFTER_MS.
- * 1 statement when none are stale (no write lock); else 8.
- */
-export async function reapStaleTasks(db: Db, nowMs: number): Promise<{ lost: number; files: number[] }> {
+/** The claimed or running tasks that have no pod run (the pod launcher owns those) and no heartbeat for LOST_AFTER_MS. */
+export async function loadStaleTasks(db: Db, nowMs: number): Promise<number[]> {
   const q = queryDb(db);
   const cutoff = new Date(nowMs - LOST_AFTER_MS).toISOString();
-  const stale = () => q.all(q.k.selectFrom("build_tasks").select("id").where("state", "in", OPEN).where("heartbeat_at", "<", cutoff)
-    .where((eb) => eb("id", "not in", eb.selectFrom("build_pod_runs").select("task_id"))).orderBy("id"));
-  if ((await stale()).length === 0) return { lost: 0, files: [] };
+  return (await q.all(q.k.selectFrom("build_tasks").select("id").where("state", "in", OPEN).where("heartbeat_at", "<", cutoff)
+    .where((eb) => eb("id", "not in", eb.selectFrom("build_pod_runs").select("task_id"))).orderBy("id"))).map((t) => t.id);
+}
+
+/**
+ * Loses the stale tasks (loadStaleTasks), read again under the lock. `seen`: what the caller read already; with none stale nothing
+ * is sent, else 8 statements.
+ */
+export async function reapStaleTasks(db: Db, nowMs: number, seen?: number[]): Promise<{ lost: number; files: number[] }> {
+  if ((seen ?? await loadStaleTasks(db, nowMs)).length === 0) return { lost: 0, files: [] };
   return await db.write(async () => {
-    const ids = (await stale()).map((t) => t.id);
+    const ids = await loadStaleTasks(db, nowMs);
     return await loseTasks(db, ids.map((id) => ({ id, reason: "The worker stopped answering twice (no heartbeat for 2 minutes)." })), nowMs);
   });
 }

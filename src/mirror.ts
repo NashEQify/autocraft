@@ -19,12 +19,12 @@ import { exclusive } from "./async-seq.ts";
 import { isFenced } from "./db/fence.ts";
 import type { Db } from "./db/index.ts";
 import { dbLockName, openDb, setDbRole } from "./db/open.ts";
-import { loadTrackedRepos } from "./data/control/index.ts";
+import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
   advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan, loadSyncState,
   markReposReconciled, markReposRead, markReposSyncedByError, saveItems, saveRepoList, saveSyncState, startSyncRun,
-  type CommentInsert, type ItemEntry, type ItemRowInput, type SyncState,
+  type CommentInsert, type ItemEntry, type ItemRowInput, type SyncPlan, type SyncState,
 } from "./data/mirror/index.ts";
 
 
@@ -332,7 +332,7 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): CommentI
 }
 
 /** One item read: its repo, kind and detail level, and the node GitHub returned. */
-type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node };
+type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node; /** When this node's own read started, if not the call's. */ readAt?: string };
 
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**
@@ -354,7 +354,7 @@ async function writeNodes(db: Db, nodes: readonly NodeWrite[], opts: { force?: b
   const own = await mentionNames(db, live);
   // Rows are built before the write lock. An item read twice keeps its last read (the writer also keeps one entry per item).
   const entries: ItemEntry[] = nodes.map((w) => ({
-    repo: w.repo, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [],
+    repo: w.repo, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [], ...(w.readAt !== undefined && { readAt: w.readAt }),
   }));
   if (!entries.length && !opts.inside) return;
   await db.write(async () => {
@@ -402,17 +402,20 @@ async function readRepoSince(db: Db, client: Querier, name: string, cutoff: stri
   return { count, newest };
 }
 
-// high_water is written only when the whole repo finished, so a crash leaves the repo incomplete.
-async function syncRepo(db: Db, client: Querier, name: string, full: boolean): Promise<number> {
+// high_water (`high` as the run began) is written only when the whole repo finished, so a crash leaves the repo incomplete.
+// `inside` runs in that write.
+async function syncRepo(db: Db, client: Querier, name: string, full: boolean, high: string | null, inside: () => Promise<void>): Promise<number> {
   // synced_at is the start of the sync: every item the sync read is at least as new as it (the pre-approved merge compares it with a push).
   const startedAt = iso(new Date());
-  const high = (await loadRepos(db, { names: [name] })).get(name)?.high_water ?? null;
   const cutoff = high && !full ? iso(new Date(new Date(high).getTime() - OVERLAP_MS)) : null;
   const read = await readRepoSince(db, client, name, cutoff);
   const count = read.count;
   const newest = read.newest > (high ?? "") ? read.newest : (high ?? "");
   // The writer moves the high water only forward: an incremental sync may have moved it further while a full pass ran.
-  await markReposRead(db, [{ name, syncedAt: startedAt, highWater: newest || null }]);
+  await db.write(async () => {
+    await markReposRead(db, [{ name, syncedAt: startedAt, highWater: newest || null }]);
+    await inside();
+  });
   return count;
 }
 
@@ -507,13 +510,14 @@ const settledTimes = (nodes: readonly { updatedAt: string }[], before: string): 
 // (`updated:A..B` is inclusive, in whole seconds) until every slice fits. A one-second slice with
 // more matches than the cap cannot be read by search; the tracked repos are listed for that
 // second instead.
-export type SearchResult = { count: number; newest: string | null; slices: number; fallbacks: number };
+/** `mark`: how far pages without items settled the window past the last mark recorded; the caller records it. */
+export type SearchResult = { count: number; newest: string | null; slices: number; fallbacks: number; mark: string | null };
 
 // Everything updated from `since` to `until`, oldest slice first, each slice in updatedAt order. `newest` is the largest
 // updatedAt returned (tracked repos or not), the next sync's starting point; null when nothing matched.
 // `progress(t)` runs in the write transaction of a page once every item updated before `t` is stored (see pageMark), so
 // a stopped run keeps what it finished.
-export async function syncBySearch(db: Db, client: Querier, tracked: string[], since: string, until: string, progress?: (t: string) => Promise<void>): Promise<SearchResult> {
+export async function syncBySearch(db: Db, client: Querier, tracked: string[], since: string, until: string, closing: (() => Promise<void>)[], progress?: (t: string) => Promise<void>): Promise<SearchResult> {
   const trackedSet = new Set(tracked);
   // Before the first request: the read start every page of this run is stored with (see writePage).
   const startedAt = iso(new Date());
@@ -523,7 +527,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
   const repoNewest = new Map<string, string>();
   let size = SEARCH_PAGE;
   let failures = 0;
-  const out: SearchResult = { count: 0, newest: null, slices: 0, fallbacks: 0 };
+  const out: SearchResult = { count: 0, newest: null, slices: 0, fallbacks: 0, mark: null };
 
   async function page(q: string, cursor: string | null): Promise<Node> {
     for (;;) {
@@ -548,7 +552,12 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
       if (!n?.repository || !trackedSet.has(n.repository.name) || !ownedBy(n, n.repository.name)) continue;
       items.push({ repo: n.repository.name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n });
     }
-    const inside = mark && progress ? () => progress(mark) : undefined;
+    // A page with nothing to store writes nothing: its mark goes with the next page's items, or to the caller.
+    const settled = mark ?? out.mark;
+    out.mark = settled;
+    if (!items.length) return;
+    out.mark = null;
+    const inside = settled && progress ? () => progress(settled) : undefined;
     try {
       await writeNodes(db, items, { readAt: startedAt, inside });
     } catch (e) {
@@ -615,10 +624,12 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
 
   const from = new Date(since);
   await window(from, new Date(Math.max(from.getTime(), new Date(until).getTime())));
-  for (const name of tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
+  const others = tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER);
+  const rows = await loadRepos(db, { names: others });
+  for (const name of others) {
     try {
       // A repo that failed for a while has its own high water behind the window: read from there.
-      const hw = (await loadRepos(db, { names: [name] })).get(name)?.high_water;
+      const hw = rows.get(name)?.high_water;
       const own = hw ? new Date(new Date(hw).getTime() - OVERLAP_MS) : null;
       const r = await readRepoSince(db, client, name, iso(own && own < from ? own : from));
       await clearRepoFailure(db, name);
@@ -628,7 +639,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
       await failRepo(db, client, name, e);
     }
   }
-  await advanceRepoHighWater(db, [...repoNewest].map(([name, t]) => ({ name, t })));
+  if (repoNewest.size) closing.push(() => advanceRepoHighWater(db, [...repoNewest].map(([name, t]) => ({ name, t }))));
   return out;
 }
 
@@ -730,48 +741,53 @@ query($owner: String!, $name: String!) {
 
 // Lists the default org's repos. Repos of other owners are tracked one by one by name, never listed;
 // a failure reading one is logged and leaves the rest of the sync alone.
-async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
+async function refreshRepoList(db: Db, client: Querier, tracked: string[], failing: Set<string>): Promise<string[]> {
+  const fail = async (name: string, e: unknown): Promise<void> => {
+    failing.add(name);
+    await failRepo(db, client, name, e);
+  };
   const repos: (Node & { owner: string })[] = [];
   for (const r of await listRepos(client, DEFAULT_OWNER)) repos.push({ ...r, owner: DEFAULT_OWNER });
-  for (const name of (await trackedNames(db)).filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
+  for (const name of tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
     const owner = ownerOf(name);
     try {
       const r = (await client.query(REPO_QUERY, { owner, name })).repository;
       if (r && r.owner?.login?.toLowerCase() === owner.toLowerCase()) repos.push({ ...r, owner });
-      else await failRepo(db, client, name, new GithubError("graphql error: repository not found under this owner", 0, "NOT_FOUND"));
+      else await fail(name, new GithubError("graphql error: repository not found under this owner", 0, "NOT_FOUND"));
     } catch (e) {
-      await failRepo(db, client, name, e);
+      await fail(name, e);
     }
   }
   // A tracked repo of the default org missing from the listing is archived, or moved or deleted: only the last two are errors.
   const listedNames = new Set(repos.map((r) => r.name as string));
-  for (const name of (await trackedNames(db)).filter((n) => ownerOf(n) === DEFAULT_OWNER && !listedNames.has(n))) {
+  for (const name of tracked.filter((n) => ownerOf(n) === DEFAULT_OWNER && !listedNames.has(n))) {
     try {
       const r = (await client.query(REPO_QUERY, { owner: DEFAULT_OWNER, name })).repository;
       if (!r || r.owner?.login?.toLowerCase() !== DEFAULT_OWNER.toLowerCase()) throw new GithubError("graphql error: repository not found under this owner", 0, "NOT_FOUND");
     } catch (e) {
-      if (e instanceof GithubError && e.type === "NOT_FOUND") await failRepo(db, client, name, e);
+      if (e instanceof GithubError && e.type === "NOT_FOUND") await fail(name, e);
       else console.warn(`  ${slugOf(name)}: ${(e as Error).message}`);
     }
   }
   // Names are unique across owners: a repo already known under another owner is left alone. The writer also clears the not-found record of every repo it wrote.
-  const written = new Set(await saveRepoList(db, repos.map((r) => ({
-    name: r.name, owner: r.owner, visibility: r.visibility.toLowerCase(), default_branch: r.defaultBranchRef?.name ?? null, open_prs: r.pullRequests.totalCount, open_issues: r.issues.totalCount,
-  }))));
+  const written = new Set(await db.write(async () => {
+    await saveSyncState(db, { repos_refreshed_at: iso(new Date()) });
+    return await saveRepoList(db, repos.map((r) => ({
+      name: r.name, owner: r.owner, visibility: r.visibility.toLowerCase(), default_branch: r.defaultBranchRef?.name ?? null, open_prs: r.pullRequests.totalCount, open_issues: r.issues.totalCount,
+    })));
+  }));
   for (const r of repos) {
-    if (!written.has(r.name)) await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
+    if (!written.has(r.name)) await fail(r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
   }
   await reloadRepoOwners(db);
-  await saveSyncState(db, { repos_refreshed_at: iso(new Date()) });
   return [...new Set(repos.map((r: Node) => r.name as string))];
 }
 
 /** Repos the last per-repo pass skipped; the org high water waits for them. */
 let syncFailures = 0;
 
-async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<number> {
-  const listed = await refreshRepoList(db, client);
-  const tracked = await trackedNames(db);
+async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts, tracked: string[], plan: SyncPlan): Promise<number> {
+  const listed = await refreshRepoList(db, client, tracked, plan.failing);
   const names = selectSyncRepos(listed, tracked, opts);
   const gone = opts.only.length || opts.all ? [] : tracked.filter((n) => !listed.includes(n));
   if (gone.length) console.log(`tracked but not in the org (archived or renamed): ${gone.join(", ")}`);
@@ -779,7 +795,7 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
   // so a stopped run continues after it. The cursor belongs to one scope (tracked repos or all).
   const resumable = opts.full && !opts.only.length;
   const scope = opts.all ? "all" : "tracked";
-  const saved = resumable ? (await loadSyncState(db)).full_sync_cursor : null;
+  const saved = resumable ? plan.state.full_sync_cursor : null;
   const after = saved?.startsWith(`${scope}|`) ? saved.slice(scope.length + 1) : null;
   const todo = after === null ? names : names.filter((n) => n > after);
   if (after !== null) console.log(`resuming the full re-sync after ${after}: ${todo.length} of ${names.length} repos left`);
@@ -791,7 +807,11 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
     const before = client.spent;
     let count: number;
     try {
-      count = await syncRepo(db, client, name, opts.full);
+      count = await syncRepo(db, client, name, opts.full, plan.repos.get(name)?.high_water ?? null, async () => {
+        if (plan.failing.has(name)) await clearRepoFailure(db, name);
+        // The cursor stops at the first failure so the next full run redoes that repo.
+        if (resumable && !failed) await saveSyncState(db, { full_sync_cursor: `${scope}|${name}` });
+      });
     } catch (e) {
       await failRepo(db, client, name, e);
       failed++;
@@ -802,10 +822,7 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
       continue;
     }
     transientRun = 0;
-    await clearRepoFailure(db, name);
     total += count;
-    // The cursor stops at the first failure so the next full run redoes that repo.
-    if (resumable && !failed) await saveSyncState(db, { full_sync_cursor: `${scope}|${name}` });
     console.log(`${name}: ${count} items, ${client.spent - before} points used, ${client.remaining} left`);
   }
   if (resumable && !failed) await saveSyncState(db, { full_sync_cursor: null });
@@ -852,14 +869,19 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
   const stale = (await listItems(db, { repos: [name], states: ["OPEN"] }, "ref")).filter((r) => !listed.has(`${r.kind}\t${r.number}`)).sort((a, b) => a.number - b.number);
   let updated = 0;
   const goneRefs: string[] = [];
+  // Every item is stored with the time its own request was sent; a page's worth shares one write.
+  const read: (NodeWrite & { readAt: string })[] = [];
+  const store = async (): Promise<void> => { if (read.length) await writeNodes(db, read.splice(0)); };
   for (const r of stale) {
     const sentAt = iso(new Date());
     const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
     if (n && n.repository?.name === name && ownedBy(n, name)) {
-      await writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
+      read.push({ repo: name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n, readAt: sentAt });
       updated++;
+      if (read.length >= FULL_PAGE) await store();
     } else goneRefs.push(`${name}#${r.number}`);
   }
+  await store();
   // Deleted or transferred items are marked CLOSED (no consumer reads a state other than OPEN, CLOSED and MERGED) and audited.
   const gone = await closeGoneItems(db, goneRefs, iso(now));
   await markReposReconciled(db, [{ name, at: iso(now) }]);
@@ -894,8 +916,13 @@ export async function reconcileNext(db: Db, client: Querier, now: Date = new Dat
 // minutes before it; a search run moves it page by page as it stores them (syncBySearch). It does not move for --repo
 // runs, and a full re-sync leaves an existing one alone.
 export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date = new Date()): Promise<{ mode: string; items: number }> {
+  const [tracked, plan, settings] = await db.together(() => Promise.all([trackedNames(db), loadSyncPlan(db), readSettingsSnapshot(db)]));
+  // The run reads its settings (the names comments address the app by, for every page) once.
+  return await withSettingsSnapshot(db, () => syncWith(db, client, opts, now, tracked, plan), Promise.resolve(settings));
+}
+
+async function syncWith(db: Db, client: Querier, opts: SyncOpts, now: Date, tracked: string[], plan: SyncPlan): Promise<{ mode: string; items: number }> {
   const started = iso(now);
-  const [tracked, plan] = await db.together(() => Promise.all([trackedNames(db), loadSyncPlan(db)]));
   const orgHigh = plan.state.org_high_water;
   // A repo that cannot be read has no synced_at and would keep every run per-repo.
   // Only a repo that cannot be read at all (not found, no access) is passed over; others are retried per repo for their first full read.
@@ -905,43 +932,60 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
   const spent0 = client.spent;
   let mode = "per-repo";
   let items: number;
+  // What the run records once it has read everything, in one write.
+  let closing: (() => Promise<void>)[] = [];
+  const state: Partial<SyncState> = {};
+  const close = async (): Promise<void> => {
+    const writes = closing;
+    closing = [];
+    if (!writes.length && !Object.keys(state).length) return;
+    await db.write(async () => {
+      for (const w of writes) await w();
+      await saveSyncState(db, state);
+    });
+  };
   try {
     if (wantsSearch) {
       // Runs inside each page's transaction; a compare-and-set, so a rolled-back page leaves nothing to remember.
       const progress = async (t: string) => { await advanceOrgHighWater(db, t); };
-      const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started, progress);
+      const r = await syncBySearch(db, client, tracked, searchSince(orgHigh as string), started, closing, progress);
       mode = "search";
       items = r.count;
       const high = r.newest && r.newest > (orgHigh as string) ? r.newest : (orgHigh as string);
-      await advanceOrgHighWater(db, high);
+      const reached = r.mark && r.mark > high ? r.mark : high;
+      if (reached > (orgHigh as string)) closing.push(async () => void await advanceOrgHighWater(db, reached));
       const last = plan.state.search_catchup_at;
       if (!last || now.getTime() - new Date(last).getTime() >= CATCHUP_EVERY_MS) {
-        const c = await syncBySearch(db, client, tracked, iso(new Date(new Date(high).getTime() - CATCHUP_SPAN_MS)), iso(new Date(high)));
+        const c = await syncBySearch(db, client, tracked, iso(new Date(new Date(high).getTime() - CATCHUP_SPAN_MS)), iso(new Date(high)), closing);
         items += c.count;
-        await saveSyncState(db, { search_catchup_at: started });
+        state.search_catchup_at = started;
       }
       // One org-wide search covers every tracked repo, so each counts as synced now.
       // The search read every default-org repo, so errors of earlier runs other than not-found are stale; a failure of this run (at >= started) stays.
-      await clearRepoFailures(db, tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER), { kinds: ["transient", "error"], before: started });
+      if (plan.failing.size) closing.push(() => clearRepoFailures(db, tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER), { kinds: ["transient", "error"], before: started }));
       // Not the repos that were never read in full (no high water) or that cannot be read.
-      await markReposSyncedByError(db, tracked, started);
+      closing.push(() => markReposSyncedByError(db, tracked, started));
       console.log(`search: ${r.slices} slice${r.slices === 1 ? "" : "s"}${r.fallbacks ? `, ${r.fallbacks} listed per repo` : ""}`);
-      const at = (await loadSyncState(db)).repos_refreshed_at;
-      if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) await refreshRepoList(db, client);
+      const at = plan.state.repos_refreshed_at;
+      if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) {
+        // First: a repo the listing finds gone was synced until now.
+        await close();
+        await refreshRepoList(db, client, tracked, plan.failing);
+      }
     } else {
       syncFailures = 0;
-      items = await syncPerRepo(db, client, opts);
-      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) await saveSyncState(db, { org_high_water: started });
+      items = await syncPerRepo(db, client, opts, tracked, plan);
+      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) state.org_high_water = started;
     }
   } finally {
     // The dashboard can show the rate budget from these.
-    const rate: Partial<SyncState> = opts.full ? { full_points_last_run: client.spent - spent0 } : { points_last_run: client.spent - spent0 };
-    if (client.remaining !== null) rate.rate_remaining = client.remaining;
-    if (client.resetAt) rate.rate_reset_at = client.resetAt.toISOString();
-    await saveSyncState(db, rate);
+    state[opts.full ? "full_points_last_run" : "points_last_run"] = client.spent - spent0;
+    if (client.remaining !== null) state.rate_remaining = client.remaining;
+    if (client.resetAt) state.rate_reset_at = client.resetAt.toISOString();
+    await close();
   }
   // History written before ids were bound: one batched pass, nothing when every login is bound.
-  if (opts.full || (!opts.only.length && (await loadSyncState(db)).author_ids_backfilled_at === null)) {
+  if (opts.full || (!opts.only.length && plan.state.author_ids_backfilled_at === null)) {
     try {
       const { backfillAuthorIds } = await import("./author-ids.ts");
       const bound = await backfillAuthorIds(db, client);

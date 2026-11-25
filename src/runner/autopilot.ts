@@ -1331,16 +1331,23 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
 const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string, released: Map<string, string>): string =>
   [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers, ...[...released].sort().flat()].join(",");
 
+type PlanDueReads = Awaited<ReturnType<typeof loadPlanDue>>;
+
+/** What planDue reads, in one wave. */
+export async function loadPlanDue(db: Db, nowMs: number) {
+  return await db.together(() => Promise.all([
+    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, nowMs), loadPipelineEndedSince(db, { mark: MARK_PLANNED_AT }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  ]));
+}
+
 /**
  * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, an autopilot job finished, an operator released
  * work, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
  * it is, so the caller must then plan.
  */
-export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
+export async function planDue(db: Db, nowMs: number = Date.now(), read?: PlanDueReads): Promise<boolean> {
   const t = nowMs;
-  const [marks, limits, tasks, seqs, takers, finished, released] = await db.together(() => Promise.all([
-    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, t), loadPipelineEndedSince(db, { mark: MARK_PLANNED_AT }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
-  ]));
+  const [marks, limits, tasks, seqs, takers, finished, released] = read ?? await loadPlanDue(db, t);
   const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
   const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];
   const sig = inputSignature(seqs, limits, tasks, takers, released);

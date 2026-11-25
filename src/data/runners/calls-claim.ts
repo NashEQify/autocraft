@@ -6,7 +6,7 @@ import type { ItemRef } from "../../../web/src/api/types.ts";
 import { loadCooloffs } from "./cooloffs.ts";
 import { goneCallExpr, loadLiveness } from "./calls-expiry.ts";
 import { loadQueueFor, loadQueueSignature } from "./calls-queue-load.ts";
-import { INTERACTIVE_PROMPTS, dropQueueCache, lostLeaseExpr } from "./calls-shared.ts";
+import { INTERACTIVE_PROMPTS, cachedQueue, dropQueueCache, lostLeaseExpr } from "./calls-shared.ts";
 import { unlease } from "./calls-unlease.ts";
 import { loadRunnerRole } from "./cross.ts";
 import { loadRunnerSnapshot } from "./runner-snapshot.ts";
@@ -18,7 +18,7 @@ import type { ClaimCaller, ClaimFacts, LeaseSource, QueueSnapshot, RunnerSnapsho
 const NO_SETTINGS: UserSettings = { reserve: { fiveHour: 20, weekly: 20 }, repos: [], maxCalls: null, interactiveSlots: null, manualOnly: false, skipTasks: [], taskItems: "all", runnerPrivate: false };
 
 /**
- * Wave A of a claim: role and idle flag, cool-off, settings, lease counts, queue signature, and, for the first try (`requestId`), the orphan lease of a
+ * The facts of a claim: role and idle flag, cool-off, settings, lease counts, queue signature, and, for the first try (`requestId`), the orphan lease of a
  * repeated claim and the lost and gone calls of the expiry. About 9 statements in one round trip.
  */
 export async function loadClaimFacts(db: Db, caller: ClaimCaller, opts: { requestId?: string; now: number }): Promise<ClaimFacts> {
@@ -49,13 +49,14 @@ export async function loadClaimFacts(db: Db, caller: ClaimCaller, opts: { reques
   };
 }
 
-/** Wave B, only on a cache miss: the queue and the runner snapshot in one wave. */
-export async function loadClaimWave(db: Db, caller: ClaimCaller, facts: ClaimFacts, now: number): Promise<{ queue: QueueSnapshot; snapshot: RunnerSnapshot }> {
-  void caller;
-  return await db.together(async () => {
-    const [queue, snapshot] = await Promise.all([loadQueueFor(db, now, facts.signature), loadRunnerSnapshot(db, now)]);
-    return { queue, snapshot };
-  });
+/**
+ * Everything a claim decides on: the facts with, in the same wave, the runner snapshot and the queue where their 2 s caches do
+ * not hold them. A cached queue that the facts' signature does not confirm costs one more wave.
+ */
+export async function loadClaim(db: Db, caller: ClaimCaller, opts: { requestId?: string; now: number }): Promise<{ facts: ClaimFacts; queue: QueueSnapshot; snapshot: RunnerSnapshot }> {
+  const { now } = opts;
+  const [facts, snapshot, queue] = await db.together(() => Promise.all([loadClaimFacts(db, caller, opts), loadRunnerSnapshot(db, now), cachedQueue(db, now) ? null : loadQueueFor(db, now)]));
+  return { facts, snapshot, queue: queue ?? await loadQueueFor(db, now, facts.signature) };
 }
 
 /** The queued call about to be leased, with its bundle (not in the queue read). */

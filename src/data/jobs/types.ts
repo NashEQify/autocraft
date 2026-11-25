@@ -17,7 +17,7 @@ export type JobPatch = { progress?: string | null; items?: number; acted?: numbe
 /** What `openJobPulse` needs of the claimed row: a resumed job's counts add to those of its earlier runs. */
 export type PulseRow = Pick<JobRow, "id"> & Partial<Pick<JobRow, "items" | "acted" | "resumes" | "started_at">>;
 export type JobFlags = { cancel_requested_at: string | null; error: string | null; started_at: string | null };
-export type JobResult = { usage?: string | null; summary?: string | null; error?: string | null; leaseSkips?: number; leaseSkipKeys?: string[]; stats?: { statements: number; roundTrips: number; ms: number; effects: number } };
+export type JobResult = { usage?: string | null; summary?: string | null; error?: string | null; leaseSkips?: number; leaseSkipKeys?: string[]; /** What the pulse had not written yet (`JobPulse.end`). */ patch?: JobPatch; stats?: { statements: number; roundTrips: number; ms: number; effects: number } };
 
 /** Buffered progress writer of one running job (replaces `ctx.progress`, `handled`, `acted`, `cancelled`, `timeUp`). */
 export interface JobPulse {
@@ -27,6 +27,8 @@ export interface JobPulse {
   cancelled(): Promise<boolean>;
   timeUp(sliceMs: number): Promise<boolean>;
   flush(): Promise<void>;
+  /** Writes the buffered job items and waits for a pulse under way; the progress and counts not written yet, for the final write. */
+  end(): Promise<JobPatch>;
 }
 
 export type JobItemRow = { id: number; job_id: number; repo: string; number: number; outcome: string | null; at: string };

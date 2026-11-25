@@ -1,4 +1,4 @@
-// Run records: write and lifecycle (`agent_runs`, `agent_run_items`, `agent_run_texts`, `agent_run_tools`). No writer opens a transaction or a named lock.
+// Run records: write and lifecycle (`agent_runs`, `agent_run_items`, `agent_run_texts`, `agent_run_tools`). No writer takes a named lock.
 // reads: runners.remote_calls
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
@@ -17,31 +17,45 @@ function stored(text: string | Uint8Array, scrub: Scrub | undefined, what: strin
 }
 
 /**
- * Inserts the running row, its item rows and its prompt text; runs inside the caller's transaction (`leaseCall` calls it under the login lock).
- * Statements: the run, its items (per 500), its text, and the run's first item (lowest repo and number by the database's own order, so the
- * live board and the activity feed read it as a column).
+ * Inserts running rows with their item rows and prompt texts, in the caller's transaction (`leaseCall` calls it under the login lock), else in one
+ * of its own, and returns their ids in order. Statements, for any number of runs (per 500 rows): the runs, their items, their texts, and one more
+ * for the runs whose items are of several repos. A run's first item (lowest repo and number by the database's own order) is kept in its columns, so
+ * the live board and the activity feed read it there.
  */
-export async function openRun(db: Db, s: RunStart, scrub?: Scrub): Promise<number> {
+export async function openRuns(db: Db, starts: readonly RunStart[], scrub?: Scrub): Promise<number[]> {
+  if (!starts.length) return [];
   const q = queryDb(db);
   const { k } = q;
-  const prompt = stored(s.prompt, scrub, "the prompt");
-  const refs = s.items.slice(0, MAX_ITEM_REFS);
-  const id = Number((await q.get(k.insertInto("main.agent_runs").values({
-    job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: s.promptId, prompt_version: s.promptVersion, provider: s.provider, model: s.model,
-    items: JSON.stringify(refs), item_count: s.items.length, state: "running", started_at: now(),
-    ...(s.remote && { user_login: s.remote.userLogin, harness: s.remote.harness, reported_model: s.remote.reportedModel }),
-  }).returning("id")))!.id);
-  if (s.items.length) {
-    for (const part of kx.batches(s.items)) {
-      await q.run(k.insertInto("main.agent_run_items").values(part.map((r) => ({ run_id: id, repo: r.repo, number: r.number }))).onConflict((oc) => oc.doNothing()));
+  const at = now();
+  const prompts = starts.map((s) => stored(s.prompt, scrub, "the prompt"));
+  const rows = starts.map((s) => {
+    const repo = s.items.length && s.items.every((r) => r.repo === s.items[0]!.repo) ? s.items[0]!.repo : null;
+    return {
+      job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: s.promptId, prompt_version: s.promptVersion, provider: s.provider, model: s.model,
+      items: JSON.stringify(s.items.slice(0, MAX_ITEM_REFS)), item_count: s.items.length, state: "running" as const, started_at: at,
+      first_repo: repo, first_number: repo === null ? null : Math.min(...s.items.map((r) => r.number)),
+      user_login: s.remote?.userLogin ?? null, harness: s.remote?.harness ?? null, reported_model: s.remote?.reportedModel ?? null,
+    };
+  });
+  const open = async (): Promise<number[]> => {
+    const ids: number[] = [];
+    for (const part of kx.batches(rows)) for (const r of await q.all(k.insertInto("main.agent_runs").values(part).returning("id"))) ids.push(Number(r.id));
+    const items = starts.flatMap((s, i) => s.items.map((r) => ({ run_id: ids[i]!, repo: r.repo, number: r.number })));
+    for (const part of kx.batches(items)) await q.run(k.insertInto("main.agent_run_items").values(part).onConflict((oc) => oc.doNothing()));
+    for (const part of kx.batches(prompts.map((prompt, i) => ({ run_id: ids[i]!, prompt })))) await q.run(k.insertInto("main.agent_run_texts").values(part));
+    const mixed = ids.filter((_, i) => starts[i]!.items.length > 0 && rows[i]!.first_repo === null);
+    if (mixed.length) {
+      const first = (col: "repo" | "number") => k.selectFrom("main.agent_run_items as ri").select(`ri.${col}`).whereRef("ri.run_id", "=", "agent_runs.id" as never).orderBy("ri.repo").orderBy("ri.number").limit(1);
+      await q.run(k.updateTable("main.agent_runs").set({ first_repo: first("repo") as never, first_number: first("number") as never }).where(kx.inList(db, "id", mixed, "bigint")));
     }
-  }
-  await q.run(k.insertInto("main.agent_run_texts").values({ run_id: id, prompt }));
-  if (s.items.length) {
-    const first = (col: "repo" | "number") => k.selectFrom("main.agent_run_items as ri").select(`ri.${col}`).where("ri.run_id", "=", id).orderBy("ri.repo").orderBy("ri.number").limit(1);
-    await q.run(k.updateTable("main.agent_runs").set({ first_repo: first("repo") as never, first_number: first("number") as never }).where("id", "=", id));
-  }
-  return id;
+    return ids;
+  };
+  return db.inTransaction("write") ? await open() : await db.write(open);
+}
+
+/** One-run wrapper over `openRuns`. */
+export async function openRun(db: Db, s: RunStart, scrub?: Scrub): Promise<number> {
+  return (await openRuns(db, [s], scrub))[0]!;
 }
 
 /**
