@@ -12,6 +12,7 @@ import { askConflict, type ConflictRun } from "../src/fixup/conflict.ts";
 import type { ConflictCandidate } from "../src/fixup/conflict-state.ts";
 import type { FixupDeps, FixupSummary } from "../src/fixup/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
+import { acting } from "./acting.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { GuardedItem, GuardedRepo, Guarded } from "../src/core/guard.ts";
 import { commentOn, createIssue, ghComment, postReview, type Writer } from "../src/github/write.ts";
@@ -37,6 +38,7 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
     await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: HEAD, head_ref: "fix", head_repo: "contrib/app", base_ref: "main", maintainer_can_modify: 0, mergeable: "CONFLICTING", created_at: iso(T0 - 60 * MIN), updated_at: iso(T0 - 60 * MIN) }));
     await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: HEAD, run_id: "rv", at: iso(T0 - 30 * MIN), model: "m", verdict: "take", reason: "right", fixes: "[]", sure: 1, mode: "full" }));
     await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: iso(T0 - 40 * MIN), startedVia: "dashboard" });
+    await acting(db, ["op"]);
 
     await db.run(db.k.insertInto("verifications").values({ repo: "app", number: 1, head_sha: HEAD, kind: "ci-enough", reason: "upstream CI", state: "ci-enough", created_at: iso(T0 - 20 * MIN) }));
     const plan = async () => decidePr((await loadPrFacts(db, { now: Date.now() })).find((f) => f.number === 1)!);

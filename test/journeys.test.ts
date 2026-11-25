@@ -35,6 +35,7 @@ import { LANES, planCtx } from "../src/runner/autopilot.ts";
 import { checkRequest } from "../src/runner/jobs.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
+import { appLane } from "./acting.ts";
 import { CHECK, OPERATOR, T1, tmpdir, world, type World } from "./world-db.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { excluded } from "../src/db/kx.ts";
@@ -698,7 +699,7 @@ function gitWorld(n: number, lib = "fn a() {}\nfn main() { a(); }\n", conflict =
         fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
         ask: async () => patch,
         check: async () => JSON.stringify({ verdict: "approve", reasons: "matches the listed fix", problems: [] }),
-        lane: { mint: async () => "installation-token", appClient: () => querier },
+        lane: appLane(querier),
       };
     },
     /** The CI fix step's deps: the failed check's log names src/lib.rs. */

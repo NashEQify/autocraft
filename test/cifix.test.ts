@@ -18,6 +18,7 @@ import { setCiApproval } from "../src/merge/ci-approval.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { saveOpus } from "../src/review/opus.ts";
+import { acting, appLane } from "./acting.ts";
 import { validating } from "./gql.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -52,6 +53,7 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   if (o.comment) await setCommentApproval(db, "op", "app", true);
   if (o.ci) await setCiApproval(db, "op", "app", true);
   await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await acting(db, ["op"]);
   await reportingTaskRunner(db);
   return db;
 }
@@ -190,7 +192,7 @@ function world(opts: { log?: string; reply?: string | null; check?: string | nul
     return exec("git", net >= 0 ? sub2 : args, { ...o });
   };
   const deps: CifixDeps = {
-    querier, exec: run, now: () => new Date(T2), root: join(root, "cache"),
+    querier, lane: appLane(querier), exec: run, now: () => new Date(T2), root: join(root, "cache"),
     fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
     gh: async (args) => {
       if (args[0] === "api" && args[1]!.includes("/pulls/")) return `${BASE}\n`;

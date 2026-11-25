@@ -11,6 +11,7 @@ import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { viewFile } from "../src/fixup/excerpt.ts";
 import { validatePatch, type FixupPr } from "../src/fixup/patch.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
+import { acting, appLane } from "./acting.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
@@ -42,6 +43,7 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   if (o.approved !== false) await setPushApproval(db, "op", "app", true);
   await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await acting(db, ["op"]);
   await reportingTaskRunner(db);
   return db;
 }
@@ -154,7 +156,7 @@ function world(opts: { check?: string | null; reply?: string | null; moveBranch?
     return exec("git", net >= 0 ? sub2 : args, { ...o });
   };
   w.deps = {
-    querier, exec: run, now: () => new Date(T1), root: join(root, "cache"),
+    querier, lane: appLane(querier), exec: run, now: () => new Date(T1), root: join(root, "cache"),
     fetchDiff: async () => ({ ok: true, text: opts.diff ?? "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
     ask: async (_db, input) => { log.push("model"); w.asked.push(...input); return opts.reply === undefined ? good : opts.reply; },
     check: async (_db, input) => { log.push("check"); assert.match(input[0]!.patch, /^diff --git/); return opts.check === undefined ? APPROVE : opts.check; },
