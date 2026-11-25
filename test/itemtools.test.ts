@@ -54,12 +54,11 @@ before(async () => {
 });
 
 describe("snapshot", () => {
-  test("holds items, comments and decision outcomes, and nothing private", () => {
+  test("holds items and comments, and nothing private", () => {
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name);
-    for (const t of ["settings", "audit", "access", "sessions", "decisions", "decision_comments", "decision_opinions"]) assert.ok(!tables.includes(t), t);
-    const dump = JSON.stringify([db.prepare("SELECT * FROM decision_outcomes").all(), db.prepare("SELECT * FROM meta").all()]);
+    for (const t of ["settings", "audit", "access", "sessions", "decisions", "decision_comments", "decision_opinions", "decision_outcomes"]) assert.ok(!tables.includes(t), t);
+    const dump = JSON.stringify(db.prepare("SELECT * FROM meta").all());
     assert.ok(!dump.includes(PRIVATE) && !dump.includes("SETTING-VALUE") && !dump.includes("AUDIT-VALUE"));
-    assert.deepEqual(db.prepare("SELECT kind, answer, answer_label FROM decision_outcomes").all().map((r) => ({ ...r })), [{ kind: "scope", answer: "take", answer_label: "Take it" }]);
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM comments").get() as { n: number }).n, 2);
   });
 });

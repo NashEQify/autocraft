@@ -38,7 +38,6 @@ function dump(file: string): Record<string, unknown[]> {
     items: q("SELECT * FROM items ORDER BY repo, number"),
     comments: q("SELECT * FROM comments ORDER BY id"),
     embeddings: q("SELECT repo, number, model, at, hex(vec) AS vec, typeof(vec) AS t FROM item_embeddings ORDER BY repo, number"),
-    outcomes: q("SELECT * FROM decision_outcomes ORDER BY repo, number"),
     schema: q("SELECT value FROM meta WHERE key = 'schema'"),
     found: q("SELECT i.repo, i.number FROM items_fts f JOIN items i ON i.rowid = f.rowid WHERE items_fts MATCH 'ligature'"),
   };
