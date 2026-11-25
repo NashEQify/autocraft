@@ -20,9 +20,9 @@ const APPROVED: LandedApproval = { approvedAt: day(2), since: day(2), prOpenedAt
 
 test("a merge is reviewed when nobody approved it or our push changed code after the approved head", () => {
   const push = { id: 1, from: "a", to: "b", reason: null, at: day(3), state: "pushed" as const, source: null };
-  const edge = (o: object) => ownPushes([{ ...push, kind: "fixup", ...o } as never], [], []);
-  const outcome = (action: string, at = day(3)) => ownPushes([], [{ action, from: "a", to: "b", at, lines: 4 }], []);
-  const repin = ownPushes([], [], [{ from: "a", to: "b", at: day(3) }]);
+  const edge = (o: object) => ownPushes([], [{ ...push, kind: "fixup", ...o } as never], [], []);
+  const outcome = (action: string, at = day(3)) => ownPushes([], [], [{ action, from: "a", to: "b", at, lines: 4 }], []);
+  const repin = ownPushes([], [], [], [{ from: "a", to: "b", at: day(3) }]);
   const cleanBase = edge({ kind: "conflict", state: "merged", ownDiff: "same" });
   const table: [string, LandedApproval | null, ReturnType<typeof ownPushes>, LandedWhy | null][] = [
     ["by the rule", null, [], "rule"],
@@ -36,7 +36,7 @@ test("a merge is reviewed when nobody approved it or our push changed code after
     ["an autorepin", APPROVED, repin, null],
     ["a fix-up the person saw when they approved", APPROVED, edge({ at: day(1) }), null],
     ["a fix-up the person saw when they answered later", { ...APPROVED, since: day(4) }, edge({}), null],
-    ["a fix-up under a clean base merge", APPROVED, [...edge({}), ...ownPushes([{ ...push, kind: "conflict", from: "b", to: "c", state: "merged", ownDiff: "same" } as never], [], [])], "push"],
+    ["a fix-up under a clean base merge", APPROVED, [...edge({}), ...ownPushes([], [{ ...push, kind: "conflict", from: "b", to: "c", state: "merged", ownDiff: "same" } as never], [], [])], "push"],
     ["a fix-up of a commit that did not land", APPROVED, edge({ from: "x", to: "y" }), null],
     ["an implementation approved before its PR existed", { ...APPROVED, prOpenedAt: day(3) }, [], "implementation"],
     ["an implementation approved on its PR", { ...APPROVED, prOpenedAt: day(1) }, [], null],
