@@ -8,10 +8,11 @@ import { writePlanCache } from "../src/core/plan-cache.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
-import { findAutoStops } from "../src/workflow/auto-stop.ts";
+import { findAutoStops, startAutoStops } from "../src/workflow/auto-stop.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { RULE_STARTER } from "../src/workflow/types.ts";
+import { expectFlat } from "./helpers/query-count.ts";
 import { T0, untilQuiet, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
@@ -20,17 +21,21 @@ afterEach(() => current?.close());
 const MAINT = "mira";
 const actor: Actor = { login: MAINT, canWrite: async () => true };
 const say = async (w: World, text: string) => (await runCommand(w.db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 1 }] })).items[0]!;
+/** PR `n`, a small bug fix on the auto path, stopped at an unsure take whose recommendation is to merge it. */
+async function unsure(w: World, n: number): Promise<void> {
+  await w.pr(n);
+  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: n, head_oid: `sha${n}`, run_id: "rv", at: T0, model: "m", mode: "full", verdict: "take", sure: 0, reason: "r",
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Merge it.", fix: [], merge: true, close: false } }),
+  }));
+  await (await w.verified(n)).premerge(n, "clean");
+}
 const rows = async (w: World, n: number) => (await w.rows(`SELECT id FROM item_workflows WHERE number = ${n}`)).length;
 
 test("the automatic merge rule's unsure stop asks once, the answer makes the merge the answerer's, and a CI wait asks nothing", async () => {
   const w = current = await (await (await world()).repo()).acting(MAINT);
   await w.db.run(w.db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
-  await w.pr(1);
-  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
-    repo: "app", number: 1, head_oid: "sha1", run_id: "rv", at: T0, model: "m", mode: "full", verdict: "take", sure: 0, reason: "r",
-    workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Merge it.", fix: [], merge: true, close: false } }),
-  }));
-  await (await w.verified(1)).premerge(1, "clean");
+  await unsure(w, 1);
   await (await (await (await w.pr(2, { ci: "pending" })).review(2)).verified(2)).premerge(2, "clean");
   const stops = async () => (await w.db.seqs())["auto-stops"] ?? 0;
   const before = await stops();
@@ -60,4 +65,13 @@ test("the automatic merge rule's unsure stop asks once, the answer makes the mer
   assert.deepEqual(await findAutoStops(w.db), [], "an ended workflow is not started again");
   await advanceWorkflows(w.db);
   assert.equal(await rows(w, 1), 1);
+});
+
+test("starting the rule's stops sends as many statements for many PRs as for one", async () => {
+  await expectFlat(async (size) => {
+    const w = await (await world()).repo();
+    for (let n = 1; n <= size; n++) await unsure(w, n);
+    await writePlanCache(w.db, await w.plan());
+    return { db: w.db, run: async () => assert.equal(await startAutoStops(w.db), size), close: async () => w.close() };
+  }, 1, 6);
 });
