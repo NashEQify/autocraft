@@ -7,6 +7,7 @@ import { blankIfHidden } from "../../data/control/index.ts";
 import { loadAttention } from "../../data/views/attention.ts";
 import type { AttentionFacts } from "../../data/views/types.ts";
 import { checksOf, healthOptions } from "../../health-checks.ts";
+import { effectsInTx } from "../../db/effects.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { t } from "../../i18n/index.ts";
 import { mainCiRepos } from "../../mainci/index.ts";
@@ -57,6 +58,9 @@ export async function healthProblems(db: Db, o: ProblemFacts): Promise<{ state: 
     const steps = byCount.slice(0, 3).map(([step]) => stepTitle(step)).join(", ");
     out.push({ id: "jobs", area: "jobs", tone: "warn", text: `${n} job${n === 1 ? "" : "s"} failed in the last hour: ${steps}${byCount.length > 3 ? " and more" : ""}`, to: "/pipeline", since: null });
   }
+  // Only effects of the last hour: the counters are per process and never reset, so an old one would warn forever.
+  const sites = staff ? effectsInTx().sites.filter((x) => o.nowMs - x.lastAt < 3_600_000) : [];
+  if (sites.length) out.push({ id: "effects-in-tx", area: "database", tone: "warn", text: `${sites.length} place${sites.length === 1 ? "" : "s"} made an outside call inside a database transaction in the last hour: ${sites.slice(0, 3).map((x) => x.site).join(", ")}${sites.length > 3 ? " and more" : ""}`, to: "/admin/health", since: null });
   return { state, problems: out };
 }
 

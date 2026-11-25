@@ -87,7 +87,7 @@ test("a revision after a base merge keeps main's change, also in the revision af
     return execFileSync("git", ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...DIFF_FLAGS.split(" "), base], { cwd: work, encoding: "utf8" });
   };
 
-  const w = await (await (await world()).repo()).issue(5, { title: "Crash on start" });
+  const w = await (await (await (await world()).repo()).acting()).issue(5, { title: "Crash on start" });
   const db = w.db;
   await insertWorkflow(db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-01-01T00:00:00.000Z", startedVia: "dashboard" });
   await setFeature(db, "implement", true, "op", "app");
@@ -114,10 +114,10 @@ test("a revision after a base merge keeps main's change, also in the revision af
     }
     const at = args.findIndex((a) => a.startsWith("https://github.com/"));
     if (at < 0) return realExec(cmd, args, opt);
-    const target = args[at]!.includes("/storytold/") ? upstream : fork;
+    const target = args[at]!.includes("/storytold/") && !args.includes("push") && !args.some((a) => a.includes("refs/heads/autocraft/")) ? upstream : fork;
     return realExec(cmd, args.map((a, i) => (i === at ? target : a)).filter((a, i, all) => a !== "protocol.file.allow=never" && !(a === "-c" && all[i + 1] === "protocol.file.allow=never")), opt);
   };
-  const opened = await openImplementationPr(db, { implementation: (await implementationById(db, started.id))!, diff: diffFor("pub fn a() -> u8 { 1 }\n"), base, model: "claude-opus-5-5", checks: [], by: "pipeline" }, { exec, root: join(dir, "cache"), log: () => {} });
+  const opened = await openImplementationPr(db, { implementation: (await implementationById(db, started.id))!, diff: diffFor("pub fn a() -> u8 { 1 }\n"), base, model: "claude-opus-5-5", checks: [], by: "pipeline" }, { exec, root: join(dir, "cache"), log: () => {}, mint: async () => "installation-token" });
   assert.ok(opened.ok, opened.ok ? "" : opened.reason);
 
   // The conflict step merges main, which changed another file, into the PR's branch.
@@ -139,7 +139,7 @@ test("a revision after a base merge keeps main's change, also in the revision af
     await w.synced(12, head);
     await w.review(12, { verdict: "take-fix" });
     const req: ReviseRound = { prNumber: 12, head, from, review: true, ci: false, message: "fix" };
-    const r = await pushRevision(db, { exec, root, gh: (args: string[]) => exec("gh", args).then((x) => x.stdout) } as unknown as ReviseDeps, impl, req, diffFor(lib), "pipeline", () => {});
+    const r = await pushRevision(db, { exec, root, mint: async () => "installation-token", gh: (args: string[]) => exec("gh", args).then((x) => x.stdout) } as unknown as ReviseDeps, impl, req, diffFor(lib), "pipeline", () => {});
     assert.ok(r.ok, r.ok ? "" : r.reason);
     const at = (path: string) => git(fork, "show", `refs/heads/${branch}:${path}`);
     assert.equal(at("src/other.rs"), "pub fn b() -> u8 { 2 }", "main's change stays");

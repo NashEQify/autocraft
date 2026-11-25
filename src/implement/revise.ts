@@ -77,6 +77,8 @@ export type ReviseDeps = {
   exec: Exec;
   /** Directory holding one bare cache repository per repo. */
   root: string;
+  /** Replaces the installation-token minter (tests). */
+  mint?: Writer["mint"];
 };
 
 function workspaceApi(db: Db): KubeApi {
@@ -521,7 +523,7 @@ export async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, 
   const moved = (reason: string): PushResult => { log(`  ${ref(impl)}: revision not pushed: ${reason}`); return { ok: false, reason, retry: true, moved: true }; };
   try {
     if (!impl.baseSha || !impl.branch) return fail("the attempt has no base commit or branch", false);
-    const w: Writer = { db, login: ACTOR };
+    const w: Writer = { db, login: ACTOR, ...(d.mint && { mint: d.mint }) };
     const git = new Git(d.exec, d.root, repo);
     const who = await pipelineAccount(d.exec);
     await setPipelineLogin(db, who.login);

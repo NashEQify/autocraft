@@ -143,7 +143,7 @@ test("opening an implementation's PR survives reruns: the stored branch is reuse
   writeFileSync(join(work, "src/lib.rs"), "pub fn a() -> u8 { 1 }\n");
   const diff = execFileSync("git", ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...DIFF_FLAGS.split(" "), base], { cwd: work, encoding: "utf8" });
 
-  const w = await (await (await world()).repo()).issue(5, { title: "Crash on start" });
+  const w = await (await (await (await world()).repo()).acting()).issue(5, { title: "Crash on start" });
   const db = w.db;
   await insertWorkflow(db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-01-01T00:00:00.000Z", startedVia: "dashboard" });
   await setFeature(db, "implement", true, "op", "app");
@@ -181,10 +181,10 @@ test("opening an implementation's PR survives reruns: the stored branch is reuse
     const at = args.findIndex((a) => a.startsWith("https://github.com/"));
     if (at < 0) return realExec(cmd, args, opt);
     if (args.includes("push")) gh.pushes.push(args.at(-1)!.split(":refs/heads/")[1]!);
-    const target = args[at]!.includes("/storytold/") ? upstream : fork;
+    const target = args[at]!.includes("/storytold/") && !args.includes("push") ? upstream : fork;
     return realExec(cmd, args.map((a, i) => (i === at ? target : a)).filter((a, i, all) => a !== "protocol.file.allow=never" && !(a === "-c" && all[i + 1] === "protocol.file.allow=never")), opt);
   };
-  const deps = { exec, root: join(dir, "cache"), log: () => {} };
+  const deps = { exec, root: join(dir, "cache"), log: () => {}, mint: async () => "installation-token" };
   const open = async () => openImplementationPr(db, { implementation: (await implementationById(db, started.id))!, diff, base, model: "claude-opus-5-5", checks: [], by: "pipeline" }, deps);
 
   // GitHub makes the PR but its response is lost; the issue is renamed before the rerun.

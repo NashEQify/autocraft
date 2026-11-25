@@ -33,3 +33,12 @@ test("health lists a failing sync, a tripped breaker and failed jobs, and hides 
   assert.ok(of(viewer, "sync").length > 0 && of(viewer, "breaker").length === 1);
   assert.match(of(viewer, "jobs")[0]!.text, /1 job failed/);
 });
+
+test("an outside call made inside a transaction in the last hour warns staff only", async () => {
+  const { note } = await import("../src/db/effects.ts");
+  const db = await connectDb(":memory:");
+  assert.ok(!(await health(db, req("operator"))).problems.some((p) => p.area === "database"));
+  note("process", "a transaction", "test/health-api.test.ts:effect-site", false);
+  assert.ok((await health(db, req("operator"))).problems.some((p) => p.area === "database"));
+  assert.ok(!(await health(db, req("viewer"))).problems.some((p) => p.area === "database"));
+});

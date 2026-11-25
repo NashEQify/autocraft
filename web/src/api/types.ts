@@ -1947,7 +1947,7 @@ export interface NextPage {
 // ---- Health (GET /api/health) ---------------------------------------------------
 
 /** A thing that needs attention; `to` is the page where it is fixed. `info` problems do not break "all healthy". */
-export type HealthProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install"; /** `to` is a server page (an authorization flow), opened with a full page load that returns here. */ fullPage?: true };
+export type HealthProblem = { id: string; area: "pipeline" | "runner" | "workers" | "breaker" | "limit" | "account" | "jev" | "main-ci" | "jobs" | "sync" | "deadline" | "liveness" | "database"; tone: "bad" | "warn"; text: string; to: string; since: string | null; /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear the warning. */ ackStep?: string; /** Another warning an operator clears by acknowledging it. */ ack?: "app-foreign-install"; /** `to` is a server page (an authorization flow), opened with a full page load that returns here. */ fullPage?: true };
 export type Health = {
   pipeline: { enabled: boolean; by: string | null; at: string | null };
   problems: HealthProblem[];
@@ -2032,7 +2032,7 @@ export interface LiveWorker {
   /** The calls that ran in the board's last hour, oldest first. */
   calls: LiveWorkerCall[];
 }
-/** `GET /api/live`: running and queued work and what ended in the last minutes, for the Live timeline on Home. `workers` only for staff. */
+/** `GET /api/live-board`: running and queued work and what ended in the last minutes, for the Live timeline on Home. `workers` only for staff. */
 export interface LiveBoard { lanes: LiveLane[]; workers?: LiveWorker[] }
 
 // ---- security deep scan (operators and maintainers only; viewers get 404) ----------------------------------

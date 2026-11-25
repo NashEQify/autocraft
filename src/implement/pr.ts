@@ -42,6 +42,8 @@ export type PrDeps = {
   root: string;
   /** GitHub GraphQL, to read the new PR into the mirror. Absent: the PR waits for the sync, and the run ends as `retry`. */
   querier?: Querier;
+  /** Replaces the installation-token minter (tests). */
+  mint?: Writer["mint"];
   log: (line: string) => void;
 };
 
@@ -221,7 +223,7 @@ async function commentOnce(db: Db, d: PrDeps, g: GuardedItem, im: Implementation
   const ref = refOf(im);
   const rows = await listAudit(db, { actions: ["implement-comment"], targets: [ref] });
   if (rows.some((r) => r.details?.pr === pr.number && r.details?.state !== "failed")) return null;
-  const cm = await ghComment({ db, login: ACTOR }, g, d.exec, "implement-comment", { repo: im.repo, number: im.number, pr: false }, { by: "fixed" }, implCommentText(pr.url, pr.draft), { pr: pr.number, ...(run && { run }) });
+  const cm = await ghComment({ db, login: ACTOR, ...(d.mint && { mint: d.mint }) }, g, d.exec, "implement-comment", { repo: im.repo, number: im.number, pr: false }, { by: "fixed" }, implCommentText(pr.url, pr.draft), { pr: pr.number, ...(run && { run }) });
   if (cm.code === 0) return null;
   d.log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
   return oneLine(cm.stderr || cm.stdout) || `exit code ${cm.code}`;
@@ -257,7 +259,7 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
   const im = input.implementation;
   const { repo, number } = im;
   const ref = refOf(im);
-  const w: Writer = { db, login: ACTOR };
+  const w: Writer = { db, login: ACTOR, ...(d.mint && { mint: d.mint }) };
   const run = input.run ? { run: input.run } : {};
   const fail = (reason: string, retry: boolean, problems?: string[]): OpenPrResult => { d.log(`  ${ref}: PR not opened: ${reason}`); return { ok: false, reason, retry, ...(problems && { problems }) }; };
   const stale = (): OpenPrResult => { d.log(`  ${ref}: the implementation left opening meanwhile; nothing more is written`); return { ok: false, reason: "the implementation left opening meanwhile", retry: true, stale: true }; };

@@ -114,7 +114,7 @@ export function createHttpApi(): Api {
         await post(`/api/area-proposals/${id}/dismiss`);
       },
     },
-    live: () => get("/api/live"),
+    live: () => get("/api/live-board"),
     health: () => get("/api/health"),
     item: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`),
     itemTrace: (repo, number, q = {}) =>

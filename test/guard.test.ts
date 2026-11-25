@@ -8,8 +8,8 @@ import { guard, guardBatchMerge, guardItem, guardRepo, type Live, type LiveRead 
 import { slugOf } from "../src/owners.ts";
 import { closeItem, mergeViaCommand } from "../src/github/write.ts";
 import { G } from "./guarded.ts";
-import { mergeDecisionId } from "../src/merge/queue.ts";
 import { parseSafeMergeArgs, safeMerge } from "../src/merge/safe-merge.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import { world } from "./world-db.ts";
 import { prFacts } from "./world.ts";
 import type { Db } from "./helpers/raw-db.ts";
@@ -47,10 +47,9 @@ test("refuses a merge without a live read, and when GitHub's head moved", async 
   assert.match(why(await guard(db, ref, MERGE, OP, live({ state: "CLOSED" }))), /no longer open/);
 });
 
-test("refuses when an operator's Hold answer arrived", async () => {
+test("refuses when the PR's workflow ended in the backlog", async () => {
   const db = await fresh([{ n: 1 }]);
-  const id = mergeDecisionId("app", 1, "sha1");
-  await db.run(db.k.insertInto("decisions").values({ id, kind: "merge", repo: "app", number: 1, items: "[]", question: "q", options: "[]", facts: JSON.stringify(["head commit sha1"]), asked_at: T, answer: "hold", answered_by: "op", answered_at: T }));
+  await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "review", state: "backlog", startedBy: "op", startedAt: T, startedVia: "dashboard" });
   assert.match(why(await guard(db, ref, MERGE, OP, live())), /plan no longer has merge/);
 });
 

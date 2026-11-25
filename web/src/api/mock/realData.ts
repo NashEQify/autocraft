@@ -36,7 +36,7 @@ export function phaseOf(planState: string, itemState: string | null, ghState: It
   if (["needs-fix-up", "ci-failed", "conflict"].includes(planState)) return "Fixing";
   if (/^verify/.test(planState)) return "Verifying";
   if (["waiting-ci", "waiting-premerge", "ready", "queued"].includes(planState)) return "In queue";
-  if (["label-not-reviewed", "not-reviewed", "review-stale"].includes(planState)) return "Review";
+  if (["not-reviewed", "review-stale"].includes(planState)) return "Review";
   if (/^Fix:/.test(next ?? "")) return "Fixing";
   return "Triage";
 }
