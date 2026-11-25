@@ -9,6 +9,7 @@ import { loadActivityRound } from "../src/data/views/activity.ts";
 import { loadImplementFacts } from "../src/data/implement/index.ts";
 import { attemptNow } from "../src/implement/attempt.ts";
 import { opensAsDraft } from "../src/implement/stuck.ts";
+import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { openQuestionOf, viewOf } from "../src/workflow/question.ts";
 import { countEventsSince, loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
 
@@ -150,11 +151,7 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
   assert.deepEqual(await rows(db, "SELECT DISTINCT workflow FROM main.tracked_repos").then((x) => x.map((y) => y.workflow)), ["new"]);
   assert.equal((await rows(db, "SELECT value FROM main.user_settings WHERE key = 'task_items'"))[0]!.value, "fast", "the older release reads it");
 
-  const stopped = (await rows(db, "SELECT state, rec, rec_head FROM main.item_workflows WHERE id = 1002"))[0]!;
-  assert.equal(stopped.state, "recommending");
-  assert.equal(stopped.rec_head, "h5");
-  assert.equal((JSON.parse(stopped.rec as string) as { text: string }).text, "Fix 1, then merge it.");
-  assert.equal((await rows(db, "SELECT state FROM main.item_workflows WHERE id = 1001"))[0]!.state, "running");
+  assert.deepEqual((await rows(db, "SELECT state FROM main.item_workflows WHERE id IN (1001, 1002)")).map((w) => w.state), ["running", "running"]);
   assert.equal((await rows(db, "SELECT count(*) AS n FROM main.preapprovals WHERE state = 'asked'"))[0]!.n, 0);
 
   assert.deepEqual((await rows(db, "SELECT step FROM main.repo_step_approvals WHERE repo = 'demo' ORDER BY step")).map((x) => x.step), ["labels", "merge"]);
@@ -184,6 +181,44 @@ test("a second run, and a run after one that was cut short, change nothing; an o
   await db.prepare("UPDATE main.decisions SET answer = 'take', answered_by = 'alice', answered_at = '2026-11-22T00:00:00.000Z' WHERE id = 'open'").run();
   const again = (await switchOver(db, { now: "2026-11-23T00:00:00.000Z" }))!;
   assert.deepEqual([again.archived.answered, again.archived.withdrawn, again.archived.actions, again.fastTrack.length], [1, 0, 0, 0]);
+  await db.close();
+});
+
+test("a started pull request whose pre-approved merge had stopped comes back with a recommendation a yes can run, and no new merge starts", async () => {
+  const db = await legacy();
+  // Stopped at a hold while it conflicts: its findings cannot be fixed before the base is merged.
+  await db.prepare("UPDATE main.preapprovals SET reason = 'the review says hold' WHERE workflow_id = 1002").run();
+  await db.prepare("UPDATE main.opus_reviews SET verdict = 'hold', fixes = ? WHERE number = 5").run(JSON.stringify([{ file: "a.ts", anchor: "x", change: "Check the length." }]));
+  await insert(db, "pr_checks", { repo: "demo", number: 5, head_oid: "h5", state: "OPEN", overall: "success", checks: "[]", mergeable: "CONFLICTING", fetched_at: AFTER });
+  await switchOver(db, { now: NOW });
+  await advanceWorkflows(db);
+  const w = (await rows(db, "SELECT state, approved_by, rec, rec_head FROM main.item_workflows WHERE id = 1002"))[0]!;
+  const rec = JSON.parse(w.rec as string) as { parts: { fix: number[] }; merges: boolean; again?: string };
+  assert.deepEqual([w.state, w.approved_by, w.rec_head, rec.parts.fix, rec.merges, rec.again], ["blocked", "erin", "h5", [], true, "review"]);
+  assert.deepEqual((await rows(db, "SELECT state FROM main.preapprovals WHERE number = 5")).map((l) => l.state), ["cancelled"]);
+  await db.close();
+});
+
+test("a pull request of an earlier attempt goes with no later workflow of its issue, one the workflow's own attempt opened does", async () => {
+  const db = await legacy();
+  const START = "2026-11-20T00:30:00.000Z";
+  const implement = async (number: number, attempts: [pr: number, state: string, created: string][]) => {
+    await item(db, number, "issue");
+    await insert(db, "item_workflows", { id: 2000 + number, repo: "demo", number, kind: "issue", entry: "implement", state: "running", started_by: "dave", started_at: START, started_via: "github", updated_at: START });
+    for (const [pr, state, created_at] of attempts) {
+      await item(db, pr, "pr");
+      await insert(db, "implementations", { id: pr, repo: "demo", number, queued_by: "dave", state, attempt: pr, text_hash: `x${pr}`, pr_number: pr, created_at, updated_at: AFTER });
+      await insert(db, "preapprovals", { repo: "demo", number: pr, by: "erin", at: AFTER, instructions: "", state: "ci", from_head: `h${pr}`, updated_at: AFTER });
+    }
+  };
+  // The end of the first attempt was recorded after the workflow started, which made a second one.
+  await implement(40, [[41, "closed", BEFORE], [42, "pr", AFTER]]);
+  await implement(45, [[46, "closed", BEFORE]]);
+  await db.prepare("DELETE FROM main.preapprovals WHERE number = 42").run();
+  await switchOver(db, { now: NOW });
+  const legs = await rows(db, "SELECT p.number, w.number AS item FROM main.preapprovals p JOIN main.item_workflows w ON w.id = p.workflow_id WHERE p.number > 40 ORDER BY p.number");
+  assert.deepEqual(legs.map((l) => [l.number, l.item]), [[41, 41], [46, 45]]);
+  assert.deepEqual((await rows(db, "SELECT number, approved_by FROM main.item_workflows WHERE number IN (40, 45) ORDER BY number")).map((w) => [w.number, w.approved_by]), [[40, null], [45, "erin"]]);
   await db.close();
 });
 
@@ -259,6 +294,12 @@ test("an answer nobody may act on leaves the question open, Backlog ends the wor
   await stuck(37, answerBy("alice", "backlog", BEFORE));
   await stuck(38, { ...answerBy("alice", "draft-pr"), applied_at: AFTER }, "opening");
   await stuck(39, {});
+  // Nobody started it.
+  await stuck(40, answerBy("alice", "backlog"));
+  await insert(db, "workspaces", { id: 1, repo: "demo", base_sha: "b", env_id: "e", state: "parked", state_at: BEFORE, created_at: BEFORE, updated_at: BEFORE });
+  await insert(db, "remote_calls", { id: 1, step: "implement", stage: 1, prompt_id: "p", prompt_version: "1", tier: "top", effort: "medium", asked_model: "m", bundle: "{}", state: "queued", since: 0, seen_at: 0, max_attempts: 1, timeout_ms: 1 });
+  await insert(db, "remote_call_items", { call_id: 1, pos: 0, repo: "demo", number: 36 });
+  await db.prepare("UPDATE main.implementations SET workspace_id = 1 WHERE id = 36").run();
   const rec = (id: number) => JSON.stringify({ text: "Start it again.", parts: { fix: [], drop: [] }, merges: true, answer: { decision: `demo#${id}:implement`, option: "try-again" }, question: `demo#${id}:implement` });
   for (const [id, at] of [[36, BEFORE], [37, AFTER], [39, BEFORE]] as const) {
     await insert(db, "item_workflows", { id: 2000 + id, repo: "demo", number: id, kind: "issue", entry: "implement", state: "blocked", started_by: "erin", started_at: at, started_via: "github", approved_by: "erin", approved_at: at, blocker: "failed-twice", rec: rec(id), rec_at: AFTER, updated_at: AFTER });
@@ -270,6 +311,7 @@ test("an answer nobody may act on leaves the question open, Backlog ends the wor
       answers: numbers.map((n) => [n, facts.get(`demo#${n}`)!.answer?.option ?? null]),
       workflows: (await rows(db, "SELECT number, state, rec, rec_at FROM main.item_workflows WHERE number IN (36, 37, 39) ORDER BY number")).map((w) => ({ ...w })),
       asks39: openQuestionOf(facts.get("demo#39")!),
+      attempts: (await rows(db, "SELECT id, state, reason FROM main.implementations WHERE id IN (36, 37, 40) ORDER BY id")).map((x) => ({ ...x })),
       rounds: (await rows(db, "SELECT * FROM main.implementation_rounds ORDER BY id")).map((x) => JSON.stringify(x)),
     };
   };
@@ -277,6 +319,11 @@ test("an answer nobody may act on leaves the question open, Backlog ends the wor
   const first = await state();
   assert.deepEqual(first.answers, [[31, null], [32, null], [33, null], [34, null], [35, "try-again"], [38, "draft-pr"], [39, null]], "disputed, waiting, no write access, no role");
   assert.deepEqual(first.workflows.map((w) => [w.number, w.state]), [[36, "backlog"], [37, "blocked"], [39, "blocked"]], "a start after the Backlog answer stands");
+  const ended = { state: "cancelled", reason: "moved to the backlog by alice" };
+  assert.deepEqual(first.attempts, [{ id: 36, ...ended }, { id: 37, state: "stuck", reason: "The plan call failed: no reply" }, { id: 40, ...ended }], "a later implement makes a new attempt");
+  assert.equal((await rows(db, "SELECT state FROM main.item_workflows WHERE number = 40"))[0]!.state, "backlog");
+  assert.equal((await rows(db, "SELECT state FROM main.workspaces"))[0]!.state, "ended");
+  assert.equal((await rows(db, "SELECT state FROM main.remote_calls"))[0]!.state, "failed");
   const back = first.workflows[2]!;
   assert.equal(back.rec_at, AFTER, "the same question does not come back as a new one");
   assert.deepEqual([JSON.parse(back.rec as string).question, JSON.parse(back.rec as string).answer.question], [first.asks39, first.asks39]);

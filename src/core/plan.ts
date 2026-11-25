@@ -140,6 +140,8 @@ export type PrFacts = {
   gateRed?: boolean;
   /** The head has no review, but the review of the earlier head carries to it (src/review/carry.ts): the Carry step stores it and no model reviews the head. */
   carriable?: boolean;
+  /** A PR of the merge entry, which merges without a review, whose head holds pushes of ours since a person approved it that a model has to read: it needs a review like any other PR. */
+  reviewOwed?: boolean;
   /** Why a due review waits (src/review/gate.ts): an open blocker, CI at the head not finished or not passed, the PR's daily review cap, or the minimum time since its last review. */
   reviewHold?: { kind: "blocked" | "ci" | "cap" | "interval" | "failed"; wait: string; /** When a timed wait ends (ms). */ until?: number; /** A ci hold whose head's CI has failed. */ red?: boolean; person?: boolean };
   /** AutoCraft has its own work on this PR: one of its pushes (fix-up, CI fix, base merge) at or since the reviewed head, a stored lint patch, or the PR is our own fix PR. It ends when the PR is closed; selection also drops it while the plan waits on a person (see inFlightNow). */
@@ -311,7 +313,7 @@ export type PrFacts = {
   gateFailureNote: string | null;
   /**
    * What the merge and push approval checks (src/core/may.ts) read: the repo's merge and push approvals, the live workflow's
-   * approval inputs, how the latest workflow ended when none is live, and our recorded pushes to the PR. The only place the facts
+   * approval inputs, how the latest workflow ended when none is live, and every push we made to the PR. The only place the facts
    * hold the repo's merge and push approvals, so no rule can read them past a person's approval.
    */
   may: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ended: EndedWorkflow | null; pushes: { from: string; to: string }[]; /** The head is a commit we pushed to a branch of our own, or our later pushes on top of one. */ ownHead: boolean; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };

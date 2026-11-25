@@ -2,7 +2,7 @@
 import { readConfig, saveSettings, type Config } from "../data/control/index.ts";
 import type { Db } from "../db/index.ts";
 
-/** A fix-up or implementation diff with more changed lines than this is a large fix (blocker 5). */
+/** Our pushes since the approval with more changed lines than this together are a large fix (blocker 5). */
 export const LARGE_FIX_KEY = "blocker_large_fix_lines";
 export const LARGE_FIX_DEFAULT = 400;
 /** A change outside the PR's purpose blocks (blocker 6) when the review counts at least this many changed lines outside it. */

@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "./world-db.ts";
 import { carriedReviews } from "../src/review/carry.ts";
 import type { Db } from "../src/db/index.ts";
-import { changedHunks, ownDiffKey } from "../src/review/own-diff.ts";
+import { changedHunks, changedLines, ownDiffKey } from "../src/review/own-diff.ts";
 import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { conflictBucket } from "../src/fixup/conflict-state.ts";
+import { startWorkflows } from "../src/data/workflow/index.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
 const carriedReview = async (db: Db, c: { repo: string; number: number; head_oid: string }, stale?: Set<string>) => (await carriedReviews(db, [c], stale)).get(`${c.repo}#${c.number}`) ?? null;
@@ -32,6 +33,9 @@ test("a merge of the base that leaves the PR's own diff alone carries the verdic
   assert.match(only, /let b = 3;/);
   assert.match(only, /src\/b\.rs/);
   assert.equal(changedHunks(before, before), "");
+  // The size of a resolution: the PR's lines it changed, not the ones it only moved.
+  assert.equal(changedLines(before, before.replace("@@ -10,3", "@@ -40,3")), 0);
+  assert.equal(changedLines(before, after), 4);
 
   const db = await connectDb(join(tmpdir("conflict-cost"), "t.db"));
   const at = "2026-11-04T10:00:00.000Z";
@@ -81,4 +85,8 @@ test("the review after our resolution reads the changed and dropped PR hunks, an
   assert.ok(d.kind === "ready" && d.input.diff.includes("dropped line"));
   const f = await prepareOpusInput(db, "app", c("H2"), deps, () => {});
   assert.equal(f.kind === "ready" && f.mode, "full", "an empty delta is not a delta");
+  // Sent to merge without a review: the review our push owes reads the whole PR, not the changes since a review the person went past.
+  await startWorkflows(db, [{ repo: "app", number: 1, kind: "pr", entry: "merge", weight: 5, startedBy: "ann", startedVia: "dashboard", baseHead: "E", at: "2026-11-04T11:00:00.000Z" }]);
+  const m = await prepareOpusInput(db, "app", c("H"), deps, () => {});
+  assert.deepEqual(m.kind === "ready" && [m.mode, m.input.earlier_opus], ["full", null]);
 });

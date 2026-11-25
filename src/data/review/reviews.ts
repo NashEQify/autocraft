@@ -4,9 +4,11 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { loadOwnLogins } from "../access/index.ts";
+import { listAudit } from "../control/index.ts";
+import { unclearWrite } from "../../github/unsent.ts";
 import { discussionEntries, followupFixLinks, premergeBase, unreviewedMerges } from "./cross.ts";
 import { headRef, headTuples, latestRows, listOf, noKeys, parseHistory, parseReview, pushTo, refKey, reviewSelect, reviewWindow } from "./rows.ts";
-import type { Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
+import type { Filing, Finding, Followup, HeadKey, HeadRef, HistoryRow, MirrorEntry, PendingDefect, PostmergeRow, PremergeRow, RefKey, ReviewPost, ReviewRow, ReviewTexts, StoredHistory } from "./types.ts";
 
 /** A review that failed with a `retry:` error is tried again after this long; filing retries wait 1 h after the first failed try and 6 h after the second, three tries at most. */
 const FAILED_BACKOFF_MS = [3600_000, 6 * 3600_000];
@@ -197,7 +199,7 @@ export async function loadPendingDefects(db: Db, keys: KeySource, o: { now: numb
       if (f.severity !== "defect" || f.duplicate_of !== null) return;
       const row = have.find((x) => x.finding === i);
       if (row && row.state !== "skipped-limit" && !retryDue(row, o.now)) return;
-      out.push({ repo: r.repo, number: r.number, review_at: r.at, finding: i, f, model: r.model, attempts: row?.attempts ?? 0, note: row?.note ?? null });
+      out.push({ repo: r.repo, number: r.number, review_at: r.at, finding: i, f, model: r.model, attempts: row?.attempts ?? 0, note: row?.note ?? null, was: row ?? null });
     });
   }
   return out;
@@ -211,6 +213,25 @@ export async function loadRecentFiled(db: Db, repo: string, o: { now: number }):
     .select(["pf.number", "pf.finding", "r.findings"]).where("pf.repo", "=", repo).where("pf.state", "in", ["filed", "filing"]).where("pf.at", ">=", since)
     .orderBy("pf.review_at").orderBy("pf.number").orderBy("pf.finding"));
   return rows.flatMap((x) => { const f = listOf<Finding>(x.findings)[x.finding]; return f ? [{ number: x.number, f }] : []; });
+}
+
+/**
+ * The rows in `filing` (of the PRs of `repo` when given), each with what the audit rows tell of its create: an issue any create of this
+ * finding made, else whether one begun since the claim may have made it. 1 statement, 1 more when there are any.
+ */
+export async function loadFilings(db: Db, o: { repo?: string } = {}): Promise<Filing[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.postmerge_followups as f").select(kx.cols("postmerge_followups", "f")).where("f.state", "=", "filing").$if(o.repo !== undefined, (b) => b.where("f.repo", "=", o.repo!))
+    .orderBy("f.repo").orderBy("f.number").orderBy("f.review_at").orderBy("f.finding")) as Followup[];
+  if (!rows.length) return [];
+  const since = rows.reduce((m, r) => (r.review_at < m ? r.review_at : m), rows[0]!.review_at);
+  const audits = await listAudit(db, { actions: ["postmerge-file"], targets: [...new Set(rows.map((r) => refKey(r.repo, r.number)))], since });
+  return rows.map((r) => {
+    const mine = audits.filter((a) => a.target === refKey(r.repo, r.number) && a.details?.finding === r.finding && a.at >= r.review_at);
+    const made = mine.flatMap((a) => { const m = a.details?.state === "done" ? /\/issues\/(\d+)/.exec(String(a.details.url ?? "")) : null; return m ? [{ number: Number(m[1]), url: String(a.details!.url) }] : []; });
+    const open = mine.some((a) => a.at >= r.at && (a.details?.state === "done" || unclearWrite(a.details)));
+    return { ...r, create: made.length ? { issue: made[made.length - 1]! } : open ? { issue: null } : null };
+  });
 }
 
 /** Merged PRs since `since` with no post-merge row. 1 statement. */

@@ -78,6 +78,7 @@ export type ItemWorkflow = {
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;
   recAt: string | null;
+  /** The PR's head the recommendation was made at; an answer accepts it and our own pushes on it. Kept while a question the author pushed past is made again. */
   recHead: string | null;
   plan: PlanPart[];
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */

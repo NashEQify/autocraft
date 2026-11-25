@@ -14,8 +14,10 @@ import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
 import { countEventsSince, listWorkflows, loadActions, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
+import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -238,10 +240,13 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}) };
   try {
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
-    const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
+    const closes = r.run.end === "close" && says(input.parsed, "close");
+    const close = closes ? said : on;
+    // Runs the open question's answer, as against a word that ends the work whatever was asked.
+    const accepts = r.run.answers && (r.run.end === null || (r.run.end === "close" && !closes));
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said });
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts });
     const more = too.flatMap((x) => (x.workflow ? [x] : []));
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
@@ -301,13 +306,26 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
 /** `commit` writes the workflow row (started, changed or ended) with the run's own rows and returns its id; it runs in the write that records the event. */
 type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
+/** Whether our own pushes alone moved the PR from `from` to `to`. */
+const ownSince = async (db: Db, pr: fx.Target, from: string, to: string): Promise<boolean> =>
+  from === to || chainsOwn((await loadOwnPushes(db, [{ repo: pr.repo, number: pr.number }])).get(`${pr.repo}#${pr.number}`) ?? [], from, to);
+
+const PUSHED_SINCE = (): string => t("The author pushed commits after the question was asked. A new question follows.");
 const CHANGED = (): string => t("The pull request changed after the command was written. Send it again.");
 
 /** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target }): Promise<Done> {
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target; accepts: boolean }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
+  // An implement workflow's PR, read once however much of the command needs it.
+  let read: Promise<fx.Target | null> | undefined;
+  const issuePr = (w: ItemWorkflow): Promise<fx.Target | null> => (read ??= implementationPr(db, w));
+  // An answer at another head than the question's would accept code nobody was shown.
+  if (o.accepts && wf?.recHead && !r.pick) {
+    const pr = item.kind === "pr" ? item : await issuePr(wf);
+    if (pr?.head && !await ownSince(db, pr, wf.recHead, pr.head)) throw new fx.EffectError(PUSHED_SINCE());
+  }
   if (r.end !== null) {
     if (r.end === "close" && o.close.kind === "pr" && !o.close.head) throw new fx.EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: refText(o.close.repo, o.close.number) }));
     const state = r.end === "stop" ? "stopped" : r.end === "close" ? "closed" : "backlog";
@@ -368,22 +386,20 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
   let on: fx.Ctx = { ...c, workflowId: live.id };
   if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
-    const pr = await implementationPr(db, live);
+    const pr = await issuePr(live);
     // A command written on the PR is about its head then, and about that PR.
     if (o.said.kind === "pr" && (pr?.number !== o.said.number || (o.said.head !== null && pr.head !== o.said.head))) throw new fx.EffectError(CHANGED());
-    // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
-    if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(CHANGED());
     if (pr) on = { ...c, item: pr, workflowId: live.id };
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
-  const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await implementationPr(db, live)] : [])].filter((x) => x !== null);
+  const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await issuePr(live)] : [])].filter((x) => x !== null);
   const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges }) : null;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
   // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
-  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, ...(item.head ? { baseHead: item.head } : {}) });
+  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null, ...(item.head ? { baseHead: item.head } : {}) });
   // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
   if (runs) patch.state = r.again !== null || r.merges || r.pick ? "running" : r.answers ? "done" : live.state;

@@ -1,30 +1,174 @@
-// Merge trust follows the code it covered: an approved merge carries to the head of a base merge that left the PR's own diff unchanged, and to no other head the pipeline made from code nobody reviewed.
+// The merge approval of a started PR and AutoCraft's own pushes: whatever step made the push and wherever the merge leg is, the approval stays, nobody
+// is asked again, and the new head goes through the review, CI and the pre-merge review it needs. Anyone else's commits end it.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { loadOwnPushes } from "../src/data/views/own-pushes.ts";
+import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals, preapprovalOf, preapproveMerge } from "../src/preapproval/index.ts";
+import { advanceWorkflows } from "../src/workflow/advance.ts";
+import { liveWorkflow } from "../src/workflow/store.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
 
-test("an approved merge carries across a base merge that left the diff unchanged, not across a CI fix or a changed-diff merge", async () => {
+const fixup = (source: string | null) => (w: World, n: number, from: string, to: string) =>
+  w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: from, to_head: to, state: "pushed", source, attempt: 1, created_at: T0 }));
+const cifix = (w: World, number: number, head: string, to_head: string) =>
+  w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number, head, to_head, kind: "code", state: "pushed", attempt: 1, created_at: T0 }));
+const merged = (own_diff: string | null) => (w: World, number: number, from_head: string, to_head: string) =>
+  w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number, from_head, to_head, state: "merged", attempt: 1, created_at: T0, own_diff }));
+const revision = (w: World, number: number, from_oid: string, to_oid: string) =>
+  w.db.run(w.db.k.insertInto("push_outcomes").values({ at: T0, stage: "implement", action: "implement-push", repo: "app", number, from_oid, to_oid, before_res: "unknown" }));
+const repin = (w: World, number: number, head: string, to_head: string) =>
+  w.db.run(w.db.k.insertInto("autorepins").values({ repo: "app", number, ref_repo: "libs", ref_number: 5, login: OPERATOR, github_id: 1, requested_at: T0, state: "pushed", head, to_head, done_at: T0 }));
+/** A push a crash left between the push and its record. */
+const pushing = (w: World, n: number, from: string, to: string) =>
+  w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: n, head: from, to_head: to, kind: "code", state: "pushing", attempt: 1, created_at: T0 }));
+
+const PUSHES: { name: string; push: (w: World, n: number, from: string, to: string) => Promise<unknown>; /** Nothing a model wrote: a PR that merges without a review needs none after it. */ small?: true }[] = [
+  { name: "review fix-up", push: fixup(null) },
+  { name: "pre-merge fix-up", push: fixup("premerge") },
+  { name: "operator fix-up", push: fixup("operator") },
+  { name: "CI fix", push: cifix },
+  { name: "CI fix left by a crash", push: pushing },
+  { name: "clean base merge", push: merged("same"), small: true },
+  { name: "resolved conflict", push: merged("changed") },
+  { name: "base merge whose diff nobody could read", push: merged(null) },
+  { name: "implementation revision", push: revision },
+  { name: "autorepin", push: repin, small: true },
+];
+const STATES = ["review", "ci", "queued"] as const;
+
+/** Every push kind, leg state and entry, one PR each. */
+type Case = (typeof PUSHES)[number] & { n: number; state: (typeof STATES)[number]; entry: "review" | "merge" };
+const cases = (): Case[] => {
+  let n = 0;
+  return PUSHES.flatMap((p) => STATES.flatMap((state) => (["review", "merge"] as const).map((entry) => ({ ...p, n: ++n, state, entry }))));
+};
+/** A started PR approved for merge whose leg is in `state` at sha<n>. A merge entry has an old review that says close, which plays no part. */
+async function approved(w: World, c: Pick<Case, "n" | "state" | "entry">): Promise<void> {
+  await (await w.pr(c.n)).workflow(c.n, { entry: c.entry });
+  await w.review(c.n, { verdict: c.entry === "merge" ? "close" : "take" });
+  if (c.entry === "merge") await w.db.run(w.db.k.updateTable("opus_reviews").set({ at: "2020-01-01T00:00:00.000Z" }).where("number", "=", c.n));
+  await preapproveMerge(w.db, { repo: "app", number: c.n, by: OPERATOR });
+  await w.db.run(w.db.k.updateTable("preapprovals").set({ state: c.state }).where("number", "=", c.n));
+}
+const tick = async (w: World, times = 3): Promise<void> => { for (let i = 0; i < times; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+const legOf = async (w: World, n: number) => (await preapprovalOf(w.db, "app", n))!;
+
+test("a push of ours keeps the merge approval, whatever made it and wherever the leg is, and asks nobody", async () => {
   const w = (current = await (await (await world()).repo()).acting());
-  for (const n of [1, 2, 3]) {
-    await (await (await w.pr(n)).review(n, { verdict: "take" })).workflow(n);
-    await preapproveMerge(w.db, { repo: "app", number: n, by: OPERATOR });
+  const all = cases();
+  for (const c of all) await approved(w, c);
+  for (const c of all) { await c.push(w, c.n, `sha${c.n}`, `sha${c.n}b`); await w.synced(c.n, `sha${c.n}b`); await w.verified(c.n); }
+  await tick(w);
+  const plans = new Map((await w.plan()).prs.map((p) => [p.facts.number, p.plan]));
+  for (const c of all) {
+    const label = `${c.name}, ${c.state}, ${c.entry}`;
+    const wf = (await liveWorkflow(w.db, "app", c.n))!, leg = await legOf(w, c.n);
+    const unreviewed = c.entry === "merge" && !!c.small;
+    assert.deepEqual([wf.state, wf.blocker, wf.baseHead, wf.approvedBy], ["running", null, `sha${c.n}b`, OPERATOR], label);
+    assert.deepEqual([leg.state, leg.head, leg.fromHead], [unreviewed ? "ci" : "review", `sha${c.n}b`, `sha${c.n}`], label);
+    // The next step is planned: the review (or its carry), or the pre-merge review where none is needed.
+    const kinds = plans.get(c.n)!.actions.map((a) => a.kind);
+    assert.ok(kinds.includes(unreviewed ? "premerge" : c.name === "clean base merge" ? "carry" : "review"), `${label}: ${kinds.join()}`);
+    assert.ok(!kinds.includes("merge"), label);
+    const may = (await mergeVerdicts(w.db, "app", [{ number: c.n, head: `sha${c.n}b` }])).get(c.n)!;
+    assert.ok(!may.ok && /hand it over/.test(may.why), `${label}: ${JSON.stringify(may)}`);
   }
-  await advancePreapprovals(w.db);
-  for (const n of [1, 2, 3]) assert.equal((await preapprovalOf(w.db, "app", n))?.state, "ci");
-  const merge = (number: number, from_head: string, to_head: string, own_diff: string) =>
-    w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number, from_head, to_head, state: "merged", attempt: 1, created_at: T0, own_diff }));
-  await merge(1, "sha1", "sha1m", "same");
-  await merge(2, "sha2", "sha2m", "changed");
-  await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3", to_head: "sha3c", kind: "code", state: "pushed", attempt: 1, created_at: T0 }));
-  await (await (await w.synced(1, "sha1m")).synced(2, "sha2m")).synced(3, "sha3c");
-  await advancePreapprovals(w.db);
-  const p = (await preapprovalOf(w.db, "app", 1))!;
-  assert.deepEqual([p.state, p.fromHead, p.head, p.by], ["review", "sha1", "sha1m", OPERATOR]);
-  for (const n of [2, 3]) assert.equal((await preapprovalOf(w.db, "app", n))?.state, "cancelled");
-  // The base merge's head needs its own review before anything merges it.
-  assert.ok(!(await w.prPlan(1)).actions.some((a) => a.kind === "merge"));
+
+  // Reviewed, green and clean at the new head, every one is handed over and may merge as the approver.
+  for (const c of all) {
+    if (!(c.entry === "merge" && c.small)) await w.review(c.n, { sure: false });
+    await w.premerge(c.n, "clean");
+  }
+  await tick(w);
+  const verdicts = await mergeVerdicts(w.db, "app", all.map((c) => ({ number: c.n, head: `sha${c.n}b` })));
+  for (const c of all) {
+    assert.equal((await legOf(w, c.n)).state, "queued", `${c.name}, ${c.state}, ${c.entry}`);
+    assert.deepEqual(verdicts.get(c.n), { ok: true, as: "person", by: OPERATOR }, `${c.name}, ${c.state}, ${c.entry}`);
+  }
+});
+
+test("someone else's commits end the leg and ask, also under a push of ours or after one", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  const after = STATES.map((state, i) => ({ n: 1 + i, state, entry: "review" as const }));
+  const under = STATES.map((state, i) => ({ n: 4 + i, state, entry: "merge" as const }));
+  for (const c of [...after, ...under]) await approved(w, c);
+  // Ours, then theirs on top; and theirs with ours on top.
+  for (const c of after) { await cifix(w, c.n, `sha${c.n}`, `sha${c.n}b`); await w.synced(c.n, `sha${c.n}b`); }
+  await tick(w);
+  for (const c of after) { assert.equal((await legOf(w, c.n)).state, "review"); await w.synced(c.n, `theirs${c.n}`); }
+  for (const c of under) { await cifix(w, c.n, `theirs${c.n}`, `sha${c.n}c`); await w.synced(c.n, `sha${c.n}c`); }
+  await tick(w);
+  for (const c of [...after, ...under]) {
+    const wf = (await liveWorkflow(w.db, "app", c.n))!;
+    assert.deepEqual([wf.state, wf.blocker, (await legOf(w, c.n)).state], ["blocked", "author-commits", "cancelled"], `${c.n}`);
+  }
+});
+
+test("the review a push of ours owes a merge entry stops it on a hold, and has its fixes made on a take-fix", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  for (const n of [1, 2]) {
+    await approved(w, { n, state: "ci", entry: "merge" });
+    await cifix(w, n, `sha${n}`, `sha${n}b`);
+    await w.synced(n, `sha${n}b`);
+  }
+  await tick(w);
+  await w.review(1, { verdict: "hold" });
+  await w.review(2, { verdict: "take-fix" });
+  await tick(w);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.blocker, (await legOf(w, 1)).state], ["major-finding", "cancelled"]);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 2))!.state, (await legOf(w, 2)).state], ["running", "review"]);
+  assert.ok((await w.prPlan(2)).actions.some((a) => a.kind === "fixup" && a.params?.bucket === "fix"));
+});
+
+test("a push of ours while the approved fix-up waits takes the fix-up to the new head", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  for (const n of [1, 2]) { await (await (await w.pr(n)).workflow(n)).review(n, { verdict: "take-fix" }); await w.fixup(n, n === 1); }
+  await w.db.run(w.db.k.updateTable("items").set({ maintainer_can_modify: 1 }));
+  // A try stored at the old head for its lint check is dropped there, and says nothing about the request.
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "sha1", state: "superseded", attempt: 1, created_at: T0, source: "operator", operator_fix: Number((await w.rows("SELECT id FROM operator_fixups WHERE number = 1"))[0]!.id) }));
+  for (const n of [1, 2]) { await cifix(w, n, `sha${n}`, `sha${n}b`); await w.synced(n, `sha${n}b`); }
+  await tick(w);
+  assert.deepEqual([(await legOf(w, 1)).state, (await legOf(w, 1)).fromHead, (await legOf(w, 1)).reason], ["fixup", "sha1b", null]);
+  for (const n of [1, 2]) {
+    assert.deepEqual(await w.rows("SELECT state, from_head FROM operator_fixups WHERE number = ?", n), [{ state: "queued", from_head: `sha${n}b` }]);
+    assert.ok((await w.prPlan(n)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"), `${n}`);
+  }
+  await w.synced(1, "theirs");
+  await tick(w);
+  assert.equal((await legOf(w, 1)).state, "cancelled");
+});
+
+test("a push of ours the mirror does not show yet neither moves the leg nor ends it, until a sync that began after it has finished", async () => {
+  const w = (current = await (await (await world()).repo()).acting());
+  for (const [n, o] of [[1, { mergeable: "CONFLICTING" }], [2, { overall: "failure" }]] as const) {
+    await approved(w, { n, state: "ci", entry: "review" });
+    await w.db.run(w.db.k.updateTable("pr_checks").set(o).where("number", "=", n));
+  }
+  await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }));
+  const at = new Date().toISOString();
+  await merged("same")(w, 1, "sha1", "sha1b");
+  await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 2, head: "sha2", to_head: "sha2b", kind: "code", state: "pushed", attempt: 1, created_at: at }));
+  for (const n of [1, 2]) {
+    await w.db.run(w.db.k.insertInto("push_outcomes").values({ at, stage: "fixup", action: n === 1 ? "conflict-push" : "cifix-push", repo: "app", number: n, from_oid: `sha${n}`, to_oid: `sha${n}b`, before_res: "unknown" }));
+  }
+  await tick(w);
+  for (const n of [1, 2]) assert.deepEqual([(await legOf(w, n)).state, (await legOf(w, n)).head, (await liveWorkflow(w.db, "app", n))!.state], ["ci", `sha${n}`, "running"]);
+  // The push never shows: the leg judges the head it has.
+  await w.db.run(w.db.k.updateTable("repos").set({ synced_at: new Date(Date.now() + 1000).toISOString() }));
+  await tick(w);
+  assert.equal((await legOf(w, 1)).state, "failed");
+});
+
+test("every push of ours is one list: its kind, its size, and the newest time recorded for it", async () => {
+  const w = (current = await (await (await world()).repo()).pr(1));
+  await fixup(null)(w, 1, "a", "b");
+  await w.db.run(w.db.k.insertInto("push_outcomes").values({ at: "2026-12-01T00:00:00.000Z", stage: "fixup", action: "fixup-push", repo: "app", number: 1, from_oid: "a", to_oid: "b", before_res: "unknown", lines: 12 }));
+  await repin(w, 1, "b", "c");
+  const got = (await loadOwnPushes(w.db, [{ repo: "app", number: 1 }])).get("app#1")!;
+  assert.deepEqual(got.map((p) => [p.from, p.to, p.what, p.lines, p.small]), [["a", "b", "fix-up", 12, false], ["b", "c", "autorepin", null, true]]);
+  assert.equal(got[0]!.at, "2026-12-01T00:00:00.000Z");
 });

@@ -73,6 +73,22 @@ export function changedHunks(before: string, after: string, touched: readonly st
   return out.length ? `${out.join("\n")}\n` : "";
 }
 
+/** How many of the added and removed lines of two diffs of the same PR are in one of them only. */
+export function changedLines(before: string, after: string): number {
+  const was = parse(before), now = parse(after);
+  let n = 0;
+  for (const path of new Set([...was.keys(), ...now.keys()])) {
+    const left = new Map<string, number>();
+    const count = (hunks: string[] | undefined, by: 1 | -1): void => {
+      for (const l of (hunks ?? []).filter((h) => !h.startsWith("# ")).flatMap((h) => h.split("\n"))) left.set(l, (left.get(l) ?? 0) + by);
+    };
+    count(was.get(path), 1);
+    count(now.get(path), -1);
+    for (const d of left.values()) n += Math.abs(d);
+  }
+  return n;
+}
+
 /**
  * What a review owes a head made by our merge of the base branch. The reviewer reads the PR's own diff, which the merge leaves as it was
  * unless the conflict resolution changed it: unchanged, the earlier verdict carries; changed, only those hunks are read; unknown, the whole diff.

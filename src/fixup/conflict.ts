@@ -17,7 +17,7 @@ import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { cachedDiff } from "../review/diff.ts";
 import { mergeInAllowed } from "../merge/base.ts";
 import { MAX_DIFF_CHARS } from "../review/opus.ts";
-import { changedHunks, hasBinary, ownDiffKey } from "../review/own-diff.ts";
+import { changedHunks, changedLines, hasBinary, ownDiffKey } from "../review/own-diff.ts";
 import { checkLine, parseCheck, recordCheck } from "../patchcheck/index.ts";
 import { CHECK_DIFF_CAP, CHECK_PATCH_CAP, type FixupCheckInput } from "../patchcheck/types.ts";
 import { CLAUDE_PROMPTS, untrustedJson } from "../prompts/index.ts";
@@ -87,17 +87,18 @@ async function record(db: Db, at: string, c: ConflictCandidate, state: string, r
 /**
  * Whether the PR's own diff is unchanged by the merge, read from the local commits (no GitHub call, and no wait for GitHub to show the new head).
  * Only a clean git merge is `same`: the key ignores line positions, so a model resolution may have moved PR lines. A binary file is `changed`.
- * `delta` is what changed, for the review. Both are null when git cannot say.
+ * `delta` is what changed, for the review; `lines` how many of the PR's lines a model's resolution changed (a clean merge changes none). All
+ * are null when git cannot say.
  */
-async function ownDiffAfterMerge(git: Git, head: string, baseSha: string, commit: string, resolved: string[]): Promise<{ ownDiff: "same" | "changed" | null; delta: string | null }> {
+async function ownDiffAfterMerge(git: Git, head: string, baseSha: string, commit: string, resolved: string[]): Promise<{ ownDiff: "same" | "changed" | null; delta: string | null; lines: number | null }> {
   try {
     const mb = (await git.must(["merge-base", head, baseSha])).trim();
     const before = await git.diffText(mb, head), after = await git.diffText(baseSha, commit);
-    if (!resolved.length && !hasBinary(before) && !hasBinary(after) && ownDiffKey(before) === ownDiffKey(after)) return { ownDiff: "same", delta: null };
+    if (!resolved.length && !hasBinary(before) && !hasBinary(after) && ownDiffKey(before) === ownDiffKey(after)) return { ownDiff: "same", delta: null, lines: 0 };
     // Over the review's size cap the delta is not kept: the review then reads the whole diff (and is refused as too large if that is over the cap too).
     const delta = changedHunks(before, after, resolved) || null;
-    return { ownDiff: "changed", delta: delta && delta.length <= MAX_DIFF_CHARS ? delta : null };
-  } catch { return { ownDiff: null, delta: null }; }
+    return { ownDiff: "changed", delta: delta && delta.length <= MAX_DIFF_CHARS ? delta : null, lines: resolved.length ? changedLines(before, after) : 0 };
+  } catch { return { ownDiff: null, delta: null, lines: null }; }
 }
 
 async function live(db: Db, x: ConflictRun, c: ConflictCandidate): Promise<PrNode | null> {
@@ -371,7 +372,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     const g = await guard(db, { repo: x.repo, number: c.number }, c.lint ? { kind: "lint", bucket: "conflict", head: c.head, source: "review" } : { kind: "conflict", bucket: "merge", head: c.head }, x.by, liveOf(db, x.d.querier));
     if ("refused" in g) { x.log(`  ${ref}: skipped: ${g.refused}`); return; }
     await recordPushing(db, x.at(), c, files, baseSha, commit);
-    const push = await pushBranch(x.gw, git, "conflict-push", g, { remote: pr.headRepository.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: x.runId, from: head, to: commit, base: c.base, files });
+    const push = await pushBranch(x.gw, git, "conflict-push", g, { remote: pr.headRepository.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: x.runId, from: head, to: commit, base: c.base, files, ...(own.lines !== null ? { changed: own.lines } : {}) });
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
       if (/denied|403|permission|not allowed|protected branch|declined|GH013/i.test(err)) { await held("push-denied", "the branch cannot be pushed to"); return; }

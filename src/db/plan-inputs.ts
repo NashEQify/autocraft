@@ -127,6 +127,14 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "preapprovals", class: "item", why: "A pre-approved merge of one PR." },
     { table: "premerge_reviews", class: "item", why: "Pre-merge reviews of one PR." },
     { table: "push_outcomes", class: "item", why: "Our pushes to one PR (pushed heads, broken heads)." },
+    {
+      table: "workflow_events", class: "item", why: "When a person last chose to go on with a started item, and who answered it.", when: "r.kind IN ('started', 'answered')",
+      noTopic: "Written with the workflow row the event is about (workflows).",
+    },
+    {
+      table: "autorepins", class: "item", why: "An autorepin's commit on one PR (our own pushes).", columns: ["head", "to_head"],
+      noTopic: "The commit is stored before its push; the push moves the PR's head (items), which the decision needs.",
+    },
     { table: "review_state", class: "item", why: "One PR's review flags: stale mark, reruns of the day, failures at a head." },
     {
       table: "merge_state", class: "item", why: "One PR's mergeable-unknown record.", columns: ["head", "since", "stuck"],

@@ -126,6 +126,21 @@ export async function setFiledNumber(db: Db, slot: number, number: number): Prom
   await q.run(q.k.updateTable("main.discord_filed").set({ number }).where(kx.rowid("main.discord_filed"), "=", slot));
 }
 
+/**
+ * Records the issue an earlier press made and lost the answer of (its write began at `since`): its number goes on that press's slot (the person's
+ * oldest one in the repo from then without a number) and `slot`, the finding press's, is released. Without such a slot `slot` is the issue's.
+ */
+export async function setFoundNumber(db: Db, f: { slot: number; repo: string; login: string; reporter: string; since: string; number: number }): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    const lost = await q.run(q.k.updateTable("main.discord_filed").set({ number: f.number }).where(kx.rowid("main.discord_filed"), "=", (eb) => eb.selectFrom("main.discord_filed as l").select(kx.rowid("main.discord_filed", "l").as("slot"))
+      .where("l.repo", "=", f.repo).where("l.login", "=", f.login).where("l.reporter", "=", f.reporter).where("l.at", ">=", f.since).where("l.number", "=", 0)
+      .where(kx.rowid("main.discord_filed", "l"), "<", f.slot).orderBy(kx.rowid("main.discord_filed", "l")).limit(1)));
+    if (Number(lost.changes) > 0) await releaseFiling(db, f.slot);
+    else await setFiledNumber(db, f.slot, f.number);
+  });
+}
+
 /** Releases a reserved slot. */
 export async function releaseFiling(db: Db, slot: number): Promise<void> {
   const q = queryDb(db);

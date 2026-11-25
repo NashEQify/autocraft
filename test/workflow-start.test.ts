@@ -468,6 +468,11 @@ test("a revision runs for whoever last answered, approved or started the issue's
   assert.deepEqual(await w.rows("SELECT queued_by FROM implementations"), [{ queued_by: "ann" }]);
 });
 
+/** The push of the conflict merge of sha1 went through. */
+const pushRecorded = (w: World) => w.db.run(w.db.k.insertInto("main.push_outcomes").values({
+  at: new Date().toISOString(), stage: "fixup", action: "conflict-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1b", before_res: "unknown",
+}));
+
 test("the recommendation on a conflicting PR runs on a yes: the merge is approved, the base is merged in, then the fixes nobody dropped are made", async () => {
   const fixes = [{ file: "src/lib.rs", change: "rename a to b", title: "rename a" }, { file: "src/lib.rs", change: "drop the copy", title: "drop the copy" }];
   for (const text of ["yes", "fix 1, drop 2, merge", "fix-up and merge", "drop 2"]) {
@@ -489,6 +494,10 @@ test("the recommendation on a conflicting PR runs on a yes: the merge is approve
 
     // The base is merged in; the review of the new head asks for the same.
     await w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head: "sha1", to_head: "sha1b", base_sha: "base", state: "merged", attempt: 1, created_at: new Date().toISOString(), own_diff: "same" }));
+    await pushRecorded(w);
+    // The mirror does not show the push yet: the leg waits for it.
+    await settle(w);
+    assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.state, ...(await w.rows("SELECT state FROM preapprovals")).map((l) => l.state)], ["running", "review"], text);
     await w.synced(1, "sha1b");
     await w.db.run(w.db.k.updateTable("main.pr_checks").set({ fetched_at: new Date().toISOString() }));
     await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: T0 }));
@@ -525,6 +534,13 @@ test("a yes on a conflicting PR with nothing to fix approves the merge, and the 
     assert.deepEqual([wf.state, wf.approvedBy], ["running", MAINT], `${ci}: ${wf.rec?.text}`);
     assert.deepEqual((await w.rows("SELECT state, reason FROM preapprovals")).map((l) => l.state), ["ci"], ci);
     assert.ok((await acts(w, 1)).includes("conflict:merge"), `${ci}: ${await acts(w, 1)}`);
+    await w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head: "sha1", to_head: "sha1b", base_sha: "base", state: "merged", attempt: 1, created_at: new Date().toISOString(), own_diff: "same" }));
+    await pushRecorded(w);
+    await settle(w);
+    assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.state, ...(await w.rows("SELECT state FROM preapprovals")).map((l) => l.state)], ["running", "ci"], ci);
+    await w.synced(1, "sha1b");
+    await settle(w);
+    assert.deepEqual(await w.rows("SELECT state, head FROM preapprovals"), [{ state: "review", head: "sha1b" }], ci);
     w.close();
   }
 });

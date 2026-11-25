@@ -2,6 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
+import type { OutcomePush } from "../../core/evidence.ts";
 import { BREAKER_WINDOW, breakerTripped, classifyPush, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
@@ -76,13 +77,13 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
       const row = stored.get(`${p.repo}#${p.number}`);
       if (row && row.head_oid === p.from) before = requiredResult(parse(row.checks), optional(p.repo));
     }
-    return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before };
+    return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before, lines: p.lines ?? null };
   });
   const q = queryDb(db);
   for (const part of kx.batches(rows)) {
-    const v = kx.valuesTable(db, part.map((r, ord) => ({ ...r, ord })), { ord: "bigint", at: "text", stage: "text", action: "text", repo: "text", number: "bigint", from_oid: "text", to_oid: "text", before_res: "text" }, "v");
-    await q.run((q.k as any).insertInto("main.push_outcomes").columns(["at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res"])
-      .expression((q.k as any).selectFrom(v).select(["v.at", "v.stage", "v.action", "v.repo", "v.number", "v.from_oid", "v.to_oid", "v.before_res"])
+    const v = kx.valuesTable(db, part.map((r, ord) => ({ ...r, ord })), { ord: "bigint", at: "text", stage: "text", action: "text", repo: "text", number: "bigint", from_oid: "text", to_oid: "text", before_res: "text", lines: "bigint" }, "v");
+    await q.run((q.k as any).insertInto("main.push_outcomes").columns(["at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "lines"])
+      .expression((q.k as any).selectFrom(v).select(["v.at", "v.stage", "v.action", "v.repo", "v.number", "v.from_oid", "v.to_oid", "v.before_res", "v.lines"])
         .where((eb: kx.AnyEb) => eb.not(eb.exists(eb.selectFrom("main.push_outcomes as o").select(eb.lit(1).as("one"))
           .whereRef("o.repo", "=", "v.repo").where((ie) => ie("o.number", "is not distinct from", ie.ref("v.number")))
           .whereRef("o.to_oid", "=", "v.to_oid").whereRef("o.action", "=", "v.action"))))
@@ -211,6 +212,8 @@ const keysJoin = (db: Db, keys: { repo: string; number: number }[] | KeySource) 
 
 const isEmptyKeys = (keys: unknown): boolean => Array.isArray(keys) && keys.length === 0;
 
+const outcomePush = (r: { from_oid: string; to_oid: string; action: string; at: string; lines: number | null }): OutcomePush => ({ from: r.from_oid, to: r.to_oid, action: r.action, at: r.at, lines: r.lines === null ? null : Number(r.lines) });
+
 /**
  * Per PR: the heads we pushed or moved off (`to_oid` and `from_oid`), when each head was moved off (the latest push away from it),
  * and the head our latest push broke (`outcome = 'broke'`, last by id).
@@ -220,14 +223,14 @@ export async function loadPushFacts(db: Db, keys: { repo: string; number: number
   if (isEmptyKeys(keys)) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.push_outcomes as p").innerJoin(keysJoin(db, keys), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
-    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome"]).orderBy("p.id"));
+    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome", "p.action as action", "p.lines as lines"]).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
     const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null }).get(ref)!;
     f.pushed.add(r.to_oid);
     if (r.from_oid !== null) {
       f.pushed.add(r.from_oid);
-      f.moves.push({ from: r.from_oid, to: r.to_oid });
+      f.moves.push(outcomePush({ ...r, from_oid: r.from_oid }));
       if (r.to_oid !== r.from_oid && r.at > (f.movedOffAt.get(r.from_oid) ?? "")) f.movedOffAt.set(r.from_oid, r.at);
     }
     if (r.outcome === "broke") f.brokeHead = r.to_oid;
@@ -236,15 +239,15 @@ export async function loadPushFacts(db: Db, keys: { repo: string; number: number
 }
 
 /** The recorded pushes of each PR that name the head they were made on, oldest first: the push-outcome part of the own-push chain. */
-export async function loadPushOutcomeEdges(db: Db, keys: { repo: string; number: number }[] | KeySource): Promise<Map<RefKey, { from: string; to: string }[]>> {
-  const out = new Map<RefKey, { from: string; to: string }[]>();
+export async function loadPushOutcomeEdges(db: Db, keys: { repo: string; number: number }[] | KeySource): Promise<Map<RefKey, OutcomePush[]>> {
+  const out = new Map<RefKey, OutcomePush[]>();
   if (isEmptyKeys(keys)) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.push_outcomes as p").innerJoin(keysJoin(db, keys), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
-    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid"]).where("p.from_oid", "is not", null).orderBy("p.id"));
+    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.action as action", "p.at as at", "p.lines as lines"]).where("p.from_oid", "is not", null).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
-    (out.get(ref) ?? out.set(ref, []).get(ref)!).push({ from: r.from_oid!, to: r.to_oid });
+    (out.get(ref) ?? out.set(ref, []).get(ref)!).push(outcomePush({ ...r, from_oid: r.from_oid! }));
   }
   return out;
 }

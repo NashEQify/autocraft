@@ -3,13 +3,15 @@
 // A pre-approved merge is the merge leg of a person's workflow: the merge they approved, worked through a fix-up, its review, CI
 // and the pre-merge review. States (see Preapproval in web/src/api/types.ts):
 //   fixup   -> the fix-up step works the operator's instructions (source 'operator' in its fixups rows)
-//   review  -> the fix-up pushed; waiting for the Opus review of the pushed head. A row with no fix-up (the merge of an approved workflow, also after a
-//              base merge) starts here at its head.
+//   review  -> the fix-up pushed; waiting for the Opus review of the pushed head. A row with no fix-up (the merge of an approved workflow) starts
+//              here at its head. A merge-queue entry waits here only for a review that a push of ours owes (src/core/evidence.ts reviewOwed).
 //   ci      -> that review says take (sure or unsure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it.
 //              A take-fix review keeps the row in review while the pipeline's fix-up of its fixes runs; that push is reviewed again.
 //   queued  -> CI is green and the pre-merge review is clean: the merge queue merges it as the person who approved the workflow
 //              (src/core/may.ts mayMerge), with every check it always makes (safe-merge included). It stops when the queue can go on only
 //              with a person's answer (queueStop), and goes back to review when a new review asks for fixes.
+// A push of ours (whatever step made it) never ends the row: in every state it goes on at the new head, through the review, CI and the
+// pre-merge review that head needs, and a row in fixup takes its request there. Someone else's push cancels it.
 //   merged / cancelled / failed end it. A stop ends the leg failed; the workflow then stops at a blocker with its recommendation.
 // Every transition is a pure reaction to rows other steps write (fixups, opus_reviews, pr_checks, items, merges), evaluated by
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
@@ -19,6 +21,7 @@ import { cifixBucket, decidePr, fixupOf, isDraft as draftPr, notStarted, refusal
 import { ownImplementation } from "../core/implementation.ts";
 import { pushRefusal } from "../core/gates.ts";
 import { draftOf, loadPrFact, loadPrFacts } from "../core/facts.ts";
+import { chainsOwn, reviewOwed, type RecordedPush } from "../core/evidence.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
 import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
@@ -33,10 +36,11 @@ import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { operatorTriesLeft, queuedOperatorFix } from "./state.ts";
 import { refreshSettlers, settlesNow, type RefreshDeps } from "./permissions.ts";
-import { addAudit, listAudit, listPushOutcomes, loadAuditActions, withConfig } from "../data/control/index.ts";
+import { addAudit, listAudit, loadAuditActions, withConfig } from "../data/control/index.ts";
 import { loadChecks, loadItems, loadRepos, type PrChecksView } from "../data/mirror/index.ts";
 import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
-import { loadOperatorFixResults, loadPushEdges, ownPushKind, type PushEdge } from "../data/changes/index.ts";
+import { loadOperatorFixResults } from "../data/changes/index.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadReviewsAt, type ReviewFinding } from "../data/review/index.ts";
 import { verdictKept } from "../workflow/work.ts";
 import { isRunning } from "../data/jobs/index.ts";
@@ -44,7 +48,7 @@ import { permKey, standings } from "../data/access/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { addTurns } from "../data/conversations/index.ts";
 import {
-  addFixupRequests, addLegs, adoptLegs, endFixupRequests, listWorkflows, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadRepins, loadWorkflowFacts, moveLegs,
+  addFixupRequests, addLegs, adoptLegs, endFixupRequests, listWorkflows, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadWorkflowFacts, moveFixupRequests, moveLegs,
   type LegContext, type LegMove, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
@@ -215,9 +219,10 @@ export async function checkFixup(db: Db, o: { repo: string; number: number; by: 
  * repair or a fix-up that cannot run stops the leg and the workflow asks.
  *
  * The workflow the leg belongs to puts the PR in the pipeline's scope and is its merge approval, so neither is checked. `head`, when
- * given, is the only head it may start at: the one the person saw (a command's comment-time head).
+ * given, is the only head it may start at: the one the person saw (a command's comment-time head). `fromHead`: the head the person
+ * approved, when pushes of ours lead from it to the PR's head.
  */
-export async function checkMergeLeg(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string }): Promise<CheckedStep> {
+export async function checkMergeLeg(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; fromHead?: string }): Promise<CheckedStep> {
   const { repo, number, by, via } = o;
   const ref = refOf(repo, number);
   const it = await openPr(db, repo, number);
@@ -230,7 +235,7 @@ export async function checkMergeLeg(db: Db, o: { repo: string; number: number; b
   return {
     write: async (workflowId) => {
       // The insert refuses a second active leg itself (the partial unique index).
-      const made = (await addLegs(db, [{ repo, number, by, workflowId, head, state: "review", ...(via ? { via } : {}) }])).get(ref);
+      const made = (await addLegs(db, [{ repo, number, by, workflowId, head, ...(o.fromHead ? { fromHead: o.fromHead } : {}), state: "review", ...(via ? { via } : {}) }])).get(ref);
       if (made === undefined || made === "active") throw busy(ref);
       await say(db, repo, number, `${by} added the PR to the merge queue at ${short(head)}: it merges once the review there says take, the pre-merge review is clean and CI is green.`);
       return made;
@@ -242,7 +247,7 @@ export async function checkMergeLeg(db: Db, o: { repo: string; number: number; b
  * Starts the merge leg (`checkMergeLeg`) of the live workflow that works on the PR: its own, or the one of the issue it implements.
  * Refused when there is none, or when it is not the one the caller names.
  */
-export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; workflowId?: number }): Promise<void> {
+export async function preapproveMerge(db: Db, o: { repo: string; number: number; by: string; via?: string; head?: string; fromHead?: string; workflowId?: number }): Promise<void> {
   const { repo, number } = o;
   const ref = refOf(repo, number);
   const facts = await loadWorkflowFacts(db, [{ repo, number }]);
@@ -259,8 +264,7 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
 // ---- the state machine ---------------------------------------------------------------------------------------------------
 
 /**
- * What the thread calls the row's head: the fix-up's push; for a row without a fix-up, the pipeline's push it went on with (a base merge,
- * an autorepin or the fix-up of a review's fixes) or, for one added to the merge queue and not pushed to since, the PR's own head.
+ * What the thread calls the row's head: the fix-up's push; for a row without a fix-up, the pipeline's push it went on with or, for one added to the merge queue and not pushed to since, the PR's own head.
  */
 function headName(p: Row): string {
   return p.fix_id !== null ? "the pushed head" : p.head !== p.from_head ? "the new head" : "the PR's head";
@@ -272,12 +276,9 @@ type PassFacts = {
   checks: Map<string, PrChecksView>;
   syncedAt: Map<string, string | null>;
   merge: MergeFacts;
-  fixResults: Map<number, { state: string; toHead: string | null; reason: string | null }>;
-  edges: Map<string, PushEdge[]>;
-  /** `ref` -> from -> to of the implementation session's revisions. */
-  implPushes: Map<string, Map<string, string>>;
-  /** `ref` -> autorepins that are waiting, locking or pushed. */
-  repins: Map<string, { head: string | null; to_head: string | null }[]>;
+  fixResults: Map<number, { state: string; fromHead: string; toHead: string | null; reason: string | null }>;
+  /** Every push of ours to each PR. */
+  pushes: Map<string, RecordedPush[]>;
   workflows: Map<number, WorkflowFact>;
   reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[] }>;
 };
@@ -287,23 +288,15 @@ async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
   const repos = [...new Set(rows.map((r) => r.repo))];
   const heads = rows.flatMap((r) => (r.head ? [{ repo: r.repo, number: r.number, head: r.head }] : []));
   const fixIds = rows.flatMap((r) => (r.fix_id !== null ? [r.fix_id] : []));
-  const [items, checks, repoRows, merge, fixResults, edges, outcomes, repins, wfFacts, reviews] = await db.together(() => Promise.all([
+  const [items, checks, repoRows, merge, fixResults, pushes, wfFacts, reviews] = await db.together(() => Promise.all([
     loadItems(db, refs, "pr"), loadChecks(db, refs), loadRepos(db, { names: repos }), loadMergeFacts(db, refs), loadOperatorFixResults(db, fixIds),
-    loadPushEdges(db, refs), listPushOutcomes(db, { refs: refs.map((r) => refOf(r.repo, r.number)) }), loadRepins(db, refs, { states: ["waiting", "locking", "pushed"] }),
-    loadWorkflowFacts(db, refs), loadReviewsAt(db, heads),
+    loadOwnPushes(db, refs), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads),
   ]));
-  const implPushes = new Map<string, Map<string, string>>();
-  for (const o of outcomes) {
-    if (o.action !== "implement-push" || o.number === null || !o.from_oid) continue;
-    const k = refOf(o.repo, o.number);
-    (implPushes.get(k) ?? implPushes.set(k, new Map()).get(k)!).set(o.from_oid, o.to_oid);
-  }
   const workflows = new Map<number, WorkflowFact>();
   for (const f of [...wfFacts.live.values(), ...wfFacts.ofPr.values()]) workflows.set(f.id, f);
   return {
-    items, checks, merge, fixResults, edges, implPushes, workflows,
+    items, checks, merge, fixResults, pushes, workflows,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
-    repins: new Map([...repins].map(([k, v]) => [k, v.map((x) => ({ head: x.head, to_head: x.to_head }))])),
     reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes }])),
   };
 }
@@ -361,20 +354,18 @@ async function noteOnce(db: Db, p: Row, head: string, note: string, line: string
   await say(db, p.repo, p.number, line);
 }
 
-/**
- * "base merge", "autorepin", "fix-up for the review's fixes" or the implementation session's revision when the pipeline itself pushed `cur` on top of the row's head, else null.
- * The review's fix-up counts for every row: the merge approval says the change is wanted, and the fix-up's push gets a fresh review.
- */
-function ownPush(p: Row, cur: string, pf: PassFacts): string | null {
-  const ref = refOf(p.repo, p.number);
-  // Only a base merge that left the PR's own diff unchanged continues an approval; a CI fix or a resolved conflict is model-written code nobody saw.
-  const kind = p.head ? ownPushKind(pf.edges.get(ref) ?? [], p.head, cur) : null;
-  if (kind) return kind;
-  // A revision of our implementation PR by the session that wrote it: the PR is the queuer's implementation, and the push gets a fresh review.
-  if (p.head && pf.implPushes.get(ref)?.get(p.head) === cur) return "implementation session's revision";
-  // An autorepin (src/repin) is no model's code either: the revs of a dependency moved to a merge commit on its default branch, as someone who may queue the PR asked.
-  if ((pf.repins.get(ref) ?? []).some((a) => a.head === p.head && a.to_head === cur)) return "autorepin";
-  return null;
+/** What AutoCraft's push to `cur` was when our own pushes alone lead there from `from`; null for a head someone else pushed, or pushed under ours. */
+function ownPush(pf: PassFacts, ref: string, from: string | null, cur: string): string | null {
+  const pushes = pf.pushes.get(ref) ?? [];
+  return from !== null && from !== cur && chainsOwn(pushes, from, cur) ? pushes.find((x) => x.to === cur)?.what ?? null : null;
+}
+
+/** The leg's head needs an Opus review: always, except for a merge-queue entry at a head that no push of ours owes one. */
+const needsReview = (leg: LegContext | null, pf: PassFacts, ref: string, head: string): boolean => leg?.entry !== "merge" || reviewOwed(pf.pushes.get(ref) ?? [], head, leg.since);
+
+/** A push of ours moved the PR off the head the mirror shows, until a sync that began after the push has finished: no step works the old head any more, and the new one is not here yet. */
+function mirrorBehind(pushes: readonly RecordedPush[], head: string | null, syncedAt: string | null): boolean {
+  return pushes.some((x) => x.from === head && x.to !== head && (syncedAt === null || syncedAt <= x.at));
 }
 
 /** Our implementation PR whose revision by its session is planned or running: the review's fixes and red CI are its to repair. */
@@ -454,17 +445,29 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
 
   // A draft gets no work and no merge: the leg waits where it is, and the plan says for what.
   const draft = draftPr(draftOf(it, pf.checks.get(ref)));
+  // Where the plan says the mirror is behind our push, the leg waits for the new head.
+  const behind = async (): Promise<boolean> => mirrorBehind(pf.pushes.get(ref) ?? [], cur, pf.syncedAt.get(p.repo) ?? null) && !!(await factOf())?.pushedOff;
 
   if (p.state === "fixup") {
-    const fx = p.fix_id !== null ? pf.fixResults.get(p.fix_id) : undefined;
+    // A try at a head the request has moved on from says nothing about the request, unless it pushed.
+    const tried = p.fix_id !== null ? pf.fixResults.get(p.fix_id) : undefined;
+    const fx = tried && (tried.fromHead === p.from_head || tried.state === "pushed") ? tried : undefined;
     if (fx?.state === "pushed" && fx.toHead) return void await move(db, p, "review", { head: fx.toHead, line: `The fix-up pushed ${short(fx.toHead)}; Opus reviews it next.` });
-    if (fx && FAILED_FIXUP.includes(fx.state)) return await stop(`the fix-up ${fx.state}${fx.reason ? `: ${oneLine(fx.reason, 120)}` : ""}`);
     // A push written before it ran: when the head is its commit, it landed.
     if (fx?.state === "pushing" && fx.toHead && cur === fx.toHead) return void await move(db, p, "review", { head: fx.toHead, line: `The fix-up pushed ${short(fx.toHead)}; Opus reviews it next.` });
+    if (cur !== null && cur !== p.from_head && cur !== fx?.toHead) {
+      // Another push of ours came first, which ends a try at the old head: the fix-up is made on top of it.
+      const own = ownPush(pf, ref, p.from_head, cur);
+      if (own) {
+        if ((await moveFixupRequests(db, [{ id: p.fix_id!, from: p.from_head, to: cur }])).length) await say(db, p.repo, p.number, `The ${own} pushed ${short(cur)}; the fix-up is made there.`);
+        return;
+      }
+    }
+    if (fx && FAILED_FIXUP.includes(fx.state)) return await stop(`the fix-up ${fx.state}${fx.reason ? `: ${oneLine(fx.reason, 120)}` : ""}`);
     // Whatever the fix-up row says (none yet, linting, pushing), a head that is neither its start nor its push is someone else's.
     if (cur !== null && cur !== p.from_head && cur !== fx?.toHead) return cancel(`another push moved the head to ${short(cur)}`);
     // No try yet and the planner would not work the request (not pushable, conflicting, a draft, ...): it would wait for ever.
-    if (!fx && !draft) {
+    if (!fx && !draft && !await behind()) {
       const f = await factOf();
       const why = f ? await whyNotPlanned(db, f) : null;
       if (why) await stop(`the fix-up cannot run: ${why}`);
@@ -478,17 +481,19 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     // The mirror row shows the old head until a sync that started after the push has finished (synced_at is the sync's start; the row's state entry follows the push); a review at the pushed head also shows the mirror saw it.
     const synced = pf.syncedAt.get(p.repo) ?? null;
     const lag = p.state === "review" && cur === p.from_head && (synced === null || synced <= p.updated_at) && !pf.reviews.has(`${ref}@${head}`);
-    if (!lag && p.state !== "queued") {
-      // The pipeline's own CI fix or conflict merge on the pushed head carries the pre-approval on: the new head needs the whole chain again.
-      const own = ownPush(p, cur, pf);
-      if (own) return void await move(db, p, "review", { head: cur, line: `The ${own} pushed ${short(cur)}; it needs a fresh review, a clean pre-merge review and green CI before the PR goes to the merge queue.` });
+    if (!lag) {
+      // A push of ours carries the approval on, after the hand-over too: the new head needs the whole chain again.
+      const own = ownPush(pf, ref, head, cur);
+      const needs = needsReview(leg, pf, ref, cur) ? "a review, a clean pre-merge review and green CI" : "a clean pre-merge review and green CI";
+      if (own) return void await move(db, p, "review", { head: cur, line: `The ${own} pushed ${short(cur)}; the approval stands, and it needs ${needs} before the PR ${p.state === "queued" ? "goes back" : "goes"} to the merge queue.` });
     }
     if (!lag) return cancel(cur === p.from_head ? `the head went back to ${short(cur)}` : `another push moved the head to ${short(cur)}`);
   }
 
-  if (draft) return;
+  if (draft || await behind()) return;
 
-  if (p.state === "review" && leg?.entry === "merge") {
+  const reviewed = needsReview(leg, pf, ref, head);
+  if (p.state === "review" && !reviewed) {
     return void await move(db, p, "ci", { line: `In the merge queue at ${short(head)} with no review; waiting for CI and a clean pre-merge review.` });
   }
   if (p.state === "review") {
@@ -528,8 +533,8 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
   if (!gate.ok) return p.state === "queued" ? cancel("merging is no longer approved") : await stop("merging is no longer approved");
 
   if (p.state === "ci") {
-    // A re-review since the move to ci counts: the hand-over needs a take at this head now. A merge-queue entry has no review.
-    const r: ReviewRead = leg?.entry === "merge" ? { kind: "take", why: "", unsure: false } : accepted(await reviewAt(db, p, head, pf, wake));
+    // A re-review since the move to ci counts: the hand-over needs a take at this head now.
+    const r: ReviewRead = !reviewed ? { kind: "take", why: "", unsure: false } : accepted(await reviewAt(db, p, head, pf, wake));
     if (r.kind === "none" || r.kind === "stale") return void await move(db, p, "review", { line: `The review of ${headName(p)} is out of date; Opus reviews it again.` });
     if (r.kind === "takefix") return void await move(db, p, "review", { line: `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.` });
     if (r.kind === "bad") return await stop(r.why);
@@ -545,7 +550,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     const ci = pf.merge.runs.get(`${ref}@${head}`)?.approved.length ? "pending" : await effectiveCi(db, p.repo, c.overall ?? "none", c.checks);
     if (ci === "pending") return;
     if (ci === "failure") {
-      // The CI fix step works the red head as it would for any PR; its push is a head nobody saw, so the leg ends. A person decides when the step has given up.
+      // The CI fix step works the red head as it would for any PR, and the leg goes on with its push. A person decides when the step has given up.
       const f = await factOf();
       if (f && revisesNow(f)) return;
       const bucket = f ? cifixBucket(f) : null;
@@ -571,13 +576,13 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (moved) await say(db, p.repo, p.number, line);
   };
   // A new review that asks for fixes, sure or not, of a PR approved for merge: the pipeline's fix-up runs under that approval, and its push is the leg's own again.
-  if (leg?.entry !== "merge" && (await reviewAt(db, p, head, pf, wake)).kind === "takefix") return await leave("review", null, `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.`);
+  if (reviewed && (await reviewAt(db, p, head, pf, wake)).kind === "takefix") return await leave("review", null, `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.`);
   const f = cur === head ? await factOf() : null;
   const why = f?.head === head ? queueStop(p, f) : null;
   if (why !== null) await leave("failed", why, `The pre-approved merge stopped: ${why}.`);
 }
 
-/** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
+/** Ends fix-up requests the planner can no longer work (someone else's push moved the PR's head, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
 async function endStaleRequests(db: Db, wake: Wake): Promise<void> {
   const now = Date.now();
   // A request whose maker may no longer act on the repo (a demotion, a write permission gone) is dropped before the planner can push it. One
@@ -588,12 +593,20 @@ async function endStaleRequests(db: Db, wake: Wake): Promise<void> {
   const ended = new Set(await endFixupRequests(db, gone.map((o) => ({ id: o.id, reason: "the requester may no longer act here" }))));
   await sayAll(db, gone.filter((o) => ended.has(o.id)).map((o) => ({ repo: o.repo, number: o.number, text: `The queued fix-up of ${short(o.from_head)} was dropped: ${o.by} no longer may act on ${o.repo}.` })));
   const ends: { id: number; reason: string; repo: string; number: number; head: string }[] = [];
-  const results = await loadOperatorFixResults(db, live.map((o) => o.id));
-  for (const o of live) {
-    if (o.preapproval_id !== null || ended.has(o.id)) continue;
+  const alone = live.filter((o) => o.preapproval_id === null && !ended.has(o.id));
+  const [results, pushes, repos] = await db.together(() => Promise.all([
+    loadOperatorFixResults(db, live.map((o) => o.id)), loadOwnPushes(db, alone), loadRepos(db, { names: [...new Set(alone.map((o) => o.repo))] }),
+  ]));
+  for (const o of alone) {
     const f = await loadPrFact(db, o.repo, o.number);
     if (f?.refreshAt !== undefined) wake(f.refreshAt);
-    const why = !f ? "the PR is no longer open" : f.head !== o.from_head ? `the head moved to ${short(f.head)}` : results.has(o.id) ? null : await whyNotPlanned(db, f);
+    // A push of ours moved the head: the request goes with it.
+    if (f?.head && f.head !== o.from_head && chainsOwn(pushes.get(refOf(o.repo, o.number)) ?? [], o.from_head, f.head)) {
+      await moveFixupRequests(db, [{ id: o.id, from: o.from_head, to: f.head }]);
+      continue;
+    }
+    if (f?.pushedOff && mirrorBehind(pushes.get(refOf(o.repo, o.number)) ?? [], f.head, repos.get(o.repo)?.synced_at ?? null)) continue;
+    const why = !f ? "the PR is no longer open" : f.head !== o.from_head ? `the head moved to ${short(f.head)}` : results.get(o.id)?.fromHead === o.from_head ? null : await whyNotPlanned(db, f);
     if (why) ends.push({ id: o.id, reason: why, repo: o.repo, number: o.number, head: o.from_head });
   }
   const done = new Set(await endFixupRequests(db, ends.map((e) => ({ id: e.id, reason: e.reason }))));
