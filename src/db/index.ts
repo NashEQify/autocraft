@@ -94,6 +94,11 @@ export interface DbStats {
   effects: number;
 }
 
+export interface ListenOptions {
+  /** The subscription does not keep the process alive: a cache that drops entries on a notification, not a wait for one. */
+  background?: boolean;
+}
+
 /** One `Db.listen` registration. */
 export interface Subscription {
   /** Whether the channel's notifications arrive now. */
@@ -178,8 +183,9 @@ export interface Db {
    * connection, which opens in the background; with null after that connection was lost and opened again, when some may
    * have been missed. `listening()` is false until the LISTEN is in effect and while the connection is down: poll at the
    * short interval then. A notification is a hint to look again, never the data. SQLite: null, and the caller polls.
+   * The connection keeps the process alive while a subscription that is not `background` (a cache's invalidation) is on.
    */
-  listen(channel: string, fn: (payload: string | null) => void): Subscription | null;
+  listen(channel: string, fn: (payload: string | null) => void, o?: ListenOptions): Subscription | null;
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */
   observe(fn: (e: DbEvent) => void): () => void;
   close(): Promise<void>;
