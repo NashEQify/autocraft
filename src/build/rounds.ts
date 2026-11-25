@@ -5,7 +5,7 @@ import { TERMINAL, cloneTasks, createTask, getTask, type NewTask } from "./tasks
 import { tasksFor } from "./fix-tasks.ts";
 import { readLint } from "../prepush/index.ts";
 import { loadLogTails } from "../data/build/index.ts";
-import { loadBaseScope } from "./scope.ts";
+import { inRepoScope } from "../runner/scope.ts";
 import { queueWarmBuild } from "../verify/tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { mapSeq } from "../async-seq.ts";
@@ -30,7 +30,7 @@ export async function failureTail(db: Db, taskId: number, step: string): Promise
 export async function queueRound(db: Db, r: RoundRequest): Promise<[number, number]> {
   const ids = await mapSeq(tasksFor({ repo: r.repo, number: null, main_sha: r.sha, crate: r.crate, test: r.test }, r.patch, r.testPatch, r.step ?? "fix-check"), async (t: NewTask) => await createTask(db, t));
   // The warm build is a pipeline task: it would never be claimed for a repo outside the pipeline scope.
-  if ((await loadBaseScope(db)).has(r.repo)) await queueWarmBuild(db, r.repo, r.sha);
+  if (await inRepoScope(db, r.repo, "builds")) await queueWarmBuild(db, r.repo, r.sha);
   return [ids[0]!, ids[1]!];
 }
 

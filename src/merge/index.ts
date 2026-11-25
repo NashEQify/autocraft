@@ -5,7 +5,8 @@
 //
 // Without --apply it is a dry run: it reads the local tables only, calls nothing and writes nothing.
 import { baseRefusal, recordLiveBase } from "./base.ts";
-import { mergeScope, mergeVerdicts } from "./approval.ts";
+import { inRepoScope } from "../runner/scope.ts";
+import { mergeVerdicts } from "./approval.ts";
 import { DRAFT_REFUSAL } from "./safe-merge.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -167,7 +168,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const at = () => (deps?.now() ?? new Date()).toISOString();
   const runId = `merge-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
-  if (!(await mergeScope(db)).any.has(repo)) {
+  if (!await inRepoScope(db, repo, "work")) {
     log(`merge ${repo}: not in the pipeline scope; nothing done`);
     return { runId, repo, dryRun, states: {}, attempted: [], merged: [], refused: [] };
   }

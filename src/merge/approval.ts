@@ -2,8 +2,7 @@
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
 // approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` asks the merge's permission (src/core/authority.ts) on the
 // facts the planner decides on, read now.
-import { setStepApproval, loadTrackedRepos } from "../data/control/index.ts";
-import { loadLiveRepos } from "../data/workflow/index.ts";
+import { setStepApproval } from "../data/control/index.ts";
 import { permit } from "../core/authority.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { memberRefusal } from "../core/guard.ts";
@@ -39,13 +38,3 @@ export const firstRefusal = (verdicts: Map<number, Permission>, repo: string): s
   for (const [n, v] of verdicts) if (!v.ok) return `${repo}#${n}: ${v.why.text}`;
   return null;
 };
-
-/**
- * The repos the merge stages act in. `full`: the pipeline flag is on.
- * `any`: those and the tracked repos with a live workflow, which take part for those items alone.
- */
-export async function mergeScope(db: Db): Promise<{ full: Set<string>; any: Set<string> }> {
-  const [tracked, live] = await db.together(() => Promise.all([loadTrackedRepos(db), loadLiveRepos(db)]));
-  const full = new Set([...tracked.values()].filter((t) => t.pipeline).map((t) => t.name));
-  return { full, any: new Set([...full, ...[...live].filter((r) => tracked.has(r))]) };
-}
