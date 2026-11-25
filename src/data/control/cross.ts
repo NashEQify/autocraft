@@ -1,7 +1,7 @@
-// reads: mirror.items, mirror.pr_checks, workflow.item_workflows, jobs.job_items
+// reads: mirror.items, mirror.pr_checks, workflow.item_workflows, workflow.workflow_actions, jobs.job_items
 // resolvePushes closes outcomes of items that are closed or moved head (one UPDATE joined to items); pushesUnsettled reads the open
-// pushes joined to open items at the pushed head and their stored checks (one statement); loadActBlocked embeds the workflow fragment
-// `startedRepo`; loadActUsage adds Act job items.
+// pushes joined to open items at the pushed head and their stored checks (one statement); loadActBlocked embeds the workflow module's
+// `repoScopeCols`; loadActUsage adds Act job items.
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";

@@ -1678,7 +1678,7 @@ CREATE TABLE IF NOT EXISTS fast_track (
   UNIQUE (repo, number)
 );
 
--- Merge holds (src/merge/controls.ts): a PR held here is reviewed and fixed as usual but does not merge, alone or in a batch, until released.
+-- Retired (src/db/retired-names.ts): merge holds, which are held items (src/db/holds-to-items.ts). A release before that reads them.
 CREATE TABLE IF NOT EXISTS merge_holds (
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,

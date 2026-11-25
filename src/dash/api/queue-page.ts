@@ -15,6 +15,7 @@ import { holdBatched, stopBatch } from "../../workflow/batch.ts";
 import { actorOf } from "./commands.ts";
 import { loadBatches } from "../../data/merge/index.ts";
 import type { Preapproval } from "../../data/workflow/index.ts";
+import { NO_WORKFLOW_SCORE } from "../../core/work-score.ts";
 import { mergeOrder, queueSlots } from "../../rank/position.ts";
 import { classifyListOf, NOT_PLANNED } from "../../rank/next.ts";
 import { HttpError } from "../server/util.ts";
@@ -147,7 +148,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     return out;
   }
   const rows = entries.map((e) => [e, asRow(e)] as const);
-  const ordered = mergeOrder(entries, (e) => facts.workScores.get(refText(e)) ?? facts.scores.get(refText(e)) ?? 0);
+  const ordered = mergeOrder(entries, (e) => facts.workScores.get(refText(e)) ?? facts.scores.get(refText(e)) ?? NO_WORKFLOW_SCORE);
   const active = facts.batches.filter((b) => (b.state === "checking" || b.state === "open") && b.members.some((p) => inScope(b.repo, p.number)));
   const rowOfEntry = new Map(rows);
   const rowOf = new Map(rows.map(([e, r]) => [`${e.repo}#${e.number}`, r]));

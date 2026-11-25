@@ -135,6 +135,8 @@ export function yesClause(rec: Recommendation): string | null {
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   }
   if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
+  if (rec.goes === "look") return rec.merges ? t("Reply yes to look again, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to look again.");
+  if (rec.goes === "on" && !fix.length && !rec.again) return rec.merges ? t("Reply yes to go on in your name, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to go on in your name.");
   const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
@@ -204,11 +206,12 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   const did: string[] = [];
   if (r.drop.length) did.push(t("dropping {parts}", { parts: listText(r.drop) }));
   if (r.start === "review") did.push(t("reviewing"));
-  else if (r.start === "fixup") did.push(t("reviewing, fixing what the review finds, reviewing again"));
+  else if (r.start === "fixup") did.push(waits ? t("reviewing") : t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
   if (r.resume) did.push(t("going on where it was held"));
+  else if (r.goesOn && !r.merges) did.push(t("going on"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {
@@ -216,10 +219,10 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
     const shown = r.weight === null ? null : weightWord(r.weight)?.startsWith("weight ") ? String(r.weight) : weight;
     return t("Weight {weight} {by}.", { weight: shown ?? t("normal"), by: who });
   }
-  const end = r.start === "merge"
-    ? t("updating from main, then merging in the next batch when CI is green")
-    : waits
-      ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
+  const end = waits
+    ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
+    : r.start === "merge"
+      ? t("updating from main, then merging in the next batch when CI is green")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
@@ -278,6 +281,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "not-held": return t("This item is not held.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
     case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or hold it.", { parts: listText(r.parts) });
+    case "premerge-defects": return t("The pre-merge review found defects, and nothing merges past them as they are.");
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }
 }

@@ -1,10 +1,6 @@
 // The live topics this module's tables feed (src/db/live.ts).
 import { registerTriggerSource } from "../../db/live.ts";
 
-registerTriggerSource("queue",
-  { table: "merge_holds" },
-);
-
 // Started items of the maintainer workflow: entry, approval, weight, plan, blocker, recommendation. Planner input.
 registerTriggerSource("workflows",
   { table: "item_workflows" },

@@ -43,7 +43,7 @@ const ENDS_WITH_RECOMMENDATION = "Nobody approved this yet; the workflow ends wi
 
 /** Workflow ends by which a person took the item out of the pipeline: nothing merges it until someone starts it again. */
 const ENDED_WHY: Partial<Record<EndedWorkflow, string>> = {
-  stopped: "Someone stopped the work on this; it merges once someone starts it again.",
+  stopped: "Someone holds this; it merges once someone resumes it or starts it again.",
   backlog: "Someone sent this to the backlog; it merges once someone starts it again.",
   closed: "The work on this ended with a close; it merges once someone starts it again.",
   done: "The work on this ended with an answer that did not merge it; it merges once someone starts it again.",
@@ -121,9 +121,9 @@ export const ACTION_WAITS: readonly ActionState[] = ["waiting-token", "waiting-p
  * The PR's merge waits for its approver's sign-in or access: it was tried at `head` for this approval, so it stays put until the
  * row goes back to pending, the head or the approver changes, or the approval is given again.
  */
-export function mergeWaits(actions: readonly WorkflowAction[] | undefined, wf: Pick<ItemWorkflow, "id" | "startedBy" | "approvedBy" | "approvedAt"> | undefined, head: string): boolean {
+export function mergeWaits(actions: readonly WorkflowAction[] | undefined, wf: Pick<ItemWorkflow, "id" | "startedBy" | "approvedBy" | "approvedAt"> | undefined, head: string, states: readonly ActionState[] = ACTION_WAITS): boolean {
   if (!wf) return false;
   const by = (wf.approvedBy ?? wf.startedBy).toLowerCase();
-  return (actions ?? []).some((a) => a.kind === "merge" && a.workflow_id === wf.id && a.head === head && ACTION_WAITS.includes(a.state)
+  return (actions ?? []).some((a) => a.kind === "merge" && a.workflow_id === wf.id && a.head === head && states.includes(a.state)
     && a.by.toLowerCase() === by && (!wf.approvedAt || a.updated_at >= wf.approvedAt));
 }

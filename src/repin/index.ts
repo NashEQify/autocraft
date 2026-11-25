@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { absolute } from "../build/artifacts.ts";
 import { cancelTask, createTask, getTask, TERMINAL } from "../build/tasks.ts";
 import { guardRepo } from "../core/guard.ts";
+import { taskInScope } from "../core/scope.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { HttpError } from "../dash/server/util.ts";
 import { ensureAuthorWrites, type PermissionReader } from "../fixup/author-permission.ts";
@@ -94,13 +95,10 @@ const itemsOf = async (db: Db, refs: { repo: string; number: number }[]): Promis
 
 // ---- the command ---------------------------------------------------------------
 
-/**
- * Why no build worker would take the pull request's lockfile task, or null: workers take pipeline tasks only for repos whose
- * pipeline is on or for started items (claim in src/build/tasks.ts).
- */
+/** Why no build worker would take the pull request's lockfile task (taskInScope), or null. */
 async function outOfBuildScope(db: Db, repo: string, number: number): Promise<string | null> {
   const [tracked, started] = await db.together(() => Promise.all([loadTrackedRepos(db, [repo]), loadStartedRefs(db, { refs: [{ repo, number }] })]));
-  return tracked.get(repo)?.pipeline || started.has(`${repo}#${number}`) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
+  return taskInScope(tracked.get(repo), [`${repo}#${number}`], started) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
 }
 
 /** Cancels a lockfile task that is no longer wanted; one that already ended is left as it is. */

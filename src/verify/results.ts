@@ -51,7 +51,7 @@ const headKey = (repo: string, number: number, head: string): string => `${repo}
 // ---- when to run -------------------------------------------------------------
 
 /**
- * Whether a collection run has work: a pending verification whose PR head moved or closed, whose tasks are all
+ * Whether a collection run has work: a pending verification, in scope or not, whose PR head moved or closed, whose tasks are all
  * finished, or that is still `planned` while a task has started; the same for screenshot runs, which also stop when
  * their repo's switch went off. One statement, plus one switch read per repo with a run in flight.
  */
@@ -219,7 +219,8 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
         const st = stageOf("verify-error", at, `${v.kind} at ${sha7}: ${why}`);
         if (await finish("error", why, null, st)) { s.errors++; s.changed++; await noted(st); }
       } else {
-        const summary = verdict.failed ? await summariseFailure(db, v, v.headTask!, verdict.failed, d, runId) : oneLine(verdict.reason ?? "failed");
+        // No model call for an item the pipeline does not work.
+        const summary = verdict.failed ? !v.inScope ? fallbackSummary(verdict.failed) : await summariseFailure(db, v, v.headTask!, verdict.failed, d, runId) : oneLine(verdict.reason ?? "failed");
         const st = stageOf("verify-failed", at, `${v.kind} at ${sha7}: ${summary}`);
         if (await finish("failed", summary, null, st, stageOf("hold", at, `verify failed: ${summary}`))) { s.failed++; s.changed++; await noted(st); }
       }

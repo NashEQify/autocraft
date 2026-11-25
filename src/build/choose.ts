@@ -4,7 +4,7 @@ import type { ClaimInputs, ClaimPick, TaskRecord } from "../data/build/index.ts"
 import { PRIVATE_STEPS, WARM_STEP } from "../data/build/index.ts";
 import type { Config } from "../data/control/index.ts";
 import { envSettings } from "./envs.ts";
-import { baseScope } from "./scope.ts";
+import { taskInScope } from "../core/scope.ts";
 import { warmClaim } from "./warm-queue.ts";
 
 /**
@@ -45,12 +45,6 @@ function refsOf(t: TaskRecord, inputs: ClaimInputs): string[] {
   return b ? b.members.map((n) => `${b.repo}#${n}`) : [];
 }
 
-/** Every item the task builds was started by a person. */
-function started(t: TaskRecord, inputs: ClaimInputs): boolean {
-  const refs = refsOf(t, inputs);
-  return refs.length > 0 && refs.every((r) => inputs.startedRefs.has(r));
-}
-
 /**
  * Picks the oldest of the highest priority of `inputs.candidates` that the environment may run, at most
  * min(free, its slots minus the tasks it is running). A disabled, paused or unreported environment gets none.
@@ -65,7 +59,6 @@ export async function chooseTasks(inputs: ClaimInputs, o: ChooseOptions): Promis
   const kube = env.kind === "kubernetes" ? envSettings(env) : null;
   const room = Math.min(o.free, (o.fit ? env.operatorSlots : env.slots) - inputs.running);
   if (room <= 0) return out;
-  const scope = baseScope(inputs.tracked.values());
   for (const t of inputs.candidates) {
     if (out.picks.length >= room) break;
     if (!satisfies(caps, t.requires)) continue;
@@ -84,8 +77,8 @@ export async function chooseTasks(inputs: ClaimInputs, o: ChooseOptions): Promis
     // Untrusted-code builds run only while their feature's switch is on for the repo.
     const feature = SWITCHED.find(([step]) => step === t.step)?.[1];
     if (feature && !o.config.repo(t.repo).buildFeature(feature)) continue;
-    // Operator smoke tests and the security fix's builds run anywhere; pipeline builds only for repos in scope, or when a person started every item they build.
-    if (t.step !== "smoke-test" && t.step !== "fix-check" && !scope.has(t.repo) && !started(t, inputs)) continue;
+    // Operator smoke tests and the security fix's builds run anywhere; pipeline builds only where taskInScope says so.
+    if (t.step !== "smoke-test" && t.step !== "fix-check" && !taskInScope(inputs.tracked.get(t.repo), refsOf(t, inputs), inputs.startedRefs)) continue;
     // A warm build waits for its repo's interval and takes the newest default-branch head, with the plan this environment runs.
     let head = t.headSha, base = t.baseSha;
     if (t.step === WARM_STEP) {

@@ -106,6 +106,31 @@ describe("workflow commands", () => {
     assert.equal(run("merge", { kind: "issue", workflow: null }).kind, "refused");
   });
 
+  test("the word merge approves a recommendation without the review it would run again; a yes runs it", () => {
+    const rec: Recommendation = { text: "Review it again, then merge.", parts: { fix: [], drop: [] }, merges: true, again: "review" };
+    const wf = started({ state: "blocked", blocker: "failed-twice", rec, recAt: "2026-11-24T10:00:00Z" });
+    const merge = run("merge", pr(wf)), yes = run("yes", pr(wf));
+    assert.ok(merge.kind === "run" && merge.run.again === null && merge.run.approve && merge.run.answers);
+    assert.ok(yes.kind === "run" && yes.run.again === "review" && yes.run.approve);
+    // A question of the implementation is answered as a yes answers it.
+    const answer = { question: { implementation: 1, round: 1 }, option: "retry" };
+    const asked = run("merge", { kind: "issue", workflow: started({ kind: "issue", entry: "implement", state: "recommending", rec: { text: "Try again.", parts: { fix: [], drop: [] }, merges: true, answer } }) });
+    assert.ok(asked.kind === "run" && asked.run.pick?.option === "retry" && asked.run.approve);
+  });
+
+  test("nothing merges past the pre-merge review's defects: merge, and dropping their last part, are refused", () => {
+    const stopped = (parts: number[]) => started({
+      state: "blocked", blocker: "major-finding", blockerParams: { premerge: parts }, plan: [part(1, "a"), part(2, "b")], approvedBy: "mira", recAt: "2026-11-24T10:00:00Z",
+      rec: { text: "Fix them.", parts: { fix: parts, drop: [] }, merges: true, ...(parts.length ? {} : { again: "review" as const }) },
+    });
+    for (const [text, parts] of [["merge", []], ["merge", [1, 2]], ["drop 1 and 2, merge", [1, 2]], ["drop 1 and 2", [1, 2]]] as const) {
+      const r = run(text, pr(stopped([...parts])));
+      assert.ok(r.kind === "refused" && r.refusal.why === "premerge-defects", text);
+    }
+    const one = run("drop 2, merge", pr(stopped([1, 2])));
+    assert.ok(one.kind === "run" && one.run.fix.join() === "1" && one.run.again === "fixup");
+  });
+
   test("yes needs an open recommendation, and a yes to one ending in a merge approves it", () => {
     assert.equal(run("yes", pr(started())).kind, "ambiguous");
     const rec: Recommendation = { text: "Fix both problems, then merge?", parts: { fix: [1, 2], drop: [] }, merges: true };

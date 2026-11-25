@@ -258,6 +258,10 @@ export type PrFacts = {
   handOver: boolean;
   /** The merge, made as the person who approved it, waits for their sign-in or access: the merge step leaves it out, so none is proposed. */
   mergeWaiting: boolean;
+  /** It waits because that person could not write to the repo, which no sign-in of theirs changes. */
+  mergeLacksAccess?: boolean;
+  /** The before and after screenshots at the head show a clear regression, found after a person last started or answered the item. */
+  screenshots?: { summary: string | null };
 
   /** The pre-merge review row at the reviewed head. */
   premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
@@ -436,7 +440,7 @@ export type ItemFacts = {
   /** A person's close of the item that the Act step carries out now (a `workflow_actions` row in `pending`), as that person. */
   close: { id: number; by: string; weight: number; at: string } | null;
 
-  /** The open PR that holds an issue: one that closes or addresses it (`closes`), else a person's PR that mentions it by number; null when there is none. */
+  /** The open PR of an issue: one that closes or addresses it (`closes`), which holds it, else a person's PR that mentions it by number; null when there is none. */
   openPr: { number: number; closes: boolean } | null;
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */

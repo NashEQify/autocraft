@@ -37,7 +37,10 @@ async function fresh(): Promise<World> {
   return await (await (await w.pr(1, { label: "feature" })).verified(1)).premerge(1, "clean");
 }
 const legs = async (w: World, number = 1) => await w.rows(`SELECT state, "by", head, reason FROM preapprovals WHERE number = ${number} ORDER BY id`);
-const push = async (w: World, head: string) => void await w.db.run(w.db.k.updateTable("main.items").set({ head_oid: head }).where("number", "=", 1));
+const push = async (w: World, head: string) => {
+  await w.db.run(w.db.k.updateTable("main.items").set({ head_oid: head }).where("number", "=", 1));
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ head_oid: head }).where("number", "=", 1));
+};
 const mayMerge = async (w: World) => (await mergeMay((await loadPrFact(w.db, "app", 1))!)).ok;
 
 test("an approved PR on hold merges nothing; another maintainer's resume goes on with its merge, as them", async () => {
@@ -85,6 +88,28 @@ test("an item held at a blocker comes back with its question; the resume answers
   await settle(w);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([wf.id, wf.state, wf.blocker, wf.blockerParams, wf.rec, wf.plan[0]!.state], [id, "blocked", "large-fix", { lines: 900 }, rec, "planned"]);
+});
+
+test("a question that closes by itself does not while the item is held; resumed, it is open again and the pass closes it once its cause is gone", async () => {
+  const w = await fresh();
+  const rec = { text: "Make the default branch its base.", parts: { fix: [], drop: [] }, merges: true, goes: "look" as const, cause: { code: "base-off-default" as const } };
+  for (const head of ["sha1", "sha-author"]) {
+    const id = await insertWorkflow(w.db, {
+      repo: "app", number: 1, kind: "pr", entry: "merge", state: "blocked", startedBy: MAINT, startedAt: T0, startedVia: "github", baseHead: "sha1", approvedBy: MAINT, approvedAt: T0,
+      blocker: "other", blockerParams: { code: "base-off-default", reason: "x" }, rec, recAt: T0, recHead: "sha1",
+    });
+    await run(w, "hold");
+    await push(w, head);
+    await settle(w);
+    const held = (await workflowHistory(w.db, "app", 1)).at(-1)!;
+    assert.deepEqual([held.state, held.stoppedBy], ["stopped", MAINT], "its cause is gone, and the hold stands");
+    await run(w, "resume", OTHER);
+    assert.deepEqual((await liveWorkflow(w.db, "app", 1))!.rec, rec);
+    await settle(w);
+    const now = (await liveWorkflow(w.db, "app", 1))!;
+    assert.deepEqual([now.id, now.state, now.blocker, now.approvedBy], head === "sha1" ? [id, "running", null, OTHER] : [id, "blocked", "author-commits", OTHER]);
+    await run(w, "backlog");
+  }
 });
 
 test("a fix-up that was asked for is asked for again by the resume, as the person, unless the head moved", async () => {

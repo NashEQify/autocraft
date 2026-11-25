@@ -15,7 +15,6 @@ import { addScreenshotRuns, loadPendingScreenshotRuns, loadScreenshotRuns, settl
 import * as mirror from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadReviewsAt } from "../data/review/index.ts";
-import { holdMerges } from "../data/workflow/index.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { scrub } from "../runner/scrub.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
@@ -289,13 +288,11 @@ async function collectOne(db: Db, r: PendingShotRun, ctx: Ctx, deps: Pick<Collec
   if (!await finish("compared", { verdict, clear, comparison: summary, model })) return false;
 
   if (verdict === "regression" && clear) {
-    // The head may have moved, or the switch gone off, while the model looked: hold only the head that was compared, and only while the feature is on.
+    // The head may have moved, or the switch gone off, while the model looked: only the head that was compared is kept from merging, and only while the feature is on.
     const now = (await mirror.loadItems(db, [{ repo: r.repo, number: r.number }], "pr")).get(ref);
     if (await featureOn(db, "screenshots", r.repo) && now?.state === "OPEN" && now.head_oid === r.headSha) {
       const held = await db.write(async () => {
-        const got = await holdMerges(db, [{ repo: r.repo, number: r.number, by: "screenshots", details: { head: r.headSha, summary } }]);
-        if (!got.length) return false;
-        await settle({ held: true }, ["compared"]);
+        if (!await settle({ held: true }, ["compared"])) return false;
         await addStageEvents(db, [{ repo: r.repo, number: r.number, stage: "hold", at: at(), actor: "verify", note: `screenshots show a regression: ${summary}`.slice(0, 300) }]);
         return true;
       });

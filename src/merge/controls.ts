@@ -35,7 +35,7 @@ async function endBatch(db: Db, by: string, id: number, why: string, comment: st
       // The merge went through while the batch was being ended: the merge bookkeeping records it.
       const at = new Date().toISOString();
       await endBatches(db, [{
-        id, by, state: "merged", summary: null,
+        id, state: "merged", summary: null,
         stage: b.members.map((m) => ({ repo: b.repo, number: m.number, stage: "merged", at, actor: by, note: `merge in ${b.branch} at ${m.head_oid.slice(0, 7)}` })),
         audit: [{ at, actor: by, action: "batch-end-too-late", target: `${b.repo}:${b.branch}`, details: { pr: b.pr_number } }],
       }]);

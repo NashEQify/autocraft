@@ -2,10 +2,11 @@
 import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
+import { NO_WORKFLOW_SCORE, workScore } from "../../src/core/work-score.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
   countEventsSince, listWorkflows, loadActingPairs, loadAnswers, loadEvents, loadGoOnAt, loadLastEventKinds, loadLiveRepos, loadPathEnds, loadQueuePositions, loadStartedRefs,
-  loadStartedWork, loadWorkflowFacts, loadWorkflowHistory, loadWorkScores, recordEvents, saveWorkflows, startWorkflows,
+  loadStartedWork, loadWorkflowFacts, loadWorkflowHistory, loadWorkScores, loadWorkWeights, recordEvents, saveWorkflows, startWorkflows,
 } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
@@ -116,6 +117,14 @@ both("scores, queue positions, started refs and the acting pairs follow the live
   assert.ok(scores.get("o/a#2")! > scores.get("o/a#1")!, "weight first");
   assert.ok(scores.get("o/a#1")! > scores.get("o/a#4")!, "the weight-5 start outranks the weight-2 implementation PR");
   assert.ok(scores.has("o/a#4"), "an implementation PR takes its issue's workflow");
+  for (const [weight, before] of [[10, true], [5, true], [3, true], [2, false], [1, false]] as const) {
+    await saveWorkflows(db, [{ id: ids.get("o/a#1")!, patch: { weight }, at: AT }]);
+    const s = (await loadWorkScores(db, [{ repo: "o/a", number: 1 }])).get("o/a#1")!;
+    assert.equal(s > NO_WORKFLOW_SCORE, before, `weight ${weight} against unstarted work`);
+    assert.equal(s, workScore({ id: ids.get("o/a#1")!, weight }), "the planner's order is the queues'");
+    assert.equal((await loadWorkWeights(db, [{ repo: "o/a", number: 1 }])).get("o/a#1"), weight);
+  }
+  await saveWorkflows(db, [{ id: ids.get("o/a#1")!, patch: { weight: 5 }, at: AT }]);
   const positions = await loadQueuePositions(db);
   assert.deepEqual([...positions.keys()], ["o/a#2", "o/b#1", "o/a#1", "o/a#3"].filter((r) => positions.has(r)));
   assert.equal(positions.get("o/a#2")!.position, 1);

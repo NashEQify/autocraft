@@ -66,7 +66,7 @@ function RowLine({ r }: { r: MaintainItemRow }) {
         <span className={r.group === "needs" ? "font-medium text-accent-ink" : "text-ink/80"}>{r.line}</span>
       ) : r.status ? (
         <span className="text-ink/80">
-          <span className="font-medium">{r.status.phase === "Held" ? t("Parked") : r.status.phase}</span>
+          <span className="font-medium">{r.status.phase === "Held" && !r.stoppedBy ? t("Parked") : r.status.phase}</span>
           {r.status.waiting && <span className="text-ink/70"> · {t("waiting for {what}", { what: r.status.waiting })}</span>}
         </span>
       ) : null}

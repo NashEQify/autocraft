@@ -15,7 +15,7 @@ import { cacheReport } from "./caches.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 import { autoBuildSize, clearBuildSize, gib, listSizings, setBuildSize, setWarmTarget, type RepoSizing } from "./sizing.ts";
-import { loadBaseScope } from "./scope.ts";
+import { scopeRepos } from "../runner/scope.ts";
 import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -320,7 +320,7 @@ async function sizes(db: Db, args: string[]): Promise<void> {
     return b > 0 ? b : die(`--${name} must be a Kubernetes quantity such as 6Gi`);
   };
   if (sub === "list") {
-    const rows = await listSizings(db, await loadBaseScope(db));
+    const rows = await listSizings(db, await scopeRepos(db, { for: "builds" }));
     if (!rows.length) console.log("no repo in the pipeline scope: step pods get their environment's memory");
     for (const r of rows) console.log(sizingLine(r));
   } else if (sub === "set") {

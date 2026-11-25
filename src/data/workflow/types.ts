@@ -7,8 +7,6 @@ import type { RefKey } from "../mirror/types.ts";
 export type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState, RefKey };
 export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
 
-/** Score at or above this means "started": `1e15 + weight * 1e12 - workflow.id`. */
-export const FAST_FLOOR = 1e15 / 2;
 
 export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;

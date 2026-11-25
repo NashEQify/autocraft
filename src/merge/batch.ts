@@ -23,6 +23,7 @@ import { rustPlan } from "../worker/rust.ts";
 import type { RefusalCode } from "../core/codes.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardBatchMerge, guardRepo, liveOf, type GuardedRepo } from "../core/guard.ts";
+import { repoInScope } from "../core/scope.ts";
 import { claimForWork } from "../github/claim.ts";
 import { ghClosePr, ghOpenPr, ghRerunMainFailed, mergeViaCommand, pushOwnBranch, type Writer } from "../github/write.ts";
 import { readFailure } from "../cifix/logs.ts";
@@ -37,14 +38,15 @@ import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { BatchGit } from "./batch-git.ts";
 import { ACTIVE_BATCH, BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, MAX_PUBLISH_FAILURES, PUBLISH_FAILED, RUNS_WAIT_NOTE, BUILD_MAX_MS, MAX_BUILD_TRIES, admits, cancelBuild, retryDelayMs, getBatch, publishDelayMs, updateBatch, type BatchMember, type BatchView } from "./batch-store.ts";
-import { firstRefusal, mergeScope, mergeVerdicts } from "./approval.ts";
+import { firstRefusal, mergeVerdicts } from "./approval.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
-import { allowFailedArgs, ciNow, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, NO_WORKFLOW_SCORE, type CommandResult } from "./index.ts";
+import { allowFailedArgs, ciNow, prInfo, mergeRun, DEFAULT_MERGE_COMMAND, type CommandResult } from "./index.ts";
 import { liveGateChecked } from "../review/discussion.ts";
 import { redMainRepos } from "../mainci/index.ts";
 import { optionalChecks } from "../optional-checks.ts";
 import { buildQueue, type QueueEntry } from "./queue.ts";
 import { planned } from "../core/select.ts";
+import { NO_WORKFLOW_SCORE } from "../core/work-score.ts";
 import { envVar } from "../env.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { leaseItem } from "../runner/leases.ts";
@@ -55,7 +57,7 @@ import type { StageRow } from "../data/merge/types.ts";
 import { loadItems, loadMainCiAt } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadItemAreas } from "../data/triage/index.ts";
-import { loadPrWorkflows, loadWorkScores } from "../data/workflow/index.ts";
+import { loadPrWorkflows, loadRepoScopes, loadWorkScores } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -131,10 +133,10 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   const at = () => d.now().toISOString();
   const runId = `batch-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   const s: BatchSummary = { runId, repo, started: [], published: [], merged: [], failed: [], split: [], superseded: [], waiting: [] };
-  const scope = await mergeScope(db);
-  if (!scope.any.has(repo)) { log(`batch ${repo}: not in the pipeline scope; nothing done`); return s; }
-  // A repo in scope only through live workflows (its pipeline is off): only batches made of PRs with a live workflow are touched.
-  const fullScope = scope.full.has(repo);
+  const scope = (await loadRepoScopes(db, [repo])).get(repo);
+  if (!repoInScope(scope, "cleanup")) { log(`batch ${repo}: not tracked; nothing done`); return s; }
+  // With the repo's pipeline off only batches made of PRs with a live workflow are worked; the others are closed.
+  const fullScope = repoInScope(scope, "builds");
   /** The repo's active batches, split into those this run works and those whose PRs left the scope. */
   const batchesNow = async (): Promise<{ mine: BatchView[]; outside: BatchView[] }> => {
     const active = (await loadBatchRun(db, repo)).active;
@@ -738,10 +740,10 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const q = await buildQueue(db, { repo, merged: "exclude" });
     for (const b of first.mine) await advance(b.id, q);
   }
-  // A batch in a repo whose pipeline is off loses its place when a PR in it has no live workflow any more: it is only closed, never advanced.
+  // A batch in a repo whose pipeline is off loses its place when a PR in it has no live workflow any more: it is only closed, never advanced, also in a repo with no work left.
   for (const b of first.outside) await supersede(b, [], "a PR in the batch has no live workflow and the repo's pipeline is off");
 
-  if (!(await batchesNow()).mine.length && (params.limit === undefined || params.limit > 0)) {
+  if (repoInScope(scope, "work") && !(await batchesNow()).mine.length && (params.limit === undefined || params.limit > 0)) {
     // PRs in a repo Verify cannot build are left to the single-PR merge (the plan's merge action is not batchable).
     const due = (await planned(db, "merge", { repo, by })).filter((p) => p.action.params?.batchable);
     if (due.length) {

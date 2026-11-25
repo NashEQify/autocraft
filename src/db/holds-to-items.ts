@@ -1,6 +1,7 @@
 // Once: every merge hold (`merge_holds`) of an open pull request becomes a held item, as the command `hold` leaves one (src/workflow/apply.ts):
 // its live workflow, or the one of the issue it implements, is held with what a resume goes back to; a pull request nobody started gets
-// a held row. One that a person already took out of the pipeline stays as it is. The rows go. Merge legs and queued steps of the held
+// a held row. One that a person already took out of the pipeline stays as it is. The rows go; the table stays for a release before this
+// (src/db/retired-names.ts), and nothing is converted where it is gone. Merge legs and queued steps of the held
 // workflows end with the pre-approval pass. Runs on SQLite with the value migrations of connect() (src/db.ts) and on Postgres inside
 // migratePg's transaction (src/db/pg-triggers.ts).
 import type { DatabaseSync } from "node:sqlite";
@@ -19,6 +20,8 @@ type HoldRow = {
 type Mark = (n: number) => string;
 type Write = { sql: (main: string, p: Mark) => string; args: (string | number | null)[] };
 
+const TABLE_SQLITE = "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = 'merge_holds'";
+const TABLE_PG = "SELECT 1 WHERE to_regclass('merge_holds') IS NOT NULL";
 const DONE_READ = (main: string): string => `SELECT 1 FROM ${main}settings WHERE key = '${HOLDS_TO_ITEMS_DONE}'`;
 // The live workflow of the pull request itself comes before the one of its issue.
 const ROWS_SQL = (main: string): string => `SELECT h.repo, h.number, h.held_by, h.held_at, i.head_oid AS head, w.id, w.state, w.rec, w.blocker, w.blocker_params,
@@ -70,7 +73,7 @@ const CLEAR_SQL = (main: string): string => `DELETE FROM ${main}merge_holds`;
 const DONE_SQL = (main: string, p: Mark): string => `INSERT INTO ${main}settings (key, value) VALUES ('${HOLDS_TO_ITEMS_DONE}', ${p(1)}) ON CONFLICT (key) DO NOTHING`;
 
 export function holdsToItemsSqlite(db: DatabaseSync, at = new Date().toISOString()): void {
-  if (db.prepare(DONE_READ("main.")).get()) return;
+  if (!db.prepare(TABLE_SQLITE).get() || db.prepare(DONE_READ("main.")).get()) return;
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!db.prepare(DONE_READ("main.")).get()) {
@@ -87,7 +90,7 @@ export function holdsToItemsSqlite(db: DatabaseSync, at = new Date().toISOString
 
 /** The Postgres form, on the migration connection inside its transaction. */
 export async function holdsToItemsPg(client: PgClient, at = new Date().toISOString()): Promise<void> {
-  if ((await client.query(DONE_READ(""))).rows.length) return;
+  if (!(await client.query(TABLE_PG)).rows.length || (await client.query(DONE_READ(""))).rows.length) return;
   for (const w of writesOf((await client.query(ROWS_SQL(""))).rows as HoldRow[], at)) await client.query(w.sql("", (n) => `$${n}`), w.args);
   await client.query(CLEAR_SQL(""));
   await client.query(DONE_SQL("", (n) => `$${n}`), [at]);

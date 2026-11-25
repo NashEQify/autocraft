@@ -25,6 +25,7 @@ describe("item status", () => {
     assert.equal(phaseOf(input({ itemState: "classified", inPipeline: false })), "Pipeline off", "an issue in a repo with the pipeline off");
     assert.equal(phaseOf(input({ gh: "MERGED", inPipeline: false })), "Merged");
     assert.deepEqual(statusOf(input({ state: "out-of-scope", wait: "not in scope", next: "Classify" })), { phase: "Pipeline off", waiting: null, next: null });
+    assert.deepEqual(statusOf(input({ state: "out-of-scope", inPipeline: false, held: true, wait: "x" })), { phase: "Held", waiting: null, next: null }, "a held item");
     assert.equal(phaseOf(input({ state: "opus-close" })), "Out of scope");
     assert.equal(phaseOf(input({ state: "ci-failed" })), "Fixing");
     assert.equal(phaseOf(input({ state: "waiting-verify" })), "Verifying");

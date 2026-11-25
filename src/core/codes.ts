@@ -6,7 +6,7 @@ export type Who = "person" | "contributor" | "system";
 /** Why an action that is due may not run. */
 export type RefusalCode =
   | "pipeline-off" | "scope" | "ended" | "duplicate" | "blocked" | "not-approved" | "unaccepted-head" | "not-handed-over"
-  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "hold" | "other";
+  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "other";
 
 /** What an item waits on when nothing of it is due. */
 export type WaitCode = RefusalCode
@@ -15,7 +15,7 @@ export type WaitCode = RefusalCode
   | "sign-in" | "hand-over" | "leg" | "base-off-default" | "no-ci" | "review-hold" | "review-failed" | "review-cap"
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
   | "ci-contributor" | "ci-running" | "ci-fix-failed" | "ci-own-breakage" | "ci-nothing-to-fix" | "ask-unsent" | "ask-failed" | "lint"
-  | "revision" | "revision-failed" | "implement-question" | "implement-stuck" | "implement-off" | "implement-ended" | "implement-room"
+  | "screenshots" | "revision" | "revision-failed" | "implement-question" | "implement-stuck" | "implement-off" | "implement-ended" | "implement-room"
   | "open-pr" | "draft" | "mirror" | "triage" | "outside-hold";
 
 /** Why a merge leg ended without a merge. */
@@ -32,8 +32,13 @@ export type Stop = Why<StopCode>;
 /** Who settles a refusal of this code. */
 export const refusalWho = (code: RefusalCode): Who => (code === "not-handed-over" || code === "actor-unknown" || code === "scope" ? "system" : "person");
 
-/** Person waits that ask nothing: a person set them on purpose, or their person acts on GitHub, on a switch or at the sign-in. */
-const NO_QUESTION: ReadonlySet<WaitCode> = new Set(["hold", "repo-approval", "changes-requested", "sign-in", "open-pr"]);
+/**
+ * Person waits that ask nothing: a person set them on purpose, or their person acts on GitHub, on a switch or at the sign-in, or (the item that
+ * blocks a review) their question is another item's.
+ */
+const NO_QUESTION: ReadonlySet<WaitCode> = new Set([
+  "repo-approval", "changes-requested", "sign-in", "open-pr", "conflict-person", "review-hold", "box-identity", "pipeline-off", "breaker",
+]);
 
 /** Whether a started item with this wait has to have a question open. */
 export const needsQuestion = (code: WaitCode, who: Who): boolean => who === "person" && !NO_QUESTION.has(code);
@@ -106,7 +111,8 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
 const WAIT_FORM: readonly (readonly [RegExp, WaitCode])[] = [
   [/^duplicates .*; waits for (a maintainer|their comparison or a maintainer)$/s, "duplicate"],
   [/; waits for a maintainer$/, "not-started"],
-  [/^a maintainer of \S+ to answer, approve or start it again: /, "actor-gone"],
+  [/^a maintainer of \S+ to (answer, approve or start it|approve the merge) again: /, "actor-gone"],
+  [/^a person: the screenshots show a regression/, "screenshots"],
   [/^GitHub's answer on .* access to \S+$/s, "actor-unknown"],
   [/^Implement is off for /, "implement-off"],
   [/, which blocks its review$/, "review-hold"],
@@ -121,7 +127,7 @@ const WAIT_FORM: readonly (readonly [RegExp, WaitCode])[] = [
   [/^the implementation session's revision for #\d+$/, "revision"],
   [/^a maintainer's answer on the stuck implementation of #\d+$/, "implement-stuck"],
   [/^\d+ implementations already running in /, "implement-room"],
-  [/^open PR #\d+( mentions it)?$/, "open-pr"],
+  [/^open PR #\d+(, which closes it: answer that pull request)?$/, "open-pr"],
   [/^author's daily limit \(/, "outside-hold"],
 ];
 
