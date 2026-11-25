@@ -40,6 +40,23 @@ export const CHECK = "gate / test";
 export type Write = { kind: "merge" | "assign" | "comment" | "close" | "pr" | "push"; number: number; head?: string; detail?: string };
 type Live = { head: string; state: string; draft?: boolean; mergeable: string; ci: string; authors: string[]; assignees: string[] };
 
+/**
+ * Runs `passes` until one run issues no write, `most` times at the most: a pass reads only the database and the clock, so a run
+ * after one that wrote nothing decides the same.
+ */
+export async function untilQuiet(db: Db, passes: () => Promise<unknown>, most: number): Promise<void> {
+  let wrote = true;
+  const stop = db.observe((e) => { wrote ||= e.kind === "write-lock" || /\b(insert|replace)\s+into\b|\bupdate\b|\bdelete\s+from\b/i.test(e.sql); });
+  try {
+    for (let i = 0; i < most && wrote; i++) {
+      wrote = false;
+      await passes();
+    }
+  } finally {
+    stop();
+  }
+}
+
 mkdirSync(SCRATCH, { recursive: true });
 export const tmpdir = (name: string): string => mkdtempSync(join(SCRATCH, `${name}-`));
 

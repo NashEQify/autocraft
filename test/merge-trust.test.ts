@@ -8,7 +8,7 @@ import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals, preapprovalOf, preapproveMerge } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
-import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
@@ -61,7 +61,7 @@ async function approved(w: World, c: Pick<Case, "n" | "state" | "entry">): Promi
   await preapproveMerge(w.db, { repo: "app", number: c.n, by: OPERATOR });
   await w.db.run(w.db.k.updateTable("preapprovals").set({ state: c.state }).where("number", "=", c.n));
 }
-const tick = async (w: World, times = 3): Promise<void> => { for (let i = 0; i < times; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+const tick = (w: World, times = 3): Promise<void> => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, times);
 const legOf = async (w: World, n: number) => (await preapprovalOf(w.db, "app", n))!;
 
 test("a push of ours keeps the merge approval, whatever made it and wherever the leg is, and asks nobody", async () => {

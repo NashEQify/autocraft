@@ -83,6 +83,7 @@ export class SqliteAdapter {
       text,
       () => {
         const rows = stmt.all(...(args as [])) as unknown as unknown[][];
+        if (!rows.length) return [];
         const cols = names(stmt);
         return rows.map((v) => rowOf(cols, v));
       }, (r) => [r.length, Buffer.byteLength(JSON.stringify(r))]);

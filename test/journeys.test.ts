@@ -35,7 +35,7 @@ import { LANES, planCtx } from "../src/runner/autopilot.ts";
 import { checkRequest } from "../src/runner/jobs.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { CHECK, OPERATOR, T1, tmpdir, world, type World } from "./world-db.ts";
+import { CHECK, OPERATOR, T1, tmpdir, untilQuiet, world, type World } from "./world-db.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { excluded } from "../src/db/kx.ts";
 import * as kx from "../src/db/kx.ts";
@@ -109,7 +109,7 @@ describe("PR journeys", () => {
 
     const answer = await runCommand(w.db, { login: "mira", canWrite: async () => true }, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
     assert.equal(answer.items[0]!.outcome, "run", answer.lines.join());
-    const advance = async () => { for (let i = 0; i < 3; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+    const advance = () => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 3);
     await advance();
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind), ["review"]);
     assert.deepEqual((await merge()).merged, []);
@@ -461,7 +461,7 @@ describe("a repo with no step approvals", () => {
   const say = async (w: World, text: string, n: number, login = "mira") => {
     const r = await runCommand(w.db, { login, canWrite: async () => true }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] });
     assert.equal(r.items[0]!.outcome, "run", r.lines.join());
-    for (let i = 0; i < 3; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }
+    await untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 3);
   };
   /** The jobs the lane proposes, each taken by the queue's own check. */
   const jobs = async (w: World, lane: string): Promise<string[]> => {
