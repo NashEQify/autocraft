@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
+import { abandonWrites, addOwnCommits, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
@@ -134,15 +134,10 @@ async function laneQuery(w: Writer, g: Guarded | Grant, q: Querier, kind: WriteK
 // (identity, repo owner) under a margin, inside begin(), so every write path is covered. Operator presses (`user:`
 // identities) are exempt.
 export const PACE_PER_MINUTE = 60;
-export const PACE_PER_HOUR = 400;
-/** Bulk writes (the label writes of the labels-apply step, the PR status comments) start only while the key has used less than this share of each limit, so they leave room for the writes that move PRs. */
-export const BULK_SHARE = 0.5;
+/** Bulk writes (the label writes of the labels-apply step, the PR status comments) start only while the key has used less than a share of each limit, so they leave room for the writes that move PRs. */
 const BULK_ACTIONS = new Set(["labels-apply", "pr-status-comment", "pr-status-comment-edit"]);
 /** The longest a write waits for the budget; past it the write is refused as paced and the caller retries later. */
 export const PACE_MAX_WAIT_MS = 15_000;
-/** After a secondary-limit failure the key pauses this long. */
-export const SECONDARY_PAUSE_MS = 60_000;
-const SECONDARY_LIMIT = /secondary rate limit|abuse/i;
 
 /** The write was held back by pacing for longer than the bound and nothing was written or recorded. Retry later. */
 export class WritePacedError extends Error {
@@ -169,23 +164,7 @@ function paceOwner(identity: string, target: string, owner?: string): string {
 
 /** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
 async function keyWait(db: Db, action: string, identity: string, owner: string, now: number): Promise<number> {
-  const valid = (eb: kx.AnyEb) => eb.case().when(kx.jsonValid(db, "details")).then(eb.ref("details")).end();
-  const rows = await db.all(db.k.selectFrom("audit")
-    .select((eb) => ["at", kx.jsonText(db, valid(eb), "$.state").as("state"), kx.jsonText(db, valid(eb), "$.error").as("error")])
-    .where("at", ">=", new Date(now - 3_600_000).toISOString())
-    .where((eb) => eb.and([eb(kx.jsonText(db, valid(eb), "$.identity"), "=", identity), eb(kx.jsonText(db, valid(eb), "$.paceOwner"), "=", owner)]))
-    .orderBy("at").orderBy(kx.rowid("audit")));
-  const times = rows.map((r) => Date.parse(r.at));
-  const inMinute = times.filter((t) => t > now - 60_000);
-  const share = BULK_ACTIONS.has(action) ? BULK_SHARE : 1;
-  const perMinute = Math.floor(PACE_PER_MINUTE * share);
-  const perHour = Math.floor(PACE_PER_HOUR * share);
-  let wait = 0;
-  if (inMinute.length >= perMinute) wait = inMinute[inMinute.length - perMinute]! + 60_000 - now;
-  if (times.length >= perHour) wait = Math.max(wait, times[times.length - perHour]! + 3_600_000 - now);
-  const lastSecondary = rows.filter((r) => r.state === "failed" && SECONDARY_LIMIT.test(r.error ?? "")).map((r) => Date.parse(r.at)).at(-1);
-  if (lastSecondary !== undefined) wait = Math.max(wait, lastSecondary + SECONDARY_PAUSE_MS - now);
-  return wait > 0 ? Math.max(wait, 1) : 0;
+  return (await loadPaceWaits(db, [{ action, identity, owner }], now)).get(`${action}\t${identity}\t${owner}`) ?? 0;
 }
 
 /**
@@ -197,31 +176,18 @@ export async function pipelineWriteWait(db: Db, action: string, repo: string, no
   return await keyWait(db, action, identity, paceOwner(identity, repo), now);
 }
 
-/**
- * Tries to insert the row inside one BEGIN IMMEDIATE: counts the key's rows of the last hour (json_extract over the
- * window's rows via the audit_at index: fine at this volume) and inserts when under budget. Returns the row id, or
- * how long to wait before the window frees.
- */
-async function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): Promise<{ id: number } | { wait: number }> {
+/** Adds the `started` row when the key is under budget (the module counts the key's rows of the last hour under the writer lock); else how long to wait before the window frees. */
+async function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): Promise<{ id: number; paceOwner: string | null } | { wait: number }> {
   const identity = String(details.identity ?? "");
-  const owner = paceOwner(identity, target, ownerArg);
-  const insert = async (d: Details): Promise<number> => (await w.db.get(w.db.k.insertInto("audit")
-    .values({ at: new Date(now).toISOString(), login: w.login, action, target, details: JSON.stringify(d) })
-    .returning(kx.rowid("audit").as("rowid"))))!.rowid;
-  const started = { ...details, state: "started" };
-  if (identity.startsWith("user:")) return { id: await insert(started) };
-  return await w.db.write(async () => {
-    const wait = await keyWait(w.db, action, identity, owner, now);
-    if (wait > 0) return { wait };
-    return { id: await insert({ ...started, paceOwner: owner }) };
-  });
+  const pace = identity.startsWith("user:") ? null : { identity, owner: paceOwner(identity, target, ownerArg), bulk: BULK_ACTIONS.has(action) };
+  return await beginWrite(w.db, { at: new Date(now).toISOString(), login: w.login, action, target, details, pace });
 }
 
 /** The running job's id, joined to the audit row so a write can be traced to its job. Absent outside a job. */
 const jobOf = (): { jobId?: number } => { const j = currentJobId(); return j === null ? {} : { jobId: j }; };
 
 /** Audit rows of writes this process has begun and not yet finished, with what resolves when they finish. */
-const inFlight = new Map<number, { done: Promise<void>; end: () => void }>();
+const inFlight = new Map<number, { done: Promise<void>; end: () => void; owner: string | null }>();
 let stoppedWhy: string | null = null;
 /**
  * Writes that finished whose caller has not asked for another write since: it may still be recording what the write did
@@ -270,10 +236,10 @@ async function park(cleanup?: () => Promise<void>): Promise<never> {
   return await new Promise<never>(() => {});
 }
 
-function track(id: number): void {
+function track(id: number, owner: string | null): void {
   let end = (): void => {};
   const done = new Promise<void>((r) => { end = r; });
-  inFlight.set(id, { done, end });
+  inFlight.set(id, { done, end, owner });
 }
 
 function untrack(id: number): void {
@@ -300,8 +266,8 @@ async function begin(w: Writer, action: string, target: string, details: Details
     if ("id" in r) {
       // Checked and tracked in one turn of the event loop: stopWrites either waits for this write, or it is not made.
       const id = r.id;
-      if (stoppedWhy !== null) return await park(async () => { await w.db.run(w.db.k.deleteFrom("audit").where(kx.rowid("audit"), "=", id)); await beforePark?.(); });
-      track(id);
+      if (stoppedWhy !== null) return await park(async () => { await abandonWrites(w.db, [id]); await beforePark?.(); });
+      track(id, r.paceOwner);
       return id;
     }
     if (now - t0 + r.wait > PACE_MAX_WAIT_MS) throw new WritePacedError(`${String(details.identity)} on ${paceOwner(String(details.identity), target, owner) || "all owners"}`, r.wait);
@@ -313,13 +279,9 @@ async function begin(w: Writer, action: string, target: string, details: Details
 async function finish(w: Writer, id: number, details: Details, error?: string, owes = true): Promise<void> {
   const d = error === undefined ? { ...details, state: "done" } : { ...details, state: "failed", error };
   // The pacing key's owner, set by begin(), stays on the row.
+  const owner = inFlight.get(id)?.owner ?? null;
   try {
-    await w.db.write(async () => {
-      const row = await w.db.get(w.db.k.selectFrom("audit").select("details").where(kx.rowid("audit"), "=", id));
-      let owner: unknown = null;
-      try { owner = (JSON.parse(row?.details ?? "null") as { paceOwner?: unknown } | null)?.paceOwner ?? null; } catch { /* no owner */ }
-      await w.db.run(w.db.k.updateTable("audit").set({ details: JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }) }).where(kx.rowid("audit"), "=", id));
-    });
+    await finishWrite(w.db, id, owner === null ? d : { ...d, paceOwner: owner });
   } finally {
     if (owes) owed++;
     untrack(id);
@@ -339,6 +301,14 @@ const onceKey = (...parts: unknown[]): string => createHash("sha256").update(JSO
 /** What tells two comments of one job with the same text apart: the decision, card, comment or command they answer. */
 const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command"].map((k) => d[k] ?? null);
 
+const earlier = new WeakMap<Db, Map<string, Promise<Awaited<ReturnType<typeof loadMadeBefore>>>>>();
+/** A resumed job's rows from before its run started: they cannot change while it runs, so every write of the run shares one read. */
+const earlierWrites = (db: Db, job: number, before: string): Promise<Awaited<ReturnType<typeof loadMadeBefore>>> => {
+  const byJob = earlier.get(db) ?? earlier.set(db, new Map()).get(db)!;
+  const key = `${job}@${before}`;
+  return byJob.get(key) ?? byJob.set(key, loadMadeBefore(db, job, before).catch((e) => { byJob.delete(key); throw e; })).get(key)!;
+};
+
 /**
  * In a resumed job: the details of the successful write its earlier run made with this action, target and one of `keys`,
  * or null. A write the earlier run began and never finished (it was stopped before recording the outcome) is made again,
@@ -349,17 +319,10 @@ async function madeBefore(w: Writer, action: string, target: string, keys: strin
   if (job === null) return null;
   const run = await resumedRun(w.db, job);
   if (!run) return null;
-  const rows = await w.db.all(w.db.k.selectFrom("audit").select([kx.rowid("audit").as("id"), "details"]).$narrowType<{ details: string }>()
-    .where("target", "=", target).where("action", "=", action).where("at", "<", run.startedAt)
-    .where((eb) => eb.and([
-      eb(kx.jsonNum(w.db, "details", "$.jobId"), "=", job),
-      kx.inList(w.db, kx.jsonText(w.db, "details", "$.writeKey"), keys),
-      eb(kx.jsonText(w.db, "details", "$.state"), "in", ["done", "started"]),
-    ]))
-    .orderBy(kx.rowid("audit"), "desc"));
-  const done = rows.find((r) => (JSON.parse(r.details) as Details).state === "done");
-  if (done) return { done: JSON.parse(done.details) as Details };
-  return rows.length ? { unknown: Number(rows[0]!.id) } : null;
+  const rows = (await earlierWrites(w.db, job, run.startedAt)).get(`${action}\t${target}`)?.filter((r) => typeof r.details.writeKey === "string" && keys.includes(r.details.writeKey)) ?? [];
+  const done = rows.find((r) => r.details.state === "done");
+  if (done) return { done: done.details };
+  return rows.length ? { unknown: rows[0]!.id } : null;
 }
 
 /**
@@ -565,10 +528,8 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
   const ids: number[] = [];
   // Paced or stopped partway: the rows already added were never sent.
   const unsent = async (): Promise<void> => {
-    for (const id of ids) {
-      untrack(id);
-      await w.db.run(w.db.k.deleteFrom("audit").where(kx.rowid("audit"), "=", id));
-    }
+    for (const id of ids) untrack(id);
+    await abandonWrites(w.db, ids);
   };
   try {
     for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it), undefined, unsent));
@@ -874,7 +835,7 @@ export function pushOwnBranch(w: Writer, g: Grant | Guarded<"implement">, git: P
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
   return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, lease, details, { repo: o.repo, number: g.scope === "pr" ? g.number : null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
-    if (r.code === 0) try { await w.db.run(w.db.k.insertInto("main.own_commits").values({ repo: o.repo, sha: o.sha, action, at: new Date().toISOString() }).onConflict((oc) => oc.doNothing())); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    if (r.code === 0) try { await addOwnCommits(w.db, [{ repo: o.repo, sha: o.sha, action }]); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;
   });
 }
