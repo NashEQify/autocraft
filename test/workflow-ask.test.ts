@@ -8,6 +8,7 @@ import { startAttempt } from "../src/data/implement/index.ts";
 import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { textHash } from "../src/core/open-prs.ts";
+import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
@@ -147,6 +148,7 @@ test("a PR that failed alone in a batch, or whose screenshots show a regression,
       await w.db.run(w.db.k.insertInto("main.merge_batch_prs").values({ batch_id: id, number: 1, head_oid: "sha1", position: 0 }));
     } else await w.db.run(w.db.k.insertInto("main.screenshot_runs").values({ repo: "app", number: 1, head_sha: "sha1", state: "compared", verdict: "regression", clear: 1, held: 1, comparison: "The handles moved.", created_at: at, finished_at: at }));
     assert.ok(!(await actions(w)).includes("merge"), what);
+    if (what === "screenshots") assert.equal((await mergeVerdicts(w.db, "app", [{ number: 1, head: "sha1" }], { batch: true })).get(1)!.ok, false, "a batch that holds it goes on without it");
     await settle(w);
     assert.deepEqual(await shown(w), ["blocked", what, MAINT]);
     await say(w, "yes", ANN);
