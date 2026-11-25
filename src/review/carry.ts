@@ -70,8 +70,3 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
   });
   return out;
 }
-
-/** carriedReviews() for one PR. */
-export async function carriedReview(db: Db, c: Cand, stale: Set<string> = new Set()): Promise<Carried | null> {
-  return (await carriedReviews(db, [c], stale)).get(`${c.repo}#${c.number}`) ?? null;
-}

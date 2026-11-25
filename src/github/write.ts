@@ -162,11 +162,6 @@ function paceOwner(identity: string, target: string, owner?: string): string {
   return owner ?? (ownerOf(name) || name);
 }
 
-/** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
-async function keyWait(db: Db, action: string, identity: string, owner: string, now: number): Promise<number> {
-  return (await loadPaceWaits(db, [{ action, identity, owner }], now)).get(`${action}\t${identity}\t${owner}`) ?? 0;
-}
-
 /**
  * How long the pipeline's write of `action` on each of `repos` (made as the app, or the box account while writes use it) waits for
  * the budget now; 0 when it may start. The planner reads it so it does not queue a job whose writes would be refused as paced.

@@ -22,7 +22,7 @@ import { dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
-  advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan, loadSyncState,
+  advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan,
   markReposReconciled, markReposRead, markReposSyncedByError, saveItems, saveRepoList, saveSyncState, startSyncRun,
   type CommentInsert, type ItemEntry, type ItemRowInput, type SyncPlan, type SyncState,
 } from "./data/mirror/index.ts";

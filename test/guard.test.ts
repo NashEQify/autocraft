@@ -50,7 +50,7 @@ test("refuses a merge without a live read, and when GitHub's head moved", async 
 test("refuses when the PR's workflow ended in the backlog", async () => {
   const db = await fresh([{ n: 1 }]);
   await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "review", state: "backlog", startedBy: "op", startedAt: T, startedVia: "dashboard" });
-  assert.match(why(await guard(db, ref, MERGE, OP, live())), /plan no longer has merge/);
+  assert.match(why(await guard(db, ref, MERGE, OP, live())), /sent this to the backlog/);
 });
 
 test("refuses when a maintainer's changes-requested review blocks the PR", async () => {

@@ -2,11 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpdir } from "./world-db.ts";
-import { carriedReview } from "../src/review/carry.ts";
+import { carriedReviews } from "../src/review/carry.ts";
+import type { Db } from "../src/db/index.ts";
 import { changedHunks, ownDiffKey } from "../src/review/own-diff.ts";
 import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { conflictBucket } from "../src/fixup/conflict-state.ts";
 import { connectDb } from "./helpers/raw-db.ts";
+
+const carriedReview = async (db: Db, c: { repo: string; number: number; head_oid: string }, stale?: Set<string>) => (await carriedReviews(db, [c], stale)).get(`${c.repo}#${c.number}`) ?? null;
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("conflict-cost-diffs"), "cache");
 

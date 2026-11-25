@@ -7,7 +7,7 @@ import { filtered, isHiddenRepo, listAuditPage, loadStepApprovals, loadTrackedRe
 import { endSessionById, listSessions, loadOverrides } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type {
-  AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
+  AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, Tier, TrackedRepo, WhitelistRule,
 } from "../../../web/src/api/types.ts";
 import { AccessError, addLogin, getAccess, isRole, LOGIN, listAccess, removeLogin, ROLES, setRole } from "../../access.ts";
 import { setApproval } from "../../labels/approval.ts";
@@ -30,7 +30,7 @@ import { audit } from "../audit.ts";
 import { dropSessionTokens } from "../server/user-tokens.ts";
 import { endTokens, listAllTokens, revokeAnyToken } from "../mcp/tokens.ts";
 import { HttpError } from "../server/util.ts";
-import type { Req, Role } from "../types.ts";
+import type { Req } from "../types.ts";
 import type { Step } from "../../data/control/types.ts";
 import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { canSeeInternals } from "./staff.ts";

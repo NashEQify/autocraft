@@ -6,10 +6,13 @@ import { tmpdir } from "./world-db.ts";
 import { decidePr } from "../src/core/decide.ts";
 import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
-import { carriedReview } from "../src/review/carry.ts";
+import { carriedReviews } from "../src/review/carry.ts";
+import type { Db } from "../src/db/index.ts";
 import { prFacts } from "./world.ts";
 import { connectDb, dbFor } from "./helpers/raw-db.ts";
 import { sqliteOnly } from "./test-db.ts";
+
+const carriedReview = async (db: Db, c: { repo: string; number: number; head_oid: string }, stale?: Set<string>) => (await carriedReviews(db, [c], stale)).get(`${c.repo}#${c.number}`) ?? null;
 
 test("selection order: our broken push, then work in flight, then score", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const mk = (n: number, over: Parameters<typeof prFacts>[0]) => { const facts = prFacts({ number: n, review: { head: "old" }, head: "h", ...over }); return { facts, plan: decidePr(facts) }; };
