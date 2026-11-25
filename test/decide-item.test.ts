@@ -37,7 +37,7 @@ const rows: Row[] = [
   { name: "Haiku as new as Jev's verdict: not due", facts: { classification: { status: "settled", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } } }, expect: { state: "classified", actions: [] } },
   { name: "an item out of scope is not classified", facts: { inScope: false, classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "unclassified", wait: "not in scope" } },
   { name: "our own integration PR is not classified", facts: { kind: "pr", integration: true, classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "unclassified", actions: [] } },
-  { name: "a held item is still classified", facts: { held: "duplicate", classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "held-duplicate", actions: ["classify"], next: "Held: waiting for a Duplicate? answer" } },
+  { name: "a held item is still classified", facts: { held: "duplicate", classification: { status: "unclassified", label: null, jev: null } }, expect: { state: "held-duplicate", actions: ["classify"], next: "Held" } },
 
   // ---- referee and disagreement
   { name: "labels disagree, Sonnet has not answered", facts: disagree(), expect: { state: "referee-due", actions: ["referee"], next: "Referee: waiting for Sonnet" } },
