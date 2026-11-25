@@ -154,6 +154,8 @@ export const PLAN_INPUTS: PlanInput[] = [
   { table: "item_embeddings", class: "item", why: "One item's embedding hash.", columns: ["repo", "number", "model", "hash"] },
   {
     table: "item_plans", class: "item", why: "The item's own planned review or carry: its open decisions' prepare waits for it (reviewQueuedSql). The planner writes it; an unchanged plan writes nothing.",
+    // Only an item with an open decision reads it; opening a decision logs the item through the decisions input.
+    refs: "SELECT r.repo AS repo, r.number AS number WHERE EXISTS (SELECT 1 FROM decisions d WHERE d.repo = r.repo AND d.number = r.number AND d.answer IS NULL)",
     columns: ["actions"],
   },
   { table: "item_priority", class: "item", why: "One item's priority row." },

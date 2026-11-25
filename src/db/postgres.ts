@@ -34,6 +34,11 @@ const DEFAULT_IDLE_IN_TRANSACTION_MS = 60_000;
  */
 export const SERVER_KEEPALIVE = { tcp_keepalives_idle: 5, tcp_keepalives_interval: 2, tcp_keepalives_count: 3, tcp_user_timeout: 10_000 } as const;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
+/**
+ * JIT compilation off (0 is a boolean's false). The planner's cost estimates for the facts loads' correlated subqueries pass
+ * jit_above_cost while the queries run in milliseconds, and each compile costs 100 ms or more, up to seconds for the full load.
+ */
+const NO_JIT = { jit: 0 } as const;
 
 /** Parsed statement texts kept per handle. */
 const PARSE_CACHE = 1000;
@@ -210,7 +215,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     client.on("error", () => {});
   });
   const raw = (text: string, values?: unknown[]) => k.CompiledQuery.raw(text, values);
-  const sessionSettings = { ...SERVER_KEEPALIVE, idle_in_transaction_session_timeout: opts.idleInTransactionMs ?? DEFAULT_IDLE_IN_TRANSACTION_MS };
+  const sessionSettings = { ...SERVER_KEEPALIVE, ...NO_JIT, idle_in_transaction_session_timeout: opts.idleInTransactionMs ?? DEFAULT_IDLE_IN_TRANSACTION_MS };
   /**
    * The driver awaits this once per new pool client before the client's first statement (pg's own `connect` event cannot
    * wait), so every statement runs with the session settings in effect.
