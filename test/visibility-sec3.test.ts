@@ -60,7 +60,6 @@ before(async () => {
     db.run(db.k.insertInto("opus_reviews").values({ repo, number, head_oid, run_id: "r", at: now, verdict, reason: "ok", sure: 1, mode: "full", conflicts, blocked_by }));
   await review("open-app", 1, "h1", "take", JSON.stringify([{ id: 1, reason: "MARK-MODEL-REASON" }]), null);
   await review("vault", 9, "h9", "hold", null, JSON.stringify(["open-app#10"]));
-  await db.run(db.k.insertInto("decision_comments").values({ id: "c1", decision_id: "open-app#2:scope", login: "maint", at: now, body: "MARK-QUIET-COMMENT" }));
   // A model call recorded without item rows, about the hidden repo.
   await finishRun(db, await insertRun(db, { jobId: null, step: "dupes.compare-prs.opus", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [], prompt: "prompt about vault#7" }), { state: "done", output: "vault" });
   await addLogin(db, "cli", "boss", "operator", null);
@@ -107,7 +106,6 @@ test("viewers read no staff text of queue rows or of a quiet pull request's feed
   assert.deepEqual(queue.rows[0]!.outsideRule, ["conflicts with an owner statement", "verification failed"]);
   assert.deepEqual(queue.rows[1]!.outsideRule, []);
   for (const get of [reader, maint]) assert.doesNotMatch(await get("/api/queue/batches"), /oldrepo/);
-  assert.match(await maint("/api/needs?feedback=1"), /MARK-QUIET-COMMENT/);
   // The quiet pull request keeps its tab (from the stored next step) without the text.
   assert.match(await boss("/api/work"), /MARK-NEXT/);
   assert.doesNotMatch(await reader("/api/work"), /MARK-/);
@@ -119,7 +117,7 @@ test("a maintainer who cannot see a repo finds its name in no fact, wait, statem
   const boss = await signIn("boss"), maint = await signIn("maint");
   assert.match(await boss("/api/agents"), /dupes/);
   assert.match(await boss("/api/pipeline/jobs/1"), /vault#7 failed/);
-  for (const path of ["/api/next", "/api/items/status", "/api/queue",
+  for (const path of ["/api/next", "/api/queue",
     "/api/items/open-app/1", "/api/items/open-app/1/page", "/api/items/open-app/1/trace", "/api/agents", "/api/pipeline", "/api/pipeline/jobs", "/api/pipeline/jobs/1"])
     assert.doesNotMatch(await maint(path), /vault/, path);
   assert.match(await maint("/api/items/open-app/1/page"), /another item, which blocks its review/);

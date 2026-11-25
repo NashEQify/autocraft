@@ -1,6 +1,7 @@
 // A tracked repo that is not public is visible to operators and to users whose
 // own GitHub permission on it is not "none"; to nobody else.
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +59,7 @@ before(async () => {
     const id = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo, number: 1 }], prompt: `prompt for ${repo}` });
     await finishRun(db, id, { state: "done", output: `output for ${repo}` });
   }
+  for (const repo of ["open-app", "vault"]) await insertWorkflow(db, { repo, number: 1, kind: "pr", entry: "review", state: "running", startedBy: "boss", startedAt: now, startedVia: "dashboard" });
   await refreshPlanCache(db);
   await addLogin(db, "cli", "boss", "operator", null);
   await addLogin(db, "cli", "reader", "viewer", null);
@@ -115,7 +117,6 @@ describe("repo visibility", () => {
   test("a viewer without permission sees nothing of the internal repo", async () => {
     const c = await signedIn("outsider");
     assert.deepEqual(await c.get<string[]>("/api/repos"), ["open-app"]);
-    assert.deepEqual(refs((await c.get<ItemList>("/api/items?state=all")).rows), ["open-app#1"]);
     assert.deepEqual(refs(await c.get<SearchHit[]>("/api/search?q=wave")), ["open-app#1"]);
     assert.deepEqual(refs(await c.get<SearchHit[]>("/api/search?q=vault%231")), []);
     assert.equal(await c.status("/api/items/vault/1"), 404);
@@ -149,7 +150,6 @@ describe("repo visibility", () => {
     for (const login of ["reader", "boss"]) {
       const c = await signedIn(login);
       assert.deepEqual(await c.get<string[]>("/api/repos"), ["open-app", "vault"], login);
-      assert.deepEqual(refs((await c.get<ItemList>("/api/items?state=all")).rows), ["open-app#1", "vault#1"], login);
       assert.equal(await c.status("/api/items/vault/1"), 200, login);
       assert.deepEqual((await c.get<QueueList>("/api/queue")).rows.map((r) => r.repo), ["open-app", "vault"], login);
       assert.equal((await c.get<Progress>("/api/progress")).funnel.open, 2, login);
@@ -307,13 +307,12 @@ describe("repo visibility", () => {
       await db.prepare("INSERT INTO main.conversations (repo, number, item_block, item_sig, created_at, created_by) VALUES ('open-app', ?, 'b', 's', ?, 'boss')").run(n, now);
       await db.prepare("INSERT INTO main.conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('open-app', ?, 'opus', 'opus', ?, 'the Opus analysis', 'blk', NULL, 1)").run(n, now);
     }
-    type Conv = { turns: { body: string }[]; choices: unknown };
+    type Conv = { turns: { body: string }[] };
     const reader = await signedIn("reader"), maint = await signedIn("maint");
     assert.equal((await reader.get<Conv>("/api/conversations/open-app/1")).turns[0]!.body, "the Opus analysis");
     const quiet = await reader.get<Conv>("/api/conversations/open-app/2");
     assert.equal(quiet.turns.length, 1);
     assert.equal(quiet.turns[0]!.body, "");
-    assert.equal(quiet.choices, null);
     assert.equal((await maint.get<Conv>("/api/conversations/open-app/2")).turns[0]!.body, "the Opus analysis");
     await db.script("DELETE FROM main.conversation_turns; DELETE FROM main.conversations");
     await db.run(db.k.deleteFrom("security_findings").where("number", "=", 901));

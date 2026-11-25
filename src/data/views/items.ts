@@ -5,7 +5,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { parseSearch, type Search } from "../../db/search.ts";
-import { hiddenRepos } from "../control/fragments.ts";
+import { hiddenRepos, trackedRepo } from "../control/fragments.ts";
 import type { Scope } from "./types.ts";
 
 /** The item's rowid is among the full-text hits of the search; needs the items table aliased `i`. */
@@ -30,7 +30,7 @@ export async function loadQuickSearch(db: Db, scope: Pick<Scope, "hidden">, quer
   const ref = /^([A-Za-z0-9._-]+)?#(\d{1,9})$/.exec(text) ?? /^()(\d{1,9})$/.exec(text);
   if (ref) {
     return await q.all(q.k.selectFrom("main.items").select([...COLS])
-      .where((eb) => kx.like(db, eb.cast<string>("number", "text"), eb.val(`${ref[2]}%`))).where(hide("repo"))
+      .where((eb) => kx.like(db, eb.cast<string>("number", "text"), eb.val(`${ref[2]}%`))).where(hide("repo")).where((eb) => trackedRepo(eb, "repo"))
       .$if(!!ref[1], (b) => b.where((eb) => kx.like(db, "repo", eb.val(`${likeEscape(ref[1]!)}%`), "\\")))
       .orderBy((eb) => eb.fn<number>("length", [eb.cast<string>("number", "text")])).orderBy("repo").orderBy("number").limit(o.limit)) as QuickHit[];
   }
@@ -38,7 +38,7 @@ export async function loadQuickSearch(db: Db, scope: Pick<Scope, "hidden">, quer
   const look = (titleOnly: boolean) => q.all(q.k
     .with("hits", (qb) => qb.selectFrom(kx.itemHits(db, fts!, { titleOnly }, "x")).select("x.rid").orderBy("x.rid", "desc").limit(HITS))
     .selectFrom("hits as h").innerJoin("main.items as i", (j) => j.on(kx.rowid("main.items", "i"), "=", (eb) => eb.ref("h.rid")))
-    .select(["i.repo", "i.number", "i.kind", "i.title", "i.author", "i.state"]).where(hide("i.repo"))
+    .select(["i.repo", "i.number", "i.kind", "i.title", "i.author", "i.state"]).where(hide("i.repo")).where((eb) => trackedRepo(eb, "i.repo"))
     .orderBy((eb) => eb("i.state", "<>", "OPEN")).orderBy("i.updated_at", (ob) => ob.desc().nullsLast()).limit(o.limit)) as Promise<QuickHit[]>;
   const [byAuthor, byTitle] = await db.together(() => Promise.all([
     // A single word may be a login: that author's latest items first.

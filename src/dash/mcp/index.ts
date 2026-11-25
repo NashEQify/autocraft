@@ -31,6 +31,7 @@ import { home } from "../api/maintain.ts";
 import { slugOf } from "../../owners.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadLegPass } from "../../data/workflow/index.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { loadUserRuns } from "../../data/inference/index.ts";
 import { loadHeldFixups } from "../../data/views/held-fixups.ts";
 
@@ -312,6 +313,11 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const ref = refText(r);
   const it = (await loadItems(env.db, [r], "card")).get(ref);
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
+  // A quiet pull request (the landing fix of a security finding) shows viewers no workflow text, as on the item page.
+  const role = (await env.user(false)).role;
+  if (role !== "operator" && role !== "maintainer" && (await loadQuiet(env.db, [ref])).has(ref)) {
+    return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
+  }
   const wf = await liveWorkflow(env.db, r.repo, r.number);
   const wait = wf ? await legWait(env.db, wf) : null;
   const events = (await eventsOf(env.db, r.repo, r.number)).slice(-10);
@@ -355,7 +361,8 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const done = await runCommand(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo),
   });
-  return { text: done.lines.join("\n") };
+  const text = done.lines.join("\n");
+  return { text: /has no write access to/.test(text) ? text + PERMISSION_HINT : text };
 }
 
 async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
