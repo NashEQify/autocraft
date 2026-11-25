@@ -18,6 +18,19 @@ export async function loadCheckResult(db: Db, id: number): Promise<{ id: number;
 }
 
 /**
+ * The calls with a requested check: one their current lease made, which takeRequestedChecks takes, or with `everyLease` one of any
+ * lease, which refuseChecks refuses. 1 statement.
+ */
+export async function loadRequestedChecks(db: Db, callIds: number[], o: { everyLease?: boolean } = {}): Promise<Set<number>> {
+  if (!callIds.length) return new Set();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.remote_checks as k").innerJoin("main.remote_calls as c", "c.id", "k.call_id").select("k.call_id").distinct()
+    .where(kx.inList(db, "k.call_id", callIds, "bigint")).where("k.state", "=", "requested")
+    .$if(!o.everyLease, (b) => b.where((eb) => eb("k.run_id", "is not distinct from", eb.ref("c.run_id")))));
+  return new Set(rows.map((r) => Number(r.call_id)));
+}
+
+/**
  * Marks the call's requested checks `running` in one `UPDATE ... RETURNING`, oldest first. Only requests made under the call's
  * current lease run (`run_id`) are taken; one made under an earlier lease is stale and left alone.
  */

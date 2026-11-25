@@ -1,10 +1,10 @@
 // Workspace tool calls (`workspace_calls`) (package build-b).
-// reads: runners.remote_calls (through runners/fragments.ts: callSince, leasedRunOf, runOfCall)
+// reads: runners.remote_calls (through runners/fragments.ts: callSince, leasedRunOf, leasedRunsOf, runOfCall)
 import { createHash } from "node:crypto";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { callSince, leasedRunOf, runOfCall } from "../runners/fragments.ts";
+import { callSince, leasedRunOf, leasedRunsOf, runOfCall } from "../runners/fragments.ts";
 import { patchRows } from "./row-patch.ts";
 import type { CallAccounting, NewWorkspaceCall, ToolCallQuery, WorkspaceCallRow } from "./types.ts";
 
@@ -59,6 +59,15 @@ export async function claimQueuedCalls(db: Db, workspaceId: number, callId: numb
   const rows = await db.write(async () => await q.all(q.k.updateTable("main.workspace_calls").set({ state: "running", started_at: new Date().toISOString() })
     .where("workspace_id", "=", workspaceId).where("state", "=", "queued").where("run_id", "=", leasedRunOf(db, callId)).returning(["id", "tool", "args"])));
   return rows.map((r) => ({ id: Number(r.id), tool: r.tool, args: r.args })).sort((a, b) => a.id - b.id);
+}
+
+/** The workspaces of `pairs` with a call claimQueuedCalls would claim. 1 statement. */
+export async function loadQueuedWorkspaces(db: Db, pairs: { workspaceId: number; callId: number }[]): Promise<Set<number>> {
+  if (!pairs.length) return new Set();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.workspace_calls").select("workspace_id").distinct().where(kx.inList(db, "workspace_id", pairs.map((p) => p.workspaceId), "bigint"))
+    .where("state", "=", "queued").where((eb) => eb("run_id", "in", leasedRunsOf(db, pairs.map((p) => p.callId)))));
+  return new Set(rows.map((r) => Number(r.workspace_id)));
 }
 
 /** Refuses the queued calls of the workspace under the last run of `callId` (no live lease needed) with `result`; returns their ids. */

@@ -2,7 +2,7 @@
 import type { AliasableExpression, Expression, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { exprOf, ref, schemaEb, type AnyEb, type Eb, type Ex } from "../../db/kx.ts";
+import { exprOf, inList, ref, schemaEb, type AnyEb, type Eb, type Ex } from "../../db/kx.ts";
 
 import { earlierRunCall as jobsEarlierRunCall, resumingJobs } from "../jobs/fragments.ts";
 
@@ -11,6 +11,11 @@ const MANUAL_ONLY_KEY = "manual_only";
 /** The run of the call's live lease: only calls queued under it are served. */
 export function leasedRunOf(db: Db, callId: number): SelectQueryBuilder<any, any, { run_id: number | null }> {
   return queryDb(db).k.selectFrom("remote_calls").select("run_id").where("id", "=", callId).where("state", "=", "leased");
+}
+
+/** leasedRunOf for several calls. */
+export function leasedRunsOf(db: Db, callIds: number[]): SelectQueryBuilder<any, any, { run_id: number | null }> {
+  return queryDb(db).k.selectFrom("remote_calls").select("run_id").where(inList(db, "id", callIds, "bigint")).where("state", "=", "leased");
 }
 
 /** The run of the call in any state: what its last lease ran under. */

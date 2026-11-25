@@ -5,9 +5,9 @@ import type { JobUsage } from "../../web/src/api/types.ts";
 import { NoTakerError, setCallContext, StoppedError } from "../agents/call.ts";
 import { trackedNames } from "../repos.ts";
 import { AUTOPILOT_USER, KEY_ENABLED } from "./autopilot.ts";
-import { loadLiveConfig, withConfig } from "../data/control/index.ts";
+import { loadLiveConfig, readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../data/control/index.ts";
 import { loadJobUsage } from "../data/inference/index.ts";
-import { openJobPulse, type JobPulse } from "../data/jobs/index.ts";
+import { openJobPulse, type JobPulse, type JobResult } from "../data/jobs/index.ts";
 import { leaseSkipKeys, leaseSkips } from "./leases.ts";
 import { jobRow, scrub, type JobRow } from "./jobs.ts";
 import { recordResult } from "../data/jobs/index.ts";
@@ -36,7 +36,8 @@ async function usageOf(db: Db, runs: Set<string>, since: string): Promise<JobUsa
 
 export async function execJob(id: number): Promise<number> {
   const db = await openDb();
-  const row = await jobRow(db, id);
+  // The job's row and what its step starts with, in one wave.
+  const { value: [row, tracked, settings], stats: loaded } = await db.meter(() => db.together(() => Promise.all([jobRow(db, id), trackedNames(db), readSettingsSnapshot(db)])));
   if (!row || row.state !== "running" || !row.started_at) {
     console.error(`job ${id} is not running`);
     return 2;
@@ -53,10 +54,9 @@ export async function execJob(id: number): Promise<number> {
     return all ? JSON.stringify(all) : undefined;
   };
   const saveUsage = async () => await recordResult(db, id, { usage: await usageJson() });
-  const fail = async (msg: string): Promise<number> => {
-    await recordResult(db, id, { usage: await usageJson(), error: oneLine(msg) });
+  const fail = async (msg: string): Promise<Ended> => {
     console.error(`failed: ${msg}`);
-    return 1;
+    return { code: 1, result: { usage: await usageJson(), error: oneLine(msg) } };
   };
   // The runner signals this process alone: GitHub writes in flight finish and are recorded, and a write asked for now is
   // not made (its caller waits, and a resumed run makes it); then the rest of the job's process group (model calls,
@@ -77,18 +77,22 @@ export async function execJob(id: number): Promise<number> {
       process.exit(ran.code ?? 143);
     })();
   });
-  const { value: code, stats } = await db.meter(() => runJob(db, id, row, { runs, usageJson, saveUsage, fail, pulse }));
+  const { value: { code, result }, stats } = await db.meter(() => runJob(db, id, row, { runs, usageJson, fail, pulse, tracked, settings }));
+  const patch = await pulse.end();
+  // The outcome, the last progress and counts, and what the job cost the database, in one write.
+  await recordResult(db, id, { ...result, patch, stats: { statements: loaded.statements + stats.statements, roundTrips: loaded.roundTrips + stats.roundTrips, ms: loaded.ms + stats.ms, effects: stats.effects } });
   ran.code = code;
-  await pulse.flush().catch(() => {});
-  await recordResult(db, id, { stats: { statements: stats.statements, roundTrips: stats.roundTrips, ms: stats.ms, effects: stats.effects } }).catch(() => {});
   stepEnded();
   // Stopping: the handler exits once the writes in flight are recorded.
   if (ran.stop) await ran.stop;
   return code;
 }
 
-/** Runs the job's step in this process; returns the exit code. */
-async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; usageJson: () => Promise<string | undefined>; saveUsage: () => Promise<void>; fail: (msg: string) => Promise<number>; pulse: JobPulse }): Promise<number> {
+/** How a job's step ended: the exit code and what its row records. */
+type Ended = { code: number; result: JobResult };
+
+/** Runs the job's step in this process. */
+async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; usageJson: () => Promise<string | undefined>; fail: (msg: string) => Promise<Ended>; pulse: JobPulse; tracked: string[]; settings: SettingsSnapshot }): Promise<Ended> {
   const { runs, usageJson, fail, pulse } = o;
   const startedAt = row.started_at!;
   const step = (await loadSteps()).get(row.step);
@@ -96,7 +100,7 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; u
   console.log(`${new Date().toISOString()} job ${id}: ${step.name} ${row.params}, requested by ${row.requested_by}`);
   let params;
   try {
-    params = validateParams(step, JSON.parse(row.params), await trackedNames(db));
+    params = validateParams(step, JSON.parse(row.params), o.tracked);
     const why = step.available?.() ?? (step.check ? await step.check(db, params) : null);
     if (why) return await fail(why);
   } catch (e) {
@@ -133,17 +137,17 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; u
     stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await liveWrites(db)) });
   try {
     // One reading of the settings table serves the step's reads; the keys it polls to stop or throttle stay live.
-    const summary = await withConfig(db, () => step.run(ctx), { live: LIVE_SETTINGS, watchWrites: true });
+    const summary = await withSettingsSnapshot(db, () => step.run(ctx), Promise.resolve(o.settings), { live: LIVE_SETTINGS, watchWrites: true });
     // Items skipped for a lease are work left for a later job: the planner retries once no job holds a lease (unchangedSinceIdle).
-    await recordResult(db, id, { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary: oneLine(summary) });
+    const result = { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary: oneLine(summary) };
     console.log(`${new Date().toISOString()} done: ${summary}`);
-    return 0;
+    return { code: 0, result };
   } catch (e) {
     if (e instanceof StoppedError || e instanceof NoTakerError) {
       const summary = e instanceof NoTakerError ? `skipped: ${e.message}` : "stopped: the pipeline was switched off";
-      await recordResult(db, id, { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary });
+      const result = { usage: await usageJson(), ...(leaseSkips() ? { leaseSkips: leaseSkips(), leaseSkipKeys: leaseSkipKeys() } : {}), summary };
       console.log(`${new Date().toISOString()} done: ${summary}`);
-      return 0;
+      return { code: 0, result };
     }
     console.error((e as Error).stack ?? e);
     return await fail((e as Error).message ?? String(e));

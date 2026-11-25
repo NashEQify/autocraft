@@ -105,7 +105,7 @@ export async function pulseJob(db: Db, id: number, patch: JobPatch): Promise<Job
 export async function recordResult(db: Db, id: number, r: JobResult): Promise<void> {
   const q = queryDb(db);
   const s = r.stats;
-  const set: Record<string, unknown> = {};
+  const set: Record<string, unknown> = { ...r.patch };
   if (r.usage !== undefined) set.usage = r.usage;
   if (r.summary !== undefined) set.summary = r.summary;
   if (r.error !== undefined) set.error = r.error;
@@ -114,7 +114,7 @@ export async function recordResult(db: Db, id: number, r: JobResult): Promise<vo
   if (s) {
     set.db_statements = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_statements", eb.lit(0)), "+", s.statements);
     set.db_round_trips = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_round_trips", eb.lit(0)), "+", s.roundTrips);
-    set.db_ms = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_ms", eb.lit(0)), "+", s.ms);
+    set.db_ms = (eb: kx.AnyEb) => eb(eb.fn.coalesce("db_ms", eb.lit(0)), "+", Math.round(s.ms));
     set.effects = (eb: kx.AnyEb) => eb(eb.fn.coalesce("effects", eb.lit(0)), "+", s.effects);
   }
   if (!Object.keys(set).length) return;
@@ -161,6 +161,14 @@ export async function openJobPulse(db: Db, row: PulseRow, o: { minMs: number }):
     async flush() {
       await flushJobItems(db, row.id);
       if (Object.keys(pending).length) await pulse();
+    },
+    async end() {
+      await flushJobItems(db, row.id);
+      // A pulse under way that fails puts its patch back.
+      await chain;
+      const patch = pending;
+      pending = {};
+      return patch;
     },
   };
 }

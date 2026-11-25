@@ -45,7 +45,7 @@ both("markCancelQueued cancels queued jobs (of the pipeline only on request) and
 
 both("recordResult adds query counts to those of earlier runs and leaves unset fields alone", async (db) => {
   const [id] = await seedJobs(db, [{ state: "running" }]);
-  await recordResult(db, id!, { summary: "s", stats: { statements: 5, roundTrips: 2, ms: 10, effects: 1 } });
+  await recordResult(db, id!, { summary: "s", stats: { statements: 5, roundTrips: 2, ms: 10.2, effects: 1 } });
   await recordResult(db, id!, { leaseSkips: 2, leaseSkipKeys: ["pr:a#1"], stats: { statements: 3, roundTrips: 1, ms: 5, effects: 0 } });
   const r = (await loadJobs(db, [id!])).get(id!)!;
   assert.deepEqual([r.summary, r.db_statements, r.db_round_trips, r.db_ms, r.effects, r.lease_skips, r.lease_skip_keys], ["s", 8, 3, 15, 1, 2, '["pr:a#1"]']);

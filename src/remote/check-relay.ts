@@ -6,7 +6,7 @@ import { allocation } from "../agents/call.ts";
 import { scaled } from "./time-scale.ts";
 import type { CheckResult, CheckTool } from "../checktool/index.ts";
 import type { Db } from "../db/index.ts";
-import { finishChecks, loadCheckResult, refuseChecks, requestCheck, takeRequestedChecks } from "../data/runners/index.ts";
+import { finishChecks, loadCheckResult, loadRequestedChecks, refuseChecks, requestCheck, takeRequestedChecks } from "../data/runners/index.ts";
 
 /** How often the waiting dashboard request calls `tick` (the HTTP layer writes a keep-alive byte). */
 const TICK_MS = scaled(15_000);
@@ -29,6 +29,7 @@ export async function serveChecks(db: Db, callId: number, tool: Pick<CheckTool, 
 
 /** Job side, when the call has ended: requests nobody will run get an answer. */
 export async function endChecks(db: Db, callId: number): Promise<void> {
+  if (!(await loadRequestedChecks(db, [callId], { everyLease: true })).size) return;
   await refuseChecks(db, { callId }, "refused: the model call is over", Date.now());
 }
 

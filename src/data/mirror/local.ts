@@ -145,12 +145,13 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
       const readAt = (e: ItemEntry): string => e.readAt ?? o.readAt;
       const ref = (e: ItemEntry): RefKey => refKey(e.repo, e.row.number);
       const authors = [...new Set(chunk.flatMap(({ row }) => (typeof row.author === "string" && typeof row.author_id === "number" ? [row.author] : [])))];
-      // With the rows, the authors of id-less merged or closed PRs outside this page; the page's own follow from what is written.
-      const [rows, idless] = await db.together(() => Promise.all([q.all((q.k.selectFrom("main.items as i").leftJoin("main.item_reads as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+      // With the rows, the authors of id-less merged or closed PRs outside this page (its own follow from what is written) and the bound ones.
+      const [rows, idless, bound] = await db.together(() => Promise.all([q.all((q.k.selectFrom("main.items as i").leftJoin("main.item_reads as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
         .select([...ITEM_COLUMNS.map((c) => `i.${c}`), "r.synced_at as read_synced_at"] as never) as any)
         .where(kx.tupleIn(db, ["i.repo", "i.number"], chunk.map((x) => [x.repo, x.row.number] as const), ["text", "bigint"])), { label: "mirror.saveItems" }) as Promise<Record<string, unknown>[]>,
       authors.length ? q.all(q.k.selectFrom("main.items").select("author").distinct().where(kx.inList(db, "author", authors))
-        .where("kind", "=", "pr").where("state", "in", ["MERGED", "CLOSED"]).where("author_id", "is", null).where((eb) => eb.not(isRef(chunk))), { label: "mirror.saveItems" }) : []]));
+        .where("kind", "=", "pr").where("state", "in", ["MERGED", "CLOSED"]).where("author_id", "is", null).where((eb) => eb.not(isRef(chunk))), { label: "mirror.saveItems" }) : [],
+      authors.length ? q.all(q.k.selectFrom("main.author_ids").select("login").where(kx.inList(db, "login", authors)), { label: "mirror.saveItems" }) : []]));
       const old = new Map(rows.map((r) => [refKey(String(r.repo), Number(r.number)), r]));
       const current = chunk.filter((e) => {
         const last = old.get(refKey(e.repo, e.row.number))?.read_synced_at;
@@ -182,7 +183,8 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
           const s = (written.has(e) ? e.row : old.get(ref(e))) as Record<string, unknown> | undefined;
           if (s?.kind === "pr" && (s.state === "MERGED" || s.state === "CLOSED") && (s.author_id ?? null) === null) unbound.add(s.author as string);
         }
-        const bind = [...ids].filter(([login]) => !unbound.has(login)).map(([login, id]) => ({ login, id }));
+        const already = new Set(bound.map((r) => r.login));
+        const bind = [...ids].filter(([login]) => !unbound.has(login) && !already.has(login)).map(([login, id]) => ({ login, id }));
         for (const b of kx.batches(bind)) await q.run(q.k.insertInto("main.author_ids").values(b).onConflict((oc) => oc.doNothing()));
       }
       const full = changed.filter((e) => e.detail === "full");

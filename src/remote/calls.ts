@@ -27,6 +27,7 @@ import { holdMs, Ticket, type ClaimTry, type ClaimWaits, type EmptyReply } from 
 import { scaled, scaledS } from "./time-scale.ts";
 import { CALLER_STALE_MS, IDLE_FRESH_MS, SEEN_EVERY_MS } from "./room.ts";
 import { serveChecks, endChecks } from "./check-relay.ts";
+import { loadQueuedWorkspaces } from "../data/build/index.ts";
 import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
 import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
@@ -720,31 +721,39 @@ export type Outcome =
   /** A follow-up turn that the session's helper did not take in time (STICKY_MS, STICKY_CAP_MS); it was withdrawn. */
   | { state: "unclaimed" };
 
+/** What an await serves while its call is leased: the check relay, the tool calls of its workspace. */
+type Held = { checks: boolean; workspaceId: number | null };
+/** A call's poll, with whether a check or a tool call of it waits to be run. */
+type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
+
 /**
  * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
- * with the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. A lost lease or a gone call among them is ended
- * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields.
+ * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
+ * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
+ * queued call's poll carries the waits' fields.
  */
 class CallPoller {
   readonly #db: Db;
-  #waiting = new Map<number, { resolve: (p: runners.CallPoll) => void; reject: (e: unknown) => void }[]>();
-  /** Calls awaited now, with how many awaits hold each. */
-  #held = new Map<number, number>();
+  #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
+  /** Calls awaited now, with how many awaits hold each and what else they wait for. */
+  #held = new Map<number, Held & { n: number }>();
   #timer: NodeJS.Timeout | null = null;
   #running = false;
   #last = 0;
   #seenAt = 0;
   constructor(db: Db) { this.#db = db; }
 
-  hold(id: number): void { this.#held.set(id, (this.#held.get(id) ?? 0) + 1); }
+  hold(id: number, o: Held): void {
+    const h = this.#held.get(id);
+    this.#held.set(id, { n: (h?.n ?? 0) + 1, checks: o.checks || !!h?.checks, workspaceId: o.workspaceId ?? h?.workspaceId ?? null });
+  }
   release(id: number): void {
-    const n = (this.#held.get(id) ?? 1) - 1;
-    if (n > 0) this.#held.set(id, n);
-    else this.#held.delete(id);
+    const h = this.#held.get(id);
+    if (h && --h.n <= 0) this.#held.delete(id);
   }
 
   /** The next poll of call `id`: the first at once, later ones a poll interval after the one before. */
-  next(id: number): Promise<runners.CallPoll> {
+  next(id: number): Promise<Polled> {
     return new Promise((resolve, reject) => {
       const list = this.#waiting.get(id);
       if (list) list.push({ resolve, reject });
@@ -772,13 +781,18 @@ class CallPoller {
         await runners.markCallersSeen(db, [...this.#held.keys()], now);
         this.#seenAt = now;
       }
-      const polls = await runners.loadCallPolls(db, ids, now);
+      const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
+      const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
+      const [polls, checks, tools] = await db.together(() => Promise.all([
+        runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
+      ]));
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);
       if (ended.length) {
         await runners.expireLeases(db, { now, ids: ended });
         for (const [id, p] of await runners.loadCallPolls(db, ended, now)) polls.set(id, p);
       }
-      for (const [id, list] of batch) for (const w of list) w.resolve(polls.get(id)!);
+      const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
+      for (const [id, list] of batch) for (const w of list) w.resolve({ ...polls.get(id)!, checks: checks.has(id), tools: asked.has(id) });
     } catch (e) {
       for (const list of batch.values()) for (const w of list) w.reject(e);
     } finally {
@@ -807,7 +821,7 @@ const pollerOf = (db: Db): CallPoller => {
 export async function awaitCall(db: Db, id: number, opts: AwaitOptions = {}): Promise<Outcome> {
   const ws = await WorkspaceServer.open(db, id, opts.workspace);
   const poller = pollerOf(db);
-  poller.hold(id);
+  poller.hold(id, { checks: !!opts.check, workspaceId: ws?.workspaceId ?? null });
   try {
     return await pollCall(db, id, opts, ws, poller);
   } finally {
@@ -876,8 +890,8 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
         }
       }
     }
-    if (r.state === "leased" && opts.check) await serveChecks(db, id, opts.check);
-    if (r.state === "leased" && ws) await ws.serve();
+    if (r.state === "leased" && opts.check && poll.checks) await serveChecks(db, id, opts.check);
+    if (r.state === "leased" && ws && poll.tools) await ws.serve();
   }
 }
 
