@@ -1,5 +1,6 @@
 // Which PRs the Opus review looks at: the PRs whose Plan holds a `review` action (no Opus verdict at
 // the current head commit, or one older than a comment or review by someone else).
+import { onAutoPath } from "../core/decide.ts";
 import { planned } from "../core/select.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { type Size } from "../core/rules.ts";
@@ -9,6 +10,8 @@ import { loadItems } from "../data/mirror/index.ts";
 export type OpusCandidate = {
   repo: string; number: number; title: string; body: string; author_association: string | null;
   head_oid: string; lines_changed: number; size: Size; score: number | null;
+  /** Nobody started it: it is reviewed only to merge by the rule. */
+  auto?: boolean;
 };
 
 const candidateOf = (it: { title: string | null; body: string | null; author_association: string | null } | undefined, f: Pick<PrFacts, "repo" | "number" | "lines" | "size" | "score">, head: string, fallbackTitle: string): OpusCandidate =>
@@ -23,5 +26,5 @@ export async function opusCandidateOf(db: Db, f: Pick<PrFacts, "repo" | "number"
 export async function selectOpusCandidates(db: Db, repo: string, run?: string | null): Promise<OpusCandidate[]> {
   const rows = await planned(db, "review", { repo, ...(run !== undefined ? { run } : {}) });
   const items = await loadItems(db, rows.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), "text");
-  return rows.map((p) => candidateOf(items.get(`${p.facts.repo}#${p.facts.number}`), p.facts, p.action.head!, ""));
+  return rows.map((p) => ({ ...candidateOf(items.get(`${p.facts.repo}#${p.facts.number}`), p.facts, p.action.head!, ""), auto: onAutoPath(p.facts) }));
 }

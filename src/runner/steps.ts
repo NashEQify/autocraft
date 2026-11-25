@@ -449,7 +449,7 @@ export const STEPS: StepDef[] = [
   {
     name: "dupes",
     title: "Find duplicates",
-    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. A confirmed duplicate is a signal on both items; it closes and holds nothing. Writes nothing to GitHub.",
+    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. A confirmed duplicate is a signal on both items; it closes nothing and holds back only a pull request nobody started. Writes nothing to GitHub.",
     stage: runStage("dupes"),
     requires: "operator",
     exclusive: "dupes",
@@ -691,7 +691,7 @@ export const STEPS: StepDef[] = [
       const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
       ctx.usageRun(r.runId);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
-      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.missing.length} without an answer`;
+      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.off.length} off the automatic path, ${r.missing.length} without an answer`;
     },
   },
   {
@@ -742,7 +742,7 @@ export const STEPS: StepDef[] = [
       const { runPremerge } = await import("../premerge/review.ts");
       const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
       ctx.usageRun(r.runId);
-      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.moved.length} moved`;
+      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
     },
   },
   {

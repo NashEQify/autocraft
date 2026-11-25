@@ -15,7 +15,10 @@ import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
-import { world, type World } from "./world-db.ts";
+import { dupeGroups, kindSets } from "../src/dupes/plan.ts";
+import { loadDupeState, saveComparisons } from "../src/data/triage/index.ts";
+import { fillEmbedHashes } from "../src/itemhash.ts";
+import { T0, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
 afterEach(() => current?.close());
@@ -139,4 +142,79 @@ test("started work under the box identity says that it waits for the GitHub App"
   assert.match((await legWait(w.db, wf))!, /GitHub App/);
   const step = implementStep((await loadItemFact(w.db, "app", 7))!);
   assert.ok(step && "wait" in step && /GitHub App/.test(step.wait), JSON.stringify(step));
+});
+
+// ---- duplicates of a PR nobody started
+
+const EDGE = { repo: "app", a: 1, b: 2 };
+/** The pair of PRs 1 and 2 as the duplicate check leaves it at their current text. */
+async function pair(w: World, row: { verdict: string | null; by_operator?: number }): Promise<void> {
+  await fillEmbedHashes(w.db);
+  const hash = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
+  await w.db.run(w.db.k.deleteFrom("duplicate_pairs").where("repo", "=", "app"));
+  await w.db.run(w.db.k.insertInto("duplicate_pairs").values({ ...EDGE, a_hash: await hash(1), b_hash: await hash(2), similarity: 0.9, by_operator: 0, created_at: T0, ...row }));
+}
+/** The group's comparison as the compare step stores it. */
+async function compared(w: World, kept: number, source = "model", duplicate = true): Promise<void> {
+  const state = await loadDupeState(w.db);
+  const s = kindSets(state, dupeGroups(state)[0]!)[0]!;
+  const others = s.members.filter((m) => m.number !== kept).map((m) => ({ number: m.number, duplicate, better: [], carry: [] }));
+  await saveComparisons(w.db, [{ repo: "app", key: s.key, kind: "pr", members: s.members.map((m) => m.number), hash: s.hash, kept, source, model: "m", reason: "r", result: { others, rounds: 1 }, error: null, attempts: 0, at: T0, summary: null, why: null, sizes: { 1: 20, 2: 20 }, heads: null }]);
+}
+const setState = async (w: World, n: number, state: string) => void await w.db.run(w.db.k.updateTable("items").set({ state }).where("repo", "=", "app").where("number", "=", n));
+
+test("an unstarted PR that duplicates another open PR is neither reviewed nor merged; the one the comparison keeps goes on", async () => {
+  const w = await (await ready()).pr(2);
+  await pair(w, { verdict: null });
+  assert.deepEqual(await merges(w), ALL, "a candidate pair nobody checked");
+  await pair(w, { verdict: "duplicate" });
+  assert.deepEqual(await merges(w), NONE, "a duplicate not compared yet");
+  assert.match((await w.prPlan(1)).wait!, /^duplicates app#2; waits for their comparison/);
+
+  await compared(w, 2);
+  assert.deepEqual(await merges(w), NONE, "the comparison keeps the other");
+  assert.match((await refusedBy(w))!, /duplicates app#2/);
+  const p = await w.prPlan(1);
+  assert.deepEqual([p.state, p.wait, p.waitKind], ["not-started", "duplicates app#2; waits for a maintainer", "person"]);
+  assert.deepEqual((await w.prPlan(2)).actions.map((a) => a.kind), ["review"], "the kept one goes on");
+
+  await compared(w, 1);
+  assert.deepEqual(await merges(w), ALL, "the comparison keeps it");
+  assert.deepEqual((await w.prPlan(2)).actions, [], "the other is not reviewed");
+  await w.db.run(w.db.k.updateTable("items").set({ additions: 200 }).where("repo", "=", "app").where("number", "=", 2));
+  await fillEmbedHashes(w.db);
+  assert.deepEqual(await merges(w), ALL, "an outgrown comparison stands until the next one");
+
+  await w.workflow(2, { by: MAINT });
+  assert.deepEqual(await merges(w), NONE, "a person chose the other one");
+});
+
+test("a duplicate that merged meanwhile stops the merge; one closed unmerged, found different or ruled different does not", async () => {
+  const w = await (await ready()).pr(2);
+  await pair(w, { verdict: "duplicate" });
+  await compared(w, 1);
+  assert.deepEqual(await merges(w), ALL);
+  await setState(w, 2, "MERGED");
+  assert.deepEqual(await merges(w), NONE, "merged since the comparison");
+  await compared(w, 2, "closed");
+  assert.deepEqual(await merges(w), NONE, "the merged one won");
+  await setState(w, 2, "CLOSED");
+  assert.deepEqual(await merges(w), ALL, "closed unmerged");
+
+  await setState(w, 2, "OPEN");
+  await compared(w, 1, "rule");
+  assert.deepEqual(await merges(w), NONE, "no model named the best one");
+  await compared(w, 2, "model", false);
+  assert.deepEqual(await merges(w), ALL, "the comparison found two different fixes");
+  await compared(w, 2);
+  assert.deepEqual(await merges(w), NONE);
+  await pair(w, { verdict: "distinct", by_operator: 1 });
+  assert.deepEqual(await merges(w), ALL, "a person ruled the pair out");
+});
+
+test("a duplicate holds nothing that a person started", async () => {
+  const w = await (await handedOver()).pr(2);
+  await pair(w, { verdict: "duplicate" });
+  await compared(w, 2);
+  assert.deepEqual(await merges(w), ALL);
 });

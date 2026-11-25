@@ -21,7 +21,7 @@ export async function loadTriageFacts(db: Db, keys: KeySource, ctx: TriageFactsC
     loadItemFactRows(db, keys, ctx.model),
     loadVerdicts(db, keys, ctx.run, { slim: true }),
     loadUncheckedPairCounts(db, keys),
-    loadDupeState(db),
+    ctx.dupes?.() ?? loadDupeState(db),
   ]));
   const due = dueSets(dupes, ctx.nowMs);
   const compare = compareOf(due.sets);

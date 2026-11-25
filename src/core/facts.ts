@@ -24,11 +24,11 @@ import { CARRIED, carriedReviews } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
-import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData } from "./pass-load.ts";
+import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
 
@@ -49,6 +49,7 @@ export type LoadOptions = {
 };
 
 type Mirrored = PrPassData["mirror"] extends Map<string, infer V> ? V : never;
+type DiffRow = PrPassData["diff"] extends Map<string, infer V> ? V : never;
 type RunApproval = PrPassData["merge"]["runs"] extends Map<string, infer V> ? V : never;
 
 const parseList = (s: string | null): unknown[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; } };
@@ -117,7 +118,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
 }
 
 /** loadPrFacts() as one load of a group that runs in step. */
-export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase }, endWave: EndWave): Promise<PrFacts[]> {
+export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
   const keys: KeySource = opts.keys ?? (refs ? [...refs].map(asRef) : prPass(opts.repo));
@@ -135,7 +136,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase }, en
   };
   // Clock-driven changes the facts below do not show as a time of their own (expiries, daily counts, cache lifetimes), per PR.
   const refresh = refreshTimes(now);
-  const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, mergeEntryHead, rows: rowsOf }, endWave);
+  const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, dupes: opts.dupes, mergeEntryHead, rows: rowsOf }, endWave);
   const ownPrs = ownPrSet(d.mainFixPrs, d.quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
   const openPrs = new Map([...d.mirror].filter(([, m]) => m.item.kind === "pr" && m.item.state === "OPEN").map(([ref, m]) => [ref, m.item] as const));
   const staleOf = (respectCap: boolean): Promise<Set<string>> => staleFrom({ facts: d.review, items: openPrs, repos: d.repos, reads: d.blockers }, respectCap, { now, refresh: refresh.soon });
@@ -265,6 +266,14 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     return base;
   }
 
+  const duplicates = state === "OPEN" ? d.duplicates.get(ref) : undefined;
+  if (duplicates) base.duplicates = duplicates;
+  const ownDiff = state === "OPEN" && head ? diffFactsOf(d.diff.get(`${ref}@${head}`)) : null;
+  if (ownDiff && !ownDiff.pending) {
+    const size = sizeOf(ownDiff.lines);
+    const out = [...(RULE_SIZES.includes(size) ? [] : [`size ${size}`]), ...ownDiff.reasons];
+    if (out.length) base.ruledOut = out;
+  }
   const s = d.settled.get(ref) ?? settle(null, null);
   base.label = s.label ?? null;
   base.needsDecisionFlag = s.flags.includes("needs decision");
@@ -325,8 +334,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.pushChain = chain;
   if (state === "OPEN" && (chain.length > 1 || (!!head && !!push?.pushed.has(head)))) base.inFlight = true;
   // The facts of the queue head's cached diff (src/review/diff.ts writes them with the cache); null when it is not cached.
-  const dr = d.diff.get(`${ref}@${qh}`);
-  const diffFacts = !dr || dr.lines === null ? null : { reasons: parseList(dr.reasons) as string[], lines: dr.lines, pending: dr.pending === 1, lastRead: dr.last_read };
+  const diffFacts = diffFactsOf(d.diff.get(`${ref}@${qh}`));
   // While the extras are pending the reasons are the conservative ones, and the wait itself keeps the PR off the rule.
   base.sensitive = diffFacts ? (diffFacts.pending ? [...diffFacts.reasons, EXTRAS_PENDING_REASON] : diffFacts.reasons) : null;
   if (diffFacts?.pending) base.diffPending = { lastRead: diffFacts.lastRead };
@@ -411,6 +419,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (why) base.changesRequested = { why, live };
   return base;
 }
+
+/** A head's stored diff facts; null when its diff is not cached. */
+const diffFactsOf = (r: DiffRow | undefined): { reasons: string[]; lines: number; pending: boolean; lastRead: number | null } | null =>
+  !r || r.lines === null ? null : { reasons: parseList(r.reasons) as string[], lines: r.lines, pending: r.pending === 1, lastRead: r.last_read };
 
 /** The statements named by the given `conflicts` values ([{id, reason}]), one entry per id with the first reason; unknown ids and unreadable values count for nothing. */
 function statementConflicts(d: PrPassData, stored: unknown[]): PrFacts["statementConflicts"] {

@@ -74,7 +74,7 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
 }
 
 const mergeInputs = (f: PrFacts): MergeInputs | null =>
-  f.may ? { repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, head: f.head ?? "", pushes: f.may.pushes } : null;
+  f.may ? { repoApproval: f.may.repoMerge, workflow: f.may.workflow, ended: f.may.ended, duplicates: f.duplicates?.of.map((n) => `${f.repo}#${n}`), head: f.head ?? "", pushes: f.may.pushes } : null;
 
 /** Whether the PR may be merged at its head (src/core/may.ts); null on facts built without the approval inputs. */
 export function mergeMay(f: PrFacts): MayResult | null {
@@ -104,8 +104,15 @@ function pushMayOf(f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult 
 }
 const pushMay = (f: PrFacts, a: Want): MayResult | null => pushMayOf(f, pushKind(a), a.source === "operator");
 
+/** Why a push of `kind` is not approved; null when it is. */
+export function pushRefusal(f: PrFacts, kind: PushKind, operatorFix = false): string | null {
+  const m = pushMayOf(f, kind, operatorFix);
+  if (m) return m.ok ? null : m.why;
+  return f.repoFacts.pushApproved ? null : "Pushing is not approved for the repo.";
+}
+
 /** The push approval as a yes or no: `mayPush` where the facts carry its inputs, else the repo's push approval. */
-export const pushAllowed = (f: PrFacts, kind: PushKind, operatorFix = false): boolean => pushMayOf(f, kind, operatorFix)?.ok ?? f.repoFacts.pushApproved;
+export const pushAllowed = (f: PrFacts, kind: PushKind, operatorFix = false): boolean => pushRefusal(f, kind, operatorFix) === null;
 
 /** Writes from the command line are an operator's. */
 export const CLI_BY: By = { operator: "cli" };

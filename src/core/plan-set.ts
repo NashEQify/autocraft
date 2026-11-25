@@ -4,7 +4,7 @@ import { decideItem } from "./decide-item.ts";
 import { decidePr } from "./decide.ts";
 import { loadPass, prFacts } from "./facts.ts";
 import { itemFacts } from "./issue-facts.ts";
-import { inStep, loadPassBase, type PassBase } from "./pass-load.ts";
+import { inStep, loadPassBase, sharedDupes, type PassBase } from "./pass-load.ts";
 import type { ItemFacts, ItemPlan, PassFacts, Plan, PrFacts } from "./plan.ts";
 import type { Db } from "../db/index.ts";
 
@@ -40,7 +40,7 @@ export async function loadPlanSet(db: Db, opts: PlanSetOptions = {}): Promise<Pl
 export async function loadFacts(db: Db, o: { now: number; run?: string | null | undefined; model?: string; refs?: string[]; base?: PassBase }): Promise<{ run: string | null; prs: PrFacts[]; items: ItemFacts[] }> {
   return await db.read(async () => {
     const base = o.base ?? await loadPassBase(db, o.run);
-    const load = { now: o.now, base, ...(o.refs ? { refs: o.refs } : {}) };
+    const load = { now: o.now, base, dupes: sharedDupes(db), ...(o.refs ? { refs: o.refs } : {}) };
     const [prs, items] = await inStep<[PrFacts[], ItemFacts[]]>(db, (endWave) => prFacts(db, load, endWave), (endWave) => itemFacts(db, { ...load, ...(o.model ? { model: o.model } : {}) }, endWave));
     return { run: base.run, prs, items };
   });

@@ -5,7 +5,7 @@ import type { Db, Dialect } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { compareOf, dueSets } from "../../src/data/triage/dupe-sets.ts";
+import { compareOf, dueSets, dupeGroups, kindSets, prDuplicates } from "../../src/data/triage/dupe-sets.ts";
 import { loadTriageFacts } from "../../src/data/triage/facts.ts";
 import type { DupeMember, DupeState } from "../../src/data/triage/types.ts";
 import {
@@ -193,7 +193,7 @@ test("the classifier read models issue the same number of statements at 2 and 12
 test("due comparison sets: an uncompared set is due for the model, a fresh rule result waits for its retry, a dropped snapshot pauses", () => {
   const member = (number: number, o: Partial<DupeMember> = {}): DupeMember => ({
     repo: "o/a", number, kind: "issue", state: "OPEN", title: null, head_oid: null, embed_hash: `e${number}`, comments_count: 0, additions: null, deletions: null,
-    closing_issues: null, state_reason: null, in_scope: true, ...o,
+    closing_issues: null, state_reason: null, in_scope: true, started: false, ruled: null, ...o,
   });
   const now = Date.parse("2026-03-01T12:00:00.000Z");
   const edge = (a: number, b: number) => ({ repo: "o/a", a, b, similarity: 0.9, jev_p: null, haiku: null });
@@ -216,4 +216,24 @@ test("due comparison sets: an uncompared set is due for the model, a fresh rule 
 
   const out = base([member(1, { in_scope: false }), member(2, { in_scope: false }), member(3), member(4, { state_reason: "DUPLICATE" })]);
   assert.deepEqual(dueSets(out, now).sets.map((s) => s.key), ["issue:3"], "out of scope sets and items closed as duplicates are left out");
+});
+
+test("a comparison in rounds: a PR it found different leads the PRs that lost to it, and a person's ruling frees one", () => {
+  const member = (number: number, o: Partial<DupeMember> = {}): DupeMember => ({
+    repo: "o/a", number, kind: "pr", state: "OPEN", title: null, head_oid: null, embed_hash: `e${number}`, comments_count: 0, additions: 1, deletions: 0,
+    closing_issues: null, state_reason: null, in_scope: true, started: false, ruled: null, ...o,
+  });
+  const edge = (a: number, b: number) => ({ repo: "o/a", a, b, similarity: 0.9, jev_p: null, haiku: null });
+  const of = (over: { [n: number]: Partial<DupeMember> } = {}) => {
+    const members = [1, 2, 3, 4].map((n) => member(n, over[n]));
+    const state: DupeState = { edges: [edge(1, 2), edge(2, 3), edge(3, 4)], members: new Map(members.map((m) => [`o/a#${m.number}`, m])), comparisons: new Map(), drops: new Map() };
+    const set = kindSets(state, dupeGroups(state)[0]!)[0]!;
+    const result = { rounds: 2, others: [{ number: 2, duplicate: true }, { number: 3, duplicate: false }, { number: 4, duplicate: true, via: 3 }] };
+    state.comparisons.set(`o/a\n${set.key}`, { repo: "o/a", key: set.key, kind: "pr", members: "[1,2,3,4]", hash: set.hash, kept: 1, source: "model", model: "m", reason: null,
+      result: JSON.stringify(result), error: null, attempts: 0, at: T0, heads: null, summary: null, why: null, sizes: null });
+    return Object.fromEntries([...prDuplicates(state)].map(([ref, d]) => [ref, d.of]));
+  };
+  assert.deepEqual(of(), { "o/a#2": [1], "o/a#4": [3] });
+  assert.deepEqual(of({ 1: { ruled: "2" } }), { "o/a#4": [3] });
+  assert.deepEqual(of({ 4: { started: true } }), { "o/a#2": [1], "o/a#3": [4], "o/a#4": [3] }, "a person chose one that lost");
 });

@@ -8,7 +8,7 @@ Copies every issue, pull request and comment from GitHub once a minute. It also 
 
 ## Duplicates
 
-Finds items that report the same bug or request as another item. It compares each group and shows the result on the items. A duplicate closes and holds nothing by itself.
+Finds items that report the same bug or request as another item. It compares each group and shows the result on the items. A duplicate closes nothing by itself. A pull request nobody started waits for a maintainer while another open or merged one duplicates it, unless the comparison keeps it.
 
 ## Classify
 

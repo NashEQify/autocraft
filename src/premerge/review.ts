@@ -7,7 +7,9 @@ import { runModelStep } from "../agents/step.ts";
 import { REFUSED_PREFIX } from "../remote/calls.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
-import { planned } from "../core/select.ts";
+import { workflowOf } from "../core/decide.ts";
+import { notDue, planned, planNow } from "../core/select.ts";
+import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -41,7 +43,7 @@ export type PremergeParams = {
   onHandled?: (n: number) => void;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
-export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[] };
+export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
 
 export function defaultPremergeDeps(): PremergeDeps {
   const d = defaultOpusDeps();
@@ -83,7 +85,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
   let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now() });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
-  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [] };
+  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);
   if (params.dryRun || !cands.length) {
     log(`premerge ${repo}: ${s.candidates.length} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);
@@ -122,8 +124,16 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       params.onHandled?.(++handled);
       return;
     }
-    const p = await prepareOpusInput(db, repo, await candidateOf(db, e), opusDeps, log, { independent: true });
-    if (p.kind === "no-diff") await fail(`retry: no diff: ${p.error}`);
+    // A person's approval does not read the diff's facts: only the merge rule's own merges wait for what they read beside the diff.
+    const off = async (): Promise<string | null> => {
+      const p = await planNow(db, repo, e.number, deps.now?.());
+      return notDue(p, "premerge", head) ?? (p!.facts.diffPending && !workflowOf(p!.facts) ? EXTRAS_PENDING_REASON : null);
+    };
+    const p = await prepareOpusInput(db, repo, await candidateOf(db, e), opusDeps, log, { independent: true, off });
+    if (p.kind === "off") {
+      await jobItem(db, repo, e.number, `no pre-merge review: ${p.why}`, log);
+      s.off.push(ref);
+    } else if (p.kind === "no-diff") await fail(`retry: no diff: ${p.error}`);
     else if (p.kind === "large") await fail("too large to review automatically", true);
     else if (p.kind === "no-threads") await fail(`retry: ${p.error}`);
     else {
@@ -150,6 +160,6 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
     }
     params.onHandled?.(++handled);
   }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
-  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.moved.length} moved`);
+  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
   return s;
 }

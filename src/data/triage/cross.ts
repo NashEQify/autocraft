@@ -10,7 +10,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import * as control from "../control/fragments.ts";
 import type { HiddenRepos } from "../control/types.ts";
 import { notOwnIntegration } from "../merge/fragments.ts";
-import { inScopeExpr } from "../workflow/fragments.ts";
+import { inScopeExpr, liveWorkflowExpr } from "../workflow/fragments.ts";
 import type { AreaDue, ClassifierPairRow, DupeEdge, DupeMember, EmbedDiffRow, EmbeddingMark, Pair, PairKey, SampleItem, StreamedEmbedding } from "./types.ts";
 
 
@@ -208,9 +208,11 @@ export async function dupeMemberRows(db: Db, repo?: string): Promise<DupeMember[
   const rows = await q.all(k.with("e", () => edgeQuery(db, repo)).selectFrom("items as i")
     .innerJoin(k.selectFrom("e").select(["e.repo", "e.a as number"]).union(k.selectFrom("e").select(["e.repo", "e.b as number"])).as("m"), onKey("m", "i"))
     .select((eb: any) => ["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.head_oid", "i.embed_hash", "i.comments_count", "i.additions", "i.deletions", "i.closing_issues", "i.state_reason",
-      inScopeExpr(db, eb, "i.repo", "i.number").as("in_scope")])
-    .orderBy("i.repo").orderBy("i.number")) as (Omit<DupeMember, "in_scope"> & { in_scope: unknown })[];
-  return rows.map((r) => ({ ...r, in_scope: !!r.in_scope }));
+      inScopeExpr(db, eb, "i.repo", "i.number").as("in_scope"), liveWorkflowExpr(eb, "i.repo", "i.number").as("started"),
+      eb.selectFrom("duplicate_pairs as rp").select(kx.groupConcat(db, "rp.b", ",", "rp.b").as("r"))
+        .whereRef("rp.repo", "=", "i.repo").whereRef("rp.a", "=", "i.number").where("rp.by_operator", "=", 1).as("ruled")])
+    .orderBy("i.repo").orderBy("i.number")) as (Omit<DupeMember, "in_scope" | "started"> & { in_scope: unknown; started: unknown })[];
+  return rows.map((r) => ({ ...r, in_scope: !!r.in_scope, started: !!r.started }));
 }
 
 // ---- classifier report ------------------------------------------------------------------------------------------------
