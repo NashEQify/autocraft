@@ -1,6 +1,7 @@
 import type { RefKey } from "../mirror/types.ts";
 import type { HiddenRepos } from "../control/types.ts";
 import type { BuildTask, TaskResult, TaskStep } from "../../../web/src/api/types.ts";
+import type { ArtifactRow, Warm } from "../build/types.ts";
 
 export type { RefKey };
 /** `repo#number@head`. */
@@ -84,27 +85,28 @@ export type BatchEnd = { id: number; by: string; state: "superseded" | "merged" 
 export type BatchUpdate = { id: number; at: string; set: BatchPatch; onlyIf?: BatchState[]; size?: "grow" | "shrink" };
 export type BatchLanded = { batchId: number; runId: string; at: string; mergeSha: string; members: { number: number; head: string; path: string; ci: string | null; mergeable: string | null }[]; by: string };
 
-export type VerificationTask = { id: number; role: "head" | "base"; state: BuildTask["state"]; results: TaskResult[]; summary: string | null; endedAt: string | null };
+export type VerificationTask = { id: number; role: "head" | "base"; state: BuildTask["state"]; plan: TaskStep[]; results: TaskResult[]; summary: string | null; endedAt: string | null };
 export type VerificationView = {
   repo: string; number: number; headSha: string; baseSha: string | null; kind: string; reason: string; plan: unknown; model: string | null;
   state: VerificationState; summary: string | null; note: string | null; createdAt: string; finishedAt: string | null; tasks: VerificationTask[];
 };
-export type PendingVerification = VerificationView & { itemState: string; currentHead: string | null; inScope: boolean; headTask: number | null; baseTask: number | null };
+export type PendingVerification = VerificationView & { itemState: "OPEN" | "CLOSED"; currentHead: string | null; inScope: boolean; headTask: number | null; baseTask: number | null };
 export type SavedVerification = {
   repo: string; number: number; headSha: string; baseSha: string | null; kind: string; reason: string; plan: unknown; model: string | null;
   headTaskId: number | null; baseTaskId: number | null; state: VerificationState; summary: string | null; note: string | null; at: string; finishedAt: string | null; stage?: StageRow;
 };
 export type VerificationSettle = { key: HeadRef; from: VerificationState[]; set: { state: VerificationState; summary?: string | null; note?: string | null; finishedAt?: string | null }; stage?: StageRow };
-export type VerifyDue = { verifications: boolean; screenshots: boolean };
+/** `screenshots` is true when a run in flight moved or its tasks ended; `shotRepos` are the repos with a run in flight, for the caller to check their switches. */
+export type VerifyDue = { verifications: boolean; screenshots: boolean; shotRepos: string[] };
 
 export type PrBuildView = {
   repo: string; number: number; headSha: string; baseSha: string | null; scope: string; taskId: number | null; retried: number; state: string;
   summary: string | null; ciOverall: string | null; disagree: boolean; createdAt: string; finishedAt: string | null; taskState: string | null;
 };
-export type PendingBuild = PrBuildView & { itemState: string; currentHead: string | null };
-export type NewPrBuild = { repo: string; number: number; head: string; base: string | null; scope: "outside" | "all"; plan: TaskStep[]; warm: boolean };
-export type PrBuildSettle = { key: HeadRef; from?: "queued" | "failed"; set: { state: string; summary?: string | null; ciOverall?: string | null; disagree?: boolean; finishedAt: string } };
-export type LateDisagreement = { number: number; head: string; summary: string | null };
+export type PendingBuild = PrBuildView & { itemState: "OPEN" | "CLOSED"; currentHead: string | null };
+export type NewPrBuild = { repo: string; number: number; head: string; base: string | null; scope: "outside" | "all"; plan: TaskStep[]; warm: Warm | null };
+export type PrBuildSettle = { key: HeadRef; from?: "queued" | "failed"; set: { state: string; summary?: string | null; ciOverall?: string | null; disagree?: boolean; finishedAt?: string } };
+export type LateDisagreement = { repo: string; number: number; head: string; summary: string | null };
 
 export type CommandSpec = { doc: string; params: Record<string, unknown>; argv?: string[]; line?: string; capture?: string };
 export type ScreenshotConfig = {
@@ -117,7 +119,13 @@ export type ScreenshotRun = {
   held: boolean; createdAt: string; finishedAt: string | null;
 };
 export type NewScreenshotRun = Pick<ScreenshotRun, "repo" | "number" | "headSha" | "baseSha" | "state" | "reason" | "plan" | "headTaskId" | "baseTaskId" | "createdAt">;
-export type PendingShotRun = ScreenshotRun & { itemState: string; currentHead: string | null; title: string; body: string };
+/** `itemState` is `OPEN` or `CLOSED`. The tasks carry their plans and results; the artifacts are those the two tasks stored. Title and body come from `mirror.loadItems`. */
+export type PendingShotRun = ScreenshotRun & {
+  itemState: "OPEN" | "CLOSED"; currentHead: string | null; headTask: VerificationTask | null; baseTask: VerificationTask | null;
+  headArtifacts: ArtifactRow[]; baseArtifacts: ArtifactRow[];
+};
+/** What `saveScreenshotConfig` stores; the caller validated it. */
+export type ScreenshotConfigInput = Omit<ScreenshotConfig, "repo" | "updatedBy" | "updatedAt">;
 export type ScreenshotSettle = { key: HeadRef; from: string[]; set: Partial<Pick<ScreenshotRun, "state" | "reason" | "verdict" | "clear" | "comparison" | "model" | "held" | "finishedAt" | "headTaskId" | "baseTaskId" | "plan">> };
 
 export type Suite = { id: number; name: string; event: string; status: string; conclusion: string | null };
