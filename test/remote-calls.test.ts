@@ -93,9 +93,9 @@ describe("user-local remote calls", async () => {
     assert.equal((await db.get(db.k.selectFrom("remote_calls").select("reply").where("id", "=", lease.id)))!.reply, null, "the raw reply is not kept");
     assert.equal(r?.usage.input, 90);
     assert.deepEqual(r?.usage.extra?.map((e) => [e.model, e.usage.input]), [["haiku", 10]]);
-    const run = await db.get(db.k.selectFrom("agent_runs").select(["state", "user_login", "harness", "reported_model", "account_id", "cost_usd"])
+    const run = await db.get(db.k.selectFrom("agent_runs").select(["state", "user_login", "harness", "reported_model", "cost_usd"])
       .where("id", "=", (eb) => eb.selectFrom("remote_calls").select("run_id").where("remote_calls.id", "=", lease.id)));
-    assert.deepEqual({ ...run }, { state: "done", user_login: "bob", harness: "claude", reported_model: "claude-opus-4-5", account_id: null, cost_usd: 0.25 });
+    assert.deepEqual({ ...run }, { state: "done", user_login: "bob", harness: "claude", reported_model: "claude-opus-4-5", cost_usd: 0.25 });
     const tool = await db.prepare("SELECT seq, tool, args, result_bytes, started_at FROM agent_run_tools WHERE run_id = (SELECT run_id FROM remote_calls WHERE id = ?)").get(lease.id) as Record<string, unknown>;
     assert.deepEqual({ ...tool }, { seq: 1, tool: "mcp__items__item", args: '{"ref":"photocraft#1"}', result_bytes: 300, started_at: "2026-11-19T10:00:00.000Z" });
   });

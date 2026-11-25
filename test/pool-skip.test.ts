@@ -40,11 +40,10 @@ test("a pool skips a unit nobody may take and runs the later ones", async () => 
   assert.equal(t.alone.size + t.haiku.size, 0, "a skipped item is not one Haiku decided alone");
 });
 
-test("user-local batches hold one repo's items in the order of their first item; server-account batches mix repos", async () => {
+test("batches hold one repo's items in the order of their first item", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
   const items = ["deck:1", "photo:1", "deck:2", "deck:3", "photo:2", "deck:4", "design:1"].map((x) => ({ repo: x.split(":")[0]!, id: x }));
   const ids = async () => (await repoBatches(db, items, 2, (x) => x.repo, (x) => [{ repo: x.repo, number: Number(x.id.split(":")[1]) }])).map((b) => b.map((x) => x.id));
-  assert.deepEqual(await ids(), [["deck:1", "photo:1"], ["deck:2", "deck:3"], ["photo:2", "deck:4"], ["design:1"]]);
   assert.deepEqual(await ids(), [["deck:1", "deck:2"], ["photo:1", "photo:2"], ["deck:3", "deck:4"], ["design:1"]]);
 });
 
