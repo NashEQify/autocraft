@@ -132,13 +132,15 @@ export function ciAt(
 // ---- the heads a person accepted
 
 /**
- * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`): the workflow's own,
- * and for an issue's implementation PR the heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
+ * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`). A PR's is its base head,
+ * which every release writes. An issue's is the accepted head of its implementation PR; a row without one says it with the base head and the
+ * heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
  */
 export function acceptedHeads(
   w: { kind: "pr" | "issue"; baseHead: string | null; acceptedHead: string | null }, legs: readonly { from_head: string | null; head: string | null }[],
 ): string[] {
-  return [w.baseHead, ...(w.kind === "issue" ? legs.flatMap((l) => [l.from_head, l.head]) : [])].filter((h) => h !== null);
+  const heads = w.kind === "pr" ? [w.baseHead ?? w.acceptedHead] : w.acceptedHead !== null ? [w.acceptedHead] : [w.baseHead, ...legs.flatMap((l) => [l.from_head, l.head])];
+  return heads.filter((h) => h !== null);
 }
 
 /** Whether `head` is one of `heads` or our own pushes on top of one. */
