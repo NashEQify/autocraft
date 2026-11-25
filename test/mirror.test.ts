@@ -237,12 +237,12 @@ test("saveChecks of many PRs records waiting runs, settles pushes and follows un
   assert.equal((await unknownOf(db, "app", 3, "h3"))?.reads, READS_BEFORE_REQUEST, "each read of the unknown state counts");
   assert.equal(await unknownOf(db, "app", 4, "h4"), null, "a known state is not followed");
   // A note left for a closed PR goes; the unknown one is requested and, with no answer, marked stuck.
-  await db.run(db.k.insertInto("main.settings").values({ key: "mergeable_unknown:app#30", value: JSON.stringify({ head: "h30", since: at, reads: 9, rereads: 0, stuck: false }) }));
+  await db.run(db.k.insertInto("merge_state").values({ repo: "app", number: 30, head: "h30", since: at, reads: 9, rereads: 0, stuck: 0 }));
   const asked: number[] = [];
   const done = await rereadUnknown(db, { query: async () => { throw new Error("no GitHub read expected"); } } as never, "app", () => {}, async (_repo, n) => { asked.push(n); return null; });
   assert.deepEqual([done, asked], [[3], [3]]);
   assert.equal((await unknownOf(db, "app", 3, "h3"))?.stuck, true);
-  assert.equal(await db.get(db.k.selectFrom("main.settings").select("key").where("key", "=", "mergeable_unknown:app#30")), undefined);
+  assert.equal(await db.get(db.k.selectFrom("merge_state").select("number").where("repo", "=", "app").where("number", "=", 30)), undefined);
   // GitHub now reports #3 as mergeable: the note goes.
   await saveChecks(db, [{ ...row(3), mergeable: "MERGEABLE" }]);
   assert.equal(await unknownOf(db, "app", 3, "h3"), null);

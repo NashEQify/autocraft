@@ -7,7 +7,8 @@ import { RateLimiter } from "../src/dash/server/util.ts";
 import type { Role } from "../src/dash/types.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
 import { addFastTrack, fastTrackList } from "../src/fasttrack.ts";
-import { insertBatch, updateBatch } from "../src/merge/batch-store.ts";
+import { updateBatch } from "../src/merge/batch-store.ts";
+import { openBatch } from "../src/data/merge/index.ts";
 import { preapprovalOf } from "../src/preapproval/index.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
 import { excluded } from "../src/db/kx.ts";
@@ -90,7 +91,7 @@ describe("merge queue tools", () => {
 
   test("a viewer gets no batch summary, staff do", async () => {
     const w = await (await fresh()).pr(1);
-    const id = await insertBatch(w.db, { repo: "app", branch: "batch-1", baseSha: "b", commitSha: "c", parentId: null, members: [{ number: 1, head_oid: "h" }], at: "2026-01-01T00:00:00Z" });
+    const { id } = await openBatch(w.db, { repo: "app", baseSha: "b", commitSha: "c", parentId: null, taskId: null, members: [{ number: 1, head_oid: "h" }], at: "2026-01-01T00:00:00Z", build: null, runId: "t", prs: [1] });
     await updateBatch(w.db, id, "2026-01-01T00:00:00Z", { summary: "push failed: remote said no" });
     await refreshPlanCache(w.db);
     for (const [role, want] of [["operator", "push failed: remote said no"], ["maintainer", "push failed: remote said no"], ["viewer", null]] as const) {
