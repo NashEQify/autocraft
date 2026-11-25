@@ -9,7 +9,7 @@ import type { DiscordRest } from "./rest.ts";
 import { QUESTION_CHARS, type Search } from "./search.ts";
 import { isWatched } from "./store.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { loadReplyPings, saveReplies } from "../data/discord/index.ts";
 
 type Mentionable = { id: string };
 export type PingMessage = {
@@ -91,7 +91,7 @@ export class Pings {
   async #ping(m: PingMessage): Promise<void> {
     const { db, keys, rest, search } = this.#d;
     const pingHash = keys.hash("message", m.id);
-    if (this.#inflight.has(pingHash) || await db.get(db.k.selectFrom("discord_replies").select("ping_hash").where("ping_hash", "=", pingHash))) return;
+    if (this.#inflight.has(pingHash) || (await loadReplyPings(db, [pingHash])).has(pingHash)) return;
     // A forward (type 1) is not a reply: its text is not a quoted message.
     const isReply = !m.message_reference?.type;
     const quotedId = isReply ? m.message_reference?.message_id : undefined;
@@ -109,8 +109,7 @@ export class Pings {
       let sent: { id: string } | undefined;
       await deliver(r, async (b) => { sent = await rest.createMessage(m.channel_id, { ...b, allowed_mentions: { parse: [] }, message_reference: { message_id: m.id, fail_if_not_exists: false } }); });
       const sealed = keys.seal({ guildId: m.guild_id ?? "", channelId: m.channel_id, messageId: sent!.id, at: new Date().toISOString() }, pingHash);
-      await db.run(db.k.insertInto("discord_replies").values({ ping_hash: pingHash, quoted_hash: quoted, channel_hash: keys.hash("channel", m.channel_id), sealed })
-        .onConflict((oc) => oc.column("ping_hash").doUpdateSet(excluded(["quoted_hash", "channel_hash", "sealed"]))));
+      await saveReplies(db, [{ pingHash, quotedHash: quoted, channelHash: keys.hash("channel", m.channel_id), sealed }]);
       // Deleted while the reply was being sent.
       if (this.#deletedMeanwhile.has(pingHash) || (quoted && this.#deletedMeanwhile.has(quoted))) await this.#deleted([m.id, ...(quotedId ? [quotedId] : [])]);
     } finally {
