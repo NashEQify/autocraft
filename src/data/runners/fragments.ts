@@ -1,5 +1,5 @@
 // Predicates other modules embed.
-import { sql, type Expression, type RawBuilder, type SelectQueryBuilder, type SqlBool } from "kysely";
+import type { AliasableExpression, Expression, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { exprOf, ref, schemaEb, type AnyEb, type Eb, type Ex } from "../../db/kx.ts";
@@ -51,15 +51,15 @@ export function userSettingExpr(eb: Eb, loginCol: Ex, key: string, value?: strin
 }
 
 /** Scalar: 1 when a call of the job waits in the queue for a caller that polls it (seen within `staleMs`), else 0. */
-export function remoteQueuedOf(eb: AnyEb, jobIdRef: Ex, nowMs: number, staleMs: number): RawBuilder<number> {
+export function remoteQueuedOf(eb: AnyEb, jobIdRef: Ex, nowMs: number, staleMs: number): AliasableExpression<number> {
   const t = schemaEb(eb);
-  return sql<number>`${eb.fn.coalesce(t.selectFrom("main.remote_calls as rq").select((e) =>
+  return eb.fn.coalesce(t.selectFrom("main.remote_calls as rq").select((e) =>
     e.fn.max<number>(e.case().when(e.and([e("rq.state", "=", "queued"), e("rq.seen_at", ">=", nowMs - staleMs)])).then(e.lit(1)).else(e.lit(0)).end()).as("q"))
-    .where("rq.job_id", "=", exprOf(eb, jobIdRef)), eb.lit(0))}`;
+    .where("rq.job_id", "=", exprOf(eb, jobIdRef)), eb.lit(0)) as unknown as AliasableExpression<number>;
 }
 
 /** Scalar: when the job's latest remote call was leased (ms), or null. */
-export function lastLeaseOf(eb: AnyEb, jobIdRef: Ex): RawBuilder<number | null> {
-  return sql<number | null>`${schemaEb(eb).selectFrom("main.remote_calls as rl").select((e) => e.fn.max<number | null>("rl.leased_at").as("l"))
-    .where("rl.job_id", "=", exprOf(eb, jobIdRef))}`;
+export function lastLeaseOf(eb: AnyEb, jobIdRef: Ex): AliasableExpression<number | null> {
+  return schemaEb(eb).selectFrom("main.remote_calls as rl").select((e) => e.fn.max<number | null>("rl.leased_at").as("l"))
+    .where("rl.job_id", "=", exprOf(eb, jobIdRef)) as unknown as AliasableExpression<number | null>;
 }

@@ -3,7 +3,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
 import { PERM_READ_TTL } from "../access/permissions.ts";
@@ -87,7 +86,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
 
   const latest = k.selectFrom("main.item_workflows as w")
     .innerJoin(resolveKeys(db, keys, "ke"), (j: any) => j.onRef("ke.repo", "=", "w.repo").onRef("ke.number", "=", "w.number"))
-    .select(["w.repo", "w.number", "w.state", sql`row_number() over (partition by w.repo, w.number order by w.id desc)`.as("rn")])
+    .select((e: any) => ["w.repo", "w.number", "w.state", e.fn.agg("row_number").over((o: any) => o.partitionBy(["w.repo", "w.number"]).orderBy("w.id", "desc")).as("rn")])
     .where("w.state", "not in", LIVE_STATES);
   const endedQ = k.selectFrom(latest.as("x")).select(["x.repo", "x.number", "x.state"]).where("x.rn", "=", 1)
     .where((eb: any) => eb.not(eb.exists(k.selectFrom("main.item_workflows as lw").select(one(eb)).whereRef("lw.repo", "=", "x.repo").whereRef("lw.number", "=", "x.number").where("lw.state", "in", LIVE_STATES))))
@@ -192,7 +191,7 @@ export async function loadEvents(db: Db, refs: { repo: string; number: number }[
     .$if(!!o.kinds, (b: any) => b.where(kx.inList(db, "e.kind", o.kinds!)));
   const query = o.lastPerRef === undefined
     ? base.orderBy("e.id")
-    : k.selectFrom(base.select(sql`row_number() over (partition by e.repo, e.number order by e.id desc)`.as("rn")).as("x")).selectAll("x").where("x.rn", "<=", o.lastPerRef).orderBy("x.id");
+    : k.selectFrom(base.select((e: any) => e.fn.agg("row_number").over((o: any) => o.partitionBy(["e.repo", "e.number"]).orderBy("e.id", "desc")).as("rn")).as("x")).selectAll("x").where("x.rn", "<=", o.lastPerRef).orderBy("x.id");
   for (const r of await q.all(query) as EventRow[]) {
     const key = refKey(r.repo, Number(r.number));
     (out.get(key) ?? out.set(key, []).get(key)!).push({
@@ -332,7 +331,7 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
   });
 }
 
-const score = () => sql<number>`1e15 + w.weight * 1e12 - w.id`;
+const score = (eb: any) => eb(eb(eb.lit(1e15), "+", eb("w.weight", "*", eb.lit(1e12))), "-", eb.ref("w.id"));
 
 /**
  * `1e15 + weight * 1e12 - workflow.id` for every item of `keys` with a live workflow and for the implementation PR of a live implement
@@ -344,10 +343,10 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
   const q = queryDb(db);
   const k = q.k as any;
   const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ks"), (j: any) => j.onRef("ks.repo", "=", "w.repo").onRef("ks.number", "=", "w.number"))
-    .select(["w.repo as repo", "w.number as number", score().as("s")]).where("w.state", "in", LIVE_STATES);
+    .select((eb: any) => ["w.repo as repo", "w.number as number", score(eb).as("s")]).where("w.state", "in", LIVE_STATES);
   const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
     .innerJoin(resolveKeys(db, keys, "kt"), (j: any) => j.onRef("kt.repo", "=", "i.repo").onRef("kt.number", "=", "i.pr_number"))
-    .select(["i.repo as repo", "i.pr_number as number", score().as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", score(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
   for (const r of await q.all(own.unionAll(viaPr)) as { repo: string; number: number; s: number | string }[]) {
     const key = refKey(r.repo, Number(r.number)), s = Number(r.s), old = out.get(key);
     if (old === undefined || s > old) out.set(key, s);
@@ -368,7 +367,7 @@ export async function loadQueuePositions(db: Db, f: { repos?: string[] } = {}): 
   const q = queryDb(db);
   const k = q.k as any;
   const all = k.selectFrom("main.item_workflows as w")
-    .select(["w.repo", "w.number", "w.weight", "w.started_by", sql`row_number() over (order by w.weight desc, w.id)`.as("pos"), sql`count(*) over ()`.as("total")])
+    .select((e: any) => ["w.repo", "w.number", "w.weight", "w.started_by", e.fn.agg("row_number").over((o: any) => o.orderBy("w.weight", "desc").orderBy("w.id")).as("pos"), e.fn.countAll().over().as("total")])
     .where("w.state", "in", LIVE_STATES).where((eb: any) => openItem(eb, "w.repo", "w.number"));
   const rows = await q.all(k.selectFrom(all.as("x")).selectAll("x").$if(!!f.repos, (b: any) => b.where(kx.inList(db, "x.repo", f.repos!))).orderBy("x.pos")) as
     { repo: string; number: number; weight: number; started_by: string; pos: number; total: number }[];

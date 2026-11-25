@@ -15,7 +15,7 @@ const ROOT = new URL("..", import.meta.url).pathname;
 export const PERMANENT: readonly string[] = [
   "src/db/",
   "src/db.ts",
-  "src/itemtools/snapshot.ts",
+  "src/data/views/snapshot.ts",
   "src/itemtools/index.ts",
   "src/itemtools/server/tools.ts",
   "src/data/external/",

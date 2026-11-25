@@ -21,8 +21,8 @@ export function openItem(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, o: { kind?: "
 export const itemIsOpen = (eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> => eb(kx.exprOf(eb, `${alias}.state`), "=", "OPEN");
 
 /** The head commit of the item, or null. */
-export function itemHead(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<string | null> {
-  return kx.schemaEb(eb).selectFrom("main.items as ih").select("ih.head_oid").where("ih.repo", "=", kx.exprOf(eb, repo)).where("ih.number", "=", kx.exprOf(eb, number)) as unknown as Expression<string | null>;
+export function itemHead(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<string | null> {
+  return kx.schemaEb(eb).selectFrom("main.items as ih").select("ih.head_oid").where("ih.repo", "=", kx.exprOf(eb, repo)).where("ih.number", "=", kx.exprOf(eb, number)) as unknown as AliasableExpression<string | null>;
 }
 
 /** `pr_checks.overall` of the PR when the stored checks are at `head`, else null. */

@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { createTasks, loadTaskStates } from "../build/index.ts";
 import { itemHead, openItem, checksOverallAt } from "../mirror/fragments.ts";
 import { headOf, refOf } from "./read.ts";
@@ -43,7 +42,8 @@ export async function loadPrBuildViews(db: Db, items: { ref: RefKey; head: strin
   const want = items.map((i) => { const at = i.ref.lastIndexOf("#"); return { repo: i.ref.slice(0, at), number: Number(i.ref.slice(at + 1)), head: i.head }; });
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("pr_builds as b")
     .innerJoin(kx.valuesTable(db, want, { repo: "text", number: "bigint", head: "text" }, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "b.number"))
-    .select([...cols, sql<number>`row_number() over (partition by b.repo, b.number order by (b.head_sha = kk.head) desc, b.created_at desc)`.as("rn")]).as("t"))
+    .select((e: any) => [...cols, e.fn.agg("row_number").over((o: any) => o.partitionBy(["b.repo", "b.number"])
+      .orderBy(e.case().when("b.head_sha", "=", e.ref("kk.head")).then(e.lit(0)).else(e.lit(1)).end()).orderBy("b.created_at", "desc")).as("rn")]).as("t"))
     .selectAll().where("rn", "=", 1)) as (Row & { rn: number })[];
   const states = await taskStatesOf(db, rows);
   return new Map(rows.map((r) => [refOf(r.repo, r.number), viewOf(r, states)]));
@@ -63,7 +63,7 @@ export async function loadPrBuildState(db: Db, repo: string, sinceMs: number): P
 export async function loadPendingPrBuilds(db: Db, repo?: string): Promise<PendingBuild[]> {
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("pr_builds as b")
-    .select((eb: any) => [...cols, openItem(eb, "b.repo", "b.number").as("is_open"), sql<string | null>`${itemHead(eb, "b.repo", "b.number")}`.as("item_head")])
+    .select((eb: any) => [...cols, openItem(eb, "b.repo", "b.number").as("is_open"), itemHead(eb, "b.repo", "b.number").as("item_head")])
     .where("b.state", "=", "queued")
     .$if(!!repo, (s: any) => s.where("b.repo", "=", repo!))
     .orderBy("b.created_at").orderBy("b.number")) as (Row & { is_open: unknown; item_head: string | null })[];

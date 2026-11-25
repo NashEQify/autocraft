@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { namedKeys, resolveKeys, type KeySource } from "../keys.ts";
 import { addAudit } from "../control/audit.ts";
 import { loadTrackedRepos } from "../control/repos.ts";
@@ -37,7 +36,7 @@ const toList = (r: ListRow): AreaList => ({ repo: r.repo, version: Number(r.vers
 export async function loadAreaLists(db: Db, repos: string[] | "all"): Promise<Map<string, AreaList>> {
   if (repos !== "all" && !repos.length) return new Map();
   const q = queryDb(db), k = q.k as any;
-  const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("area_lists").select(["repo", "version", "areas", "at", "by", "note", sql<number>`row_number() over (partition by repo order by version desc)`.as("rn")])
+  const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("area_lists").select((e: any) => ["repo", "version", "areas", "at", "by", "note", e.fn.agg("row_number").over((o: any) => o.partitionBy("repo").orderBy("version", "desc")).as("rn")])
     .$if(repos !== "all", (b: any) => b.where(kx.inList(db, "repo", repos as string[]))).as("t"))
     .select(["t.repo", "t.version", "t.areas", "t.at", "t.by", "t.note"]).where("t.rn", "=", 1).orderBy("t.repo")) as ListRow[];
   return new Map(rows.map((r) => [r.repo, toList(r)]));

@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { addAudit } from "../control/index.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import { applyLocal } from "../mirror/index.ts";
@@ -117,7 +116,7 @@ export async function openBatch(db: Db, b: NewBatch): Promise<{ id: number; bran
   return await db.write(async () => {
     const prefix = `integration-${b.repo}-${b.at.slice(0, 10).replace(/-/g, "")}-`;
     const n = (await q.get(q.k.selectFrom("merge_batches").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", b.repo)
-      .where(kx.like(db, "branch", sql`${prefix + "%"}`))))!.n;
+      .where((eb) => kx.like(db, "branch", eb.val(`${prefix}%`)))))!.n;
     const branch = `${prefix}${Number(n) + 1}`;
     const row = (await q.get(q.k.insertInto("merge_batches").values({
       repo: b.repo, branch, state: "checking", base_sha: b.baseSha, commit_sha: b.commitSha, parent_id: b.parentId, task_id: b.taskId, created_at: b.at, updated_at: b.at,
@@ -188,8 +187,10 @@ async function resizeRepos(db: Db, ops: { repo: string; op: "grow" | "shrink"; a
     for (let level = 0; ; level++) {
       const due = [...counts].filter(([, n]) => n > level).map(([repo]) => repo);
       if (due.length === 0) break;
-      const next = op === "grow" ? kx.least(db, [sql.lit(MAX_BATCH), sql`batch_size + 1`]) : kx.greatest(db, [sql.lit(1), sql`batch_size / 2`]);
-      await q.run(q.k.updateTable("merge_repo_state").set({ batch_size: next as any, updated_at: at }).where(kx.inList(db, "repo", due)));
+      await q.run(q.k.updateTable("merge_repo_state").set((eb) => ({
+        batch_size: (op === "grow" ? kx.least(db, [kx.literal(MAX_BATCH), eb("batch_size", "+", eb.lit(1))]) : kx.greatest(db, [kx.literal(1), eb("batch_size", "/", eb.lit(2))])) as any,
+        updated_at: at,
+      })).where(kx.inList(db, "repo", due)));
     }
   }
 }

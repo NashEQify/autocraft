@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { finalTakeAtLatestHead } from "../review/fragments.ts";
 import { batchViews, headOf, holdsMembers, mergedInfoOf, refOf, toBatchView } from "./read.ts";
@@ -25,10 +24,10 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
   const [attempts, merged, verifs, runs, unknown, batches, batchPrs] = await db.together(() => Promise.all([
     // The newest attempt at each head and the refusals there.
     q.all(k.selectFrom((eb: any) => eb.selectFrom("merges as m").innerJoin(resolveKeys(db, keys, "kk"), onKey("m"))
-      .select([
+      .select((e: any) => [
         "m.repo", "m.number", "m.head_oid", "m.outcome", "m.reason", "m.ci", "m.mergeable", "m.at", "m.path", "m.method",
-        sql<number>`row_number() over (partition by m.repo, m.number, m.head_oid order by m.at desc, ${kx.rowid("merges", "m")} desc)`.as("rn"),
-        sql<number>`sum(case when m.outcome = 'refused' then 1 else 0 end) over (partition by m.repo, m.number, m.head_oid)`.as("refusals"),
+        e.fn.agg("row_number").over((o: any) => o.partitionBy(["m.repo", "m.number", "m.head_oid"]).orderBy("m.at", "desc").orderBy(kx.rowid("merges", "m"), "desc")).as("rn"),
+        e.fn.sum(e.case().when("m.outcome", "=", kx.literal("refused")).then(e.lit(1)).else(e.lit(0)).end()).over((o: any) => o.partitionBy(["m.repo", "m.number", "m.head_oid"])).as("refusals"),
       ]).as("t")).selectAll().where("rn", "=", 1)) as Promise<any[]>,
     mergedInfoOf(db, keys),
     q.all(k.selectFrom("verifications as v").innerJoin(resolveKeys(db, keys, "kk"), onKey("v"))

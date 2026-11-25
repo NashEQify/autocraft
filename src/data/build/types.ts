@@ -1,4 +1,4 @@
-import type { Selectable, SelectQueryBuilder } from "kysely";
+import type { Insertable, Selectable, SelectQueryBuilder } from "kysely";
 import type {
   BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, EnvTask, ItemShown, Requires, SandboxEnv, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage,
 } from "../../../web/src/api/types.ts";
@@ -68,7 +68,7 @@ export type PodRunPatch = Partial<Omit<PodRun, "task_id">>;
 export type WorkspaceRow = Omit<Selectable<DB["workspaces"]>, "checkpoint"> & { checkpoint?: Uint8Array | null };
 export type SessionRow = Selectable<DB["workspace_sessions"]>;
 export type WorkspaceCallRow = Selectable<DB["workspace_calls"]>;
-export type NewSession = import("kysely").Insertable<DB["workspace_sessions"]>;
+export type NewSession = Insertable<DB["workspace_sessions"]>;
 export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string };
 
 export type TaskCard = {
@@ -150,7 +150,7 @@ export type WarmNote = { warm: string | null; warmCommit: string | null };
 /** `ciCheckout`: the repository works at the CI paths when it has a warm target (the caller knows whether it has a CI checkout path). */
 export type WorkspaceRequest = { repo: string; baseSha: string; envId: string; app?: string | null; limits?: { deadlineSec?: number }; owner: string | null; ciCheckout: boolean };
 export type WorkspaceMove = { id: number; from: WorkspaceStateName[]; to: WorkspaceStateName; set?: Partial<Omit<WorkspaceRow, "id">> };
-export type WorkspaceSource = { ids: number[] } | { env: string; states: WorkspaceStateName[] } | { remoteCallIds: number[] } | { idsFrom: import("kysely").SelectQueryBuilder<any, any, { id: number }> };
+export type WorkspaceSource = { ids: number[] } | { env: string; states: WorkspaceStateName[] } | { remoteCallIds: number[] } | { idsFrom: SelectQueryBuilder<any, any, { id: number }> };
 /** `running`: calls in `running` state within their deadline. `background`: the done shell, shell_status and shell_kill calls since the pod was created, with the bookkeeping of `result.acct`. */
 export type CallActivity = {
   running: { id: number; tool: string; deadlineAt: string }[];

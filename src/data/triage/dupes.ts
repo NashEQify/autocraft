@@ -5,7 +5,6 @@ import type { DB } from "../../db/types.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { retiredColumns } from "../../db/retired-names.ts";
-import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { Ref } from "../keys.ts";
 import { addAudit } from "../control/audit.ts";
@@ -198,8 +197,8 @@ export async function loadDupeSignals(db: Db, keys: KeySource): Promise<Map<RefK
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("dupe_group_items as gi").innerJoin(resolveKeys(db, keys, "kk"), onKey("kk", "gi"))
     .leftJoin("dupe_comparisons as c", (j: any) => j.onRef("c.repo", "=", "gi.repo").onRef("c.kind", "=", "gi.kind").on((w: any) =>
       w.exists(w.selectFrom(kx.jsonEach(db, "c.members", "je", "bigint")).select(w.lit(1).as("one")).whereRef("je.value", "=", "gi.number"))))
-    .select(["gi.repo", "gi.number", "gi.role", "gi.target", "c.reason", "gi.group_id",
-      sql<number>`row_number() over (partition by gi.repo, gi.number order by c.at desc nulls last, gi.group_id desc)`.as("rn")]).as("t"))
+    .select((e: any) => ["gi.repo", "gi.number", "gi.role", "gi.target", "c.reason", "gi.group_id",
+      e.fn.agg("row_number").over((o: any) => o.partitionBy(["gi.repo", "gi.number"]).orderBy("c.at", (d: any) => d.desc().nullsLast()).orderBy("gi.group_id", "desc")).as("rn")]).as("t"))
     .select(["t.repo", "t.number", "t.role", "t.target", "t.reason", "t.group_id"]).where("t.rn", "=", 1)) as { repo: string; number: number; role: string; target: number | null; reason: string | null; group_id: string }[];
   return new Map(rows.map((r) => [refKey(r.repo, Number(r.number)), { groupId: r.group_id, role: r.role as DupeSignal["role"], target: r.target === null ? null : Number(r.target), reason: r.reason }]));
 }

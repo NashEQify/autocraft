@@ -2,7 +2,6 @@
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
-import { sql } from "../../db/sql.ts";
 import { registerKeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as control from "../control/fragments.ts";
@@ -53,7 +52,7 @@ export function inScopeExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): A
 /** The work score of the item (`1e15 + weight * 1e12 - id` of its live workflow, or of the live implement workflow of its issue), falling back to `fallback`. */
 export function weightScoreExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, fallback: kx.Ex): Expression<number> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
-  const score = t.selectFrom("main.item_workflows as sw").select((e) => e.fn.max(sql<number>`1e15 + sw.weight * 1e12 - sw.id`).as("s"))
+  const score = t.selectFrom("main.item_workflows as sw").select((e) => e.fn.max(e(e(e.lit<number>(1e15), "+", e("sw.weight", "*", e.lit<number>(1e12))), "-", e.ref("sw.id"))).as("s"))
     .where("sw.repo", "=", r).where("sw.state", "in", LIVE_STATES).where((w) => w.or([
       w("sw.number", "=", n),
       w.and([w("sw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as si").select(one(eb)).where("si.repo", "=", kx.ref<string>("sw.repo")).where("si.number", "=", kx.ref<number>("sw.number")).where("si.pr_number", "=", n))]),

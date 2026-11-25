@@ -301,6 +301,22 @@ both("updateFrom sets different values on many rows in one statement and counts 
   return rows;
 });
 
+both("blobTable carries blobs and NULLs beside keys", async (db) => {
+  const v = kx.blobTable(db, [{ id: 1, vec: new Uint8Array([1, 2]), name: "one" }, { id: 3, vec: new Uint8Array([]), name: null }], { id: "bigint", vec: "bytea", name: "text" }, "v");
+  const rows = await db.all(k(db).selectFrom("t").innerJoin(v, (j) => j.onRef("v.id", "=", "t.id")).select(["t.id", "t.login", "v.vec", "v.name"]).orderBy("t.id"));
+  const seen = rows.map((r) => [r.id, r.login, [...r.vec], r.name]);
+  assert.deepEqual(seen, [[1, "Alice", [1, 2], "one"], [3, "Carol", [], null]]);
+  return seen;
+});
+
+both("byteLength counts UTF-8 bytes; isoMinusHours keeps toISOString's form", async (db) => {
+  const row = await db.get(k(db).selectFrom("t").where("id", "=", 1).select((eb) => [
+    kx.byteLength(db, kx.literal("naïve ✓")).as("bytes"), kx.isoMinusHours(db, kx.literal("2026-03-01T00:30:00.250Z"), 1).as("before"), kx.isoMinusHours(db, eb.val(null), 1).as("none"),
+  ]));
+  assert.deepEqual({ ...row, bytes: Number(row!.bytes) }, { bytes: Buffer.byteLength("naïve ✓"), before: "2026-02-28T23:30:00.250Z", none: null });
+  return row;
+});
+
 test("chunks slices a list, 10,000 by default", () => {
   assert.deepEqual(kx.chunks([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.deepEqual(kx.chunks([]), []);
@@ -316,6 +332,6 @@ both("resolveKeys turns a ref list or a registered descriptor into a (repo, numb
   assert.deepEqual(await keys([]), []);
   const named = await keys(namedKeys("test.repoKeys", { repo: "app" }));
   assert.deepEqual(named, [{ repo: "app", number: 1 }, { repo: "app", number: 2 }]);
-  assert.throws(() => resolveKeys(db, { mode: "full" }, "ks"), /planner\.fullPass/);
+  assert.throws(() => resolveKeys(db, namedKeys("test.unregistered", {}), "ks"), /test\.unregistered/);
   return [list, named];
 });

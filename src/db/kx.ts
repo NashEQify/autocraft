@@ -154,6 +154,16 @@ export function valuesTable<C extends Record<string, ElemType>, A extends string
     : sql<ValuesRow<C>>`(SELECT ${proj} FROM json_each(${list}))`.as(alias);
 }
 
+/**
+ * A table expression named `alias` over `rows` that may hold blobs, which cannot travel as JSON (`valuesTable`): every value
+ * is its own parameter, so keep the rows few. Needs at least one row.
+ */
+export function blobTable<C extends Record<string, ElemType | "bytea">, A extends string>(d: D, rows: readonly Record<keyof C & string, Param>[], cols: C, alias: A): AliasedRawBuilder<{ [K in keyof C]: C[K] extends "bytea" ? Uint8Array : ElemTs<C[K] & ElemType> }, A> {
+  const pg = pgOf(d);
+  const picks = rows.map((r) => sql`SELECT ${sql.join(Object.entries(cols).map(([name, type]) => pg ? sql`(${r[name]})::${sql.raw(type)} AS ${sql.id(ident(name))}` : sql`${r[name]} AS ${sql.id(ident(name))}`))}`);
+  return sql<any>`(${sql.join(picks, sql` UNION ALL `)})`.as(alias);
+}
+
 /** Keys per JSON key list and rows per `updateFrom` statement. */
 export const JSON_CHUNK = 10_000;
 
@@ -301,6 +311,19 @@ export function like(d: D, a: Ex, pattern: Ex, escape?: string): RawBuilder<SqlB
 /** `e` without any of the characters of `chars` at either end (SQLite `trim(e, chars)`, Postgres `btrim`). */
 export function trimChars(d: D, e: Ex, chars: string): RawBuilder<string | null> {
   return pgOf(d) ? sql`btrim(${x(e)}, ${chars})` : sql`trim(${x(e)}, ${chars})`;
+}
+
+/** The size in bytes of the UTF-8 text `e`, as `Buffer.byteLength` counts it. */
+export function byteLength(d: D, e: Ex): RawBuilder<number> {
+  return pgOf(d) ? sql`octet_length(${x(e)})` : sql`length(CAST(${x(e)} AS BLOB))`;
+}
+
+/** The ISO timestamp `e` (as `Date.toISOString` writes it) less `hours`, in the same form; NULL when it is NULL. */
+export function isoMinusHours(d: D, e: Ex, hours: number): RawBuilder<string | null> {
+  const n = sql.lit(Math.trunc(hours));
+  return pgOf(d)
+    ? sql`to_char(((${x(e)})::timestamptz - make_interval(hours => ${n})) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`
+    : sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${x(e)}, '-' || ${n} || ' hours')`;
 }
 
 /** `text` with `esc` (one character), `%` and `_` escaped by `esc`: `like(db, "title", eb.val(`%${likeEscape(s)}%`), "\\")`. */
