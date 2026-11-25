@@ -3,7 +3,8 @@
 // maintainers also see override notes. The access list and every write here
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
-import { filtered, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { filtered, isHiddenRepo, listAuditPage, PilotError, setPilot, setPipelineFlags, type HiddenRepos } from "../../data/control/index.ts";
+import { endSessionById, listSessions, loadOverrides } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type {
   AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
@@ -20,7 +21,6 @@ import { mainFixApprovalOf, setMainFixApproval } from "../../mainfix/approval.ts
 import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts";
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
-import { setRepoPipeline } from "../../pilot.ts";
 import { featureOn, isFeature, shownFeatures, type BuildFeature } from "../../build/features.ts";
 import { switchFeature } from "./build.ts";
 import { countPlan, planLabels } from "../../labels/plan.ts";
@@ -28,18 +28,14 @@ import { listAll, RepoError, type RepoRow, trackRepoChecked, untrackRepo } from 
 import { contributors, getRule, OVERRIDE_LOGIN, setOverride, setRule, tierOf, type Contributor as Row, type Rule } from "../../whitelist.ts";
 import { audit } from "../audit.ts";
 import { dropSessionTokens } from "../server/user-tokens.ts";
-import { sessionEndsAt } from "../server/sessions.ts";
 import { endTokens, listAllTokens, revokeAnyToken } from "../mcp/tokens.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, Role } from "../types.ts";
 import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { pipelineState } from "../../runner/autopilot.ts";
-import { PilotError, setPilot } from "../../pilot.ts";
 import { canSeeInternals } from "./staff.ts";
 import { mapLimit, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-import * as kx from "../../db/kx.ts";
-import type { Expression, SqlBool } from "kysely";
 import { setting } from "../../settings-read.ts";
 
 const NOTE_MAX = 300;
@@ -248,7 +244,7 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
   if (status !== "allow" && status !== "deny" && status !== null) throw new HttpError(400, "status must be allow, deny or null");
   if (!OVERRIDE_LOGIN.test(login)) throw new HttpError(400, `not a GitHub login: ${login}`);
   // Without a note field the override keeps the note it has.
-  const kept = async () => (await db.get(db.k.selectFrom("whitelist_overrides").select("note").where((eb) => kx.ciEq(db, "login", eb.val(login)))))?.note ?? null;
+  const kept = async () => (await loadOverrides(db, [login])).get(login.toLowerCase())?.note ?? null;
   const note = status === null ? null : b.note === undefined ? await kept() : text(b.note, NOTE_MAX, "note");
   // An allow belongs to the account that holds the login now; a deny holds for any account, so it does not wait for GitHub.
   let id: number | null = null;
@@ -461,7 +457,7 @@ export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<Tra
   if (!await maySwitch(req, name)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, switches its pipeline");
   const changed = await refused(async () => {
     try {
-      return await setRepoPipeline(db, req.user.login, name, on);
+      return (await setPipelineFlags(db, [{ repo: name, on }], req.user.login)).changed.length > 0;
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
@@ -484,11 +480,7 @@ export async function track(db: Db, req: Req, on: boolean): Promise<TrackedRepo[
 export async function accessOverview(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const nowMs = Date.now();
-  const sessions = (await db.all(db.k.selectFrom("sessions as s").innerJoin("access as a", "a.login", "s.login")
-    .select([kx.rowid("sessions", "s").as("id"), "s.login", "s.csrf", "s.created_at", "s.last_seen", "s.expires_at", "s.user_agent", "a.role"])
-    .$narrowType<{ role: Role }>()
-    .where("s.expires_at", ">", new Date(nowMs).toISOString()).orderBy("s.last_seen", "desc")))
-    .filter((s) => nowMs < sessionEndsAt(s.created_at, s.role));
+  const sessions = await listSessions(db, nowMs);
   const perLogin = new Map<string, number>();
   for (const s of sessions) perLogin.set(s.login.toLowerCase(), (perLogin.get(s.login.toLowerCase()) ?? 0) + 1);
   return {
@@ -496,7 +488,7 @@ export async function accessOverview(db: Db, req: Req): Promise<AccessOverview> 
       login: r.login, role: r.role, addedBy: r.added_by, addedAt: r.added_at, note: r.note, sessions: perLogin.get(r.login.toLowerCase()) ?? 0,
     })),
     sessions: sessions.map((s) => ({
-      id: s.id, login: s.login, createdAt: s.created_at, lastSeen: s.last_seen, expiresAt: s.expires_at,
+      id: s.rowid, login: s.login, createdAt: s.created_at, lastSeen: s.last_seen, expiresAt: s.expires_at,
       userAgent: s.user_agent ? s.user_agent.slice(0, 200) : null, current: s.csrf === req.csrf,
     })),
     tokens: await listAllTokens(db),
@@ -552,13 +544,13 @@ export async function revokeSession(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const id = body(req).id;
   if (!Number.isInteger(id)) throw new HttpError(400, "id must be a session id");
-  const s = await db.get(db.k.deleteFrom("sessions").where(kx.rowid("sessions"), "=", id as number).returning(["id_hash", "login", "created_at", "token_enc"]));
+  const s = await endSessionById(db, id as number);
   if (!s) throw new HttpError(404, "that session has already ended");
   // Revoking a session cuts off the login's agent tokens too: they act with that login's permissions.
   const mcpTokens = await endTokens(db, s.login);
   // ...and the GitHub App token this session signed in with, but not the login's authorization: its other sign-ins keep working.
-  const userTokens = await dropSessionTokens(db, s.login, s.id_hash, s.token_enc);
-  await audit(db, req.user.login, "session-revoke", s.login, { created_at: s.created_at, ...(mcpTokens ? { mcpTokens } : {}), ...(userTokens ? { userTokens } : {}) });
+  const userTokens = await dropSessionTokens(db, s.login, s.idHash, s.sealed);
+  await audit(db, req.user.login, "session-revoke", s.login, { created_at: s.createdAt, ...(mcpTokens ? { mcpTokens } : {}), ...(userTokens ? { userTokens } : {}) });
   return await accessOverview(db, req);
 }
 
@@ -585,29 +577,8 @@ export async function auditLog(db: Db, req: Req): Promise<AuditPage> {
   const offset = int(q.get("offset"), 0, 0, 1e9, "offset");
   // Security rows name their repo first in the target (`<repo>:scan:<id>`, `<repo>:finding:<n>`); a maintainer sees those of repos they can see.
   const visible = operator ? [] : await visibleRepos(db, req);
-  const filter = (eb: kx.Eb) => {
-    const c: Expression<SqlBool>[] = [];
-    if (login) c.push(eb.or([kx.ciEq(db, "login", eb.val(login)), kx.ciEq(db, "target", eb.val(login))]));
-    if (action) c.push(eb("action", "=", action));
-    if (!operator) {
-      c.push(kx.inList(db, "action", actions));
-      const colon = eb.fn<number>("instr", ["target", eb.val(":")]);
-      const repoOf = eb.case().when(colon, ">", 0).then(eb.fn<string>("substr", ["target", eb.lit(1), eb(colon, "-", eb.lit(1))])).else(eb.ref("target")).end();
-      c.push(eb.or([eb.not(kx.like(db, "action", eb.val("security-%"))), kx.inList(db, repoOf, ["", ...visible])]));
-    }
-    return eb.and(c);
-  };
-  const total = (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where(filter)))!.n;
-  const rows = await db.all(db.k.selectFrom("audit").select(["at", "login", "action", "target", "details"]).where(filter)
-    .orderBy("at", "desc").orderBy(kx.rowid("audit"), "desc").limit(limit).offset(offset));
-  const entries: AuditEntry[] = rows.map((r) => {
-    let details: Record<string, unknown> | null = null;
-    try {
-      const d = JSON.parse(r.details ?? "null") as unknown;
-      if (d && typeof d === "object" && !Array.isArray(d)) details = d as Record<string, unknown>;
-    } catch { /* not JSON: shown without details */ }
-    return { at: r.at, login: r.login, action: r.action, target: r.target, details };
-  });
+  const { total, rows } = await listAuditPage(db, { login: login || undefined, action: action || undefined, limit, offset, ...(operator ? {} : { visible, actions }) });
+  const entries: AuditEntry[] = rows.map((r) => ({ at: r.at, login: r.login, action: r.action, target: r.target, details: r.details }));
   return { entries, total, actions };
 }
 
