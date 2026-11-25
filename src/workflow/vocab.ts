@@ -31,7 +31,7 @@ export type CommandDef = {
 
 export const COMMANDS: readonly CommandDef[] = [
   {
-    word: "review", usage: "review", aliases: ["review again"], entry: "review",
+    word: "review", usage: "review", aliases: ["review again", "take a look", "take a look at", "have a look", "have a look at"], entry: "review",
     short: tk("Start at Review."),
     does: tk("Reviews the pull request. On a started item, reviews it again."),
     back: tk("When the review is done, with one recommendation. If the merge is approved: only at a blocker."),
@@ -52,14 +52,14 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "implement",
   },
   {
-    word: "merge", usage: "merge", aliases: ["merge queue", "merge-queue", "mergequeue"], entry: "merge",
+    word: "merge", usage: "merge", aliases: ["merge queue", "merge-queue", "mergequeue", "land", "ship"], entry: "merge",
     short: tk("Approve for merge; on a pull request nobody started, the merge queue."),
     does: tk("Approves the merge. On a started item the steps stay the same and end in a merge. A pull request nobody started goes straight to the merge queue, with no review."),
     back: tk("Only at a blocker."),
     example: "merge",
   },
   {
-    word: "drop", usage: "drop <part>", aliases: [], entry: null, answer: true,
+    word: "drop", usage: "drop <part>", aliases: ["skip", "leave out"], entry: null, answer: true,
     short: tk("Remove a finding or change from the plan."),
     does: tk("Leaves one finding or change out, named by its number or by words from its title. Words that match no part or several parts run nothing."),
     back: tk("As the plan said before."),
@@ -73,7 +73,7 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "fix 1, drop 2, then merge",
   },
   {
-    word: "backlog", usage: "backlog", aliases: [], entry: null,
+    word: "backlog", usage: "backlog", aliases: ["park"], entry: null,
     short: tk("Keep it open, with no work planned."),
     does: tk("The item stays open with nothing planned and leaves the active lists."),
     back: tk("Never; send any command to start it again."),
@@ -87,14 +87,14 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "close as duplicate of #12",
   },
   {
-    word: "hold", usage: "hold", aliases: ["stop", "pause", "wait", "halt", "hold on", "hold off", "on hold", "not yet"], entry: null,
+    word: "hold", usage: "hold", aliases: ["stop", "pause", "wait", "halt", "hold on", "hold off", "on hold", "not yet", "not now", "don't merge yet", "dont merge yet", "do not merge yet"], entry: null,
     short: tk("End all work on the item, and keep off it until someone resumes it."),
     does: tk("Ends every step at once and takes the item out of its batch. AutoCraft keeps off it, whether anyone started it or not, and shows who holds it. stop, pause, wait and not yet mean the same."),
     back: tk("Never; resume or yes goes on, and any other command starts again."),
     example: "hold",
   },
   {
-    word: "resume", usage: "resume", aliases: ["continue"], entry: null,
+    word: "resume", usage: "resume", aliases: ["continue", "carry on", "unpause"], entry: null,
     short: tk("Go on with a held item."),
     does: tk("Goes on with a held item where it was, with its merge approval, now in your name. yes does the same. If the author pushed commits meanwhile, AutoCraft asks first. An item nobody started goes back to how it was."),
     back: tk("As the plan said before the hold."),
@@ -115,7 +115,7 @@ export const HOLD_WORDS: readonly string[] = COMMANDS.filter((c) => c.word === "
 
 /** Answers that run the open recommendation as it stands, lower case and without punctuation. */
 export const YES_WORDS: readonly string[] = [
-  "yes", "y", "yep", "yeah", "yup", "ok", "okay", "approve", "approved", "lgtm", "go", "go ahead", "sounds good", "do it", "ship it",
+  "yes", "y", "yep", "yeah", "yup", "ok", "okay", "approve", "approved", "lgtm", "looks good", "looks good to me", "looks great", "go", "go ahead", "go for it", "sounds good", "do it", "ship it",
 ];
 /** Words a yes may carry after it without changing it: "yes please", "lgtm, thanks". */
 export const YES_TRAILERS: readonly string[] = ["please", "thanks", "thank you", "thx"];

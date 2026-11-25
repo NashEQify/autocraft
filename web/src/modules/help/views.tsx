@@ -243,6 +243,10 @@ function After() {
           <li>
             {t("An instruction,")} <Code>fix 1, drop 2, then merge</Code>: {t("runs as written.")}
           </li>
+          <li>
+            {t("You can also write")} <Code>looks good, merge it</Code>, <Code>yes except 3</Code>, <Code>land it</Code>, <Code>park it</Code>, <Code>carry on</Code>, <Code>close, it's a dupe of #12</Code>.{" "}
+            {t("A message with not, maybe or a question mark runs nothing; don't merge yet holds.")}
+          </li>
           <li>{t("Anything unclear runs nothing. AutoCraft says what it understood and waits.")}</li>
         </ul>
       </Part>

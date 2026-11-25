@@ -21,7 +21,7 @@ const run = (text: string, state: ItemState) => resolve(parse(text), state);
 
 describe("workflow commands", () => {
   test("an item named inside words that were not read is not quoted back as a target", () => {
-    const p = parse("please close this, it's a dupe of #12", { repo: "photocraft" });
+    const p = parse("please close this, it's related to #12", { repo: "photocraft" });
     assert.ok(p.kind === "ambiguous");
     assert.ok(!p.understood.includes("12"));
     assert.ok(p.rest.includes("#12"));
