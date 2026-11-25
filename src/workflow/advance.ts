@@ -4,26 +4,28 @@
 // the end once the PR merged or closed. An implementation's open question, and a stuck implementation, come back as the issue's
 // recommendation (question.ts). The runner runs it on each tick its inputs changed, before the pre-approval pass.
 //
-// A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. The
+// A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. While an item waits for its
+// answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end. A workflow a person changed
 // meanwhile (stopped, answered, approved) keeps what they did: the pass's write leaves it out and the next pass looks at it again.
-import { loadPushOutcomeEdges, withConfig } from "../data/control/index.ts";
+import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
-import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepinPushes, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import type { Db } from "../db/index.ts";
 import { decidePr, fixedAfterMerge, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
-import { approvedHead, chainsOwn, ownPushes, reviewOwed, type RecordedPush } from "../core/evidence.ts";
+import { approvedHead, chainsOwn, reviewOwed, type RecordedPush } from "../core/evidence.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { findingsOf } from "../premerge/store.ts";
 import { t } from "../i18n/index.ts";
 import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
-import { afterSteps, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
+import { afterPush, afterSteps, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { listText, stepsFor, type StepName } from "./status.ts";
@@ -135,14 +137,22 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
 }
 
 /**
- * Whether the head of an issue's implementation PR is one the workflow may go on with: a commit of ours on the branch we opened, or
- * our own pushes on top of a head a person was shown (`base_head`) or a merge leg was at (a leg starts at one of these or where a
- * person answered, and follows our own pushes only). "later": its facts are at another head, as for a moment after a push.
+ * Whether the head is our own pushes on top of one a person accepted: `base_head`, or for an issue's implementation PR also a head a
+ * merge leg was at (a leg starts at one of these, at a commit of ours on the branch we opened or where a person answered, and follows
+ * our own pushes only).
+ */
+function accepted(pass: Pass, w: ItemWorkflow, ref: string, head: string): boolean {
+  const legs = w.kind === "issue" ? (pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).flatMap((l) => [l.from_head, l.head]) : [];
+  return [w.baseHead, ...legs].some((b) => b !== null && ownChain(pass, ref, b, head));
+}
+
+/**
+ * Whether the head of an issue's implementation PR is one the workflow may go on with: an accepted one, or a commit of ours on the
+ * branch we opened. "later": its facts are at another head, as for a moment after a push.
  */
 function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours" | "theirs" | "later" | "unread" {
   const f = pass.facts.get(ref);
-  const bases = [w.baseHead, ...(pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).flatMap((l) => [l.from_head, l.head])];
-  if (bases.some((b) => b !== null && ownChain(pass, ref, b, head))) return "ours";
+  if (accepted(pass, w, ref, head)) return "ours";
   if (!f) return "unread";
   return f.head !== head ? "later" : f.may.ownHead ? "ours" : "theirs";
 }
@@ -164,14 +174,15 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
       return number === null ? [] : [[key(w.repo, number), { repo: w.repo, number }] as const];
     })).values()];
     const itemRefs = [...new Map([...live.map((w) => ({ repo: w.repo, number: w.number })), ...prRefs].map((r) => [key(r.repo, r.number), r])).values()];
-    const [items, legs, reviews, patches, fixes, outcomes, repins] = await db.together(() => Promise.all([
-      loadItems(db, itemRefs, "pr"), loadLegs(db, prRefs), loadReviewRows(db, prRefs), loadPatchFacts(db, prRefs), loadLatestFixPushes(db, prRefs),
-      loadPushOutcomeEdges(db, prRefs), loadRepinPushes(db, prRefs),
-    ]));
+    const [items, legs, reviews, patches, fixes, moves] = await db.together(() => {
+      const patchFacts = loadPatchFacts(db, prRefs);
+      return Promise.all([
+        loadItems(db, itemRefs, "pr"), loadLegs(db, prRefs), loadReviewRows(db, prRefs), patchFacts, loadLatestFixPushes(db, prRefs), loadOwnPushes(db, prRefs, patchFacts),
+      ]);
+    });
     const facts = new Map((prRefs.length ? await loadPrFacts(db, { refs: prRefs.map((r) => key(r.repo, r.number)) }) : []).map((f) => [key(f.repo, f.number), f]));
     const pass: Pass = {
-      items, implement, goOn, legs, reviews, patches, fixes, facts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
-      moves: new Map(prRefs.map((r) => key(r.repo, r.number)).map((k) => [k, ownPushes(patches.get(k)?.pushes ?? [], outcomes.get(k) ?? [], repins.get(k) ?? [])])),
+      items, implement, goOn, legs, reviews, patches, fixes, moves, facts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
     };
     const writes: Writes = { workflows: [], events: [], adopt: [] };
     const moved: Moved[] = [];
@@ -283,12 +294,14 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     Object.assign(base, on);
     w = { ...w, ...on };
   }
+  /** The question made at `head`: one that follows another the author pushed past says so. */
+  const ask = (rec: Recommendation, head: string): Recommendation => (w.recHead !== null && !ownChain(pass, key(w.repo, target!), w.recHead, head) ? afterPush(rec) : rec);
   /** The attempt's open question, as the issue's recommendation; a stuck attempt of an approved issue is a step that failed twice. */
   const comeBack = (patch: WorkflowPatch, head: string | null): { to: ItemWorkflow["state"] | null } | null => {
     const q = openQuestionOf(attempt);
     if (!attempt || !q) return null;
     const { plan, rec } = viewOf(attempt, q, patch.plan ?? w.plan, w.approvedBy !== null);
-    const asked: WorkflowPatch = { ...patch, plan, rec, recAt: at, recHead: head };
+    const asked: WorkflowPatch = { ...patch, plan, rec: head !== null ? ask(rec, head) : rec, recAt: at, recHead: head };
     return { to: attempt.attempt.state === "stuck" && w.approvedBy !== null
       ? write({ ...asked, state: "blocked", blocker: "failed-twice", blockerParams: { step: "implement" } }, "blocked")
       : write({ ...asked, state: "recommending", blocker: null, blockerParams: null }) };
@@ -310,9 +323,18 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (!pr) return settle(base);
   if (pr.state === "MERGED") return write({ state: "done", rec: null, blocker: null, blockerParams: null });
   if (pr.state !== "OPEN") return write({ state: "closed", rec: null, blocker: null, blockerParams: null });
-  // Waiting for a person: nothing moves until they answer.
-  if (w.state === "blocked" || w.state === "recommending") return settle(base);
   const head = pr.head_oid;
+  // Waiting for a person: nothing moves until they answer, or someone else pushes past the head their question was made at. Then the
+  // question goes and the item is looked at like a running one; `recHead` stays, so that the next question says why it is asked.
+  const repushed = w.state === "blocked" || w.state === "recommending";
+  if (repushed) {
+    if (!head || w.recHead === null || ownChain(pass, ref, w.recHead, head)) return settle(base);
+    // The facts are at another head, as for a moment after a push: the next pass looks again.
+    if ((pass.facts.get(ref)?.head ?? head) !== head) return settle(base);
+    const on = { state: "running", rec: null, recAt: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
+    Object.assign(base, on);
+    w = { ...w, ...on };
+  }
   if (!head) return settle(base);
   const since = pass.goOn.get(w.id) ?? w.startedAt;
   // The head the person approved: an approval accepts what was pushed before it.
@@ -331,6 +353,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
 
   const impl = w.kind === "issue" ? implHead(pass, w, ref, head) : null;
   if (impl === "theirs") authorPush = { from: w.baseHead ?? (pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).at(-1)?.head ?? "", to: head };
+  // Past a question nobody answered, nothing but an accepted head goes on by itself.
+  if (repushed && !authorPush && !accepted(pass, w, ref, head)) authorPush = { from: w.recHead, to: head };
 
   // The numbered plan follows the latest review at the head; a merge-queue entry has none, unless a push of ours owes one.
   const reviewed = w.entry !== "merge" || reviewOwed(pass.moves.get(ref) ?? [], head, since);
@@ -400,7 +424,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       found.params.premerge = extra.map((p) => p.n);
     }
     if ((found.blocker === "beyond-agreed" && beyond?.length) || impl === "theirs") patch.baseHead = head;
-    return write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: blockerRec(found, blockPlan), recAt: at, recHead: head }, "blocked");
+    return write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: ask(blockerRec(found, blockPlan), head), recAt: at, recHead: head }, "blocked");
   }
 
   if (!approved) {
@@ -411,13 +435,13 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
         rec = { ...rec, text: t("{text} The implementation also changes {files}, which no part of its plan names.", { text: rec.text, files: listText(beyond.slice(0, 10)) }) };
         patch.baseHead = head;
       }
-      return write({ ...patch, state: "recommending", rec, recAt: at, recHead: head });
+      return write({ ...patch, state: "recommending", rec: ask(rec, head), recAt: at, recHead: head });
     }
   } else if (impl !== "later") {
     const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head, agreed);
     if (refused) {
       const stop: Found = { blocker: "other", params: { reason: refused } };
-      return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: blockerRec(stop, plan), recAt: at, recHead: head }, "blocked");
+      return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: ask(blockerRec(stop, plan), head), recAt: at, recHead: head }, "blocked");
     }
   }
   return settle(patch);
