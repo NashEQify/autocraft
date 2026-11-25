@@ -16,10 +16,11 @@ export function noDatabaseFiles(): string[] {
 
 /** In the process of a listed file, and the Node processes it spawns with the preload: opening a database throws, and the process fails even if that is caught. */
 export function guardNoDatabase(): void {
-  const main = process.argv[1] ? relative(join(TEST_DIR, ".."), process.argv[1]) : "";
-  if (!process.env.AUTOCRAFT_TEST_NO_DATABASE && !(main.endsWith(".test.ts") && noDatabaseFiles().includes(main))) return;
-  if (!process.env.AUTOCRAFT_TEST_NO_DATABASE) {
-    process.env.AUTOCRAFT_TEST_NO_DATABASE = "1";
+  const inherited = process.env.AUTOCRAFT_TEST_NO_DATABASE;
+  const main = inherited ?? (process.argv[1] ? relative(join(TEST_DIR, ".."), process.argv[1]) : "");
+  if (!inherited && !(main.endsWith(".test.ts") && noDatabaseFiles().includes(main))) return;
+  if (!inherited) {
+    process.env.AUTOCRAFT_TEST_NO_DATABASE = main;
     const preload = `--import=${join(TEST_DIR, "suite-preload.ts")}`;
     if (!process.env.NODE_OPTIONS?.includes(preload)) process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, preload].filter(Boolean).join(" ");
   }
