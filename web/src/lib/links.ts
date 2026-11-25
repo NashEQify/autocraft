@@ -39,7 +39,7 @@ export function decisionItem(id: string): { repo: string; number: number } | nul
   return m ? { repo: m[1]!, number: Number(m[2]) } : null;
 }
 
-type DecisionRef = { repo: string; number: number | null; items?: { repo: string; number: number }[] };
+type DecisionRef = { id?: string; repo: string; number: number | null; items?: { repo: string; number: number }[] };
 
 /** The page of a decision's item (its first one for a batch), or Home for a decision without any. */
 export function decisionPath(d: DecisionRef | undefined): string {

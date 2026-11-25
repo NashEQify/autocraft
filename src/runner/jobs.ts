@@ -174,7 +174,7 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   const hidden = view.hidden ?? [];
   const d = await loadJobDetail(db, id, { hidden, logs: view.logs !== false });
   if (!d) throw new JobError(404, `no job ${id}`);
-  const items = d.items.map((i) => ({ repo: i.repo, number: i.number, ...(d.shown.get(`${i.repo}#${i.number}`) ?? { kind: null, state: null, title: null }), outcome: i.outcome, decision: null }));
+  const items = d.items.map((i) => ({ repo: i.repo, number: i.number, ...(d.shown.get(`${i.repo}#${i.number}`) ?? { kind: null, state: null, title: null }), outcome: i.outcome }));
   const job = (await toJobs(db, [d.row]))[0]!;
   if (view.logs === false) return { ...job, items, log: null, logTruncated: false, canCancel: false };
   const tail = await jobLogTail(db, id, d.row.log_path);

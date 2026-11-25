@@ -1,4 +1,4 @@
-// The new dashboard's Home (ui_v2): one Task Runner line, then what waits for the reader's answer, what they started,
+// Home: one Task Runner line, then what waits for the reader's answer, what they started,
 // problems, stuck items and the live board.
 import type { FeatureModule } from "../../../registry/types";
 import { lazyView } from "../../../registry/lazyView";

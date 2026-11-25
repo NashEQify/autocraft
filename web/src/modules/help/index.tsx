@@ -1,4 +1,4 @@
-// Help for the new dashboard (ui_v2): an index and short pages. Commands, controls, entries, blockers and weights are drawn
+// Help: an index and short pages. Commands, controls, entries, blockers and weights are drawn
 // from src/workflow/vocab.ts and status.ts, the same lists every surface uses.
 import { QuestionIcon } from "@phosphor-icons/react";
 import type { FeatureModule } from "../../registry/types";

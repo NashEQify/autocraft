@@ -1213,10 +1213,9 @@ export interface Job {
   waiting: string | null;
 }
 
-/** An item a job handled: what happened to it, and the decision the job asked about it (null when none). */
+/** An item a job handled and what happened to it. */
 export interface JobItem extends ItemRef, ItemShown {
   outcome: string | null;
-  decision: string | null;
 }
 
 export interface JobDetail extends Job {
@@ -2022,7 +2021,7 @@ export interface QueueSlot {
   place: number;
 }
 
-/** Place of a fast-tracked item among the open fast-tracked items, first to run first. */
+/** Place of an item started with a weight among those items, first to run first. */
 export interface FastPosition {
   /** From 1. */
   position: number;
@@ -2031,7 +2030,7 @@ export interface FastPosition {
   weight?: number;
 }
 
-/** One row of the All, Review, Fix and Verify tabs: a work row with its fast-track place. */
+/** One row of the All, Review, Fix and Verify tabs: a work row with its place by weight. */
 export interface QueueWorkRow extends WorkRow {
   queue?: QueueSlot | null;
   fast: FastPosition | null;
@@ -2049,7 +2048,7 @@ export interface QueueOrigin {
   at: string | null;
 }
 
-/** One row of the Merge tab: a merge queue row with its fast-track place, hold and how it came in. */
+/** One row of the Merge tab: a merge queue row with its place by weight, hold and how it came in. */
 export interface QueueMergeRow extends QueueRow {
   fast: FastPosition | null;
   held: boolean;
@@ -2059,8 +2058,7 @@ export interface QueueMergeRow extends QueueRow {
 /**
  * A PR queued with Queue items or pre-approved that is no merge queue row yet: `fixup` (the operator's fix-up runs first), `review`
  * (waits for a take review at its head), `ci` (reviewed take; becomes a queue row on the next plan).
- * Or an open fast-tracked issue whose PR is not in the queue: `build` (Fix builds its PR; no open PR closes it yet), `pr` (open PRs close it,
- * none queued), `next` (no open PR closes it and Fix is not its next step: `next` says what is).
+ * Or a started issue whose PR is not in the queue: `implement` (its attempt), `build`, `pr` (open PRs close it, none queued), `next` (`next` says what is).
  */
 export interface QueuePendingRow {
   repo: RepoName;
@@ -2105,7 +2103,7 @@ export interface QueuePageCounts {
   merge: number;
 }
 
-/** `pipeline`: repos with the pipeline on, plus fast-tracked items of any repo; `all`: every repo; otherwise one repo. */
+/** `pipeline`: repos with the pipeline on; `all`: every repo; otherwise one repo. */
 export type QueueRepos = "pipeline" | "all" | RepoName;
 
 export interface QueuePageFilter {
@@ -2131,7 +2129,7 @@ export interface QueuePage {
   nextMerges: NextMerge[];
   /** Merge tab only: batches in flight, with their PRs. */
   batches: QueueBatch[];
-  /** Merge tab only: PRs queued or pre-approved that wait for their fix-up or review before they join the queue, then fast-tracked issues whose PR is not in the queue yet. */
+  /** Merge tab only: PRs approved for merge that wait for their fix-up or review before they join the queue. */
   pending?: QueuePendingRow[];
   /** Rows matching the tab, every page. */
   total: number;
@@ -2565,20 +2563,19 @@ export interface LiveWorkerCall {
 }
 /**
  * Who does the model calls, one row each on the Live board's worker view: a person's Task Runner (with their own tokens), the runners
- * their owners keep private (one row, no owner), one of the box's Claude accounts, or Jev. Runners go to operators and maintainers, box
- * accounts to operators only, as the call pages show them.
+ * their owners keep private (one row, no owner), or Jev. For operators and maintainers.
  */
 export interface LiveWorker {
-  /** "runner:<token id>", "login:<login>" (a runner no longer known), "private", "account:<id>" or "jev". */
+  /** "runner:<token id>", "login:<login>" (a runner no longer known), "private" or "jev". */
   key: string;
-  kind: "runner" | "private" | "account" | "jev";
-  /** The runner's label ("Task Runner" without one), "Private Task Runner", the account's label, or "Jev". */
+  kind: "runner" | "private" | "jev";
+  /** The runner's label ("Task Runner" without one), "Private Task Runner", or "Jev". */
   name: string;
   /** A runner's owner. */
   login: string | null;
   /** A runner's harness ("claude", "codex"). */
   harness: string | null;
-  /** online: takes calls; held: online but not taking any (`note` says why); offline: no fresh status, or a disabled account. */
+  /** online: takes calls; held: online but not taking any (`note` says why); offline: no fresh status. */
   status: "online" | "held" | "offline";
   note: string | null;
   /** Calls running now, against `slots` (null when not known). */
@@ -2717,7 +2714,7 @@ export interface ScanDetail {
 /** One of the signed-in user's agent tokens for the Inbox MCP server; the token itself is shown only when made. `canAnswer`: an operator's token whose agent may answer decisions. */
 export type McpToken = { id: number; label: string | null; /** `connector`: the MCP Connector; `runner`: a Task Runner credential. */ kind: "connector" | "runner"; canAnswer: boolean; /** The token's helper may claim model calls in the user-local inference mode. */ canRun: boolean; createdAt: string; lastUsedAt: string | null; expiresAt: string };
 /** The user's live tokens, the most they may hold, and the server's MCP path (on the dashboard's own origin). */
-export type McpTokens = { tokens: McpToken[]; max: number; path: string; /** Whether an operator may make a token that answers decisions. */ answering: boolean };
+export type McpTokens = { tokens: McpToken[]; max: number; path: string; /** Whether a token that sends commands can be made. */ answering: boolean };
 /** After making a token: the list, the new token's id, and its value, shown this once. */
 export type McpTokenCreated = McpTokens & { id: number; token: string };
 
@@ -2729,7 +2726,7 @@ export type { HelperInfo as RemoteHelper, Readiness as HelperReadiness, UsageWin
  * the task does, `models` which Claude models its calls ask for.
  */
 /**
- * `taskItems`: the items the runners take work on: every item, fast-tracked items only, or items the user fast-tracked.
+ * `taskItems`: the items the runners take work on: every item, started items only, or items the user started.
  * `runnerPrivate`: the Live board shows the runners' calls to others under one "Private Task Runner" row, without the user's login,
  * the runners' labels, slots or models.
  */
@@ -2777,7 +2774,7 @@ export type ItemPhase = "Triage" | "Waiting for a person" | "Review" | "Fixing" 
 /** Where an item is, what it waits for and what happens next; every page draws the same line. */
 export interface ItemStatus {
   phase: ItemPhase;
-  /** What it waits for, in words ("CI on a1b2c3d", "a Merge? answer"); null when it does not wait. */
+  /** What it waits for, in words ("CI on a1b2c3d", "a maintainer"); null when it does not wait. */
   waiting: string | null;
   /** What happens when the wait ends. */
   next: string | null;
@@ -3230,7 +3227,7 @@ export type WorkspaceCalls = { calls: WorkspaceCall[]; older: string | null };
 /** Untrusted text, shown as text: the first 4000 and the last 20000 characters of a longer output; `chars` is the full length. */
 export type WorkspaceCallOutput = { output: string | null; chars: number };
 
-/** One started item on the new Home (GET /api/maintain/home), from its live workflow row (src/workflow/). */
+/** One started item on Home (GET /api/maintain/home), from its live workflow row (src/workflow/). */
 export interface MaintainRow {
   repo: RepoName;
   number: number;
@@ -3259,7 +3256,7 @@ export interface MaintainRunnerLine {
 }
 
 /**
- * The new Home. `needs` holds items waiting for an answer on repos the reader may act on (operators: every repo; maintainers:
+ * Home. `needs` holds items waiting for an answer on repos the reader may act on (operators: every repo; maintainers:
  * repos with GitHub write; viewers: none). Viewers get `waiting` (every waiting item) and `running`; others get `mine` (items
  * they started, approved or stopped). `runner` is null for viewers and when model calls run on the server's own accounts.
  */
@@ -3303,7 +3300,7 @@ export interface MaintainStats {
   perDay: { day: string; n: number }[];
 }
 
-// ---- the new Items page (GET /api/maintain/items) ----
+// ---- the Items page (GET /api/maintain/items) ----
 
 /**
  * Which list an item is in: `needs` (an open recommendation or an unclear last answer), `started` (a live workflow), `automatic`
@@ -3404,9 +3401,8 @@ export interface MaintainDuplicate { repo: RepoName; number: number; kind: "pr" 
 
 
 /**
- * The new item page's AutoCraft side (GET /api/maintain/items/:repo/:n). `workflowRepo` false means the repo still runs the decision
- * pipeline: the classic item page serves the item. `canAct`: the reader may send commands and controls here (operators, and
- * maintainers with GitHub write on the repo). Viewers get no security findings and no withdrawn questions.
+ * The item page's AutoCraft side (GET /api/maintain/items/:repo/:n). `canAct`: the reader may send commands and controls here (operators, and
+ * maintainers with GitHub write on the repo). Viewers get no security findings.
  */
 export interface MaintainItem {
   repo: RepoName;

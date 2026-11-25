@@ -17,7 +17,7 @@ import type { TraceEvent, TraceKind } from "../api/types";
 export const TRACE_KIND: Record<TraceKind, { label: string; Icon: PhosphorIcon }> = {
   "model-call": { label: "Model calls", Icon: SparkleIcon },
   github: { label: "GitHub", Icon: GithubLogoIcon },
-  decision: { label: "Decisions", Icon: QuestionIcon },
+  decision: { label: "Commands and answers", Icon: QuestionIcon },
   write: { label: "Writes", Icon: PencilSimpleIcon },
   check: { label: "Checks", Icon: ShieldCheckIcon },
   review: { label: "Reviews", Icon: MagnifyingGlassIcon },

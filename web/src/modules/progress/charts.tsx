@@ -12,7 +12,7 @@ export const OUTCOMES: { key: keyof Funnel; label: string; cls: string }[] = [
   { key: "hold", label: "Held", cls: "bg-c2" },
   { key: "close", label: "To close", cls: "bg-c3" },
   { key: "batched", label: "In a batch", cls: "bg-c4" },
-  { key: "waiting", label: "Waiting for a decision", cls: "bg-c5" },
+  { key: "waiting", label: "Waiting for an answer", cls: "bg-c5" },
 ];
 
 export const DONE_PARTS: { key: keyof Done; label: string; cls: string }[] = [

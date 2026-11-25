@@ -15,7 +15,6 @@ import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { Block, ConfirmButton, ErrorLine, Page, useWrite, when } from "../admin/parts";
 import { OutsideLimits, PipelineSwitch, StageLimits } from "./controls";
 import { useNow } from "../../lib/useNow";
-import { decisionPath } from "../../lib/links";
 import { ItemRef } from "../../ui/molecules/ItemRef";
 
 // ---- helpers -------------------------------------------------------------------
@@ -225,11 +224,6 @@ function JobItems({ items }: { items: JobItem[] }) {
             <ItemRef repo={i.repo} number={i.number} kind={i.kind} state={i.state} title={i.title} size="sm" className="sm:flex-1" />
             <span className="flex flex-wrap items-center gap-x-2 text-xs text-ink/65 sm:max-w-[45%] sm:justify-end">
               {i.outcome}
-              {i.decision && (
-                <Link to={decisionPath({ id: i.decision, repo: i.repo, number: i.number })} className="font-medium text-accent-ink hover:underline max-md:py-2">
-                  Decision
-                </Link>
-              )}
             </span>
           </li>
         ))}

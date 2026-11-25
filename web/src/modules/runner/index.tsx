@@ -1,5 +1,4 @@
-// The Runner page of the new dashboard (ui_v2): the user's Task Runners and settings, and the agent access tokens. Built from the
-// classic Connect module's parts.
+// The Runner page: the user's Task Runners and settings, and the agent access tokens, built from the Connect module's parts.
 import { CpuIcon } from "@phosphor-icons/react";
 import type { FeatureModule } from "../../registry/types";
 import { lazyView } from "../../registry/lazyView";

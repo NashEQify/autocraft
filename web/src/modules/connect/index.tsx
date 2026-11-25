@@ -3,7 +3,7 @@ import { lazyView } from "../../registry/lazyView";
 
 const ConnectView = lazyView(() => import("./views"), "ConnectView");
 
-/** The MCP Connector and Task Runners. Opened from the user menu (AppShell), not the rail. */
+/** The MCP Connector and Task Runners. Opened by a device-login link, not from the rail. */
 export const connectModule: FeatureModule = {
   id: "connect",
   permission: "viewer",

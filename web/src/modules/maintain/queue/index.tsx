@@ -1,4 +1,4 @@
-// The new dashboard's Work queue (ui_v2): what runs, what waits and why, the merge queue with its batches, the model call queue
+// Work queue: what runs, what waits and why, the merge queue with its batches, the model call queue
 // and what merged recently.
 import type { FeatureModule } from "../../../registry/types";
 import { lazyView } from "../../../registry/lazyView";
