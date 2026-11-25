@@ -5,8 +5,12 @@ import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import * as kx from "../../src/db/kx.ts";
 import { loadImplementFacts } from "../../src/data/implement/index.ts";
-import { implementsLive, worksOnPr } from "../../src/data/workflow/fragments.ts";
-import { linkWorkflows, listWorkflows, loadLinks, moveWorkflows, saveWorkflows, startWorkflows, type WorkflowState } from "../../src/data/workflow/index.ts";
+import { startedWorkAllows } from "../../src/data/runners/cross.ts";
+import { liveWorkflowExpr, worksOnPr } from "../../src/data/workflow/fragments.ts";
+import {
+  linkWorkflows, listWorkflows, loadEndedWorkflows, loadLinks, loadPrWorkflows, loadStartedRefs, loadStartedWork, loadWorkflowFacts, loadWorkScores, moveWorkflows, saveWorkflows, startWorkflows,
+  type WorkflowState,
+} from "../../src/data/workflow/index.ts";
 import { workOf } from "../../src/workflow/work.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import * as legacy from "../legacy-link.ts";
@@ -164,6 +168,36 @@ both("rows written without the link read as the linked ones do, and one run link
   assert.deepEqual(await links(db, 1, { ended: true }), [[stopped, 100], [w, 101]]);
 });
 
+both("the Task Runner snapshot, the lease and the planner agree on a PR whose attempt ended while its workflow goes on, and on an older PR of the workflow that is reopened", async ({ db }) => {
+  const r = rows(db);
+  const q = queryDb(db), k = q.k as any;
+  const w = await startOne(db, 1, 10);
+  const i = await r.attempt({ number: 1, made: 11, pr: 100 });
+  await r.pr(100);
+  await r.move(i, 12, { state: "closed" });
+  // The lease's condition on a call whose item is the PR: the call's id is the PR's number.
+  const call = async (pr: number): Promise<boolean> =>
+    (await q.all(k.selectFrom("main.items as c").select("c.number").where("c.number", "=", pr).where((eb: any) => startedWorkAllows(db, eb, "ann", "c.number")))).length === 1;
+  for (const pr of [100, 101]) await q.run(k.insertInto("main.remote_call_items").values({ call_id: pr, repo: REPO, number: pr, pos: 0 }));
+  const says = async (pr: number) => [(await loadStartedWork(db)).prs.some((x) => x.pr === pr), await call(pr), (await loadWorkflowFacts(db, [{ repo: REPO, number: pr }])).ofPr.get(`${REPO}#${pr}`)?.id === w];
+  for (const linked of [false, true]) {
+    if (linked) await linkWorkflows(db);
+    assert.deepEqual(await says(100), [true, true, true]);
+  }
+  await r.attempt({ number: 1, made: 13, pr: 101 });
+  await r.pr(101);
+  await q.run(k.updateTable("main.item_workflows").set({ pr_number: null }).where("id", "=", w));
+  for (const linked of [false, true]) {
+    if (linked) await linkWorkflows(db);
+    assert.deepEqual([await says(100), await says(101)], [[false, false, false], [true, true, true]]);
+    // Started on its own, the older PR is its own workflow's.
+    if (!linked) continue;
+    const own = (await startWorkflows(db, [{ ...start(100, 14), kind: "pr", entry: "review" }])).get(`${REPO}#100`)!;
+    assert.equal((await loadPrWorkflows(db, [{ repo: REPO, number: 100 }])).get(`${REPO}#100`)!.id, own);
+    assert.equal((await loadPrWorkflows(db, [{ repo: REPO, number: 101 }])).get(`${REPO}#101`)!.id, w);
+  }
+});
+
 // ---- against the rules the link stands for -------------------------------------------------------------------
 
 type Wf = { id: number; number: number; state: string; started: number; born: number };
@@ -190,7 +224,7 @@ function history(n: number, x: () => number, id: () => number): Snapshot[] {
         const add = (state: string) => wfs.push({ id: id(), number: n, state, started: m, born: step });
         can.push(() => add(pick(LIVE)), () => add(pick(LIVE)), () => add(pick(["backlog", "closed", "stopped"])));
       }
-      if (live) can.push(() => { live.state = pick(["done", "stopped", "closed", "backlog"]); });
+      if (live && x() < 0.55) can.push(() => { live.state = pick(["done", "stopped", "closed", "backlog"]); });
       if (!cur && atts.length < 3) for (let i = 0; i < (live ? 3 : 1); i++) can.push(() => atts.push({ id: id(), number: n, state: pick(["planning", "implementing"]), made: m, moved: m, pr: null, born: step }));
       if (cur && cur.pr === null) for (let i = 0; i < 3; i++) can.push(() => {
         cur.pr = 100_000 + n * 10 + prs.length;
@@ -245,7 +279,7 @@ async function reading(db: Db, repo: string, shift: number, numbers: number[]): 
 const CASES = 400;
 /** Keys of one load: SQLite walks the JSON key list once per row it compares. */
 const KEYS = 200;
-both(`over ${CASES} random histories the link, stored or not, gives what the rules before it gave, but for a PR over before the start, an older PR of the workflow, an earlier workflow's end and a carried-over PR`, async ({ db }) => {
+both(`over ${CASES} random histories the link, stored or not, gives what the rules before it gave, but for a PR over before the start, an older PR of the workflow, an attempt that ended in it and a carried-over PR`, async ({ db }) => {
   const x = prng(20260101);
   const numbers = Array.from({ length: CASES }, (_, i) => i + 1);
   let next = 0;
@@ -264,24 +298,35 @@ both(`over ${CASES} random histories the link, stored or not, gives what the rul
   const keyed = async <T>(ns: number[], load: (part: number[]) => Promise<T[]>): Promise<T[]> => { const out: T[] = []; for (const part of kx.chunks(ns, KEYS)) out.push(...await load(part)); return out; };
   const prNumbers = last.flatMap((s) => s.prs.map((p) => p.number));
 
-  // The other readers of the same predicate agree with loadLinks.
+  // Every reader of live work agrees with loadLinks, and the ends are the rule's own.
   for (const [repo, shift, got] of [["o/linked", 0, linked], ["o/plain", SHIFT, plain]] as const) {
     const q = queryDb(db), k = q.k as any;
     const pairs = await q.all(k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as a", (j: any) => j.onRef("a.repo", "=", "w.repo").onRef("a.number", "=", "w.number"))
       .where("w.repo", "=", repo).where("a.pr_number", "is not", null).where((eb: any) => worksOnPr(eb, "w", "a.pr_number")).select(["w.id as id", "a.pr_number as pr"])) as { id: number | string; pr: number | string }[];
     assert.deepEqual(pairs.map((p) => `${Number(p.id) - shift}:${p.pr}`).sort(), [...got.all].flatMap(([pr, ws]) => [...ws.keys()].map((w) => `${w}:${pr}`)).sort());
-    const on = await q.all(k.selectFrom("main.items as it").where("it.repo", "=", repo).where((eb: any) => implementsLive(eb, "it.repo", "it.number")).select("it.number as n")) as { n: number | string }[];
+    const pairsOf = (m: Iterable<readonly [number, number]>) => [...m].map(([pr, w]) => `${w}:${pr}`).sort();
+    const want = pairsOf(got.live), prsOf = (ns: Iterable<number>) => [...ns].sort(), livePrs = prsOf(got.live.keys());
+    const on = await q.all(k.selectFrom("main.items as it").where("it.repo", "=", repo).where((eb: any) => liveWorkflowExpr(eb, "it.repo", "it.number")).select("it.number as n")) as { n: number | string }[];
     const mirrored = new Set(last.flatMap((s) => s.prs.filter((p) => p.mirrored).map((p) => p.number)));
-    assert.deepEqual(on.map((r) => Number(r.n)).sort(), [...got.live.keys()].filter((n) => mirrored.has(n)).sort());
-    const byPr = await keyed(prNumbers, (ns) => loadLinks(db, { prs: refs(repo, ns) }));
-    assert.deepEqual(byPr.map((l) => `${l.workflowId - shift}:${l.pr}`).sort(), [...got.live].map(([pr, w]) => `${w}:${pr}`).sort());
+    assert.deepEqual(prsOf(on.map((r) => Number(r.n))), livePrs.filter((n) => mirrored.has(n)));
+    assert.deepEqual(pairsOf(await keyed(prNumbers, async (ns) => (await loadLinks(db, { prs: refs(repo, ns) })).map((l) => [l.pr, l.workflowId - shift] as const))), want);
+    assert.deepEqual(pairsOf(await keyed(prNumbers, async (ns) => [...await loadPrWorkflows(db, refs(repo, ns), { others: true })].map(([key, w]) => [Number(key.split("#")[1]), w.id - shift] as const))), want);
+    const found = await keyed(prNumbers, async (ns) => [await loadWorkflowFacts(db, refs(repo, ns))]);
+    assert.deepEqual(pairsOf(found.flatMap((f) => [...f.ofPr].map(([key, w]) => [Number(key.split("#")[1]), w.id - shift] as const))), want);
+    assert.deepEqual(prsOf(await keyed(prNumbers, async (ns) => [...(await loadWorkScores(db, refs(repo, ns))).keys()].map((key) => Number(key.split("#")[1])))), livePrs);
+    assert.deepEqual(prsOf([...await loadStartedRefs(db, { login: "ann", repos: [repo] })].map((key) => Number(key.split("#")[1])).filter((n) => n > 100_000)), livePrs);
+    assert.deepEqual(prsOf((await loadStartedWork(db)).prs.filter((x) => x.repo === repo).map((x) => x.pr)), livePrs);
+    const ends = await keyed(prNumbers, async (ns) => [...await loadEndedWorkflows(db, refs(repo, ns))]);
+    const rule = await keyed(prNumbers, async (ns) => [...await legacy.loadEndedWorkflows(db, refs(repo, ns))]);
+    assert.ok(rule.length > 0);
+    assert.deepEqual(ends, rule);
   }
 
   const oldLive = new Map(await keyed(prNumbers, async (ns) => [...await legacy.loadPrWorkflows(db, refs("o/plain", ns), { others: true })]));
-  const oldEnded = new Map(await keyed(prNumbers, async (ns) => [...await legacy.loadEndedWorkflows(db, refs("o/plain", ns))]));
   const oldStarted = new Set((await legacy.loadStartedPrs(db)).filter((r) => r.repo === "o/plain").map((r) => r.pr));
   const attempts = new Map(await keyed(numbers, async (ns) => [...(await loadImplementFacts(db, refs("o/plain", ns))).byIssue]));
-  const seen = { c1: 0, c2: 0, c3: 0, c7: 0, c8: 0, live: 0, ended: 0 };
+  const stored = new Map((await listWorkflows(db, { repos: ["o/linked"] })).map((w) => [w.id, w.prNumber]));
+  const seen = { c1: 0, c2: 0, c3: 0, c7: 0, live: 0 };
 
   for (const s of last) {
     const n = s.wfs[0]?.number ?? s.atts[0]?.number;
@@ -295,22 +340,20 @@ both(`over ${CASES} random histories the link, stored or not, gives what the rul
     const c2 = (pr: number, w: Wf) => attemptOf(of(pr), w) && s.atts.some((b) => b.pr !== null && b.id > of(pr).id && attemptOf(b, w));
     // The workflow was linked while the carried-over attempt was the newest; a newer one took its place since.
     const c7 = (pr: number, w: Wf) => !attemptOf(of(pr), w) && of(pr).moved >= w.started;
-    // An attempt made for a later workflow of the issue is not an earlier one's, whose end the old rule read once the later one was left out.
-    const c8 = (pr: number, w: Wf) => s.wfs.some((v) => v.id > w.id && v.started <= of(pr).made);
-    const state = new Map(s.wfs.map((w) => [w.id, w]));
     const live = s.wfs.find((w) => LIVE.includes(w.state)) ?? null;
 
     // A live workflow's PR: the pass's own rule, with C7 as the only difference.
     if (live) {
       const a = attempts.get(`o/plain#${n}`) ?? null;
       const cand = legacy.candidatePr(a, { startedAt: at(live.started) });
-      const p = cand === null ? null : prOf.get(cand)!;
-      const item = p?.mirrored ? { state: p.state as string, closed_at: p.closed === null ? null : at(p.closed) } : null;
+      const itemOf = (pr: number) => { const p = prOf.get(pr)!; return p.mirrored ? { state: p.state as string, closed_at: p.closed === null ? null : at(p.closed) } : null; };
+      const item = cand === null ? null : itemOf(cand);
       const want = legacy.overBefore(item, at(live.started)) ? null : cand;
-      assert.equal(workOf(a, { startedAt: at(live.started) }, item).pr, want);
+      assert.equal(workOf(a, { startedAt: at(live.started), prNumber: null }, item).pr, want);
       const of_ = (r: Reading) => s.prs.find((q) => r.live.get(q.number) === live.id)?.number ?? null;
       assert.equal(of_(plain), want, `issue ${n}, not linked`);
-      const got = of_(linked);
+      const got = of_(linked), linkedPr = stored.get(live.id) ?? null, li = linkedPr === null ? item : itemOf(linkedPr);
+      assert.equal(workOf(a, { startedAt: at(live.started), prNumber: linkedPr }, li).pr, got, `issue ${n}, the pass's rule on the linked row`);
       if (got !== want) { assert.ok(got !== null && c7(got, live), `issue ${n}: linked to ${got}, the rule says ${want}`); seen.c7++; }
       else if (got !== null) seen.live++;
     }
@@ -327,21 +370,6 @@ both(`over ${CASES} random histories the link, stored or not, gives what the rul
       // The Task Runner's own rule: a current attempt. The link also covers one that ended while the workflow goes on.
       if (now !== null && !oldStarted.has(p.number)) { assert.ok(ENDED_ATTEMPTS.includes(of(p.number).state)); seen.c3++; }
       if (now === null && oldStarted.has(p.number)) assert.ok(live && c1(p.number, live), `issue ${n} #${p.number}: a working attempt's PR is not its work`);
-
-      // How the PR's issue ended, as the ended-workflow loader reads it.
-      const endOf = (r: Reading) => {
-        const ws = [...(r.all.get(p.number)?.keys() ?? [])].map((id) => state.get(id)!)
-          .filter((w) => w.state !== "done" || !s.prs.some((o) => o.mirrored && o.state === "MERGED" && o.closed! >= w.started)).sort((a, b) => b.id - a.id);
-        return ws.length && !LIVE.includes(ws[0]!.state) ? ws[0]!.state : undefined;
-      };
-      const before = oldEnded.get(key);
-      for (const [name, r] of [["plain", plain], ["linked", linked]] as const) {
-        const after = endOf(r);
-        if (after === before) { if (after) seen.ended++; continue; }
-        const why = s.wfs.some((w) => c1(p.number, w)) ? "c1" : s.wfs.some((w) => c2(p.number, w)) ? "c2" : s.wfs.some((w) => c8(p.number, w)) ? "c8" : name === "linked" && s.wfs.some((w) => c7(p.number, w)) ? "c7" : null;
-        assert.ok(why, `issue ${n} #${p.number} (${name}): ended ${before} became ${after}`);
-        seen[why]++;
-      }
     }
   }
   for (const [what, count] of Object.entries(seen)) assert.ok(count > 0, `no case of ${what}`);

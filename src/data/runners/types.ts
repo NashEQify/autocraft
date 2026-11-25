@@ -58,7 +58,7 @@ export type RunnerRow = {
   /** Leases outside the own lane. */
   leased: number; ownLaneLeased: number; beatAt: number | null;
 };
-/** Rows of the workflow module's started-work load: live workflows and the PR of each implement workflow's current attempt. */
+/** Rows of the workflow module's started-work load: live workflows and the PR each implement workflow works on. */
 export type StartedWork = {
   live: { repo: string; number: number; entry: string; state: string; started_by: string; approved_by: string | null }[];
   prs: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];

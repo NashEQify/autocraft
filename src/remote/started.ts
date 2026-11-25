@@ -1,6 +1,6 @@
 // Calls for work a person started or approved in the maintainer workflow (src/workflow): every item a queued call names has a
-// live workflow in a repo on that workflow whose starter or approver is the person, or is the PR of an issue whose live
-// implement workflow they started or approved (a current attempt). Their own Task Runners take such a call first, ahead of
+// live workflow in a repo on that workflow whose starter or approver is the person, or is the PR that the live implement
+// workflow of an issue, which they started or approved, works on. Their own Task Runners take such a call first, ahead of
 // automatic work, in a slot that counts toward their Max calls at once, and not held back by their cool-off. While one of
 // their runners is fresh, ready and not cooling off, offers the call's tier and may take it (role rules, write permission, a
 // token whose model did not decline it), other users' runners pass the call over, for at most STARTED_HOLD_MS from its
@@ -18,8 +18,6 @@ import { canWriteOf, freshReady, loadView, tiersOf, type RemoteView } from "./vi
 
 /** How long other users' runners pass a started call over for its owner, from its queueing. */
 export const STARTED_HOLD_MS = scaled(10 * 60_000);
-/** The attempts that are not current, as the implementations_current index leaves them out. */
-export const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 
 /** The My tasks ids (my-tasks.ts) of the steps a live workflow of each entry runs. */
 const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {

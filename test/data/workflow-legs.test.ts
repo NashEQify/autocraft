@@ -44,7 +44,7 @@ both("loadLegs: oldest first, active only, latest only; loadLegPass reads each l
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 2)!.id, workflowId: 999 }]), 0, "a linked leg is not adopted again");
 });
 
-both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue's implement workflow; listWorkflowLegs finds an issue's legs", async ({ db }) => {
+both("loadPrWorkflows: a PR's own live workflow, else its issue's implement workflow, and no workflow for a leg alone; listWorkflowLegs finds an issue's legs", async ({ db }) => {
   const q = queryDb(db);
   const k = q.k as any;
   const ids = await seed(db, 4);
@@ -52,12 +52,12 @@ both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue'
   const [byLeg, byAttempt] = [issues.get("o/a#90")!, issues.get("o/a#91")!];
   const impl = (number: number, pr: number, attempt: number, state: string) => ({ repo: "o/a", number, queued_by: "ann", state, attempt, text_hash: "h", pr_number: pr, created_at: AT, updated_at: AT });
   await q.run(k.insertInto("main.implementations").values([impl(91, 2, 1, "closed"), impl(91, 4, 2, "pr-opened")]));
-  // PR 3 and 4 have no live workflow of their own; PR 3's leg is the first issue's, PR 4 was opened for the second.
+  // PR 3 and 4 have no live workflow of their own; PR 3's leg is the first issue's, which does not work on it; PR 4 was opened for the second.
   await saveWorkflows(db, [3, 4].map((n) => ({ id: ids.get(`o/a#${n}`)!, patch: { state: "stopped" as const } })));
   await q.run(k.updateTable("main.preapprovals").set({ workflow_id: byLeg }).where("number", "=", 3));
   const refs = [1, 2, 3, 4, 5].map((number) => ({ repo: "o/a", number }));
   assert.deepEqual([...await loadPrWorkflows(db, refs)].map(([key, w]) => [key, w.id]).sort(),
-    [["o/a#1", ids.get("o/a#1")], ["o/a#2", ids.get("o/a#2")], ["o/a#3", byLeg], ["o/a#4", byAttempt]]);
+    [["o/a#1", ids.get("o/a#1")], ["o/a#2", ids.get("o/a#2")], ["o/a#4", byAttempt]]);
   assert.deepEqual((await listWorkflowLegs(db, [byLeg])).map((l) => l.number), [3]);
 });
 
