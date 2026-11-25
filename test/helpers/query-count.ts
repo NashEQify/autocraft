@@ -24,20 +24,29 @@ export interface FlatOptions {
 export async function expectFlat(unit: (size: number) => Promise<FlatUnit>, small: number, large: number, opts: FlatOptions = {}): Promise<{ small: DbStats; large: DbStats }> {
   assert.ok(large > small, `expectFlat: the large size (${large}) must exceed the small one (${small})`);
   const perEffect = opts.perEffect ?? 2;
-  const measure = async (size: number): Promise<DbStats> => {
+  const measure = async (size: number): Promise<DbStats & { texts: Map<string, number> }> => {
     const u = await unit(size);
+    const texts = new Map<string, number>();
+    const stop = u.db.observe((e) => {
+      if (e.kind !== "query") return;
+      const text = `${e.sql.replace(/\s+/g, " ").replace(/\((?:(?:\?|\$\d+), )*(?:\?|\$\d+)\)/g, "(..)").replace(/\(\.\.\)(?:, \(\.\.\))+/g, "(..)").slice(0, 160)} <- ${e.site.replace(/\(?file:\S*\/(?=src\/)/, "")}`;
+      texts.set(text, (texts.get(text) ?? 0) + 1);
+    });
     try {
-      return (await u.db.meter(() => u.run())).stats;
+      return { ...(await u.db.meter(() => u.run())).stats, texts };
     } finally {
+      stop();
       await u.close?.();
     }
   };
-  const a = await measure(small);
-  const b = await measure(large);
+  const { texts: before, ...a } = await measure(small);
+  const { texts: after, ...b } = await measure(large);
+  const grown = (): string => [...after].map(([t, n]) => [t, n - (before.get(t) ?? 0)] as const).filter(([, d]) => d > 0).sort((x, y) => y[1] - x[1])
+    .slice(0, 12).map(([t, d]) => `\n  +${d} ${t}`).join("");
   const net = (s: DbStats): number => s.statements - perEffect * s.effects;
   assert.ok(
     net(b) <= net(a),
-    `statements grow with size: ${b.statements} at size ${large} (${b.effects} effects) against ${a.statements} at size ${small} (${a.effects} effects), allowing ${perEffect} per effect`,
+    `statements grow with size: ${b.statements} at size ${large} (${b.effects} effects) against ${a.statements} at size ${small} (${a.effects} effects), allowing ${perEffect} per effect; sent more often:${grown()}`,
   );
   return { small: a, large: b };
 }

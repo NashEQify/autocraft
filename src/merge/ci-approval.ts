@@ -89,6 +89,13 @@ export async function needsWork(db: Db, repo: string, run?: string | null, plans
   return out.sort((a, b) => a.number - b.number);
 }
 
+/** The repos the step has work in, from a pass's Plans. */
+export async function ciApproveRepos(db: Db, plans: PlanSet, run: string | null): Promise<Set<string>> {
+  const due = await planned(db, "approve-ci", { run, plans });
+  const rows = await loadRunApprovals(db, due.map((p) => ({ repo: p.facts.repo, number: p.facts.number })));
+  return new Set(due.filter((p) => rows.has(headOf(p.facts.repo, p.facts.number, p.action.head!))).map((p) => p.facts.repo));
+}
+
 /** Runs of a candidate the step may still try: pull_request runs with fewer than MAX_FAILURES failed attempts. */
 export const approvable = (c: Candidate): WaitingRun[] => c.runs.filter((r) => r.event === "pull_request" && (c.failed[r.id] ?? 0) < MAX_FAILURES);
 

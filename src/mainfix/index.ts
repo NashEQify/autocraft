@@ -27,13 +27,14 @@ import { ghExec, type Gh } from "../merge/safe-merge.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { cleanLine } from "../review/post-template.ts";
 import { scrub } from "../runner/scrub.ts";
-import { mainFixApprovalOf } from "./approval.ts";
+import { mainFixApprovalOf, mainFixApprovals } from "./approval.ts";
 import { lintReadyIn, openFixPrs, type FixPrDeps } from "./pr.ts";
 import { REASON_WORDS, VERDICTS, type MainFixInput, type MainFixVerdict } from "./types.ts";
 import { slugOf } from "../owners.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { filterSeq } from "../async-seq.ts";
 
 export { mainFixApprovalOf, setMainFixApproval } from "./approval.ts";
 export { autocraftText } from "./status.ts";
@@ -127,27 +128,36 @@ export async function onCodeVerdict(db: Db, row: FixRow, why: string, at: string
 
 type Current = { headSha: string; branch: string; state: string; culprit: string; culpritPr: number | null; redSince: string; stateChangedAt: string };
 
-async function currentOf(db: Db, repo: string): Promise<Current | null> {
-  const r = (await mainCiRepos(db)).find((x) => x.repo === repo);
-  if (!r) return null;
-  const changed = (await loadMainCiAt(db, [{ repo, sha: r.headSha }])).get(`${repo}@${r.headSha}`);
-  const stateChangedAt = changed?.state_changed_at ?? "";
-  return { headSha: r.headSha, branch: r.branch, state: r.state, culprit: r.culprit?.sha ?? r.headSha, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, stateChangedAt };
+/** The default branch's head of each of `repos` that has one read. */
+async function currentHeads(db: Db, repos: readonly string[]): Promise<Map<string, Current>> {
+  const wanted = new Set(repos);
+  const heads = (await mainCiRepos(db)).filter((x) => wanted.has(x.repo));
+  const changed = await loadMainCiAt(db, heads.map((r) => ({ repo: r.repo, sha: r.headSha })));
+  return new Map(heads.map((r) => {
+    const stateChangedAt = changed.get(`${r.repo}@${r.headSha}`)?.state_changed_at ?? "";
+    return [r.repo, { headSha: r.headSha, branch: r.branch, state: r.state, culprit: r.culprit?.sha ?? r.headSha, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, stateChangedAt }];
+  }));
+}
+
+const currentOf = async (db: Db, repo: string): Promise<Current | null> => (await currentHeads(db, [repo])).get(repo) ?? null;
+
+/** Those of `repos` where a run of the step has something to do. */
+export async function mainFixDueRepos(db: Db, repos: readonly string[]): Promise<string[]> {
+  const approved = await mainFixApprovals(db, [...repos]);
+  const heads = await currentHeads(db, repos.filter((r) => approved.get(r)));
+  const facts = await loadMainFixDue(db, [...heads].map(([repo, cur]) => ({ repo, headSha: cur.headSha, running: cur.state === "running" })));
+  return await filterSeq([...heads.keys()], async (repo) => {
+    const cur = heads.get(repo)!, due = facts.get(`${repo}@${cur.headSha}`)!;
+    // A stored patch is collected once its lint task ended, or closed when its head is no longer the current one.
+    if (cur.state !== "running" && await lintReadyIn(db, due.lintingHeads, cur.headSha)) return true;
+    if (cur.state === "red") return due.rows.length === 0 || due.rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
+    // A row left at needs-fix by an older head is closed by the next run.
+    return due.rows.some((r) => r.state === "rerun-requested") || due.staleNeedsFix;
+  });
 }
 
 /** Whether a run of the step has something to do for the repo. */
-export async function mainFixDue(db: Db, repo: string): Promise<boolean> {
-  if (!await mainFixApprovalOf(db, repo)) return false;
-  const cur = await currentOf(db, repo);
-  if (!cur) return false;
-  const running = cur.state === "running";
-  const due = (await loadMainFixDue(db, [{ repo, headSha: cur.headSha, running }])).get(`${repo}@${cur.headSha}`)!;
-  // A stored patch is collected once its lint task ended, or closed when its head is no longer the current one.
-  if (!running && await lintReadyIn(db, due.lintingHeads, cur.headSha)) return true;
-  if (cur.state === "red") return due.rows.length === 0 || due.rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
-  // A row left at needs-fix by an older head is closed by the next run.
-  return due.rows.some((r) => r.state === "rerun-requested") || due.staleNeedsFix;
-}
+export const mainFixDue = async (db: Db, repo: string): Promise<boolean> => (await mainFixDueRepos(db, [repo])).length > 0;
 
 const issueTitle = (check: string): string => `Main CI fails: ${cleanLine(check, 100)}`;
 

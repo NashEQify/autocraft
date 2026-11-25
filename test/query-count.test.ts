@@ -2,10 +2,12 @@
 // grow with the size. The data modules' own loaders are covered in test/data; these are the whole paths over them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { Kysely } from "kysely";
 import { join } from "node:path";
 import { effect } from "../src/db/effects.ts";
 import { activity } from "../src/dash/api/activity.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
+import { setMainFixApproval } from "../src/mainfix/approval.ts";
 import { live } from "../src/dash/api/live.ts";
 import { home, items } from "../src/dash/api/maintain.ts";
 import { item } from "../src/dash/api/maintain-item.ts";
@@ -37,13 +39,36 @@ const unit = (seed: (w: World, size: number) => Promise<() => Promise<unknown>>)
   return { db: w.db, run, close: async () => { w.close(); await w.db.close(); } };
 };
 
-/** Pull requests at each point of the pipeline, in turn: classified, reviewed, with a fix to make, verified, before the merge. */
-async function seedPrs(w: World, list: readonly number[]): Promise<void> {
-  for (const n of list) {
-    await w.pr(n, { ci: n % 4 === 3 ? "failure" : "success", mergeable: n % 5 === 4 ? "CONFLICTING" : "MERGEABLE" });
-    if (n % 2 === 0) await w.review(n, { verdict: n % 4 === 0 ? "take-fix" : "take" });
-    if (n % 6 === 0) { await w.verified(n); await w.premerge(n, "clean"); }
-    if (n % 3 === 0) await insertWorkflow(w.db, { kind: "pr", entry: "review", startedBy: "op", startedAt: iso(60), startedVia: "github", repo: "app", number: n, state: "running" });
+/** Where a seeded pull request is in the pipeline. */
+const POINTS: { pr?: Parameters<World["pr"]>[1]; review?: Parameters<World["review"]>[1]; checked?: true; started?: "review" | "merge" }[] = [
+  {},
+  { review: { verdict: "take" } },
+  { review: { verdict: "take-fix" }, started: "review" },
+  { pr: { ci: "failure" }, review: { verdict: "take" }, started: "review" },
+  { pr: { mergeable: "CONFLICTING" } },
+  { review: { verdict: "take" }, checked: true, started: "merge" },
+];
+
+/** `n` pull requests at each point, numbered from 1, so both sizes of a unit meet the same cases. */
+async function seedPrs(w: World, n: number): Promise<void> {
+  for (const i of numbers(n, 0)) {
+    for (const [k, p] of POINTS.entries()) {
+      const pr = i * POINTS.length + k + 1;
+      await w.pr(pr, p.pr);
+      if (p.review) await w.review(pr, p.review);
+      if (p.checked) { await w.verified(pr); await w.premerge(pr, "clean"); }
+      if (p.started) await insertWorkflow(w.db, { kind: "pr", entry: p.started, startedBy: "op", startedAt: iso(60), startedVia: "github", repo: "app", number: pr, state: "running" });
+    }
+  }
+}
+
+/** More tracked repos, each with the rows of "app". */
+async function addRepos(w: World, names: readonly string[]): Promise<void> {
+  const k = w.db.k as unknown as Kysely<Record<string, Record<string, unknown>>>;
+  for (const table of ["tracked_repos", "repos", "items", "classifications", "pr_checks", "opus_reviews", "item_priority", "repo_step_approvals", "main_ci"]) {
+    const repoCol = table === "tracked_repos" || table === "repos" ? "name" : "repo";
+    const rows = await w.db.all(k.selectFrom(table).selectAll().where(repoCol, "=", "app"));
+    for (const name of names) if (rows.length) await w.db.run(k.insertInto(table).values(rows.map(({ id: _, rowid: __, ...r }) => ({ ...r, [repoCol]: name }))));
   }
 }
 
@@ -65,18 +90,26 @@ async function seedJob(w: World, state: "running" | "done", list: readonly numbe
 
 test("a full planner pass, and one over the items that changed, read in sets", async () => {
   const full = unit(async (w, n) => {
-    await seedPrs(w, numbers(n));
+    await seedPrs(w, n);
     for (const i of numbers(n, 100)) await w.issue(i);
     return () => detectAutopilot(w.db);
   });
   await expectFlat(full, 2, 12);
   const changed = unit(async (w, n) => {
-    await seedPrs(w, numbers(12));
+    await seedPrs(w, 12);
     await detectAutopilot(w.db);
-    for (const i of numbers(n)) await w.db.run(w.db.k.updateTable("items").set({ title: "new title" }).where("number", "=", i));
+    for (const i of numbers(n * POINTS.length)) await w.db.run(w.db.k.updateTable("items").set({ title: "new title" }).where("number", "=", i));
     return () => detectAutopilot(w.db);
   });
   await expectFlat(changed, 2, 12);
+  // Two repos at the small size: the copies of "app" have no started work, so they meet cases "app" does not.
+  await expectFlat(unit(async (w, n) => {
+    await seedPrs(w, 2);
+    await setMainFixApproval(w.db, "op", "app", true);
+    await w.db.run(w.db.k.insertInto("main_ci").values({ repo: "app", head_sha: "main1", branch: "main", state: "red", failing: '[{"name":"gate / test","url":null}]', checks: "[]", committed_at: iso(90), headline: "h", first_seen_at: iso(80), state_changed_at: iso(70), updated_at: iso(5) }));
+    await addRepos(w, numbers(n - 1).map((i) => `app${i}`));
+    return () => detectAutopilot(w.db);
+  }), 2, 5);
 });
 
 const bundle = { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 600, maxTurns: 10, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } as const;
@@ -86,7 +119,7 @@ const queueCall = (w: World, n: number): Promise<number> =>
 test("a Task Runner's claim reads the queue and the other Task Runners in sets", async () => {
   let k = 0;
   const claims = (queued: number, runners: number, leases: boolean) => unit(async (w) => {
-    await seedPrs(w, numbers(queued));
+    await seedPrs(w, queued);
     for (const n of numbers(queued)) await queueCall(w, n);
     const tokens: number[] = [];
     for (const i of numbers(runners)) {
@@ -105,7 +138,7 @@ test("a Task Runner's claim reads the queue and the other Task Runners in sets",
 
 test("calls that wait for their result share one poll", async () => {
   await expectFlat(unit(async (w, n) => {
-    await seedPrs(w, numbers(n));
+    await seedPrs(w, n);
     const ids: number[] = [];
     for (const i of numbers(n)) ids.push(await queueCall(w, i));
     await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "failed", error: "ended" }));
@@ -141,7 +174,7 @@ test("a runner tick reads its running and queued jobs in sets", async () => {
 
 test("the live board reads its lanes in sets", async () => {
   await expectFlat(unit(async (w, n) => {
-    await seedPrs(w, numbers(n));
+    await seedPrs(w, n);
     for (const i of numbers(n)) { await seedJob(w, "running", [i]); await seedJob(w, "done", [i]); }
     return async () => assert.ok((await live(w.db, req())).lanes.length >= n);
   }), 2, 12);
@@ -173,7 +206,7 @@ test("an item's pages read its history in sets", async () => {
 
 test("the activity feed, Home and the Items page read their rows in sets", async () => {
   const pages = (read: (w: World) => Promise<unknown>) => unit(async (w, n) => {
-    await seedPrs(w, numbers(n));
+    await seedPrs(w, n);
     for (const i of numbers(n)) {
       await seedJob(w, "done", [i]);
       await w.issue(100 + i);
