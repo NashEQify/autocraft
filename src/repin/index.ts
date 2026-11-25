@@ -488,7 +488,7 @@ async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "fa
   if ("refused" in g) d.log?.(`autorepin ${refOf(r)}: no comment: ${g.refused}`);
   else {
     try {
-      const out = await ghComment({ db, login: AUDIT_LOGIN, mint: d.mint }, g, d.exec ?? defaultExec, "autorepin-comment", { repo: r.repo, number: r.number, pr: true }, { by: "fixed-operator" }, noticeText(r), { on: depRefOf(r), state: r.state });
+      const out = await ghComment({ db, login: AUDIT_LOGIN, mint: d.mint }, g, d.exec ?? defaultExec, "autorepin-comment", { repo: r.repo, number: r.number, pr: true }, { by: "fixed-operator" }, noticeText(r), { on: depRefOf(r), state: r.state, repin: r.requested_at });
       if (out.code === 0) notice = "posted";
       else d.log?.(`autorepin ${refOf(r)}: the comment failed: ${oneLine(out.stderr || out.stdout)}`);
     } catch (e) {

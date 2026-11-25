@@ -182,6 +182,15 @@ export async function loadMadeBefore(db: Db, jobId: number, before: string): Pro
   return out;
 }
 
+/** The rows of earlier tries of a write (its action, target and one of its write keys), newest first, the latest 20. Keyed by the target. */
+export async function loadWriteTries(db: Db, w: { action: string; target: string; keys: string[] }): Promise<{ id: number; at: string; details: Details }[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom(AUDIT).select([kx.rowid(AUDIT).as("id"), "at", "details"]).$narrowType<{ details: string }>()
+    .where("target", "=", w.target).where("action", "=", w.action).where((eb) => kx.inList(db, kx.jsonText(db, valid(db, eb), "$.writeKey"), w.keys))
+    .orderBy(kx.rowid(AUDIT), "desc").limit(20));
+  return rows.map((r) => ({ id: Number(r.id), at: r.at, details: parseDetails(r.details) ?? {} }));
+}
+
 // ---- readers ---------------------------------------------------------------------------------------------------------
 
 const cols = () => [kx.rowid(AUDIT).as("rowid"), "at", "login", "action", "target", "details"] as const;

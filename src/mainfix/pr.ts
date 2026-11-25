@@ -271,8 +271,11 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     const fork = await forkOf({ db: c.db, login: PR_ACTOR }, g, c.exec, who.login, c.repo);
     const owner = fork.split("/")[0]!;
     const sel = await ownPrSelect(c.db, c.repo, [owner], now.branch);
-    const found = await c.exec("gh", ["pr", "list", "--repo", `${slugOf(c.repo)}`, "--state", "open", "--head", branch, "--json", sel.json, "--jq", sel.jq]);
-    let url = found.code === 0 ? found.stdout.trim().split("\n")[0] ?? "" : "";
+    const openPr = async (): Promise<string> => {
+      const found = await c.exec("gh", ["pr", "list", "--repo", `${slugOf(c.repo)}`, "--state", "open", "--head", branch, "--json", sel.json, "--jq", sel.jq]);
+      return found.code === 0 ? found.stdout.trim().split("\n")[0] ?? "" : "";
+    };
+    let url = await openPr();
     if (!(url && urlOk(url, c.repo))) {
       const push = await pushOwnBranch({ db: c.db, login: PR_ACTOR }, g, git, "main-fix-push", { repo: c.repo, remote: fork, branch, sha: commit }, { fork, head });
       if (push.code !== 0) return await set(live, "fix-failed", `push failed: ${oneLine(push.stderr)}`);
@@ -280,7 +283,9 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
       const pr = await ghOpenPr({ db: c.db, login: PR_ACTOR }, g, c.exec, "main-fix-pr", { repo: c.repo, target: ref, base: now.branch, head: `${owner}:${branch}`, title, body },
         { by: "model", kind: "pull request", model }, { branch, files: patchFiles });
       url = pr.stdout.trim().split("\n").pop() ?? "";
-      if (pr.code !== 0 || !urlOk(url, c.repo)) return await set(live, "fix-failed", `the pull request was not opened: ${oneLine(pr.stderr || pr.stdout)}`);
+      // A create whose answer was lost may have opened it.
+      if (pr.code !== 0 || !urlOk(url, c.repo)) url = await openPr();
+      if (!urlOk(url, c.repo)) return await set(live, "fix-failed", `the pull request was not opened: ${oneLine(pr.stderr || pr.stdout)}`);
     }
     for (const r of live) await c.setState(r, "pr-opened", r.reason, at(), { prNumber: Number(url.split("/").pop()), prUrl: url });
     c.log(`  ${c.repo}: ${names.join(", ")}: opened ${url}`);

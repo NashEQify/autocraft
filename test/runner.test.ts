@@ -227,6 +227,20 @@ describe("runner", () => {
       await retry("");
       assert.equal(posts, 3, "a comment GitHub does not show was never made");
 
+      // Another job, after one that lost GitHub's answer: the same comment is looked up, and one that carries out a known action is made once for good.
+      setCallContext(null);
+      const act = (text: string, e: Parameters<typeof ghComment>[2], o: { action?: number } = {}) => ghComment({ db, login: "act" }, g, e, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, text, o);
+      assert.notEqual((await act("later", async () => ({ code: 1, stdout: "", stderr: "timeout" }))).code, 0);
+      const lost = JSON.parse((await db.get(db.k.selectFrom("audit").select("details").where("action", "=", "act-comment").where("details", "like", "%later%")))!.details!) as { text: string };
+      const shown = `${JSON.stringify({ url: "https://github.com/storytold/app/issues/3#issuecomment-88", body: lost.text, at: new Date().toISOString() })}\n`;
+      assert.match((await act("later", on(shown))).stdout, /issuecomment-88/);
+      assert.equal(posts, 3);
+      await act("later", on(null));
+      assert.equal(posts, 4, "a comment that was made may be made again later, with nothing to look up");
+      for (let k = 0; k < 2; k++) await act("closing", on(null), { action: 7 });
+      assert.equal(posts, 5, "the comment of one action is made once");
+      setCallContext({ jobId: id, step: "test-echo", stage: 2, cancelled: async () => false });
+
       // A stopping job lets a write in flight finish and be recorded, and refuses writes asked for after the stop.
       let send = (): void => {};
       const slow = async () => { await new Promise<void>((r) => { send = r; }); return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-9\n", stderr: "" }; };

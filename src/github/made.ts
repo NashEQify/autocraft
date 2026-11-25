@@ -23,6 +23,14 @@ export async function issueMade(read: GhRead, o: { repo: string; title: string; 
   return hit ? { number: hit.number, url: hit.url } : null;
 }
 
+/** The id of the repo's draft security advisory with this summary and description created since `since`. */
+export async function advisoryMade(read: GhRead, o: { repo: string; summary: string; description: string; since: string }): Promise<string | null> {
+  const out = await read(["api", "--paginate", `repos/${slugOf(o.repo)}/security-advisories?state=draft&sort=created&direction=desc&per_page=100`,
+    "--jq", ".[] | {id: .ghsa_id, summary, description, at: .created_at} | tojson"]);
+  return rows<{ id: string; summary: string; description: string | null; at: string }>(out)
+    .find((r) => Date.parse(r.at) >= Date.parse(from(o.since)) && text(r.summary) === text(o.summary) && text(r.description) === text(o.description))?.id ?? null;
+}
+
 /** The URL of the comment with this text made on the issue or PR since `since`. */
 export async function commentMade(read: GhRead, o: { repo: string; number: number; body: string; since: string }): Promise<string | null> {
   const since = from(o.since);
