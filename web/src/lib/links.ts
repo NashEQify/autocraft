@@ -53,9 +53,6 @@ export function pickDecision<T extends { answer: string | null; askedAt: string 
   return open[0] ?? [...ds].sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
 }
 
-/** A commit as shown inside the PR on GitHub. */
-export const githubCommitUrl = (repo: string, number: number, sha: string): string => `${githubItemUrl(repo, number, "pr")}/commits/${encodeURIComponent(sha)}`;
-
 /** A file at a commit on GitHub, at the given line. */
 export const githubBlobUrl = (repo: string, sha: string, path: string, line?: number): string =>
   `https://github.com/${encodeURIComponent(ownerOfRepo(repo))}/${encodeURIComponent(shortRepo(repo))}/blob/${encodeURIComponent(sha)}/${path.split("/").map(encodeURIComponent).join("/")}${line ? `#L${line}` : ""}`;

@@ -1,5 +1,5 @@
 import type { ItemPhase, ItemStatus } from "../../api/types";
-import { Badge, type Tone } from "../atoms/Badge";
+import { type Tone } from "../atoms/Badge";
 import { TimeAgo } from "../atoms/TimeAgo";
 import { cn } from "../cn";
 
@@ -16,8 +16,6 @@ export const PHASE_TONE: Record<ItemPhase, Tone> = {
   "Out of scope": "neutral",
   "Pipeline off": "neutral",
 };
-
-export const PhaseBadge = ({ phase }: { phase: ItemPhase }) => <Badge tone={PHASE_TONE[phase]}>{phase}</Badge>;
 
 /** The one status line every page draws: where the item is, what it waits for, what happens next. */
 export function StatusLine({ status, className, compact }: { status: ItemStatus; className?: string; compact?: boolean }) {

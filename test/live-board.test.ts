@@ -69,8 +69,6 @@ test("viewers see no account label and no progress line that names a repo hidden
 
 test("the worker view: staff see shared runners with owner, slots and models, private runners as one neutral row; never a hostname", async () => {
   const db = await connectDb(":memory:");
-  setupBox(["acc"]);
-  await syncAccounts(db);
   await db.run(db.k.insertInto("repos").values([{ name: "app", visibility: "public" }, { name: "secret", visibility: "private" }]));
   await db.run(db.k.insertInto("tracked_repos").values([{ name: "app" }, { name: "secret" }]).onConflict((oc) => oc.doNothing()));
   const token = async (login: string, label: string, hostname: string) => (await db.get(db.k.insertInto("mcp_tokens").values({

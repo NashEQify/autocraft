@@ -12,7 +12,6 @@ import { Badge } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
 import { Block, ConfirmButton, ErrorLine, TextInput, useWrite } from "../admin/parts";
 import { useNow } from "../../lib/useNow";
-import { cn } from "../../ui/cn";
 
 const usePipelineState = () => useQuery<PipelineState>("pipeline-state", (a) => a.pipeline.state());
 
@@ -145,24 +144,7 @@ function TripLine({ t, stage }: { t: StageTrip; stage?: string }) {
   );
 }
 
-/** The repos where the stage's breaker tripped, oldest first. */
-function StageTrips({ l, className }: { l: StageLimit; className?: string }) {
-  if (!l.trips?.length) return null;
-  return (
-    <ul aria-label={`${l.title}: tripped breakers`} className={cn("flex flex-col gap-2", className)}>
-      {l.trips.map((t) => <TripLine key={t.key} t={t} />)}
-    </ul>
-  );
-}
-
 const trippedIn = (trips: StageTrip[]) => (trips.some((t) => t.repo === null) ? "Tripped on all repos" : `Tripped in ${trips.length} repo${trips.length === 1 ? "" : "s"}`);
-
-function PauseBadge({ l }: { l: StageLimit }) {
-  // A trip on every repo is the pause reason; StageTrips shows it.
-  if (l.trips?.some((t) => t.repo === null)) return null;
-  if (l.pausedReason) return <Badge tone="warn">{l.pausedReason}</Badge>;
-  return l.status ? <span className="text-xs text-ink/50">{l.status}</span> : null;
-}
 
 /** Number input for the daily limit: empty means no limit, 0 pauses the stage. */
 function LimitEditor({ l }: { l: StageLimit }) {
@@ -187,29 +169,6 @@ function LimitEditor({ l }: { l: StageLimit }) {
       </Button>
       <ErrorLine error={write.error} className="basis-full" />
     </form>
-  );
-}
-
-function useLimit(step: string): { l: StageLimit | undefined; operator: boolean; error?: string } {
-  const q = usePipelineState();
-  return { l: q.data?.limits.find((x) => x.step === step), operator: useUser().role === "operator", error: q.error?.message };
-}
-
-/** One stage's limit, usage today and (for operators) its editor, for use inside a stage panel. */
-export function StageLimitRow({ step }: { step: string }) {
-  const { l, operator, error } = useLimit(step);
-  if (!l) return <ErrorLine error={error} />;
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-      <span className="num">
-        Today: {usage(l)} items
-        {l.perDay === null && <span className="text-ink/50"> (no limit)</span>}
-      </span>
-      {operator && <ResetCount l={l} />}
-      <PauseBadge l={l} />
-      {operator && <LimitEditor l={l} />}
-      <StageTrips l={l} className="basis-full" />
-    </div>
   );
 }
 

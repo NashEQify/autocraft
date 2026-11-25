@@ -36,8 +36,6 @@ export function eventTime(isoTime: string): string {
 export const num = (n: number) => n.toLocaleString("en");
 export const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "–");
 
-export const ageDays = (isoTime: string) => (now() - Date.parse(isoTime)) / 86400_000;
-
 /** The current time in ms on the app's clock (frozen in the mock). */
 export const nowMs = () => now();
 

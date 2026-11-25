@@ -107,8 +107,6 @@ const BATCHES: QueueBatch[] = Array.from({ length: 45 }, (_, k) => {
   };
 });
 
-export const QUEUE_ROWS = ROWS;
-
 // An open integration batch on designcraft: its members are the repo's first ready PRs, shown as in the batch.
 const OPEN_BATCH: QueueBatch = (() => {
   const prs = ROWS.filter((r) => r.repo === "designcraft" && (r.state === "ready" || r.state === "decision-answered-merge")).slice(0, 3).map((r): QueueRow => ({ ...r, state: "in-batch" }));
