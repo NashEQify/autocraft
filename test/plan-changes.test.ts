@@ -109,12 +109,48 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.equal(c.full, true);
   seq = c.cursor;
 
+  // A PR's text edit as sync writes it (the row, then its references): the issues the old and the new text name, no full pass.
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 60, kind: "pr", state: "OPEN", title: "t", body: "Fixes #61", text_refs: "[[61],[61]]", closing_issues: "[62]", created_at: T }));
+  seq = (await since(seq)).cursor;
+  await db.write(async () => {
+    await db.run(db.k.updateTable("items").set({ body: "See #63" }).where("number", "=", 60));
+    await db.run(db.k.updateTable("items").set({ text_refs: "[[],[63]]" }).where("number", "=", 60));
+  });
+  c = await since(seq);
+  assert.equal(c.full, false);
+  assert.deepEqual(c.refs.filter((r) => ["app#60", "app#61", "app#62", "app#63"].includes(r)), ["app#60", "app#61", "app#62", "app#63"]);
+  seq = c.cursor;
+  // Without stored references the issues the old text named are unknown.
+  await db.run(db.k.updateTable("items").set({ text_refs: null }).where("number", "=", 60));
+  seq = (await since(seq)).cursor;
+  await db.run(db.k.updateTable("items").set({ body: "Fixes #64" }).where("number", "=", 60));
+  c = await since(seq);
+  assert.equal(c.full, true);
+  seq = c.cursor;
+
   // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
   assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#11"], false]);
+  seq = c.cursor;
+
+  // The planner's own Plan cache is an input only of items with an open decision, so its writes do not reload every item it plans.
+  const plan = (number: number, actions: string) => db.run(db.k.insertInto("main.item_plans").values({ repo: "app", number, kind: "pr", state: "s", actions, reasons: "[]", view: "{}", planned_at: T })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ actions })));
+  await db.run(db.k.insertInto("decisions").values({ id: "dq", kind: "merge", repo: "app", number: 31, asked_at: T, asked_by: "x", question: "q", options: "[]" }));
+  seq = (await since(seq)).cursor;
+  await plan(30, "[]");
+  await plan(31, "[]");
+  c = await since(seq);
+  assert.deepEqual(c.refs, ["app#31"]);
+  seq = c.cursor;
+  await db.run(db.k.updateTable("decisions").set({ answer: "merge" }).where("id", "=", "dq"));
+  seq = (await since(seq)).cursor;
+  await plan(31, '[{"kind":"review","head":"h"}]');
+  c = await since(seq);
+  assert.deepEqual([c.refs, c.full], [[], false]);
   await db.close();
 });
 
@@ -206,7 +242,7 @@ test("a step outside the planner decides the items its stored Plans hold and the
   };
   const candidates = async () => (await dueCandidates(w.db, "verify", "pr"))!.sort();
   const due = async () => (await planned(w.db, "verify")).map((p) => p.facts.number);
-  // A pass that writes an item's Plan logs the item (item_plans is a planner input); the next pass covers that.
+  // A pass that writes the Plan of an item with an open decision logs the item (item_plans is its input); the next pass covers that.
   await pass();
   await pass();
   assert.deepEqual(await candidates(), ["app#1"], "only the reviewed PR's stored Plan holds verify");

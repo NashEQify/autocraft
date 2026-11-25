@@ -1445,9 +1445,11 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
   }
   const repos: string[] = [];
   for (const c of await detectOf(db, ctx, lane)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
-  const picked = (i: LaneItem) => !lane.perRepo || repos.includes(i.repo);
-  const first = lane.perRepo ? repos.flatMap((r) => all.filter((i) => i.repo === r)) : all;
-  const rest = all.filter((i) => !first.includes(i));
+  const order = new Map(repos.map((r, i) => [r, i]));
+  const picked = (i: LaneItem) => !lane.perRepo || order.has(i.repo);
+  // A stable sort keeps the planner's order within a repo; items of repos detect did not list follow.
+  const first = lane.perRepo ? all.filter(picked).sort((a, b) => order.get(a.repo)! - order.get(b.repo)!) : all;
+  const rest = lane.perRepo ? all.filter((i) => !picked(i)) : [];
   return [...first, ...rest].map((i) => ({ ...i, next: picked(i) && !i.blocked }));
 }
 

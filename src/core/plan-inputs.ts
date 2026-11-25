@@ -76,14 +76,30 @@ const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new
 const PILOT_LIST_SET = `COALESCE((SELECT json_array_length(CASE WHEN json_valid(ps.value) THEN ps.value ELSE '[]' END) FROM settings ps WHERE ps.key = 'pilot_items'), 0) > 0`;
 const PILOT_LIST_SET_PG = `COALESCE((SELECT json_array_length(${pgJsonArray("ps.value")}) FROM settings ps WHERE ps.key = 'pilot_items'), 0) > 0`;
 
-/** Item columns that change other PRs' facts: issues' open PR (title, body, closing_issues), stacked PRs (head_ref, head_repo), long-lived branches (base_ref, author_association), authors' tiers (state). */
-const PR_CROSS_COLUMNS = ["state", "title", "body", "closing_issues", "head_ref", "head_repo", "base_ref", "author_association"];
+/**
+ * Item columns that change other PRs' facts: stacked PRs (head_ref, head_repo), long-lived branches (base_ref, author_association),
+ * authors' tiers (state). A PR's text and closing links move issues' open PR, which the PR_REFS input logs by issue.
+ */
+const PR_CROSS_COLUMNS = ["state", "head_ref", "head_repo", "base_ref", "author_association"];
+
+/**
+ * A PR's text edit whose earlier references are not stored: the issues it named are not readable, so every item is decided again.
+ * Only sync writes title and body, and it writes text_refs in the same transaction (src/mirror.ts), so the new references are logged.
+ */
+const PR_TEXT_UNKNOWN = "(new.kind = 'pr' AND old.text_refs IS NULL AND (old.title IS NOT new.title OR old.body IS NOT new.body))";
+
+/** The issues a PR's stored text references (text_refs mentions, which include the closing ones) and closing-issue links name. */
+const PR_REFS = `SELECT r.repo AS repo, j.value AS number FROM json_each(CASE WHEN json_valid(r.text_refs) AND json_type(r.text_refs, '$[1]') = 'array' THEN json_extract(r.text_refs, '$[1]') ELSE '[]' END) j WHERE j.type = 'integer'
+      UNION SELECT r.repo, j.value FROM json_each(CASE WHEN json_valid(r.closing_issues) AND json_type(r.closing_issues) = 'array' THEN r.closing_issues ELSE '[]' END) j WHERE j.type = 'integer'`;
+const pgRefsArray = (x: string): string => `COALESCE(CASE WHEN json_valid(${x}) THEN CASE WHEN json_typeof(${x}::json -> 1) = 'array' THEN ${x}::json -> 1 END END, '[]'::json)`;
+const PR_REFS_PG = `SELECT r.repo AS repo, ac_int(j #>> '{}') AS number FROM json_array_elements(${pgRefsArray("r.text_refs")}) j WHERE json_typeof(j) = 'number'
+      UNION SELECT r.repo, ac_int(j #>> '{}') FROM json_array_elements(${pgJsonArray("r.closing_issues")}) j WHERE json_typeof(j) = 'number'`;
 /** Item columns that change duplicate sets, group plans and the canonical pick of the item's group. */
 const DUPE_COLUMNS = ["state", "title", "body", "embed_hash", "comments_count", "created_at", "closing_issues"];
 
 /** An item write that forces a full pass; `no` is the dialect's false (the CASE keeps SQLite from probing the dupe tables on every write). */
 const itemsFullUpdate = (no: string): string => `${changed(["kind", "author", "author_id"])}
-      OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)}))
+      OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)})) OR ${PR_TEXT_UNKNOWN}
       OR (CASE WHEN ${changed(DUPE_COLUMNS)} THEN ${inDupeSet("new")} ELSE ${no} END)`;
 
 /**
@@ -138,6 +154,8 @@ export const PLAN_INPUTS: PlanInput[] = [
   { table: "item_embeddings", class: "item", why: "One item's embedding hash.", columns: ["repo", "number", "model", "hash"] },
   {
     table: "item_plans", class: "item", why: "The item's own planned review or carry: its open decisions' prepare waits for it (reviewQueuedSql). The planner writes it; an unchanged plan writes nothing.",
+    // Only an item with an open decision reads it; opening a decision logs the item through the decisions input.
+    refs: "SELECT r.repo AS repo, r.number AS number WHERE EXISTS (SELECT 1 FROM decisions d WHERE d.repo = r.repo AND d.number = r.number AND d.answer IS NULL)",
     columns: ["actions"],
   },
   { table: "item_priority", class: "item", why: "One item's priority row." },
@@ -174,6 +192,15 @@ export const PLAN_INPUTS: PlanInput[] = [
     updateWhen: changed(["state", "kind", "embed_hash"]),
     refs: `SELECT dp.repo AS repo, dp.b AS number FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.a = r.number AND +dp.verdict IS NULL
       UNION SELECT dp.repo, dp.a FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.b = r.number AND +dp.verdict IS NULL`,
+  },
+  {
+    // Old and new rows both: the issues the earlier text named and those the new text names. Sync clears text_refs when the text
+    // changes (schema trigger items_text_refs_stale) and writes the new references after the row.
+    table: "items", class: "cross", why: "A PR's text references and closing links: the issues it closes or mentions (issues' open PR).",
+    when: "r.kind = 'pr'",
+    updateWhen: changed(["title", "body", "closing_issues", "text_refs"]),
+    refs: PR_REFS,
+    pg: { refs: PR_REFS_PG, updateWhen: pgExpr(changed(["title", "body", "closing_issues", "text_refs"])) },
   },
   {
     table: "items", class: "cross", why: "An item's state: PRs held for it as a blocking item.",

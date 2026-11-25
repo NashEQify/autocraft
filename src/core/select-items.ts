@@ -50,14 +50,33 @@ async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Pr
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
-/** The sort keys of a PlanSet's items, read on first use for every item with an action (one query for every kind) and kept with the set. */
+/**
+ * The sort keys of a PlanSet's items, read on first use for every item with an action (one query for every kind). Kept per
+ * facts object: the planner's incremental pass keeps the facts of items no logged change touched, and any write to an item's
+ * row logs it (src/core/plan-inputs.ts), so a kept facts object's keys are current and only reloaded items are read again.
+ */
+const factKeys = new WeakMap<object, Keys>();
 const planKeys = new WeakMap<ItemPlans, Map<string, Keys>>();
 async function planSortKeys(db: Db, plans: ItemPlans, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
   let m = planKeys.get(plans);
-  if (!m) planKeys.set(plans, (m = await sortKeysOf(db, plans.items.filter((p) => p.plan.actions.length).map((p) => p.facts))));
-  const missing = new Map<string, { repo: string; number: number }>();
-  for (const x of items) if (!m.has(`${x.repo}#${x.number}`)) missing.set(`${x.repo}#${x.number}`, x);
-  if (missing.size) for (const [k, v] of await sortKeysOf(db, [...missing.values()])) m.set(k, v);
+  if (!m) {
+    m = new Map();
+    const missing = new Map<string, ItemFacts>();
+    for (const { facts: f, plan } of plans.items) {
+      if (!plan.actions.length) continue;
+      const k = `${f.repo}#${f.number}`, hit = factKeys.get(f);
+      if (hit) m.set(k, hit);
+      else missing.set(k, f);
+    }
+    if (missing.size) {
+      const read = await sortKeysOf(db, [...missing.values()]);
+      for (const [k, f] of missing) { const v = read.get(k); if (v) { factKeys.set(f, v); m.set(k, v); } }
+    }
+    planKeys.set(plans, m);
+  }
+  const extra = new Map<string, { repo: string; number: number }>();
+  for (const x of items) if (!m.has(`${x.repo}#${x.number}`)) extra.set(`${x.repo}#${x.number}`, x);
+  if (extra.size) for (const [k, v] of await sortKeysOf(db, [...extra.values()])) m.set(k, v);
   return m;
 }
 
