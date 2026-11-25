@@ -293,8 +293,12 @@ async function* pgPages(db: Db, t: PgTable, select: (q: SelectQueryBuilder<any, 
   }
 }
 
-/** Writes rows read from Postgres (the copied columns and `h`) into the snapshot table of `t` and its hash table. */
-function writer(out: DatabaseSync, t: PgTable): { add: (rows: Record<string, unknown>[]) => void; flush: () => void } {
+/** Writes rows read from Postgres (the copied columns and `h`) into the snapshot table of `t` and its hash table, or with `into` another schema's prefix, into one staging table `<into><name>` with `h` as its last column. */
+function writer(out: DatabaseSync, t: PgTable, into: string): { add: (rows: Record<string, unknown>[]) => void; flush: () => void } {
+  if (into !== "main.") {
+    const all = inserter(out, `${into}${t.name}`, [...t.columns, "h"]);
+    return { add: (rs) => rs.forEach((r) => all.add([...t.columns.map((c) => cell(c, r[c])), r.h as SQLInputValue])), flush: all.flush };
+  }
   const rows = inserter(out, `main.${t.name}`, t.columns);
   const hashes = t.hashes ? inserter(out, `main.${t.hashes}`, [...t.key, "h"]) : null;
   return {
@@ -308,13 +312,19 @@ function writer(out: DatabaseSync, t: PgTable): { add: (rows: Record<string, unk
   };
 }
 
-/** Recomputes the decision outcomes of the items in the snapshot; true when they differed and were replaced. */
-async function syncOutcomes(db: Db, out: DatabaseSync): Promise<boolean> {
+type Decisions = DecisionRow[];
+
+/** The answered decisions, for the outcomes of the items in the snapshot. */
+async function readDecisions(db: Db): Promise<Decisions> {
   const rows = await db.all(db.k.selectFrom("decisions").select(["kind", "repo", "number", "items", "options", "answer", "exceptions", "answered_at"])
     .where("answer", "is not", null).where("answered_at", "is not", null));
+  return rows.map((r) => ({ ...r, answer: r.answer!, number: r.number === null ? null : Number(r.number) }));
+}
+
+/** Replaces the decision outcomes of the items in the snapshot when they differ from `rows`'; true when replaced. */
+function applyOutcomes(out: DatabaseSync, rows: Decisions): boolean {
   const have = new Set((out.prepare("SELECT repo, number FROM main.items").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
-  const want = outcomes(rows.map((r) => ({ ...r, answer: r.answer!, number: r.number === null ? null : Number(r.number) })))
-    .filter((o) => have.has(`${o.repo}#${o.number}`)).map((o) => [o.repo, o.number, o.kind, o.answer, o.label, o.at] as const);
+  const want = outcomes(rows).filter((o) => have.has(`${o.repo}#${o.number}`)).map((o) => [o.repo, o.number, o.kind, o.answer, o.label, o.at] as const);
   const key = (xs: readonly (readonly unknown[])[]) => JSON.stringify([...xs].map((x) => JSON.stringify(x)).sort());
   const current = (out.prepare("SELECT repo, number, kind, answer, answer_label, answered_at FROM main.decision_outcomes").all() as Record<string, unknown>[]).map((r) => Object.values(r));
   if (key(want) === key(current)) return false;
@@ -325,6 +335,19 @@ async function syncOutcomes(db: Db, out: DatabaseSync): Promise<boolean> {
   return true;
 }
 
+/** Which database the counters belong to: a database recreated or copied into a new one has another oid. */
+async function readSource(db: Db): Promise<string> {
+  const r = await db.get(anyK(db).selectFrom("pg_database").select([sql<string>`current_database()`.as("name"), sql<string>`oid::text`.as("oid")])
+    .where("datname", "=", sql<string>`current_database()`));
+  return `${String(r?.name)}:${String(r?.oid)}`;
+}
+
+/** What a refresh stored about its source: the database, its change counters, and when every row was last compared. */
+type SourceMark = { source: string; seqs: Seqs; comparedAt: string };
+
+/** Items and comments are compared in full at least this often, whatever the counters say. */
+const FULL_COMPARE_MS = 24 * 3600_000;
+
 const countOf = (out: DatabaseSync, table: string): number => Number((out.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 
 /**
@@ -332,7 +355,8 @@ const countOf = (out: DatabaseSync, table: string): number => Number((out.prepar
  * of its columns (embeddings: model and write time); a refresh compares the public rows' keys and hashes with the
  * file's and rewrites only the rows added, changed or gone, in one transaction. Items and comments are compared only
  * when the change counters of their topics moved since the last refresh, so a refresh after an embed run reads keys
- * and hashes of the embeddings alone. The file is built from scratch (in a temporary file renamed into place) when it
+ * and hashes of the embeddings alone; they are compared regardless when a counter went down (a restore, a copy), the
+ * database is another one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
  * is missing, has another schema version, or the change is too large to apply row by row. All reads share one snapshot.
  */
 export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
@@ -349,30 +373,36 @@ export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(),
 async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<SnapshotStats | null> {
   const out = new DatabaseSync(dest, { timeout: 30_000 });
   try {
-    const stored = storedSeqs(out);
+    const stored = storedMark(out);
     const changed = { items: 0, comments: 0, embeddings: 0 };
-    // A plain BEGIN: comparing reads the file and writes only temp tables, so writers' locks wait for the apply step.
+    // A plain BEGIN: everything read from Postgres goes into temp tables first, so the write lock on the file is taken
+    // only by the apply step at the end, which does local work alone.
     out.exec("BEGIN");
-    let seqs: Seqs = {};
+    let mark: SourceMark = { source: "", seqs: {}, comparedAt: stored?.comparedAt ?? "" };
     let large = false;
-    let outcomesChanged = false;
+    let decisions: Decisions | null = null;
+    const deltas: { t: PgTable; n: number }[] = [];
     await db.read(async () => {
-      seqs = await readSeqs(db);
-      const moved = (t: string) => stored?.[t] !== seqs[t];
-      const rowsMoved = moved("items") || moved("repos");
-      const deltas: { t: PgTable; n: number }[] = [];
+      mark = { ...mark, source: await readSource(db), seqs: await readSeqs(db) };
+      const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
+      // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
+      const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
+        || !(Date.now() - Date.parse(stored.comparedAt) < FULL_COMPARE_MS);
+      const rowsMoved = full || moved("items") || moved("repos");
+      // Comparing items and comments compares all of them.
+      if (rowsMoved) mark.comparedAt = new Date().toISOString();
       for (const t of PG_TABLES) {
         if (t.name !== "item_embeddings" && !rowsMoved) continue;
         const keys = t.key.join(", ");
         const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
-        for (const x of [`pg_${t.name}`, `chg_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
+        for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
         out.exec(`CREATE TEMP TABLE pg_${t.name} (${keys}, h, PRIMARY KEY (${keys}))`);
         const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
         for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
           for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
         }
         stage.flush();
-        // The keys to delete: changed rows (rewritten below) and rows no longer public or present.
+        // The keys to delete: changed rows (rewritten from new_*) and rows no longer public or present.
         out.exec(`CREATE TEMP TABLE chg_${t.name} AS
           SELECT p.${t.key.join(", p.")}, 1 AS refetch FROM temp.pg_${t.name} p LEFT JOIN (${t.local}) l ON ${on} WHERE l.h IS NULL OR l.h <> p.h
           UNION ALL SELECT l.${t.key.join(", l.")}, 0 FROM (${t.local}) l WHERE NOT EXISTS (SELECT 1 FROM temp.pg_${t.name} p WHERE ${on})`);
@@ -381,16 +411,11 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
           large = true;
           return;
         }
-        deltas.push({ t, n });
-      }
-      for (const { t, n } of deltas) {
         if (!n) continue;
-        changed[t.name === "item_embeddings" ? "embeddings" : t.name] = n;
-        const keyIn = `(${t.key.join(", ")}) IN (SELECT ${t.key.join(", ")} FROM temp.chg_${t.name})`;
-        out.exec(`DELETE FROM main.${t.name} WHERE ${keyIn}`);
-        if (t.hashes) out.exec(`DELETE FROM main.${t.hashes} WHERE ${keyIn}`);
-        const fetch = out.prepare(`SELECT ${t.key.join(", ")} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
-        const w = writer(out, t);
+        deltas.push({ t, n });
+        out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
+        const fetch = out.prepare(`SELECT ${keys} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
+        const w = writer(out, t, "temp.new_");
         for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
           const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
           const where = t.key.length === 1
@@ -400,16 +425,28 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
         }
         w.flush();
       }
-      if (rowsMoved || moved("decisions")) outcomesChanged = await syncOutcomes(db, out);
+      if (rowsMoved || moved("decisions")) decisions = await readDecisions(db);
     });
     if (large) {
       out.exec("ROLLBACK");
       return null;
     }
-    if (outcomesChanged) changed.items += 1;
+    // The apply step: synchronous, from the temp tables.
+    for (const { t, n } of deltas) {
+      changed[t.name === "item_embeddings" ? "embeddings" : t.name] = n;
+      const keys = t.key.join(", ");
+      const keyIn = `(${keys}) IN (SELECT ${keys} FROM temp.chg_${t.name})`;
+      out.exec(`DELETE FROM main.${t.name} WHERE ${keyIn}`);
+      out.exec(`INSERT INTO main.${t.name} (${t.columns.join(", ")}) SELECT ${t.columns.join(", ")} FROM temp.new_${t.name}`);
+      if (t.hashes) {
+        out.exec(`DELETE FROM main.${t.hashes} WHERE ${keyIn}`);
+        out.exec(`INSERT INTO main.${t.hashes} (${keys}, h) SELECT ${keys}, h FROM temp.new_${t.name}`);
+      }
+    }
+    if (decisions && applyOutcomes(out, decisions)) changed.items += 1;
     const any = changed.items || changed.comments || changed.embeddings;
     if (any) out.prepare("INSERT OR REPLACE INTO main.meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
-    if (any || SEQ_TOPICS.some((t) => stored?.[t] !== seqs[t])) out.prepare("INSERT OR REPLACE INTO main.meta VALUES ('pg_seqs', ?)").run(JSON.stringify(seqs));
+    if (any || JSON.stringify(mark) !== JSON.stringify(stored)) out.prepare("INSERT OR REPLACE INTO main.meta VALUES ('pg_source', ?)").run(JSON.stringify(mark));
     const counts = { items: countOf(out, "main.items"), comments: countOf(out, "main.comments") };
     out.exec("COMMIT");
     return { ...counts, bytes: statSync(dest).size, rebuilt: false, changed };
@@ -431,18 +468,18 @@ async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     out.exec(DDL);
     out.prepare("INSERT INTO meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
     out.exec("BEGIN");
-    let seqs: Seqs = {};
+    let mark: SourceMark | null = null;
     await db.read(async () => {
-      seqs = await readSeqs(db);
+      mark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString() };
       for (const t of PG_TABLES) {
-        const w = writer(out, t);
+        const w = writer(out, t, "main.");
         for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);
         w.flush();
       }
-      await syncOutcomes(db, out);
+      applyOutcomes(out, await readDecisions(db));
     });
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
-    out.prepare("INSERT OR REPLACE INTO meta VALUES ('pg_seqs', ?)").run(JSON.stringify(seqs));
+    out.prepare("INSERT OR REPLACE INTO meta VALUES ('pg_source', ?)").run(JSON.stringify(mark));
     const result = { items: countOf(out, "items"), comments: countOf(out, "comments") };
     const embeddings = countOf(out, "item_embeddings");
     out.exec("COMMIT");
@@ -561,9 +598,9 @@ function dropJournal(dest: string): void {
   try { unlinkSync(`${dest}-journal`); } catch { /* none */ }
 }
 
-function storedSeqs(db: DatabaseSync): Seqs | null {
-  const v = (db.prepare("SELECT value FROM meta WHERE key = 'pg_seqs'").get() as { value: string } | undefined)?.value;
-  try { return v ? (JSON.parse(v) as Seqs) : null; } catch { return null; }
+function storedMark(db: DatabaseSync): SourceMark | null {
+  const v = (db.prepare("SELECT value FROM meta WHERE key = 'pg_source'").get() as { value: string } | undefined)?.value;
+  try { return v ? (JSON.parse(v) as SourceMark) : null; } catch { return null; }
 }
 
 function hasVersion(file: string): boolean {
