@@ -5,7 +5,7 @@
 import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker } from "../../../web/src/api/types.ts";
 import { STATUS_FRESH_MS } from "../../data/runners/index.ts";
 import type { HiddenRepos } from "../../data/control/index.ts";
-import type { RunRow } from "../../data/inference/index.ts";
+import type { JobCall, RunRow } from "../../data/inference/index.ts";
 import type { TaskCard } from "../../data/build/index.ts";
 import type { RunnerRow } from "../../data/runners/index.ts";
 import { loadLiveView, type LiveView } from "../../data/views/live.ts";
@@ -60,7 +60,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const callEstimate = (step: string, model: string) => estimateOf((v.callDurations.get(`${step}:${model}`) ?? []).map((d) => Date.parse(d.endedAt) - Date.parse(d.startedAt)));
   const taskEstimate = (repo: string, step: string) => estimateOf(v.taskDurations.get(`${repo}|${step}`) ?? []);
 
-  const callOp = (c: RunRow): LiveOp => ({
+  const callOp = (c: JobCall): LiveOp => ({
     kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" && c.userLogin ? `${stepTitle(c.step)} on ${c.userLogin}` : stepTitle(c.step),
     start: c.startedAt, end: c.endedAt, estimate: c.state === "running" ? callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
   });

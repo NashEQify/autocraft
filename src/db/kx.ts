@@ -97,6 +97,23 @@ export function jsonEach<A extends string, T extends ElemType = "text">(d: D, e:
 }
 
 /**
+ * The string at `key` of each element of the JSON array in `e`: `from` is the table expression to join (as `jsonEach`), `value` the string, NULL for an
+ * element that is not an object or has no such key. Text that is not a JSON array has no elements.
+ */
+export function jsonEachField<A extends string>(d: D, e: Ex, key: string, alias: A): { from: AliasedRawBuilder<{ value: string }, A>; value: RawBuilder<string | null> } {
+  if (pgOf(d)) {
+    return {
+      from: sql<{ value: string }>`LATERAL (SELECT e ->> ${sql.lit(key)} AS value FROM json_array_elements(CASE WHEN (${x(e)}) IS JSON ARRAY THEN (${x(e)})::json ELSE '[]'::json END) AS e)`.as(alias),
+      value: sql`${sql.ref(`${alias}.value`)}`,
+    };
+  }
+  return {
+    from: sql<{ value: string }>`json_each(CASE WHEN json_valid(${x(e)}) THEN CASE json_type(${x(e)}) WHEN 'array' THEN ${x(e)} ELSE '[]' END ELSE '[]' END)`.as(alias),
+    value: sql`(CASE ${sql.ref(`${alias}.type`)} WHEN 'object' THEN json_extract(${sql.ref(`${alias}.value`)}, ${sql.lit(`$.${key}`)}) END)`,
+  };
+}
+
+/**
  * `e IN (values)` with the list bound as one JSON parameter, so the statement text is the same for any length and an
  * empty list matches nothing (Kysely's `in` with an empty array is a syntax error on Postgres). `type` is the elements'
  * type on Postgres; compare a citext column with "citext" to keep SQLite's NOCASE match. `not` gives NOT IN.

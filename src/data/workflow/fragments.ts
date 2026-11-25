@@ -1,5 +1,5 @@
 // Predicates other modules embed in their statements (src/data/** only).
-import type { AliasableExpression, Expression, SqlBool } from "kysely";
+import type { AliasableExpression, Expression, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource } from "../keys.ts";
@@ -20,12 +20,24 @@ export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => 
 /** The item has a live workflow, or is the PR of a live implement workflow. */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
-  return eb.exists(t.selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.state", "in", LIVE_STATES)
-    .where((w) => w.or([
-      w("pw.number", "=", n),
-      w.and([w("pw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as pwi").select(one(eb))
-        .where("pwi.repo", "=", w.ref("pw.repo")).where("pwi.number", "=", w.ref("pw.number")).where("pwi.pr_number", "=", n))]),
-    ])));
+  // One probe by item and one by PR, each on its index: a single subquery with both would read every live workflow for every item.
+  return eb.or([
+    eb.exists(t.selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.number", "=", n).where("pw.state", "in", LIVE_STATES)),
+    eb.exists(t.selectFrom("main.implementations as pwi").innerJoin("main.item_workflows as pw", (j) => j.onRef("pw.repo", "=", "pwi.repo").onRef("pw.number", "=", "pwi.number")).select(one(eb))
+      .where("pwi.repo", "=", r).where("pwi.pr_number", "=", n).where("pw.entry", "=", "implement").where("pw.state", "in", LIVE_STATES)),
+  ]);
+}
+
+/** `1e15 + weight * 1e12 - id` of the workflow row aliased `w`: what orders started items. */
+export const workScore = (eb: any): AliasableExpression<number> => eb(eb(eb.lit(1e15), "+", eb("w.weight", "*", eb.lit(1e12))), "-", eb.ref("w.id"));
+
+/** The work score `s` of every item with a live workflow and of the PR of a live implement workflow, the highest when both apply. */
+export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string; number: number; s: number }> {
+  const k = queryDb(db).k as any;
+  const own = k.selectFrom("main.item_workflows as w").select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
+  const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
+  return k.selectFrom(own.unionAll(viaPr).as("ws")).select((eb: any) => ["ws.repo", "ws.number", eb.fn.max("ws.s").as("s")]).groupBy(["ws.repo", "ws.number"]);
 }
 
 /**

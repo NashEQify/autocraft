@@ -11,7 +11,7 @@ import { autocraftTexts } from "../mainfix/status.ts";
 import { classify, derive, type Culprit, type HeadRow, type MainCheck, type MainCiState } from "./classify.ts";
 import { ownerOf } from "../owners.ts";
 import type { HiddenRepos } from "../hidden-sql.ts";
-import { loadMainCi, loadRepos, loadSyncState, saveMainHeads, saveSyncState } from "../data/mirror/index.ts";
+import { loadDecidingHeads, loadRepos, loadSyncState, saveMainHeads, saveSyncState } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { warmPass } from "../build/warm-queue.ts";
@@ -129,7 +129,7 @@ export type MainCiRepoRow = {
 
 /** One entry per repo with stored heads, red first, then by name. `hidden` repos are left out. */
 export async function mainCiRepos(db: Db, hidden: HiddenRepos = []): Promise<MainCiRepoRow[]> {
-  const by = await loadMainCi(db, { hiddenOk: hidden });
+  const by = await loadDecidingHeads(db, hidden);
   const out: MainCiRepoRow[] = [];
   for (const [repo, heads] of by) {
     const rows = heads.map((h) => ({ ...h, state: h.state as MainCiState }));

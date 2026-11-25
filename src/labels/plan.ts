@@ -20,7 +20,7 @@ export const planLabels = async (db: Db, repo: string, runId?: string): Promise<
 /** The plan of each repo, in one wave. */
 export async function planLabelsOf(db: Db, repos: string[], runId?: string): Promise<Map<string, PlanRow[]>> {
   const [listed, own, quiet, cls] = await db.together(() => Promise.all([
-    listItems(db, { repos, states: ["OPEN"], inScope: true }, "card"), loadOwnIntegration(db, repos), listQuietPrs(db), loadLabelVerdicts(db, repos, runId),
+    listItems(db, { repos, states: ["OPEN"], inScope: true }, "labels"), loadOwnIntegration(db, repos), listQuietPrs(db), loadLabelVerdicts(db, repos, runId),
   ]));
   const out = new Map<string, PlanRow[]>();
   for (const it of listed) {
@@ -30,7 +30,7 @@ export async function planLabelsOf(db: Db, repos: string[], runId?: string): Pro
   return out;
 }
 
-function planOf(it: ItemOf<"card">, rows: ClsRow[], quiet: ReadonlySet<string>, runId: string | undefined): PlanRow {
+function planOf(it: ItemOf<"labels">, rows: ClsRow[], quiet: ReadonlySet<string>, runId: string | undefined): PlanRow {
   let existing: string[] = [];
   try {
     existing = (JSON.parse(it.labels ?? "[]") as unknown[]).map(String);

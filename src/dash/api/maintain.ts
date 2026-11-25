@@ -168,19 +168,24 @@ export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const visible = await visibleRepos(db, req);
   if (!visible.length || (q.has("refs") && !refPairs.length)) return { rows: [], counts };
   const hidden = await hiddenRepos(db, req);
-  const base = await loadItemsBase(db, { repos: visible, hidden }, { show, filters, areas, text: text || null, refs, limit: refPairs.length ? REFS_MAX : limit });
+  const base = await loadItemsBase(db, { repos: visible, hidden }, { show, filters, areas, text: text || null, refs, limit: refPairs.length ? REFS_MAX : limit, sort, normalWeight: WEIGHT_NORMAL });
 
   let placed: Placed[];
   if (show === "closed") {
     counts.done = base.closedTotal ?? 0;
     placed = base.rows.map((b) => ({ ...b, group: "done", unclear: false }));
   } else {
-    placed = base.rows.map((b) => {
+    const place = (b: ItemBase): Placed => {
       const waits = waitsForAnswer(b.workflowState === null ? null : { state: b.workflowState as ItemWorkflow["state"], rec: b.hasRecommendation ? ({} as NonNullable<ItemWorkflow["rec"]>) : null }, b.lastEvent ?? undefined);
       const backlog = b.lastEvent === "backlog" || PLAN_BACKLOG.has(b.planState ?? "") || b.itemState === "held-backlog";
       return { ...b, unclear: b.lastEvent === "ambiguous", group: groupOf({ open: true, live: b.workflowState !== null, waits, backlog, phase: b.phase as ItemPhase }) };
-    }).filter((p) => (show === "backlog" ? p.group === "backlog" : p.group !== "backlog"));
-    for (const p of placed) counts[p.group]++;
+    };
+    const shown = (g: MaintainItemGroup): boolean => (show === "backlog") === (g === "backlog");
+    placed = base.rows.map(place).filter((p) => shown(p.group));
+    for (const p of base.places) {
+      const { group } = place(p.item);
+      if (shown(group)) counts[group] += p.count;
+    }
   }
 
   // Semantic hits keep their order; otherwise the heaviest first, then the work rank, then the latest change.

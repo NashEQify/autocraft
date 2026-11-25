@@ -458,7 +458,7 @@ const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChe
 
 /** What `loadHealthFacts` needs from the thresholds and the environment. */
 export const healthOptions = () => ({
-  leaderStaleMs: THRESHOLDS.leaderStaleMs, taskQueuedMs: THRESHOLDS.taskQueuedMs, foreignWarnMs: FOREIGN_WARN_MS, discord: !!envVar("DISCORD_KEY_FILE"), stepWindow: STEP_WINDOW, stepDays: STEP_DAYS,
+  leaderStaleMs: THRESHOLDS.leaderStaleMs, taskQueuedMs: THRESHOLDS.taskQueuedMs, foreignWarnMs: FOREIGN_WARN_MS, discord: !!envVar("DISCORD_KEY_FILE"), stepWindow: STEP_WINDOW, stepDays: STEP_DAYS, stepLast: STEP_FAILED_RUNS,
   thresholds: { queuedMs: THRESHOLDS.remoteQueuedMs, tierWaitMs: { ...THRESHOLDS.remoteTierWaitMs }, interactiveWaitMs: THRESHOLDS.interactiveWaitMs, callerStaleMs: CALLER_STALE_MS, noTakerMs: NO_TAKER_MS },
 });
 

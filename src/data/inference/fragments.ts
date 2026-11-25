@@ -27,6 +27,10 @@ export function runVisible(vis: { hidden: HiddenRepos }, eb: Eb, alias = "r"): E
 }
 export type { RunVisibility };
 
+/** The lowest item by repo and number of the run aliased `alias`: the stored column, or the item rows of a run an old pod wrote without it. */
+export const runFirst = (eb: Eb, col: "repo" | "number", alias = "r") =>
+  eb.fn.coalesce(`${alias}.first_${col}`, schemaEb(eb).selectFrom("agent_run_items as fi").select(`fi.${col}`).where("fi.run_id", "=", eb.ref(`${alias}.id`)).orderBy("fi.repo").orderBy("fi.number").limit(1) as never);
+
 /** `run_id`s of runs that touched the items of `keys`, as a subquery. */
 export function runItems(db: Db, keys: KeySource) {
   return queryDb(db).k.selectFrom("agent_run_items as ri")

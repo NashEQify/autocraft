@@ -7,7 +7,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb, type QueryDb } from "../../db/query-db.ts";
 import { privateStepExpr } from "../build/fragments.ts";
-import { runVisible } from "../inference/fragments.ts";
+import { runFirst, runVisible } from "../inference/fragments.ts";
 import { notArchived } from "../workflow/fragments.ts";
 import type { Scope, TraceKind } from "./types.ts";
 
@@ -35,12 +35,21 @@ type Def = {
 };
 type Ctx = ActivityScope & { db: QueryDb; only: boolean; repo: string | null; limit: number; before: ActivityQuery["before"]; writeActions: string[] | null };
 
+/** The end of the cursor's second as stored times with a second's precision write it. */
+const secondOf = (at: string): string => `${at.slice(0, 19)}Z`;
+
 const byOwn = (col: string): Def["only"] => (c) => (c.own.size ? () => kx.inList(c.db, col, [...c.own]) : null);
 
 const item = (id: string, time: "created_at" | "merged_at" | "closed_at", where: (eb: any) => Expression<SqlBool>): Def => ({
   id, kinds: ["github"], table: "items", time, only: () => null,
   q: (db) => db.k.selectFrom("items").select(["repo", "number", "kind", "author", "created_at", "closed_at", "merged_at", "merged_by", "head_oid"]).where(where),
 });
+
+/** The ids of the newest visible runs matching `where`, at or before the cursor's second. */
+const newestRuns = (c: Ctx, where: (eb: kx.Eb) => Expression<SqlBool>, alias: string) =>
+  c.db.k.selectFrom(c.db.k.selectFrom("agent_runs as r").select("r.id").where(where as never).where((eb) => runVisible({ hidden: c.hidden }, eb))
+    .$if(c.before !== null, (q) => q.where("r.started_at", "<=", secondOf(c.before!.at)))
+    .orderBy("r.started_at", "desc").orderBy("r.id", "desc").limit(c.limit).as(alias)).select(`${alias}.id` as never) as unknown as SelectQueryBuilder<any, any, { id: number }>;
 
 export const SOURCES: Def[] = [
   item("opened", "created_at", (eb) => eb("kind", "is not", null)),
@@ -56,15 +65,15 @@ export const SOURCES: Def[] = [
   { id: "job", kinds: ["job"], table: "job_items", time: "ji.at", repoCol: "ji.repo", tie: () => kx.rowid("job_items", "ji"), one: (r) => String(r.job_id),
     q: (db) => db.k.selectFrom("job_items as ji").leftJoin("jobs as j", "j.id", "ji.job_id").select(["ji.repo as repo", "ji.number as number", "ji.id", "ji.job_id", "ji.outcome", "ji.at", "j.step", "j.state", "j.error"]) },
   // A run over many items is one row too: its first item. Runs that touched a hidden repo are left out whole.
-  { id: "run", kinds: ["model-call"], table: "agent_runs", time: "r.started_at", repoCol: "i.repo",
-    q: (db, c) => {
-      const firstItem = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("agent_run_items as x").where("x.run_id", "=", eb.ref("r.id")).orderBy("x.repo").orderBy("x.number").limit(1);
-      return db.k.selectFrom("agent_runs as r")
-        .innerJoin("agent_run_items as i", (j) => j.onRef("i.run_id", "=", "r.id").on((eb) => eb.and([eb("i.repo", "=", firstItem(eb).select("x.repo")), eb("i.number", "=", firstItem(eb).select("x.number"))])))
-        .select((eb) => ["r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd", "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",
-          "i.repo as repo", "i.number as number", db.k.selectFrom("agent_run_tools as t").select((e) => e.fn.countAll<number>().as("n")).where("t.run_id", "=", eb.ref("r.id")).as("tools")])
-        .where((eb) => runVisible({ hidden: c.hidden }, eb));
-    } },
+  { id: "run", kinds: ["model-call"], table: "agent_runs", time: "r.started_at", repoCol: null, tie: () => kx.ref("r.id"),
+    q: (db, c) => db.k.selectFrom("agent_runs as r")
+      .select((eb) => ["r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd", "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",
+        runFirst(eb, "repo").as("repo"), runFirst(eb, "number").as("number"), db.k.selectFrom("agent_run_tools as t").select((e) => e.fn.countAll<number>().as("n")).where("t.run_id", "=", eb.ref("r.id")).as("tools")])
+      // Both parts of a repo's runs come in time order from the index on (first_repo, started_at), so each stops at the limit.
+      .where((eb) => c.repo === null ? kx.inList(c.db, runFirst(eb, "repo"), c.repos)
+        : c.repos.includes(c.repo) ? eb("r.id", "in", newestRuns(c, (r) => r("r.first_repo", "=", c.repo!), "n").unionAll(newestRuns(c, (r) => r.and([r("r.first_repo", "is", null), r(runFirst(r, "repo"), "=", c.repo!)]), "o")))
+          : eb.val(false) as unknown as Expression<SqlBool>)
+      .where((eb) => runVisible({ hidden: c.hidden }, eb)) },
   { id: "check", kinds: ["check"], table: "model_checks", time: "started_at", q: (db) => db.k.selectFrom("model_checks").select(["repo", "number", "id", "run_id", "step", "head", "command", "crate", "test_name", "task_id", "outcome", "started_at"]) },
   { id: "task", kinds: ["check"], table: "build_tasks", time: "queued_at", q: (db) => db.k.selectFrom("build_tasks").select(["repo", "number", "id", "job_id", "step", "head_sha", "state", "summary", "queued_at"]).where((eb) => eb.not(privateStepExpr(eb, "step"))) },
   { id: "push", kinds: ["check"], table: "push_outcomes", time: "at", q: (db) => db.k.selectFrom("push_outcomes").select(["repo", "number", "id", "at", "stage", "action", "to_oid", "before_res", "after_res", "outcome"]) },
@@ -109,7 +118,7 @@ async function newest(c: Ctx, s: Def): Promise<{ source: SourceId; rows: Activit
   const repoCol = s.repoCol === undefined ? "repo" : s.repoCol;
   const own = c.only ? s.only?.(c) : undefined;
   if (own === null) return { source: s.id, rows: [], floor: null };
-  const before = c.before ? `${c.before.at.slice(0, 19)}Z` : null;
+  const before = c.before ? secondOf(c.before.at) : null;
   // Only visible (tracked, readable) repos are read. The function around the column keeps the planner on the time index instead of a repo index plus a sort.
   // No `repoCol`: the repo is not a column (audit targets), so `of` filters it.
   const raw = await c.db.all(s.q(c.db, c).select((eb: kx.Eb) => eb.ref(s.time).as(T)).where(s.time, "is not", null)

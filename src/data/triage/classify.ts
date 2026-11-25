@@ -6,6 +6,7 @@ import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource, type Ref } from "../keys.ts";
 import { addAudit } from "../control/audit.ts";
 import { itemsOfRepos, openItem } from "../mirror/fragments.ts";
+import { inScopeExpr } from "../workflow/fragments.ts";
 import { fromRow, settledOfRows } from "./settle.ts";
 import type { ClassifierDuplicates, ClsRow, JevFailed, RefKey, RefereeRow, RunVerdict, Settled, VerdictInput } from "./types.ts";
 
@@ -204,13 +205,14 @@ export async function loadLatestVerdicts(db: Db, keys: KeySource): Promise<Map<R
 /** What the label plan reads of a classification row. */
 export type LabelVerdict = Pick<ClsRow, "repo" | "number" | "classifier" | "run_id" | "at" | "type_label" | "flags" | "probs" | "input_hash">;
 
-/** Every classification row of the repos' open items (only run `run` when given), newest first per item. 1 statement. */
+/** The Jev and Haiku rows of the repos' open items in the pipeline's scope (only run `run` when given), newest first per item. 1 statement. */
 export async function loadLabelVerdicts(db: Db, repos: string[], run?: string): Promise<Map<RefKey, LabelVerdict[]>> {
   const out = new Map<RefKey, LabelVerdict[]>();
   if (!repos.length) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.classifications as c").select(["c.repo", "c.number", "c.classifier", "c.run_id", "c.at", "c.type_label", "c.flags", "c.probs", "c.input_hash"])
-    .where(kx.inList(db, "c.repo", repos)).where((eb) => openItem(eb, "c.repo", "c.number"))
+    .where(kx.inList(db, "c.repo", repos)).where("c.classifier", "in", ["jev", "haiku"])
+    .where((eb) => openItem(eb, "c.repo", "c.number")).where((eb) => inScopeExpr(db, eb, "c.repo", "c.number"))
     .$if(run !== undefined, (b) => b.where("c.run_id", "=", run!)).orderBy("c.at", "desc").orderBy(kx.rowid("main.classifications", "c"), "desc"), { label: "triage.loadLabelVerdicts" });
   for (const r of rows) push(out, refKey(r.repo, r.number), r);
   return out;

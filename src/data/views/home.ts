@@ -2,13 +2,14 @@
 // reads: workflow.item_workflows, workflow.workflow_actions
 // The maintainer Home: live workflows with their item titles, what the pipeline stopped, health, findings the fix gave up on and the Task Runner line.
 import type { Db } from "../../db/index.ts";
-import { inList, jsonText } from "../../db/kx.ts";
+import { inList } from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as mirror from "../mirror/index.ts";
 import * as runners from "../runners/index.ts";
 import * as security from "../security/index.ts";
 import * as workflow from "../workflow/index.ts";
 import { hiddenRepos } from "../control/fragments.ts";
+import { planCifixIs } from "../planner/fragments.ts";
 import { loadFailedJobs } from "./attention.ts";
 import { loadHealthFacts, type HealthOptions } from "./health.ts";
 import { loadStopped } from "./stopped.ts";
@@ -27,8 +28,8 @@ export async function loadMaintainHome(db: Db, scope: Pick<Scope, "repos" | "hid
     loadStopped(db, scope, o.limits),
     scope.staff ? security.loadFindingAttention(db, { hide: scope.hidden, oldest: 0 }) : Promise.resolve(null),
     scope.staff ? q.all(q.k.selectFrom("item_plans as p").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-      .select(["p.repo", "p.number", "i.title"]).where("i.state", "=", "OPEN").where((eb) => eb(jsonText(db, "p.view", "$.cifix"), "=", "cifix-failed"))
-      .where(hiddenRepos(db, "i.repo", scope.hidden)).orderBy("p.planned_at", "desc").limit(20)) : Promise.resolve([]),
+      .select(["p.repo", "p.number", "i.title"]).where("i.state", "=", "OPEN").where((eb) => planCifixIs(db, eb, "p", "cifix-failed"))
+      .where(hiddenRepos(db, "i.repo", scope.hidden)).orderBy("p.planned_at", "desc").orderBy("p.repo").orderBy("p.number").limit(20)) : Promise.resolve([]),
     loadFailedJobs(db, scope, o.nowMs),
     o.withRunner && scope.login ? runners.loadRunnerSnapshot(db, o.nowMs) : Promise.resolve(null),
     scope.staff ? loadFailedCloses(db, scope.repos) : Promise.resolve([]),

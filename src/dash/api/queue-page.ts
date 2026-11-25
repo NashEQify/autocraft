@@ -84,50 +84,40 @@ function prBuildOf(r: PrBuildView, head: string | null, internals: boolean): Ite
   return { headSha: r.headSha, current: r.headSha === head, state: state as ItemPrBuild["state"], summary: internals ? r.summary : null, disagree: r.disagree, ci: r.ciOverall as ItemPrBuild["ci"], createdAt: r.createdAt, finishedAt: r.finishedAt };
 }
 
+/** Rows a page holds at most. */
+const PAGE_MAX = 500;
+
 export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const tab = (req.query.get("tab") || "all") as QueueTab;
   if (!TABS.includes(tab)) throw new HttpError(400, `tab must be one of ${TABS.join(", ")}`);
   const reposParam = (req.query.get("repos") || "pipeline") as QueueRepos;
-  const limit = Math.min(Math.max(Number(req.query.get("limit")) || 100, 1), 500);
+  const limit = Math.min(Math.max(Number(req.query.get("limit")) || 100, 1), PAGE_MAX);
   const offset = Math.max(Number(req.query.get("offset")) || 0, 0);
   const [visible, reader] = await Promise.all([visibleRepos(db, req), readerOf(db, req)]);
   const visibleSet = new Set(visible);
   if (reposParam !== "pipeline" && reposParam !== "all" && !visibleSet.has(reposParam)) throw new HttpError(404, `${reposParam} is not a tracked repo`);
   const internals = canSeeInternals(req);
-  // The page's reads do not depend on each other, so they run together.
-  const [facts, slots] = await db.together(() => Promise.all([
-    loadQueuePage(db, { pipelineScope: reposParam === "pipeline", merge: tab === "merge", visible, hidden: reader.hidden }),
-    queueSlots(db, visible),
-  ]));
-  const { scope: scoped, holds: held, ranked, closes: closesOf, positions } = facts;
-  const allEntries = facts.entries;
-  const places = new Map<string, WeightPlace>([...positions].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))).map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
-  // The default view is the pipeline's scope (src/rank/position.ts), the same one the position badges count.
-  const inScope = (repo: string, number: number): boolean =>
-    reposParam === "all" ? visibleSet.has(repo) : reposParam === "pipeline" ? visibleSet.has(repo) && scoped!.has(`${repo}#${number}`) : repo === reposParam;
-
   // A linked item (`item=repo:number`) comes with the first page: it is cut long enough to include the item.
   const item = req.query.get("item");
-  const indexOf = (list: { repo: string; number: number }[]): number | null => {
-    const at = item ? list.findIndex((r) => `${r.repo}:${r.number}` === item) : -1;
-    return at < 0 ? null : at;
+  const sizeFor = (at: number | null): number => (at === null || offset > 0 ? limit : Math.min(PAGE_MAX, Math.max(limit, Math.ceil((at + 1) / 100) * 100)));
+  const itemRef = (): { repo: string; number: number } | null => {
+    const i = item?.lastIndexOf(":") ?? -1, number = Number(item?.slice(i + 1));
+    return i > 0 && Number.isSafeInteger(number) && `${item!.slice(0, i)}:${number}` === item ? { repo: item.slice(0, i), number } : null;
   };
-  const sizeFor = (list: { repo: string; number: number }[], from: number): number => {
-    const at = from === 0 ? indexOf(list) : null;
-    return at === null ? limit : Math.min(500, Math.max(limit, Math.ceil((at + 1) / 100) * 100));
-  };
-
-  // Items in work order: the workflow's weight first, then the work rank.
-  const inView = ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)).map((r) => ({ r, s: facts.work.get(refText(r)) ?? r.score }));
-  inView.sort((a, b) => b.s - a.s);
-  const work: QueueWorkRow[] = inView.map(({ r }) => {
-    const bd = r.breakdown;
-    return {
-      repo: r.repo, number: r.number, kind: r.kind, title: r.title, score: r.score, level: bd.level, size: bd.size, breakdown: bd,
-      label: r.label as TypeLabel | null, next: r.next ?? NOT_PLANNED, nextHref: r.itemState === "referee-due" ? classifyListOf(r.repo) : null,
-      queue: slots.get(`${r.repo}#${r.number}`) ?? null, held: held.has(`${r.repo}#${r.number}`),
-    };
-  });
+  // The page's reads do not depend on each other, so they run together. The default view is the pipeline's scope (src/rank/position.ts), the same one the position badges count.
+  const pipeline = reposParam === "pipeline";
+  const [facts, slots] = await db.together(() => Promise.all([
+    loadQueuePage(db, {
+      pipelineScope: pipeline, merge: tab === "merge", visible, hidden: reader.hidden,
+      list: { repos: pipeline || reposParam === "all" ? visible : [reposParam], scope: pipeline, top: tab === "merge" ? 1 : item && offset === 0 ? PAGE_MAX : offset + limit, item: tab === "merge" ? null : itemRef() },
+    }),
+    queueSlots(db, visible),
+  ]));
+  const { scope: scoped, holds: held, closes: closesOf, positions } = facts;
+  const allEntries = facts.entries;
+  const places = new Map<string, WeightPlace>([...positions].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))).map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
+  const inScope = (repo: string, number: number): boolean =>
+    reposParam === "all" ? visibleSet.has(repo) : pipeline ? visibleSet.has(repo) && scoped!.has(`${repo}#${number}`) : repo === reposParam;
 
   // Merge queue rows
   const entries = allEntries.filter((e) => e.state !== "merged" && visibleSet.has(e.repo) && inScope(e.repo, e.number));
@@ -135,31 +125,37 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const builds = tab === "merge" ? await prBuildsOf(db, entries, internals) : new Map<string, ItemPrBuild>();
   const asRow = (e: CachedEntry): QueueMergeRow => ({ ...toRow(e, reader), place: places.get(refText(e)) ?? null, held: e.held, prBuild: builds.get(refText(e)) ?? null, closes: closesOf.get(refText(e)) ?? [], added: originOf(e) });
   // Tabs come from the stored next step; the text is veiled afterwards, so a quiet pull request stays in its tab.
-  const tabOf = new Map(work.map((w) => [w, tabOfNext(w.next)]));
+  const inTab = (next: string | null, t: QueueTab): boolean => t === "all" || tabOfNext(next ?? NOT_PLANNED) === t;
   const veilNext = (w: QueueWorkRow): QueueWorkRow => (veiledFor(reader, w.repo, w.number) ? { ...w, next: "" } : w);
   const pending = pendingRows(facts, entries, inScope, originOf, held);
-  const count = (t: QueueTab): number => (t === "all" ? work.length : t === "merge" ? entries.length + pending.length : work.filter((w) => tabOf.get(w) === t).length);
+  const total = (t: QueueTab): number => facts.work.steps.reduce((n, s) => (inTab(s.next, t) ? n + s.count : n), 0);
+  const count = (t: QueueTab): number => (t === "merge" ? entries.length + pending.length : total(t));
   const counts = { all: count("all"), review: count("review"), fix: count("fix"), verify: count("verify"), merge: count("merge") };
 
   const out: QueuePage = { tab, repos: reposParam, counts, rows: [], mergeRows: [], nextMerges: [], batches: [], total: 0, next: null };
   if (tab !== "merge") {
-    const match = tab === "all" ? work : work.filter((w) => tabOf.get(w) === tab);
-    out.itemIndex = indexOf(match);
-    out.rows = match.slice(offset, offset + sizeFor(match, offset)).map(veilNext);
-    out.total = match.length;
-    out.next = offset + out.rows.length < match.length ? offset + out.rows.length : null;
+    const steps = facts.work.steps.filter((s) => inTab(s.next, tab));
+    out.itemIndex = steps.some((s) => s.hasItem) ? steps.reduce((n, s) => n + s.before!, 0) : null;
+    out.rows = facts.work.rows.filter((r) => inTab(r.next, tab)).slice(offset, offset + sizeFor(out.itemIndex)).map((r): QueueWorkRow => veilNext({
+      repo: r.repo, number: r.number, kind: r.kind, title: r.title, score: r.score, level: r.breakdown.level, size: r.breakdown.size, breakdown: r.breakdown,
+      label: r.label as TypeLabel | null, next: r.next ?? NOT_PLANNED, nextHref: r.itemState === "referee-due" ? classifyListOf(r.repo) : null,
+      queue: slots.get(refText(r)) ?? null, held: held.has(refText(r)),
+    }));
+    out.total = total(tab);
+    out.next = offset + out.rows.length < out.total ? offset + out.rows.length : null;
     return out;
   }
   const rows = entries.map((e) => [e, asRow(e)] as const);
-  const ordered = mergeOrder(entries, (e) => facts.work.get(refText(e)) ?? facts.scores.get(refText(e)) ?? 0);
+  const ordered = mergeOrder(entries, (e) => facts.workScores.get(refText(e)) ?? facts.scores.get(refText(e)) ?? 0);
   const active = facts.batches.filter((b) => (b.state === "checking" || b.state === "open") && b.members.some((p) => inScope(b.repo, p.number)));
   const rowOfEntry = new Map(rows);
   const rowOf = new Map(rows.map(([e, r]) => [`${e.repo}#${e.number}`, r]));
   const batchOf = new Map(active.flatMap((b) => b.members.map((p) => [`${b.repo}#${p.number}`, { id: b.id, branch: b.branch }] as const)));
   // The merge rows are the ones built above, in merge order.
   const free = ordered.map((e) => rowOfEntry.get(e)!);
-  out.itemIndex = indexOf(free);
-  out.mergeRows = free.slice(offset, offset + sizeFor(free, offset));
+  const at = item ? free.findIndex((r) => `${r.repo}:${r.number}` === item) : -1;
+  out.itemIndex = at < 0 ? null : at;
+  out.mergeRows = free.slice(offset, offset + sizeFor(out.itemIndex));
   out.total = free.length;
   out.next = offset + out.mergeRows.length < free.length ? offset + out.mergeRows.length : null;
   out.nextMerges = nextMerges(entries, places, batchOf, facts.scores);

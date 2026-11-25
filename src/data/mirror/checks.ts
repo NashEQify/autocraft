@@ -61,32 +61,23 @@ export async function loadRepoCiSignals(db: Db, repos?: string[]): Promise<Map<s
   return out;
 }
 
-const names = (texts: (string | null)[]): string[] => {
-  const seen = new Set<string>();
-  for (const t of texts) {
-    try { for (const c of JSON.parse(t ?? "[]") as { name?: string }[]) if (c.name) seen.add(c.name); } catch { /* an unreadable list names nothing */ }
-  }
-  return [...seen].sort();
-};
-
-/** Check names seen on the latest 40 PR rows and 10 main heads of each repo, sorted; two statements in one wave. */
+/** Check names seen on the latest 40 PR rows and 10 main heads of each repo, sorted; a list that is not an array names nothing. Two statements in one wave. */
 export async function loadCheckSamples(db: Db, repos: string[]): Promise<Map<string, { pr: string[]; main: string[] }>> {
-  const out = new Map<string, { pr: string[]; main: string[] }>();
+  const out = new Map(repos.map((repo) => [repo, { pr: [] as string[], main: [] as string[] }]));
   if (!repos.length) return out;
   const q = queryDb(db);
-  const [pr, main] = await Promise.all([
-    q.all(q.k.selectFrom((eb) => eb.selectFrom("pr_checks").select(["repo", "checks", (e) => e.fn.agg<number>("row_number", []).over((o) => o.partitionBy("repo").orderBy("fetched_at", "desc")).as("n")])
-      .where(kx.inList(db, "repo", repos)).as("c")).select(["c.repo", "c.checks"]).where("c.n", "<=", 40), { label: "mirror.loadCheckSamples" }),
-    q.all(q.k.selectFrom((eb) => eb.selectFrom("main_ci").select(["repo", "checks", (e) => e.fn.agg<number>("row_number", []).over((o) => o.partitionBy("repo").orderBy("updated_at", "desc")).as("n")])
-      .where(kx.inList(db, "repo", repos)).as("c")).select(["c.repo", "c.checks"]).where("c.n", "<=", 10), { label: "mirror.loadCheckSamples" }),
-  ]);
-  const by = (rows: { repo: string; checks: string }[]) => {
-    const m = new Map<string, string[]>();
-    for (const r of rows) (m.get(r.repo) ?? m.set(r.repo, []).get(r.repo)!).push(r.checks);
-    return m;
+  const named = (rows: AnyQ, newest: number) => {
+    const name = kx.jsonEachField(db, "c.checks", "name", "e");
+    const each = (q.k.selectFrom(rows.as("c") as never) as AnyQ).crossJoin(name.from).select(["c.repo", name.value.as("name")]).where("c.n", "<=", newest);
+    return (q.k.selectFrom(each.as("x") as never) as AnyQ).select(["x.repo", "x.name"]).distinct().where("x.name", "is not", null).where("x.name", "<>", "");
   };
-  const p = by(pr), m = by(main);
-  for (const repo of repos) out.set(repo, { pr: names(p.get(repo) ?? []), main: names(m.get(repo) ?? []) });
+  const [pr, main] = await Promise.all([
+    q.all(named(q.k.selectFrom("pr_checks").select(["repo", "checks", (e) => e.fn.agg<number>("row_number", []).over((o) => o.partitionBy("repo").orderBy("fetched_at", "desc")).as("n")]).where(kx.inList(db, "repo", repos)), 40), { label: "mirror.loadCheckSamples" }),
+    q.all(named(q.k.selectFrom("main_ci").select(["repo", "checks", (e) => e.fn.agg<number>("row_number", []).over((o) => o.partitionBy("repo").orderBy("updated_at", "desc")).as("n")]).where(kx.inList(db, "repo", repos)), 10), { label: "mirror.loadCheckSamples" }),
+  ]) as { repo: string; name: string }[][];
+  for (const r of pr!) out.get(r.repo)!.pr.push(String(r.name));
+  for (const r of main!) out.get(r.repo)!.main.push(String(r.name));
+  for (const s of out.values()) { s.pr.sort(); s.main.sort(); }
   return out;
 }
 

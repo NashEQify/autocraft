@@ -49,6 +49,8 @@ export type RunRow = {
   costUsd: number | null; summary: string | null; error: string | null; progress: string | null;
   userLogin: string | null; harness: string | null; reportedModel: string | null;
 };
+/** A call as the live board draws it. */
+export type JobCall = Pick<RunRow, "id" | "step" | "provider" | "model" | "state" | "startedAt" | "endedAt" | "userLogin">;
 export type ItemRun = RunRow & { toolCount: number; repo: string; number: number };
 export type ToolRow = { runId: number; seq: number; tool: string; args: string | null; resultBytes: number | null; isError: boolean; startedAt: string | null; endedAt: string | null; checkId: number | null };
 export type ToolView = Omit<ToolRow, "runId">;

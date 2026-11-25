@@ -31,6 +31,7 @@ const TEXT = [...CARD, "body", "author_id", "author_association", "additions", "
 export function presetColumns(preset: ItemPreset): string[] {
   switch (preset) {
     case "ref": return ["repo", "number", "kind", "state"];
+    case "labels": return ["repo", "number", "kind", "state", "url", "labels"];
     case "card": return CARD;
     case "pr": return PR;
     case "text": return [...new Set(TEXT)];

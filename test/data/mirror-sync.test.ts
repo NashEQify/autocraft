@@ -4,10 +4,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Db, Dialect } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
+import { derive, type MainCiState } from "../../src/mainci/classify.ts";
+import type { MainHeadSummary } from "../../src/data/mirror/types.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  advanceOrgHighWater, advanceRepoHighWater, clearRepoFailures, finishSyncRun, hasSyncRequests, loadLastSyncEnd, loadLatestMainHeads, loadMainCi, loadMainCiAt, loadRepoErrors, loadRepos,
+  advanceOrgHighWater, advanceRepoHighWater, clearRepoFailures, finishSyncRun, hasSyncRequests, loadDecidingHeads, loadLastSyncEnd, loadLatestMainHeads, loadMainCi, loadMainCiAt, loadRepoErrors, loadRepos,
   loadSyncPlan, loadSyncRequests, loadSyncRuns, loadSyncState, markReposRead, markReposReconciled, markReposSyncedByError, purgeRepoMirror, queueSyncRequests, recordRepoFailures,
   removeSyncRequests, requestReadsAfter, saveMainHeads, saveRepoList, saveSyncState, startSyncRun, countItemsByRepo,
 } from "../../src/data/mirror/index.ts";
@@ -144,6 +146,27 @@ both("purge deletes the repo's comments and items and resets its marks", async (
 });
 
 const head = (repo: string, sha: string, state: string, at: string) => ({ repo, sha, branch: "main", state, failing: "[]", checks: "[]", committed_at: at, headline: sha });
+
+both("main CI: the deciding heads say the same as every stored head", async (db) => {
+  const q = queryDb(db);
+  const histories = ["r", "g", "gr", "rgrr", "grgyrr", "grrg", "ygrryr", "rr", "grry", "y"];
+  await q.run(q.k.insertInto("main.tracked_repos").values(histories.map((name) => ({ name }))));
+  const STATES: Record<string, string> = { r: "red", g: "green", y: "running" };
+  for (const h of histories) {
+    // Two heads of one time are ordered by when they were first seen, then by sha; a head without a commit time counts from when it was seen.
+    await q.run(q.k.insertInto("main.main_ci").values([...h].map((c, i) => ({
+      repo: h, head_sha: `s${i}`, branch: "main", state: STATES[c]!, failing: "[]", checks: "[]", headline: `#${i}`, committed_at: i % 3 === 2 ? null : `2026-01-0${1 + Math.floor(i / 2)}T00:00:00Z`,
+      first_seen_at: `2026-01-0${1 + Math.floor(i / 2)}T00:00:00Z`, state_changed_at: `c${i}`, updated_at: T0,
+    }))));
+  }
+  const of = (rows: MainHeadSummary[]) => derive(rows.map((x) => ({ sha: x.head_sha, state: x.state as MainCiState, committedAt: x.committed_at, headline: x.headline, firstSeenAt: x.first_seen_at, stateChangedAt: x.state_changed_at })));
+  const all = await loadMainCi(db), few = await loadDecidingHeads(db, ["y"]);
+  for (const h of histories.slice(0, -1)) {
+    assert.deepEqual(of(few.get(h)!), of(all.get(h)!), h);
+    assert.ok(few.get(h)!.length <= 3);
+  }
+  assert.equal(few.has("y"), false);
+});
 
 both("main CI: state change time moves only with the state, and only the newest 50 heads of a repo stay", async (db) => {
   const q = queryDb(db);

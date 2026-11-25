@@ -84,7 +84,10 @@ export type { FunnelFacts };
 
 export type ItemsFilter = {
   show: "open" | "backlog" | "closed"; filters: ("security" | "outside" | "stuck" | "duplicates")[]; areas: string[]; text: string | null; refs: Ref[]; limit: number;
+  /** The order `limit` cuts open items in: latest change, or the weight (`normalWeight` without a workflow), the rank, then the latest change. */
+  sort: "priority" | "updated"; normalWeight: number;
 };
+export type ItemsBase = { rows: ItemBase[]; places: { item: ItemBase; count: number }[]; closedTotal: number | null };
 export type ItemBase = {
   repo: string; number: number; kind: "pr" | "issue"; title: string; author: string | null; state: string; updatedAt: string; mergedAt: string | null; closedAt: string | null; planState: string | null; itemState: string | null;
   phase: string | null; score: number | null; weight: number | null; workflowState: string | null; hasRecommendation: boolean; startedBy: string | null;

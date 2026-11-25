@@ -1,4 +1,4 @@
-// reads: planner.item_plans, mirror.items
+// reads: planner.item_plans, mirror.items, triage.item_rank, workflow.preapprovals, merge.merge_batches, merge.merge_batch_prs
 // The merge queue: the PRs whose stored plan is in a queue state, with their title; counts and the views of open plans.
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
@@ -7,7 +7,7 @@ import type { PlanView, QueueView } from "../../core/plan-cache.ts";
 import type { QueueState } from "../../core/plan.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import type { HiddenRepos } from "../control/types.ts";
-import { planGh, planScope, queuedPlan } from "../planner/fragments.ts";
+import { inPlanScope, planGh, queuedPlan } from "../planner/fragments.ts";
 
 /** A PR in a queue state as the merge queue lists it: the plan's state, reasons and note and the cached queue fields. `gh` is GitHub's state as mirrored. */
 export type CachedEntry = QueueView & {
@@ -25,6 +25,9 @@ export type MergeQueueOptions = {
   /** Only these PRs, as "repo#number". */
   refs?: Iterable<string>;
 };
+
+/** The states of a merge approval whose PR is not in a queue state yet. */
+export const LEG_STATES = ["fixup", "review", "ci"] as const;
 
 const filtered = (h: HiddenRepos | undefined): h is HiddenRepos => !!h && (!!h.visible || h.length > 0);
 
@@ -49,10 +52,24 @@ export async function loadMergeQueue(db: Db, o: MergeQueueOptions = {}): Promise
   });
 }
 
-/** The open items whose stored plan is in the pipeline's scope, as `repo#number`. 1 statement. */
+/** The rank and the closing issues (stored JSON) of each open PR in a queue state. 1 statement. */
+export async function loadQueueRanks(db: Db): Promise<{ repo: string; number: number; score: number | null; closing_issues: string | null }[]> {
+  const q = queryDb(db);
+  return await q.all(q.k.selectFrom("main.item_plans as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .leftJoin("main.item_rank as r", (j) => j.onRef("r.repo", "=", "p.repo").onRef("r.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "r.score", "i.closing_issues"]).where((eb) => queuedPlan(db, eb, "p")).where(planGh(db, "p"), "=", "OPEN"), { label: "views.loadQueueRanks" });
+}
+
+/** The open items whose stored plan is in the pipeline's scope, of those a merge queue can show (a queue state, an active merge approval, a member of an open batch), as `repo#number`. 1 statement. */
 export async function loadPipelineScope(db: Db): Promise<Set<string>> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.item_plans as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-    .select(["p.repo", "p.number"]).where("i.state", "=", "OPEN").where(planScope(db, "p"), "=", 1), { label: "views.loadPipelineScope" });
+    .select(["p.repo", "p.number"]).where("i.state", "=", "OPEN").where((eb) => inPlanScope(eb, "p"))
+    .where((eb) => eb.or([
+      queuedPlan(db, eb, "p"),
+      eb(eb.refTuple("p.repo", "p.number"), "in", q.k.selectFrom("main.preapprovals as l").select(["l.repo", "l.number"]).where("l.state", "in", [...LEG_STATES]).$asTuple("repo", "number")),
+      eb(eb.refTuple("p.repo", "p.number"), "in", q.k.selectFrom("main.merge_batch_prs as bp").innerJoin("main.merge_batches as b", "b.id", "bp.batch_id")
+        .select(["b.repo", "bp.number"]).where("b.state", "in", ["checking", "open"]).$asTuple("repo", "number")),
+    ])), { label: "views.loadPipelineScope" });
   return new Set(rows.map((r) => `${r.repo}#${r.number}`));
 }

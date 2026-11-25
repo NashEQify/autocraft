@@ -67,6 +67,17 @@ both("JSON fields read as SQLite's json_extract, json_type, json_valid and json_
   return [row, valid];
 });
 
+both("jsonEachField reads one key of each object and takes any other text for an empty list", async (db) => {
+  const of = async (text: string) => {
+    const f = kx.jsonEachField(db, "v.j", "name", "e");
+    return (await db.all(k(db).selectFrom(kx.valuesTable(db, [{ j: text }], { j: "text" }, "v")).crossJoin(f.from).select(f.value.as("name")))).map((r) => r.name).sort();
+  };
+  assert.deepEqual(await of('[{"name":"b","x":1},{"name":"a"}]'), ["a", "b"]);
+  assert.deepEqual(await of('[{"x":1},"s",5,null,[1]]'), [null, null, null, null, null]);
+  for (const text of ['{"name":"a"}', "not json", "", "5"]) assert.deepEqual(await of(text), [], text);
+  return null;
+});
+
 both("jsonEach joins array elements as `value` after the table it reads", async (db) => {
   const arr = await db.all(k(db).selectFrom("t").crossJoin(kx.jsonEach(db, kx.jsonText(db, "t.j", "$.arr"), "e")).select(["t.id", "e.value"]).where("t.id", "=", 1).orderBy("e.value"));
   assert.deepEqual(arr, [{ id: 1, value: "p" }, { id: 1, value: "q" }]);
