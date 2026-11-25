@@ -62,11 +62,6 @@ export function jsonType(d: D, e: Ex, path?: string): RawBuilder<JsonType | null
   return sql`(SELECT CASE json_typeof(v) WHEN 'string' THEN 'text' WHEN 'boolean' THEN v::text WHEN 'number' THEN CASE WHEN v::text ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END ELSE json_typeof(v) END FROM (SELECT ${v} AS v) AS jt)`;
 }
 
-/** The number of elements of the JSON array `e`; NULL for NULL. */
-export function jsonArrayLength(d: D, e: Ex): RawBuilder<number | null> {
-  return pgOf(d) ? sql`json_array_length((${x(e)})::json)` : sql`json_array_length(${x(e)})`;
-}
-
 /** Whether `e` is valid JSON: a predicate for `where(...)`; selected, it reads 1/0 on both. */
 export function jsonValid(d: D, e: Ex): RawBuilder<SqlBool> {
   return pgOf(d) ? sql`((${x(e)}) IS JSON)` : sql`json_valid(${x(e)})`;

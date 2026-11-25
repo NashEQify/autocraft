@@ -502,12 +502,6 @@ export async function loadStartedWork(db: Db): Promise<StartedWork> {
   };
 }
 
-/** Repos with a live workflow. */
-export async function loadLiveRepos(db: Db): Promise<Set<string>> {
-  const q = queryDb(db);
-  return new Set((await q.all(q.k.selectFrom("main.item_workflows").select("repo").distinct().where("state", "in", LIVE_STATES))).map((r) => r.repo));
-}
-
 /** Distinct logins the pipeline acts for with their repo: active leg owners, queued fix-up requesters, `approved_by` or `started_by` of live workflows, and who answered or resumed a live workflow; one `UNION`. */
 export async function loadActingPairs(db: Db): Promise<{ login: string; repo: string }[]> {
   const q = queryDb(db);

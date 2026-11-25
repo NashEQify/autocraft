@@ -5,7 +5,7 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { NO_WORKFLOW_SCORE, workScore } from "../../src/core/work-score.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  countEventsSince, listWorkflows, loadActingPairs, loadAnswers, loadEvents, loadGoOnAt, loadLastEventKinds, loadLiveRepos, loadPathEnds, loadQueuePositions, loadStartedRefs,
+  countEventsSince, listWorkflows, loadActingPairs, loadAnswers, loadEvents, loadGoOnAt, loadLastEventKinds, loadPathEnds, loadQueuePositions, loadStartedRefs,
   loadStartedWork, loadWorkflowFacts, loadWorkflowHistory, loadWorkScores, loadWorkWeights, recordEvents, saveWorkflows, startWorkflows,
 } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
@@ -134,7 +134,6 @@ both("scores, queue positions, started refs and the acting pairs follow the live
   assert.deepEqual([...await loadStartedRefs(db, { login: "BOB" })], ["o/a#2"]);
   assert.deepEqual([...await loadStartedRefs(db, { login: "cat" })], ["o/b#1"]);
   assert.ok((await loadStartedRefs(db, { login: "ann", repos: ["o/a"] })).has("o/a#4"));
-  assert.deepEqual([...await loadLiveRepos(db)].sort(), ["o/a", "o/b"]);
   const work = await loadStartedWork(db);
   assert.equal(work.live.length, 5);
   assert.deepEqual(work.prs.map((p) => p.pr), [4]);

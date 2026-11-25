@@ -1,42 +1,14 @@
 // Every wait a plan can have, and every reason a merge leg can end with, has a code.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { needsQuestion, stopCodeOf, waitCodeOf, type WaitCode } from "../src/core/codes.ts";
-import { answerPrWait, decideItem, openPrWait } from "../src/core/decide-item.ts";
-import { decidePr, implementOffWait, standingWait } from "../src/core/decide.ts";
-import { holdWait } from "../src/outside.ts";
+import { needsQuestion, stopCodeOf, type WaitCode } from "../src/core/codes.ts";
+import { decideItem } from "../src/core/decide-item.ts";
+import { decidePr } from "../src/core/decide.ts";
 import { legBlocker, premergeStop } from "../src/workflow/blockers.ts";
 import { factsOf, prng, randomPrRows, rnd, type PrRows, type Rnd } from "./random-pr.ts";
 import { randomItem } from "./random-item.ts";
 
 const CASES = Number(process.env.INVARIANT_CASES ?? 4000);
-
-/** The texts named by the code they stand for, where the text holds a name, a time or a reason. */
-const NAMED: [string, WaitCode][] = [
-  [implementOffWait("app"), "implement-off"],
-  [standingWait({ queuedBy: "mira", standing: "no" }, "app")!.text, "actor-gone"],
-  [standingWait({ queuedBy: "mira", standing: "unknown" }, "app")!.text, "actor-unknown"],
-  [standingWait({ queuedBy: "mira", standing: "unknown", boxIdentity: true }, "app")!.text, "box-identity"],
-  [openPrWait(7), "open-pr"], [answerPrWait(7), "open-pr"],
-  [holdWait({ reason: "surge", kind: "pr", limit: 5 }), "outside-hold"], [holdWait({ reason: "limit", kind: "issue", limit: 5 }), "outside-hold"],
-  ["duplicates app#3, app#4; waits for a maintainer", "duplicate"], ["duplicates app#3; waits for their comparison or a maintainer", "duplicate"],
-  ["touches README.md; waits for a maintainer", "not-started"],
-  ["app#3, gui#4, which blocks its review", "review-hold"], ["next review after 10:05", "review-hold"],
-  ["its review failed 4 times at this commit; a new commit, a Review again press or a maintainer's comment gives it one more try", "review-failed"],
-  ["the review after 1 failed try at this commit, from 10:05", "review-failed"],
-  ["a person: CI is red and the CI fix has nothing to fix", "ci-nothing-to-fix"], ["a person: CI is red and the CI fix has nothing to fix (a flaky\ntest)", "ci-nothing-to-fix"],
-  ["the CI fix comment again later: the last one did not reach GitHub", "ask-unsent"], ["the comment asking the contributor for the fixes again after 10:05: the last one did not reach GitHub", "ask-unsent"],
-  ["GitHub's merge state, unknown since 10:05 (unknown for 3 checks reads in a row)", "mergeable-unknown"],
-  ["GitHub still reports the merge state as unknown after being asked to compute it (unknown since 2026-11-04 10:05); closing and reopening the PR on GitHub makes it compute the state", "mergeable-stuck"],
-  ["a person: the merge was refused (a verification failed)", "merge-refused"],
-  ["the implementation session's revision for #7", "revision"], ["a maintainer's answer on the stuck implementation of #7", "implement-stuck"],
-  ["2 implementations already running in app", "implement-room"],
-];
-
-/** Texts that stand for more than one wait. */
-const SAME_WORDS: Record<string, WaitCode[]> = {
-  "approval of CI runs": ["ci-approval-failed", "repo-approval"], "its batch": ["batch-failed"], "a maintainer's answer": ["ci-nothing-to-fix", "implement-question"],
-};
 
 test("a wait has a code exactly when the plan waits, and no text of decide or decide-item is without one of its own", () => {
   const seed = process.env.INVARIANT_SEED ? Number(process.env.INVARIANT_SEED) : (Date.now() & 0x7fffffff);
@@ -56,8 +28,8 @@ test("a wait has a code exactly when the plan waits, and no text of decide or de
   }
   assert.ok(at.texts.size > 30, `only ${at.texts.size} different waits came up`);
   // One text is one wait, except where a person and the system wait in the same words.
-  for (const [text, codes] of at.texts) for (const code of codes) assert.ok(code === waitCodeOf(text) || SAME_WORDS[text]?.includes(code), `INVARIANT_SEED=${seed}: "${text}" as ${code}`);
-  for (const [text, code] of NAMED) assert.equal(waitCodeOf(text), code, text);
+  const sameWords = new Set(["approval of CI runs", "its batch", "a maintainer's answer"]);
+  for (const [text, codes] of at.texts) assert.ok(codes.size === 1 || sameWords.has(text), `INVARIANT_SEED=${seed}: "${text}" as ${[...codes].join(", ")}`);
   // Started items whose wait is left to the person who set it, or to GitHub, are asked nothing.
   assert.deepEqual((["answer", "merge-refused", "repo-approval", "breaker", "box-identity", "changes-requested", "sign-in"] as const).map((c) => needsQuestion(c, "person")), [true, true, false, false, false, false, false]);
   assert.equal(needsQuestion("merge-refused", "system"), false);

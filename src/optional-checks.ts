@@ -2,11 +2,8 @@
 // or count as a failure to fix. Exact check names. Every other check must still be green.
 import { REPO_SETTINGS, listSettings, loadTrackedRepos, saveSettings, setting, settingKey } from "./data/control/index.ts";
 import { loadCheckSamples } from "./data/mirror/index.ts";
-import { effectiveCiWith, effectiveOverall } from "./core/evidence.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
-
-export { effectiveCiWith, effectiveOverall };
 
 const def = REPO_SETTINGS.optionalChecks;
 const key = (repo: string) => settingKey(def.name, repo);
@@ -33,12 +30,6 @@ export async function setOptionalCheck(db: Db, by: string, repo: string, name: s
   await saveSettings(db, [{ key: def.name, repo, value: names.length ? JSON.stringify(names) : null }], by,
     { action: on ? "optional-check-add" : "optional-check-remove", target: repo, details: { check } });
   return true;
-}
-
-/** effectiveOverall with the repo's list and the PR's stored checks (JSON text or parsed). */
-export async function effectiveCi(db: Db, repo: string, overall: string, checks: Parameters<typeof effectiveCiWith>[2]): Promise<string> {
-  if (overall !== "failure") return overall;
-  return effectiveCiWith(await optionalChecks(db, repo), overall, checks);
 }
 
 /** Check names seen on each repo's recent PRs and default-branch heads, for the add control. */

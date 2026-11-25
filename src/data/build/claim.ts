@@ -4,7 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { loadTrackedRepos } from "../control/index.ts";
 import { loadBatchesByTask } from "../merge/index.ts";
-import { loadStartedRefs, loadLiveRepos } from "../workflow/index.ts";
+import { loadStartedRefs } from "../workflow/index.ts";
 import { ENV_COLUMNS, hasPatchExpr, TASK_COLUMNS, toEnv, toEnvTask, toTask, type EnvDbRow, type RunningRow, type TaskDbRow } from "./rows.ts";
 import { loadSizings, loadWarmFacts } from "./sizes.ts";
 import { loadWorkerUpdate } from "./build-state.ts";
@@ -17,19 +17,18 @@ export const CLAIM_CANDIDATES = 500;
 /**
  * Everything one claim pass reads, in two waves whatever the queue length: wave 1 the environment and its running count, the queued
  * candidates (without patches: `hasPatch` tells, `loadTasks` with `patch` reads the picked ones), the other enabled environments, the
- * tracked repos, the repos with a live workflow and the pending worker update; wave 2 what depends on the candidates: sizings, the warm
+ * tracked repos and the pending worker update; wave 2 what depends on the candidates: sizings, the warm
  * facts of the warm candidates' repos (when `warm` names the writer's image), the refs started in the candidates' repos and the merge
- * batches of the candidate tasks. Feature switches come from `config(db)`. 14 statements at most.
+ * batches of the candidate tasks. Feature switches come from `config(db)`. 13 statements at most.
  */
 export async function loadClaimInputs(db: Db, envId: string, nowMs: number, warm?: { version: string; rev: number; image: string | null }): Promise<ClaimInputs> {
   const q = queryDb(db);
-  const [envRows, running, queued, others, tracked, liveRepos, update] = await db.together(async () => await Promise.all([
+  const [envRows, running, queued, others, tracked, update] = await db.together(async () => await Promise.all([
     q.all(q.k.selectFrom("build_envs as e").select(ENV_COLUMNS).where("e.id", "=", envId), { label: "build.loadClaimInputs" }),
     q.get(q.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]), { label: "build.loadClaimInputs" }),
     q.all(q.k.selectFrom("build_tasks as t").select((eb) => [...TASK_COLUMNS, hasPatchExpr(eb)]).where("t.state", "=", "queued").orderBy("t.priority", "desc").orderBy("t.id").limit(CLAIM_CANDIDATES), { label: "build.loadClaimInputs" }),
     q.all(q.k.selectFrom("build_envs as e").select(ENV_COLUMNS).where("e.enabled", "=", 1).where("e.id", "!=", envId).orderBy("e.created_at").orderBy("e.id"), { label: "build.loadClaimInputs" }),
     loadTrackedRepos(db),
-    loadLiveRepos(db),
     loadWorkerUpdate(db),
   ]));
   const candidates = (queued as TaskDbRow[]).map(toTask);
@@ -43,7 +42,7 @@ export async function loadClaimInputs(db: Db, envId: string, nowMs: number, warm
   ]));
   return {
     env: envRows[0] ? toEnv(envRows[0] as EnvDbRow, [], nowMs) : null, running: Number(running?.n ?? 0), candidates, otherEnvs: (others as EnvDbRow[]).map((r) => toEnv(r, [], nowMs)),
-    sizings, warm: warmFacts, liveRepos, startedRefs: started, batches, tracked, pendingUpdate: update.pending,
+    sizings, warm: warmFacts, startedRefs: started, batches, tracked, pendingUpdate: update.pending,
   };
 }
 

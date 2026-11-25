@@ -136,7 +136,7 @@ type CheckLike = { name: string; state: string };
  * checks had not run (success when nothing else is pending or failing and some other check succeeded).
  * The stored `overall` and `checks` stay as GitHub reported them.
  */
-export function effectiveOverall(overall: string, checks: CheckLike[], optional: readonly string[]): string {
+function effectiveOverall(overall: string, checks: CheckLike[], optional: readonly string[]): string {
   if (overall !== "failure" || !optional.length) return overall;
   const failing = checks.filter((c) => c.state === "failure");
   if (!failing.length || failing.some((c) => !optional.includes(c.name))) return overall;
@@ -146,7 +146,7 @@ export function effectiveOverall(overall: string, checks: CheckLike[], optional:
 }
 
 /** effectiveOverall with the repo's optional list and the PR's stored checks (JSON text or parsed). */
-export function effectiveCiWith(optional: readonly string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
+function effectiveCiWith(optional: readonly string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
   if (overall !== "failure") return overall;
   let list: CheckLike[] = [];
   try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays failure */ }
