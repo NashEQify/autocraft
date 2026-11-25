@@ -198,7 +198,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
-  if (r.decision) did.push(r.decision.label ? t("going on with “{option}”", { option: r.decision.label }) : t("going on with the implementation"));
+  if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.answers) {
     // A weight alone.

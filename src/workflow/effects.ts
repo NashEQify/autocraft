@@ -1,30 +1,19 @@
 // What a maintainer's command does to the machinery that already works: the review-again mark, operator fix-ups, pre-approved
-// merges (the merge leg, owned through preapprovals.workflow_id), the fast_track row (scope, the implement queue and the weight),
-// the Backlog answer, Act's close made as the person, autorepin and the stop of every queued step. The command core
-// (apply.ts) calls these and then writes the workflow row; nothing here touches item_workflows.
-//
-// Every start also writes the legacy rows (fast_track, preapprovals, operator_fixups), so `workflow flip <repo> --legacy`
-// leaves the old planner with everything it needs.
-import { audit } from "../dash/audit.ts";
-import { t } from "../i18n/index.ts";
-import { backlogItem } from "../dash/api/decisions.ts";
-import { applyAnswer } from "../dash/api/decisions.ts";
-import { queueIssue } from "../dash/api/queue-page.ts";
-import { CLOSE_OPTIONS, closeDecisionId } from "../act/index.ts";
+// merges (the merge leg, owned through preapprovals.workflow_id), the close made as the person (a `workflow_actions` row the
+// action executor carries out), autorepin and the stop of every queued step. The command core (apply.ts) calls these and then
+// writes the workflow row; nothing here touches item_workflows.
 import { endWorkspace } from "../build/workspaces.ts";
-import { HEAD_FACT } from "../core/rules.ts";
-import { SCOPE_OPTIONS } from "../decide/decision.ts";
-import { ask, getDecision } from "../decisions.ts";
+import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
+import { loadImplementFacts, cancelUnopened } from "../data/implement/index.ts";
+import { releaseHeld } from "../data/intake/index.ts";
+import { withdrawItemCalls } from "../data/runners/index.ts";
+import { endFixupRequests, holdMerges, loadFixupRequests, loadHolds, loadLegs, releaseMerges } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { addFastTrack, removeFastTrack, setFastTrackWeight } from "../fasttrack.ts";
 import type { Exec } from "../fixup/git.ts";
-import { currentImplementation, moveImplementationIf } from "../implement/store.ts";
-import { holdMerge, releaseMerge, removeFromBatch } from "../merge/controls.ts";
-import { releaseOutside } from "../outside.ts";
-import { setRepoPipeline } from "../pilot.ts";
+import { queueLaneActions } from "../github/user-lane.ts";
+import { t } from "../i18n/index.ts";
+import { removeFromBatch } from "../merge/controls.ts";
 import { cancelPreapproval, inActiveBatch, INSTRUCTIONS_MAX, preapproveMerge, PreapprovalRefused, runPipelineStep } from "../preapproval/index.ts";
-import { resumeStage } from "../push-outcomes.ts";
-import { withdrawCall } from "../remote/calls.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
 import { markReviewsStale } from "../review/discussion.ts";
@@ -72,8 +61,7 @@ export type Target = { repo: string; number: number; kind: ItemKind; head: strin
 /** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a stop ends. */
 export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number };
 
-const ref = (t: Target): string => `${t.repo}#${t.number}`;
-const ACTIVE_PREAPPROVAL = ["fixup", "review", "ci", "queued"];
+const ref = (t: { repo: string; number: number }): string => `${t.repo}#${t.number}`;
 
 /** Turns a refusal of an existing step into an EffectError, so the item's line says why and the other items go on. */
 async function step<T>(fn: () => Promise<T>): Promise<T> {
@@ -84,21 +72,9 @@ async function step<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** The PR's newest active merge leg. */
 const activePreapproval = async (db: Db, t: Target): Promise<number | null> =>
-  (await db.get(db.k.selectFrom("main.preapprovals").select("id").where("repo", "=", t.repo).where("number", "=", t.number)
-    .where("state", "in", ACTIVE_PREAPPROVAL).orderBy("id", "desc").limit(1)))?.id ?? null;
-
-// ---- weight and scope (fast_track) ---------------------------------------------------------------------------------------
-
-/** The item's fast_track row with exactly `weight`: added when missing, re-weighted when it differs. */
-export async function storeWeight(c: Ctx, weight: number): Promise<void> {
-  const r = ref(c.item);
-  const had = (await c.db.get(c.db.k.selectFrom("main.fast_track").select("weight").where("repo", "=", c.item.repo).where("number", "=", c.item.number)))?.weight;
-  await step(async () => {
-    if (had === undefined) await addFastTrack(c.db, c.by, r, weight, c.via);
-    else if (had !== weight) await setFastTrackWeight(c.db, c.by, r, weight, c.via);
-  });
-}
+  (await loadLegs(db, [{ repo: t.repo, number: t.number }], { activeOnly: true })).get(ref(t))?.at(-1)?.id ?? null;
 
 // ---- starts --------------------------------------------------------------------------------------------------------------
 
@@ -118,19 +94,14 @@ async function mergeLeg(c: Ctx): Promise<number> {
 
 /**
  * Starts the item at `entry`. Review and Fix-up mark the PR for a review of its current head (the fix-up follows from what the
- * review finds); Implement queues the issue as the actor's; the merge queue pre-approves the merge. An approved PR gets its merge
- * leg now. Returns the pre-approval the workflow owns, if any.
+ * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself. An approved PR gets its
+ * merge leg now. Returns the pre-approval the workflow owns, if any.
  */
-export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean, weight: number): Promise<{ preapproval: number | null }> {
+export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<{ preapproval: number | null }> {
   const { db, by, item } = c;
-  if (entry === "implement") {
-    await step(() => queueIssue(db, by, item.repo, item.number, weight, c.via));
-    await storeWeight(c, weight);
-    return { preapproval: null };
-  }
+  if (entry === "implement") return { preapproval: null };
   // The pre-approval validates the PR first (open, reviewable, merging approved), so nothing else is written when it refuses.
   const preapproval = approved || entry === "merge" ? await mergeLeg(c) : null;
-  await storeWeight(c, weight);
   if (entry !== "merge") await step(() => markReviewsStale(db, by, item.repo, item.number));
   return { preapproval };
 }
@@ -171,8 +142,8 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
 
 /**
  * Stops everything that runs or waits for the item: its pre-approved merge (out of its batch first), queued fix-ups, its place in
- * an integration batch, queued model calls made for it alone, the implementation attempt of an issue that has no PR yet, and its
- * fast_track row (scope and the implement queue). Leased calls finish; nothing acts on their result once the workflow stopped.
+ * an integration batch, queued model calls made for it alone, the implementation attempt of an issue that has no PR yet, and the
+ * merge legs of the workflow's implementation PRs. Leased calls finish; nothing acts on their result once the workflow stopped.
  * Every part runs; the ones that could not stop are returned.
  */
 export async function stopAll(c: Ctx): Promise<string[]> {
@@ -182,85 +153,54 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   const attempt = async (fn: () => Promise<unknown>) => {
     try { await fn(); } catch (e) { failed.push(effectText((e as Error).message)); }
   };
+  const one = [{ repo: item.repo, number: item.number }];
   if (item.kind === "pr") {
-    if (await activePreapproval(db, item) !== null) await attempt(() => cancelPreapproval(db, by, item.repo, item.number, c.exec, c.via));
-    const fixups = await db.all(db.k.selectFrom("main.operator_fixups").select("id").where("repo", "=", item.repo).where("number", "=", item.number).where("state", "=", "queued"));
-    for (const f of fixups) {
-      if ((await db.run(db.k.updateTable("main.operator_fixups").set({ state: "ended" }).where("id", "=", f.id).where("state", "=", "queued"))).changes) {
-        await audit(db, by, "operator-fixup", ref(item), { id: f.id, ended: true, reason: why });
-      }
-    }
+    const [active, requests, holds] = await db.together(() => Promise.all([
+      activePreapproval(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), loadHolds(db, { refs: one }),
+    ]));
+    if (active !== null) await attempt(() => cancelPreapproval(db, by, item.repo, item.number, c.exec, c.via));
+    await endFixupRequests(db, requests.filter((r) => r.state === "queued").map((r) => ({ id: r.id, reason: why })));
     if (await inActiveBatch(db, item.repo, item.number)) {
       await attempt(async () => {
-        const heldBefore = !!await db.get(db.k.selectFrom("main.merge_holds").select((eb) => eb.lit(1).as("one")).where("repo", "=", item.repo).where("number", "=", item.number));
         await removeFromBatch(db, by, item.repo, item.number, c.exec);
-        if (!heldBefore) await releaseMerge(db, by, item.repo, item.number);
+        if (!holds.has(ref(item))) await releaseMerges(db, one, by);
       });
     }
   } else {
-    const impl = await currentImplementation(db, item.repo, item.number);
-    if (impl && impl.prNumber === null && await moveImplementationIf(db, impl.id, [impl.state], "cancelled", { reason: why }, at)) {
-      if (impl.workspaceId !== null) await endWorkspace(db, impl.workspaceId);
-      await audit(db, by, "implement-cancel", ref(item), { id: impl.id, reason: why });
+    for (const w of await cancelUnopened(db, [{ ...one[0]!, reason: why }], by, at)) {
+      if (w.workspaceId !== null) await endWorkspace(db, w.workspaceId);
     }
   }
-  // The workflow's merge legs on other items: an issue's implementation PR.
-  if (c.workflowId !== undefined) {
-    for (const p of await db.all(db.k.selectFrom("main.preapprovals").select("number").where("workflow_id", "=", c.workflowId).where("state", "in", ACTIVE_PREAPPROVAL)
-      .where((eb) => eb.or([eb("repo", "!=", item.repo), eb("number", "!=", item.number)])))) {
+  // The workflow's merge legs on other items: an issue's implementation PRs.
+  if (c.workflowId !== undefined && item.kind === "issue") {
+    const facts = await loadImplementFacts(db, one);
+    const prs = [...new Set((facts.byIssue.get(ref(item))?.prAttempts ?? []).map((a) => a.prNumber))].map((number) => ({ repo: item.repo, number }));
+    const legs = prs.length ? await loadLegs(db, prs, { activeOnly: true }) : new Map();
+    for (const p of [...legs.values()].flat().filter((l) => l.workflow_id === c.workflowId)) {
       await attempt(() => cancelPreapproval(db, by, item.repo, p.number, c.exec, c.via));
     }
   }
-  const calls = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items"]).where("repo", "=", item.repo).where("state", "=", "queued"));
-  for (const k of calls) {
-    let items: { repo?: unknown; number?: unknown }[] = [];
-    try { items = JSON.parse(k.items) as typeof items; } catch { /* unreadable: not this item's */ }
-    if (items.length === 1 && items[0]!.repo === item.repo && items[0]!.number === item.number) await withdrawCall(db, Number(k.id), why, ["queued"]);
-  }
-  await attempt(() => removeFastTrack(db, by, ref(item), c.via));
+  await withdrawItemCalls(db, ref(item), why);
   return failed;
 }
 
-/** The Backlog: open, nothing planned. Stops what runs, then records the Backlog answer the legacy holds read. */
+/** The Backlog: open, nothing planned. Stops what runs; the workflow row's state is the backlog. */
 export async function backlog(c: Ctx): Promise<string[]> {
-  const failed = await stopAll(c);
-  await step(() => backlogItem(c.db, c.item.repo, c.item.number, c.by, "workflow", c.via));
-  return failed;
+  return await stopAll(c);
 }
 
 /**
- * Closes the item through Act, as the person (the user lane): a close question answered Close by them, the way an answered
- * question closes any item. A PR's question names its current head, so a push after the command stops the close. Stops what
- * runs first, so no fix-up pushes to an item about to close.
+ * Closes the item as the person: a close action the action executor carries out (a comment as the app, then the close through
+ * the user lane). A PR's action names its current head, so a push after the command stops the close. Stops what runs first, so no
+ * fix-up pushes to an item about to close.
  */
 export async function close(c: Ctx): Promise<string[]> {
   const { db, by, item, at } = c;
+  if (c.workflowId === undefined) throw new EffectError(t("{ref} has no started workflow to close.", { ref: ref(item) }));
+  if (item.kind === "pr" && !item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: ref(item) }));
   const failed = await stopAll(c);
-  let id: string;
-  let question: Record<string, unknown>;
-  if (item.kind === "pr") {
-    if (!item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: ref(item) }));
-    id = closeDecisionId(item.repo, item.number, item.head);
-    question = { id, kind: "close", repo: item.repo, number: item.number, question: "Close this PR?", context: `${by} asked to close it.`,
-      facts: [`${HEAD_FACT}${item.head}`], options: Object.values(CLOSE_OPTIONS).map((o) => ({ ...o })), asked_by: by, asked_at: at };
-  } else {
-    id = `${ref(item)}:scope:workflow-close-${Date.parse(at)}`;
-    question = { id, kind: "scope", repo: item.repo, number: item.number, question: "What happens to this issue?", context: `${by} asked to close it.`,
-      facts: [], options: [{ ...SCOPE_OPTIONS.close }, { ...SCOPE_OPTIONS.take }], recommended: null, asked_by: by, asked_at: at };
-  }
-  const had = await getDecision(db, id);
-  if (had?.answer === "close") throw new EffectError(t("{ref} is already being closed on the answer of {login}.", { ref: ref(item), login: had.answered_by ?? "" }));
-  if (had?.answer) throw new EffectError(t("The close question at this head was already answered {answer} by {login}.", { answer: had.answer, login: had.answered_by ?? "" }));
-  if (!had) await ask(db, [question]);
-  await step(async () => applyAnswer(db, (await getDecision(db, id))!, by, { answer: "close" }, "workflow", c.via));
+  await queueLaneActions(db, [{ workflowId: c.workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at }]);
   return failed;
-}
-
-/** Answers a question of the legacy machinery (a stuck implementation's Try again) as the person, as the dashboard would. */
-export async function answerQuestion(c: Ctx, id: string, option: string): Promise<void> {
-  const d = await getDecision(c.db, id);
-  if (!d || d.answer) throw new EffectError(t("The question this recommendation answers is no longer open."));
-  await step(() => applyAnswer(c.db, d, c.by, { answer: option }, "workflow", c.via));
 }
 
 // ---- autorepin -----------------------------------------------------------------------------------------------------------
@@ -282,9 +222,12 @@ export async function autorepin(c: Ctx, args: string, githubId: number | null): 
 // ---- controls ------------------------------------------------------------------------------------------------------------
 
 /** Keeps an approved PR out of the next merge until it is released. Returns false when it was already held. */
-export const hold = (c: Ctx): Promise<boolean> => step(() => holdMerge(c.db, c.by, c.item.repo, c.item.number, { via: c.via }));
-export const release = (c: Ctx): Promise<boolean> => step(() => releaseMerge(c.db, c.by, c.item.repo, c.item.number));
-export const releaseHeld = (c: Ctx): Promise<void> => step(() => releaseOutside(c.db, c.by, c.item.repo, c.item.number));
+export async function hold(c: Ctx): Promise<boolean> {
+  if (c.item.kind !== "pr") throw new EffectError(t("{ref} is not a pull request.", { ref: ref(c.item) }));
+  return (await step(() => holdMerges(c.db, [{ repo: c.item.repo, number: c.item.number, by: c.by, details: { via: c.via } }]))).length > 0;
+}
+export const release = async (c: Ctx): Promise<boolean> => (await step(() => releaseMerges(c.db, [{ repo: c.item.repo, number: c.item.number }], c.by))).length > 0;
+export const releaseHeldItem = async (c: Ctx): Promise<void> => { await step(() => releaseHeld(c.db, c.by, [{ repo: c.item.repo, number: c.item.number }])); };
 export const resumeBreaker = (db: Db, by: string, key: string): Promise<void> => step(() => resumeStage(db, key, by));
 /** The repo's Automatic switch: whether AutoCraft works its items without a person picking them (the per-repo Pipeline switch). */
-export const setAutomatic = (db: Db, by: string, repo: string, on: boolean): Promise<boolean> => step(() => setRepoPipeline(db, by, repo, on));
+export const setAutomatic = async (db: Db, by: string, repo: string, on: boolean): Promise<boolean> => (await step(() => setPipelineFlags(db, [{ repo, on }], by))).changed.length > 0;

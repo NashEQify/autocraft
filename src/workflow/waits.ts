@@ -1,29 +1,42 @@
-// What an approved workflow's merge leg waits for when nothing can move it on: the pre-merge check of the PR's head, due once the
-// leg is in `ci`, with no Task Runner that may take it, or only the approver's own runners, none of which can claim now
-// (src/remote/takers.ts waitingOn). The status comment, the item page and the agent show it as the state line.
+// What an approved workflow's merge leg waits for when nothing can move it on: the merge, made as the approver, waiting for them
+// to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, with no Task Runner that may take it, or only
+// the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). The status comment, the item page and
+// the agent show it as the state line.
+import { loadImplementFacts } from "../data/implement/index.ts";
+import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
+import { loadActions, loadLegs } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { t, tk } from "../i18n/index.ts";
-import { PREMERGE_MAX_TRIES, premergeAt } from "../premerge/store.ts";
-import { mergeDecisionId } from "../core/rules.ts";
-import { inferenceMode } from "../remote/mode.ts";
 import { takerTest, waitingOn, type RunnerHold } from "../remote/takers.ts";
 import type { ItemWorkflow } from "./types.ts";
 
+/** The PR the workflow's merge leg is on: the item, or an implement workflow's latest implementation PR. */
+async function legPr(db: Db, wf: Pick<ItemWorkflow, "repo" | "number" | "kind">): Promise<number | null> {
+  if (wf.kind === "pr") return wf.number;
+  const a = (await loadImplementFacts(db, [{ repo: wf.repo, number: wf.number }])).byIssue.get(`${wf.repo}#${wf.number}`);
+  return a?.attempt.prNumber ?? a?.prAttempts[0]?.prNumber ?? null;
+}
+
 /**
- * The state line of a workflow whose merge leg waits for a pre-merge check that no Task Runner can take, or that only the own
- * runners of the people whose work it is take while none of them can claim (offline, held for its usage, cooling off); else null.
+ * The state line of a workflow whose merge leg waits for its approver's sign-in, or for a pre-merge check that no Task Runner can
+ * take, or that only the own runners of the people whose work it is take while none of them can claim (offline, held for its
+ * usage, cooling off); else null.
  */
-export async function legWait(db: Db, wf: Pick<ItemWorkflow, "id" | "repo" | "state">, nowMs: number = Date.now()): Promise<string | null> {
+export async function legWait(db: Db, wf: Pick<ItemWorkflow, "id" | "repo" | "number" | "kind" | "state">, nowMs: number = Date.now()): Promise<string | null> {
   if (wf.state !== "running" && wf.state !== "waiting") return null;
-  const p = await db.get(db.k.selectFrom("main.preapprovals").select(["number", "head"]).where("workflow_id", "=", wf.id).where("state", "=", "ci").orderBy("id", "desc").limit(1));
-  if (p?.head) {
-    const d = await db.get(db.k.selectFrom("main.decisions").select(["exec_state", "answered_by"]).where("id", "=", mergeDecisionId(wf.repo, p.number, p.head)));
-    if (d?.exec_state === "waiting-token" && d.answered_by) return t("Waiting for {login} to sign in to AutoCraft, so the merge runs as them", { login: d.answered_by });
-  }
-  if (!p?.head || await inferenceMode(db) !== "user-local") return null;
-  const pm = await premergeAt(db, wf.repo, p.number, p.head);
+  const pr = await legPr(db, wf);
+  if (pr === null) return null;
+  const [legs, actions] = await db.together(() => Promise.all([
+    loadLegs(db, [{ repo: wf.repo, number: pr }], { activeOnly: true, latestOnly: true }),
+    loadActions(db, { workflowIds: [wf.id] }),
+  ]));
+  const p = (legs.get(`${wf.repo}#${pr}`) ?? []).find((l) => l.workflow_id === wf.id && l.state === "ci");
+  if (!p?.head) return null;
+  const merge = [...actions.values()].flat().find((a) => a.kind === "merge" && a.number === pr && a.head === p.head && a.state === "waiting-token");
+  if (merge) return t("Waiting for {login} to sign in to AutoCraft, so the merge runs as them", { login: merge.by });
+  const pm = (await loadPremerge(db, [{ repo: wf.repo, number: pr, head: p.head }])).get(`${wf.repo}#${pr}@${p.head}`) ?? null;
   if (pm && (pm.findings !== null || pm.tries >= PREMERGE_MAX_TRIES)) return null;
-  const call = { prompt_id: "", repos: [wf.repo], step: "premerge", refs: [{ repo: wf.repo, number: p.number }] };
+  const call = { prompt_id: "", repos: [wf.repo], step: "premerge", refs: [{ repo: wf.repo, number: pr }] };
   if (!await takerTest(db, nowMs)(call)) return t("Waiting for the pre-merge check: no Task Runner can take it");
   const [first] = await waitingOn(db, call, nowMs);
   return first ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : null;

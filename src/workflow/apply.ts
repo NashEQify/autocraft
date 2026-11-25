@@ -1,23 +1,26 @@
 // The command core: every surface (GitHub, Discord, the agent, the dashboard, the CLI) parses text with parse.ts and hands the
-// result here. For each item it checks the repo is on the maintainer workflow and that the person may act (src/settlers.ts
-// actRefusal), resolves the text against the item's workflow (resolve.ts), carries the run out on the existing machinery
-// (effects.ts), writes the workflow row and its event (store.ts) and returns the line every surface shows (status.ts).
+// result here. For each item it checks the repo is tracked and that the person may act (src/settlers.ts actRefusal), resolves
+// the text against the item's workflow (resolve.ts), carries the run out on the existing machinery (effects.ts), writes the
+// workflow row with its event in one write and returns the line every surface shows (status.ts).
 //
 // A list of items runs item by item: one that is refused or fails leaves the others running, and the reply lists it. GitHub takes
 // one item per comment. Each person has an hourly number of items per surface, counted from the recorded events so every
 // process and replica shares it.
+import { loadAccess } from "../data/access/index.ts";
+import { loadTrackedRepos } from "../data/control/index.ts";
+import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { adoptLegs, countEventsSince, listWorkflows, recordEvents, saveWorkflows, startWorkflows, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { actRefusal, type ActRefusal } from "../settlers.ts";
-import { prOf } from "./advance.ts";
 import * as fx from "./effects.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
 import { confirmLine, listText, replyLine, stepsFor, utcClock, type Clock } from "./status.ts";
-import { addEvent, insertWorkflow, liveWorkflow, repoWorkflow, updateWorkflow, type WorkflowPatch } from "./store.ts";
-import { WEIGHT_NORMAL, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type Surface, type WorkflowEventKind } from "./types.ts";
+import { WEIGHT_NORMAL, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
 export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; githubId?: number | null };
@@ -56,18 +59,29 @@ function refusalLine(r: ActRefusal, login: string | null, repo: string): string 
 }
 
 /** The tracked repo a command names (`name` or `owner/name`), or null. */
-async function trackedRepo(db: Db, written: string): Promise<string | null> {
+function trackedRepo(tracked: ReadonlySet<string>, written: string): string | null {
   const [owner, name] = written.includes("/") ? written.split("/", 2) as [string, string] : [null, written];
-  const row = await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", name));
-  if (!row) return null;
-  return owner === null || owner.toLowerCase() === ownerOf(row.name).toLowerCase() ? row.name : null;
+  if (!tracked.has(name)) return null;
+  return owner === null || owner.toLowerCase() === ownerOf(name).toLowerCase() ? name : null;
 }
 
-/** How many command items `login` sent on `via` in the last hour. */
-async function sentLastHour(db: Db, login: string, via: Surface, nowMs: number): Promise<number> {
-  const r = await db.get(db.k.selectFrom("main.workflow_events").select((eb) => eb.fn.countAll<number>().as("n"))
-    .where("login", "=", login).where("via", "=", via).where("at", ">", new Date(nowMs - HOUR_MS).toISOString()));
-  return Number(r?.n ?? 0);
+type ItemNow = { kind: ItemKind; state: string; head: string | null };
+/** What a command batch reads once for all its items: the tracked repos, the items and their live workflows. */
+/** `again`: items the list names more than once; each later run reads the workflow the earlier one left. */
+type Batch = { tracked: Set<string>; items: Map<string, ItemNow>; live: Map<string, ItemWorkflow>; again: Set<string> };
+
+async function loadBatch(db: Db, written: readonly ItemRef[]): Promise<Batch> {
+  const tracked = new Set((await loadTrackedRepos(db)).keys());
+  const refs = written.flatMap((x) => { const repo = trackedRepo(tracked, x.repo); return repo ? [{ repo, number: x.number }] : []; });
+  const [items, live] = refs.length
+    ? await db.together(() => Promise.all([loadItems(db, refs, "pr"), listWorkflows(db, { live: true, refs })]))
+    : [new Map(), []] as const;
+  return {
+    tracked,
+    items: new Map([...items].map(([k, it]) => [k, { kind: it.kind as ItemKind, state: it.state, head: it.head_oid }])),
+    live: new Map(live.map((w) => [`${w.repo}#${w.number}`, w])),
+    again: new Set(refs.map((x) => `${x.repo}#${x.number}`).filter((k, i, all) => all.indexOf(k) !== i)),
+  };
 }
 
 /** Runs parsed text from `actor` on each item, and returns one outcome and line per item. */
@@ -78,11 +92,12 @@ export async function runCommand(db: Db, actor: Actor, via: Surface, input: Comm
   const all = (line: string): CommandResult => ({ items: targets.map((x) => ({ repo: x.repo, number: x.number, outcome: "refused", line, workflowId: null })), lines: [line] });
   if (!targets.length) return { items: [], lines: [t("Name an item for the command.")] };
   if (via === "github" && targets.length > 1) return all(t("One item per comment on GitHub. Send a list from the dashboard, Discord or your agent."));
-  if (actor.login && await sentLastHour(db, actor.login, via, Date.parse(at)) + targets.length > COMMAND_LIMITS[via]) {
+  if (actor.login && await countEventsSince(db, { login: actor.login, via, since: new Date(Date.parse(at) - HOUR_MS).toISOString() }) + targets.length > COMMAND_LIMITS[via]) {
     return all(t("Too many commands from {login} in the last hour. Try again later.", { login: actor.login }));
   }
+  const batch = await loadBatch(db, targets);
   const items: ItemOutcome[] = [];
-  for (const target of targets) items.push(await runOne(db, actor, via, input, target, at));
+  for (const target of targets) items.push(await runOne(db, actor, via, input, target, at, batch));
   const many = items.length > 1;
   const lines = items.map((o) => (many ? t("{ref}: {line}", { ref: refText(o.repo, o.number), line: o.line }) : o.line));
   const failed = items.filter((o) => o.outcome !== "run");
@@ -90,30 +105,31 @@ export async function runCommand(db: Db, actor: Actor, via: Surface, input: Comm
   return { items, lines };
 }
 
-async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, target: ItemRef, at: string): Promise<ItemOutcome> {
-  const repo = await trackedRepo(db, target.repo);
+async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, target: ItemRef, at: string, batch: Batch): Promise<ItemOutcome> {
+  const repo = trackedRepo(batch.tracked, target.repo);
   const out = (outcome: ItemOutcome["outcome"], line: string, workflowId: number | null = null): ItemOutcome =>
     ({ repo: repo ?? target.repo, number: target.number, outcome, line, workflowId });
   if (!repo || (input.visible && !await input.visible(repo))) return out("refused", t("{repo} is not a repository AutoCraft tracks.", { repo: target.repo }));
-  if (await repoWorkflow(db, repo) !== "new") return out("refused", t("AutoCraft commands are not switched on for {repo}.", { repo: slugOf(repo) }));
   const no = await actRefusal(db, actor, repo);
   if (no) return out("refused", refusalLine(no, actor.login, repo));
   const login = actor.login!;
   const ref = refText(repo, target.number);
-  const it = await db.get(db.k.selectFrom("main.items").select(["kind", "state", "head_oid"]).where("repo", "=", repo).where("number", "=", target.number));
+  const key = `${repo}#${target.number}`;
+  const it = batch.items.get(key);
   if (!it) return out("refused", t("{ref} is not an item AutoCraft has read.", { ref }));
   if (it.state !== "OPEN") return out("refused", t("{ref} is not open.", { ref }));
-  const kind = it.kind as ItemKind;
-  const head = input.head ?? it.head_oid ?? null;
-  if (input.head !== undefined && it.head_oid !== input.head) return out("refused", t("{ref} changed after the command was written. Send it again.", { ref }));
+  const kind = it.kind;
+  const head = input.head ?? it.head ?? null;
+  if (input.head !== undefined && it.head !== input.head) return out("refused", t("{ref} changed after the command was written. Send it again.", { ref }));
 
-  const wf = await liveWorkflow(db, repo, target.number);
+  // A list may name the item twice: the first run's workflow is the one the second sees.
+  const wf = batch.live.get(key) ?? null;
   const r = resolve(input.parsed, { kind, workflow: wf });
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string) =>
-    addEvent(db, { workflowId, repo, number: target.number, login, via, kind, parsed: input.parsed, line, at });
+    ({ workflowId, repo, number: target.number, login, via, kind, parsed: input.parsed, line, at });
   if (r.kind === "ambiguous") {
     const line = replyLine(r, input.clock, input.mention);
-    await event("ambiguous", wf?.id ?? null, line);
+    await recordEvents(db, [event("ambiguous", wf?.id ?? null, line)]);
     return out("ambiguous", line, wf?.id ?? null);
   }
   if (r.kind === "refused") return out("refused", replyLine(r, input.clock, input.mention), wf?.id ?? null);
@@ -123,8 +139,16 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor);
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "");
-    await event(eventKind(r.run), done.workflowId, line);
-    return out("run", line, done.workflowId);
+    const id = await db.write(async () => {
+      const id = await done.commit();
+      await recordEvents(db, [event(eventKind(r.run), id, line)]);
+      return id;
+    });
+    if (batch.again.has(key)) {
+      const live = await listWorkflows(db, { live: true, refs: [{ repo, number: target.number }] });
+      if (live[0]) batch.live.set(key, live[0]); else batch.live.delete(key);
+    }
+    return out("run", line, id);
   } catch (e) {
     if (!(e instanceof fx.EffectError)) throw e;
     return out("refused", t("Nothing ran on {ref}: {why}", { ref, why: e.message }), wf?.id ?? null);
@@ -144,52 +168,63 @@ function eventKind(r: Run): WorkflowEventKind {
   return "set";
 }
 
-type Done = { workflowId: number | null; failed: string[]; note?: string };
+/** `commit` writes the workflow row (started, changed or ended) and returns its id; it runs in the write that records the event. */
+type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
-/** Runs the resolved command on the machinery, then writes the workflow row. */
+/** Runs the resolved command on the machinery, then returns the write of the workflow row. */
 async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
-  const ended = async (state: "stopped" | "closed" | "backlog", failed: string[]): Promise<Done> => {
-    if (wf) await updateWorkflow(db, wf.id, { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null }, at);
-    return { workflowId: wfId, failed };
-  };
-  const cw: fx.Ctx = wf ? { ...c, workflowId: wf.id } : c;
-  if (r.end === "stop") return await ended("stopped", await fx.stopAll(cw));
-  if (r.end === "close") return await ended("closed", await fx.close(cw));
-  if (r.end === "backlog") return await ended("backlog", await fx.backlog(cw));
+  const unchanged = async (): Promise<number | null> => wfId;
+  if (r.end !== null) {
+    if (r.end === "close" && item.kind === "pr" && !item.head) throw new fx.EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: refText(item.repo, item.number) }));
+    const state = r.end === "stop" ? "stopped" : r.end === "close" ? "closed" : "backlog";
+    const end: WorkflowPatch = { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null };
+    // An item nobody started gets a row that records the close or the backlog, ended at once.
+    const id = wf?.id ?? await db.write(async () => {
+      const id = (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
+        .get(`${item.repo}#${item.number}`);
+      if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+      await saveWorkflows(db, [{ id, patch: end, at }]);
+      return id;
+    });
+    const cw: fx.Ctx = { ...c, workflowId: id };
+    const failed = r.end === "stop" ? await fx.stopAll(cw) : r.end === "close" ? await fx.close(cw) : await fx.backlog(cw);
+    return { failed, commit: async () => { if (wf) await saveWorkflows(db, [{ id, patch: end, at }]); return id; } };
+  }
   if (r.autorepin !== null) {
-    const githubId = actor.githubId ?? (await db.get(db.k.selectFrom("main.access").select("github_id").where("login", "=", by)))?.github_id ?? null;
-    await fx.autorepin(c, r.autorepin, githubId);
-    return { workflowId: wfId, failed: [] };
+    const githubId = actor.githubId ?? (await loadAccess(db, [by])).get(by.toLowerCase())?.github_id ?? null;
+    await fx.autorepin(c, r.autorepin, githubId === null ? null : Number(githubId));
+    return { failed: [], commit: unchanged };
   }
 
   if (r.start) {
+    const entry = r.start;
     const weight = r.weight ?? WEIGHT_NORMAL;
-    const { preapproval } = await fx.start(c, r.start, r.approve, weight);
-    const id = await db.write(async () => {
-      const id = await insertWorkflow(db, {
-        repo: item.repo, number: item.number, kind: item.kind, entry: r.start!, weight, state: "running", startedBy: by, startedAt: at, startedVia: via, baseHead: item.head,
-        step: stepsFor(r.start!, r.approve)[0]!,
-        ...(r.approve ? { approvedBy: by, approvedAt: at, approvedVia: via } : {}),
-      }, at);
-      if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: id }).where("id", "=", preapproval));
-      return id;
-    });
-    return { workflowId: id, failed: [] };
+    const { preapproval } = await fx.start(c, entry, r.approve);
+    return {
+      failed: [],
+      commit: async () => {
+        const id = (await startWorkflows(db, [{
+          repo: item.repo, number: item.number, kind: item.kind, entry, weight, startedBy: by, startedVia: via, baseHead: item.head,
+          step: stepsFor(entry, r.approve)[0]!, at, ...(r.approve ? { approvedBy: by, approvedVia: via } : {}),
+        }])).get(`${item.repo}#${item.number}`);
+        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+        if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: id }]);
+        return id;
+      },
+    };
   }
 
   // A started item: weight, an answer, a step again, approval.
   const live = wf!;
   const patch: WorkflowPatch = {};
-  if (r.weight !== null && r.weight !== live.weight) {
-    await fx.storeWeight(c, r.weight);
-    patch.weight = r.weight;
-  }
+  // NEEDS remote/level.claimLevel (C04): with it, a weight change also rewrites the claim level of the item's queued calls (runners.setCallLevels).
+  if (r.weight !== null && r.weight !== live.weight) patch.weight = r.weight;
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
   let on = c;
-  if (live.kind === "issue" && !r.decision && (r.again !== null || r.fix.length > 0 || r.merges)) {
+  if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await implementationPr(db, live);
     // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
     if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(t("The pull request changed after the command was written. Send it again."));
@@ -197,31 +232,46 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
   let preapproval: number | null = null;
-  if (r.decision) await fx.answerQuestion(c, r.decision.decision, r.decision.option);
+  if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
   if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
-  if (r.decision) patch.plan = live.plan.filter((p) => p.question !== r.decision!.decision);
+  if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
   // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, ...(item.head ? { baseHead: item.head } : {}) });
   // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
-  if (runs) patch.state = r.again !== null || r.merges || r.decision ? "running" : r.answers ? "done" : live.state;
+  if (runs) patch.state = r.again !== null || r.merges || r.pick ? "running" : r.answers ? "done" : live.state;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
-  await db.write(async () => {
-    await updateWorkflow(db, live.id, patch, at);
-    if (preapproval !== null) await db.run(db.k.updateTable("main.preapprovals").set({ workflow_id: live.id }).where("id", "=", preapproval).where("workflow_id", "is", null));
-  });
-  return { workflowId: live.id, failed: [] };
+  return {
+    failed: [],
+    commit: async () => {
+      await saveWorkflows(db, [{ id: live.id, patch, at }]);
+      if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: live.id }]);
+      return live.id;
+    },
+  };
+}
+
+/**
+ * Records the picked option as the person's answer to the implementation's question; refused when that question is no longer the
+ * attempt's open one (answered meanwhile, or a newer attempt or round).
+ */
+async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promise<void> {
+  const a = (await loadImplementFacts(c.db, [{ repo: c.item.repo, number: c.item.number }])).byIssue.get(`${c.item.repo}#${c.item.number}`);
+  const open = a?.attempt.id === q.implementation && (a.attempt.state === "stuck" || (a.question?.round === q.round && a.answer === null));
+  if (!open) throw new fx.EffectError(t("The question this recommendation answers is no longer open."));
+  await recordAnswers(c.db, [{ id: q.implementation, question: q.round, by: c.by, via: c.via, option }], c.at);
 }
 
 /** The open implementation PR of an implement workflow, with its head; null while the issue has none. */
 async function implementationPr(db: Db, w: ItemWorkflow): Promise<fx.Target | null> {
-  const pr = await prOf(db, w);
-  if (!pr || pr.number < 0) return null;
-  const it = await db.get(db.k.selectFrom("main.items").select(["state", "head_oid"]).where("repo", "=", w.repo).where("number", "=", pr.number));
-  return it?.state === "OPEN" ? { repo: w.repo, number: pr.number, kind: "pr", head: it.head_oid } : null;
+  const a = (await loadImplementFacts(db, [{ repo: w.repo, number: w.number }])).byIssue.get(`${w.repo}#${w.number}`);
+  const pr = a?.attempt.prNumber ?? a?.prAttempts.find((p) => p.createdAt >= w.startedAt)?.prNumber ?? null;
+  if (pr === null) return null;
+  const it = (await loadItems(db, [{ repo: w.repo, number: pr }], "pr")).get(`${w.repo}#${pr}`);
+  return it?.state === "OPEN" ? { repo: w.repo, number: pr, kind: "pr", head: it.head_oid } : null;
 }
 
 // ---- controls ------------------------------------------------------------------------------------------------------------
@@ -233,20 +283,19 @@ export type ControlInput =
   | { control: "set-automatic"; repo: string; on: boolean };
 
 /**
- * Runs a control under the act rule of its repo; a repo on the decision pipeline refuses, as commands do. A breaker without a
+ * Runs a control under the act rule of its repo. A breaker without a
  * repo (the outside-surge breaker) is instance-wide, so only an operator resumes it.
  */
 export async function runControl(db: Db, actor: Actor, via: Surface, input: ControlInput): Promise<{ ok: boolean; line: string }> {
   const written = input.control === "resume-breaker" ? parseTripKey(input.key)?.repo ?? null : input.control === "set-automatic" ? input.repo : input.item.repo;
   const login = actor.login ?? "";
   if (written === null) {
-    const role = actor.login ? (await db.get(db.k.selectFrom("main.access").select("role").where("login", "=", actor.login)))?.role : undefined;
+    const role = actor.login ? (await loadAccess(db, [actor.login])).get(actor.login.toLowerCase())?.role : undefined;
     if (role !== "operator") return { ok: false, line: t("Only an operator resumes an instance-wide breaker.") };
     return await controlStep(() => fx.resumeBreaker(db, login, (input as { key: string }).key), t("Resumed {key} (by {login}).", { key: (input as { key: string }).key, login }));
   }
-  const repo = await trackedRepo(db, written);
+  const repo = trackedRepo(new Set((await loadTrackedRepos(db)).keys()), written);
   if (!repo) return { ok: false, line: t("{repo} is not a repository AutoCraft tracks.", { repo: written }) };
-  if (await repoWorkflow(db, repo) !== "new") return { ok: false, line: t("AutoCraft commands are not switched on for {repo}.", { repo: slugOf(repo) }) };
   const no = await actRefusal(db, actor, repo);
   if (no) return { ok: false, line: refusalLine(no, actor.login, repo) };
   const at = new Date().toISOString();
@@ -259,12 +308,13 @@ export async function runControl(db: Db, actor: Actor, via: Surface, input: Cont
         : t("Automatic work is off for {repo} (by {login}).", { repo: slugOf(repo), login }));
     default: {
       const ref = refText(repo, input.item.number);
-      const it = await db.get(db.k.selectFrom("main.items").select(["kind", "head_oid"]).where("repo", "=", repo).where("number", "=", input.item.number));
+      const it = (await loadItems(db, [{ repo, number: input.item.number }], "pr")).get(`${repo}#${input.item.number}`);
       if (!it) return { ok: false, line: t("{ref} is not an item AutoCraft has read.", { ref }) };
+      if (input.control === "hold-merge" && it.state !== "OPEN") return { ok: false, line: t("Nothing changed: {why}", { why: t("{ref} is not open.", { ref }) }) };
       const c: fx.Ctx = { db, by: login, via, at, item: { repo, number: input.item.number, kind: it.kind as ItemKind, head: it.head_oid } };
       if (input.control === "hold-merge") return await controlStep(() => fx.hold(c), t("{ref} is held out of the next merge (by {login}).", { ref, login }));
       if (input.control === "release-merge") return await controlStep(() => fx.release(c), t("{ref} can merge again (by {login}).", { ref, login }));
-      return await controlStep(() => fx.releaseHeld(c), t("{ref} is released from its author's hold (by {login}).", { ref, login }));
+      return await controlStep(() => fx.releaseHeldItem(c), t("{ref} is released from its author's hold (by {login}).", { ref, login }));
     }
   }
 }

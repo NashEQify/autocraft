@@ -26,8 +26,8 @@ export type PlanPart = {
   files?: string[];
   /** An implement question's option this part is (its key in the question): naming the part picks it. */
   option?: string;
-  /** The question (decision id) whose option the part is. */
-  question?: string;
+  /** The question whose option the part is. */
+  question?: QuestionRef;
   major?: boolean;
   state: "planned" | "dropped" | "fixed";
 };
@@ -42,11 +42,20 @@ export type Recommendation = {
   close?: boolean;
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
-  /** A yes answers this question of the legacy machinery as the person (a stuck implementation's Try again). */
-  answer?: { decision: string; option: string; label?: string };
-  /** The open question of the legacy machinery the recommendation stands for: once it is answered or set aside, the recommendation goes. */
-  question?: string;
+  /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
+  answer?: QuestionAnswer;
+  /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
+  question?: QuestionRef;
 };
+
+/** A question an implementation attempt asked: the attempt and the round that asked it (answers are recorded on that attempt). */
+export type QuestionRef = { implementation: number; round: number };
+/** An option picked as the answer to an implementation's question. */
+export type QuestionAnswer = { question: QuestionRef; option: string; label?: string };
+
+/** Both name the same question; a stored value of another shape names none. */
+export const sameQuestion = (a: QuestionRef | null | undefined, b: QuestionRef | null | undefined): boolean =>
+  typeof a === "object" && a !== null && typeof b === "object" && b !== null && a.implementation === b.implementation && a.round === b.round;
 
 export type ItemWorkflow = {
   id: number;
