@@ -285,7 +285,44 @@ export function OutsideLimits({ className }: { className?: string }) {
           )}
         </form>
         <ErrorLine error={write.error} className="mt-2" />
+        {operator && held && <HeldAuthors />}
       </Block>
+    </div>
+  );
+}
+
+const count = (n: number, one: string) => `${num(n)} ${one}${n === 1 ? "" : "s"}`;
+
+/** The outside authors with held items; an operator lets everything held for one author through at once. */
+function HeldAuthors() {
+  const api = useApi();
+  const { data } = useQuery("outside-held", (a) => a.pipeline.heldAuthors());
+  const write = useWrite();
+  if (!data?.length) return null;
+  return (
+    <div className="mt-4">
+      <h3 className="text-xs text-ink/60">Held items by author</h3>
+      <ul className="mt-1 divide-y divide-line border-y border-line">
+        {data.map((h) => (
+          <li key={h.author} className="flex min-h-[44px] flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
+            <div className="min-w-0 flex-1 basis-52">
+              <span className="break-words text-sm font-medium">{h.author}</span>
+              {h.surge && <Badge tone="warn" className="ml-2">Surge</Badge>}
+              <p className="text-xs text-ink/60">
+                {[h.prs && count(h.prs, "PR"), h.issues && count(h.issues, "issue")].filter(Boolean).join(", ")}
+                {h.oldest && (
+                  <>
+                    {", oldest "}
+                    <TimeAgo iso={h.oldest} />
+                  </>
+                )}
+              </p>
+            </div>
+            <ConfirmButton label="Release all" confirmLabel={`Release ${h.prs + h.issues} for ${h.author}`} loading={write.busy === h.author} onConfirm={() => void write.run(h.author, () => api.pipeline.releaseAuthor(h.author))} />
+          </li>
+        ))}
+      </ul>
+      <ErrorLine error={write.error} className="mt-2" />
     </div>
   );
 }

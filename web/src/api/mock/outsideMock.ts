@@ -1,5 +1,5 @@
 // Outside-author protections on fake data: the three numbers, the tripped surge breaker and the items held for two authors.
-import type { OutsideState } from "../types";
+import type { HeldAuthor, OutsideState } from "../types";
 import { NOW } from "./fixtures";
 
 const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
@@ -25,4 +25,18 @@ export function resumeSurge(): void {
   outside.tripped = null;
   held = held.filter((r) => r.reason !== "surge");
   recount();
+}
+
+export const heldAuthors = (): HeldAuthor[] =>
+  [...new Set(held.map((r) => r.author))].map((author) => {
+    const rows = held.filter((r) => r.author === author);
+    const issues = Math.floor(rows.length / 3);
+    return { author, prs: rows.length - issues, issues, oldest: at(rows.length * 130), surge: rows.some((r) => r.reason === "surge") };
+  });
+
+export function releaseAuthor(author: string): number {
+  const n = held.filter((r) => r.author === author).length;
+  held = held.filter((r) => r.author !== author);
+  recount();
+  return n;
 }

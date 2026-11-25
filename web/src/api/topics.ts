@@ -33,7 +33,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
   ["maintain-repos", ["workflows", "items", "repos", "limits", "settings", "access"]],
   ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
-  ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "access", "security", "repos"]],
+  ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "outside", "access", "security", "repos"]],
   ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos"]],
   // One opened event row: its detail reads what the timeline does; the run and the task behind it read one table each.
   ["item-trace-detail:", TRACE],
@@ -64,7 +64,8 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["model-queue", ["remote-queue"]],
   ["audit:", ["access"]],
   ["prompts", []],
-  ["pipeline-state", ["settings", "jobs"]],
+  ["pipeline-state", ["settings", "jobs", "limits", "outside"]],
+  ["outside-held", ["outside", "items", "repos"]],
   ["pipeline-jobs:", ["jobs", "usage"]],
   ["pipeline-job:", ["jobs", "usage", "agents"]],
   ["pipeline", ["jobs", "settings", "repos", "sync"]],
@@ -76,9 +77,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["mention", ["settings"]],
   ["next-page", ["plans", "jobs", "settings", "repos", "items", "ranks", "usage", "stages", "tasks"]],
   ["batch:", ["queue", "tasks", "items", "checks", "access"]],
-  ["queue-batches:", ["queue", "tasks", "items"]],
   ["queue-page:", ["queue", "preapprovals", "plans", "ranks", "items", "checks", "classify", "reviews", "verify", "fixes", "tasks", "settings", "repos", "pr-builds", "build-features"]],
-  ["merge-held", ["queue"]],
   ["envs-repos", ["repos"]],
   ["nightly", ["nightly", "repos"]],
   ["build-features", ["build-features", "repos"]],
@@ -93,7 +92,6 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["envs", ["envs", "tasks"]],
   ["tasks:", ["tasks", "envs"]],
   ["task-", ["tasks", "envs"]],
-  ["build-summary", ["tasks", "envs"]],
 ].sort((a, b) => b[0].length - a[0].length) as [string, Topic[]][];
 
 /** Topics a query key reads, or null for "any change". */

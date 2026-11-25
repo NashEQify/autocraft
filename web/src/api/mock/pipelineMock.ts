@@ -3,7 +3,7 @@ import { mayRunMock } from "./adminMock";
 import type { Api } from "../client";
 import type { Job, JobDetail, PipelineOverview, PipelineState, PipelineStep, StageLimit, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
-import { outside, resumeSurge } from "./outsideMock";
+import { heldAuthors, outside, releaseAuthor, resumeSurge } from "./outsideMock";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 const iso = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -214,6 +214,16 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
         ackedDeadlines.add(step);
         changed();
         return { ok: true as const };
+      },
+      async heldAuthors() {
+        requireOperator();
+        return wait(heldAuthors(), 30);
+      },
+      async releaseAuthor(author) {
+        requireOperator();
+        const released = releaseAuthor(author);
+        changed();
+        return wait({ released }, 30);
       },
       async setOutsideLimits(input) {
         requireOperator();
