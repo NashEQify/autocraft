@@ -12,7 +12,7 @@ import { loadArtifacts, loadLogTails } from "./artifacts.ts";
 import { privateStepExpr } from "./fragments.ts";
 import { byteLen, hasPatchExpr, idsIn, lastLogSteps, parseJson, refKey, TASK_COLUMNS, toTask, type TaskDbRow } from "./rows.ts";
 import { loadConfidentialReadyAt } from "./tasks-load.ts";
-import { CONFIDENTIAL_WAIT, LOG_TAIL_BYTES, PRIVATE_STEPS, StatusError } from "./types.ts";
+import { CONFIDENTIAL_WAIT, LOG_TAIL_BYTES, PRIVATE_STEPS, StatusError, TERMINAL } from "./types.ts";
 import type {
   BuildSummary, BuildTask, BuildTaskDetail, EnvTasks, IdSource, ItemShown, MemRow, PodRun, RefSource, Requires, SandboxEnv, TaskCard, TaskEvent, TaskFilter, TaskHistoryStat, TaskPage, TaskResult,
   TaskState, TaskStep, ViewScope,
@@ -169,15 +169,14 @@ export async function loadStandaloneTasks(db: Db, src: { states: TaskState[] } |
   }));
 }
 
-/** The newest `samples` durations in ms of done tasks per `repo|step`, newest first (a window function). 1 statement. */
-export async function loadTaskDurations(db: Db, pairs: { repo: string; step: string }[], samples: number): Promise<Map<string, number[]>> {
-  if (pairs.length === 0) return new Map();
+/** The newest `samples` durations in ms of done tasks per `repo|step` of the tasks that have not ended, newest first (a window function). 1 statement. */
+export async function loadOpenTaskDurations(db: Db, samples: number): Promise<Map<string, number[]>> {
   const q = queryDb(db);
-  const want = kx.valuesTable(db, pairs, { repo: "text", step: "text" }, "w");
+  const want = q.k.selectFrom("build_tasks as o").select(["o.repo", "o.step"]).distinct().where("o.state", "not in", [...TERMINAL]).as("w");
   const rows = await q.all(q.k.selectFrom((eb) => eb.selectFrom("build_tasks as t").innerJoin(want, (j) => j.onRef("w.repo", "=", "t.repo").onRef("w.step", "=", "t.step"))
     .select((e) => ["t.repo", "t.step", "t.started_at", "t.ended_at", "t.id", e.fn.agg<number>("row_number").over((o) => o.partitionBy(["t.repo", "t.step"]).orderBy("t.id", "desc")).as("rn")])
     .where("t.state", "=", "done").where("t.started_at", "is not", null).where("t.ended_at", "is not", null).as("s"))
-    .select(["s.repo", "s.step", "s.started_at", "s.ended_at"]).where("s.rn", "<=", samples).orderBy("s.repo").orderBy("s.step").orderBy("s.id", "desc"), { label: "build.loadTaskDurations" });
+    .select(["s.repo", "s.step", "s.started_at", "s.ended_at"]).where("s.rn", "<=", samples).orderBy("s.repo").orderBy("s.step").orderBy("s.id", "desc"), { label: "build.loadOpenTaskDurations" });
   const out = new Map<string, number[]>();
   for (const r of rows) (out.get(`${r.repo}|${r.step}`) ?? out.set(`${r.repo}|${r.step}`, []).get(`${r.repo}|${r.step}`)!).push(Date.parse(r.ended_at!) - Date.parse(r.started_at!));
   return out;

@@ -299,28 +299,31 @@ const itemArg = (s: unknown): { repo: string; number: number } => {
 const refText = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
 
 /** Repos not switched to AutoCraft commands read with the same line the command core gives. */
-async function workflowItem(env: McpEnv, raw: unknown): Promise<{ repo: string; number: number }> {
-  const a = args(raw, { item: "item" }, ["item"]);
-  const r = itemArg(a.item);
+async function needWorkflowItem(env: McpEnv, r: { repo: string }): Promise<User> {
+  const workflow = repoWorkflow(env.db, r.repo);
+  void workflow.catch(() => {});
   const user = await env.user(false);
   await needVisible(env.db, reqOf(user), r.repo);
-  if (await repoWorkflow(env.db, r.repo) !== "new") throw new HttpError(409, t("AutoCraft commands are not switched on for {repo}.", { repo: slugOf(r.repo) }));
-  return r;
+  if (await workflow !== "new") throw new HttpError(409, t("AutoCraft commands are not switched on for {repo}.", { repo: slugOf(r.repo) }));
+  return user;
 }
 
 async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
-  const r = await workflowItem(env, raw);
+  const r = itemArg(args(raw, { item: "item" }, ["item"]).item);
   const ref = refText(r);
-  const it = (await loadItems(env.db, [r], "card")).get(ref);
+  // The item's rows are read alongside the checks, which decide whether they count.
+  const reads = env.db.together(() => Promise.all([loadItems(env.db, [r], "card"), loadQuiet(env.db, [ref]), liveWorkflow(env.db, r.repo, r.number), eventsOf(env.db, r.repo, r.number)]));
+  void reads.catch(() => {});
+  const { role } = await needWorkflowItem(env, r);
+  const [found, quiet, wf, stored] = await reads;
+  const it = found.get(ref);
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
   // A quiet pull request (the landing fix of a security finding) shows viewers no workflow text, as on the item page.
-  const role = (await env.user(false)).role;
-  if (role !== "operator" && role !== "maintainer" && (await loadQuiet(env.db, [ref])).has(ref)) {
+  if (role !== "operator" && role !== "maintainer" && quiet.has(ref)) {
     return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
   }
-  const wf = await liveWorkflow(env.db, r.repo, r.number);
   const wait = wf ? await legWait(env.db, wf) : null;
-  const events = (await eventsOf(env.db, r.repo, r.number)).slice(-10);
+  const events = stored.slice(-10);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {

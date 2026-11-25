@@ -158,7 +158,7 @@ const ROUTES: [string, Record<string, string>, string?][] = [
   ["/api/pipeline", {}], ["/api/pipeline/jobs", {}], ["/api/pipeline/jobs/:id", { id: "20" }], ["/api/pipeline/state", {}], ["/api/rates", {}], ["/api/prompts", {}], ["/api/audit", {}], ["/api/cost", {}], ["/api/classifiers", {}], ["/api/contributors", {}],
   ["/api/nightly", {}], ["/api/downloads", {}], ["/api/build/summary", {}], ["/api/build/features", {}], ["/api/build/screenshots", {}], ["/api/batches/:id", { id: "1" }], ["/api/mcp/tokens", {}],
   ["/api/repos/:repo/security", { repo: "repo1" }], ["/api/security/scans", {}], ["/api/security/findings", {}], ["/api/areas/:repo", { repo: "repo1" }],
-  ["/api/health", {}], ["/api/access", {}], ["/api/admin/discord", {}], ["/api/settings/inference", {}], ["/api/settings/jev", {}], ["/api/pipeline/outside/held", {}], ["/healthz/checks", {}],
+  ["/api/health", {}], ["/api/access", {}], ["/api/admin/discord", {}], ["/api/settings/inference", {}], ["/api/settings/jev", {}], ["/api/pipeline/outside/held", {}],
 ];
 
 const name = `pagebench_${randomBytes(3).toString("hex")}`;

@@ -196,16 +196,18 @@ export async function listRunEvents(db: Db, f: { before?: string; limit: number;
   return rows.map((r) => ({ ...toRun(r), toolCount: counts.get(Number(r.id)) ?? 0 }));
 }
 
-/** Last `samples` done runs per `step:model` (newest first), for the live board's estimates; the caller turns pairs into milliseconds. 1 statement. */
-export async function loadCallDurations(db: Db, keys: { step: string; model: string }[], samples: number): Promise<Map<string, { startedAt: string; endedAt: string }[]>> {
+/** Last `samples` done runs per `step:model` (newest first; `running`: of the pairs running now), for the live board's estimates; the caller turns pairs into milliseconds. 1 statement. */
+export async function loadCallDurations(db: Db, keys: { step: string; model: string }[] | "running", samples: number): Promise<Map<string, { startedAt: string; endedAt: string }[]>> {
   const out = new Map<string, { startedAt: string; endedAt: string }[]>();
   if (keys.length === 0) return out;
   const q = queryDb(db);
   const { k } = q;
-  for (const part of kx.chunks(keys)) {
+  for (const part of keys === "running" ? [keys] : kx.chunks(keys)) {
     const rows = await q.all(k.selectFrom(k.selectFrom("main.agent_runs").select(["step", "model", "started_at", "ended_at", "id",
       (eb) => eb.fn.agg<number>("row_number").over((w) => w.partitionBy(["step", "model"]).orderBy("id", "desc")).as("rn")])
-      .where("state", "=", "done").where("ended_at", "is not", null).where(kx.tupleIn(db, ["step", "model"], part.map((x) => [x.step, x.model]), ["text", "text"])).as("t"))
+      .where("state", "=", "done").where("ended_at", "is not", null)
+      .where((eb) => part === "running" ? eb(eb.refTuple("step", "model"), "in", k.selectFrom("main.agent_runs as now").select(["now.step", "now.model"]).where("now.state", "=", "running").$asTuple("step", "model"))
+        : kx.tupleIn(db, ["step", "model"], part.map((x) => [x.step, x.model]), ["text", "text"])).as("t"))
       .select(["t.step", "t.model", "t.started_at", "t.ended_at"]).where("t.rn", "<=", samples).orderBy("t.step").orderBy("t.model").orderBy("t.id", "desc"));
     for (const r of rows) {
       const key = `${r.step}:${r.model}`;

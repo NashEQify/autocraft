@@ -7,6 +7,15 @@ import { join } from "node:path";
 import { effect } from "../src/db/effects.ts";
 import { COLUMNS } from "../src/db/types.ts";
 import { activity } from "../src/dash/api/activity.ts";
+import { allRepos } from "../src/dash/api/admin.ts";
+import { nextPage } from "../src/dash/api/next.ts";
+import { queuePage } from "../src/dash/api/queue-page.ts";
+import { TokenBox } from "../src/dash/server/crypto.ts";
+import { FakeProvider } from "../src/dash/server/provider.ts";
+import { makeUser } from "../src/dash/server/sessions.ts";
+import { refreshPlanCache } from "../src/core/plan-cache.ts";
+import { runRank } from "../src/rank/index.ts";
+import { queueSlots } from "../src/rank/position.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
 import { setMainFixApproval } from "../src/mainfix/approval.ts";
 import { live } from "../src/dash/api/live.ts";
@@ -205,6 +214,63 @@ test("an item's pages read its history in sets", async () => {
   await expectFlat(page((w) => itemPage(w.db, req({}, at))), 2, 12);
   await expectFlat(page((w) => item(w.db, req({}, at))), 2, 12);
   await expectFlat(page((w) => trace(w.db, req({}, at))), 2, 12);
+});
+
+/** `n` more repos the pipeline works, each with an approval, an optional check and an open PR. */
+async function seedRepos({ db }: World, n: number): Promise<string[]> {
+  const names = numbers(n).map((i) => `r${i}`);
+  for (const r of names) {
+    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES (?, 1)").run(r);
+    await db.prepare("INSERT INTO repos (name, visibility) VALUES (?, 'private')").run(r);
+    await db.prepare("INSERT INTO repo_step_approvals (repo, step, by, at) VALUES (?, 'labels', 'op', ?)").run(r, iso(1));
+    await db.prepare("INSERT INTO settings (key, value) VALUES (?, 'on')").run(`build_feature:implement:${r}`);
+    await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at) VALUES (?, 1, 'pr', 'OPEN', 't', 'dev', ?, ?)").run(r, iso(9), iso(9));
+    await db.prepare("INSERT INTO pr_checks (repo, number, head_oid, overall, checks, fetched_at) VALUES (?, 1, 'h', 'success', '[{\"name\":\"build\",\"state\":\"success\"}]', ?)").run(r, iso(5));
+    await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('Mia', ?, 'write', ?)").run(r, new Date().toISOString());
+  }
+  return names;
+}
+
+test("the Repos page reads every repo's settings in sets", async () => {
+  await expectFlat(unit(async (w, n) => {
+    await seedRepos(w, n);
+    return async () => {
+      const rows = (await allRepos(w.db, req())).filter((r) => r.name.startsWith("r"));
+      assert.equal(rows.length, n);
+      assert.ok(rows.every((r) => r.labels?.approved && r.labels.skipped === 1 && !r.merging?.approved && r.seenChecks[0] === "build" && r.buildFeatures.some((f) => f.feature === "implement" && f.on)));
+    };
+  }), 2, 20);
+});
+
+test("a person's permissions on many repos are one read", async () => {
+  await expectFlat(unit(async (w, n) => {
+    const names = await seedRepos(w, n);
+    const session = { rowid: 1, idHash: "h", login: "mia", role: "maintainer" as const, csrf: "c", tokenEnc: null };
+    return async () => {
+      const user = makeUser(w.db, new TokenBox("k".repeat(32)), new FakeProvider(null), session, false);
+      assert.deepEqual(await Promise.all(names.map((r) => user.canWrite(r))), names.map(() => true));
+    };
+  }), 2, 20);
+});
+
+test("the Work queue and Next read their rows in sets", async () => {
+  const seed = async (w: World, n: number): Promise<void> => {
+    await seedPrs(w, n);
+    await runRank(w.db);
+    await refreshPlanCache(w.db);
+  };
+  await expectFlat(unit(async (w, n) => {
+    await seed(w, n);
+    return async () => {
+      for (const tab of ["all", "merge"]) assert.ok((await queuePage(w.db, req({ tab }))).total >= n);
+      assert.ok([...(await queueSlots(w.db, ["app"])).values()].length >= n);
+    };
+  }), 2, 12);
+  await expectFlat(unit(async (w, n) => {
+    await seed(w, n);
+    await w.db.prepare("INSERT INTO lane_next (lane, total, items, at) VALUES ('review', ?, ?, ?)").run(n, JSON.stringify(numbers(n).map((number) => ({ repo: "app", number, action: "review" }))), iso(1));
+    return async () => assert.equal((await nextPage(w.db, ["app"])).steps.find((s) => s.lane === "review")?.items.length, n);
+  }), 2, 12);
 });
 
 test("the activity feed, Home and the Items page read their rows in sets", async () => {

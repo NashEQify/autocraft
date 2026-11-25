@@ -131,9 +131,9 @@ export async function activity(db: Db, req: Req): Promise<ActivityPage | { uncha
   // `since` applies to the first page; a later page is always read.
   if (!cursor && q("since") === stamp) return { unchanged: true, stamp };
   const { events, next } = await page(db, base, { kinds, only, repo, limit, cursor });
-  const info = await itemsOf(db, events);
+  const refs = [...new Set(events.map((e) => `${e.repo}#${e.number}`))];
   // Viewers get no model or failure text: quiet pull requests lose the model-written kinds, every summary is cut to its plain part.
-  const quiet = base.staff ? new Set<string>() : await loadQuiet(db, [...new Set(events.map((e) => `${e.repo}#${e.number}`))]);
+  const [info, quiet] = await Promise.all([itemsOf(db, events), base.staff ? new Set<string>() : loadQuiet(db, refs)]);
   const shown: typeof events = base.staff ? events : events.flatMap((e) => {
     const isQuiet = quiet.has(`${e.repo}#${e.number}`);
     if (isQuiet && VEILED_KINDS.includes(e.kind)) return [];

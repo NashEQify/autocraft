@@ -505,6 +505,8 @@ let cached: { db: Db; at: number; full: string; plain: string; fail: boolean } |
  */
 export async function serveChecks(req: IncomingMessage, res: ServerResponse, db: Db, nowMs: number = Date.now(), ttlMs = 5_000, staff: (req: IncomingMessage) => Promise<boolean> = async () => false): Promise<boolean> {
   if ((req.method !== "GET" && req.method !== "HEAD") || (req.url ?? "").split("?")[0] !== "/healthz/checks") return false;
+  const who = staff(req);
+  void who.catch(() => {});
   if (!cached || cached.db !== db || Date.now() - cached.at >= ttlMs) {
     let body: ReturnType<typeof publicChecks>;
     try {
@@ -514,7 +516,7 @@ export async function serveChecks(req: IncomingMessage, res: ServerResponse, db:
     }
     cached = { db, at: Date.now(), full: JSON.stringify({ ...body, at: new Date(nowMs).toISOString() }), plain: JSON.stringify(anonymousChecks(body)), fail: body.status === "fail" };
   }
-  const text = await staff(req) ? cached.full : cached.plain;
+  const text = await who ? cached.full : cached.plain;
   res.writeHead(cached.fail ? 503 : 200, { ...PROBE_HEADERS, "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(text) });
   res.end(req.method === "HEAD" ? undefined : text);
   return true;
