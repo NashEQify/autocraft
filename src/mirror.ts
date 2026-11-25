@@ -12,6 +12,7 @@ import { syncActivity } from "./activity.ts";
 import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";
 import { envVar } from "./env.ts";
+import { markUnsent } from "./github/unsent.ts";
 import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/read.ts";
 import { DEFAULT_OWNER, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
@@ -182,7 +183,7 @@ export class Client {
   async query(query: string, variables: object): Promise<Node> {
     // Mutations are counted where they are recorded (src/github/write.ts).
     if (!/^\s*mutation\b/.test(query)) effect("github-read");
-    const { env, key } = await this.childEnv(ownerOfVariables(variables));
+    const { env, key } = await this.childEnv(ownerOfVariables(variables)).catch((e) => { throw markUnsent(e); });
     this.useRate(key);
     if (this.remaining !== null && this.remaining < this.reserve) {
       await this.sleepUntilReset(`${this.remaining} points left, reserve ${this.reserve}`);

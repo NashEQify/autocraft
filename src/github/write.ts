@@ -15,6 +15,7 @@ import type { Exec, ExecResult, Git } from "../fixup/git.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstallationError, type TokenScope } from "./install-token.ts";
 import { type Note, withNote } from "./note.ts";
+import { isUnsent, markUnsent } from "./unsent.ts";
 import { advisoryMade, commentMade, issueMade, nodeCommentMade, reviewMade, type GhRead } from "./made.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
@@ -89,9 +90,9 @@ async function appEnv(w: Writer, g: AnyGrant, scope?: TokenScope): Promise<Recor
     return appChildEnv(await (w.mint ?? installationToken)(owner, g.repo, scope));
   } catch (e) {
     const fix = "install it on the repository or set the repository's identity back to legacy";
-    if (e instanceof AppNotInstalledError) throw new AppNoAccessError(`app identity: the GitHub App is not installed on ${owner}; ${fix}`);
-    if (e instanceof RepoNotInInstallationError) throw new AppNoAccessError(`app identity: ${owner}/${g.repo} is not in the GitHub App's installation; ${fix}`);
-    throw new Error(`app identity: no installation token for ${owner}/${g.repo}: ${oneLine(String((e as Error).message ?? e))}`);
+    if (e instanceof AppNotInstalledError) throw markUnsent(new AppNoAccessError(`app identity: the GitHub App is not installed on ${owner}; ${fix}`));
+    if (e instanceof RepoNotInInstallationError) throw markUnsent(new AppNoAccessError(`app identity: ${owner}/${g.repo} is not in the GitHub App's installation; ${fix}`));
+    throw markUnsent(new Error(`app identity: no installation token for ${owner}/${g.repo}: ${oneLine(String((e as Error).message ?? e))}`));
   }
 }
 
@@ -318,19 +319,26 @@ const earlierWrites = (db: Db, job: number, before: string): Promise<Awaited<Ret
 };
 
 type Tried = { id: number; at: string; details: Details };
-/** Whether the row leaves open if the write was made: it was never finished, or failed without GitHub refusing it. */
-const unclear = (r: Tried): boolean => r.details.state === "started" || (r.details.state === "failed" && !REFUSED.test(String(r.details.error ?? "")) && !RATE_LIMITED.test(String(r.details.error ?? "")));
-/** GitHub's rate limits refuse the request before anything is made. */
-const RATE_LIMITED = /rate limit|abuse detection/i;
+/** GitHub's rate limits refuse the request before anything is made (`secondary`: the GraphQL client's word for one). */
+const RATE_LIMITED = /rate limit|abuse detection|^secondary$/i;
+/**
+ * Whether an audit row of a write leaves open if it was made: it was never finished, or failed after its request may have gone out
+ * (no `sent: false`) without GitHub refusing it.
+ */
+export function unclearWrite(details: Details | null): boolean {
+  if (details?.state !== "failed") return details?.state === "started";
+  const error = String(details.error ?? "");
+  return details.sent !== false && !REFUSED.test(error) && !RATE_LIMITED.test(error);
+}
 
 /**
  * The details of the write when an earlier run made it, or the row of a try whose outcome is unknown (the run was stopped before
- * recording it, or recorded a failure that GitHub's own refusal does not explain) with the time of the earliest such try. Null when there is neither.
+ * recording it, or its request went out and failed without GitHub refusing it) with the time of the earliest such try. Null when there is neither.
  */
 async function madeBefore(w: Writer, action: string, target: string, once: Pick<Once<unknown>, "key" | "also" | "lasting" | "find">): Promise<{ done: Details } | { unknown: Tried } | null> {
   const keys = [once.key, ...once.also ?? []];
   const open = (rows: Tried[]): { unknown: Tried } | null => {
-    const list = rows.filter(unclear);
+    const list = rows.filter((r) => unclearWrite(r.details));
     const row = list.find((r) => r.details.state === "started") ?? list[0];
     return row ? { unknown: { ...row, at: list[list.length - 1]!.at } } : null;
   };
@@ -389,11 +397,12 @@ async function recorded<T>(w: Writer, identity: string, action: string, target: 
   try {
     r = await f();
   } catch (e) {
-    await finish(w, id, details, oneLine(String((e as Error).message ?? e)));
+    await finish(w, id, isUnsent(e) ? { ...details, sent: false } : details, oneLine(String((e as Error).message ?? e)));
     throw e;
   }
   const bad = failure?.(r) ?? null;
-  if (bad !== null) await finish(w, id, details, bad);
+  // What is known not to have gone out is recorded as such: a later run makes the write without looking for it.
+  if (bad !== null) await finish(w, id, (r as { sent?: false } | undefined)?.sent === false ? { ...details, sent: false } : details, bad);
   else await finish(w, id, { ...details, ...view?.(r) });
   return r;
 }

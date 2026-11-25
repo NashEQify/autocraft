@@ -13,6 +13,8 @@ import type { ConflictCandidate } from "../src/fixup/conflict-state.ts";
 import type { FixupDeps, FixupSummary } from "../src/fixup/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { SCRATCH } from "./scratch.ts";
+import type { GuardedItem, GuardedRepo, Guarded } from "../src/core/guard.ts";
+import { commentOn, createIssue, ghComment, postReview, type Writer } from "../src/github/write.ts";
 import { insertWorkflow } from "../src/workflow/store.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
@@ -80,4 +82,36 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
   } finally {
     mock.timers.reset();
   }
+});
+
+test("a comment, issue or review that never went out is made by the next try with no look on GitHub; one that went out is looked for", async () => {
+  const db = await connectDb(join(dir, "siblings.db"));
+  await setGithubIdentity(db, "op", "app");
+  const g = { scope: "item", action: { kind: "act" }, repo: "app", number: 3, as: "app" } as unknown as GuardedItem;
+  const gr = { scope: "repo", repo: "app", as: "app" } as unknown as GuardedRepo;
+  const gp = { scope: "pr", action: { kind: "post-review" }, repo: "app", number: 3, head: HEAD, as: "app" } as unknown as Guarded<"post-review">;
+  const note = { by: "fixed" } as const, item = { repo: "app", number: 3, id: "I3" };
+  let mode: "no-token" | "lost" = "no-token", made = 0, looks = 0;
+  const exec = async (_cmd: string, args: string[]) => {
+    if (args[0] === "api") { looks++; return { code: 0, stdout: "", stderr: "" }; }
+    made++;
+    return { code: 1, stdout: "", stderr: "timeout" };
+  };
+  const q = { spent: 0, remaining: 5000, async query(text: string) {
+    if (!text.startsWith("mutation")) { looks++; return { node: null }; }
+    made++;
+    throw new Error("timeout");
+  } };
+  const w: Writer = { db, login: "act", mint: async () => { if (mode === "no-token") throw new Error("HTTP 500"); return "ghs_token"; }, appClient: () => q };
+  const writes = [
+    () => ghComment(w, g, exec, "act-comment", { repo: "app", number: 3, pr: false }, note, "by gh"),
+    () => commentOn(w, g, q, "act-comment", item, note, "by GraphQL"),
+    () => createIssue(w, gr, exec, { repo: "app", target: "app#3", title: "t", body: "b" }, note),
+    () => postReview(w, q, gp, "I3", note, "review"),
+  ];
+  const all = async () => { made = looks = 0; for (const f of writes) await f().catch(() => {}); return [made, looks]; };
+  assert.deepEqual(await all(), [0, 0], "no token: nothing goes out");
+  mode = "lost";
+  assert.deepEqual(await all(), [4, 0], "the tries before are known not to have gone out");
+  assert.deepEqual(await all(), [4, 4], "these may have");
 });

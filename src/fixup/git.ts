@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { envVar } from "../env.ts";
 import { APP_CREDENTIAL_ARGS } from "../github/install-token.ts";
 import { readEnvFor } from "../github/read.ts";
+import { markUnsent } from "../github/unsent.ts";
 import { effect } from "../db/effects.ts";
 
 /** `sent: false`: the command failed before any request went out (the app lane could not get its token), so nothing reached GitHub. */
@@ -24,7 +25,7 @@ export const exec: Exec = async (cmd, args, opts = {}) => {
   // A command that brings its own whole environment (a write lane) or asks to inherit keeps it. Any other gh command and
   // the network reads of git (fetch, ls-remote, clone, pull) read as the current identity: the app's installation token
   // under `app`, the inherited login under `box`. Local git commands and pushes get no token.
-  const read = opts.replaceEnv || opts.inherit ? undefined : await readEnvFor(cmd, args);
+  const read = opts.replaceEnv || opts.inherit ? undefined : await readEnvFor(cmd, args).catch((e) => { throw markUnsent(e); });
   const env = opts.replaceEnv ? opts.env : { ...(read ?? process.env), ...opts.env };
   return spawned(cmd, args, opts, env);
 };
@@ -34,7 +35,7 @@ const spawned = (cmd: string, args: string[], opts: ExecOpts, env: NodeJS.Proces
   let stdout = "", stderr = "";
   p.stdout.on("data", (d) => (stdout += d));
   p.stderr.on("data", (d) => (stderr += d));
-  p.on("error", reject);
+  p.on("error", (e) => reject(p.pid === undefined ? markUnsent(e) : e));
   p.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
   p.stdin.on("error", () => {});
   p.stdin.end(opts.input ?? "");

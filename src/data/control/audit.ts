@@ -273,7 +273,7 @@ export async function loadAssignments(db: Db, scope: { repo?: string } | { refs:
 
 /**
  * The create each held follow-up's filing recorded: the latest `act-open-issue` row of its id no older than `since` (when the filing
- * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun.
+ * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun, or it is known not to have gone out (`sent: false`).
  */
 export async function loadHeldIssueAudits(db: Db, held: { id: number; since: string }[]): Promise<Map<number, { issue: { number: number; url: string } | null }>> {
   const out = new Map<number, { issue: { number: number; url: string } | null }>();
@@ -285,7 +285,7 @@ export async function loadHeldIssueAudits(db: Db, held: { id: number; since: str
     .orderBy(kx.rowid(AUDIT)));
   for (const r of rows) {
     const d = parseDetails(r.details);
-    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)!) continue;
+    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)! || d.sent === false) continue;
     const m = d.state === "done" ? /\/issues\/(\d+)/.exec(String(d.url ?? "")) : null;
     out.set(d.held, { issue: m ? { number: Number(m[1]), url: String(d.url) } : null });
   }

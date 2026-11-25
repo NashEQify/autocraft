@@ -19,7 +19,7 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { exec, fixupDir, type Exec } from "../fixup/git.ts";
 import { issueMade } from "../github/made.ts";
-import { createIssue, ghRerunMainFailed, IssueError, type Writer } from "../github/write.ts";
+import { createIssue, ghRerunMainFailed, IssueError, unclearWrite, type Writer } from "../github/write.ts";
 import { askClaude, saveUsage, type Usage } from "../classify/run.ts";
 import { checkoutForCommit } from "../sandbox/index.ts";
 import { readFailure } from "../cifix/logs.ts";
@@ -262,14 +262,12 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   const began = (await listAudit(db, { actions: ["postmerge-file"], targets: rows.map(issueTarget), order: "desc" })).filter((a) => a.details?.check === check && a.at >= rows[0]!.createdAt);
   const done = began.map((a) => /\/issues\/(\d+)$/.exec(a.details?.state === "done" ? String(a.details.url ?? "") : "")).find((m) => m !== null);
   if (done) return await end("issue-opened", { issueNumber: Number(done[1]) });
-  if (began.length) {
-    for (const a of began) {
-      let made: { number: number; url: string } | null;
-      try {
-        made = await issueMade(deps.gh, { repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at });
-      } catch (e) { return `${repo}: whether the issue for ${check} was opened is not known: ${oneLine(String((e as Error).message ?? e))}`; }
-      if (made) { log(`  ${repo}: the issue for ${check} was opened before: ${made.url}`); return await end("issue-opened", { issueNumber: made.number }); }
-    }
+  for (const a of began.filter((a) => unclearWrite(a.details))) {
+    let made: { number: number; url: string } | null;
+    try {
+      made = await issueMade(deps.gh, { repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at });
+    } catch (e) { return `${repo}: whether the issue for ${check} was opened is not known: ${oneLine(String((e as Error).message ?? e))}`; }
+    if (made) { log(`  ${repo}: the issue for ${check} was opened before: ${made.url}`); return await end("issue-opened", { issueNumber: made.number }); }
   }
   if (cur.state !== "red" || !streak(newest)) return await end("nothing-to-do", {}, "main is green again");
   const g = await guardRepo(db, repo, "main-fix", by);
