@@ -4,23 +4,14 @@
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { decidePr } from "./decide.ts";
-import { pipelineWrites, verifyAllows } from "./rules.ts";
+import { verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
-import { commentApprovalOf } from "../act/approval.ts";
-import { fixIssueApprovalOf } from "../implement/approval.ts";
-import { pushApprovalOf } from "../fixup/approval.ts";
-import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
-import { mainFixApprovalOf } from "../mainfix/approval.ts";
-import { mergeApprovalOf } from "../merge/approval.ts";
-import { ciApprovalOf } from "../merge/ci-approval.ts";
-import { statusApprovalOf } from "../prstatus/approval.ts";
+import { loadRepoGuards } from "../data/control/index.ts";
 import { decideItem } from "./decide-item.ts";
-import { gateRepo, gates, type By, type RepoNeed, type Want } from "./gates.ts";
+import { gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
 import { loadItemFact } from "./issue-facts.ts";
 import type { ActionKind, PrFacts } from "./plan.ts";
 import { identityOfDecision, type Identity } from "../github/identity.ts";
-import { disputeOn } from "../answers/hold.ts";
-import { freshSettings, setting } from "../settings-read.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
 
@@ -66,7 +57,6 @@ const make = <K extends ActionKind>(ref: Ref, a: Want<K>, head: string, as: Iden
 
 async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f: PrFacts } | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
   let read: LiveRead | null = null;
   if (needsLive(a)) {
     if (!live) return { refused: `${name}: no live read of the PR before the write` };
@@ -100,7 +90,9 @@ async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f
 export async function guard<K extends ActionKind>(db: Db, ref: Ref, action: Ask<K>, by: By, live?: Live): Promise<Guarded<K> | Refused> {
   const r = await check(db, ref, action, by, live);
   if ("refused" in r) return r;
-  return make(ref, action, action.head, await identityOfDecision(db, action.decisionId));
+  // A merge a person approved is made as them (src/core/may.ts); a merge on the repo's approval as the app.
+  const m = action.kind === "merge" ? mergeMay(r.f) : null;
+  return make(ref, action, action.head, m?.ok && m.as === "person" ? `user:${m.by}` : await identityOfDecision(db, action.decisionId));
 }
 
 /**
@@ -128,7 +120,6 @@ export async function guardBatchMerge(db: Db, batch: Ref & { head: string }, mem
 /** Lets an issue or PR write of the item steps through while decideItem still has the action for the item. No GitHub read: the caller reads what it needs. */
 export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDecision?: string): Promise<GuardedItem | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
   const f = await loadItemFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
   const why = gates(f, action, by);
@@ -145,15 +136,13 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDe
   return { scope: "item", action, repo: ref.repo, number: ref.number, as: await identityOfDecision(db, asDecision ?? action.decisionId) } as unknown as GuardedItem;
 }
 
-/** The approvals of a repo and the global switch, read now. */
-export const repoApprovals = (db: Db, repo: string): Promise<Parameters<typeof gateRepo>[0]> => freshSettings(() => repoApprovalsNow(db, repo));
-
-async function repoApprovalsNow(db: Db, repo: string): Promise<Parameters<typeof gateRepo>[0]> {
-  const on = pipelineWrites(await setting(db, "pipeline_enabled"));
+/** The approvals of a repo and the global switch, read now (never from a settings snapshot). */
+export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals> {
+  const g = (await loadRepoGuards(db, [repo])).get(repo);
+  const a = g?.approvals ?? {};
   return {
-    merge: !!await mergeApprovalOf(db, repo), push: await pushApprovalOf(db, repo) !== null, comment: await commentApprovalOf(db, repo) !== null, ci: await ciApprovalOf(db, repo) !== null,
-    labels: await labelsApprovalOf(db, repo) !== null, "fix-issue": await fixIssueApprovalOf(db, repo) !== null, "main-fix": await mainFixApprovalOf(db, repo) !== null,
-    status: await statusApprovalOf(db, repo) !== null, pipelineOn: on,
+    merge: !!a.merge, push: !!a.push, comment: !!a.comment, ci: !!a.ci, labels: !!a.labels, "fix-issue": !!a.fixissue, "main-fix": !!a.mainfix, status: !!a.prstatus,
+    pipelineOn: g?.pipelineOn ?? false,
   };
 }
 
