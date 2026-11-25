@@ -265,13 +265,18 @@ export async function loadBatchSizes(db: Db, repos?: string[]): Promise<Map<stri
 
 type HeadKeyRow = { repo: string; number: number; head: string };
 
-async function failedHolding(db: Db, keys: HeadKeyRow[]): Promise<Map<HeadRef, { id: number; summary: string | null }>> {
+/** The failed batch holding each head of `keys`; a key without a head stands for every head of the PR. */
+async function failedHolding(db: Db, keys: (Omit<HeadKeyRow, "head"> & { head?: string })[]): Promise<Map<HeadRef, { id: number; summary: string | null }>> {
   if (keys.length === 0) return new Map();
   const q = queryDb(db);
+  const heads = keys.filter((k): k is HeadKeyRow => k.head !== undefined), refs = keys.filter((k) => k.head === undefined);
   const rows = await q.all(q.k.selectFrom("merge_batches as b").innerJoin("merge_batch_prs as bp", "bp.batch_id", "b.id")
     .select((eb) => ["b.id", "b.repo", "b.summary", "bp.number", "bp.head_oid", eb.selectFrom("merge_batch_prs as q").select(eb.fn.countAll<number>().as("n")).whereRef("q.batch_id", "=", "b.id").as("members")])
     .where("b.state", "=", "failed")
-    .where((eb) => kx.tupleIn(db, [eb.ref("b.repo"), eb.ref("bp.number"), eb.ref("bp.head_oid")], keys.map((k) => [k.repo, k.number, k.head]), ["text", "bigint", "text"]))
+    .where((eb) => eb.or([
+      ...(heads.length ? [kx.tupleIn(db, [eb.ref("b.repo"), eb.ref("bp.number"), eb.ref("bp.head_oid")], heads.map((k) => [k.repo, k.number, k.head]), ["text", "bigint", "text"])] : []),
+      ...(refs.length ? [kx.tupleIn(db, [eb.ref("b.repo"), eb.ref("bp.number")], refs.map((k) => [k.repo, k.number]), ["text", "bigint"])] : []),
+    ]))
     .orderBy("b.id"));
   const out = new Map<HeadRef, { id: number; summary: string | null }>();
   // Ascending ids, so a later (newer) batch replaces an older one at the same head.
@@ -291,7 +296,7 @@ export async function supersedeFailedBatch(db: Db, by: string, key: { repo: stri
   });
 }
 
-/** The failed batch holding each head. */
-export async function loadFailedBatchOf(db: Db, keys: { repo: string; number: number; head: string }[]): Promise<Map<HeadRef, { id: number; summary: string | null }>> {
-  return await failedHolding(db, keys);
+/** The failed batch holding each head of the PRs. 1 statement. */
+export async function loadFailedBatches(db: Db, refs: { repo: string; number: number }[]): Promise<Map<HeadRef, { id: number; summary: string | null }>> {
+  return await failedHolding(db, refs);
 }

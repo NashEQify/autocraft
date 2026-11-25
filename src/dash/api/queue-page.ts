@@ -13,7 +13,7 @@ import type { Exec } from "../../fixup/git.ts";
 import { ControlError, holdMerge, releaseMerge, removeFromBatch, stopBatch } from "../../merge/controls.ts";
 import { loadBatches } from "../../data/merge/index.ts";
 import type { Preapproval } from "../../data/workflow/index.ts";
-import { mergeOrder, queueSlots, scoreLookup } from "../../rank/position.ts";
+import { mergeOrder, queueSlots } from "../../rank/position.ts";
 import { classifyListOf, NOT_PLANNED } from "../../rank/next.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -119,9 +119,8 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     return at === null ? limit : Math.min(500, Math.max(limit, Math.ceil((at + 1) / 100) * 100));
   };
 
-  const score = scoreLookup(db);
   // Items in work order: the workflow's weight first, then the work rank.
-  const inView = await Promise.all(ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)).map(async (r) => ({ r, s: await score(r.repo, r.number) ?? r.score })));
+  const inView = ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)).map((r) => ({ r, s: facts.work.get(refText(r)) ?? r.score }));
   inView.sort((a, b) => b.s - a.s);
   const work: QueueWorkRow[] = inView.map(({ r }) => {
     const bd = r.breakdown;
@@ -154,7 +153,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     return out;
   }
   const rows = entries.map((e) => [e, asRow(e)] as const);
-  const ordered = await mergeOrder(db, entries);
+  const ordered = mergeOrder(entries, (e) => facts.work.get(refText(e)) ?? facts.scores.get(refText(e)) ?? 0);
   const active = facts.batches.filter((b) => (b.state === "checking" || b.state === "open") && b.members.some((p) => inScope(b.repo, p.number)));
   const rowOfEntry = new Map(rows);
   const rowOf = new Map(rows.map(([e, r]) => [`${e.repo}#${e.number}`, r]));

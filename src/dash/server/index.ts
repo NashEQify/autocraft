@@ -33,7 +33,8 @@ import { saveUserTokens } from "./user-tokens.ts";
 import { FakeProvider, WRITE_PERMISSIONS, GitHubProvider, oauthProviderFor, providerFor, type GithubUser, type Provider, type Tokens } from "./provider.ts";
 import { retryWaiting } from "../../github/user-lane.ts";
 import { appPermission } from "../../remote/permission.ts";
-import { cachedWrite, createSession, deleteSession, loadSession, makeUser, PERM_READ_TTL, pruneExpired, SESSION_TTL, userForLogin, type Session } from "./sessions.ts";
+import { cachedWrite, createSession, deleteSession, loadSession, loadSessionPermissions, makeUser, type CachedPermissions, PERM_READ_TTL, pruneExpired, SESSION_TTL, userForLogin, type Session } from "./sessions.ts";
+import { loadVisibilityInputs } from "../../data/views/visibility.ts";
 import { readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../../data/control/index.ts";
 import * as sessions from "../../data/access/index.ts";
 import { handleMcp, mcpReply, writes as mcpWrites, type Msg as McpMsg, type Reply as McpReply } from "../mcp/index.ts";
@@ -373,7 +374,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     }
   }
 
-  async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, session: Session, snapshot?: Promise<SettingsSnapshot>): Promise<void> {
+  async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, session: Session, read?: RequestReads): Promise<void> {
     const method = req.method;
     const out = (r: Res, cookies?: string[]) =>
       send(res, nonce, { ...r, headers: { ...r.headers, [CSRF_HEADER]: session.csrf } }, cookies);
@@ -400,13 +401,13 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     if (route.operator && session.role !== "operator") return out(apiError(403, "operators only"));
     const run = async (): Promise<Res> => await route.handler(db, {
       method, path: url.pathname, params: params!, query: url.searchParams, form: new URLSearchParams(), json,
-      user: makeUser(db, box, provider, session, writes, await githubIdentity(db) === "app"),
+      user: makeUser(db, box, provider, session, writes, await githubIdentity(db) === "app", read?.permissions),
       scope: route.scoped && !writes ? scopeOf(req) : null,
       csrf: session.csrf, ip: clientIp(req), nonce,
     });
-    // A read request takes its settings from one reading of the table, as a planner pass does, and its parts share the
-    // rows they read alike (the item row, the repo lists), so each costs one round trip.
-    const res2 = writes ? await run() : await db.shareReads(async () => await withSettingsSnapshot(db, run, snapshot));
+    // A read request takes its settings from one reading of the table, as a planner pass does, its parts share the rows
+    // they read alike (the item row, the repo lists), and the reads they issue side by side go out as one.
+    const res2 = writes ? await run() : await db.shareReads(() => db.together(() => withSettingsSnapshot(db, run, read && Promise.resolve(read.settings))));
     // The writer sees its own change at once; other processes' writes arrive on the watcher's next read.
     if (writes) await live.poke();
     return out(res2);
@@ -616,10 +617,10 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         void vault.sweepRevocations().catch(() => {});
       }
       // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep. The check
-      // runs alongside the session read; routes that return before it leave it running on its own.
-      const revocations = sessions.hasFreshRevocation(db)
-        .then((fresh) => { if (fresh) void vault.sweepRevocations(true).catch(() => {}); });
-      void revocations.catch(() => {});
+      // runs alongside the session read; routes that return before it run it on its own.
+      const sweepRevoked = async (): Promise<void> => {
+        if (await sessions.hasFreshRevocation(db)) void vault.sweepRevocations(true).catch(() => {});
+      };
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
       if (config.devAuth && (req.headers["x-forwarded-for"] !== undefined || !isLoopbackHost(req.headers.host))) {
@@ -650,10 +651,16 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       if (method === "GET" && url.pathname === DISCORD_TERMS_PATH) return send(res, nonce, { html: discordTermsPage(nonce, await contactOf(db)) });
       // Public: the favicon and the preview image, which sign-in pages and link-preview crawlers load without a session.
       if (method === "GET" && PUBLIC_FILES.has(url.pathname)) return await sendWeb(res, nonce, url.pathname);
-      // A read request's settings snapshot is read with the session (handleApi).
-      const snapshot = method === "GET" && url.pathname.startsWith("/api/") && url.pathname !== "/api/live" ? readSettingsSnapshot(db) : undefined;
-      void snapshot?.catch(() => {});
-      const [session] = await Promise.all([loadSession(db, cookies.get(SESSION_COOKIE)), revocations, snapshot]);
+      const cookieId = cookies.get(SESSION_COOKIE);
+      if (method === "GET" && url.pathname.startsWith("/api/") && url.pathname !== "/api/live") {
+        // What nearly every read request needs is read with the session, in one round trip. The repo lists behind the
+        // visibility check stay in the request's shared reads.
+        return await db.shareReads(async () => {
+          const [session, , settings, permissions] = await db.together(() => Promise.all([loadSession(db, cookieId), sweepRevoked(), readSettingsSnapshot(db), loadSessionPermissions(db, cookieId), loadVisibilityInputs(db)]));
+          return session ? await handleApi(req, res, url, nonce, session, { settings, permissions }) : send(res, nonce, { status: 401, json: { error: "sign-in required" } });
+        });
+      }
+      const [session] = await db.together(() => Promise.all([loadSession(db, cookieId), sweepRevoked()]));
       if (!session) {
         const wantsPage = method === "GET" && /text\/html/.test(String(req.headers.accept ?? ""));
         if (wantsPage) {
@@ -666,7 +673,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         return send(res, nonce, { status: 401, json: { error: "sign-in required" } });
       }
       if (method === "GET" && url.pathname === "/api/live") return await handleLive(req, res, nonce, session);
-      if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url, nonce, session, snapshot);
+      if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url, nonce, session);
       if (url.pathname === "/img") return await sendImage(req, res, url, session);
       // Every other address belongs to the React app, which routes on the client.
       if (method === "GET") return await sendWeb(res, nonce, url.pathname);
@@ -1063,6 +1070,9 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   // Shutting down answers the held claims at once, each with its own short retry, and holds no new ones.
   return { handle, routes: opts.routes, provider, live, close: () => { clearInterval(maintenance); claimWaits.close(); live.close(); } };
 }
+
+/** What a read request reads along with its session. */
+type RequestReads = { settings: SettingsSnapshot; permissions: CachedPermissions };
 
 /** A request that runs more statements than this is logged with its counts. */
 const REQUEST_STATEMENTS_LOGGED = 100;

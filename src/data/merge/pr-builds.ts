@@ -2,7 +2,8 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { createTasks, loadTaskStates } from "../build/index.ts";
+import { createTasks } from "../build/index.ts";
+import { taskStateExpr } from "../build/fragments.ts";
 import { itemHead, openItem, checksOverallAt } from "../mirror/fragments.ts";
 import { headOf, refOf } from "./read.ts";
 import { nowIso, settleByHead, splitHead } from "./settle.ts";
@@ -15,38 +16,35 @@ const STEP = "pr-build";
 type Row = {
   repo: string; number: number; head_sha: string; base_sha: string | null; scope: string; task_id: number | null; retried: number; state: string;
   summary: string | null; ci_overall: string | null; disagree: number; created_at: string; finished_at: string | null;
+  task_state: string | null;
 };
 const COLUMNS = ["repo", "number", "head_sha", "base_sha", "scope", "task_id", "retried", "state", "summary", "ci_overall", "disagree", "created_at", "finished_at"] as const;
 const cols = COLUMNS.map((c) => `b.${c}` as const);
 
-const viewOf = (r: Row, taskStates: ReadonlyMap<number, { state: string }>): PrBuildView => ({
+const viewOf = (r: Row): PrBuildView => ({
   repo: r.repo, number: r.number, headSha: r.head_sha, baseSha: r.base_sha, scope: r.scope, taskId: r.task_id, retried: r.retried, state: r.state, summary: r.summary,
   ciOverall: r.ci_overall, disagree: Number(r.disagree) === 1, createdAt: r.created_at, finishedAt: r.finished_at,
-  taskState: r.task_id === null ? null : taskStates.get(r.task_id)?.state ?? null,
+  taskState: r.task_state,
 });
 
-/** Task states of the queued rows in one statement; a row that has ended needs none. */
-async function taskStatesOf(db: Db, rows: readonly Row[]) {
-  const ids = [...new Set(rows.filter((r) => r.state === "queued" && r.task_id !== null).map((r) => r.task_id!))];
-  return ids.length ? await loadTaskStates(db, ids) : new Map();
-}
+/** The state of a queued row's task; a row that has ended needs none. */
+const taskState = (eb: any, row: string) => eb.case().when(`${row}.state`, "=", "queued").then(taskStateExpr(eb, `${row}.task_id`)).end().as("task_state");
 
 /**
- * Per item the build of its head, else its newest build, with the task state of a queued one (a second wave). `head` null means
- * the newest build.
+ * Per item the build of its head, else its newest build, with the task state of a queued one. Without `head` it is the item's
+ * head in the mirror; null means the newest build. 1 statement.
  */
-export async function loadPrBuildViews(db: Db, items: { ref: RefKey; head: string | null }[]): Promise<Map<RefKey, PrBuildView>> {
+export async function loadPrBuildViews(db: Db, items: { ref: RefKey; head?: string | null }[]): Promise<Map<RefKey, PrBuildView>> {
   if (items.length === 0) return new Map();
   const q = queryDb(db);
   const k = q.k as any;
-  const want = items.map((i) => { const at = i.ref.lastIndexOf("#"); return { repo: i.ref.slice(0, at), number: Number(i.ref.slice(at + 1)), head: i.head }; });
+  const want = items.map((i) => { const at = i.ref.lastIndexOf("#"); return { repo: i.ref.slice(0, at), number: Number(i.ref.slice(at + 1)), head: i.head ?? null, mirrored: i.head === undefined ? 1 : 0 }; });
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("pr_builds as b")
-    .innerJoin(kx.valuesTable(db, want, { repo: "text", number: "bigint", head: "text" }, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "b.number"))
+    .innerJoin(kx.valuesTable(db, want, { repo: "text", number: "bigint", head: "text", mirrored: "bigint" }, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "b.number"))
     .select((e: any) => [...cols, e.fn.agg("row_number").over((o: any) => o.partitionBy(["b.repo", "b.number"])
-      .orderBy(e.case().when("b.head_sha", "=", e.ref("kk.head")).then(e.lit(0)).else(e.lit(1)).end()).orderBy("b.created_at", "desc")).as("rn")]).as("t"))
-    .selectAll().where("rn", "=", 1)) as (Row & { rn: number })[];
-  const states = await taskStatesOf(db, rows);
-  return new Map(rows.map((r) => [refOf(r.repo, r.number), viewOf(r, states)]));
+      .orderBy(e.case().when("b.head_sha", "=", e.case().when("kk.mirrored", "=", 1).then(itemHead(e, "b.repo", "b.number")).else(e.ref("kk.head")).end()).then(e.lit(0)).else(e.lit(1)).end()).orderBy("b.created_at", "desc")).as("rn")]).as("t"))
+    .selectAll("t").select((eb: any) => taskState(eb, "t")).where("rn", "=", 1)) as (Row & { rn: number })[];
+  return new Map(rows.map((r) => [refOf(r.repo, r.number), viewOf(r)]));
 }
 
 /** Builds created after `sinceMs` (epoch ms) and the `number@head` set the repo already has. 2 statements in one wave. */
@@ -59,16 +57,15 @@ export async function loadPrBuildState(db: Db, repo: string, sinceMs: number): P
   return { usedSince: Number(used?.n ?? 0), have: new Set(have.map((r) => `${r.number}@${r.head_sha}`)) };
 }
 
-/** Queued builds (of `repo`, or all) with the item's state and head, oldest first; the task states come in a second wave. */
+/** Queued builds (of `repo`, or all) with the item's and the task's state and the item's head, oldest first. 1 statement. */
 export async function loadPendingPrBuilds(db: Db, repo?: string): Promise<PendingBuild[]> {
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("pr_builds as b")
-    .select((eb: any) => [...cols, openItem(eb, "b.repo", "b.number").as("is_open"), itemHead(eb, "b.repo", "b.number").as("item_head")])
+    .select((eb: any) => [...cols, openItem(eb, "b.repo", "b.number").as("is_open"), itemHead(eb, "b.repo", "b.number").as("item_head"), taskState(eb, "b")])
     .where("b.state", "=", "queued")
     .$if(!!repo, (s: any) => s.where("b.repo", "=", repo!))
     .orderBy("b.created_at").orderBy("b.number")) as (Row & { is_open: unknown; item_head: string | null })[];
-  const states = await taskStatesOf(db, rows);
-  return rows.map((r) => ({ ...viewOf(r, states), itemState: r.is_open ? "OPEN" as const : "CLOSED" as const, currentHead: r.item_head }));
+  return rows.map((r) => ({ ...viewOf(r), itemState: r.is_open ? "OPEN" as const : "CLOSED" as const, currentHead: r.item_head }));
 }
 
 /** Failed builds whose CI turned green at the same head since the build ended and that are not yet flagged. */

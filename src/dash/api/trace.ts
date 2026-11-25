@@ -424,10 +424,13 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
 }
 
 /** A fingerprint of what the item's sources hold. Equal fingerprints mean the answer would not change, so `since` is answered without gathering anything. */
-export async function fingerprint(c: Ctx, qkey: string, extra: unknown[] = []): Promise<string> {
-  const parts: unknown[] = [qkey, c.staff, c.operator, c.hidden, ...(await loadItemTraceStamp(c.db, traceScope(c), { repo: c.repo, number: c.n })), ...extra];
+const fingerprint = (c: Ctx, qkey: string, sources: unknown[]): string => {
+  const parts: unknown[] = [qkey, c.staff, c.operator, c.hidden, ...sources];
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
-}
+};
+
+/** What the trace's reads narrow by, before the item's own checks: the caller reads alongside `context` and drops the rows when that throws. */
+export const contextScope = async (db: Db, req: Req) => ({ staff: canSeeInternals(req), operator: req.user.role === "operator", hidden: await hiddenRepos(db, req) });
 
 export async function context(db: Db, req: Req): Promise<Ctx> {
   const repo = req.params.repo!;
@@ -445,7 +448,6 @@ export async function context(db: Db, req: Req): Promise<Ctx> {
 }
 
 export async function trace(db: Db, req: Req): Promise<ItemTrace | { unchanged: true; stamp: string }> {
-  const c = await context(db, req);
   const q = (k: string) => req.query.get(k) || undefined;
   const limitRaw = q("limit");
   if (limitRaw !== undefined && !/^\d{1,4}$/.test(limitRaw)) throw new HttpError(400, "limit must be a whole number");
@@ -466,7 +468,11 @@ export async function trace(db: Db, req: Req): Promise<ItemTrace | { unchanged: 
     if (!at) throw new HttpError(400, "bad cursor");
     after = { at, id: cursor.slice(i + 1) };
   }
-  const stamp = await fingerprint(c, JSON.stringify([kq ?? "", only, limit]));
+  // The stamp's sources are read with the context, whose checks decide whether they count.
+  const sources = contextScope(db, req).then((s) => loadItemTraceStamp(db, s, { repo: req.params.repo!, number: Number(req.params.n) }));
+  void sources.catch(() => {});
+  const c = await context(db, req);
+  const stamp = fingerprint(c, JSON.stringify([kq ?? "", only, limit]), await sources);
   // `since` applies to the first page; a later page is always read.
   if (!cursor && q("since") === stamp) return { unchanged: true, stamp };
   const rows = await loadTraceRows(c);

@@ -88,14 +88,14 @@ export function whitelistVerdict(i: WhitelistInput): Map<string, boolean> {
 }
 
 /** What the policy reads for `authors`: one wave. A long list (the contributors page) reads every login rather than binding thousands of parameters. */
-async function loadInput(db: Db, authors: AuthorRef[], o: { overrides?: Map<string, Override>; history?: AuthorHistory[] } = {}): Promise<WhitelistInput> {
+async function loadInput(db: Db, authors: AuthorRef[], o: { overrides?: Map<string, Override>; history?: AuthorHistory[]; bound?: Map<string, number> } = {}): Promise<WhitelistInput> {
   const logins = [...new Set(authors.map((a) => a.login))];
   const all = logins.length > 500;
   const [rule, history, overrides, bound] = await db.together(() => Promise.all([
     getRule(db),
     o.history ?? loadAuthorHistory(db, all ? {} : { logins }),
     o.overrides ?? loadOverrides(db, all ? "all" : logins),
-    loadAuthorIds(db, all ? "all" : logins),
+    o.bound ?? loadAuthorIds(db, all ? "all" : logins),
   ]));
   return { authors, overrides, history, bound, rule };
 }
@@ -116,9 +116,11 @@ export async function authorTotals(db: Db, login: string): Promise<{ merged: num
 
 export async function contributors(db: Db, opts: { repo?: string; login?: string } = {}): Promise<Contributor[]> {
   // Stats always come from every repo; the repo filter only picks who is listed.
-  const [history, overrides] = await db.together(() => Promise.all([
+  const [history, overrides, bound] = await db.together(() => Promise.all([
     loadAuthorHistory(db, { repo: opts.repo, logins: opts.login ? [opts.login] : undefined }),
     loadOverrides(db, opts.login ? [opts.login] : "all"),
+    // One login is all the list can hold, so its bound account needs no second wave.
+    opts.login ? loadAuthorIds(db, [opts.login]) : undefined,
   ]));
   const byLogin = new Map<string, { merged: number; closed: number; open: number; last: string | null; repos: Set<string> }>();
   for (const h of history) {
@@ -134,7 +136,7 @@ export async function contributors(db: Db, opts: { repo?: string; login?: string
   if (!opts.repo) for (const o of overrides.values()) if (!listed.has(o.login.toLowerCase()) && (!opts.login || o.login === opts.login)) rows.push({ login: o.login, override: o, open: 0, last_merge: null, repos: "" });
   // History, override and tier are those of the account the login is bound to, as the merge rule reads them.
   const authors = rows.map((r) => ({ login: r.login, id: null }));
-  const input = await loadInput(db, authors, { overrides, history });
+  const input = await loadInput(db, authors, { overrides, history, bound });
   const st = standingsOf(input);
   return rows.map((r) => {
     const s = st.get(tierKey({ login: r.login, id: null }))!;

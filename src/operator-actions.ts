@@ -3,8 +3,8 @@
 // again after a single-PR batch failed. Each changes
 // only local tables (the pipeline then picks the item up as usual) and is audited; none writes to GitHub.
 import { loadPrMirror } from "./data/mirror/index.ts";
-import { loadReviewsAt, dropHoldReviews } from "./data/review/index.ts";
-import { loadFailedBatchOf, markVerificationsStale, supersedeFailedBatch, verificationOf } from "./data/merge/index.ts";
+import { loadReviewVerdicts, dropHoldReviews } from "./data/review/index.ts";
+import { loadFailedBatches, loadVerifications, markVerificationsStale, supersedeFailedBatch, verificationOf } from "./data/merge/index.ts";
 import { addAudit } from "./data/control/index.ts";
 import { headOf } from "./core/rules.ts";
 import type { Db } from "./db/index.ts";
@@ -37,27 +37,22 @@ async function openItem(db: Db, repo: string, n: number): Promise<Item> {
   return r;
 }
 
-const heldReview = async (db: Db, repo: string, n: number, head: string | null) => {
-  if (!head) return undefined;
-  const r = (await loadReviewsAt(db, [{ repo, number: n, head }])).get(`${repo}#${n}@${head}`);
-  return r?.verdict === "hold" ? { reason: r.reason } : undefined;
-};
+const isFailedVerify = (v: { state: string } | undefined): boolean => v?.state === "failed" || v?.state === "error";
 const failedVerify = async (db: Db, repo: string, n: number, head: string | null) => {
   const v = head ? await verificationOf(db, repo, n, head) : undefined;
-  return v && (v.state === "failed" || v.state === "error") ? { state: v.state, summary: v.summary } : undefined;
+  return v && isFailedVerify(v) ? { state: v.state, summary: v.summary } : undefined;
 };
 /** The legacy fix step's stopped attempt; the fix step is retired, so there is none. */
 export const stoppedFix = async (_db: Db, _repo: string, _n: number): Promise<{ state: string; round: number; retries: number; push_tries: number; reason: string | null; summary: string | null } | null> => null;
 
-const failedBatch = async (db: Db, repo: string, n: number, head: string | null) =>
-  head ? (await loadFailedBatchOf(db, [{ repo, number: n, head }])).get(`${repo}#${n}@${head}`) : undefined;
-
 /** Which releases apply to the item now; the Item page shows only these. */
 export async function actionsOf(db: Db, repo: string, n: number): Promise<ItemActions> {
-  const r = await itemOf(db, repo, n);
-  if (!r || r.state !== "OPEN" || r.kind !== "pr") return { reviewAgain: false, verifyAgain: false, batchAgain: false };
-  const [review, verify, batch] = await db.together(() => Promise.all([heldReview(db, repo, n, r.head), failedVerify(db, repo, n, r.head), failedBatch(db, repo, n, r.head)]));
-  return { reviewAgain: !!review, verifyAgain: !!verify, batchAgain: !!batch };
+  const refs = [{ repo, number: n }];
+  // The current head is known only with the item, so each source is read for every head of the PR: one wave.
+  const [r, reviews, verifications, batches] = await db.together(() => Promise.all([itemOf(db, repo, n), loadReviewVerdicts(db, refs), loadVerifications(db, refs, { tasks: false }), loadFailedBatches(db, refs)]));
+  if (!r || r.state !== "OPEN" || r.kind !== "pr" || !r.head) return { reviewAgain: false, verifyAgain: false, batchAgain: false };
+  const at = `${repo}#${n}@${r.head}`;
+  return { reviewAgain: reviews.get(at) === "hold", verifyAgain: isFailedVerify(verifications.get(at)), batchAgain: batches.has(at) };
 }
 
 /** Removes the hold review at the PR's current head so the Review stage reviews that head again. */

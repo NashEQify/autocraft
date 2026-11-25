@@ -30,6 +30,15 @@ export async function loadReviewsAt(db: Db, heads: HeadKey[]): Promise<Map<HeadR
   return out;
 }
 
+/** The verdict of every reviewed head of the PRs. 1 statement. */
+export async function loadReviewVerdicts(db: Db, refs: { repo: string; number: number }[]): Promise<Map<HeadRef, string>> {
+  if (!refs.length) return new Map();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.opus_reviews as o").select(["o.repo", "o.number", "o.head_oid", "o.verdict"]).where("o.verdict", "is not", null)
+    .where(kx.refIn(db, "o", refs.map((r) => [r.repo, r.number] as const))));
+  return new Map(rows.map((r) => [headRef(r.repo, Number(r.number), r.head_oid), r.verdict!]));
+}
+
 /** All heads' reviews of each PR, newest first. 1 statement. */
 export async function loadReviewRows(db: Db, keys: KeySource): Promise<Map<RefKey, ReviewRow[]>> {
   const out = new Map<RefKey, ReviewRow[]>();

@@ -58,6 +58,22 @@ export async function loadPermissionsForRepos(db: Db, login: Login, repos: strin
   return out;
 }
 
+const byRepo = (rows: readonly { repo: string; permission: string; checked_at: string }[]): Map<string, PermEntry> =>
+  new Map(rows.map((r) => [r.repo, { permission: r.permission, checkedAt: r.checked_at }]));
+
+/** Every cached permission of one login, by repo. */
+export async function loadPermissionsOf(db: Db, login: Login): Promise<Map<string, PermEntry>> {
+  const q = queryDb(db);
+  return byRepo(await q.all(q.k.selectFrom("main.repo_permissions").select(["repo", "permission", "checked_at"]).where((eb) => kx.ciEq(db, "login", eb.val(login)))));
+}
+
+/** Every cached permission of the login a session belongs to, by repo, without knowing the login yet. */
+export async function loadPermissionsOfSession(db: Db, idHash: string): Promise<Map<string, PermEntry>> {
+  const q = queryDb(db);
+  return byRepo(await q.all(q.k.selectFrom("main.repo_permissions").select(["repo", "permission", "checked_at"])
+    .where("login", "in", (eb) => eb.selectFrom("main.sessions").select("login").where("id_hash", "=", idHash))));
+}
+
 /** Batched upsert, one statement per 500 rows. A pair listed twice (in any letter case of the login) keeps its last row. */
 export async function savePermissions(db: Db, rows: { login: Login; repo: string; permission: string; checkedAt: string }[]): Promise<void> {
   const last = new Map<PermKey, (typeof rows)[number]>();
