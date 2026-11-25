@@ -62,7 +62,7 @@ test("a merge refused for a reason other than CI or mergeable blocks the merge; 
 
 test("a batch the PR failed alone in waits on a person until the PR is handed over anew", async () => {
   const { world } = await import("./world-db.ts");
-  const w = await (await (await (await (await world()).repo()).pr(1)).review(1)).verified(1);
+  const w = await (await (await (await (await (await world()).repo()).acting()).pr(1)).review(1)).verified(1);
   try {
     await w.workflow(1);
     await w.premerge(1, "clean");

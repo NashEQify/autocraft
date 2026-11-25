@@ -377,3 +377,20 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     mock.timers.reset();
   }
 });
+
+test("nothing is posted on a quiet pull request: no ask, and no patch as a comment", async () => {
+  for (const tries of [0, 2]) {
+    const w = world({ canModify: false });
+    const db = await fresh(w.head, { canModify: false, comment: true });
+    await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "app", state: "done", started_by: "op", started_at: T0 }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 50, scan_id: 1, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp", created_at: T0, updated_at: T0, fix_pr: 7 }));
+    for (let i = 1; i <= tries; i++) await db.run(db.k.insertInto("ci_fixes").values({ repo: "app", number: 7, head: w.head, attempt: i, kind: "code", state: "failed", created_at: T0 }));
+    const run = () => runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
+    await run();
+    assert.deepEqual(w.log.filter((l) => l.startsWith("comment:") || l === "model"), [], `${tries} tries`);
+    // The finding is dismissed, and the same PR gets its comment.
+    await db.run(db.k.updateTable("security_findings").set({ state: "dismissed" }));
+    await run();
+    assert.ok(w.log.some((l) => l.startsWith("comment:") || l === "model"), `${tries} tries, no longer quiet`);
+  }
+});

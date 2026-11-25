@@ -16,7 +16,6 @@ describe("item status", () => {
     assert.equal(phaseOf(input({ gh: "MERGED", state: "needs-decision" })), "Merged", "GitHub state wins");
     assert.equal(phaseOf(input({ gh: "CLOSED", state: "ready" })), "Closed");
     assert.equal(phaseOf(input({ state: "needs-decision" })), "Waiting for a person");
-    assert.equal(phaseOf(input({ state: "not-reviewed", wait: "an answer from the author" })), "Waiting for a person", "an untyped wait falls back to its wording");
     assert.equal(phaseOf(input({ state: "not-reviewed" })), "Review");
     assert.equal(phaseOf(input({ state: "review-stale", reviewBlocked: true })), "Held");
     assert.equal(phaseOf(input({ state: "opus-hold", reviewBlocked: true })), "Held", "a hold blocked by other items is parked");

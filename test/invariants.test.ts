@@ -165,6 +165,7 @@ const OWN_WAITS: Record<string, (c: Case) => boolean> = {
   "the pre-merge review": ({ w, f }) => (!!f.premerge && !f.premerge.hasFindings) || underWay(w),
   verification: ({ f }) => ["planned", "running"].includes(f.verification?.state ?? ""),
   "the approved merge to be handed over to its approver": ({ w }) => underWay(w) || w.legs.length > 0,
+  "the workflow's steps before the merge": ({ w }) => underWay(w) || w.legs.length > 0,
   "its pre-approved merge": ({ w }) => underWay(w) || w.legs.length > 0 || w.request !== null,
   "the review's fixes to be applied": ({ f }) => f.lint.length > 0 || f.implementation?.state === "revising",
   "the formatter or lint run of the CI fix": ({ f }) => (f.cifix?.formattingTask != null && !f.cifix.formatterEnded) || f.lint.some((l) => l.step === "cifix" && !l.ended),
@@ -221,16 +222,8 @@ const EXCEPTIONS: Exception[] = [
     covers: ({ w }) => w.workflow?.state === "blocked" || w.workflow?.state === "recommending", example: greenRows({ workflow: startedAs("merge", { state: "blocked", blocker: "other" }), legs: [], review: null }),
   },
   {
-    id: "breaker", rules: ["dead-end"], why: "The plan does not read the circuit breakers: what a tripped stage would do stays a planned action with no wait.",
-    covers: (c) => refusedFor(c, / is paused: /), example: greenRows({ tripped: { merge: "main is red" } }),
-  },
-  {
     id: "pipeline-off", rules: ["dead-end"], why: "The plan shows what would run with the pipeline on.",
     covers: (c) => refusedFor(c, /^The pipeline is off$/), example: greenRows({ pipelineOn: false }),
-  },
-  {
-    id: "repo-approval-off", rules: ["dead-end"], why: "The plan of a PR nobody started shows what would run with the repo's step approvals on.",
-    covers: (c) => !c.w.workflow && refusedFor(c, / are not approved/), example: greenRows({ workflow: null, legs: [], approvals: { merge: false, push: true, comment: true, ci: true, fixissue: true } }),
   },
   {
     id: "request-window", rules: ["dead-end", "false-wait"], why: "A fix-up request that cannot run (any more) holds the fix-ups of the reviews back until the next leg pass ends the request (endStaleRequests).",
