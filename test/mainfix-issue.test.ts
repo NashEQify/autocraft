@@ -15,7 +15,7 @@ async function world() {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "mainfix-issue-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: at(0), pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
-  const w = { created: 0, create: "ok" as "ok" | "lost" | "refused", onGithub: [] as { number: number; url: string; title: string; body: string; at: string }[], listed: 0, unreadable: false, now: at(1) };
+  const w = { created: 0, create: "ok" as "ok" | "lost" | "refused" | "limited", onGithub: [] as { number: number; url: string; title: string; body: string; at: string }[], listed: 0, unreadable: false, now: at(1) };
   const deps: MainFixDeps = {
     now: () => new Date(w.now),
     classify: async (_db, input) => input.checks.map((c) => ({ check: c.check, verdict: "infra" as const, reason: "a missing secret" })),
@@ -28,6 +28,7 @@ async function world() {
     exec: async (cmd, args, opts = {}) => {
       if (cmd !== "gh" || args[1] !== "create") return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
       if (w.create === "refused") return { code: 1, stdout: "", stderr: "HTTP 403: forbidden" };
+      if (w.create === "limited") return { code: 1, stdout: "", stderr: "GraphQL: API rate limit already exceeded" };
       w.created++;
       const url = `https://github.com/storytold/app/issues/${40 + w.created}`;
       w.onGithub.push({ number: 40 + w.created, url, title: args[args.indexOf("--title") + 1]!, body: String(opts.input), at: new Date().toISOString() });
@@ -86,6 +87,21 @@ test("a create whose answer was lost is looked up before it is made again, also 
   w.create = "ok";
   await run();
   assert.deepEqual([w.created, await rows()], [1, [["a1", "issue-opened", 41], ["a2", "issue-opened", 41]]]);
+});
+
+test("an issue held back by a rate limit waits while the next head runs and is opened when that head is red", async () => {
+  const { w, head, run, rows, due } = await world();
+  await head("a1", 0);
+  w.create = "limited";
+  await assert.rejects(run(), /rate limit/);
+  await head("a2", 10, "running");
+  assert.equal(await due(), false);
+  w.create = "ok";
+  await run();
+  assert.deepEqual(await rows(), [["a1", "issue-opening", null]]);
+  await head("a3", 20);
+  await run();
+  assert.deepEqual([w.created, await rows()], [1, [["a1", "issue-opened", 41], ["a3", "issue-opened", 41]]]);
 });
 
 test("a row recorded before any create, and a create GitHub never made, open the issue; a refusal is tried again at the next red head", async () => {

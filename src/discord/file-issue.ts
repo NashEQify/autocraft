@@ -173,7 +173,9 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
         await failReporter(db, req.reporter, tok.version, now);
         return { status: "sign-in", url: `${baseUrl}/discord/github/start?state=${encodeURIComponent(await newReporterState(db, req.reporter, now))}` };
       }
-      if (e instanceof IssueError && !e.clear) { filed = true; /* the issue may exist: the slot stays used */ return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
+      // The issue may exist: the slot stays used, unless this press sent nothing (an earlier press holds the slot of the issue in question).
+      if (e instanceof IssueError && !e.clear) { filed = !e.unsettled; return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
+      if (e instanceof IssueError && e.unsent) return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." };
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;
@@ -255,10 +257,12 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
     try {
       made = await createBotIssue(w, g, run, { repo: req.repo, title, body: `${body}${extra ? `\n\n${extra}` : ""}\n\n${botFooter(req.reporterName)}` }, note);
     } catch (e) {
-      if (e instanceof IssueError && !e.clear) { filed = true; return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
+      // The issue may exist: the slot stays used, unless this press sent nothing (an earlier press holds the slot of the issue in question).
+      if (e instanceof IssueError && !e.clear) filed = !e.unsettled;
       log(`discord: filing as the app failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
       // The installation no longer reaches the repo (the app was removed from it, or from its owner).
       if (e instanceof IssueError && e.noAccess) return { status: "refused", reason: "AutoCraft can no longer file issues in this repo." };
+      if (e instanceof IssueError && !e.clear) return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." };
       // No token (GitHub 5xx, network, rate limit): nothing was sent, so the slot is freed.
       if (e instanceof IssueError && e.unsent) return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." };
       return { status: "refused", reason: "GitHub did not accept the issue." };

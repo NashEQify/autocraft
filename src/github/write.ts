@@ -15,8 +15,8 @@ import type { Exec, ExecResult, Git } from "../fixup/git.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstallationError, type TokenScope } from "./install-token.ts";
 import { type Note, withNote } from "./note.ts";
-import { isUnsent, markUnsent } from "./unsent.ts";
-import { advisoryMade, commentMade, issueMade, nodeCommentMade, reviewMade, type GhRead } from "./made.ts";
+import { isUnsent, markUnsent, rateLimited, refusedWrite, unclearWrite } from "./unsent.ts";
+import { advisoryMade, byUs, commentMade, issueMade, nodeCommentMade, reviewMade, type GhRead } from "./made.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { AppError, appJwt, call, GITHUB_API } from "./app.ts";
@@ -27,11 +27,12 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits, loadWriteTries } from "../data/control/index.ts";
+import { abandonWrites, addOwnCommits, addPushOutcomes, beginWrite, finishWrite, loadMadeBefore, loadPaceWaits, loadTakenWrites, loadWriteTries } from "../data/control/index.ts";
 import { openDb } from "../db/open.ts";
 import { effect } from "../db/effects.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
+export { unclearWrite } from "./unsent.ts";
 export type { Note } from "./note.ts";
 
 /** Who writes (the audit login: the stage name, or the operator for manual actions) and where the row goes. */
@@ -293,20 +294,20 @@ async function finish(w: Writer, id: number, details: Details, error?: string, o
  * tells this write from the other writes of the same action on the same target (a hash of the text, a run id, a commit), and `replay`
  * rebuilds the result from the row of the earlier write. `lasting`: the key names one write for good (it holds the id of the card,
  * command or call the write carries out), so an earlier done row of any run is that write; without it only a done row of this job's own
- * earlier run is. `find` looks on GitHub for a write begun at `since` whose outcome was never learned, whichever run began it; its details
- * complete that row. Without `find` GitHub itself refuses a repeat (one open PR per head, a push over a moved branch) or the repeat does
+ * earlier run is. `find` looks on GitHub for a write begun at `since` whose outcome was never learned, whichever run began it, leaving out
+ * `taken`: what other writes are recorded to have made. Its details complete that row. Without `find` GitHub itself refuses a repeat (one open PR per head, a push over a moved branch) or the repeat does
  * no harm (a rerun).
  */
-type Once<T> = { key: string; also?: string[]; lasting?: boolean; replay: (d: Details) => T; find?: (since: string) => Promise<Details | null> };
+type Once<T> = { key: string; also?: string[]; lasting?: boolean; replay: (d: Details) => T; find?: (since: string, taken: ReadonlySet<string>) => Promise<Details | null> };
 
-/** An earlier write's outcome is unknown and GitHub could not be read to settle it: the write was not made again. */
+/** An earlier write's outcome is unknown and GitHub could not be read to settle it (`cause`): the write was not made again. */
 export class UnsettledError extends Error {}
 
 /** The key of a write made once: a hash of what tells it apart. */
 const onceKey = (...parts: unknown[]): string => createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
 
-/** What tells two comments with the same text apart: the decision, card, comment, command, action, call or repin they answer. */
-const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command", "action", "call", "repin"].map((k) => d[k] ?? null);
+/** What tells two comments with the same text apart: what they answer (a decision, card, comment, command, action, call or repin), or the commit they are about: the `head` an ask is made at, the commit a push note reports (`to`). */
+const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command", "action", "call", "repin", "head", "to"].map((k) => d[k] ?? null);
 /** Whether the details name by id what the comment answers: a comment with the same text and id is then the same one. */
 const answersOne = (d: Details): boolean => ["decision", "card", "comment", "action", "call", "repin"].some((k) => d[k] !== undefined && d[k] !== null);
 
@@ -319,18 +320,6 @@ const earlierWrites = (db: Db, job: number, before: string): Promise<Awaited<Ret
 };
 
 type Tried = { id: number; at: string; details: Details };
-/** GitHub's rate limits refuse the request before anything is made (`secondary`: the GraphQL client's word for one). */
-const RATE_LIMITED = /rate limit|abuse detection|^secondary$/i;
-/**
- * Whether an audit row of a write leaves open if it was made: it was never finished, or failed after its request may have gone out
- * (no `sent: false`) without GitHub refusing it.
- */
-export function unclearWrite(details: Details | null): boolean {
-  if (details?.state !== "failed") return details?.state === "started";
-  const error = String(details.error ?? "");
-  return details.sent !== false && !REFUSED.test(error) && !RATE_LIMITED.test(error);
-}
-
 /**
  * The details of the write when an earlier run made it, or the row of a try whose outcome is unknown (the run was stopped before
  * recording it, or its request went out and failed without GitHub refusing it) with the time of the earliest such try. Null when there is neither.
@@ -371,11 +360,12 @@ async function recorded<T>(w: Writer, identity: string, action: string, target: 
       return once.replay(before.done);
     }
     if (before && once.find) {
+      const taken = await loadTakenWrites(w.db, { target, action, since: before.unknown.at });
       let found: Details | null;
       try {
-        found = await once.find(before.unknown.at);
+        found = await once.find(before.unknown.at, taken);
       } catch (e) {
-        throw new UnsettledError(`${action} on ${target} may have been made by an earlier run and GitHub could not be read: ${oneLine(String((e as Error).message ?? e))}`);
+        throw new UnsettledError(`${action} on ${target} may have been made by an earlier run and GitHub could not be read: ${oneLine(String((e as Error).message ?? e))}`, { cause: e });
       }
       if (found) {
         const { error: _, ...was } = before.unknown.details;
@@ -456,7 +446,7 @@ export async function commentOn(w: Writer, g: Grant, q: Querier, action: string,
     () => q.query(ADD_COMMENT, { id: item.id, body }) as Promise<{ addComment?: { commentEdge?: { node?: { url?: string } } } }>,
     (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }), undefined,
     { key: onceKey(body, ...answered(details)), lasting: answersOne(details), replay: (d) => ({ addComment: { commentEdge: { node: { url: typeof d.url === "string" ? d.url : "" } } } }),
-      find: async (since) => { const url = await nodeCommentMade(q, { id: item.id, body, since }); return url === null ? null : { url }; } });
+      find: async (since, taken) => { const url = await nodeCommentMade(q, { id: item.id, body, since, mine: await byUs(w.db), taken }); return url === null ? null : { url }; } });
   return r.addComment?.commentEdge?.node?.url ?? "";
 }
 
@@ -546,7 +536,7 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
     (x) => ({ review: x.addPullRequestReview?.pullRequestReview?.id ?? undefined }),
     (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"),
     { key: onceKey(g.head, body), replay: (d) => ({ addPullRequestReview: { pullRequestReview: { id: typeof d.review === "string" ? d.review : undefined } } }),
-      find: async (since) => { const review = await reviewMade(q, { id: nodeId, head: g.head, body, since }); return review === null ? null : { review }; } });
+      find: async (since, taken) => { const review = await reviewMade(q, { id: nodeId, head: g.head, body, since, mine: await byUs(w.db), taken }); return review === null ? null : { review }; } });
   return r.addPullRequestReview?.pullRequestReview?.id ?? null;
 }
 
@@ -642,7 +632,7 @@ export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: 
   const body = posted(note, text);
   return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
     [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body,
-    { key: onceKey(body, ...answered(details)), lasting: answersOne(details), find: async (since) => { const url = await commentMade(ghRead(exec), { repo: o.repo, number: o.number, body, since }); return url === null ? null : { url }; } });
+    { key: onceKey(body, ...answered(details)), lasting: answersOne(details), find: async (since, taken) => { const url = await commentMade(ghRead(exec), { repo: o.repo, number: o.number, body, since, mine: await byUs(w.db), taken }); return url === null ? null : { url }; } });
 }
 
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
@@ -703,21 +693,36 @@ export async function ghFork(w: Writer, g: GuardedRepo, exec: Exec, repo: string
   return viaGh(w, await idOf(w, g), exec, "fork-create", repo, details, ["repo", "fork", `${slugOf(repo)}`, "--clone=false"]);
 }
 
-/** `clear`: GitHub refused the request, so no issue can exist. Otherwise the outcome is unknown (a timeout, a lost response, a success without a URL). */
+/** `clear`: GitHub refused the request or it never went out, so no issue can exist. Otherwise the outcome is unknown (a timeout, a lost response, a success without a URL, an answer that could not be recorded). */
 export class IssueError extends Error {
   clear: boolean;
-  /** The write pacing held the create back (WritePacedError): nothing was sent and a later run may simply try again. */
+  /** The write pacing (WritePacedError) or a rate limit of GitHub held the create back: nothing was made and a later run may simply try again. */
   paced: boolean;
   /** Nothing was sent: no token could be minted (`noAccess`: the installation does not reach the repo) or the write was not the app's. */
   unsent: boolean;
   noAccess: boolean;
-  constructor(message: string, clear: boolean, paced = false, o: { unsent?: boolean; noAccess?: boolean } = {}) {
-    super(message); this.clear = clear; this.paced = paced; this.unsent = o.unsent ?? false; this.noAccess = o.noAccess ?? false;
+  /** This call sent nothing: whether an earlier try made the issue is not known (UnsettledError). */
+  unsettled: boolean;
+  constructor(message: string, clear: boolean, paced = false, o: { unsent?: boolean; noAccess?: boolean; unsettled?: boolean } = {}) {
+    super(message); this.clear = clear; this.paced = paced; this.unsent = o.unsent ?? false; this.noAccess = o.noAccess ?? false; this.unsettled = o.unsettled ?? false;
   }
 }
 
-// gh's own wording when GitHub rejects the request before creating anything.
-const REFUSED = /issues are disabled|has disabled issues|could not resolve to a repository|not found|forbidden|must have (?:admin|write|push)|permission|requires authentication|bad credentials|gh auth login|HTTP (?:401|403|404|410|422)|validation failed/i;
+/**
+ * What a create that threw says about the issue. Only an error from before the request (the pacing, or one marked unsent) shows that none
+ * was made: anything else may have come after GitHub made it, a failed write of the audit row included.
+ */
+function issueErrorOf(e: unknown): IssueError {
+  const unsent = e instanceof WritePacedError || isUnsent(e), unsettled = e instanceof UnsettledError;
+  return new IssueError(oneLine(String((e as Error).message ?? e)), unsent, e instanceof WritePacedError, { unsent, noAccess: (unsettled ? e.cause : e) instanceof AppNoAccessError, unsettled });
+}
+
+/** The same of a create whose command failed. */
+function issueFailed(r: ExecResult): IssueError {
+  const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`;
+  const unsent = r.sent === false || rateLimited(m);
+  return new IssueError(m, unsent || refusedWrite(m), rateLimited(m), { unsent });
+}
 
 /**
  * Opens an issue; returns its number and URL. Throws an IssueError when `gh` fails or prints no issue URL; `clear` tells
@@ -731,14 +736,12 @@ export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: st
   try {
     r = await viaGh(w, await idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
       ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body,
-      { key: onceKey(o.repo, scrub(o.title), body), find: async (since) => { const made = await issueMade(ghRead(exec), { repo: o.repo, title: scrub(o.title), body, since }); return made === null ? null : { url: made.url }; } });
+      { key: onceKey(o.repo, scrub(o.title), body), find: async (since, taken) => { const made = await issueMade(ghRead(exec), { repo: o.repo, title: scrub(o.title), body, since, mine: await byUs(w.db), taken }); return made === null ? null : { url: made.url }; } });
   } catch (e) {
-    // exec rejects only when the command could not be started; the pacing rejects before anything is sent.
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError), e instanceof WritePacedError);
+    throw issueErrorOf(e);
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
-  // A failed app-token mint never sent the request (`sent: false`).
-  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m)); }
+  if (r.code !== 0) throw issueFailed(r);
   if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
   return { number: Number(url[1]), url: url[0] };
 }
@@ -754,12 +757,12 @@ export async function createReporterIssue(w: Writer, exec: Exec, o: { repo: stri
     r = await recorded(w, `user:${w.login}`, "discord-issue-open", o.repo, {}, () => exec("gh", ["issue", "create", "--repo", slugOf(o.repo), "--title", o.title, "--body-file", "-"], { input: o.body }),
       (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
       (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`),
-      { key: onceKey(o.repo, w.login, o.title, o.body), replay: ghReplay, find: async (since) => await issueMade(ghRead(exec), { repo: o.repo, title: o.title, body: o.body, since }) });
+      { key: onceKey(o.repo, w.login, o.title, o.body), replay: ghReplay, find: async (since, taken) => await issueMade(ghRead(exec), { repo: o.repo, title: o.title, body: o.body, since, mine: (login) => login?.toLowerCase() === w.login.toLowerCase(), taken }) });
   } catch (e) {
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError));
+    throw issueErrorOf(e);
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
-  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, REFUSED.test(m)); }
+  if (r.code !== 0) throw issueFailed(r);
   if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
   return { number: Number(url[1]), url: url[0] };
 }
@@ -797,12 +800,12 @@ export async function createBotIssue(w: Writer, g: GuardedFiling, exec: Exec, o:
     r = await recorded(w, await idOf(w, g), "discord-issue-bot", o.repo, {}, () => asBot(w, g, exec, ["issue", "create", "--repo", `${g.owner}/${g.repo}`, "--title", title, "--body-file", "-"], body),
       (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
       (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`),
-      { key: onceKey(o.repo, title, body), replay: ghReplay, find: async (since) => await issueMade(ghRead((_cmd, args) => asBot(w, g, exec, args)), { repo: o.repo, title, body, since }) }, g.owner);
+      { key: onceKey(o.repo, title, body), replay: ghReplay, find: async (since, taken) => await issueMade(ghRead((_cmd, args) => asBot(w, g, exec, args)), { repo: o.repo, title, body, since, mine: await byUs(w.db), taken }) }, g.owner);
   } catch (e) {
-    throw new IssueError(oneLine(String((e as Error).message ?? e)), !(e instanceof UnsettledError), e instanceof WritePacedError, { unsent: !(e instanceof UnsettledError), noAccess: e instanceof AppNoAccessError });
+    throw issueErrorOf(e);
   }
   const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
-  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m), false, { unsent: r.sent === false }); }
+  if (r.code !== 0) throw issueFailed(r);
   if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
   return { number: Number(url[1]), url: url[0] };
 }
@@ -968,7 +971,7 @@ export async function ghAdvisoryCreate(w: Writer, g: Grant, exec: Exec, o: { rep
     (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
     // One draft advisory per finding.
     { key: onceKey(o.repo), lasting: true, replay: (d) => ({ code: 0, stdout: typeof d.ghsa === "string" ? d.ghsa : "", stderr: "" }),
-      find: async (since) => { const ghsa = await advisoryMade(ghRead((cmd, args) => exec(cmd, args, { inherit: true })), { repo: o.repo, summary: o.summary, description: o.description, since }); return ghsa === null ? null : { ghsa }; } });
+      find: async (since, taken) => { const ghsa = await advisoryMade(ghRead((cmd, args) => exec(cmd, args, { inherit: true })), { repo: o.repo, summary: o.summary, description: o.description, since, taken }); return ghsa === null ? null : { ghsa }; } });
   return { ghsa: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 

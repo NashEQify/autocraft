@@ -58,6 +58,16 @@ test("a filing-only repo is offered and filed into as the app under its owner, a
   const down = { ...bot, mint: async () => { throw new Error("HTTP 502"); } };
   assert.match((await fileAsBot({ db, log: () => {} }, ask, down) as { reason: string }).reason, /could not be reached/, "a failed mint is not lost access");
 
+  // A create whose answer was lost keeps its slot; a press that cannot look for it uses none, and lost access is still told.
+  const slots = async () => Number((await db.get(db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", "sketchpad")))!.n);
+  const report = { ...ask, title: "Brush jumps" };
+  const had = await slots();
+  await fileAsBot({ db, log: () => {} }, report, { ...bot, exec: async () => ({ code: 1, stdout: "", stderr: "timeout" }) });
+  assert.equal(await slots(), had + 1);
+  assert.match((await fileAsBot({ db, log: () => {} }, report, down) as { reason: string }).reason, /could not be reached/);
+  assert.match((await fileAsBot({ db, log: () => {} }, report, lost) as { reason: string }).reason, /can no longer file/);
+  assert.equal(await slots(), had + 1);
+
   for (let i = 1; i < FILING_MAX; i++) await addFilingRepo(db, "op", `example-studio/pad-${i}`, { read, mint });
   await assert.rejects(addFilingRepo(db, "op", "example-studio/one-more", { read, mint }), /at most/, "the list leaves the app select room for tracked repos");
   assert.equal(await removeFilingRepo(db, "op", "example-studio/sketchpad"), true);

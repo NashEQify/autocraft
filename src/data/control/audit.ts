@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
+import { unclearWrite } from "../../github/unsent.ts";
 import type { AuditFilter, AuditPageFilter, AuditRow, AuditWhere, Details, NewAudit, PaceKey, WriteLogRow, WritePace } from "./types.ts";
 
 const AUDIT = "main.audit";
@@ -191,6 +192,18 @@ export async function loadWriteTries(db: Db, w: { action: string; target: string
   return rows.map((r) => ({ id: Number(r.id), at: r.at, details: parseDetails(r.details) ?? {} }));
 }
 
+/**
+ * The URLs and ids of what the writes on `target`, or of the action on any target, made since `since` (and a little earlier: a row holds
+ * the time its write began): a write whose answer was lost made none of them.
+ */
+export async function loadTakenWrites(db: Db, w: { target: string; action: string; since: string }): Promise<Set<string>> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom(AUDIT).select("details").$narrowType<{ details: string }>()
+    .where("at", ">=", new Date(Date.parse(w.since) - 3_600_000).toISOString()).where((eb) => eb.or([eb("target", "=", w.target), eb("action", "=", w.action)]))
+    .where((eb) => eb(kx.jsonText(db, valid(db, eb), "$.state"), "=", "done")));
+  return new Set(rows.flatMap((r) => { const d = parseDetails(r.details); return [d?.url, d?.review, d?.ghsa].filter((v): v is string => typeof v === "string" && v !== ""); }));
+}
+
 // ---- readers ---------------------------------------------------------------------------------------------------------
 
 const cols = () => [kx.rowid(AUDIT).as("rowid"), "at", "login", "action", "target", "details"] as const;
@@ -273,7 +286,7 @@ export async function loadAssignments(db: Db, scope: { repo?: string } | { refs:
 
 /**
  * The create each held follow-up's filing recorded: the latest `act-open-issue` row of its id no older than `since` (when the filing
- * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun, or it is known not to have gone out (`sent: false`).
+ * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun, or it is known to have made nothing (it never went out, or GitHub refused it).
  */
 export async function loadHeldIssueAudits(db: Db, held: { id: number; since: string }[]): Promise<Map<number, { issue: { number: number; url: string } | null }>> {
   const out = new Map<number, { issue: { number: number; url: string } | null }>();
@@ -285,7 +298,7 @@ export async function loadHeldIssueAudits(db: Db, held: { id: number; since: str
     .orderBy(kx.rowid(AUDIT)));
   for (const r of rows) {
     const d = parseDetails(r.details);
-    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)! || d.sent === false) continue;
+    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)! || (d.state !== "done" && !unclearWrite(d))) continue;
     const m = d.state === "done" ? /\/issues\/(\d+)/.exec(String(d.url ?? "")) : null;
     out.set(d.held, { issue: m ? { number: Number(m[1]), url: String(d.url) } : null });
   }

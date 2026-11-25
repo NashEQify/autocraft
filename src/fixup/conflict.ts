@@ -179,6 +179,8 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
   const ref = refOf(c);
   let files: string[] = [];
   let baseSha: string | null = null;
+  // The push is recorded: what fails after it (the comment) changes nothing about it.
+  let merged = false;
   const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
     const reason = x.scrub(raw);
     await record(db, x.at(), c, state, reason, files, baseSha);
@@ -378,6 +380,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       return;
     }
     await record(db, x.at(), c, "merged", null, files, baseSha, commit);
+    merged = true;
     if (own.ownDiff) await setOwnDiff(db, [{ repo: x.repo, number: c.number, toHead: commit, ownDiff: own.ownDiff, ownDelta: own.delta }]);
     x.summary.pushed.push(ref);
     x.log(`  ${ref}: merged ${c.base} into the branch: ${short(commit)} on ${short(head)}${files.length ? `, resolved ${files.join(", ")}` : ""}`);
@@ -385,10 +388,11 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     const prev = await newestConflictNote(x, c, db);
     const cm = prev
       ? await ghEditComment(x.gw, g, x.d.exec, "conflict-comment-edit", { repo: x.repo, number: c.number, commentId: prev.id }, note, conflictCommentText(c.base, prev.count + 1, x.at()), { run: x.runId })
-      : await ghComment(x.gw, g, x.d.exec, "conflict-comment", { repo: x.repo, number: c.number, pr: true }, note, conflictCommentText(c.base), { run: x.runId });
+      : await ghComment(x.gw, g, x.d.exec, "conflict-comment", { repo: x.repo, number: c.number, pr: true }, note, conflictCommentText(c.base), { run: x.runId, to: commit });
     if (cm.code !== 0) x.log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
   } catch (e) {
     if (isHalt(e)) throw e;
+    if (merged) { x.log(`  ${ref}: after the push: ${x.scrub(oneLine(String((e as Error).message ?? e)))}`); return; }
     await fail("failed", oneLine(String((e as Error).message ?? e)));
   }
 }
