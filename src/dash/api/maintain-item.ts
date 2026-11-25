@@ -3,26 +3,22 @@
 // the agent say. Around it: the signals (duplicates, questions a flip withdrew), security findings of a fix PR, an outside-author
 // hold and the breakers that pause the repo. Viewers get no findings and no withdrawn questions; on a quiet pull request (a
 // security fix) they get no model text either.
-import type { MaintainDuplicate, MaintainEvent, MaintainFinding, MaintainItem, MaintainItemStatus, MaintainWithdrawn } from "../../../web/src/api/types.ts";
+import type { MaintainDuplicate, MaintainEvent, MaintainFinding, MaintainItem, MaintainItemStatus } from "../../../web/src/api/types.ts";
 import type { FindingSeverity, FindingState } from "../../../web/src/api/types.ts";
-import { activeTripRows, mayResumeTrip } from "../../push-outcomes.ts";
-import { tripKey } from "../../core/push-outcome.ts";
-import { INTERNAL_FINDING_STATES } from "../../security/store.ts";
-import { isQuiet } from "../../security/quiet.ts";
+import { mayResumeTrip } from "../../push-outcomes.ts";
+import { tripKey, tripOf } from "../../core/push-outcome.ts";
+import { loadMaintainItem } from "../../data/views/maintain-item.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
-import { eventsOf, isLive, repoWorkflow, workflowHistory, type StoredEvent } from "../../workflow/store.ts";
+import { isLive, type StoredEvent } from "../../workflow/store.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
-import { itemState } from "./shown.ts";
 import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
-
-/** The id suffix of a question a flip to the maintainer workflow withdrew (src/workflow/flip.ts). */
-const FLIP_WITHDRAWN = "~replaced-flip-";
 
 /** Events whose line confirms a command that ran. */
 const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped"]);
@@ -82,70 +78,36 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
   };
 }
 
-async function findings(db: Db, repo: string, n: number): Promise<MaintainFinding[]> {
-  const rows = await db.all(db.k.selectFrom("security_findings").select(["number", "title", "severity", "state"])
-    .where("repo", "=", repo).where("fix_pr", "=", n).where("fork", "is", null).where("state", "not in", INTERNAL_FINDING_STATES).orderBy("number"));
-  return rows.map((r) => ({ number: r.number, title: r.title, severity: r.severity as FindingSeverity, state: r.state as FindingState }));
-}
-
-async function withdrawnOf(db: Db, repo: string, n: number): Promise<MaintainWithdrawn[]> {
-  const rows = await db.all(db.k.selectFrom("main.decisions").select(["id", "kind", "question", "summary", "asked_at"])
-    .where("repo", "=", repo).where("number", "=", n).where("id", "like", `%${FLIP_WITHDRAWN}%`).orderBy("asked_at"));
-  return rows.map((r) => ({ id: r.id, kind: r.kind, question: r.question, summary: r.summary, at: r.asked_at }));
-}
-
-async function duplicatesOf(db: Db, repo: string, n: number): Promise<MaintainDuplicate[]> {
-  const pairs = await db.all(db.k.selectFrom("duplicate_pairs").select(["a", "b", "canonical"])
-    .where("repo", "=", repo).where("verdict", "=", "duplicate").where((eb) => eb.or([eb("a", "=", n), eb("b", "=", n)])));
-  const others = new Map<number, boolean>();
-  for (const p of pairs) {
-    const other = p.a === n ? p.b : p.a;
-    others.set(other, (others.get(other) ?? false) || p.canonical === other);
-  }
-  if (!others.size) return [];
-  const items = await db.all(db.k.selectFrom("main.items").select(["number", "kind", "state", "title"]).where("repo", "=", repo).where("number", "in", [...others.keys()]));
-  return items.map((i) => ({ repo, number: i.number, kind: i.kind === "issue" ? "issue" as const : "pr" as const, state: itemState(i.state), title: i.title ?? "", canonical: others.get(i.number) ?? false }))
-    .sort((a, b) => a.number - b.number);
-}
-
 export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
-  const it = await db.get(db.k.selectFrom("main.items").select(["kind"]).where("repo", "=", repo).where("number", "=", n));
-  if (!it) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
-  const kind = it.kind === "issue" ? "issue" : "pr";
   const staff = canSeeInternals(req);
-  const [workflow, may, history, events, quiet, hidden, trips] = await Promise.all([
-    repoWorkflow(db, repo),
-    req.user.role === "viewer" ? false : mayRunRepo(req.user, repo),
-    workflowHistory(db, repo, n),
-    eventsOf(db, repo, n),
-    staff ? false : isQuiet(db, repo, n),
-    hiddenRepos(db, req),
-    activeTripRows(db),
+  const key = `${repo}#${n}`;
+  const [quiet, hidden, may] = await Promise.all([
+    staff ? new Set<string>() : loadQuiet(db, [key]), hiddenRepos(db, req), req.user.role === "viewer" ? false : mayRunRepo(req.user, repo),
   ]);
+  const facts = await loadMaintainItem(db, { staff, quiet }, { repo, number: n });
+  if (!facts) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
+  const { history, events, hold } = facts;
   const wf = history[history.length - 1] ?? null;
-  const leg = wf ? (await db.get(db.k.selectFrom("main.preapprovals").select("state").where("workflow_id", "=", wf.id).orderBy("id", "desc").limit(1)))?.state ?? null : null;
-  const [security, withdrawn, duplicates, held, released] = await Promise.all([
-    staff ? findings(db, repo, n) : [],
-    staff ? withdrawnOf(db, repo, n) : [],
-    duplicatesOf(db, repo, n),
-    db.get(db.k.selectFrom("outside_holds").select(["author", "reason"]).where("repo", "=", repo).where("number", "=", n)),
-    db.get(db.k.selectFrom("outside_released").select("by").where("repo", "=", repo).where("number", "=", n)),
-  ]);
   // The breakers that stop a step of this repo: its own, and the instance-wide one of each stage.
-  const mineTrips = trips.filter((t) => t.repo === null ? true : t.stage === tripKey(t.tripStage, repo));
+  const mineTrips = facts.trips.flatMap((t) => { const k = tripOf(t.stage); return k && (k.repo === null || t.stage === tripKey(k.stage, repo)) ? [t] : []; });
   const breakers = await Promise.all(mineTrips.map(async (t) => ({
-    key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.tripped_at, canResume: may && await mayResumeTrip(req.user, t.stage),
+    key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.trippedAt, canResume: may && await mayResumeTrip(req.user, t.stage),
   })));
   const shown: MaintainEvent[] = events.map((e) => ({ id: e.id, at: e.at, login: e.login, via: e.via, kind: e.kind, line: e.line }));
+  const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
-    repo, number: n, kind, workflowRepo: workflow === "new", canAct: may,
-    status: wf ? statusOf(wf, events, leg, quiet, await legWait(db, wf)) : null,
-    events: shown, duplicates, withdrawn, security,
-    outside: held && !released ? { reason: held.reason === "surge" ? "surge" : "limit", author: held.author, canRelease: may } : null,
+    repo, number: n, kind: facts.kind, workflowRepo: true, canAct: may,
+    status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf)) : null,
+    events: shown,
+    duplicates: facts.duplicates.map((d): MaintainDuplicate => ({ repo, number: d.other, kind: d.shown?.kind === "issue" ? "issue" : "pr", state: d.shown?.state ?? "open", title: d.shown?.title ?? "", canonical: d.canonical }))
+      .sort((a, b) => a.number - b.number),
+    withdrawn: [],
+    security: facts.findings.map((r): MaintainFinding => ({ number: r.number, title: r.title, severity: r.severity as FindingSeverity, state: r.state as FindingState })),
+    outside: hold && hold.author !== null ? { reason: hold.reason === "surge" ? "surge" : "limit", author: hold.author, canRelease: may } : null,
     breakers,
   };
 }
