@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { poolRoom, repoBatches, takersFirst } from "../src/agents/call.ts";
 import { pool, runHaiku, setRunner } from "../src/classify/run.ts";
 import type { Item } from "../src/classify/parse.ts";
-import { runTiered } from "../src/agents/step.ts";
+import { pruneJevUnsure, runTiered } from "../src/agents/step.ts";
 import { PRIORITY } from "../src/agents/steps.ts";
 import { setJevEnabled } from "../src/agents/jev.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
@@ -84,5 +84,6 @@ test("an unsure Jev answer whose Haiku batch nobody may take is not asked of Jev
     assert.deepEqual([...again.skipped], ["photocraft#7"], "the item still waits for Haiku, unsettled");
     await runTiered(db, PRIORITY, item("t, edited"));
     assert.equal(asked, 2, "changed text is asked again");
+    assert.equal(await pruneJevUnsure(db), 1, "the answer of an item that is not open in a tracked repo is dropped");
   } finally { restore(); }
 });

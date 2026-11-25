@@ -17,6 +17,7 @@ import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type De
 import { recordUsageSamples } from "../agents/accounts.ts";
 import { AccountWatcher } from "../agents/manage.ts";
 import { failRunning, pruneRuns } from "../agents/runs.ts";
+import { pruneJevUnsure } from "../agents/step.ts";
 import { pruneTasks, reapLost } from "../build/tasks.ts";
 import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
@@ -419,6 +420,11 @@ export class Runner {
         await pruneRuns(this.db, t);
       } catch (e) {
         this.o.log(`prune agent runs: ${(e as Error).message}`);
+      }
+      try {
+        await pruneJevUnsure(this.db, t);
+      } catch (e) {
+        this.o.log(`prune kept Jev answers: ${(e as Error).message}`);
       }
       try {
         await pruneCommands(this.db, t);

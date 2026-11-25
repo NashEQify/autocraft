@@ -5,13 +5,13 @@
 import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
 import { jevParallel } from "./accounts.ts";
-import { add, askClaude, askJev, pool, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
+import { add, askClaude, askJev, pool, promptVersion, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
-import { excluded, inList } from "../db/kx.ts";
+import { excluded, inList, refPairs } from "../db/kx.ts";
 import { createHash } from "node:crypto";
 
 /** What a parser knows about the reply it reads. */
@@ -241,13 +241,15 @@ export type TieredResult<JV, HV> = {
   asked: Set<string>;
   /** Items Haiku was to answer whose batch did not run: no Task Runner may take its repo. */
   skipped: Set<string>;
+  /** Items whose Jev answer was kept from an earlier pass (jev_unsure), not asked now. */
+  kept: Set<string>;
 };
 
 export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C, JV> = {}): Promise<TieredResult<JV, HV>> {
-  const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set() };
+  const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set(), kept: new Set() };
   for (const x of items) if (opts.given?.has(tier.ref(x))) out.jev.set(tier.ref(x), opts.given.get(tier.ref(x))!);
   const kept = await keptUnsure(db, tier, items, opts.ctx as C);
-  for (const x of items) { const k = kept.rows.get(tier.ref(x)); if (k !== undefined && !out.jev.has(tier.ref(x)) && k.hash === kept.hashOf(x)) out.jev.set(tier.ref(x), k.answer); }
+  for (const x of items) { const k = kept.rows.get(tier.ref(x)); if (k !== undefined && !out.jev.has(tier.ref(x)) && k.hash === kept.hashOf(x)) { out.jev.set(tier.ref(x), k.answer); out.kept.add(tier.ref(x)); } }
   const toJev = items.filter((x) => !out.jev.has(tier.ref(x)));
   if (toJev.length && await jevAvailable(db)) {
     await pool(toJev.map((x) => async () => {
@@ -290,7 +292,8 @@ async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
     let h = hashes.get(x);
     if (h === undefined) {
       const { item, body } = tier.jev.request(x, ctx);
-      hashes.set(x, h = createHash("sha256").update(body ?? renderJev(tier.jev.id, item as Item | DupePair)).digest("hex"));
+      // The parser's text and the prompt version join the request body: a kept answer is the parsed value, valid only for the parser that made it.
+      hashes.set(x, h = createHash("sha256").update(`${promptVersion(tier.jev.id)}\n${String(tier.jev.parse)}\n${body ?? renderJev(tier.jev.id, item as Item | DupePair)}`).digest("hex"));
     }
     return h;
   };
@@ -317,4 +320,22 @@ async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
   const drop = [...kept.rows.keys()].filter((ref) => !out.skipped.has(ref));
   if (keep.length) await db.run(db.k.insertInto("jev_unsure").values(keep).onConflict((oc) => oc.columns(["prompt_id", "ref"]).doUpdateSet(excluded(["input_hash", "answer", "at"]))));
   if (drop.length) await db.run(db.k.deleteFrom("jev_unsure").where("prompt_id", "=", tier.jev.id).where(inList(db, "ref", drop)));
+}
+
+/** How long a kept unsure Jev answer is reused before it is dropped and Jev is asked again. */
+const JEV_UNSURE_KEEP_MS = 30 * 24 * 3600_000;
+
+/** Drops kept unsure Jev answers older than JEV_UNSURE_KEEP_MS and those of items that are closed, gone or in untracked repos. */
+export async function pruneJevUnsure(db: Db, nowMs: number = Date.now()): Promise<number> {
+  const rows = await db.all(db.k.selectFrom("main.jev_unsure").select(["prompt_id", "ref", "at"]));
+  if (!rows.length) return 0;
+  const open = new Set((await db.all(db.k.selectFrom(refPairs(db, new Set(rows.map((r) => r.ref)), "rp"))
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "rp.repo").onRef("i.number", "=", "rp.number"))
+    .innerJoin("main.tracked_repos as t", "t.name", "i.repo").select(["i.repo", "i.number"]).where("i.state", "=", "OPEN"))).map((r) => `${r.repo}#${r.number}`));
+  const cutoff = new Date(nowMs - JEV_UNSURE_KEEP_MS).toISOString();
+  const drop = new Map<string, string[]>();
+  for (const r of rows) if (r.at < cutoff || !open.has(r.ref)) drop.set(r.prompt_id, [...drop.get(r.prompt_id) ?? [], r.ref]);
+  let n = 0;
+  for (const [id, refs] of drop) n += Number((await db.run(db.k.deleteFrom("main.jev_unsure").where("prompt_id", "=", id).where(inList(db, "ref", refs)))).changes);
+  return n;
 }

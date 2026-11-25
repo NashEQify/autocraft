@@ -81,7 +81,7 @@ async function rateChunk(db: Db, all: Due[], res: PrioritizeResult, log: (line: 
   for (const item of chunk) {
     const ref = refOf(item), v = t.jev.get(ref) ?? null;
     verdicts.set(ref, { jev: v, haiku: t.haiku.get(ref) ?? null });
-    if (v) res.jev++;
+    if (v && !t.kept.has(ref)) res.jev++;
     if (t.haiku.has(ref)) res.haiku++;
   }
   res.haikuAlone += t.alone.size;
