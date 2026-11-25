@@ -1,17 +1,18 @@
-// Screenshots, collect side: the switch gates every step, and only a clear regression on an unchanged head holds a merge.
-import { loadMergeFacts } from "../src/data/merge/index.ts";
+// Screenshots, collect side: the switch gates every step, and only a clear regression on an unchanged head keeps it from merging.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { setFeature } from "../src/build/features.ts";
+import { loadMergeFacts } from "../src/data/merge/index.ts";
 import { createEnv, hello } from "../src/build/envs.ts";
 import { claim, createTask, getTask } from "../src/build/tasks.ts";
 import { parseCompareReply, parseScreenshotReply, type CompareParsed } from "../src/verify/plan.ts";
 import { runCollect, collectDue, type CollectDeps } from "../src/verify/results.ts";
 import { putConfig, type ScreenshotConfigBody } from "../src/verify/screenshot-config.ts";
 import { runVerify, type VerifyDeps } from "../src/verify/index.ts";
+import { acting } from "./acting.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb, type Db } from "./helpers/raw-db.ts";
@@ -48,6 +49,7 @@ async function fresh(): Promise<Db> {
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await putConfig(db, "op", "app", CFG);
   await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "review", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await acting(db, ["op"]);
   await reportingTaskRunner(db);
   return db;
 }

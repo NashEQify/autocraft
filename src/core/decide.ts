@@ -230,7 +230,7 @@ const WAITS: Partial<Record<QueueState, Wait>> = {
 };
 
 /** What the leg of an approved merge carries past a person's answer, which its hand-over makes good: until then it is no question. */
-const HANDED_ON: ReadonlySet<QueueState> = new Set(["batch-failed", "verify-failed", "verify-error", "refused"]);
+const HANDED_ON: ReadonlySet<QueueState> = new Set(["batch-failed", "verify-failed", "verify-error"]);
 
 /** The workflow's merge is approved and its leg works on it, or the next workflow pass starts the leg (or asks), and the PR is not handed over yet. */
 const legWorks = (f: PrFacts): boolean => f.may.workflow?.state === "running" && f.may.workflow.approvedBy !== null && !f.handOver;
@@ -737,7 +737,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
       if (e?.noCi) return person("no-ci", "a person: the repo has no CI, and AutoCraft merges only on green CI");
       if (f.screenshots) return person("screenshots", `a person: the screenshots show a regression${f.screenshots.summary ? ` (${excerpt(f.screenshots.summary)})` : ""}`);
     }
-    if (HANDED_ON.has(st) && legWorks(f)) return LEG;
+    if ((HANDED_ON.has(st) || (st === "refused" && refusalStuck(f))) && legWorks(f)) return LEG;
     // The leg carries a merge its person approved past what keeps the PR off the rule; a merge state that stays unknown stops the leg too.
     if (st === "needs-decision" && legWorks(f)) return stuckState() ?? LEG;
     if (st === "waiting-premerge" && !workflowOf(f) && !mergeAllowed(f)) return person("repo-approval", "merge approval for the repo");
