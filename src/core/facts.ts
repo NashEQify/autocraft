@@ -76,6 +76,12 @@ function currentHead(m: Mirrored): string | null {
   return i.head_oid ?? c?.head_oid ?? null;
 }
 
+/** Whether the PR is a draft, or no longer open (`gone`, which `draft` includes), as the freshest of mirror and checks says. */
+export function draftOf(i: { is_draft: number | null; updated_at: string | null }, ch: { state: string | null; is_draft: number | null; fetched_at: string | null } | null | undefined): { draft: boolean; gone?: true } {
+  if (!ch?.fetched_at || (i.updated_at && ch.fetched_at <= i.updated_at)) return { draft: !!i.is_draft };
+  return ch.state === "OPEN" ? { draft: !!ch.is_draft } : { draft: true, gone: true };
+}
+
 /** The live workflow of the PR, or of the issue whose implementation PR it is. */
 const workflowFactOf = (d: PrPassData, ref: string) => d.workflow.live.get(ref) ?? d.workflow.ofPr.get(ref) ?? null;
 
@@ -218,7 +224,6 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const optional = cfg.repo(repo).optionalChecks;
   const ciOf = (overall: string | null | undefined): string => effectiveCiWith(optional, overall ?? "none", ch?.checks ?? null);
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
-  const fresh = !!ch?.fetched_at && (!i.updated_at || ch.fetched_at > i.updated_at);
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
   const inScope = integration ? pipelineRepo || (!!batchRow && batchRow.members.length > 0 && batchRow.members.every((x) => d.inScope.has(`${repo}#${x.number}`))) : itemScope;
@@ -242,7 +247,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const latest = d.review.latest.get(ref);
   const base: PrFacts = {
     repo, number, ...(pushedOff ? { pushedOff } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
-    tripped: tripsOfRepo(trips, repo), ghState: state, head, draft: fresh ? ch!.state !== "OPEN" || !!ch!.is_draft : !!i.is_draft,
+    tripped: tripsOfRepo(trips, repo), ghState: state, head, ...draftOf(i, ch),
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
     heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: d.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
@@ -261,7 +266,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.workflow = wfFact;
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
-    // The batch tip's run approvals count only while the batch is open and every member keeps its take review at its batched head.
+    // The batch tip's run approvals count only while the batch is open and every member keeps its take review, or its approval for merge with a clean pre-merge review, at its batched head.
     const tipRuns = batchRow?.state === "open" && batchRow.membersReviewed ? d.merge.runs.get(`${ref}@${batchRow.commitSha}`) : undefined;
     base.runs = runsOf(tipRuns, rf.ciApproved);
     return base;

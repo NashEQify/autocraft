@@ -38,7 +38,7 @@ export const CHECK = "gate / test";
 
 /** What reached GitHub. `head` is the head the write was for, where the write names one. */
 export type Write = { kind: "merge" | "assign" | "comment" | "close" | "pr" | "push"; number: number; head?: string; detail?: string };
-type Live = { head: string; state: string; mergeable: string; ci: string; authors: string[]; assignees: string[] };
+type Live = { head: string; state: string; draft?: boolean; mergeable: string; ci: string; authors: string[]; assignees: string[] };
 
 mkdirSync(SCRATCH, { recursive: true });
 export const tmpdir = (name: string): string => mkdtempSync(join(SCRATCH, `${name}-`));
@@ -90,7 +90,7 @@ export async function world() {
         const l = live.get(x)!;
         const done = l.ci !== "pending";
         return [`pr${x}`, {
-          number: x, state: l.state, isDraft: false, headRefOid: l.head, mergeable: l.mergeable, maintainerCanModify: true,
+          number: x, state: l.state, isDraft: l.draft ?? false, headRefOid: l.head, mergeable: l.mergeable, maintainerCanModify: true,
           commits: { nodes: [{ commit: { oid: l.head, statusCheckRollup: { contexts: { nodes: [{ __typename: "CheckRun", name: CHECK, status: done ? "COMPLETED" : "IN_PROGRESS", conclusion: done ? l.ci.toUpperCase() : null }] } } } }] },
         }];
       })) };
@@ -184,6 +184,12 @@ export async function world() {
     async workflow(n: number, o: { entry?: "review" | "fixup" | "merge"; by?: string; approved?: boolean } = {}) {
       const by = o.by ?? OPERATOR;
       await startWorkflows(db, [{ repo: "app", number: n, kind: "pr", entry: o.entry ?? "review", weight: 5, startedBy: by, startedVia: "dashboard", baseHead: await headOf(n), at: BEFORE, ...(o.approved === false ? {} : { approvedBy: by, approvedVia: "dashboard" as const }) }]);
+      return w;
+    },
+    /** The merge leg of the PR's live workflow, handed over to the merge queue at its head after anything the stages wrote. */
+    async handedOver(n: number) {
+      const wf = (await listWorkflows(db, { live: true, refs: [{ repo: "app", number: n }] }))[0]!;
+      await db.run(db.k.insertInto("preapprovals").values({ repo: "app", number: n, by: wf.startedBy, at: T1, instructions: "", state: "queued", from_head: await headOf(n), head: await headOf(n), updated_at: T1, workflow_id: wf.id }));
       return w;
     },
     /** The operator's fix-up of the PR's head ("rename a to b"), with the merge leg of its live workflow unless `merge` is false. */

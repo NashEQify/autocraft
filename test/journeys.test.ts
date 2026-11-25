@@ -23,6 +23,7 @@ import { runAct } from "../src/act/index.ts";
 import { runBatches } from "../src/merge/batch.ts";
 import { runMerge } from "../src/merge/index.ts";
 import { runSingles } from "../src/merge/single.ts";
+import { refreshChecks } from "../src/review/checks.ts";
 import { prepareOpusInput, saveOpus, type OpusDeps } from "../src/review/opus.ts";
 import { premergeCandidates, runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
 import { savePremerge } from "../src/premerge/store.ts";
@@ -177,6 +178,55 @@ describe("PR journeys", () => {
     assert.equal((await plan()).state, "out-of-scope");
     for (const n of [1, 2]) await w.workflow(n);
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
+  });
+
+  test("the batch PR's runs are approved for members approved for merge without a take review: a merge entry, and one answered past a hold", async () => {
+    const w = await (await (await (await (await (await fresh()).acting()).pr(1)).pr(2)).pr(3)).review(1);
+    await w.review(3, { verdict: "hold" });
+    await (await w.workflow(2, { entry: "merge" })).workflow(3);
+    for (const n of [1, 2, 3]) await (await w.verified(n)).premerge(n, "clean");
+    for (const n of [2, 3]) await w.handedOver(n);
+    await runBatches(w.db, { repo: "app" }, quiet, w.gh.batchDeps());
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("merge_batch_prs").select("number").orderBy("number"))).map((x) => Number(x.number)), [1, 2, 3]);
+    // The batch PR is open (the app identity of this world cannot open it).
+    await w.db.run(w.db.k.updateTable("merge_batches").set({ state: "open", pr_number: 900, fork: "bot/app" }));
+    const tip = (await w.db.get(w.db.k.selectFrom("merge_batches").select("commit_sha as c").where("pr_number", "=", 900)))!.c;
+    await w.db.run(w.db.k.insertInto("ci_run_approvals").values({ repo: "app", number: 900, head_oid: tip, runs: "[]", approved: "[]", reread: 1, failed: "{}", checked_at: "2026-01-02T00:00:00Z" }));
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 900, kind: "pr", state: "OPEN", title: "batch", author: "bot", additions: 1, deletions: 0,
+      head_oid: tip, head_ref: "batch", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
+    const approves = async () => (await w.prPlan(900)).actions.some((a) => a.kind === "approve-ci");
+    assert.equal(await approves(), true);
+    const findings = (await w.db.get(w.db.k.selectFrom("premerge_reviews").select("findings").where("number", "=", 2)))!.findings;
+    await w.premerge(2, "defect");
+    assert.equal(await approves(), false, "a defect of the pre-merge review");
+    await w.db.run(w.db.k.updateTable("premerge_reviews").set({ findings }).where("number", "=", 2));
+    assert.equal(await approves(), true);
+    await w.db.run(w.db.k.updateTable("preapprovals").set({ state: "cancelled" }).where("number", "=", 3));
+    assert.equal(await approves(), false, "a member whose approval for merge no longer stands");
+  });
+
+  test("a draft is not merged, alone or in a batch, and no refusal is recorded; it goes on once it is ready for review", async () => {
+    const one = await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean");
+    one.gh.live(1, { draft: true });
+    const merge = async () => await runMerge(one.db, { repo: "app", dryRun: false }, quiet, one.gh.mergeDeps());
+    assert.deepEqual((await merge()).merged, []);
+    assert.deepEqual(await one.rows("SELECT * FROM merges"), []);
+    const plan = await one.prPlan(1);
+    assert.deepEqual([plan.state, plan.waitKind, plan.actions.map((a) => a.kind)], ["draft", "contributor", []]);
+    one.gh.live(1, { draft: false });
+    await refreshChecks(one.db, one.gh.querier, "app", [1]);
+    assert.deepEqual((await merge()).merged, ["app#1"]);
+
+    const w = await (await (await (await (await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2)).review(2)).verified(2)).premerge(2, "clean");
+    const deps = w.gh.batchDeps();
+    assert.equal((await runBatches(w.db, { repo: "app" }, quiet, deps)).published.length, 1);
+    w.gh.live(2, { draft: true });
+    const done = await runBatches(w.db, { repo: "app" }, quiet, deps);
+    assert.deepEqual([done.merged, done.superseded.length], [[], 1]);
+    const newest = (await w.db.get(w.db.k.selectFrom("merge_batches").select(["id", "state"]).orderBy("id", "desc").limit(1)))!;
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("merge_batch_prs").select("number").where("batch_id", "=", newest.id))).map((x) => Number(x.number)), [1]);
+    assert.deepEqual(w.gh.writesOf("merge"), []);
   });
 
   test("a take-fix patch is linted before the push: clippy findings go back to the model, the clean patch is pushed with the format changes folded in", async () => {

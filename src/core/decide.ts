@@ -33,6 +33,8 @@ const HANDS_OFF: readonly (EndedWorkflow | null | undefined)[] = ["stopped", "ba
  * Not once someone stopped it, sent it to the backlog or ended its workflow with an answer that runs nothing: that means hands off until someone starts it.
  */
 export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && !HANDS_OFF.includes(f.endedWorkflow) && autoEligible(f);
+/** A draft: no work and no merge until it is marked ready for review. */
+export const isDraft = (f: Pick<PrFacts, "draft" | "gone">): boolean => f.draft && !f.gone;
 /** The head has no review that stands, so one is due once nothing holds it: a person who started the PR chose it, and the auto path chose by label and flags; a merge entry is never reviewed. */
 const reviewDue = (f: PrFacts): boolean => !f.draft && !!f.head && !mergeEntry(f) && !f.carriable && !(f.review && f.review.head === f.head && !f.review.staleActionable);
 /** An auto-path PR whose diff keeps it outside the merge rule before a review read it: the review could merge nothing, so it is not made. Our own push that broke CI is repaired first. */
@@ -486,8 +488,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const takeReview = !!r && (r.verdict === "take" || r.verdict === "take-fix");
   const merged = f.ghState === "MERGED" || mergedByUs;
   // A review older than a comment or review by someone else, or at another head, leaves the PR out of the queue until it is reviewed again.
-  // A merge-entry PR is in the queue at its head without one.
-  const inQueue = (takeReview && (merged || (open && !r.stale && r.head === f.head))) || (mx && open);
+  // A merge-entry PR is in the queue at its head without one. A draft is not in the queue.
+  const ready = open && !isDraft(f);
+  const inQueue = (takeReview && (merged || (ready && !r.stale && r.head === f.head))) || (mx && ready);
   // The head the queue's steps work on: the reviewed head, or a merge-entry PR's own head.
   const qHead = mx ? f.head : r?.head ?? null;
 
@@ -608,6 +611,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (st === "ready" && e?.path === "maintainer") return system("the approved merge to be handed over to its approver");
     return WAITS[st] ? { text: WAITS[st]!, kind: PERSON_WAITS.has(st) ? "person" : "system" } : null;
   };
+  const draftWait: Wait | null = state === "draft" && isDraft(f) ? contributor("the pull request to be marked ready for review") : null;
   // A hold review waits for a maintainer's answer to the workflow's recommendation.
   const holdWait: Wait | null = holdState ? person(MAINTAINER_ANSWER_WAIT) : null;
   // An implementation PR whose session revises it, or whose revision is stuck: that is what it waits on, whatever the queue state.
@@ -617,6 +621,6 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // A revision in progress is what the PR waits on, also while its continuation is planned.
   const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
-  const finalWait: Wait | null = wait ?? (main ? null : holdWait ?? unreviewedWait(f)) ?? (!main && reviewWait ? (f.reviewHold?.person ? person(reviewWait) : system(reviewWait)) : null) ?? (f.operator?.hold && !main ? system("its pre-approved merge") : null);
+  const finalWait: Wait | null = wait ?? (main ? null : draftWait ?? holdWait ?? unreviewedWait(f)) ?? (!main && reviewWait ? (f.reviewHold?.person ? person(reviewWait) : system(reviewWait)) : null) ?? (f.operator?.hold && !main ? system("its pre-approved merge") : null);
   return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, conflictNote: e.conflictNote, eligible: eligible(f, e) } : {}), actions, wait: finalWait?.text ?? null, waitKind: finalWait?.kind ?? null });
 }

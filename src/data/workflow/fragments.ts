@@ -27,6 +27,12 @@ const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> =>
   eb.or([eb(`${i}.state`, "not in", ENDED_ATTEMPTS), eb(`${i}.updated_at`, ">=", eb.ref(`${w}.started_at`))]);
 
+/** A live workflow approved for merge (an approver, or a merge entry) handed the PR over to the merge queue at `head`: its leg is queued there. */
+export const handedOverAt = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.preapprovals as hl").innerJoin("main.item_workflows as hw", "hw.id", "hl.workflow_id").select(one(eb))
+    .where("hl.repo", "=", kx.exprOf(eb, repo)).where("hl.number", "=", kx.exprOf(eb, number)).where("hl.head", "=", kx.exprOf(eb, head)).where("hl.state", "=", "queued")
+    .where("hw.state", "in", LIVE_STATES).where((w) => w.or([w("hw.approved_by", "is not", null), w("hw.entry", "=", "merge")])));
+
 /** The item has a live workflow, or is the PR of a live implement workflow. */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);

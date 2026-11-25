@@ -15,9 +15,9 @@
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf, notStarted, ownImplementation, refusalStuck, reviseOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, isDraft as draftPr, notStarted, ownImplementation, refusalStuck, reviseOf } from "../core/decide.ts";
 import { pushRefusal } from "../core/gates.ts";
-import { loadPrFact, loadPrFacts } from "../core/facts.ts";
+import { draftOf, loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
 import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
@@ -51,14 +51,14 @@ import { INPUT_TOPICS } from "../runner/autopilot.ts";
 const ACTOR = "pipeline";
 export const INSTRUCTIONS_MAX = 1500;
 const ACTIVE: readonly LegState[] = ["fixup", "review", "ci", "queued"];
-/** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts). */
-const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog", "draft"];
+/** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts); a draft waits to be marked ready. */
+const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog"];
 const short = (sha: string | null) => (sha ?? "").slice(0, 7);
 const oneLine = (s: string, n = 200) => s.replace(/\s+/g, " ").trim().slice(0, n);
 const refOf = (repo: string, n: number) => `${repo}#${n}`;
 
 type Row = LegRow;
-type PrRow = { state: string; head_oid: string | null; kind: string; head_repo: string | null; head_ref: string | null };
+type PrRow = { state: string; head_oid: string | null; kind: string; head_repo: string | null; head_ref: string | null; is_draft: number | null; updated_at: string | null };
 
 const prRow = async (db: Db, repo: string, n: number): Promise<PrRow | undefined> =>
   (await loadItems(db, [{ repo, number: n }], "pr")).get(refOf(repo, n));
@@ -444,6 +444,9 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
   if (stands === "no") return cancel(p.state === "queued" ? `${actor} no longer may act on ${p.repo}, so the approval no longer counts` : `${actor} no longer may act on ${p.repo}`);
   if (stands === "unknown") return;
 
+  // A draft gets no work and no merge: the leg waits where it is, and the plan says for what.
+  const draft = draftPr(draftOf(it, pf.checks.get(ref)));
+
   if (p.state === "fixup") {
     const fx = p.fix_id !== null ? pf.fixResults.get(p.fix_id) : undefined;
     if (fx?.state === "pushed" && fx.toHead) return void await move(db, p, "review", { head: fx.toHead, line: `The fix-up pushed ${short(fx.toHead)}; Opus reviews it next.` });
@@ -453,7 +456,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     // Whatever the fix-up row says (none yet, linting, pushing), a head that is neither its start nor its push is someone else's.
     if (cur !== null && cur !== p.from_head && cur !== fx?.toHead) return cancel(`another push moved the head to ${short(cur)}`);
     // No try yet and the planner would not work the request (not pushable, conflicting, a draft, ...): it would wait for ever.
-    if (!fx) {
+    if (!fx && !draft) {
       const f = await factOf();
       const why = f ? await whyNotPlanned(db, f) : null;
       if (why) await stop(`the fix-up cannot run: ${why}`);
@@ -475,6 +478,8 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (!lag) return cancel(cur === p.from_head ? `the head went back to ${short(cur)}` : `another push moved the head to ${short(cur)}`);
   }
 
+  if (draft) return;
+
   if (p.state === "review" && leg?.entry === "merge") {
     return void await move(db, p, "ci", { line: `In the merge queue at ${short(head)} with no review; waiting for CI and a clean pre-merge review.` });
   }
@@ -482,7 +487,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     const r = accepted(await reviewAt(db, p, head, pf, wake));
     if (r.kind === "stale") return;
     if (r.kind === "none") {
-      // No review is coming for a PR the planner does not review (a draft, a backlog item).
+      // No review is coming for a PR the planner does not review (a backlog item, say).
       const f = cur === head ? await factOf() : null;
       const state = f ? decidePr(f).state : null;
       if (state && NOT_REVIEWABLE.includes(state)) return await stop(`${headName(p)} cannot be reviewed (${state})`);
