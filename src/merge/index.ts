@@ -14,6 +14,7 @@ import { ciAt, type CiState } from "../core/evidence.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
 import { planned } from "../core/select.ts";
+import { NO_WORKFLOW_SCORE } from "../core/work-score.ts";
 import { claimForWork } from "../github/claim.ts";
 import { pipelineMe } from "../github/pipeline-account.ts";
 import { mergeViaCommand, MERGE_RECORDED_ENV, type Writer } from "../github/write.ts";
@@ -157,9 +158,6 @@ export async function ciNow(db: Db, repo: string, ch: PrChecks): Promise<CiState
 
 // ---- the step ----------------------------------------------------------------
 
-/** An item with no live workflow ranks after every weight-5 workflow and before weight 4 (loadWorkScores: 1e15 + weight * 1e12 - id). */
-export const NO_WORKFLOW_SCORE = 1e15 + 4e12 + 0.5;
-
 export async function runMerge(db: Db, params: MergeParams, log: (line: string) => void = console.log, deps?: MergeDeps): Promise<MergeSummary> {
   const { repo } = params;
   const w: Writer = { db, login: ACTOR };
@@ -183,7 +181,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   const mergeDue = new Map(due.map((p) => [p.facts.number, { singleOnly: p.action.params?.singleOnly === true, verifyOverride: p.facts.verifyOverride }]));
   const scores = await loadWorkScores(db, open.map((e) => ({ repo, number: e.number })));
   const score = (e: QueueEntry) => scores.get(refOf(e)) ?? NO_WORKFLOW_SCORE;
-  // Heaviest workflow first, then in the order the workflows started; then by number.
+  // In work order (src/core/work-score.ts), unstarted PRs by number.
   let picks = open.filter((e) => mergeDue.has(e.number) && (!params.only || params.only(e)) && (!params.singleOnly || mergeDue.get(e.number)!.singleOnly))
     .sort((a, b) => score(b) - score(a) || a.number - b.number);
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);

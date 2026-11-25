@@ -1,7 +1,7 @@
 // Issues that need a person are asked or listed, and an issue waiting on a PR names it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideItem } from "../src/core/decide-item.ts";
+import { decideItem, TRIAGE_WAIT } from "../src/core/decide-item.ts";
 import { issuesWithOpenPr, textRefs } from "../src/core/open-prs.ts";
 import { itemFacts } from "./world.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -31,11 +31,11 @@ test("an issue whose fix PR is open waits on that PR (system)", () => {
   assert.equal(p.waitKind, "system");
 });
 
-test("an open PR waits the issue whatever its implementation state, and a mention says so", () => {
+test("an open PR that closes the issue holds it whatever its implementation state; one that only mentions it does not", () => {
   const stopped = decideItem(itemFacts({ openPr: { number: 9, closes: true }, implement: queued("failed") }));
-  assert.equal(stopped.wait, "open PR #9");
+  assert.match(stopped.wait!, /^open PR #9, which closes it/);
   const mention = decideItem(itemFacts({ openPr: { number: 9, closes: false } }));
-  assert.equal(mention.wait, "open PR #9 mentions it");
+  assert.equal(mention.wait, TRIAGE_WAIT);
 });
 
 test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", async () => {

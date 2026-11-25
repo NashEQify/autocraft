@@ -200,7 +200,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   const did: string[] = [];
   if (r.drop.length) did.push(t("dropping {parts}", { parts: listText(r.drop) }));
   if (r.start === "review") did.push(t("reviewing"));
-  else if (r.start === "fixup") did.push(t("reviewing, fixing what the review finds, reviewing again"));
+  else if (r.start === "fixup") did.push(waits ? t("reviewing") : t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
@@ -211,10 +211,10 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
     const shown = r.weight === null ? null : weightWord(r.weight)?.startsWith("weight ") ? String(r.weight) : weight;
     return t("Weight {weight} {by}.", { weight: shown ?? t("normal"), by: who });
   }
-  const end = r.start === "merge"
-    ? t("updating from main, then merging in the next batch when CI is green")
-    : waits
-      ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
+  const end = waits
+    ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
+    : r.start === "merge"
+      ? t("updating from main, then merging in the next batch when CI is green")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
@@ -272,6 +272,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "nothing-running": return t("Nothing is running on this item.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });
     case "implement-part": return t("Part {parts} belongs to the plan the implementation is built from. Fix or drop parts of its review, or stop.", { parts: listText(r.parts) });
+    case "premerge-defects": return t("The pre-merge review found defects, and nothing merges past them as they are.");
     case "already-approved": return t("Already approved for merge by {login}, {time}.", { login: r.by, time: clock(r.at) });
   }
 }

@@ -9,13 +9,14 @@ import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
-import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, weightScore, workflowFactOf, type FactsOf } from "./facts.ts";
+import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, workflowFactOf, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts";
 import { openPrsByRepo, textHash, type OpenPr } from "./open-prs.ts";
+import { workScore } from "./work-score.ts";
 import { inStep, loadItemPass, loadPassBase, type EndWave, type ItemPassData, type ItemPassNeeds, type PassBase, type SharedDupes } from "./pass-load.ts";
 import type { ItemFacts } from "./plan.ts";
 import { overBefore } from "../workflow/work.ts";
@@ -174,7 +175,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       inFlight: (r.kind === "issue" && LIVE_STATES.has(a?.attempt.state ?? "failed")) || (r.kind === "pr" && ownPrs.has(ref) && isOwn(r.author)), draft: !!r.is_draft,
       inScope: d.inScope.has(ref), ...(outsideHold ? { outsideHold } : {}), integration: d.batchPrs.has(ref) && isOwn(r.author),
       held: !work && d.workflow.ended.get(ref) === "backlog" ? "backlog" : null,
-      score: weightScore(work) ?? t.score,
+      score: workScore(work) ?? t.score,
       repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment },
       workflow: wf, standing, endedWorkflow: wf ? null : d.workflow.ended.get(ref) ?? null,
       run,

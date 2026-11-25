@@ -413,13 +413,17 @@ export type ConflictPath = "merge" | "tomorrow" | "contributor" | "person";
 /** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
 export function conflictPath(f: PrFacts | null): ConflictPath | null {
   if (f?.mergeable !== "CONFLICTING") return null;
-  const r = f.review, c = f.conflict;
+  const r = f.review;
   if (!mergeEntry(f) && !(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale)) return null;
+  return settlesConflict(f);
+}
+/** Who settles the conflict of a PR that is wanted, whatever says so. */
+export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "conflict" | "pushable">): ConflictPath {
   if (!c?.baseOk) return "person";
   switch (c.bucket) {
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
     case "merge": case "unapproved": case "done": return "merge";
-    case "linting": return f.pushable ? "merge" : "person";
+    case "linting": return pushable ? "merge" : "person";
     case "capped": return "tomorrow";
     case "ask": case "ask-retry": case "asked": return "contributor";
     default: return "person";

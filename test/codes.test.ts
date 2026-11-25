@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { needsQuestion, stopCodeOf, waitCodeOf, type WaitCode } from "../src/core/codes.ts";
-import { decideItem, openPrWait } from "../src/core/decide-item.ts";
+import { answerPrWait, decideItem, openPrWait } from "../src/core/decide-item.ts";
 import { decidePr, implementOffWait, standingWait } from "../src/core/decide.ts";
 import { holdWait } from "../src/outside.ts";
 import { legBlocker, premergeStop } from "../src/workflow/blockers.ts";
@@ -17,7 +17,7 @@ const NAMED: [string, WaitCode][] = [
   [standingWait({ queuedBy: "mira", standing: "no" }, "app")!.text, "actor-gone"],
   [standingWait({ queuedBy: "mira", standing: "unknown" }, "app")!.text, "actor-unknown"],
   [standingWait({ queuedBy: "mira", standing: "unknown", boxIdentity: true }, "app")!.text, "box-identity"],
-  [openPrWait(7, true), "open-pr"], [openPrWait(7, false), "open-pr"],
+  [openPrWait(7), "open-pr"], [answerPrWait(7), "open-pr"],
   [holdWait({ reason: "surge", kind: "pr", limit: 5 }), "outside-hold"], [holdWait({ reason: "limit", kind: "issue", limit: 5 }), "outside-hold"],
   ["duplicates app#3, app#4; waits for a maintainer", "duplicate"], ["duplicates app#3; waits for their comparison or a maintainer", "duplicate"],
   ["touches README.md; waits for a maintainer", "not-started"],

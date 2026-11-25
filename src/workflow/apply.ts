@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -26,7 +26,9 @@ import { actRefusal } from "../github/identity.ts";
 import { settlesNow } from "../preapproval/permissions.ts";
 import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
-import { isLive, resolve, type Run } from "./resolve.ts";
+import { premergeParts } from "./premerge.ts";
+import { atBlocker } from "./recommend.ts";
+import { isLive, premergeStopped, resolve, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
@@ -247,6 +249,11 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const why = t("The question changed after you read it. A new question follows. {question}", { question: recommendationLine(wf!.rec) ?? "" });
     return { ...out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why })), wf!.id), question: { workflowId: wf!.id, recAt: wf!.recAt! } };
   }
+  if (r.kind === "refused" && r.refusal.why === "premerge-defects") {
+    const now = await askToFix(db, wf!, on);
+    const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: [replyLine(r, input.clock, input.mention), premergeStopped(now)?.length ? t("Fix them first?") : null, recommendationLine(now.rec)].filter((x) => x !== null).join(" ") });
+    return { ...out("refused", reply(line), now.id), ...(now.recAt ? { question: { workflowId: now.id, recAt: now.recAt } } : {}) };
+  }
   if (r.kind === "refused") return out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null);
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}) };
@@ -255,7 +262,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts });
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts, says: says(input.parsed, "merge") });
     const more = too.flatMap((x) => (x.workflow ? [x] : []));
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock, done.waits) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
@@ -323,7 +330,7 @@ const PUSHED_SINCE = (): string => t("The author pushed commits after the questi
 const CHANGED = (): string => t("The pull request changed after the command was written. Send it again.");
 
 /** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target; accepts: boolean }): Promise<Done> {
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target; accepts: boolean; says: boolean }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
@@ -372,9 +379,9 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.start) {
     const entry = r.start;
     const weight = r.weight ?? WEIGHT_NORMAL;
-    const work = await fx.start(c, entry, r.approve);
+    const { write, ...conflict } = await fx.start(c, entry, r.approve);
     return {
-      failed: [],
+      failed: [], ...conflict,
       commit: async () => {
         const id = (await startWorkflows(db, [{
           repo: item.repo, number: item.number, kind: item.kind, entry, weight, startedBy: by, startedVia: via, baseHead: item.head,
@@ -383,7 +390,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
         if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
         // Work started on the item takes back a close nobody carried out yet.
         if (o.closing) await fx.stopCloses({ ...c, workflowId: o.closing.workflow_id });
-        await work(id);
+        await write(id);
         return id;
       },
     };
@@ -405,7 +412,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await issuePr(live)] : [])].filter((x) => x !== null);
-  const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges }) : null;
+  const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges, says: o.says && r.approve }) : null;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
@@ -448,6 +455,21 @@ async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promis
   const a = (await loadImplementFacts(c.db, [{ repo: c.item.repo, number: c.item.number }])).byIssue.get(`${c.item.repo}#${c.item.number}`);
   if (!isOpenQuestion(a, q)) throw new fx.EffectError(t("The question this recommendation answers is no longer open."));
   await recordAnswers(c.db, [{ id: q.implementation, question: q.round, by: c.by, via: c.via, option }], c.at);
+}
+
+/**
+ * The question of an item stopped at the pre-merge review's defects: whether to fix them first. One whose plan has no part for them gets
+ * those parts, and the recommendation to fix them, then merge, takes the place of the open one.
+ */
+async function askToFix(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<ItemWorkflow> {
+  const pr = on.kind === "pr" ? on.number : (await implementationPr(db, wf))?.number;
+  if (!wf.rec || premergeStopped(wf)?.length || pr === undefined || wf.recHead === null) return wf;
+  const parts = await premergeParts(db, { repo: wf.repo, number: pr, head: wf.recHead }, wf.plan, "defects");
+  if (!parts.length) return wf;
+  const plan = [...wf.plan, ...parts], blockerParams = { ...wf.blockerParams, premerge: parts.map((p) => p.n) }, recAt = new Date().toISOString();
+  const patch = { plan, blockerParams, recAt, rec: atBlocker({ blocker: wf.blocker!, params: blockerParams }, null, plan) };
+  if (!(await moveWorkflows(db, [{ id: wf.id, patch, at: recAt, was: wf }])).size) throw new Moved();
+  return { ...wf, ...patch };
 }
 
 /** The workflow's merges as `login` that wait for their sign-in or access, on whatever PR they are. */

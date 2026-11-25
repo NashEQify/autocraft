@@ -438,7 +438,7 @@ export type ItemFacts = {
   /** A person's close of the item that the Act step carries out now (a `workflow_actions` row in `pending`), as that person. */
   close: { id: number; by: string; weight: number; at: string } | null;
 
-  /** The open PR that holds an issue: one that closes or addresses it (`closes`), else a person's PR that mentions it by number; null when there is none. */
+  /** The open PR of an issue: one that closes or addresses it (`closes`), which holds it, else a person's PR that mentions it by number; null when there is none. */
   openPr: { number: number; closes: boolean } | null;
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */

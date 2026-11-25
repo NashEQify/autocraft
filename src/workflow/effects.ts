@@ -7,15 +7,20 @@ import { endWorkspace } from "../build/workspaces.ts";
 import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
 import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
+import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mirror/index.ts";
 import { withdrawItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, holdMerges, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
+import { authorWrites } from "../fixup/author-permission.ts";
+import { BASE_NAME, conflictBucket } from "../fixup/conflict-state.ts";
 import type { Exec } from "../fixup/git.ts";
+import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
-import { byHand, conflictPath } from "../core/decide.ts";
+import { byHand, conflictPath, settlesConflict, type ConflictPath } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
+import type { PrFacts } from "../core/plan.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
@@ -100,18 +105,61 @@ async function mergeLeg(c: Ctx, had: Preapproval | null): Promise<Write> {
   return nothing;
 }
 
+/** Refuses a merge that no approval can make: of a PR that is not aimed at the default branch, or in a repo without CI. */
+export async function checkMerges({ db, item }: Ctx): Promise<void> {
+  const { repo, number } = item, pr = item.kind === "pr" ? [{ repo, number }] : [];
+  const [items, checks, repos, ci] = await db.together(() => Promise.all([
+    pr.length ? loadItems(db, pr, "pr") : new Map(), pr.length ? loadChecks(db, pr) : new Map(), loadRepos(db, { names: [repo] }), loadRepoCiSignals(db, [repo]),
+  ]));
+  const base = items.get(ref(item))?.base_ref, main = repos.get(repo)?.default_branch, overall = checks.get(ref(item))?.overall;
+  if (base && main && base !== main) throw new EffectError(t("{ref} is aimed at {base}, and AutoCraft merges only into {main}. Change its base branch first.", { ref: ref(item), base, main }));
+  if (ci.get(repo)?.noCi && (!overall || overall === "none")) throw new EffectError(t("{repo} has no CI, and AutoCraft merges only on green CI.", { repo }));
+}
+
+/** What a confirmation says of a PR's conflict with its base branch once the merge is approved. */
+type ConflictSaid = { note?: string; waits?: "contributor" | "person" };
+
+/** Who settles the PR's conflict once its merge is approved, also while no review says it is wanted yet; null when it does not conflict. */
+async function conflictAhead(db: Db, item: Target, read?: PrFacts | null): Promise<ConflictPath | null> {
+  const { repo, number } = item, one = [{ repo, number }];
+  const [items, checks] = await db.together(() => Promise.all([loadItems(db, one, "pr"), loadChecks(db, one)]));
+  const it = items.get(ref(item)), ch = checks.get(ref(item));
+  if (it?.mergeable !== "CONFLICTING" && ch?.mergeable !== "CONFLICTING") return null;
+  const f = read === undefined ? await loadPrFact(db, repo, number) : read;
+  if (f?.mergeable !== "CONFLICTING" || !it) return null;
+  const known = conflictPath(f);
+  if (known !== null || !f.head) return known;
+  const [longLived, writes] = await db.together(() => Promise.all([longLivedOf(db, repo), authorWrites(db, repo, number)]));
+  // An author whose permission has not been read yet counts as able to write, as in the plan.
+  const can = pushable(it.head_repo, repo, ch?.head_oid === f.head ? ch?.maintainer_can_modify : it.maintainer_can_modify, it.head_ref, longLived, false, writes !== "no");
+  const bucket = await conflictBucket(db, { repo, number, head: f.head, pushable: can }, { push: true, comment: f.repoFacts.commentApproved });
+  return settlesConflict({ conflict: { bucket, base: it.base_ref ?? "", baseOk: BASE_NAME.test(it.base_ref ?? "") }, pushable: can });
+}
+
+function conflictSaid(item: Target, path: ConflictPath | null): ConflictSaid {
+  if (byHand(path)) return { waits: path, note: t("New commits come back to you.") };
+  if (path === "merge") return { note: t("{ref} conflicts with its base branch: AutoCraft merges that branch into it first.", { ref: ref(item) }) };
+  if (path === "tomorrow") return { note: t("{ref} conflicts with its base branch, and today's merges of that branch into it are used up: AutoCraft merges it in first, tomorrow.", { ref: ref(item) }) };
+  return {};
+}
+
 /**
  * Starts the item at `entry`. Review and Fix-up mark the PR for a review of its current head (the fix-up follows from what the
  * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself. An approved PR gets its
- * merge leg at once.
+ * merge leg at once, and what is said of a conflict with its base branch names who settles it.
  */
-export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<Write> {
+export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<{ write: Write } & ConflictSaid> {
   const { db, by, item } = c;
-  if (entry === "implement") return nothing;
-  const leg = approved || entry === "merge" ? await mergeLeg(c, await activeLeg(db, item)) : nothing;
-  return async (id) => {
-    await leg(id);
-    if (entry !== "merge") await markReviewsStale(db, by, item.repo, item.number);
+  const merges = approved || entry === "merge";
+  if (merges) await checkMerges(c);
+  if (entry === "implement") return { write: nothing };
+  const leg = merges ? await mergeLeg(c, await activeLeg(db, item)) : nothing;
+  return {
+    ...(merges ? conflictSaid(item, await conflictAhead(db, item)) : {}),
+    write: async (id) => {
+      await leg(id);
+      if (entry !== "merge") await markReviewsStale(db, by, item.repo, item.number);
+    },
   };
 }
 
@@ -136,10 +184,12 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
  * this time gets its merge leg when it has none. No fix-up can be made on a PR that conflicts with its base branch (conflictPath). Where the
  * pipeline merges the base into an approved PR, the fix-up follows that merge (`note` says so): the pipeline makes a take-fix review's
  * minor fixes itself, and any other fix-up waits as a request. Where a person has to resolve the conflict, only the merge leg starts, and
- * waits for them (`waits`).
+ * waits for them (`waits`). `says`: the person said merge, which is refused where none can be made, and whose confirmation names who
+ * settles a conflict.
  */
-export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean }): Promise<{ write: Write; note?: string; waits?: "contributor" | "person" }> {
+export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean; says?: boolean }): Promise<{ write: Write } & ConflictSaid> {
   const { db, by, item } = c;
+  if (o.says) await checkMerges(c);
   if (item.kind !== "pr") return { write: nothing };
   const had = o.merges ? await activeLeg(db, item) : null;
   const f = o.merges ? await loadPrFact(db, item.repo, item.number) : null;
@@ -148,6 +198,7 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   const first = path === "merge" ? t("{ref} conflicts with its base branch: that merge comes first, then the review's fixes.", { ref: ref(item) })
     : path === "tomorrow" ? t("{ref} conflicts with its base branch, and today's merges of that branch into it are used up: that merge comes first, tomorrow.", { ref: ref(item) }) : null;
   const note = first !== null && (o.again === "fixup" || path === "tomorrow") ? { note: first } : {};
+  const said = o.says ? conflictSaid(item, await conflictAhead(db, item, f)) : {};
   // A major finding the person said to fix would come back as a question at the next head; their request is the answer to it.
   const major = o.plan.some((p) => p.major && o.fix.includes(p.n));
   if (o.again === "fixup" && path !== null && f?.review?.verdict === "take-fix" && !major) return { write: await mergeLeg(c, had), ...note };
@@ -159,7 +210,7 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   }
   const leg = o.merges ? await mergeLeg(c, had) : nothing;
   return {
-    ...note, ...(byHand(path) ? { waits: path } : {}),
+    ...note, ...(byHand(path) ? { waits: path } : {}), ...said,
     write: async (id) => {
       await leg(id);
       if (o.again === "review") await markReviewsStale(db, by, item.repo, item.number);

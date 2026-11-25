@@ -1,5 +1,6 @@
 // Predicates other modules embed in their statements (src/data/** only).
 import type { AliasableExpression, Expression, SelectQueryBuilder, SqlBool } from "kysely";
+import { LOW_WEIGHT, STARTED_SCORE, WEIGHT_STEP } from "../../core/work-score.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource, resolveKeys, type KeySource } from "../keys.ts";
@@ -156,8 +157,8 @@ export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Alia
   ]);
 }
 
-/** `1e15 + weight * 1e12 - id` of the workflow row aliased `w`: what orders started items. */
-export const workScore = (eb: any): AliasableExpression<number> => eb(eb(eb.lit(1e15), "+", eb("w.weight", "*", eb.lit(1e12))), "-", eb.ref("w.id"));
+/** The work score (src/core/work-score.ts) of the workflow row aliased `w`. */
+export const workScore = (eb: any): AliasableExpression<number> => eb(eb(eb.case().when("w.weight", ">", eb.lit(LOW_WEIGHT)).then(eb.lit(STARTED_SCORE)).else(eb.lit(-STARTED_SCORE)).end(), "+", eb("w.weight", "*", eb.lit(WEIGHT_STEP))), "-", eb.ref("w.id"));
 
 /** The work score `s` of every item with a live workflow and of the PR a live implement workflow works on, the highest when both apply. */
 export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string; number: number; s: number }> {

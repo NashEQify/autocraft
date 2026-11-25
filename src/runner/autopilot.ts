@@ -385,7 +385,7 @@ export const bestScore = (scores: (number | null | undefined)[]): number | null 
  */
 export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<string, number | null>): T[] {
   const shared = lanes.filter((l) => tops.has(l.name));
-  const sorted = [...shared].sort((a, b) => (tops.get(b.name) ?? -1) - (tops.get(a.name) ?? -1));
+  const sorted = [...shared].sort((a, b) => (tops.get(b.name) ?? -Infinity) - (tops.get(a.name) ?? -Infinity) || 0);
   let k = 0;
   return lanes.map((l) => (tops.has(l.name) ? sorted[k++]! : l));
 }

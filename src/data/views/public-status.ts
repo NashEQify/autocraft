@@ -9,8 +9,9 @@ import { quietPrExpr, findingPrExpr } from "../security/fragments.ts";
 import { hasSecurityVerdict } from "../triage/fragments.ts";
 import { needsPerson } from "../workflow/fragments.ts";
 import { mergedByUs, inMergedBatch } from "../merge/fragments.ts";
+import { openItemKeys } from "../mirror/index.ts";
 import { loadRankScores } from "../triage/index.ts";
-import { loadQueuePositions } from "../workflow/index.ts";
+import { loadWorkScores } from "../workflow/index.ts";
 import { resolveKeys } from "../keys.ts";
 import type { PublicStatsFacts, PublicStatusRow, QueueMember } from "./types.ts";
 
@@ -69,7 +70,7 @@ export async function loadPublicStatusRows(db: Db, refs: readonly { repo: string
   const q = queryDb(db);
   const wantQueue = o.queue ?? true;
   if (!refs.length && !wantQueue) return { rows: [], queue: [] };
-  const [rows, members, scores, positions] = await db.together(() => Promise.all([
+  const [rows, members, scores, work] = await db.together(() => Promise.all([
     refs.length ? q.all(q.k.selectFrom("main.items as i").innerJoin(resolveKeys(db, [...refs], "kk"), (j) => j.onRef("kk.repo", "=", "i.repo").onRef("kk.number", "=", "i.number"))
       .leftJoin("main.item_stage as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
       .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
@@ -77,7 +78,7 @@ export async function loadPublicStatusRows(db: Db, refs: readonly { repo: string
         hidden(db, eb, "i.repo", "i.number", "i.labels").as("hidden"), needsPerson(eb, "i.repo", "i.number").as("needs")])) : Promise.resolve([]),
     wantQueue ? q.all(queuedPrs(db, repos, o.withHidden).select(["p.repo", "p.number", "p.state"])) : Promise.resolve([]),
     wantQueue ? loadRankScores(db, { repos }) : Promise.resolve(new Map<string, number>()),
-    wantQueue ? loadQueuePositions(db, { repos }) : Promise.resolve(new Map<string, { weight: number }>()),
+    wantQueue ? loadWorkScores(db, openItemKeys({ repos })) : Promise.resolve(new Map<string, number>()),
   ]));
   return {
     rows: rows.map((r) => ({
@@ -85,7 +86,7 @@ export async function loadPublicStatusRows(db: Db, refs: readonly { repo: string
       planState: r.plan, view: r.view, needsPerson: !!r.needs, hidden: !!r.hidden,
     })),
     queue: members.map((m) => ({
-      repo: m.repo, number: m.number, held: false, batched: BATCHED.includes(m.state), weight: positions.get(`${m.repo}#${m.number}`)?.weight ?? null, score: scores.get(`${m.repo}#${m.number}`) ?? null,
+      repo: m.repo, number: m.number, held: false, batched: BATCHED.includes(m.state), work: work.get(`${m.repo}#${m.number}`) ?? null, score: scores.get(`${m.repo}#${m.number}`) ?? null,
     })),
   };
 }

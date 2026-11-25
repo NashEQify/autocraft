@@ -122,7 +122,7 @@ const WAIT_FORM: readonly (readonly [RegExp, WaitCode])[] = [
   [/^the implementation session's revision for #\d+$/, "revision"],
   [/^a maintainer's answer on the stuck implementation of #\d+$/, "implement-stuck"],
   [/^\d+ implementations already running in /, "implement-room"],
-  [/^open PR #\d+( mentions it)?$/, "open-pr"],
+  [/^open PR #\d+(, which closes it: answer that pull request)?$/, "open-pr"],
   [/^author's daily limit \(/, "outside-hold"],
 ];
 
