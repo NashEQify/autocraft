@@ -126,21 +126,20 @@ test("once a Pipeline-off repo's last workflow ends, our assignment is released 
     const batch = async () => (await w.rows("SELECT state, pr_number FROM merge_batches ORDER BY id")).map((r) => [r.state, Number(r.pr_number)]);
     assert.deepEqual(await batch(), [["open", 900]]);
     for (const n of [1, 2]) await w.workflow(n, { approved: true });
-    await w.db.run(w.db.k.insertInto("audit").values({ at: T0, login: "assign", action: "assign", target: "app#1", details: '{"assignee":"pipeline-bot"}' }));
-    await w.db.run(w.db.k.updateTable("items").set({ assignees: JSON.stringify(["pipeline-bot"]) }).where("number", "=", 1));
-    w.gh.live(1, { assignees: ["pipeline-bot"] });
+    await w.db.run(w.db.k.insertInto("audit").values({ at: T0, login: "assign", action: "assign", target: "app#1", details: '{"assignee":"bot"}' }));
+    await w.db.run(w.db.k.updateTable("items").set({ assignees: JSON.stringify(["bot"]) }).where("number", "=", 1));
+    w.gh.live(1, { assignees: ["bot"] });
     await reportingTaskRunner(w.db);
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     const steps = async () => [...new Set((await detectAutopilot(w.db)).proposals.filter((p) => p.params.repo === "app").map((p) => p.step))].sort();
     assert.ok(!(await steps()).includes("unassign"), "the batch goes on for the started pull requests");
     await w.db.run(w.db.k.updateTable("item_workflows").set({ state: "stopped" }));
     assert.deepEqual(await steps(), ["merge", "unassign"]);
-    const writes = w.gh.writes.length;
     const r = await runBatches(w.db, { repo: "app" }, () => {}, w.gh.batchDeps());
     assert.deepEqual([r.superseded.length, r.started, r.published, r.merged], [1, [], [], []]);
     assert.deepEqual(await batch(), [["superseded", 900]]);
-    assert.deepEqual((await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: async () => ({ code: 0, stdout: JSON.stringify({ login: "pipeline-bot", id: 9, node_id: "NB" }), stderr: "" }) })).unassigned, ["app#1"]);
-    assert.deepEqual(w.gh.writes.slice(writes).map((x) => [x.kind, x.number]).sort(), [["close", 900], ["unassign", 1]]);
+    assert.deepEqual((await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: async () => ({ code: 0, stdout: JSON.stringify({ login: "bot", id: 9, node_id: "NB" }), stderr: "" }) })).unassigned, ["app#1"]);
+    assert.deepEqual((await w.rows("SELECT action, target FROM audit WHERE action IN ('batch-pr-close', 'unassign', 'merge', 'batch-merge') ORDER BY action")).map((x) => `${x.action} ${x.target}`), ["batch-pr-close app#900", "unassign app#1"]);
     assert.ok(!(await steps()).includes("merge"));
   } finally { w.close(); }
 });
