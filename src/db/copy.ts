@@ -16,7 +16,7 @@ import { planChangesSql } from "../core/plan-changes.ts";
 import type { Db, Param, Row, Value } from "./index.ts";
 import { connect } from "../db.ts";
 import { connectDb, dbFor, isPgUrl, loadPg } from "./open.ts";
-import { applyPgSchema, MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
+import { MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
 import { migratePg } from "./pg-triggers.ts";
 import { pgConnectionString } from "./postgres.ts";
 import { HAND_TRIGGERS } from "./pg-schema.ts";

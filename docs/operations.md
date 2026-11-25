@@ -1009,7 +1009,7 @@ The runner container therefore needs an unconfined seccomp profile and unmasked 
 | Two volume claims, `data` and `config` (ReadWriteOnce) | `/config` is writable because the app writes accounts, Claude logins and usage readings there. |
 | Pod `hostUsers: false`, `runAsNonRoot`, uid and `fsGroup` 10001 | The user namespace is required for the runner's `procMount: Unmasked`. |
 | Runner container: `procMount: Unmasked`, `seccompProfile: Unconfined` | The sandbox requirement above. The other containers keep the defaults. |
-| Probes on `/healthz` and `/readyz`; `terminationGracePeriodSeconds: 30` | The dashboard probes its own port; the runner probes the worker API port. |
+| Probes on `/healthz` and `/readyz`; startup probes allow 11 minutes; `terminationGracePeriodSeconds: 30` | The dashboard probes its own port; the runner probes the worker API port. On Postgres a process serves only after the schema migration, which retries short lock waits for up to 10 minutes (src/db/pg-migrate.ts) and logs each wait with the session holding the table. |
 | `autocraft-worker-api` Service on 8981 | For workers inside the cluster. Do not publish it. |
 
 The manifest holds no secret values. Before the first start:
