@@ -92,7 +92,7 @@ test("a stop at a blocker and a person's command, in any order: both stand, and 
     if (text === "urgent") assert.equal(last.weight, 10, label);
     assert.equal(await activeLegs(w), last.state === "running" ? 1 : 0, label);
     // The leg ended by the command, or with the stop it belongs to.
-    assert.equal((await legs(w))[0]!.reason_code, n === 0 && text.startsWith("stop") ? null : "blocked", label);
+    assert.equal((await legs(w))[0]!.reason_code, n === 0 && text.startsWith("stop") ? "person" : "blocked", label);
     assert.ok(last.blocker !== "other", `${label}: the leg's own end is not a blocker`);
     w.close();
   }

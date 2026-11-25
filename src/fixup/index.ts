@@ -87,6 +87,8 @@ export type FixupDeps = {
   now: () => Date;
   /** Directory holding one bare cache repository per repo. */
   root: string;
+  /** Stands in for the app lane's token and client (tests). */
+  lane?: Pick<Writer, "mint" | "appClient">;
 };
 
 export function defaultDeps(): FixupDeps {
@@ -218,7 +220,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const at = () => (deps?.now() ?? new Date()).toISOString();
   const runId = `fixup-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
-  const gw: Writer = { db, login: ACTOR };
+  const gw: Writer = { db, login: ACTOR, ...deps?.lane };
   const summary: FixupSummary = { runId, repo, dryRun, pushed: [], asked: [], failed: [], held: [] };
   const sel = await selectFixups(db, repo, undefined, undefined, params.by);
   const asks = await takersCut(db, sel.ask, params.limit, repo, (c) => c.number);

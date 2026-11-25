@@ -216,7 +216,7 @@ const APPROVAL = { by: "op", at: "2026-11-01T00:00:00.000Z" };
 /** The live workflow as the store reads it. */
 const itemWorkflow = (w: WorkflowRow): ItemWorkflow => ({
   id: w.id, repo: "app", number: w.kind === "pr" ? 1 : 5, kind: w.kind, entry: w.entry, weight: 5, state: w.state, startedBy: "mira", startedAt: at("09:00"), startedVia: "github",
-  baseHead: w.baseHead, approvedBy: w.approvedBy, approvedAt: w.approvedBy ? at("09:00") : null, blocker: w.blocker,
+  baseHead: w.baseHead, acceptedHead: null, approvedBy: w.approvedBy, approvedAt: w.approvedBy ? at("09:00") : null, blocker: w.blocker,
 } as unknown as ItemWorkflow);
 
 /** Why the review of the head waits (src/review/gate.ts holdsFrom). */

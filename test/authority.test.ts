@@ -109,7 +109,7 @@ test("a blocked item, and one whose person is gone, keep their bookkeeping and n
 });
 
 test("a blocked workflow gets no push at the write, and gets it again once a person answered", async () => {
-  const w = await (await (await (await (await world()).repo([])).pr(1, { mergeable: "CONFLICTING" })).review(1)).workflow(1);
+  const w = await (await (await (await (await (await world()).repo([])).acting()).pr(1, { mergeable: "CONFLICTING" })).review(1)).workflow(1);
   try {
     await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }).where("number", "=", 1));
     const live: Live = async () => ({ state: "OPEN", head: "sha1", draft: false, mergeable: "CONFLICTING" });

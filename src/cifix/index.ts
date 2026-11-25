@@ -124,6 +124,8 @@ export type CifixDeps = {
   now: () => Date;
   /** Directory holding one bare cache repository per repo. */
   root: string;
+  /** Stands in for the app lane's token and client (tests). */
+  lane?: Pick<Writer, "mint" | "appClient">;
 };
 
 /** The note for a comment about a model-written patch. */
@@ -377,7 +379,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   const d = deps ?? defaultDeps();
   const rec = new Recorder(db, at);
   await rec.dropUnlisted(repo, sel.listed);
-  const gw: Writer = { db, login: ACTOR };
+  const gw: Writer = { db, login: ACTOR, ...d.lane };
   const git = new Git(d.exec, d.root, repo);
   const titles = new Map([...await loadItems(db, [...sel.work, ...sel.collect.map((x) => x.c), ...sel.lint].map((c) => ({ repo: c.repo, number: c.number })), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
   const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";

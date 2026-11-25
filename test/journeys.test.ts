@@ -470,8 +470,6 @@ describe("a repo with no step approvals", () => {
     return found.map((c) => c.step);
   };
   const actions = async (w: World, n: number) => (await w.prPlan(n)).actions.map((a) => [a.kind, a.params?.bucket, a.params?.source].filter(Boolean).join(":"));
-  /** Pushes go out as the box account in these fakes; the app has no keys here. */
-  const boxWrites = async (w: World) => void await w.db.run(w.db.k.deleteFrom("settings").where("key", "=", "github_identity"));
   const lastTask = async (w: World) => ((await w.rows("SELECT id FROM build_tasks ORDER BY id DESC LIMIT 1"))[0] as { id: number }).id;
 
   test("a merge a person started runs as them; a PR nobody started is left alone, also when the same job works the repo", async () => {
@@ -522,7 +520,6 @@ describe("a repo with no step approvals", () => {
     await w.db.run(w.db.k.updateTable("opus_reviews").set({ at: new Date().toISOString() }).where("number", "=", 2));
     assert.deepEqual((await actions(w, 2)).filter((a) => a.startsWith("fixup")), ["fixup:fix:review"]);
     assert.deepEqual(await jobs(w, "fixup"), ["fixup"]);
-    await boxWrites(w);
     await runFixup(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.deps(w));
     await endLint(w, await lastTask(w));
     assert.deepEqual(await jobs(w, "fixup"), ["fixup"]);
@@ -541,7 +538,6 @@ describe("a repo with no step approvals", () => {
     await say(w, "merge", 2);
     assert.deepEqual(await actions(w, 2), ["cifix:work"]);
     assert.deepEqual(await jobs(w, "cifix"), ["cifix"]);
-    await boxWrites(w);
     await runCifix(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.cifixDeps(w));
     await endLint(w, await lastTask(w));
     assert.deepEqual(await jobs(w, "cifix"), ["cifix"]);
@@ -702,6 +698,7 @@ function gitWorld(n: number, lib = "fn a() {}\nfn main() { a(); }\n", conflict =
         fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
         ask: async () => patch,
         check: async () => JSON.stringify({ verdict: "approve", reasons: "matches the listed fix", problems: [] }),
+        lane: { mint: async () => "installation-token", appClient: () => querier },
       };
     },
     /** The CI fix step's deps: the failed check's log names src/lib.rs. */
