@@ -5,7 +5,7 @@ import { loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
 import { loadAssignments, withConfig, config } from "../data/control/index.ts";
 import { loadReviewFacts } from "../data/review/index.ts";
-import { fullPass } from "../data/planner/index.ts";
+import { fullPass, repoPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo } from "../fixup/pushable.ts";
@@ -117,8 +117,7 @@ const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string | null
 export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? [...opts.refs] : undefined;
-  // NEEDS planner.repoPass: the pass universe of one repo; a repo-only load reads the full pass and keeps that repo's PRs.
-  const keys: KeySource = opts.keys ?? (refs ? refs.map(asRef) : fullPass());
+  const keys: KeySource = opts.keys ?? (refs ? refs.map(asRef) : opts.repo ? repoPass(opts.repo) : fullPass());
   const mergeEntryHead = (d: PrPassData, ref: string): string | null => {
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;

@@ -4,24 +4,26 @@
 // the reviews name, and only when one does.
 import type { Db } from "../db/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
-import { loadOwnLogins } from "../data/access/index.ts";
+import { loadActFacts, loadOwnLogins, type ActFacts, type PermKey } from "../data/access/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type TaskStates } from "../data/changes/index.ts";
 import { loadAssignments, loadAuditMax, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
-import { loadHolds as loadOutsideHolds, recomputeHolds, type HoldInfo } from "../data/intake/index.ts";
-import { loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
+import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
+import { loadMergeFacts, loadOwnIntegration, type MergeFacts } from "../data/merge/index.ts";
 import {
-  listItems, loadDiffFacts, loadFormalReviews, loadGates, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
+  listItems, loadComments, loadDiffFacts, loadFormalReviews, loadGates, loadItems, loadItemsWithHashes, loadOpenPrLinks, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
   type DiffFactsRow, type Gate, type PrMirror, type RepoCiSignals, type RepoRow, type ReviewFact,
 } from "../data/mirror/index.ts";
+import type { CommentOut, ItemHashes, ItemOf, OpenPrRow } from "../data/mirror/types.ts";
+import { loadStageFacts, type StageFacts } from "../data/planner/index.ts";
 import { loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
-import { loadRanks, type RankRow } from "../data/triage/index.ts";
+import { listQuietPrs } from "../data/security/index.ts";
+import { loadRanks, loadTriageFacts, type RankRow, type TriageFactsResult } from "../data/triage/index.ts";
 import { listWorkflows, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { mergeDecisionId } from "./rules.ts";
-import { whitelistVerdict } from "../whitelist.ts";
 
 type RefKey = `${string}#${number}` | string;
 
@@ -133,10 +135,71 @@ export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; merg
   });
 }
 
+/** The issue and PR triage inputs of the pass keys (core/issue-facts.ts). `items` holds the keys' mirror rows, open or not. */
+export type ItemPassData = {
+  now: number;
+  run: string | null;
+  control: ControlSnapshot;
+  items: Map<RefKey, ItemOf<"card"> & ItemHashes>;
+  triage: TriageFactsResult;
+  outsideHolds: Map<RefKey, HoldInfo>;
+  stages: Map<RefKey, StageFacts>;
+  workflow: WorkflowPassFacts;
+  implement: ImplementFacts;
+  /** In-scope open items (the workflow scope fragment). */
+  inScope: Set<RefKey>;
+  ownLogins: Set<string>;
+  quiet: Set<string>;
+  mainFixPrs: Set<RefKey>;
+  /** Integration PRs of merge batches (any author). */
+  batchPrs: Set<RefKey>;
+  assignments: Map<string, { assignee: string | null; run: string | null }>;
+  repos: Map<string, RepoRow>;
+  openPrs: OpenPrRow[];
+  /** Second wave: the text of the items `needs` named. */
+  texts: Map<RefKey, ItemOf<"text">>;
+  /** Second wave: mirror state of the PRs `needs` named. */
+  prs: Map<RefKey, ItemOf<"ref">>;
+  /** Second wave: comments created after the earliest `asked` time, of the items asked. */
+  comments: Map<RefKey, CommentOut[]>;
+  /** Second wave: role and cached permission of each login on a repo `needs` named. */
+  act: Map<PermKey, ActFacts>;
+};
+
+/** What the second wave reads, named from the first wave's rows. */
+export type ItemPassNeeds = { texts: Ref[]; prs: Ref[]; asked: { ref: Ref; since: string }[]; logins: { login: string; repo: string }[] };
+
 /**
- * Recomputes the outside-author holds before the pass loads its facts, so the facts read the new holds; commits on its own, never in
- * the facts wave. The whitelist standing of a held author comes from the pure policy of src/whitelist.ts.
+ * Loads the item facts inputs of `keys` in one read snapshot: one wave keyed by the pass keys, then one for what `needs` names from
+ * its rows (texts, implementation PRs, comments after a question, the people who started work). `repo` narrows the loaders that
+ * are not keyed.
  */
-export async function recomputeOutsideHolds(db: Db, now: number): Promise<Awaited<ReturnType<typeof recomputeHolds>>> {
-  return await recomputeHolds(db, { now, whitelist: whitelistVerdict });
+export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; run: string | null; model: string; repo?: string; needs: (d: ItemPassData) => ItemPassNeeds }): Promise<ItemPassData> {
+  return await db.read(async () => {
+    const repos = o.repo ? [o.repo] : undefined;
+    const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, ownLogins, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs] =
+      await db.together(() => Promise.all([
+        loadControl(db), loadItemsWithHashes(db, keys), loadTriageFacts(db, keys, { model: o.model, run: o.run, nowMs: o.now }), loadOutsideHolds(db, keys),
+        loadStageFacts(db, keys), loadWorkflowFacts(db, keys, { nowMs: o.now }), loadImplementFacts(db, keys),
+        // NEEDS workflow.loadInScope: the scope fragment for a key source (Set<RefKey>); the filter below reads every in-scope open item.
+        listItems(db, { states: ["OPEN"], inScope: true, ...(repos ? { repos } : {}) }, "ref"),
+        loadOwnLogins(db), listQuietPrs(db, o.repo ? { repo: o.repo } : {}), loadMainFixPrs(db, repos), loadOwnIntegration(db, repos),
+        loadAssignments(db, o.repo ? { repo: o.repo } : {}), loadRepos(db, { all: true }), loadOpenPrLinks(db, repos),
+      ]));
+    const data: ItemPassData = {
+      now: o.now, run: o.run, control, items, triage, outsideHolds, stages, workflow, implement, inScope: new Set(scoped.map((r) => refKey(r.repo, r.number))),
+      ownLogins, quiet, mainFixPrs, batchPrs, assignments, repos: repoRows, openPrs,
+      texts: new Map(), prs: new Map(), comments: new Map(), act: new Map(),
+    };
+    const n = o.needs(data);
+    const after = n.asked.reduce<string | null>((m, a) => (m === null || a.since < m ? a.since : m), null);
+    const [texts, prs, comments, act] = await db.together(() => Promise.all([
+      n.texts.length ? loadItems(db, n.texts, "text") : Promise.resolve(new Map<RefKey, ItemOf<"text">>()),
+      n.prs.length ? loadItems(db, n.prs, "ref") : Promise.resolve(new Map<RefKey, ItemOf<"ref">>()),
+      after !== null ? loadComments(db, n.asked.map((a) => a.ref), { after, order: "rowid" }) : Promise.resolve(new Map<RefKey, CommentOut[]>()),
+      n.logins.length ? loadActFacts(db, n.logins) : Promise.resolve(new Map<PermKey, ActFacts>()),
+    ]));
+    Object.assign(data, { texts, prs, comments, act });
+    return data;
+  });
 }

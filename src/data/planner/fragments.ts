@@ -22,10 +22,12 @@ const QUEUE_STATES = [
   "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested", "waiting-main-ci",
 ] as const;
 
-registerKeySource<undefined>(PASS_SOURCES.full, (db) =>
-  // The mirror's item rows (alias `ir`), narrowed to the pass universe: open PRs, merged PRs with a take review or merged by us, PRs of
-  // a current implementation attempt, and open issues of tracked repos.
-  itemsOfRepos(db).clearSelect().select(["ir.repo as repo", "ir.number as number"])
+/**
+ * The mirror's item rows (alias `ir`) of `repos` (every repo when absent), narrowed to the pass universe: open PRs, merged PRs with a
+ * take review or merged by us, PRs of a current implementation attempt, and open issues of tracked repos.
+ */
+const passUniverse = (db: Db, repos?: readonly string[]) =>
+  itemsOfRepos(db, repos).clearSelect().select(["ir.repo as repo", "ir.number as number"])
     .where((eb: any) => eb.or([
       eb.and([eb("ir.kind", "=", "pr"), eb.or([
         eb("ir.state", "=", "OPEN"),
@@ -34,7 +36,11 @@ registerKeySource<undefined>(PASS_SOURCES.full, (db) =>
         attemptOfPr(eb, eb.ref("ir.repo"), eb.ref("ir.number"), { current: true }),
       ])]),
       eb.and([eb("ir.kind", "=", "issue"), eb("ir.state", "=", "OPEN"), trackedRepo(eb, "ir.repo")]),
-    ])) as unknown as SelectQueryBuilder<any, any, KeyRow>);
+    ])) as unknown as SelectQueryBuilder<any, any, KeyRow>;
+
+registerKeySource<undefined>(PASS_SOURCES.full, (db) => passUniverse(db));
+/** The pass universe of one repo (planner.repoPass). */
+registerKeySource<{ repo: string }>("planner.repoPass", (db, args) => passUniverse(db, [args.repo]));
 
 registerKeySource<{ due: Ref[]; seen: number }>(PASS_SOURCES.changed, (db, args) => {
   const k = queryDb(db).k;

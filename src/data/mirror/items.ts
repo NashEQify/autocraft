@@ -9,7 +9,7 @@ import { hiddenRepos } from "../control/fragments.ts";
 import { inScopeExpr } from "../workflow/fragments.ts";
 import type { KeySource } from "../keys.ts";
 import { joinKeys, keyChunks, presetColumns, qualified, refKey, splitKey, type AnyQ } from "./shared.ts";
-import type { HiddenRepos, ItemFilter, ItemHit, ItemKind, ItemOf, ItemPreset, ItemRef, ItemShown, OpenPrRow, PrMirror, RefKey, SnippetMarks } from "./types.ts";
+import type { HiddenRepos, ItemFilter, ItemHashes, ItemHit, ItemKind, ItemOf, ItemPreset, ItemRef, ItemShown, OpenPrRow, PrMirror, RefKey, SnippetMarks } from "./types.ts";
 
 const select = <Q extends AnyQ>(q: Q, columns: readonly string[]): Q => q.select(columns as never) as Q;
 
@@ -162,4 +162,17 @@ export async function searchItems(db: Db, search: string, opts: { repos?: string
     ref: refKey(r.repo, r.number), score: r.score,
     ...(opts.snippets ? { snippets: [r.title_snippet, r.body_snippet].filter((x): x is string => !!x && x.includes(MARKS.open)) } : {}),
   }));
+}
+
+/**
+ * The `card` columns and the stored text hashes (embedding text, classifier input and its scheme) of each key: the planner's item
+ * pass reads these without the bodies. One statement (one per 10,000 refs for a list).
+ */
+export async function loadItemsWithHashes(db: Db, keys: KeySource): Promise<Map<RefKey, ItemOf<"card"> & ItemHashes>> {
+  const q = queryDb(db);
+  const cols = qualified("i", [...presetColumns("card"), "embed_hash", "class_hash", "class_scheme"]);
+  const parts = await Promise.all(keyChunks(keys).map((k) => q.all(select(joinKeys(db, q.k.selectFrom("items as i"), k, "i"), cols), { label: "mirror.loadItemsWithHashes" })));
+  const out = new Map<RefKey, ItemOf<"card"> & ItemHashes>();
+  for (const rows of parts) for (const r of rows as (ItemOf<"card"> & ItemHashes)[]) out.set(refKey(r.repo, r.number), r);
+  return out;
 }

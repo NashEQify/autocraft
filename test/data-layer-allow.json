@@ -15,7 +15,6 @@
   "src/conversations/index.ts",
   "src/conversations/store.ts",
   "src/core/issue-facts.ts",
-  "src/core/plan-inputs.ts",
   "src/dash/api/conversations.ts",
   "src/dash/api/decisions.ts",
   "src/dash/api/flow.ts",

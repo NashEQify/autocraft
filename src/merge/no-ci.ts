@@ -11,10 +11,6 @@ export async function repoHasNoCi(db: Db, repo: string): Promise<boolean> {
   return (await loadRepoCiSignals(db, [repo])).get(repo)?.noCi ?? false;
 }
 
-// NEEDS C01 (src/db.ts): the SQLite migration's copy of this read belongs in src/db.ts; this constant goes once it has its own.
-/** The latest checks of one repo, newest first (parameters: repo, NO_CI_SAMPLE), for the SQLite migration in src/db.ts. */
-export const NO_CI_SQL = "SELECT overall FROM pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT ?";
-
 /** repoHasNoCi() from the latest checks of one repo, newest first. */
 export const noCiFrom = (rows: { overall: string | null }[]): boolean => rows.length > 0 && rows.every((r) => !r.overall || r.overall === "none");
 

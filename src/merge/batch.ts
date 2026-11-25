@@ -167,13 +167,10 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
    * that only ends the batch (closing its PR), which needs the pipeline alone.
    */
   const grant = async (members: { number: number; head_oid: string }[] | null): Promise<GuardedRepo | null> => {
-    if (members) {
-      const why = firstRefusal(await mergeVerdicts(db, repo, members.map((m) => ({ number: m.number, head: m.head_oid }))), repo);
-      if (why) { log(`  ${why}`); return null; }
-    }
-    // NEEDS core/guard.guardRepo: for "merge", pass when every member passes mayMerge (review R4); it reads the repo approval only, so a batch
-    // of PRs people approved one by one in a repo without the switch is refused here until it does.
-    const g = await guardRepo(db, repo, members ? "merge" : null, by);
+    const verdicts = members ? await mergeVerdicts(db, repo, members.map((m) => ({ number: m.number, head: m.head_oid }))) : null;
+    const why = verdicts && firstRefusal(verdicts, repo);
+    if (why) { log(`  ${why}`); return null; }
+    const g = await guardRepo(db, repo, members ? "merge" : null, by, undefined, undefined, { members: verdicts ? [...verdicts.values()] : [] });
     if ("refused" in g) { log(`  ${g.refused}`); return null; }
     return g;
   };

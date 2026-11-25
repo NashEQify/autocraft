@@ -96,7 +96,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
     out.byIssue.set(refKey(r.repo, Number(r.number)), {
       attempt: liteOf(r),
       ...(planned && { planned }),
-      question: r.state === "asked" && q1 ? { round: q1.id, at: q1.at, audience, limit: qr?.limit === true, options: qr?.options ?? [], recommended: qr?.recommended ?? null } : null,
+      question: (r.state === "asked" || r.state === "stuck") && q1 ? { round: q1.id, at: q1.at, audience, limit: qr?.limit === true, options: qr?.options ?? [], recommended: qr?.recommended ?? null } : null,
       answer: answer && answer.result && typeof answer.result === "object" ? (answer.result as AnswerRound) : null,
       guidance: rs.filter((x) => x.kind === "guidance").flatMap((x) => {
         const g = x.result as { text?: unknown; by?: unknown } | null;
