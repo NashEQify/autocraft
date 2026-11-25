@@ -198,9 +198,9 @@ const edgeQuery = (db: Db, repo?: string) => kOf(db).selectFrom("duplicate_pairs
   .where("p.verdict", "=", "duplicate").where("p.by_operator", "=", 0)
   .$if(!!repo, (b: any) => b.where("p.repo", "=", repo!));
 
-/** Whether the item is on either side of an edge. */
+/** Whether the item is on either side of an edge: one index probe per side. Scalar subqueries, since Postgres may answer an EXISTS by reading every edge and its items. */
 export const onEdgeExpr = (db: Db, eb: any, repo: string, number: string) => eb.or((["p.a", "p.b"]).map((side) =>
-  eb.exists(edgeQuery(db).whereRef("p.repo", "=", repo).whereRef(side, "=", number))));
+  eb(edgeQuery(db).clearSelect().select((e: any) => e.lit(1).as("one")).whereRef("p.repo", "=", repo).whereRef(side, "=", number).limit(1), "is not", null)));
 
 export async function dupeEdgeRows(db: Db, repo?: string): Promise<DupeEdge[]> {
   return await queryDb(db).all(edgeQuery(db, repo).orderBy("p.repo").orderBy("p.a").orderBy("p.b")) as DupeEdge[];

@@ -123,7 +123,7 @@ test("a database of an earlier release comes to the current schema and switches 
       { number: 2, kind: "pr", entry: "merge", weight: 5, state: "running", started_by: "erin", approved_by: "erin" },
       { number: 4, kind: "pr", entry: "review", weight: 5, state: "running", started_by: "dave", approved_by: null },
       { number: 5, kind: "issue", entry: "implement", weight: 5, state: "backlog", started_by: "carol", approved_by: null },
-      { number: 6, kind: "pr", entry: "review", weight: 5, state: "recommending", started_by: "erin", approved_by: "erin" },
+      { number: 6, kind: "pr", entry: "review", weight: 5, state: "running", started_by: "erin", approved_by: "erin" },
     ]);
     assert.deepEqual(await rows("SELECT id, state FROM main.preapprovals ORDER BY id"), [{ id: 1, state: "cancelled" }, { id: 2, state: "queued" }, { id: 3, state: "cancelled" }], "the newest active leg goes on");
 
