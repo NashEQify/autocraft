@@ -24,6 +24,7 @@ import { startDiscord } from "../discord/index.ts";
 import { closeDb, openDb, setDbRole } from "../db/open.ts";
 import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
 import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
+import { dropRetired } from "../db/retired.ts";
 import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
@@ -99,6 +100,8 @@ async function serve(): Promise<void> {
   // The switch may take a while: the probes answer meanwhile. What fails here stops the runner, and the next start completes it.
   standbyProbes ??= startHealthServer(workerListen, async () => false, state).catch((e: Error) => (console.error(`runner: startup probes not started: ${e.message}`), null));
   await switchOver(db, { perDay: DEFAULT_PER_DAY, log: (l) => console.log(`runner: ${l}`) });
+  const gone = await dropRetired(db);
+  if (gone.length) console.log(`runner: dropped ${gone.join(", ")}`);
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);

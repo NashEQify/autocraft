@@ -891,10 +891,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   harness TEXT,                       -- user-local mode: claude | codex
   reported_model TEXT                 -- user-local mode: the model the harness reported
 );
-CREATE INDEX IF NOT EXISTS agent_runs_running ON agent_runs(account_id) WHERE state = 'running';
 CREATE INDEX IF NOT EXISTS agent_runs_state ON agent_runs(state, id);
 CREATE INDEX IF NOT EXISTS agent_runs_step ON agent_runs(step, id);
-CREATE INDEX IF NOT EXISTS agent_runs_account ON agent_runs(account_id, id);
 CREATE INDEX IF NOT EXISTS agent_runs_job ON agent_runs(job_id, id);
 CREATE INDEX IF NOT EXISTS agent_runs_started ON agent_runs(started_at);
 

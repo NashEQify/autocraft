@@ -26,7 +26,7 @@ const blockedBy = (repo: string, number: string): string =>
     WHERE rb.b_repo = ${repo} AND rb.b_number = ${number} AND o.verdict = 'hold'`;
 
 /** Members of the duplicate group decision `id`. */
-const groupMembers = (id: string): string => `SELECT gm.repo AS repo, gm.number AS number FROM dupe_group_items gm WHERE gm.decision_id = ${id}`;
+const groupMembers = (id: string): string => `SELECT gm.repo AS repo, gm.number AS number FROM dupe_group_items gm WHERE gm.group_id = ${id}`;
 
 /** True when item `a` is in a duplicate edge or group: its state, text and activity move other members' sets, groups and canonical pick (src/dupes/plan.ts). */
 // The unary + keeps SQLite off the verdict index: the item's own pairs are a key lookup.
@@ -170,9 +170,9 @@ export const PLAN_INPUTS: PlanInput[] = [
   },
   {
     table: "dupe_group_items", class: "cross", why: "A group member's role: every member of the group (held, group to ask, closers) and the group's carry-overs.",
-    refs: `SELECT r.repo AS repo, r.number AS number UNION ${groupMembers("r.decision_id")}`,
+    refs: `SELECT r.repo AS repo, r.number AS number UNION ${groupMembers("r.group_id")}`,
   },
-  { table: "dupe_groups", class: "cross", why: "A group's applied answer: every member (closers).", refs: groupMembers("r.decision_id") },
+  { table: "dupe_groups", class: "cross", why: "A group's applied answer: every member (closers).", refs: groupMembers("r.id") },
   {
     table: "duplicate_pairs", class: "cross", why: "A pair: both items (pairs to check); a duplicate edge changes the sets and groups of its whole component.",
     refs: "SELECT r.repo AS repo, r.a AS number UNION SELECT r.repo, r.b",

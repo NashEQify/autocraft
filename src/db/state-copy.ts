@@ -73,6 +73,13 @@ const LANE_CURSORS: Record<string, string> = { pipeline_review_cursor: "review",
 const BUILD_KEYS = new Set(["warm_report", "worker_update_pending", "worker_update_failures", "warm_gc_at", "warm_trimmed_publish", "leader:runner:endpoint"]);
 const BUILD_PREFIXES = ["warm_bytes:", "warm_rebuild:"];
 
+/** The settings rows the copy reads: exact keys, and prefixes. */
+export const COPIED_SETTINGS: { keys: string[]; prefixes: string[] } = {
+  keys: [...Object.values(SYNC_TEXT), ...Object.values(SYNC_INT), ...Object.keys(LANE_MARKS), ...Object.keys(LANE_CURSORS), ...BUILD_KEYS, "classify_run", "liveness_at", "liveness_open"],
+  prefixes: [...BUILD_PREFIXES, ...["merge", "push", "comment", "fixissue", "labels", "mainfix", "prstatus", "ci"].map((s) => `${s}_approved:`),
+    "pipeline_fp:", "limit_reset_at:", "dupe_drop:", "review_stale:", "review_rerun:", "review_fail:", "mergeable_unknown:", "batch_size:"],
+};
+
 const APPROVAL = /^(merge|push|comment|fixissue|labels|mainfix|prstatus|ci)_approved:(.+)$/;
 const STALE = /^review_stale:(.+)#([0-9]+)$/;
 const RERUN = /^review_rerun:(.+)#([0-9]+):([0-9]{4}-[0-9]{2}-[0-9]{2})$/;

@@ -1,6 +1,7 @@
 // Alert opt-ins and sent alerts (`discord_alerts`, `discord_alert_msgs`). Row identity of a sent alert is (user_hash, workflow_id, rec_at).
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
+import { DROP_RETIRED, retiredColumns } from "../../db/retired-names.ts";
 import * as kx from "../../db/kx.ts";
 // reads: access.discord_links
 import { linkedLogin } from "../access/fragments.ts";
@@ -20,14 +21,14 @@ export async function loadAlertState(db: Db, f: { sinceIso: string }): Promise<{
   const [alerters, sent] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("main.discord_alerts as a").select((eb) => ["a.user_hash", "a.sealed", "a.created_at", eb.cast<string | null>(linkedLogin(eb, "a.user_hash"), "text").as("login")])
       .where((eb) => linkedLogin(eb, "a.user_hash"), "is not", null).orderBy("a.user_hash"), { label: "discord.loadAlerters" }),
-    q.all(q.k.selectFrom("main.discord_alert_msgs as m").select(["m.user_hash", "m.workflow_id", "m.rec_at", "m.decision_id", "m.sent_at"])
+    q.all(q.k.selectFrom("main.discord_alert_msgs as m").select(["m.user_hash", "m.workflow_id", "m.rec_at", "m.sent_at"]).$if(!DROP_RETIRED, (s) => s.select("m.decision_id"))
       .where("m.sent_at", ">", f.sinceIso)
       .where((eb) => eb("m.user_hash", "in", eb.selectFrom("main.discord_alerts as a").select("a.user_hash").where((e2) => linkedLogin(e2, "a.user_hash"), "is not", null))), { label: "discord.loadSentAlerts" }),
   ]));
   return {
     alerters: alerters.map((r) => ({ userHash: r.user_hash, sealed: r.sealed, createdAt: r.created_at, login: r.login! })),
     sent: sent.map((r) => {
-      const legacy = r.workflow_id === null ? LEGACY.exec(r.decision_id) : null;
+      const legacy = r.workflow_id === null ? LEGACY.exec(r.decision_id ?? "") : null;
       return {
         userHash: r.user_hash, sentAt: r.sent_at,
         workflowId: r.workflow_id !== null ? Number(r.workflow_id) : legacy ? Number(legacy[1]) : 0,
@@ -72,7 +73,7 @@ export async function addSentAlerts(db: Db, rows: SentAlert[]): Promise<void> {
   const q = queryDb(db);
   for (const part of kx.batches(rows)) {
     await q.run(q.k.insertInto("main.discord_alert_msgs").values(part.map((r) => ({
-      decision_id: legacyId(r.workflowId, r.recAt), user_hash: r.userHash, sealed: null, choices_id: null, sent_at: r.sentAt, workflow_id: r.workflowId, rec_at: r.recAt,
+      ...retiredColumns({ decision_id: legacyId(r.workflowId, r.recAt) }), user_hash: r.userHash, sealed: null, sent_at: r.sentAt, workflow_id: r.workflowId, rec_at: r.recAt,
     }))).onConflict((oc) => oc.doNothing()));
   }
 }
