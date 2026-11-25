@@ -41,6 +41,7 @@ export const json = (v: unknown): string | null => (v === undefined || v === nul
 /** The columns of a patch as stored. A key left out is not written; null clears the column. */
 export function columnsOf(p: ImplementationPatch): Record<string, string | number | null> {
   const out: Record<string, string | number | null> = {};
+  if (p.queuedBy !== undefined) out.queued_by = p.queuedBy;
   if (p.textHash !== undefined) out.text_hash = p.textHash;
   if (p.baseSha !== undefined) out.base_sha = p.baseSha;
   if (p.workspaceId !== undefined) out.workspace_id = p.workspaceId;
@@ -60,6 +61,6 @@ export function columnsOf(p: ImplementationPatch): Record<string, string | numbe
 
 /** Column types of a patch in a `valuesTable`. */
 export const COLUMN_TYPE: Record<string, "text" | "bigint"> = {
-  text_hash: "text", base_sha: "text", workspace_id: "bigint", plan_json: "text", plan_md: "text", plan_call_id: "bigint", session_call_id: "bigint",
+  queued_by: "text", text_hash: "text", base_sha: "text", workspace_id: "bigint", plan_json: "text", plan_md: "text", plan_call_id: "bigint", session_call_id: "bigint",
   report_json: "text", diff_hash: "text", diff_stat: "text", branch: "text", pr_number: "bigint", pr_url: "text", reason: "text", state: "text",
 };

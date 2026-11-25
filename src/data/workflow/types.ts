@@ -12,6 +12,8 @@ export const FAST_FLOOR = 1e15 / 2;
 export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;
   weight: number; state: WorkflowState; own: boolean;
+  /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
+  dropped?: string[];
 };
 /** Live workflows of PRs, by the PR. */
 export type PrWorkflows = Map<RefKey, ItemWorkflow>;
@@ -20,6 +22,8 @@ export type OperatorWork = { requests: (FixupRequest & { maker_checked_at?: stri
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;
   ofPr: Map<RefKey, WorkflowFact>;
+  /** Who each live implement workflow acts for, newest first (workflowActors), by its id. */
+  actors: Map<number, string[]>;
   ended: Map<RefKey, EndedWorkflow>;
   holds: Set<RefKey>;
   operator: Map<RefKey, OperatorWork>;

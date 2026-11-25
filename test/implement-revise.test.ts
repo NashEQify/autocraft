@@ -24,7 +24,7 @@ const kinds = (f: Parameters<typeof prFacts>[0]) =>
   decidePr(prFacts(f)).actions.filter((a) => a.kind !== "unassign").map((a) => `${a.kind}${a.params?.bucket ? `:${a.params.bucket}` : ""}${a.params?.issue ? `#${a.params.issue}` : ""}`);
 
 test("an implementation PR's review fixes and red CI go to its session; a conflict goes to the conflict step", () => {
-  const ours = { implementation: { issue: 7, state: "pr-opened", revisedHeads: [] as string[] } };
+  const ours = { implementation: { issue: 7, state: "pr-opened", revisedHeads: [] as string[], queuedBy: "op", standing: "yes" as const } };
   const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
   const red = { ci: "failure" as const, cifix: { states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, skipReason: null, checksAt: null } };
 
@@ -48,11 +48,11 @@ test("an implementation PR's review fixes and red CI go to its session; a confli
 
 test("an implementation PR waits on the Implement switch while it is off, and on a revision in progress instead of merging", () => {
   const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
-  const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [] }, repoFacts: { implementOn: false } }));
+  const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [], queuedBy: "op", standing: "yes" }, repoFacts: { implementOn: false } }));
   assert.ok(!off.actions.some((a) => a.kind === "implement"), JSON.stringify(off.actions));
   assert.equal(off.wait, implementOffWait("app"));
   // A ready PR whose session is revising it is not merged meanwhile: it waits on the revision.
-  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"] } }));
+  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"], queuedBy: "op", standing: "yes" } }));
   assert.ok(!revising.eligible && !revising.actions.some((a) => a.kind === "merge"), JSON.stringify(revising.actions));
   assert.match(revising.wait ?? "", /revision for #7/);
 });

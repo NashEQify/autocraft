@@ -34,7 +34,8 @@ import { addAudit, listAudit, listPushOutcomes, loadAuditActions, withConfig } f
 import { loadChecks, loadItems, loadRepos, type PrChecksView } from "../data/mirror/index.ts";
 import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
 import { loadOperatorFixResults, loadPushEdges, ownPushKind, type PushEdge } from "../data/changes/index.ts";
-import { loadReviewsAt } from "../data/review/index.ts";
+import { loadReviewsAt, type ReviewFinding } from "../data/review/index.ts";
+import { verdictKept } from "../workflow/work.ts";
 import { isRunning } from "../data/jobs/index.ts";
 import { permKey, standings } from "../data/access/index.ts";
 import { githubIdentity } from "../github/identity.ts";
@@ -182,7 +183,7 @@ export async function checkFixup(db: Db, o: { repo: string; number: number; by: 
   if (instructions.length > INSTRUCTIONS_MAX) throw new Error(`the instructions are over ${INSTRUCTIONS_MAX} characters`);
   const head = needHead(it, ref);
   const checks = (await loadChecks(db, [{ repo, number }])).get(ref) as PrChecksView | undefined;
-  if (checks?.mergeable === "CONFLICTING") throw new Error(`${ref} conflicts with its base branch: the conflict merge comes first`);
+  if (fact.mergeable === "CONFLICTING") throw new Error(`${ref} conflicts with its base branch: the conflict merge comes first`);
   // A person's fix-up runs as that person (mayPush, src/core/may.ts); the repo's push approval is for pushes nobody asked for.
   const may = mayPush({ kind: "fixup", repoApproval: null, workflow: null, operatorFix: true, by });
   if (!may.ok) throw new Error(may.why);
@@ -275,7 +276,7 @@ type PassFacts = {
   /** `ref` -> autorepins that are waiting, locking or pushed. */
   repins: Map<string, { head: string | null; to_head: string | null }[]>;
   workflows: Map<number, WorkflowFact>;
-  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string }>;
+  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[] }>;
 };
 
 async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
@@ -300,7 +301,7 @@ async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
     items, checks, merge, fixResults, edges, implPushes, workflows,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
     repins: new Map([...repins].map(([k, v]) => [k, v.map((x) => ({ head: x.head, to_head: x.to_head }))])),
-    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at }])),
+    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes }])),
   };
 }
 
@@ -319,11 +320,16 @@ async function handOver(db: Db, p: Row, head: string, pf: PassFacts, leg: LegCon
   return { done: true };
 }
 
+/** The checks say the PR conflicts, and the conflict step works it (or is about to): its push is a head the leg goes on with. */
+const mergesBase = (f: PrFacts | null): boolean =>
+  f?.mergeable === "CONFLICTING" && !!f.conflict?.baseOk && ["merge", "linting"].includes(f.conflict.bucket) && stepRuns(f, "conflict");
+
 type ReviewRead = { kind: "none" | "stale" | "take" | "takefix" | "bad"; why: string; unsure: boolean; at?: string };
 
 /**
  * The Opus review at `head`. A take or take-fix that is not stale goes on, sure or unsure: the merge approval says the change is wanted,
- * so a take-fix is the pipeline's own fix-up to make and the pre-approval goes on with its push. Any other verdict stops it.
+ * so a take-fix is the pipeline's own fix-up to make and the pre-approval goes on with its push; one whose fixes a person all dropped is a
+ * take. Any other verdict stops it.
  */
 async function reviewAt(db: Db, p: Row, head: string, pf: PassFacts, wake?: Wake): Promise<ReviewRead> {
   const r = pf.reviews.get(`${refOf(p.repo, p.number)}@${head}`);
@@ -331,8 +337,9 @@ async function reviewAt(db: Db, p: Row, head: string, pf: PassFacts, wake?: Wake
   const ref = refOf(p.repo, p.number);
   if ((await staleReviews(db, p.repo, false, { refresh: (r, at) => (r === ref ? wake?.(at) : undefined) })).has(`${ref}@${head}`)) return { kind: "stale", why: "", unsure: false };
   const unsure = !r.sure;
-  if (r.verdict === "take") return { kind: "take", why: "", unsure, at: r.at };
-  if (r.verdict === "take-fix") return { kind: "takefix", why: r.reason ? oneLine(r.reason, 160) : "", unsure, at: r.at };
+  const verdict = verdictKept(r.verdict, r.fixes, p.workflow_id === null ? undefined : pf.workflows.get(p.workflow_id)?.dropped);
+  if (verdict === "take") return { kind: "take", why: "", unsure, at: r.at };
+  if (verdict === "take-fix") return { kind: "takefix", why: r.reason ? oneLine(r.reason, 160) : "", unsure, at: r.at };
   return { kind: "bad", why: `the review says ${r.verdict}${unsure ? " (unsure)" : ""}${r.reason ? `: ${oneLine(r.reason, 160)}` : ""}`, unsure, at: r.at };
 }
 
@@ -483,12 +490,14 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
       // The planner's fix-up of the review's fixes runs next, sure or unsure (fixupOf). Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
       const f = cur === head ? await factOf() : null;
       const fx = f ? fixupOf(f) : null;
+      // A conflict with the base branch is merged away before the fixes.
+      if (mergesBase(f)) return;
       // Our implementation PR goes back to the session that wrote it instead; its push is our own as well.
       if (f && revisesNow(f)) return await noteOnce(db, p, head, "review-revise", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the implementation session makes them.`);
       if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) {
         return await noteOnce(db, p, head, "review-fixup", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the fix-up runs.`);
       }
-      return await stop(`the review of ${name} asks for fixes and its fix-up cannot run${fx ? ` (${fx.bucket})` : ""}`);
+      return await stop(f?.mergeable === "CONFLICTING" ? "the PR conflicts with its base branch" : `the review of ${name} asks for fixes and its fix-up cannot run${fx ? ` (${fx.bucket})` : ""}`);
     }
     return await stop(r.why);
   }
@@ -515,8 +524,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (c.overall === "none" && !await repoHasNoCi(db, p.repo)) return;
     if (c.mergeable === "CONFLICTING") {
       // The conflict step merges the base into the PR when it can; its push is a new head that continues this pre-approval.
-      const f = await factOf();
-      if (f?.conflict?.baseOk && ["merge", "linting"].includes(f.conflict.bucket) && stepRuns(f, "conflict")) return;
+      if (mergesBase(await factOf())) return;
       return await stop("the PR conflicts with its base branch");
     }
     // The pre-merge review of this head must be clean; the planner runs it (src/core/decide.ts) and retries a failed one.

@@ -1,8 +1,9 @@
-// The implementation attempt and the pull request an issue's workflow works on. Pure: the advance pass, the command core and the
-// planner give it what they loaded, so they agree on what an earlier workflow left behind.
+// What a workflow works on: the implementation attempt and the pull request of an issue's, the person an implementation runs for, and the
+// findings of a review that no person dropped. Pure: the advance pass, the command core and the planner give it what they loaded, so they agree.
+import type { Standing } from "../data/access/types.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { ENDED_STATES } from "../implement/types.ts";
-import type { ItemWorkflow } from "./types.ts";
+import type { ItemWorkflow, PlanPart } from "./types.ts";
 
 /** The PR of the issue's current attempt, or of one that ended in the workflow: the one `workOf` may name. */
 export function candidatePr(a: IssueAttempt | null | undefined, w: Pick<ItemWorkflow, "startedAt">): number | null {
@@ -27,3 +28,28 @@ export function workOf(
   if (!a || overBefore(pr, w.startedAt)) return { attempt: null, pr: null };
   return { attempt: ENDED_STATES.has(a.attempt.state) ? null : a, pr: candidatePr(a, w) };
 }
+
+/**
+ * The person whose command an implementation runs on: the newest of the workflow's `actors` (data/workflow workflowActors) who may act on the
+ * repo now. When nobody may, the newest one GitHub has not answered on, else the newest; null without actors.
+ */
+export function settlerOf(actors: readonly string[], of: (login: string) => Standing): { by: string; standing: Standing } | null {
+  const all = actors.map((by) => ({ by, standing: of(by) }));
+  return all.find((a) => a.standing === "yes") ?? all.find((a) => a.standing === "unknown") ?? all[0] ?? null;
+}
+
+const TITLE_CHARS = 80;
+
+/** A review finding's title, as the plan's part carries it: the review's own, else the start of its change. */
+export const partTitle = (f: { file: string; change: string; title?: string }): string => f.title ?? (f.change.replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS) || f.file);
+
+/** The lower-case titles of the parts a person dropped. */
+export const droppedTitles = (plan: readonly PlanPart[]): string[] => plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
+
+/** The findings a person has not dropped from the workflow's plan (`dropped`: titles, lower case): the ones the pipeline fixes. */
+export const keptFixes = <F extends { file: string; change: string; title?: string }>(fixes: readonly F[], dropped: readonly string[] | undefined): F[] =>
+  fixes.filter((f) => !dropped?.includes(partTitle(f).toLowerCase()));
+
+/** The verdict with the findings a person dropped left out: a take-fix with none left is a take. */
+export const verdictKept = <V extends string>(verdict: V, fixes: readonly { file: string; change: string; title?: string }[], dropped: readonly string[] | undefined): V | "take" =>
+  verdict === "take-fix" && fixes.length > 0 && keptFixes(fixes, dropped).length === 0 ? "take" : verdict;

@@ -14,7 +14,7 @@ import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { decidePr, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
+import { decidePr, fixedAfterMerge, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { chainsOwn, type OwnPush } from "../core/may.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -23,7 +23,7 @@ import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge }
 import { findingsOf } from "../premerge/store.ts";
 import { t } from "../i18n/index.ts";
 import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
-import { afterSteps, atBlocker, planOf, type ReviewView } from "./recommend.ts";
+import { afterSteps, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { listText, stepsFor, type StepName } from "./status.ts";
@@ -339,6 +339,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const approved = w.approvedBy !== null;
   const fresh = review && review.at > since ? review : null;
   const fixed = latestFix(pass, w, ref, since);
+  const f = pass.facts.get(ref);
+  const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { fixedAfter: fixedAfterMerge(f) } : null;
+  const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts), conflict);
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     review: fresh ? { verdict: fresh.verdict, sure: fresh.sure, majors: plan.filter((p) => p.major && p.state === "planned").map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0 } : null,
@@ -372,13 +375,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       found.params.premerge = extra.map((p) => p.n);
     }
     if ((found.blocker === "beyond-agreed" && beyond?.length) || impl === "theirs") patch.baseHead = head;
-    return write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: atBlocker(found, view, blockPlan), recAt: at, recHead: head }, "blocked");
+    return write({ ...patch, ...(blockPlan !== plan ? { plan: blockPlan } : {}), state: "blocked", blocker: found.blocker, blockerParams: found.params, rec: blockerRec(found, blockPlan), recAt: at, recHead: head }, "blocked");
   }
 
-  const f = pass.facts.get(ref);
   if (!approved) {
     if (f && f.head === head && waitsForAnswer(f)) {
-      let rec: Recommendation = afterSteps(view, plan, unapprovedStop(f));
+      let rec: Recommendation = afterSteps(view, plan, unapprovedStop(f), conflict);
       // The end recommendation also says which files the implementation changed beyond its plan; they count as shown.
       if (beyond?.length) {
         rec = { ...rec, text: t("{text} The implementation also changes {files}, which no part of its plan names.", { text: rec.text, files: listText(beyond.slice(0, 10)) }) };
@@ -390,7 +392,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head);
     if (refused) {
       const stop: Found = { blocker: "other", params: { reason: refused } };
-      return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: atBlocker(stop, view, plan), recAt: at, recHead: head }, "blocked");
+      return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: blockerRec(stop, plan), recAt: at, recHead: head }, "blocked");
     }
   }
   return settle(patch);

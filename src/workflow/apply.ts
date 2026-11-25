@@ -21,6 +21,7 @@ import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { claimLevels } from "../remote/level.ts";
 import { actRefusal } from "../github/identity.ts";
+import { settlesNow } from "../preapproval/permissions.ts";
 import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
@@ -147,6 +148,9 @@ class Moved extends Error {}
 /** How often a command is resolved again on a workflow that changed under it. */
 const MOVED_TRIES = 3;
 
+/** A command that means what the item showed when it was written: a yes, parts by their numbers, or an option named on its own. */
+const byWhatWasShown = (p: Parsed): boolean => p.kind !== "commands" || p.parts.some((x) => "part" in x && typeof x.part === "number");
+
 /** Runs the command on one item; when the workflow changed meanwhile (the advance pass, another person), on what it is now. */
 async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, target: ItemRef, at: string, batch: Batch): Promise<ItemOutcome> {
   for (let tries = 1; ; tries++) {
@@ -156,12 +160,15 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
       if (!(e instanceof Moved)) throw e;
       const repo = trackedRepo(batch.tracked, target.repo)!;
       const key = `${repo}#${target.number}`;
-      const rec = (): string => JSON.stringify((batch.live.get(key) ?? batch.works.get(key))?.rec ?? null);
-      const was = rec();
+      const shown = (): string => {
+        const w = batch.live.get(key) ?? batch.works.get(key);
+        return JSON.stringify([w?.rec ?? null, w?.plan ?? []]);
+      };
+      const was = shown();
       await refresh(db, batch, repo, target.number);
       const now = batch.live.get(key) ?? batch.works.get(key);
-      // A yes answers the recommendation the person read, not one that took its place.
-      const other = input.parsed.kind === "yes" && rec() !== was;
+      // A yes answers the recommendation the person read, not one that took its place; a number names a part of the plan they read.
+      const other = byWhatWasShown(input.parsed) && shown() !== was;
       if (other || tries === MOVED_TRIES) {
         return { repo, number: target.number, outcome: "refused", line: t("The work on {ref} changed a moment ago. Send the command again.", { ref: refText(repo, target.number) }), workflowId: now?.id ?? null };
       }
@@ -205,7 +212,10 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const issue = kind === "pr" ? batch.works.get(key) ?? null : null;
   const covered = own === null && !says(input.parsed, "autorepin") ? issue : null;
   if (covered && startsWork(input.parsed)) return out("refused", worksElsewhere(ref, covered, input.clock), covered.id);
-  const wf = covered ?? own;
+  const work = covered ?? own;
+  // An approval whose maker may no longer act on the repo approves nothing: whoever goes on with the merge approves it anew.
+  const lapsed = !!work?.approvedBy && work.approvedBy.toLowerCase() !== login.toLowerCase() && await settlesNow(db, work.approvedBy, repo) === "no";
+  const wf = work && lapsed ? { ...work, approvedBy: null, approvedAt: null, approvedVia: null } : work;
   const said: fx.Target = { repo, number: target.number, kind, head };
   const on: fx.Target = covered ? { repo, number: covered.number, kind: covered.kind, head: null } : said;
   const reply = (line: string): string => (covered ? t("{ref}: {line}", { ref: refText(on.repo, on.number), line }) : line);
@@ -231,7 +241,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too });
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said });
     const more = too.flatMap((x) => (x.workflow ? [x] : []));
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
@@ -291,8 +301,10 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
 /** `commit` writes the workflow row (started, changed or ended) with the run's own rows and returns its id; it runs in the write that records the event. */
 type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
+const CHANGED = (): string => t("The pull request changed after the command was written. Send it again.");
+
 /** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[] }): Promise<Done> {
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
@@ -357,8 +369,10 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   let on: fx.Ctx = { ...c, workflowId: live.id };
   if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await implementationPr(db, live);
+    // A command written on the PR is about its head then, and about that PR.
+    if (o.said.kind === "pr" && (pr?.number !== o.said.number || (o.said.head !== null && pr.head !== o.said.head))) throw new fx.EffectError(CHANGED());
     // An answer to a recommendation made at another head of the PR would run on code nobody was shown.
-    if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(t("The pull request changed after the command was written. Send it again."));
+    if (pr && live.rec && live.recHead && pr.head !== live.recHead) throw new fx.EffectError(CHANGED());
     if (pr) on = { ...c, item: pr, workflowId: live.id };
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
@@ -376,7 +390,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   return {
-    failed: [],
+    failed: [], ...(work?.note ? { note: work.note } : {}),
     commit: async () => {
       const now = (await listWorkflows(db, { ids: [live.id], live: true }))[0];
       if (!now) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
@@ -385,7 +399,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
-      await work?.(live.id);
+      await work?.write(live.id);
       return live.id;
     },
   };

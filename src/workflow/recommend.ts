@@ -9,20 +9,16 @@ import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
 import type { PlanPart, Recommendation } from "./types.ts";
-
-const TITLE_CHARS = 80;
-
-/** A part's title: the review's own, else the start of its change. */
-const titleOf = (f: ReviewFix): string => f.title ?? (f.change.replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS) || f.file);
+import { droppedTitles, partTitle } from "./work.ts";
 
 /**
  * The plan of a review's fixes, numbered from 1 in the review's order. A part a person dropped from the plan before (same title)
  * stays dropped; a part with no fix (the review asks for nothing) is no part.
  */
 export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[]): PlanPart[] {
-  const dropped = new Set(before.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase()));
+  const dropped = new Set(droppedTitles(before));
   return fixes.map((f, i) => {
-    const title = titleOf(f);
+    const title = partTitle(f);
     return { n: i + 1, title, source: "review" as const, file: f.file, ...(f.major ? { major: true } : {}), state: dropped.has(title.toLowerCase()) ? "dropped" as const : "planned" as const };
   });
 }
@@ -50,14 +46,27 @@ const STOPS = {
   ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),
 };
 
+/** A conflict with the base branch: whether the pipeline makes the review's fixes after it merged the base (src/core/decide.ts fixedAfterMerge). */
+export type Conflict = { fixedAfter: boolean };
+
+/**
+ * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge: one that fixes and merges where the
+ * pipeline does both once the merge is approved, else a new review.
+ */
+export function onConflict(rec: Recommendation, conflict: Conflict | null): Recommendation {
+  if (!conflict || (!rec.parts.fix.length && rec.again !== "fixup")) return rec;
+  if (conflict.fixedAfter) return rec.merges ? rec : { ...rec, merges: true, text: textFor({ fix: rec.parts.fix, merges: true }) };
+  return { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" };
+}
+
 /**
  * What the item comes back with when its steps are done and the merge is not approved: the review's recommendation when it gave
  * one (without the parts a person dropped; its sentence written again when the parts changed), else one built from its verdict: fix
  * the planned parts then merge, merge, close, or review again. A yes always runs something. `stop`: what the PR ran into besides the
  * review (unapprovedStop), which the sentence names.
  */
-export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null): Recommendation {
-  const rec = recommended(review, plan);
+export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
+  const rec = onConflict(recommended(review, plan), conflict);
   return stop && !rec.close ? { ...rec, text: STOPS[stop](rec.text) } : rec;
 }
 

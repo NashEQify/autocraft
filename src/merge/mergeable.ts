@@ -11,6 +11,7 @@ import { readEnvFor } from "../github/read.ts";
 import { loadUnknownDue, markUnknownStuck, noteMergeable as saveMergeable, removeMergeState } from "../data/merge/index.ts";
 import type { UnknownState } from "../data/merge/types.ts";
 import { loadLatestReviews } from "../data/review/index.ts";
+import { listWorkflows } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 
 export type { UnknownState };
@@ -21,16 +22,18 @@ export const READS_BEFORE_REQUEST = 5;
 const known = (r: PrChecks): boolean => r.mergeable === "MERGEABLE" || r.mergeable === "CONFLICTING";
 
 /**
- * Follows PRs whose plan waits on GitHub's mergeable state: a take review at the head and CI success. Counts the consecutive checks reads
+ * Follows PRs whose plan waits on GitHub's mergeable state: a take review at the head, or a live merge-queue start, and CI success. Counts the consecutive checks reads
  * that still show an unknown state; a known state forgets the PR.
  */
 export async function noteMergeable(db: Db, rows: PrChecks[], at: string): Promise<void> {
   const waiting = rows.filter((r) => !known(r) && r.state === "OPEN" && r.overall === "success");
-  const reviews = waiting.length ? await loadLatestReviews(db, waiting.map((r) => ({ repo: r.repo, number: r.number }))) : new Map();
+  const refs = waiting.map((r) => ({ repo: r.repo, number: r.number }));
+  const [reviews, started] = await db.together(() => Promise.all([loadLatestReviews(db, refs), listWorkflows(db, { live: true, refs })]));
+  const queued = new Set(started.filter((w) => w.entry === "merge").map((w) => `${w.repo}#${w.number}`));
   const taken = new Set<string>();
   for (const r of waiting) {
     const v = reviews.get(`${r.repo}#${r.number}`);
-    if (v && v.head === r.head_oid && (v.verdict === "take" || v.verdict === "take-fix")) taken.add(`${r.repo}#${r.number}@${r.head_oid}`);
+    if (queued.has(`${r.repo}#${r.number}`) || (v && v.head === r.head_oid && (v.verdict === "take" || v.verdict === "take-fix"))) taken.add(`${r.repo}#${r.number}@${r.head_oid}`);
   }
   await saveMergeable(db, rows, at, taken);
 }

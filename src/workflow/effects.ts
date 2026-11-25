@@ -14,6 +14,8 @@ import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
+import { fixedAfterMerge } from "../core/decide.ts";
+import { loadPrFact } from "../core/facts.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
@@ -131,22 +133,28 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
 /**
  * What runs again on a started PR: a review of the current head, or a fix-up of the named parts. With `merges`, the fix-up
  * carries the merge (a new pre-approval in `fixup`), unless a pre-approved merge is already in progress; a PR with no fix-up
- * this time gets its merge leg when it has none.
+ * this time gets its merge leg when it has none. No fix-up can be made on a PR that conflicts with its base branch: where the pipeline
+ * merges the base into an approved PR and then makes the fixes itself (`fixedAfterMerge`), the merge leg alone is started (`note` says so).
  */
-export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean }): Promise<Write> {
+export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean }): Promise<{ write: Write; note?: string }> {
   const { db, by, item } = c;
-  if (item.kind !== "pr") return nothing;
+  if (item.kind !== "pr") return { write: nothing };
   const had = o.merges ? await activeLeg(db, item) : null;
+  if (o.again === "fixup" && o.merges && fixedAfterMerge(await loadPrFact(db, item.repo, item.number))) {
+    return { write: await mergeLeg(c, had), note: t("{ref} conflicts with its base branch: that merge comes first, then the review's fixes.", { ref: ref(item) }) };
+  }
   if (o.again === "fixup") {
     const merge = o.merges && had === null;
     const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix), merge })));
     const leg = o.merges && !merge ? await mergeLeg(c, had) : nothing;
-    return async (id) => { await leg(id); await fix(id); };
+    return { write: async (id) => { await leg(id); await fix(id); } };
   }
   const leg = o.merges ? await mergeLeg(c, had) : nothing;
-  return async (id) => {
-    await leg(id);
-    if (o.again === "review") await markReviewsStale(db, by, item.repo, item.number);
+  return {
+    write: async (id) => {
+      await leg(id);
+      if (o.again === "review") await markReviewsStale(db, by, item.repo, item.number);
+    },
   };
 }
 

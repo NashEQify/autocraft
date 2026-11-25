@@ -22,7 +22,14 @@ import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow, workflowHistory } from "../src/workflow/store.ts";
-import { T0, world, type World } from "./world-db.ts";
+import { loadPrWorkflows } from "../src/data/workflow/index.ts";
+import { selectFixups } from "../src/fixup/select.ts";
+import { implementMay, implementRefusal, moveTurns } from "../src/implement/gate.ts";
+import { setMergeApproval } from "../src/merge/approval.ts";
+import { noteMergeable, unknownOf } from "../src/merge/mergeable.ts";
+import type { PrChecks } from "../src/review/checks.ts";
+import { LANES, planCtx } from "../src/runner/autopilot.ts";
+import { T0, T1, world, type World } from "./world-db.ts";
 
 let current: World | undefined;
 afterEach(() => current?.close());
@@ -390,4 +397,200 @@ test("a command resolved on a workflow the pass changed meanwhile runs on what i
   const now = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([now.state, now.rec, now.approvedBy], ["running", null, MAINT]);
   assert.equal((await eventsOf(w.db, "app", 1)).at(-1)!.kind, "answered", "the approval answers the recommendation");
+});
+
+/** The newest review of the PR, made after its workflow's start. */
+const reviewed = async (w: World, number: number, o: Parameters<World["review"]>[1]): Promise<void> => {
+  await w.review(number, o);
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 1000).toISOString() }).where("number", "=", number));
+};
+const acts = async (w: World, number: number) => (await w.prPlan(number)).actions.map((a) => [a.kind, a.params?.bucket].filter(Boolean).join(":"));
+const steps = async (w: World, number: number) => (await acts(w, number)).filter((a) => /^(fixup|cifix|implement)/.test(a));
+const fails = async (w: World, number: number) =>
+  void await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }).where("number", "=", number));
+const implementJobs = async (w: World) =>
+  (await LANES.find((l) => l.name === "implement")!.detect(w.db, await planCtx(w.db))).map((c) => [c.params.number, c.params.bucket]);
+
+test("the PR of a stopped implementation, started on its own, gets the normal fix-up and CI fix; while the issue's work is live its session makes them", async () => {
+  const w = await implementing("implement");
+  await setFeature(w.db, "implement", true, MAINT, "app");
+  await reviewed(w, 8, { verdict: "take-fix" });
+  assert.deepEqual(await steps(w, 8), ["implement:revise"]);
+  await run(w, "stop", 7);
+  await run(w, "fix-up and merge", 8);
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 2000).toISOString() }).where("number", "=", 8));
+  assert.deepEqual(await steps(w, 8), ["fixup:fix"]);
+  await settle(w);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 8))!.state, (await legs8(w)).at(-1)!.state], ["running", "review"]);
+
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ verdict: "take", fixes: null }).where("number", "=", 8));
+  await fails(w, 8);
+  assert.deepEqual(await steps(w, 8), ["cifix:work"]);
+});
+
+test("a revision runs for whoever last answered, approved or started the issue's work and may act; one nobody may run waits visibly and hides no other work", async () => {
+  const w = await (await implementing("implement and merge")).issue(9);
+  await setFeature(w.db, "implement", true, MAINT, "app");
+  await w.acting("ann");
+  await reviewed(w, 8, { verdict: "take-fix" });
+  const ann: Actor = { login: "ann", canWrite: async () => true };
+  const say = async (text: string, number: number) => {
+    const o = (await runCommand(w.db, ann, "github", { parsed: parse(text), items: [{ repo: "app", number }] })).items[0]!;
+    assert.equal(o.outcome, "run", o.line);
+  };
+  await say("implement", 9);
+  assert.deepEqual(await implementJobs(w), [[7, "revise"]]);
+
+  await w.db.run(w.db.k.updateTable("main.repo_permissions").set({ permission: "read", checked_at: new Date().toISOString() }).where("login", "=", MAINT));
+  assert.deepEqual(await steps(w, 8), []);
+  const plan = await w.prPlan(8);
+  assert.deepEqual([plan.waitKind, plan.wait?.includes(MAINT)], ["person", true], plan.wait ?? "");
+  const issue = implementStep((await loadItemFact(w.db, "app", 7))!);
+  assert.ok(issue && "wait" in issue && issue.wait.includes(MAINT), JSON.stringify(issue));
+  assert.deepEqual(await implementJobs(w), [[9, "plan"]]);
+
+  // The plans may be older than the access they were made on: the job that may not run is passed over.
+  const ctx = await planCtx(w.db);
+  const p8 = ctx.plans!.prs.find((p) => p.facts.number === 8)!;
+  p8.plan.actions.push({ kind: "implement", head: p8.plan.head, params: { bucket: "revise", issue: 7 } });
+  assert.deepEqual((await LANES.find((l) => l.name === "implement")!.detect(w.db, ctx)).map((c) => c.params.number), [9]);
+
+  // Another maintainer's yes frees it: the revision, the approval and the next turns are theirs.
+  await settle(w);
+  assert.equal((await liveWorkflow(w.db, "app", 7))!.state, "blocked");
+  await say("yes", 7);
+  assert.equal((await liveWorkflow(w.db, "app", 7))!.approvedBy, "ann");
+  assert.deepEqual(await steps(w, 8), ["implement:revise"]);
+  assert.deepEqual(await implementJobs(w), [[7, "revise"]]);
+  assert.equal(await implementRefusal(w.db, "app", 7), null);
+  assert.deepEqual(await implementMay(w.db, "app", 7), { ok: true, as: "person", by: "ann" });
+  await moveTurns(w.db, "app", 7);
+  assert.deepEqual(await w.rows("SELECT queued_by FROM implementations"), [{ queued_by: "ann" }]);
+});
+
+test("the recommendation on a conflicting PR runs on a yes: the merge is approved, the base is merged in, then the fixes nobody dropped are made", async () => {
+  const fixes = [{ file: "src/lib.rs", change: "rename a to b", title: "rename a" }, { file: "src/lib.rs", change: "drop the copy", title: "drop the copy" }];
+  for (const text of ["yes", "fix 1, drop 2, merge", "fix-up and merge", "drop 2"]) {
+    const w = await unstarted(false);
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main" }).where("number", "=", 1));
+    await run(w, "review");
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }));
+    await reviewed(w, 1, { verdict: "take-fix", fixes });
+    await settle(w);
+    const rec = (await liveWorkflow(w.db, "app", 1))!;
+    assert.equal(rec.state, "recommending");
+    assert.match(rec.rec!.text, /conflicts/);
+    await run(w, text);
+    await settle(w);
+    const wf = (await liveWorkflow(w.db, "app", 1))!;
+    assert.deepEqual([wf.state, wf.approvedBy], ["running", MAINT], `${text}: ${JSON.stringify(wf.rec)}`);
+    assert.ok((await acts(w, 1)).includes("conflict:merge"), `${text}: ${await acts(w, 1)}`);
+    assert.deepEqual((await w.rows("SELECT state FROM preapprovals")).map((l) => l.state), ["review"], text);
+
+    // The base is merged in; the review of the new head asks for the same.
+    await w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head: "sha1", to_head: "sha1b", base_sha: "base", state: "merged", attempt: 1, created_at: new Date().toISOString(), own_diff: "same" }));
+    await w.synced(1, "sha1b");
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ fetched_at: new Date().toISOString() }));
+    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: T0 }));
+    await w.review(1, { verdict: "take-fix", fixes, head: "sha1b" });
+    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 1000).toISOString() }).where("head_oid", "=", "sha1b"));
+    await settle(w);
+    assert.deepEqual(await acts(w, 1), ["fixup:fix"], text);
+    const drop = text.includes("drop");
+    assert.deepEqual((await selectFixups(w.db, "app")).fix.map((c) => c.fixes.map((f) => f.change)), [fixes.slice(0, drop ? 1 : 2).map((f) => f.change)], text);
+
+    if (drop) {
+      // With every fix dropped the review asks for nothing more.
+      await updateWorkflow(w.db, wf.id, { plan: (await liveWorkflow(w.db, "app", 1))!.plan.map((p) => ({ ...p, state: "dropped" as const })) });
+      await settle(w);
+      assert.deepEqual(await acts(w, 1).then((a) => a.filter((x) => x.startsWith("fixup"))), []);
+      assert.equal((await w.rows("SELECT state FROM preapprovals"))[0]!.state, "ci");
+    }
+    w.close();
+  }
+});
+
+test("a recommendation on a conflicting PR offers nothing that is refused", async () => {
+  for (const verdict of ["take-fix", "hold"] as const) {
+    const w = await unstarted(false);
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main" }).where("number", "=", 1));
+    await run(w, "review");
+    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }));
+    await reviewed(w, 1, { verdict, fixes: [{ file: "src/lib.rs", change: "rename a to b" }] });
+    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Fix 1 first.", fix: [1], merge: false, close: false } }) }));
+    await settle(w);
+    const { rec, state } = (await liveWorkflow(w.db, "app", 1))!;
+    assert.equal(state, "recommending", verdict);
+    assert.deepEqual([rec!.parts.fix, rec!.merges, rec!.again ?? null], verdict === "hold" ? [[], false, "review"] : [[1], true, null], rec!.text);
+    await run(w, "yes");
+    w.close();
+  }
+});
+
+test("implementing again leaves the PR of stopped work stopped, reopened or not", async () => {
+  const w = await implementing("implement");
+  await setMergeApproval(w.db, MAINT, "app", true);
+  await run(w, "stop", 7);
+  // The work ran, was stopped and its PR closed before the next start.
+  await w.db.run(w.db.k.updateTable("main.item_workflows").set({ started_at: T0 }).where("number", "=", 7));
+  const pr = async (state: string, closed_at: string | null) => void await w.db.run(w.db.k.updateTable("main.items").set({ state, closed_at }).where("number", "=", 8));
+  await pr("CLOSED", T1);
+  const [a] = await w.rows("SELECT id FROM implementations");
+  await recordSteps(w.db, [{ id: Number(a!.id), to: "closed" }], T1);
+  const stopped = async () => (await mergeVerdicts(w.db, "app", [{ number: 8, head: "sha8" }])).get(8)!;
+  await pr("OPEN", null);
+  const was = await stopped();
+  assert.equal(was.ok, false);
+  await pr("CLOSED", T1);
+  await run(w, "implement", 7);
+  await pr("OPEN", null);
+  assert.deepEqual(await stopped(), was);
+  assert.equal((await loadPrFact(w.db, "app", 8))!.endedWorkflow, "stopped");
+});
+
+test("a PR whose attempt's end was recorded after the next start is no work of that start once it has its own attempt", async () => {
+  const w = await implementing("implement");
+  await run(w, "stop", 7);
+  await w.db.run(w.db.k.updateTable("main.items").set({ state: "CLOSED", closed_at: T0 }).where("number", "=", 8));
+  await run(w, "implement", 7);
+  const [a] = await w.rows("SELECT id FROM implementations");
+  await recordSteps(w.db, [{ id: Number(a!.id), to: "closed" }]);
+  await startAttempt(w.db, { repo: "app", number: 7, queuedBy: MAINT, textHash: "h" });
+  await w.db.run(w.db.k.updateTable("main.items").set({ state: "OPEN", closed_at: null }).where("number", "=", 8));
+  assert.equal((await loadPrWorkflows(w.db, [{ repo: "app", number: 8 }])).size, 0);
+  await run(w, "review", 8);
+});
+
+test("a command that names parts by number is not carried out on a plan that was renumbered meanwhile", async () => {
+  const w = await unstarted();
+  await run(w, "review");
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  const part = (n: number, title: string) => ({ n, title, source: "review" as const, state: "planned" as const });
+  await updateWorkflow(w.db, wf.id, { plan: [part(1, "typo"), part(2, "rename")] });
+  before(w.db, () => updateWorkflow(w.db, wf.id, { plan: [part(1, "rename"), part(2, "unsound cast")] }));
+  const o = await send(w, "drop 2");
+  assert.equal(o.outcome, "refused", o.line);
+  assert.deepEqual((await liveWorkflow(w.db, "app", 1))!.plan.map((p) => p.state), ["planned", "planned"]);
+});
+
+test("an approval on the PR of an implement workflow is not given to a head pushed meanwhile", async () => {
+  const w = await implementing("implement");
+  const wf = (await liveWorkflow(w.db, "app", 7))!;
+  before(w.db, async () => {
+    await w.synced(8, "sha8b");
+    await updateWorkflow(w.db, wf.id, { weight: 6 });
+  });
+  const o = await send(w, "merge", 8);
+  assert.equal(o.outcome, "refused", o.line);
+  assert.equal((await liveWorkflow(w.db, "app", 7))!.approvedBy, null);
+});
+
+test("a PR started into the merge queue whose merge state stays unknown is followed like a reviewed one", async () => {
+  const w = await unstarted();
+  const row = { repo: "app", number: 1, head_oid: "sha1", state: "OPEN", overall: "success", mergeable: "UNKNOWN" } as PrChecks;
+  await noteMergeable(w.db, [row], T1);
+  assert.equal(await unknownOf(w.db, "app", 1, "sha1"), null);
+  await run(w, "merge");
+  await noteMergeable(w.db, [row], T1);
+  assert.equal((await unknownOf(w.db, "app", 1, "sha1"))?.reads, 1);
 });

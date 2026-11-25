@@ -180,12 +180,32 @@ const WAITS: Partial<Record<QueueState, string>> = {
 const PERSON_WAITS: ReadonlySet<string> = new Set(["needs-decision", "ci-approval", "changes-requested", "verify-failed", "verify-error"]);
 
 
+type Wait = { text: string; kind: WaitKind };
+const person = (text: string): Wait => ({ text, kind: "person" });
+const contributor = (text: string): Wait => ({ text, kind: "contributor" });
+const system = (text: string): Wait => ({ text, kind: "system" });
+
+/** The implementation whose PR this is, while it is not merged, closed, failed or cancelled. */
+const liveAttempt = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
+  f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
+
 /**
- * The implementation whose PR this is, while it is not merged, closed, failed or cancelled. Its session takes the PR's review
- * fixes and red CI (implement{revise}); the fix-up and the CI fix leave the PR alone. A conflict still goes to the conflict step.
+ * The implementation that owns the PR's fixes: its session takes the review's fixes and red CI (implement{revise}), and the fix-up and the CI
+ * fix leave the PR alone (a conflict still goes to the conflict step). It owns them while the issue's implement workflow is live; a PR whose
+ * issue's work ended, or that was started on its own, gets the normal steps.
  */
 export const ownImplementation = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
-  f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
+  f.implementation && f.implementation.queuedBy !== null && !workflowOf(f)?.own ? liveAttempt(f) : null;
+
+/** The wait of started work while GitHub writes go out as the box account: nobody's started work counts then (data/access standing). */
+export const BOX_IDENTITY_WAIT = "an operator to switch AutoCraft to its GitHub App: started work runs as the person who started it only through the app";
+
+/** What an implementation waits on while the person it runs for does not count on the repo; null when they do. */
+export function standingWait(im: Pick<NonNullable<PrFacts["implementation"]>, "queuedBy" | "standing" | "boxIdentity">, repo: string): Wait | null {
+  if (im.standing === "yes") return null;
+  if (im.standing === "no") return person(`a maintainer of ${repo} to answer, approve or start it again: ${im.queuedBy}, whom it runs for, does not settle there`);
+  return im.boxIdentity ? person(BOX_IDENTITY_WAIT) : system(`GitHub's answer on ${im.queuedBy}'s access to ${repo}`);
+}
 
 /** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. A switch a maintainer flips: a system wait, live. */
 export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
@@ -326,17 +346,17 @@ function cifixOf(f: PrFacts): "work" | "collect" | "rerun" | "capped" | "ask" | 
   return b === "work" || b === "collect" || b === "capped" ? b : "other";
 }
 
-type Wait = { text: string; kind: WaitKind };
-const person = (text: string): Wait => ({ text, kind: "person" });
-const contributor = (text: string): Wait => ({ text, kind: "contributor" });
-const system = (text: string): Wait => ({ text, kind: "system" });
 /** A step's comment that never reached GitHub, due again at `until` (ms). */
 const unsentWait = (what: string, until?: number): Wait => system(`${what} again ${until === undefined ? "later" : `after ${new Date(until).toISOString().slice(11, 16)}`}: the last one did not reach GitHub`);
 const unsentUntil = (u: UnsentAsk | undefined): number | undefined => (u && u !== "final" ? u.until : undefined);
 
-/** What stops a started PR whose fixes nobody approved: a conflict or red CI (not a red main's). */
+/** What stops a started PR whose fixes nobody approved: a conflict or red CI (not a red main's, except on the PR that fixes it). */
 export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
-  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && !f.repoFacts.mainRed ? "ci" : null;
+  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && (!f.repoFacts.mainRed || f.mainFix) ? "ci" : null;
+
+/** The PR conflicts with its base branch, and once its merge is approved the pipeline merges the base into it and then makes its review's fixes. */
+export const fixedAfterMerge = (f: PrFacts | null): boolean => f?.mergeable === "CONFLICTING"
+  && (mergeEntry(f) || (!!f.review && (f.review.verdict === "take" || f.review.verdict === "take-fix") && f.review.head === f.head && !f.review.stale));
 
 /** What a PR waits on when its conflict or CI fix is left to the contributor. */
 const stuckWait = (f: PrFacts): Wait | null => {
@@ -454,14 +474,16 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // Actions that do not depend on the PR's place in the queue.
   const extra: Action[] = [];
   const im = ownImplementation(f);
+  const attempt = liveAttempt(f);
   // The session's next step on the PR: the revision due at the head, a revision that has started (also when its issue was
   // closed or held, where the issue plans nothing), or, once the PR merged or closed, the end of the attempt (the revise
-  // work records it and ends the workspace). While the repo's Implement feature is off an open PR plans no revision and
-  // waits on the switch.
-  const implDue = !!im && (!open || im.state === "revising" || !!reviseOf(f));
+  // work records it and ends the workspace). While the repo's Implement feature is off, or nobody it runs for settles on the
+  // repo, an open PR plans no revision and waits.
+  const implDue = open && !!im && (im.state === "revising" || !!reviseOf(f));
+  const implHeld = implDue ? (f.repoFacts.implementOn ? standingWait(im!, f.repo) : system(implementOffWait(f.repo))) : null;
   // Ending the attempt is bookkeeping (no GitHub write, no session): it runs whatever the switch says.
-  const implOff = implDue && open && !f.repoFacts.implementOn ? system(implementOffWait(f.repo)) : null;
-  const implementAct = implDue && !implOff ? act("implement", open ? f.head : null, { bucket: "revise", issue: im!.issue }) : null;
+  const implementAct = implDue && !implHeld ? act("implement", f.head, { bucket: "revise", issue: im!.issue })
+    : attempt && !open ? act("implement", null, { bucket: "revise", issue: attempt.issue }) : null;
   if (implementAct && !open) extra.push(implementAct);
   const pm = f.postmerge;
   if (pm && pm.mergedAt >= pm.since) {
@@ -603,13 +625,15 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
         : system(`GitHub's merge state, unknown since ${f.unknown.since.slice(11, 16)} (unknown for ${f.unknown.reads} checks reads in a row)`);
     }
     if (st === "refused" && refusalStuck(f)) return person(`a person: the merge was refused (${excerpt(f.lastMerge!.reason!)})`);
+    // A started PR nobody approved gets no CI fix, and its red CI may be the default branch's: nobody is asked about it until that is green.
+    if (st === "ci-failed" && workflowOf(f) && !fixAllowed(f)) return system(WAITS["waiting-main-ci"]!);
     if (st === "ready" && e?.path === "maintainer") return system("the approved merge to be handed over to its approver");
     return WAITS[st] ? { text: WAITS[st]!, kind: PERSON_WAITS.has(st) ? "person" : "system" } : null;
   };
   // A hold review waits for a maintainer's answer to the workflow's recommendation.
   const holdWait: Wait | null = holdState ? person(MAINTAINER_ANSWER_WAIT) : null;
   // An implementation PR whose session revises it, or whose revision is stuck: that is what it waits on, whatever the queue state.
-  const implWait: Wait | null = implOff ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
+  const implWait: Wait | null = implHeld ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
     : im?.state === "stuck" ? person(`a maintainer's answer on the stuck implementation of #${im.issue}`)
     : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null);
   // A revision in progress is what the PR waits on, also while its continuation is planned.

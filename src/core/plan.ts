@@ -90,6 +90,8 @@ export type WorkflowFact = {
   startedAt: string;
   /** False on an implementation PR, which carries the workflow of its issue. */
   own: boolean;
+  /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
+  dropped?: string[];
 };
 
 /** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Stopped and backlog mean hands off: not even the auto path takes the item up again until someone starts it. */
@@ -286,10 +288,18 @@ export type PrFacts = {
   mainFix: boolean;
   /**
    * The implementation (src/implement) whose PR this is: the latest attempt that opened it, with its issue, its state and the
-   * heads its revisions started from. Absent or null for every other PR. A live one takes the PR's review fixes and red CI
-   * itself (implement{revise}) instead of the fix-up and the CI fix.
+   * heads its revisions started from. Absent or null for every other PR. While it owns the PR (decide.ts ownImplementation), it takes
+   * the PR's review fixes and red CI itself (implement{revise}) instead of the fix-up and the CI fix.
    */
-  implementation?: { issue: number; state: string; revisedHeads: string[]; /** Who started the issue's live implement workflow. */ queuedBy?: string | null } | null;
+  implementation?: {
+    issue: number; state: string; revisedHeads: string[];
+    /** Who the issue's live implement workflow runs for (src/workflow/work.ts settlerOf); null while none is live. */
+    queuedBy: string | null;
+    /** Whether queuedBy counts on the repo (data/access standing). */
+    standing: "yes" | "no" | "unknown";
+    /** GitHub writes go out as the box account, under which nobody's standing is known. */
+    boxIdentity?: boolean;
+  } | null;
   /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
   baseOffDefault: boolean;
   /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */
@@ -406,9 +416,9 @@ export type ItemFacts = {
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
   implement: {
-    /** Who queued the issue for implementation: who started its live implement workflow; null when it has none. */
+    /** Who the issue's live implement workflow runs for (src/workflow/work.ts settlerOf); null when it has none. */
     queuedBy: string | null;
-    /** Whether queuedBy still counts on the repo (data/access standing); "unknown" while GitHub has not answered on their write access. */
+    /** Whether queuedBy counts on the repo (data/access standing); "unknown" while GitHub has not answered on their write access. */
     standing: "yes" | "no" | "unknown";
     /** GitHub writes go out as the box account, so nobody's started work counts: `standing` is "unknown" until that changes. */
     boxIdentity?: boolean;

@@ -59,7 +59,7 @@ export type Implementation = {
 
 /** The columns a step may set besides the state (updated_at is always set). */
 export type ImplementationPatch = Partial<Pick<Implementation,
-  "textHash" | "baseSha" | "workspaceId" | "plan" | "planMd" | "planCallId" | "sessionCallId" | "report" | "diffHash" | "diffStat" | "branch" | "prNumber" | "prUrl" | "reason">>;
+  "queuedBy" | "textHash" | "baseSha" | "workspaceId" | "plan" | "planMd" | "planCallId" | "sessionCallId" | "report" | "diffHash" | "diffStat" | "branch" | "prNumber" | "prUrl" | "reason">>;
 
 export type ImplementationRound = {
   id: number;
