@@ -3,38 +3,38 @@
 // maintainers also see override notes. The access list and every write here
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
-import { filtered, isHiddenRepo, listAuditPage, setPipelineFlags, type HiddenRepos } from "../../data/control/index.ts";
+import { filtered, isHiddenRepo, listAuditPage, loadStepApprovals, loadTrackedRepos, setPipelineFlags, type HiddenRepos } from "../../data/control/index.ts";
 import { endSessionById, listSessions, loadOverrides } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type {
   AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
 } from "../../../web/src/api/types.ts";
 import { AccessError, addLogin, getAccess, isRole, LOGIN, listAccess, removeLogin, ROLES, setRole } from "../../access.ts";
-import { approvalOf, setApproval } from "../../labels/approval.ts";
-import { commentApprovalOf, setCommentApproval } from "../../act/approval.ts";
-import { pushApprovalOf, setPushApproval } from "../../fixup/approval.ts";
-import { fixIssueApprovalOf, setFixIssueApproval } from "../../implement/approval.ts";
-import { mergeApprovalOf, setMergeApproval } from "../../merge/approval.ts";
-import { ciApprovalOf, setCiApproval } from "../../merge/ci-approval.ts";
-import { optionalChecks, seenChecks, setOptionalCheck } from "../../optional-checks.ts";
-import { mainFixApprovalOf, setMainFixApproval } from "../../mainfix/approval.ts";
-import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts";
+import { setApproval } from "../../labels/approval.ts";
+import { setCommentApproval } from "../../act/approval.ts";
+import { setPushApproval } from "../../fixup/approval.ts";
+import { setFixIssueApproval } from "../../implement/approval.ts";
+import { setMergeApproval } from "../../merge/approval.ts";
+import { setCiApproval } from "../../merge/ci-approval.ts";
+import { optionalChecksOf, seenChecksOf, setOptionalCheck } from "../../optional-checks.ts";
+import { setMainFixApproval } from "../../mainfix/approval.ts";
+import { setStatusApproval } from "../../prstatus/approval.ts";
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
-import { featureOn, isFeature, shownFeatures, type BuildFeature } from "../../build/features.ts";
+import { isFeature, repoSwitches, shownFeatures } from "../../build/features.ts";
 import { switchFeature } from "./build.ts";
-import { countPlan, planLabels } from "../../labels/plan.ts";
-import { listAll, RepoError, type RepoRow, trackRepoChecked, untrackRepo } from "../../repos.ts";
+import { countPlan, planLabelsOf } from "../../labels/plan.ts";
+import { listAll, RepoError, trackRepoChecked, untrackRepo } from "../../repos.ts";
 import { contributors, getRule, OVERRIDE_LOGIN, setOverride, setRule, tierOf, type Contributor as Row, type Rule } from "../../whitelist.ts";
 import { audit } from "../audit.ts";
 import { dropSessionTokens } from "../server/user-tokens.ts";
 import { endTokens, listAllTokens, revokeAnyToken } from "../mcp/tokens.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, Role } from "../types.ts";
+import type { Step } from "../../data/control/types.ts";
 import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { pipelineState } from "../../runner/autopilot.ts";
 import { canSeeInternals } from "./staff.ts";
-import { mapLimit, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import { setting } from "../../data/control/index.ts";
 
@@ -274,52 +274,40 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  // A few repos at a time: each reads about a dozen rows sets at once, and the pool serves other requests meanwhile.
-  const shown = await shownFeatures(db);
-  return await mapLimit(await listAll(db), 4, async (r) => await toTrackedRepo(db, r, req, shown));
+  return await repoRows(db, req);
 }
 
-async function toTrackedRepo(db: Db, r: RepoRow, req: Req, shown: BuildFeature[]): Promise<TrackedRepo> {
-  const t = !!r.tracked;
-  const approval = async (of: (db: Db, repo: string) => Promise<{ by: string; at: string } | null>) => (t ? approvalInfo(await of(db, r.name)) : null);
-  // The parts read independently, so they run together.
-  const [canSwitch, labels, merging, pushing, commenting, fixing, mainFixing, ciApproving, statusComments, optional, seen] = await Promise.all([
-    t && maySwitch(req, r.name),
-    t ? labelsInfo(db, r.name) : null, t ? mergeInfo(db, r.name) : null,
-    approval(pushApprovalOf), approval(commentApprovalOf), approval(fixIssueApprovalOf), approval(mainFixApprovalOf), approval(ciApprovalOf), approval(statusApprovalOf),
-    t ? optionalChecks(db, r.name) : [], t ? seenChecks(db, r.name) : [],
-  ]);
-  return {
-    name: r.name, owner: r.owner, tracked: t, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
-    labels, merging, pushing, commenting, fixing, mainFixing, ciApproving, statusComments,
-    optionalChecks: optional, seenChecks: seen,
-    pipeline: t && !!r.pipeline,
-    canSwitch,
-    canManage: canSwitch,
-    buildFeatures: r.tracked ? await mapSeq(shown, async (feature) => ({ feature, on: await featureOn(db, feature, r.name) })) : [],
-  };
+/** Every known repo, or the named one, with its settings: one wave whatever the number of repos (and one before it for the tracked names outside a read request, which shares them). */
+async function repoRows(db: Db, req: Req, only?: string): Promise<TrackedRepo[]> {
+  const tracked = [...(await loadTrackedRepos(db, only === undefined ? undefined : [only])).keys()];
+  const [rows, approvals, plans, optional, seen, shown, switches] = await db.together(() => Promise.all([
+    listAll(db), loadStepApprovals(db, tracked), planLabelsOf(db, tracked), optionalChecksOf(db), seenChecksOf(db, tracked), shownFeatures(db), repoSwitches(db),
+  ]));
+  return await Promise.all(rows.filter((r) => only === undefined || r.name === only).map(async (r): Promise<TrackedRepo> => {
+    const t = !!r.tracked;
+    const of = approvals.get(r.name) ?? {};
+    const approval = (step: Step): RepoApproval | null => t ? { approved: !!of[step], approvedBy: of[step]?.by ?? null, approvedAt: of[step]?.at ?? null } : null;
+    const c = countPlan(plans.get(r.name) ?? []);
+    const labels = approval("labels");
+    const canSwitch = t && await maySwitch(req, r.name);
+    return {
+      name: r.name, owner: r.owner, tracked: t, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
+      labels: labels && { ...labels, toAdd: c.toAdd, skipped: c.already + c.unsettled, conflicts: c.conflicts },
+      merging: approval("merge"), pushing: approval("push"), commenting: approval("comment"), fixing: approval("fixissue"), mainFixing: approval("mainfix"), ciApproving: approval("ci"), statusComments: approval("prstatus"),
+      optionalChecks: t ? optional(r.name) : [], seenChecks: t ? seen.get(r.name) ?? [] : [],
+      pipeline: t && !!r.pipeline,
+      canSwitch,
+      canManage: canSwitch,
+      buildFeatures: t ? shown.map((feature) => ({ feature, on: switches(feature, r.name) })) : [],
+    };
+  }));
 }
 
 // One repo, for the endpoints that change a single repo's settings: the web patches it into its list, so the answer skips every other repo's label plan.
 async function oneRepo(db: Db, req: Req, name: string): Promise<TrackedRepo> {
-  const r = (await listAll(db)).find((x) => x.name === name);
+  const [r] = await repoRows(db, req, name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return await toTrackedRepo(db, r, req, await shownFeatures(db));
-}
-
-function approvalInfo(a: { by: string; at: string } | null): RepoApproval {
-  return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null };
-}
-
-async function mergeInfo(db: Db, repo: string): Promise<RepoApproval> {
-  const a = await mergeApprovalOf(db, repo);
-  return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null };
-}
-
-async function labelsInfo(db: Db, repo: string): Promise<RepoLabels> {
-  const [a, plan] = await Promise.all([approvalOf(db, repo), planLabels(db, repo)]);
-  const c = countPlan(plan);
-  return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null, toAdd: c.toAdd, skipped: c.already + c.unsettled, conflicts: c.conflicts };
+  return r;
 }
 
 // An operator, or a maintainer with write access to the repo, lets the Label stage write to a repo on GitHub.

@@ -8,21 +8,6 @@ const NONE: ItemShown = { kind: null, state: null, title: null };
 const STATE: Record<string, ItemState> = { OPEN: "open", MERGED: "merged", CLOSED: "closed" };
 export const itemState = (s: string | null | undefined): ItemState => STATE[s ?? ""] ?? "open";
 
-/** One item's kind, state and title per call; the items of `preload` are read together, in one query, at the first call that needs one. */
-export function shownLookup(db: Db, preload: readonly { repo: string; number: number }[] = []): (repo: string, number: number) => Promise<ItemShown> {
-  const keys = new Set<string>();
-  for (const r of preload) keys.add(`${r.repo}#${r.number}`);
-  let known: Promise<Map<string, ItemShown>> | undefined;
-  return async (repo, number) => {
-    const key = `${repo}#${number}`;
-    if (keys.has(key)) {
-      known ??= shownMap(db, preload);
-      return { ...((await known).get(key) ?? NONE) };
-    }
-    return (await loadShown(db, [{ repo, number }])).get(key) ?? { kind: null, state: null, title: null };
-  };
-}
-
 /** Kind, state and title of many items in one read, by `repo#number`; items not mirrored are left out. */
 export async function shownMap(db: Db, refs: Iterable<{ repo: string; number: number }>): Promise<Map<string, ItemShown>> {
   const keys = new Map<string, { repo: string; number: number }>();

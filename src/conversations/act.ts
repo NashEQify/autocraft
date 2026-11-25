@@ -425,6 +425,10 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
   return { ran, writes: used };
 }
 
+/** Whether sweepRunningCards would mark the card failed. */
+export const isStaleRunning = (c: Pick<CardRow, "state" | "acted_at">, deps?: StoreDeps): boolean =>
+  c.state === "running" && c.acted_at !== null && c.acted_at < new Date(nowOf(deps).getTime() - RUNNING_STALE_MS).toISOString();
+
 /** A card left 'running' by a crashed process is marked failed: what it did on GitHub is unknown. */
 export async function sweepRunningCards(db: Db, deps?: StoreDeps): Promise<number> {
   return await sweepCards(db, new Date(nowOf(deps).getTime() - RUNNING_STALE_MS).toISOString());

@@ -48,6 +48,13 @@ export async function featureOn(db: Db, f: BuildFeature, repo?: string): Promise
   return repo !== undefined && await readOn(db, f, repo);
 }
 
+/** Every feature switch in one read: whether feature `f` is on for `repo`. */
+export async function repoSwitches(db: Db): Promise<(f: BuildFeature, repo: string) => boolean> {
+  const [rows, scanTests] = await Promise.all([listSettings(db, { scope: "repo" }), readOn(db, "scan-tests")]);
+  const on = new Set(rows.filter((r) => r.value === "on").map((r) => r.key));
+  return (f, repo) => REPO_SCOPED[f] ? on.has(featureKey(f, repo)) : scanTests;
+}
+
 /** The repos a repo-scoped feature is on for, sorted. */
 export async function featureRepos(db: Db, f: BuildFeature): Promise<string[]> {
   if (!REPO_SCOPED[f]) return [];

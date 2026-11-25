@@ -62,11 +62,12 @@ export function effectiveCiWith(optional: string[], overall: string, checks: str
   return effectiveOverall(overall, list, optional);
 }
 
-/** Check names seen on the repo's recent PRs and default-branch heads, for the add control. */
-export async function seenChecks(db: Db, repo: string): Promise<string[]> {
-  const seen = (await loadCheckSamples(db, [repo])).get(repo);
-  return [...new Set([...(seen?.pr ?? []), ...(seen?.main ?? [])])].sort();
+/** Check names seen on each repo's recent PRs and default-branch heads, for the add control. */
+export async function seenChecksOf(db: Db, repos: string[]): Promise<Map<string, string[]>> {
+  return new Map([...await loadCheckSamples(db, repos)].map(([repo, seen]) => [repo, [...new Set([...seen.pr, ...seen.main])].sort()]));
 }
+
+export const seenChecks = async (db: Db, repo: string): Promise<string[]> => (await seenChecksOf(db, [repo])).get(repo) ?? [];
 
 export const commands = {
   "optional-checks": {

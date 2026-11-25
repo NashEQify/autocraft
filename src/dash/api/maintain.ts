@@ -15,6 +15,7 @@ import { stepTitle } from "./trace.ts";
 import { parseTripKey } from "../../core/push-outcome.ts";
 import * as control from "../../data/control/index.ts";
 import { healthOptions } from "../../health-checks.ts";
+import { mainCiRepos } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
@@ -49,15 +50,16 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
   const nowMs = Date.now();
-  const facts = await loadMaintainHome(db, { repos, hidden, staff, login: req.user.login }, {
-    nowMs, withRunner: staff, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY },
-  });
+  const [facts, ci] = await Promise.all([
+    loadMaintainHome(db, { repos, hidden, staff, login: req.user.login }, { nowMs, withRunner: staff, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY } }),
+    mainCiRepos(db, hidden),
+  ]);
   const live = new Set([...facts.rows, ...facts.attention.closesFailed].map((w) => w.repo));
   const may = req.user.role === "viewer" ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
   const acting = new Set([...live].filter((_, i) => may[i]));
   const stops = await stoppedRows(facts.attention.stops, hidden);
   const [attention, runner] = await Promise.all([
-    problems(db, { hidden, staff, nowMs, stops, facts: facts.attention, acting }),
+    problems(db, { hidden, staff, nowMs, ci, stops, facts: facts.attention, acting }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
   ]);
   const rows = rowsOf(facts.rows);
