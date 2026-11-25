@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as control from "../control/index.ts";
 import * as mirror from "../mirror/index.ts";
 import * as workflow from "../workflow/index.ts";
+import { openRecommendation } from "../../workflow/types.ts";
 import type { QueueMeta, RepoFacts, Scope } from "./types.ts";
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -24,7 +25,7 @@ export async function loadMaintainRepos(db: Db, scope: Pick<Scope, "allRepos">, 
   for (const w of live) {
     const c = per.get(w.repo) ?? per.set(w.repo, { started: 0, waiting: 0 }).get(w.repo)!;
     c.started++;
-    if (w.state === "recommending" && w.rec !== null) c.waiting++;
+    if (openRecommendation(w)) c.waiting++;
   }
   return { repos: [...tracked.values()].sort((a, b) => (a.name < b.name ? -1 : 1)), open, mergedWeek, live: per, trips: [...trips.values()].sort((a, b) => a.trippedAt.localeCompare(b.trippedAt)) };
 }

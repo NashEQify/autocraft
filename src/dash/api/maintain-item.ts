@@ -7,12 +7,14 @@ import type { MaintainDuplicate, MaintainEvent, MaintainFinding, MaintainItem, M
 import type { FindingSeverity, FindingState } from "../../../web/src/api/types.ts";
 import { mayResumeTrip } from "../../data/control/index.ts";
 import { tripKey, tripOf } from "../../core/push-outcome.ts";
+import { t } from "../../i18n/index.ts";
+import { STUCK_OPTIONS } from "../../implement/stuck.ts";
 import { loadMaintainItem } from "../../data/views/maintain-item.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { isLive } from "../../workflow/store.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
-import type { ItemWorkflow } from "../../workflow/types.ts";
+import { openRecommendation, type ItemWorkflow } from "../../workflow/types.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
@@ -32,7 +34,8 @@ const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", 
 export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
   if (wf.state === "stopped" || wf.state === "closed" || wf.state === "backlog") return null;
   const names = stepsFor(wf.entry, wf.approvedBy !== null);
-  const kept = wf.plan.filter((p) => p.state !== "dropped").map((p) => p.n);
+  // A fix-up fixes what a review found; an implementation's parts and the options of its question are no fix-up.
+  const kept = wf.plan.filter((p) => p.state !== "dropped" && p.source !== "implement").map((p) => p.n);
   const notes: Record<number, string> = {};
   const fix = names.indexOf("fix-up");
   if (fix >= 0 && kept.length) notes[fix] = listText(kept);
@@ -51,6 +54,8 @@ export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
     else if (fix >= 0) i = wf.plan.some((p) => p.state === "planned") ? fix : at("review again");
     else i = names.length - 1;
   }
+  // A stuck implementation that can be tried again: a yes runs the step it stopped at once more.
+  if (names[i] === "implement" && openRecommendation(wf)?.answer?.option === STUCK_OPTIONS.tryAgain.key) notes[i] = t("start it again");
   return stepsAt(names, i, now, notes);
 }
 
@@ -62,7 +67,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
   const accepted = [...mine].reverse().find((e) => ACCEPTED.has(e.kind) && e.line);
   const steps = stepsOf(wf, leg);
   const reason = wf.blocker === "other" && typeof wf.blockerParams?.reason === "string" && !veiled ? wf.blockerParams.reason : null;
-  const open = wf.state === "recommending" && wf.rec !== null;
+  const asked = openRecommendation(wf);
   return {
     headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait),
     live: isLive(wf.state),
@@ -73,7 +78,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
     blocker: wf.state === "blocked" && wf.blocker ? (reason ? `${blockerLabel(wf.blocker)}: ${reason}` : blockerLabel(wf.blocker)) : null,
     steps: steps?.map((s) => ({ label: stepLabel(s), state: s.state })) ?? null,
     parts: wf.plan.map((p) => ({ n: p.n, title: veiled ? "" : p.title, source: p.source, file: veiled ? null : p.file ?? null, major: p.major === true, state: p.state })),
-    rec: open && !veiled ? recommendationText(wf.rec!) : null,
+    rec: asked && !veiled ? recommendationText(asked) : null,
     unclear: last?.kind === "ambiguous" ? { by: last.login, at: last.at, line: last.line ?? "" } : null,
     confirm: accepted?.line ?? null,
   };
