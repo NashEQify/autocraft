@@ -58,7 +58,7 @@ const WRITE: AppPermission = { kind: "ok", permission: "write" };
 const FAILED: AppPermission = { kind: "error", why: "GitHub permission check failed: HTTP 502" };
 const PERMS: Record<"ok" | "no" | "transient", AppPermission> = { ok: WRITE, no: { kind: "ok", permission: "read" }, transient: FAILED };
 const deps = (w: World, o: Partial<CommandDeps> & { perm?: "ok" | "no" | "transient" } = {}): CommandDeps => ({
-  querier: w.gh.querier, permission: async () => PERMS[o.perm ?? "ok"], comment: stillThere(w), pr: unchanged(w), slug: SLUG, ...o,
+  querier: w.gh.querier, permission: async () => PERMS[o.perm ?? "ok"], comment: stillThere(w), pr: unchanged(w), slug: SLUG, mint: async () => "installation-token", ...o,
 });
 /** The item was read from GitHub at `at` (as the webhook's re-read or the poll write it). */
 const readAt = async (w: World, number: number, at: Date) =>
@@ -164,14 +164,15 @@ describe("drainCommands", () => {
     const gh = ghFake();
     assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "the re-read is still queued");
     await w.db.run(w.db.k.deleteFrom("sync_requests"));
-    assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "the request is gone but the last read is older than the comment");
+    const retry = new Date(Date.now() + 2 * 60_000);
+    assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec, now: () => retry })), 0, "the request is gone but the last read is older than the comment");
     assert.equal((await rows(w))[0]!.state, "queued");
     assert.equal(await started(w, 1), null);
     assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 1 }], "the command asks for a new read");
     await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 1, new Date(Date.now() + 1000));
-    assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "it looks again a minute after asking");
-    const later = new Date(Date.now() + 2 * 60_000);
+    assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec, now: () => retry })), 0, "it looks again a minute after asking");
+    const later = new Date(Date.now() + 4 * 60_000);
     assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec, now: () => later })), 1, "the new read came after the comment");
     assert.equal(await started(w, 1), "review");
   });
@@ -263,7 +264,7 @@ describe("drainCommands", () => {
 
   test("an answer that fails is recorded and not posted again; an issue is answered with an issue comment", async () => {
     const w = await (await fresh()).issue(3);
-    await deliver(w, payload({ body: `@${SLUG} review`, number: 3, pr: false }));
+    await deliver(w, payload({ body: `@${SLUG} backlog`, number: 3, pr: false }));
     const gh = ghFake(1);
     await drained(w, { exec: gh.exec });
     assert.equal(gh.posted[0]!.args[0], "issue");
@@ -385,7 +386,7 @@ describe("comment-time checks", () => {
     assert.equal((await rows(w))[0]!.state, "queued");
     await drained(w, { exec: gh.exec, now: () => new Date(Date.now() + 3600_000) });
     assert.deepEqual((await rows(w)).map((r) => [r.state, r.reply]), [["expired", "posted"]]);
-    assert.match(gh.posted[0]!.body, /@op could not check your access; comment again\.$/);
+    assert.match(gh.posted[0]!.body, /@op could not check your access; comment again$/);
     await drained(w, { exec: gh.exec, now: () => new Date(Date.now() + 3600_000) });
     assert.equal(gh.posted.length, 1);
   });
@@ -403,7 +404,7 @@ describe("comment-time checks", () => {
     assert.equal(await started(w, 1), "review");
   });
 
-  test("an unexpected error is answered with a fixed text; a refused person's answer needs the repo's comment approval", async () => {
+  test("a refused person's answer needs the repo's comment approval; the operator's own does not", async () => {
     const w = await (await fresh(["comment"])).pr(1);
     await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer", github_id: 202 }));
     await deliver(w, payload({ body: `@${SLUG} review`, comment: 5001 }));
