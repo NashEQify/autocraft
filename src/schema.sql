@@ -1934,7 +1934,8 @@ CREATE INDEX IF NOT EXISTS main_ci_repo_time ON main_ci(repo, committed_at);
 -- Red default branches (src/mainfix): one row per (repo, head, failing gate check), written once the check is sorted.
 -- verdict: flaky | infra | code (Haiku, from the failed step's log).
 -- state: rerun-requested (flaky: the failed jobs were rerun, written before the call) | rerun-passed (the head turned green) |
---   asked (infra: an operator decision asks whether to open an issue) | issue-opened | declined (infra: the answers to that decision) |
+--   issue-opening (infra: written before the issue is created) | issue-opened (issue_number; later red heads of the streak share it) |
+--   issue-failed (infra: GitHub refused the issue) | asked, declined (infra: rows of an earlier question) |
 --   needs-fix (code, or red again after a rerun: waits for the fix PR step) | nothing-to-do (nothing readable to act on, or main is
 --   green again, or an open PR already covers the failure: `#N` in the reason) | pr-opened (our fix PR: pr_number, pr_url) |
 --   fix-failed (no fix PR could be made: reason; a person takes over). One attempt per row.

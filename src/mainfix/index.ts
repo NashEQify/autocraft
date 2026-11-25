@@ -3,7 +3,9 @@
 //   flaky  a timeout, a network error, a cancelled job or a lost runner: the failed jobs are rerun once per head. Red again
 //          at the same head counts as code.
 //   infra  a refused request from a service, a missing secret, a quota or an outage: nothing here can fix it. One issue per
-//          (repo, check, red head) is opened under the repo's approval, with the check, the run link and a scrubbed log excerpt.
+//          (repo, check, culprit) is opened under the repo's approval, with the check, the run link and a scrubbed log excerpt: the
+//          row is `issue-opening` before the create, later red heads of the streak reuse its number, and a create whose outcome was
+//          lost is looked up in the audit and on GitHub before another one is made.
 //   code   a compile, test, lint or format failure: recorded as needs-fix for the fix PR step (`onCodeVerdict`).
 // The log is untrusted text: it only reaches a model that has no tools, and what is stored or posted is scrubbed.
 //
@@ -11,11 +13,12 @@
 //   autocraft-server main-fix-approval [--repo R]
 import { leaseItem } from "../runner/leases.ts";
 import { loadMainFixes, loadMainFixDue, saveMainFixes, type MainFixRow } from "../data/changes/index.ts";
-import { loadTrackedRepos, loadStepApprovals } from "../data/control/index.ts";
+import { listAudit, loadTrackedRepos, loadStepApprovals } from "../data/control/index.ts";
 import { loadMainCiAt } from "../data/mirror/index.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { exec, fixupDir, type Exec } from "../fixup/git.ts";
+import { issueMade } from "../github/made.ts";
 import { createIssue, ghRerunMainFailed, IssueError, type Writer } from "../github/write.ts";
 import { askClaude, saveUsage, type Usage } from "../classify/run.ts";
 import { checkoutForCommit } from "../sandbox/index.ts";
@@ -120,21 +123,24 @@ const setState = async (db: Db, r: FixRow, state: string, reason: string | null,
  * Where a code verdict goes. The row records `needs-fix`; the fix PR step takes its rows from here (state needs-fix, verdict code).
  */
 export async function onCodeVerdict(db: Db, row: FixRow, why: string, at: string): Promise<FixRow> {
-  return await setState(db, { ...row, verdict: "code" }, "needs-fix", oneLine(why), at);
+  const c = codeState(why);
+  return await setState(db, { ...row, verdict: c.verdict }, c.state, c.reason, at);
 }
+const codeState = (why: string) => ({ verdict: "code" as const, state: "needs-fix", reason: oneLine(why) });
 
 // ---- the red head ---------------------------------------------------------------
 
-type Current = { headSha: string; branch: string; state: string; culprit: string; culpritPr: number | null; redSince: string; stateChangedAt: string };
+type Current = { headSha: string; branch: string; state: string; culprit: string; culpritPr: number | null; redSince: string; /** When the culprit was first seen: everything recorded about this red streak is from then on. */ culpritAt: string; stateChangedAt: string };
 
 /** The default branch's head of each of `repos` that has one read. */
 async function currentHeads(db: Db, repos: readonly string[]): Promise<Map<string, Current>> {
   const wanted = new Set(repos);
   const heads = (await mainCiRepos(db)).filter((x) => wanted.has(x.repo));
-  const changed = await loadMainCiAt(db, heads.map((r) => ({ repo: r.repo, sha: r.headSha })));
+  const at = await loadMainCiAt(db, heads.flatMap((r) => [r.headSha, ...(r.culprit && r.culprit.sha !== r.headSha ? [r.culprit.sha] : [])].map((sha) => ({ repo: r.repo, sha }))));
   return new Map(heads.map((r) => {
-    const stateChangedAt = changed.get(`${r.repo}@${r.headSha}`)?.state_changed_at ?? "";
-    return [r.repo, { headSha: r.headSha, branch: r.branch, state: r.state, culprit: r.culprit?.sha ?? r.headSha, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, stateChangedAt }];
+    const stateChangedAt = at.get(`${r.repo}@${r.headSha}`)?.state_changed_at ?? "";
+    const culprit = r.culprit?.sha ?? r.headSha;
+    return [r.repo, { headSha: r.headSha, branch: r.branch, state: r.state, culprit, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, culpritAt: at.get(`${r.repo}@${culprit}`)?.first_seen_at ?? "", stateChangedAt }];
   }));
 }
 
@@ -149,6 +155,8 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[]): Promise
     const cur = heads.get(repo)!, due = facts.get(`${repo}@${cur.headSha}`)!;
     // A stored patch is collected once its lint task ended, or closed when its head is no longer the current one.
     if (cur.state !== "running" && await lintReadyIn(db, due.lintingHeads, cur.headSha)) return true;
+    // An issue whose create was interrupted is settled whatever the head is now.
+    if (due.opening) return true;
     if (cur.state === "red") return due.rows.length === 0 || due.rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
     // A row left at needs-fix by an older head is closed by the next run.
     return due.rows.some((r) => r.state === "rerun-requested") || due.staleNeedsFix;
@@ -158,6 +166,7 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[]): Promise
 /** Whether a run of the step has something to do for the repo. */
 export const mainFixDue = async (db: Db, repo: string): Promise<boolean> => (await mainFixDueRepos(db, [repo])).length > 0;
 
+const issueTarget = (r: Pick<FixRow, "repo" | "headSha">): string => `${r.repo}:${r.headSha.slice(0, 8)}`;
 const issueTitle = (check: string): string => `Main CI fails: ${cleanLine(check, 100)}`;
 
 /** The issue's text. Fixed layout; the check name, reason and log excerpt are scrubbed, without URLs or mentions. */
@@ -191,20 +200,22 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
   if (!verdicts) { log(`  ${repo}: no usable classification; tried again at the next run`); return false; }
   s.classified++;
   const rerunRuns = new Map<number, FixRow[]>();
-  for (const c of failure.checks) {
+  const rows = failure.checks.map((c): FixRow => {
     const v = verdicts.find((x) => x.check === c.name) ?? { check: c.name, verdict: "code" as const, reason: "no verdict" };
     const row: FixRow = {
       ...base, check: c.name, verdict: v.verdict, state: "nothing-to-do", reason: v.reason || null, runId: c.runId,
       runUrl: c.runId ? `https://github.com/${slugOf(repo)}/actions/runs/${c.runId}` : null, excerpt: excerptOf(c) || null, updatedAt: at,
     };
-    if (v.verdict === "code") { await onCodeVerdict(db, row, v.reason || "a build, lint or test step failed", at); s.needsFix++; continue; }
-    if (v.verdict === "infra") { await openInfraIssue(db, row, deps, log, s, by, at); continue; }
+    if (v.verdict === "code") return { ...row, ...codeState(v.reason || "a build, lint or test step failed") };
+    if (v.verdict === "infra") return { ...row, state: "issue-opening" };
     // flaky
-    if (row.runId === null) { await setState(db, row, "nothing-to-do", "no Actions run to rerun", at); continue; }
-    // Recorded before the calls: one rerun per head, even if the process dies in the middle of them.
-    const saved = await setState(db, row, "rerun-requested", row.reason, at);
-    (rerunRuns.get(row.runId) ?? rerunRuns.set(row.runId, []).get(row.runId)!).push(saved);
-  }
+    return row.runId === null ? { ...row, reason: "no Actions run to rerun" } : { ...row, state: "rerun-requested" };
+  });
+  // Every row is recorded before the first call to GitHub, so a process that dies in between leaves no check of the head unread:
+  // one rerun per head, and an issue the next run settles.
+  await saveMainFixes(db, rows, at);
+  s.needsFix += rows.filter((r) => r.state === "needs-fix").length;
+  for (const r of rows) if (r.state === "rerun-requested" && r.runId !== null) (rerunRuns.get(r.runId) ?? rerunRuns.set(r.runId, []).get(r.runId)!).push(r);
   const w: Writer = { db, login: ACTOR };
   for (const [runId, rows] of rerunRuns) {
     const g = await guardRepo(db, repo, "main-fix", by);
@@ -215,19 +226,66 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
   return true;
 }
 
-/** One issue for an infrastructure failure; a refused or failed write ends in `issue-failed` (an outcome GitHub never confirmed may have left an issue, so it is not retried). */
-async function openInfraIssue(db: Db, row: FixRow, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By, at: string): Promise<void> {
+/**
+ * The `issue-opening` rows of the repo, check by check: one issue for the check's red streak. Returns what stopped a check whose rows
+ * stay `issue-opening` for the next run: a create without a known outcome, or one the write pacing held back.
+ */
+async function openInfraIssues(db: Db, repo: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<string[]> {
+  const open: string[] = [];
+  const checks = new Set((await loadMainFixes(db, { repo, states: ["issue-opening"] })).map((r) => r.check));
+  for (const check of checks) {
+    const release = await leaseItem(db, `main-issue:${repo}:${check}`, log);
+    if (!release) continue;
+    try {
+      const why = await openInfraIssue(db, repo, check, cur, deps, log, s, by);
+      if (why) open.push(why);
+    } finally { await release(); }
+  }
+  return open;
+}
+
+async function openInfraIssue(db: Db, repo: string, check: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<string | null> {
+  const stored = (await loadMainFixes(db, { repo, states: ["issue-opening", "issue-opened", "declined"] })).filter((r) => r.check === check);
+  const rows = stored.filter((r) => r.state === "issue-opening");
+  const newest = rows.at(-1);
+  if (!newest) return null;
+  const end = async (state: string, extra: Partial<FixRow> = {}, reason?: string): Promise<null> => {
+    const at = deps.now().toISOString();
+    await saveMainFixes(db, rows.map((r) => ({ ...r, ...extra, state, reason: reason ?? r.reason })), at);
+    return null;
+  };
+  // The streak's issue, opened (or declined by a person) at an earlier red head.
+  const streak = (r: FixRow): boolean => r.createdAt >= cur.culpritAt;
+  const had = streak(newest) ? stored.find((r) => r.state === "issue-opened" && r.issueNumber !== null && streak(r)) ?? stored.find((r) => r.state === "declined" && streak(r)) : undefined;
+  if (had) return await end(had.state, { issueNumber: had.issueNumber });
+  // A create an earlier run began: its audit row tells the issue, and one that ended without a known outcome is looked up on GitHub.
+  const began = (await listAudit(db, { actions: ["postmerge-file"], targets: rows.map(issueTarget), order: "desc" })).filter((a) => a.details?.check === check && a.at >= rows[0]!.createdAt);
+  const done = began.map((a) => /\/issues\/(\d+)$/.exec(a.details?.state === "done" ? String(a.details.url ?? "") : "")).find((m) => m !== null);
+  if (done) return await end("issue-opened", { issueNumber: Number(done[1]) });
+  if (began.length) {
+    for (const a of began) {
+      let made: { number: number; url: string } | null;
+      try {
+        made = await issueMade(deps.gh, { repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at });
+      } catch (e) { return `${repo}: whether the issue for ${check} was opened is not known: ${oneLine(String((e as Error).message ?? e))}`; }
+      if (made) { log(`  ${repo}: the issue for ${check} was opened before: ${made.url}`); return await end("issue-opened", { issueNumber: made.number }); }
+    }
+  }
+  if (cur.state !== "red" || !streak(newest)) return await end("nothing-to-do", {}, "main is green again");
+  const g = await guardRepo(db, repo, "main-fix", by);
+  if ("refused" in g) { log(`  ${repo}: issue for ${check} not opened: ${g.refused}`); return await end("issue-failed", {}, oneLine(g.refused, 100)); }
   try {
-    const g = await guardRepo(db, row.repo, "main-fix", by);
-    if ("refused" in g) { await setState(db, row, "issue-failed", oneLine(g.refused, 100), at); log(`  ${row.repo}: issue for ${row.check} not opened: ${g.refused}`); return; }
-    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo: row.repo, target: `${row.repo}:${row.headSha.slice(0, 8)}`, title: issueTitle(row.check), body: issueBody(row) }, { by: "model", kind: "issue", model: NOTE_MODEL });
-    await setState(db, row, "issue-opened", row.reason, at, { issueNumber: made.number });
+    const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: issueTarget(newest), title: issueTitle(check), body: issueBody(newest) }, { by: "model", kind: "issue", model: NOTE_MODEL }, { check });
+    await end("issue-opened", { issueNumber: made.number });
     s.issues++;
-    log(`  ${row.repo}: opened ${made.url}`);
+    log(`  ${repo}: opened ${made.url}`);
+    return null;
   } catch (e) {
     const why = oneLine(String((e as Error).message ?? e));
-    await setState(db, row, "issue-failed", `issue not opened${e instanceof IssueError && e.clear ? "" : " (outcome unknown)"}: ${why}`.slice(0, 200), at);
-    log(`  ${row.repo}: issue for ${row.check} not opened: ${why}`);
+    log(`  ${repo}: issue for ${check} not opened: ${why}`);
+    if (e instanceof IssueError && e.paced) return why;
+    if (!(e instanceof IssueError) || !e.clear) return `${repo}: whether the issue for ${check} was opened is not known: ${why}`;
+    return await end("issue-failed", {}, `issue not opened: ${why}`.slice(0, 200));
   }
 }
 
@@ -268,12 +326,15 @@ export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n:
       } finally { await release(); }
     }
   }
+  const unsettled = await openInfraIssues(db, repo, cur, deps, log, s, params.by ?? CLI_BY);
   if (deps.fix) {
     const asHead = (c: Current | null) => (c ? { headSha: c.headSha, branch: c.branch, state: c.state, redSince: c.redSince, culprit: c.culprit, culpritPr: c.culpritPr } : null);
     const r = await openFixPrs({ db, repo, gh: deps.gh, exec: deps.exec, fix: deps.fix, now: deps.now, log, by: params.by, ...(params.stopping && { stopping: params.stopping }), setState: async (r, state, reason, at, extra) => await setState(db, r, state, reason, at, extra), current: async () => asHead(await currentOf(db, repo)) }, bump);
     s.prs = r.opened;
   }
   log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}`);
+  // The job fails: the failure backoff spaces the next look (a paced write's message is skipped by it, so the next pass runs it again).
+  if (unsettled.length) throw new Error(unsettled.join("; "));
   return s;
 }
 
@@ -286,7 +347,7 @@ export const commands = {
       const repo = args[i + 1]!;
       const db = await openDb();
       if (args.includes("--apply")) { await runMainFix(db, { repo }); return; }
-      const states = ["needs-fix", "linting", "pr-opened", "fix-failed", "rerun-requested", "rerun-passed", "issue-opened", "issue-failed", "declined", "nothing-to-do"];
+      const states = ["needs-fix", "linting", "pr-opened", "fix-failed", "rerun-requested", "rerun-passed", "issue-opening", "issue-opened", "issue-failed", "declined", "nothing-to-do"];
       for (const r of (await loadMainFixes(db, { repo, states })).sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0)).slice(0, 50))
         console.log(`${r.headSha.slice(0, 8)}\t${r.check}\t${r.verdict}\t${r.state}\t${r.reason ?? ""}`);
     },

@@ -158,6 +158,9 @@ both("main fix rows upsert in one call, keep their creation time, and answer the
   assert.deepEqual(due.get("app@red")!.rows.map((r) => r.check), ["build", "lint"]);
   assert.equal(due.get("app@red")!.staleNeedsFix, true, "an older head still holds a needs-fix row");
   assert.equal(due.get("app@new")!.staleNeedsFix, false, "a running head waits");
+  assert.equal(due.get("app@new")!.opening, false);
+  await saveMainFixes(db, [mainRow({ headSha: "old", check: "infra", state: "issue-opening" })], T0);
+  assert.equal((await loadMainFixDue(db, [{ repo: "app", headSha: "new", running: true }])).get("app@new")!.opening, true, "an interrupted issue is settled whatever the head is");
   assert.equal(due.get("app@new")!.lintingHeads[0]!.headSha, "red");
   assert.equal(await countMainFixes(db, { state: "needs-fix" }), 1);
   assert.deepEqual((await loadMainFixStates(db, [{ repo: "app", headSha: "red" }])).get("app@red"), { states: ["pr-opened", "linting"], prNumber: 7 });

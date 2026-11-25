@@ -7,6 +7,7 @@ import { num, push, refKey, rowsOf } from "./rows.ts";
 import type { MainFixRow, MainFixVerdict, RefKey } from "./types.ts";
 
 type Head = { repo: string; headSha: string };
+type MainFixDue = { rows: { check: string; state: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean; /** The repo holds an `issue-opening` row at any head. */ opening: boolean };
 
 const COLS = ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "issue_number", "pr_number", "pr_url", "patch", "files", "lint_task", "lint_round", "lint_state", "session", "created_at", "updated_at"] as const;
 
@@ -39,11 +40,11 @@ export async function loadMainFixes(db: Db, q: { heads: Head[] } | { repo: strin
 
 /**
  * What `mainFixDue` and `lintReady` need for every red head at once; key is `repo@headSha`. 3 statements in one wave: the rows at the
- * heads, the repos' `linting` rows, the repos that hold a `needs-fix` row at any head. `staleNeedsFix` is true when the repo has such
+ * heads, the repos' `linting` rows, the repos that hold a `needs-fix` or `issue-opening` row at any head. `staleNeedsFix` is true when the repo has such
  * a row and the head is not running (a row left at needs-fix by an older head is closed by the next run).
  */
-export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean })[]): Promise<Map<string, { rows: { check: string; state: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean }>> {
-  const out = new Map<string, { rows: { check: string; state: string }[]; lintingHeads: { headSha: string; lintTask: number | null }[]; staleNeedsFix: boolean }>();
+export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean })[]): Promise<Map<string, MainFixDue>> {
+  const out = new Map<string, MainFixDue>();
   if (!heads.length) return out;
   const k = queryDb(db).k as any;
   const repos = [...new Set(heads.map((h) => h.repo))];
@@ -51,14 +52,15 @@ export async function loadMainFixDue(db: Db, heads: (Head & { running: boolean }
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "check", "state"]).where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"]))
       .orderBy("repo").orderBy("head_sha").orderBy("check")),
     rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "head_sha", "lint_task"]).where(kx.inList(db, "repo", repos)).where("state", "=", "linting").orderBy("created_at").orderBy("head_sha").orderBy("check")),
-    rowsOf<any>(db, k.selectFrom("main.main_fixes").select("repo").distinct().where(kx.inList(db, "repo", repos)).where("state", "=", "needs-fix")),
+    rowsOf<any>(db, k.selectFrom("main.main_fixes").select(["repo", "state"]).distinct().where(kx.inList(db, "repo", repos)).where("state", "in", ["needs-fix", "issue-opening"])),
   ]));
-  const needing = new Set(needs.map((r) => r.repo as string));
+  const withState = (state: string) => new Set(needs.filter((r) => r.state === state).map((r) => r.repo as string));
+  const needing = withState("needs-fix"), opening = withState("issue-opening");
   const lintingBy = new Map<string, { headSha: string; lintTask: number | null }[]>();
   for (const r of linting) push(lintingBy, r.repo, { headSha: r.head_sha, lintTask: num(r.lint_task) });
   const rowsBy = new Map<string, { check: string; state: string }[]>();
   for (const r of rows) push(rowsBy, `${r.repo}@${r.head_sha}`, { check: r.check, state: r.state });
-  for (const h of heads) out.set(`${h.repo}@${h.headSha}`, { rows: rowsBy.get(`${h.repo}@${h.headSha}`) ?? [], lintingHeads: lintingBy.get(h.repo) ?? [], staleNeedsFix: !h.running && needing.has(h.repo) });
+  for (const h of heads) out.set(`${h.repo}@${h.headSha}`, { rows: rowsBy.get(`${h.repo}@${h.headSha}`) ?? [], lintingHeads: lintingBy.get(h.repo) ?? [], staleNeedsFix: !h.running && needing.has(h.repo), opening: opening.has(h.repo) });
   return out;
 }
 
