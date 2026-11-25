@@ -99,8 +99,6 @@ export const CONFLICT_MAX_MERGES_PER_PR_PER_DAY = 2;
 export const CIFIX_TRY_STATES = ["formatting", "linting", "superseded", "pushing", "pushed", "failed", "refused", "rejected"];
 export const CIFIX_PUSH_STATES = ["pushing", "pushed"];
 /** States that end the CI fix step's work at a head. */
-/** A stored model patch waits for its lint task or for the collect step. */
-export const LINT_STATE = "linting";
 export const CIFIX_FINAL_STATES = ["pushed", "pushing", "asked", "push-denied", "cannot-push", "skipped", "comment-failed"];
 
 /**

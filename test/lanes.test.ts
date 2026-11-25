@@ -138,7 +138,7 @@ test("once a Pipeline-off repo's last workflow ends, our assignment is released 
     const r = await runBatches(w.db, { repo: "app" }, () => {}, w.gh.batchDeps());
     assert.deepEqual([r.superseded.length, r.started, r.published, r.merged], [1, [], [], []]);
     assert.deepEqual(await batch(), [["superseded", 900]]);
-    const said = w.gh.writesOf("pr").map((a) => a.join(" ")).filter((a) => / close /.test(a)).join();
+    const said = String((await w.rows("SELECT details FROM audit WHERE action = 'batch-pr-close'"))[0]!.details);
     assert.ok(/pipeline is off, so #1, #2 wait until someone starts them/.test(said) && !/rebuilt/.test(said), said);
     assert.deepEqual((await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: async () => ({ code: 0, stdout: JSON.stringify({ login: "bot", id: 9, node_id: "NB" }), stderr: "" }) })).unassigned, ["app#1"]);
     assert.deepEqual((await w.rows("SELECT action, target FROM audit WHERE action IN ('batch-pr-close', 'unassign', 'merge', 'batch-merge') ORDER BY action")).map((x) => `${x.action} ${x.target}`), ["batch-pr-close app#900", "unassign app#1"]);

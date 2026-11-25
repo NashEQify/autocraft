@@ -218,8 +218,8 @@ const refusedFor = (c: Case, why: RegExp): boolean => {
 type Exception = { id: string; rules: string[]; why: string; covers: (c: Case) => boolean; example: PrRows };
 const EXCEPTIONS: Exception[] = [
   {
-    id: "asked-wait", rules: ["false-wait"], why: "An item whose workflow asks a person (blocked, or a question) keeps a plan that names its next step, not the question.",
-    covers: ({ w }) => w.workflow?.state === "blocked" || w.workflow?.state === "recommending", example: greenRows({ workflow: startedAs("merge", { state: "blocked", blocker: "other" }), legs: [], review: null }),
+    id: "asked-wait", rules: ["false-wait"], why: "An item stopped at a blocker keeps a plan that names its next step (the pre-merge review, the hand-over), not the question.",
+    covers: ({ w }) => w.workflow?.state === "blocked", example: greenRows({ workflow: startedAs("merge", { state: "blocked", blocker: "other" }), legs: [], review: null }),
   },
   {
     id: "pipeline-off", rules: ["dead-end"], why: "The plan shows what would run with the pipeline on.",

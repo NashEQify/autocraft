@@ -15,7 +15,7 @@ export type Acting = { entry: Entry; startedBy: string; approvedBy: string | nul
  * The people the act may run for, the one who counts first when more than one does. The merge runs for the person who approved it (a merge
  * entry nobody approved since: who started it); other work for whoever last answered, approved or started the item.
  */
-export function actorsFor(w: Acting, act: Act): string[] {
+function actorsFor(w: Acting, act: Act): string[] {
   if (act === "work") return [...w.actors];
   const by = w.approvedBy ?? (w.entry === "merge" ? w.startedBy : null);
   return by === null ? [] : [by];
