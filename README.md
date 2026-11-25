@@ -1,6 +1,6 @@
 # AutoCraft
 
-AutoCraft is a model harness for maintaining GitHub repositories with a large backlog. It mirrors every issue and PR into a local database and runs a pipeline of model steps over them. Jev classifiers and Claude Haiku, Sonnet and Opus classify, prioritise, find duplicates, ask maintainers for decisions, review, write fixes, verify and merge.
+AutoCraft is a model harness for maintaining GitHub repositories with a large backlog. It mirrors every issue and PR into a local database and runs a pipeline of model steps over them. Jev classifiers and Claude Haiku, Sonnet and Opus classify, prioritise, find duplicates, review, write fixes, implement issues, verify and merge. Maintainers start items and answer one recommendation each.
 
 The models' tools are a fixed set of GitHub actions (comments, labels, branches, PRs, merges), all behind one write module and `safe-merge`-style checks. Actions run automatically where the rules say they are safe. Otherwise a model proposes and a person accepts. Each issue and PR has its own conversation between Opus and a maintainer, with action cards the maintainer can run. The pipeline is built around maintainers' judgement, which is the limited resource, not around token cost.
 
@@ -39,14 +39,14 @@ The image is the dashboard's home page (mock data). Each column is a stage with 
 - Only `src/github/write.ts` writes to GitHub. Every write is recorded in an audit table, and a test fails if another file writes.
 - Every GitHub write needs an operator's approval for that repo. Approvals are given on the dashboard and cannot be set from the CLI.
 - The dashboard needs GitHub sign-in. Roles are `operator` (answers, approvals, switches, accounts), `maintainer` (read and comment) and `viewer` (read only).
-- Contributors' own agents reach the Inbox through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act with their user's role, and what they send back is feedback, the same as the dashboard's Feedback box: an operator still answers. MCP decision answering and undo are currently disabled (`answering.enabled` in `src/dash/mcp/index.ts`), including when GitHub App sign-in is configured. Answer decisions on the dashboard.
+- Contributors' own agents reach AutoCraft through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act with their user's role, and send the same commands the user can send on GitHub or the dashboard.
 - A pipeline switch (on/off) turns the whole pipeline off, a per-repo pipeline switch limits it to chosen repos, and each step has a daily limit.
 
 See [Trust boundary](docs/pipeline.md#trust-boundary).
 
 ### Dashboard browsing
 
-Items is one filterable list; a row's details open inline under it. Needs you shows the decision queue beside the selected decision, with its Evidence, Discussion and item timeline. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
+Items is one filterable list; a row's details open inline under it. Home lists what waits for the reader. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
 
 ## Setup
 
@@ -133,7 +133,7 @@ autocraft-server sync                   # first sync of the tracked repos
 
 Repo names are unique across owners and case-sensitive. With the GitHub App identity, the app must also be installed on `storytold`. See [Tracked repos](docs/operations.md#tracked-repos).
 
-Newly tracked repositories start with their pipeline disabled. Sync, Embed, and Rank remain available; operator conversations and explicitly fast-tracked items are exceptions to the pipeline-off restriction. For recurring sync, install and enable the supplied systemd timer (`deploy/systemd/autocraft-sync.timer`) or use the periodic service in the Docker Compose deployment. Running the initial sync does not schedule future runs. `autocraft-server embed` populates vectors. With the default model and an empty cache, the first embedding operation downloads the approximately 34 MB model plus supporting files.
+Newly tracked repositories start with their pipeline disabled. Sync, Embed, and Rank remain available; conversations and items a maintainer started are exceptions to the pipeline-off restriction. For recurring sync, install and enable the supplied systemd timer (`deploy/systemd/autocraft-sync.timer`) or use the periodic service in the Docker Compose deployment. Running the initial sync does not schedule future runs. `autocraft-server embed` populates vectors. With the default model and an empty cache, the first embedding operation downloads the approximately 34 MB model plus supporting files.
 
 ### Start the dashboard and add the first operator
 
@@ -152,7 +152,7 @@ Sign in at the base URL. Further users are added on the Access page or with `aut
 
 ### Contributors' agents
 
-Maintainers (and operators) can work the Inbox from their own agent: from the user menu (top right, **Connect**) they make an MCP Connector token and get the command that adds the AutoCraft MCP server to Claude Code (`claude mcp add --transport http autocraft <base URL>/mcp --header "Authorization: Bearer <token>"`). Then they ask things like "is there anything open in photocraft I can help with?" or "give me 5 PRs that need a fix-up". The agent lists open decisions and held fix-ups, works one through with them locally, and sends their pick and note back as feedback. MCP decision answering and undo remain disabled, even with GitHub App sign-in configured; use the dashboard for these actions. See [MCP Connector](docs/operations.md#mcp-connector).
+Maintainers (and operators) can work from their own agent: from the user menu (top right, **Connect**) they make an MCP Connector token and get the command that adds the AutoCraft MCP server to Claude Code (`claude mcp add --transport http autocraft <base URL>/mcp --header "Authorization: Bearer <token>"`). Then they ask things like "is there anything open in photocraft I can help with?" or "give me 5 PRs that need a fix-up". The agent lists the items waiting for an answer and held fix-ups, works one through with them locally, and sends their command. See [MCP Connector](docs/operations.md#mcp-connector).
 
 ### Discord mentions (optional)
 
@@ -204,7 +204,7 @@ The mock API serves fixture data; pick the role with `?as=operator|maintainer|vi
 | `src/cli.ts` | Entry point; commands come from modules listed in `MODULES` |
 | `src/mirror.ts`, `src/db.ts`, `src/schema.sql` | Sync and the SQLite schema |
 | `src/classify`, `src/priority`, `src/dupes`, `src/embed`, `src/rank` | Classification, priority, duplicates, embeddings, work rank |
-| `src/decide`, `src/conversations`, `src/act` | Decisions, Opus conversations and cards, applying answers |
+| `src/workflow`, `src/conversations`, `src/act` | The maintainer workflow, Opus conversations and cards, closes made as a person |
 | `src/review`, `src/implement`, `src/fixup`, `src/verify`, `src/merge` | Review, fix, fix-up, verify, merge queue |
 | `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Agent runs and Jev calls, prompts, bubblewrap, read-only item tools |
 | `src/github` | `write.ts`, the only module that writes to GitHub |
