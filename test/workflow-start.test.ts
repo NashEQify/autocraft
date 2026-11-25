@@ -50,7 +50,7 @@ async function unstarted(pipeline = true): Promise<World> {
   await w.db.run(w.db.k.updateTable("main.tracked_repos").set({ pipeline: pipeline ? 1 : 0 }));
   return await (await (await w.pr(1, { label: "feature" })).verified(1)).premerge(1, "clean");
 }
-const settle = (w: World) => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 5);
+const settle = (w: World) => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 5);
 /** The newest leg is handed over, belongs to the live workflow, and the planner merges the PR at `head` as MAINT. */
 async function mergesAsPerson(w: World, head = "sha1"): Promise<void> {
   const wf = (await liveWorkflow(w.db, "app", 1))!;

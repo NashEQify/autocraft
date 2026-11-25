@@ -109,7 +109,7 @@ describe("PR journeys", () => {
 
     const answer = await runCommand(w.db, { login: "mira", canWrite: async () => true }, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
     assert.equal(answer.items[0]!.outcome, "run", answer.lines.join());
-    const advance = () => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 3);
+    const advance = () => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 3);
     await advance();
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind), ["review"]);
     assert.deepEqual((await merge()).merged, []);
@@ -461,7 +461,7 @@ describe("a repo with no step approvals", () => {
   const say = async (w: World, text: string, n: number, login = "mira") => {
     const r = await runCommand(w.db, { login, canWrite: async () => true }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] });
     assert.equal(r.items[0]!.outcome, "run", r.lines.join());
-    await untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 3);
+    await untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 3);
   };
   /** The jobs the lane proposes, each taken by the queue's own check. */
   const jobs = async (w: World, lane: string): Promise<string[]> => {

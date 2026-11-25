@@ -41,16 +41,17 @@ export type Write = { kind: "merge" | "assign" | "comment" | "close" | "pr" | "p
 type Live = { head: string; state: string; draft?: boolean; mergeable: string; ci: string; authors: string[]; assignees: string[] };
 
 /**
- * Runs `passes` until one run issues no write, `most` times at the most: a pass reads only the database and the clock, so a run
- * after one that wrote nothing decides the same.
+ * Runs `passes` in turn, up to `most` rounds, until each has run and written nothing since the last write: a pass reads only the
+ * database and the clock, so it would decide the same again.
  */
-export async function untilQuiet(db: Db, passes: () => Promise<unknown>, most: number): Promise<void> {
-  let wrote = true;
+export async function untilQuiet(db: Db, passes: (() => Promise<unknown>)[], most: number): Promise<void> {
+  let wrote = false;
   const stop = db.observe((e) => { wrote ||= e.kind === "write-lock" || /\b(insert|replace)\s+into\b|\bupdate\b|\bdelete\s+from\b/i.test(e.sql); });
   try {
-    for (let i = 0; i < most && wrote; i++) {
+    for (let i = 0, quiet = 0; i < most * passes.length && quiet < passes.length; i++) {
       wrote = false;
-      await passes();
+      await passes[i % passes.length]!();
+      quiet = wrote ? 0 : quiet + 1;
     }
   } finally {
     stop();

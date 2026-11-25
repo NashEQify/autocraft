@@ -43,7 +43,7 @@ const inCi = async (w: World, n: number) => {
   await settle(w);
   assert.equal((await preapprovalOf(w.db, "app", n))?.state, "ci");
 };
-const settle = (w: World) => untilQuiet(w.db, () => advancePreapprovals(w.db), 5);
+const settle = (w: World) => untilQuiet(w.db, [() => advancePreapprovals(w.db)], 5);
 
 describe("pre-approved merge", () => {
   test("fix-up pushed, review take, pre-merge review clean, CI green: the merge queue gets it", async () => {

@@ -146,7 +146,7 @@ test("a failed verification or a lasting refusal after the hand-over asks once, 
   for (const what of ["verification", "refusal"] as const) {
     const w = await approvedReview();
     const db = w.db;
-    const pass = async () => { await advanceWorkflows(db); await untilQuiet(db, () => advancePreapprovals(db), 3); await advanceWorkflows(db); };
+    const pass = async () => { await advanceWorkflows(db); await untilQuiet(db, [() => advancePreapprovals(db)], 3); await advanceWorkflows(db); };
     const plansMerge = async () => (await w.prPlan(1)).actions.some((a) => a.kind === "merge");
     await review(w, { head: "sha1", verdict: "take", at: new Date().toISOString() });
     await w.premerge(1, "clean");
@@ -225,7 +225,7 @@ test("an approved review entry with minor findings is fixed, reviewed again and 
   await review(w, { head: "sha2", verdict: "take", at: new Date().toISOString() });
   await w.premerge(1, "clean");
   await advanceWorkflows(db);
-  await untilQuiet(db, () => advancePreapprovals(db), 3);
+  await untilQuiet(db, [() => advancePreapprovals(db)], 3);
   assert.equal(await legState(w), "queued");
   const leg = (await db.get(db.k.selectFrom("main.preapprovals").select(["by", "workflow_id"]).where("number", "=", 1).orderBy("id", "desc").limit(1)))!;
   assert.equal(leg.by, MAINT, "the merge is made as the approver");
@@ -244,7 +244,7 @@ test("a queued merge leg whose workflow ended with the merge is recorded merged,
   await review(w, { head: "sha1", verdict: "take" });
   await w.premerge(1, "clean");
   await advanceWorkflows(db);
-  await untilQuiet(db, () => advancePreapprovals(db), 3);
+  await untilQuiet(db, [() => advancePreapprovals(db)], 3);
   assert.equal(await legState(w), "queued");
   // The merge lands and the workflow ends on it before the leg's pass sees the merge.
   await db.run(db.k.updateTable("main.items").set({ state: "MERGED" }).where("number", "=", 1));
@@ -277,7 +277,7 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
     }
     await w.premerge(1, kind, false);
     await db.run(db.k.updateTable("main.premerge_reviews").set({ unsure: 1 }).where("number", "=", 1));
-    await untilQuiet(db, async () => { await advanceWorkflows(db); await advancePreapprovals(db); }, 3);
+    await untilQuiet(db, [() => advanceWorkflows(db), () => advancePreapprovals(db)], 3);
     await advanceWorkflows(db);
     const wf = (await liveWorkflow(db, "app", 1))!;
     if (kind === "clean") assert.deepEqual([await legState(w), wf.state], ["queued", "running"], "unsure with no finding: the merge queue has it");
@@ -444,7 +444,7 @@ async function authorPushed(): Promise<World> {
   return w;
 }
 const pause = () => new Promise((r) => setTimeout(r, 5));
-const ticks = (w: World) => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, 3);
+const ticks = (w: World) => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 3);
 const leg2 = async (w: World) => (await w.rows("SELECT state, head, from_head FROM preapprovals WHERE number = 2 ORDER BY id DESC"))[0]!;
 const planned2 = async (w: World) => (await w.prPlan(2)).actions.map((a) => a.kind);
 /** A CI fix of ours that lands now. */

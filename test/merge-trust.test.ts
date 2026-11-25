@@ -61,7 +61,7 @@ async function approved(w: World, c: Pick<Case, "n" | "state" | "entry">): Promi
   await preapproveMerge(w.db, { repo: "app", number: c.n, by: OPERATOR });
   await w.db.run(w.db.k.updateTable("preapprovals").set({ state: c.state }).where("number", "=", c.n));
 }
-const tick = (w: World, times = 3): Promise<void> => untilQuiet(w.db, async () => { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }, times);
+const tick = (w: World, times = 3): Promise<void> => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], times);
 const legOf = async (w: World, n: number) => (await preapprovalOf(w.db, "app", n))!;
 
 test("a push of ours keeps the merge approval, whatever made it and wherever the leg is, and asks nobody", async () => {

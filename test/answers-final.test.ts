@@ -17,7 +17,7 @@ const startPushed = async (w: World, n: number, to: string) => {
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state: "pushed", attempt: 1, created_at: T0, source: "operator", operator_fix: fix }));
   await w.synced(n, to);
 };
-const settle = (w: World) => untilQuiet(w.db, () => advancePreapprovals(w.db), 5);
+const settle = (w: World) => untilQuiet(w.db, [() => advancePreapprovals(w.db)], 5);
 
 describe("a review that failed for good", () => {
   test("a request newer than the last failure grants exactly one more try", async () => {
