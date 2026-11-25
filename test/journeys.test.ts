@@ -577,7 +577,7 @@ describe("a repo with no step approvals", () => {
     await checkRequest(w.db, found[0]!.step, found[0]!.params);
     const grant = async (n: number) => await guardItem(w.db, { repo: "app", number: n }, { kind: "implement", bucket: "plan" }, "pipeline");
     assert.ok(!("refused" in await grant(5)));
-    assert.match((await grant(4) as { refused: string }).refused, /Issue implementations in app are not approved/);
+    assert.match((await grant(4) as { refused: string }).refused, /issue is not queued/);
     const repoGrant = async (n: number) => await guardRepo(w.db, "app", "fix-issue", "pipeline", undefined, { members: [await implementMay(w.db, "app", n)] });
     assert.ok(!("refused" in await repoGrant(5)));
     assert.ok("refused" in await repoGrant(4));
@@ -587,7 +587,7 @@ describe("a repo with no step approvals", () => {
     await w.db.run(w.db.k.insertInto("implementations").values({ repo: "app", number: 5, pr_number: 6, state: "pr-opened", text_hash: "h", attempt: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), queued_by: "mira" }));
     const f = (await w.plan()).prs.find((p) => p.facts.number === 6)!.facts;
     assert.equal(gates(f, { kind: "implement", bucket: "revise" }, "pipeline"), null);
-    assert.match(gates({ ...f, implementation: { ...f.implementation!, queuedBy: null } }, { kind: "implement", bucket: "revise" }, "pipeline") ?? "", /not approved/);
+    assert.match(gates({ ...f, implementation: { ...f.implementation!, queuedBy: null } }, { kind: "implement", bucket: "revise" }, "pipeline") ?? "", /not queued/);
   });
 
   test("a started PR nobody approved that conflicts or has red CI comes back with one recommendation", async () => {

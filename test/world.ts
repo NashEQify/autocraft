@@ -32,7 +32,7 @@ function mayOf(f: Omit<PrFacts, "may">): PrFacts["may"] {
     repoMerge: REPO_APPROVAL, repoPush: REPO_APPROVAL, ended: f.endedWorkflow ?? null, pushes: [], ownHead: false, fixupBy: f.operator?.fix ? "maint" : null,
     workflow: w ? {
       live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: "running", startedBy: w.startedBy, approvedBy: w.approved ? w.startedBy : null,
-      approvedAt: w.approved ? w.startedAt : null, blocker: null, baseHead: f.head, fixupAsked: !!f.operator?.fix,
+      approvedAt: w.approved ? w.startedAt : null, blocker: null, baseHead: f.head,
       leg: f.handOver ? { state: "queued", head: f.head } : f.operator?.hold ? { state: "ci", head: f.head } : null,
     } : null,
   };
@@ -52,7 +52,7 @@ export function prFacts(over: Override = {}): PrFacts {
 
 const itemBase = (): ItemFacts => ({
   repo: "app", number: 1, kind: "issue", open: true, assignment: { login: "bot", assignees: ["dev"], ours: false }, now: NOW, pipelineOn: true, draft: false, inScope: true, integration: false, held: null, score: 100,
-  repoFacts: { labelsApproved: true, commentApproved: true, fixIssueApproved: true }, run: "run1",
+  repoFacts: { labelsApproved: true, commentApproved: true }, run: "run1",
   classification: {
     status: "settled", label: "bugfix", flags: [], jevLabel: "bugfix", haikuLabel: null, referee: null,
     jev: { at: "2026-11-04T08:00:00.000Z", changed: false, unsure: false }, haiku: null,

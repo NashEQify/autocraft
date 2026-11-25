@@ -173,7 +173,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       inScope: d.inScope.has(ref), ...(outsideHold ? { outsideHold } : {}), integration: d.batchPrs.has(ref) && isOwn(r.author),
       held: !work && d.workflow.ended.get(ref) === "backlog" ? "backlog" : null,
       score: weightScore(work) ?? t.score,
-      repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment, fixIssueApproved: !!approvals.fixissue },
+      repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment },
       workflow: wf, endedWorkflow: wf ? null : d.workflow.ended.get(ref) ?? null,
       run,
       classification: {

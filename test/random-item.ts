@@ -7,7 +7,7 @@ export function randomItem(x: Rnd): ItemFacts {
   return itemFacts({
     kind: x.pick(["pr", "issue"] as const), open: x.bool(0.9), draft: x.bool(0.1), inScope: x.bool(0.7), integration: x.bool(0.05),
     held: x.pick([null, null, null, "backlog"] as const), pipelineOn: x.bool(0.85), run: x.pick(["run1", "run1", null]),
-    repoFacts: { labelsApproved: x.bool(0.8), commentApproved: x.bool(0.8), fixIssueApproved: x.bool(0.8) },
+    repoFacts: { labelsApproved: x.bool(0.8), commentApproved: x.bool(0.8) },
     classification: {
       status: x.pick(["settled", "settled", "waiting", "disagree", "unclassified"] as const), label: x.pick(["bugfix", "bugfix", "plugin candidate", null]),
       flags: x.pick([[], [], ["needs decision"], ["security"]]), jevLabel: x.pick(["bugfix", "small extra", "plugin candidate"]), haikuLabel: x.pick([null, "bugfix", "small extra"]),

@@ -15,7 +15,6 @@ export type WorkflowGate = {
   baseHead: string | null;
   /** The heads a person accepted (src/core/evidence.ts acceptedHeads, isAccepted); absent in a gate that judges one head by itself. */
   accepted?: readonly string[];
-  fixupAsked: boolean;
   /** Its merge leg on the PR while the leg is active; null before it starts and once it ended (cancelled, failed). */
   leg: { state: string; head: string | null } | null;
 };
@@ -26,12 +25,12 @@ export type WorkflowGate = {
  * so its implementation PR's base is the head its leg is at: the leg starts at a head of ours or one a person answered at, and
  * follows our own pushes only.
  */
-export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked?: boolean; legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "from_head" | "head">[] } = {}): WorkflowGate | null {
+export function workflowGate(w: ItemWorkflow | null | undefined, o: { legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "from_head" | "head">[] } = {}): WorkflowGate | null {
   if (!w) return null;
   const legs = (o.legs ?? []).filter((l) => l.workflow_id === w.id), leg = legs.at(-1);
   return {
     live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
-    blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, accepted: acceptedHeads(w, legs), fixupAsked: o.fixupAsked ?? false,
+    blocker: w.blocker, baseHead: w.kind === "issue" ? leg?.head ?? null : w.baseHead, accepted: acceptedHeads(w, legs),
     leg: leg ? { state: leg.state, head: leg.head } : null,
   };
 }
@@ -39,7 +38,7 @@ export function workflowGate(w: ItemWorkflow | null | undefined, o: { fixupAsked
 export type MayResult = { ok: true; as: "person" | "repo"; by: string } | { ok: false; code: RefusalCode; why: string };
 
 const person = (by: string): MayResult => ({ ok: true, as: "person", by });
-const refuse = (code: RefusalCode, why: string): MayResult => ({ ok: false, code, why });
+const refuse = (code: RefusalCode, why: string): Extract<MayResult, { ok: false }> => ({ ok: false, code, why });
 const REPO_OFF = "An operator, or a maintainer of the repo, turns it on on the Repos page.";
 const ENDS_WITH_RECOMMENDATION = "Nobody approved this yet; the workflow ends with a recommendation.";
 
@@ -63,6 +62,13 @@ export type MergeInputs = {
   pushes: readonly OwnPush[];
 };
 
+/** Why the PR neither merges nor gets our pushes while nobody has started it: a person took it out of the pipeline, or it duplicates another. */
+export function handsOff(f: Pick<MergeInputs, "ended" | "duplicates">): Extract<MayResult, { ok: false }> | null {
+  const ended = f.ended && ENDED_WHY[f.ended];
+  if (ended) return refuse("ended", ended);
+  return f.duplicates?.length ? refuse("duplicate", `It duplicates ${f.duplicates.join(", ")}; it merges once a maintainer starts it.`) : null;
+}
+
 /** Whether the merge of the PR at `head` is approved, by a person or by the repo. A started PR merges only once handed over (`mayMerge`). */
 export function mergeApproved(f: MergeInputs): MayResult {
   const w = f.workflow;
@@ -72,10 +78,7 @@ export function mergeApproved(f: MergeInputs): MayResult {
     if (w.approvedBy === null && w.entry !== "merge") return refuse("not-approved", ENDS_WITH_RECOMMENDATION);
     return person(w.approvedBy ?? w.startedBy);
   }
-  const ended = f.ended && ENDED_WHY[f.ended];
-  if (ended) return refuse("ended", ended);
-  if (f.duplicates?.length) return refuse("duplicate", `It duplicates ${f.duplicates.join(", ")}; it merges once a maintainer starts it.`);
-  return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse("repo-approval", REPO_OFF);
+  return handsOff(f) ?? (f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse("repo-approval", REPO_OFF));
 }
 
 /**
@@ -91,7 +94,7 @@ export function mayMerge(f: MergeInputs): MayResult {
 }
 
 export function mayPush(f: {
-  kind: "fixup" | "cifix" | "conflict" | "implement-revision";
+  kind: "fixup" | "cifix" | "conflict";
   repoApproval: StepApproval | null;
   workflow: WorkflowGate | null;
   operatorFix: boolean;
@@ -103,9 +106,8 @@ export function mayPush(f: {
     return by ? person(by) : refuse("request-unnamed", "The fix-up command does not name who asked for it.");
   }
   if (w?.live) {
-    if (f.kind === "implement-revision") return w.entry === "implement" ? person(w.startedBy) : refuse("not-approved", "Only an implement workflow revises its own pull request.");
     if (f.kind === "fixup") {
-      if (w.entry !== "review" || w.fixupAsked) return person(w.startedBy);
+      if (w.entry !== "review") return person(w.startedBy);
       return w.approvedBy !== null ? person(w.approvedBy) : refuse("not-approved", ENDS_WITH_RECOMMENDATION);
     }
     return w.entry !== "review" || w.approvedBy !== null ? person(w.approvedBy ?? w.startedBy) : refuse("not-approved", ENDS_WITH_RECOMMENDATION);

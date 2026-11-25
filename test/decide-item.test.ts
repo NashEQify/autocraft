@@ -90,7 +90,6 @@ const rows: Row[] = [
   // ---- implement
   { name: "a settled bugfix issue nobody queued is left for a person", facts: {}, expect: { state: "classified", actions: [], wait: "an open request for a person to pick up", next: "Triage by a person" } },
   { name: "a queued issue is planned", facts: queued(), expect: { state: "classified", actions: ["implement"], bucket: "plan", next: "Implement" } },
-  { name: "approval is a fact: gates() applies it", facts: queued({ repoFacts: { fixIssueApproved: false } }), expect: { state: "classified", actions: ["implement"] } },
   { name: "Implement off for the repo: the queued issue waits on it", facts: queued({ implement: { featureOn: false } }), expect: { state: "classified", actions: [], wait: "Implement is off for app" } },
   { name: "queued by someone who no longer settles", facts: queued({ implement: { standing: "no" } }), expect: { state: "classified", actions: [], wait: "an open request for a person to pick up" } },
   { name: "GitHub has not answered on who queued it: nothing runs, nobody is asked", facts: queued({ implement: { standing: "unknown", row: attempt("planned") } }), expect: { state: "classified", actions: [], wait: "GitHub's answer on maint's access to app" } },
