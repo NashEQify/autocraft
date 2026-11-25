@@ -7,7 +7,9 @@
 import type { Db } from "../db/index.ts";
 import { envVar } from "../env.ts";
 import type { ExecResult, KPod, KubeApi } from "./kube-api.ts";
-import { MIRROR_WAIT_CONTAINER, PULL_REASONS, settingsOf } from "./pods.ts";
+import { loadEnvs } from "../data/build/index.ts";
+import { envSettings } from "./envs.ts";
+import { MIRROR_WAIT_CONTAINER, PULL_REASONS } from "./pods.ts";
 import { cutMiddle, seconds } from "./workspace-tool-specs.ts";
 import { ciLayoutOf, workspaceImages } from "./workspace-launch.ts";
 import {
@@ -36,8 +38,7 @@ export async function fetchDependencies(db: Db, api: KubeApi, workspaceId: numbe
   const now = o.now ?? Date.now;
   const w = await getWorkspace(db, workspaceId);
   if (!w) return refused(`there is no workspace ${workspaceId}`);
-  const env = await db.get(db.k.selectFrom("build_envs").select(["settings"]).where("id", "=", w.env_id));
-  const s = settingsOf(env?.settings ?? null);
+  const s = envSettings((await loadEnvs(db, { ids: [w.env_id] }))[0] ?? { settings: null });
   if (!s.crateMirror) {
     return refused(`the environment ${w.env_id} has no crate mirror (its crateMirror setting is unset), so nothing can be fetched; if the change needs a crate that is not in the workspace, report blocked with "needs dependencies"`);
   }

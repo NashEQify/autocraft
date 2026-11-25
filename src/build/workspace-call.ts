@@ -6,6 +6,7 @@ import type { Db } from "../db/index.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
 import { REFERENCE_SERVER } from "../remote/bundle.ts";
 import { enqueueCall } from "../remote/calls.ts";
+import { bindWorkspaceCall, loadWorkspaces, loadWorkspaceCallSince, WorkspaceError } from "../data/build/index.ts";
 import type { TaskBundle, Tier } from "../remote/protocol.ts";
 import { MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { BuildError } from "./envs.ts";
@@ -62,8 +63,6 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
   if (extra.includes(REFERENCE_SERVER) && !r.referenceRepo) throw new BuildError(400, "the reference server needs referenceRepo");
   const servers = [WORKSPACE_SERVER, ...extra].sort();
   return await db.write(async () => {
-    const ws = await db.get(db.k.selectFrom("workspaces").select(["id", "remote_call_id"]).where("id", "=", r.workspaceId).where("state", "in", LIVE_STATES));
-    if (!ws) throw new BuildError(409, `workspace ${r.workspaceId} is not live`);
     const id = await enqueueCall(db, {
       promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, askedModel: r.model, items: r.items, level: r.level ?? 2, maxAttempts: r.maxAttempts ?? 1,
       ...(r.parentId !== undefined && { parentId: r.parentId }), ...(r.referenceRepo && extra.includes(REFERENCE_SERVER) && { referenceRepo: r.referenceRepo }),
@@ -75,13 +74,10 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
         hints: { claude: { args: workspaceClaudeArgs(r, servers) } },
       },
     });
-    // Checked after the enqueue: a resumed job adopts its earlier call, which is then the one bound already.
-    const bound = ws.remote_call_id;
-    if (bound !== null && bound !== id && bound !== r.parentId) {
-      const other = await db.get(db.k.selectFrom("remote_calls").select("state").where("id", "=", bound).where("state", "in", ["queued", "leased"]));
-      if (other) throw new BuildError(409, `workspace ${ws.id} is in use by call ${bound}, which is ${other.state}`);
-    }
-    await db.run(db.k.updateTable("workspaces").set({ remote_call_id: id, updated_at: new Date().toISOString() }).where("id", "=", ws.id));
+    // Bound after the enqueue: a resumed job adopts its earlier call, which is then the one bound already.
+    await bindWorkspaceCall(db, r.workspaceId, id, r.parentId === undefined ? {} : { parentId: r.parentId }).catch((e: unknown) => {
+      throw e instanceof WorkspaceError ? new BuildError(e.status, e.message) : e;
+    });
     return id;
   });
 }
@@ -94,12 +90,11 @@ const hhmm = (iso: string): string => `${iso.slice(11, 16)} UTC`;
  * last resume did, and the changes as of the last checkpoint, which the launcher takes when the call goes back to the queue.
  */
 export async function resumePrompt(db: Db, callId: number, base: string): Promise<string> {
-  const w = await db.get(db.k.selectFrom("workspaces").select(["id", "checkpoint", "checkpoint_at", "restored", "restored_at"]).where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
-  const since = (await db.get(db.k.selectFrom("remote_calls").select("since").where("id", "=", callId)))?.since;
-  if (!w || since == null) return base;
-  const worked = await db.get(db.k.selectFrom("workspace_calls").select("created_at").where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS)
-    .where("created_at", ">=", new Date(Number(since)).toISOString()).orderBy("id").limit(1));
-  if (!worked) return base;
+  const w = [...(await loadWorkspaces(db, { remoteCallIds: [callId] }, { checkpoint: true })).values()].find((x) => (LIVE_STATES as readonly string[]).includes(x.state));
+  if (!w) return base;
+  const { firstWorkAt } = await loadWorkspaceCallSince(db, w.id, callId, OWN_CALLS);
+  if (firstWorkAt === null) return base;
+  const worked = { created_at: firstWorkAt };
   const r = w.restored_at !== null && w.restored_at > worked.created_at ? w.restored : null;
   const kept = r === null ? "The workspace kept its tree: /work/src holds the earlier session's changes, and commands it started may still run or have ended."
     : r === "kept" ? "The workspace was started again on its volume: /work/src holds the earlier session's changes, and the commands it started were stopped."

@@ -6,14 +6,13 @@
 // for it only briefly: it mounts the previous checkout when the new one is
 // not ready.
 import { existsSync, rmSync, statSync } from "node:fs";
-import { audit } from "../dash/audit.ts";
-import { excluded } from "../db/kx.ts";
-import { trackedNames } from "../repos.ts";
+import { loadTrackedRepos, saveSettings } from "../data/control/index.ts";
+import { loadRepos } from "../data/mirror/index.ts";
+import { settingsConfig } from "../build/scope.ts";
 import { SHARED_NAME } from "./command.ts";
 import { checkoutHeld, touchCheckout } from "./checkout.ts";
 import { checkoutForCommit, sandboxAvailable } from "./index.ts";
 import { envVar } from "../env.ts";
-import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -24,13 +23,8 @@ const clean = (names: unknown[]): string[] => [...new Set(names.map((n) => Strin
 
 /** Repositories left out of the workspace (sorted); none until the setting is saved. */
 export async function workspaceExcluded(db: Db): Promise<string[]> {
-  const value = await setting(db, EXCLUDE_KEY);
-  if (value === undefined) return [];
-  try {
-    const v = JSON.parse(value) as unknown;
-    if (Array.isArray(v) && v.every((x) => typeof x === "string" && SHARED_NAME.test(x))) return clean(v);
-  } catch { /* unreadable: nothing is excluded */ }
-  return [];
+  const v = (await settingsConfig(db, [EXCLUDE_KEY])).workspaceExclude;
+  return v.every((x) => SHARED_NAME.test(x)) ? clean(v) : [];
 }
 
 export async function setWorkspaceExcluded(db: Db, names: unknown, by: string): Promise<string[]> {
@@ -39,8 +33,7 @@ export async function setWorkspaceExcluded(db: Db, names: unknown, by: string): 
   }
   const list = clean(names);
   const was = await workspaceExcluded(db);
-  await db.run(db.k.insertInto("main.settings").values({ key: EXCLUDE_KEY, value: JSON.stringify(list) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-  if (JSON.stringify(list) !== JSON.stringify(was)) await audit(db, by, "workspace-exclude", "sandbox", { repos: list, was });
+  if (JSON.stringify(list) !== JSON.stringify(was)) await saveSettings(db, [{ key: EXCLUDE_KEY, value: JSON.stringify(list) }], by, { action: "workspace-exclude", target: "sandbox", details: { repos: list, was } });
   return list;
 }
 
@@ -121,17 +114,14 @@ export class WorkspaceCache {
 
 const cache = new WorkspaceCache();
 
-async function branchOf(db: Db, repo: string): Promise<string> {
-  return (await db.get(db.k.selectFrom("main.repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
-}
-
 /** Checkouts of every public tracked repository's default branch (sorted by name) that could be had; the others are left out. */
 export async function workspaceCheckouts(db: Db, log: (line: string) => void = console.log, deps: WorkspaceDeps = defaultWorkspaceDeps(), c: WorkspaceCache = cache): Promise<{ name: string; dir: string }[]> {
   const skip = new Set(await workspaceExcluded(db));
   // Opus replies reach everyone who may view the dashboard, so only public repositories are mounted.
-  const pub = new Set((await db.all(db.k.selectFrom("main.repos").select("name").where("visibility", "=", "public"))).map((r) => r.name));
-  const names = (await trackedNames(db)).filter((n) => pub.has(n) && !skip.has(n) && SHARED_NAME.test(n));
-  const dirs = await Promise.all(names.map(async (n) => c.dirOf(n, await branchOf(db, n), deps, log).catch(() => null)));
+  const tracked = [...(await loadTrackedRepos(db)).keys()];
+  const repos = await loadRepos(db, { names: tracked, all: true });
+  const names = tracked.filter((n) => repos.get(n)?.visibility === "public" && !skip.has(n) && SHARED_NAME.test(n));
+  const dirs = await Promise.all(names.map(async (n) => c.dirOf(n, repos.get(n)?.default_branch ?? "main", deps, log).catch(() => null)));
   const out: { name: string; dir: string }[] = [];
   names.forEach((name, i) => { if (dirs[i]) out.push({ name, dir: dirs[i]! }); else log(`  workspace ${name}: no checkout yet; left out`); });
   return out;
