@@ -79,6 +79,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
     steps: steps?.map((s) => ({ label: stepLabel(s), state: s.state })) ?? null,
     parts: wf.plan.map((p) => ({ n: p.n, title: veiled ? "" : p.title, source: p.source, file: veiled ? null : p.file ?? null, major: p.major === true, state: p.state })),
     rec: asked && !veiled ? recommendationText(asked) : null,
+    asked: wf.rec ? wf.recAt : null,
     unclear: last?.kind === "ambiguous" ? { by: last.login, at: last.at, line: last.line ?? "" } : null,
     confirm: accepted?.line ?? null,
   };

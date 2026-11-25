@@ -12,7 +12,7 @@ const started = (over: Partial<ItemWorkflow> = {}): ItemWorkflow => ({
   id: 1, repo: "storytold/photocraft", number: 812, kind: "pr", entry: "review", weight: 5, state: "running", step: null,
   startedBy: "mira", startedAt: "2026-11-24T09:02:00Z", startedVia: "github", baseHead: "abc", acceptedHead: null, version: 0,
   approvedBy: null, approvedAt: null, approvedVia: null, stoppedBy: null, stoppedAt: null,
-  blocker: null, blockerParams: null, rec: null, recAt: null, recHead: null, plan: [], prNumber: null, legacyPreapprovalId: null,
+  blocker: null, blockerParams: null, rec: null, recAt: null, recHead: null, plan: [], prNumber: null, reviewAskedAt: null, legacyPreapprovalId: null,
   updatedAt: "2026-11-24T09:02:00Z", ...over,
 });
 const part = (n: number, title: string): PlanPart => ({ n, title, source: "review", state: "planned" });

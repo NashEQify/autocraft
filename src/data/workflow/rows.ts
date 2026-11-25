@@ -8,17 +8,16 @@ import { canActExpr, writeCheckedAt } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { linkRows, LIVE_STATES, notArchived, prIssueWorkflows, workScore } from "./fragments.ts";
+import { goOnAt, isGoOn, linkRows, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
-  SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
+  GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
 import { ASKING_STATES, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
-const GO_ON_EVENTS = ["started", "answered"];
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
 const isEmpty = (keys: KeySource): boolean => Array.isArray(keys) && keys.length === 0;
@@ -34,7 +33,7 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null; review_asked_at: string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
@@ -46,7 +45,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
+    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), reviewAskedAt: r.review_asked_at, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
   };
 }
 
@@ -54,7 +53,7 @@ const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFac
   const dropped = w.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
   return {
     id: w.id, entry: w.entry, approved: w.approvedBy !== null, approvedBy: w.approvedBy, startedBy: w.startedBy, startedAt: w.startedAt, weight: w.weight, state: w.state, own,
-    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt,
+    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt, reviewAskedAt: w.reviewAskedAt,
     ...(dropped.length ? { dropped } : {}),
   };
 };
@@ -121,7 +120,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
       eb.case().when(keyed("ko", "w.repo", "w.number")(eb)).then(1).else(0).end().as("own"),
       eb.case().when(eb.and([eb("l.pr", "is not", null), keyed("kp", "w.repo", "l.pr")(eb)])).then(1).else(0).end().as("pr_hit"),
       lastAnswer("a1", "login").as("answer_by"), lastAnswer("a2", "at").as("answer_at"),
-      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on"),
+      goOnAt(eb, "w.id").as("go_on"),
     ])
     .where("w.state", "in", LIVE_STATES)
     .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("l.pr", "is not", null), keyed("kp2", "w.repo", "l.pr")(eb)])]))
@@ -278,17 +277,18 @@ export async function loadAnswers(db: Db, workflowIds: number[]): Promise<Map<nu
   return out;
 }
 
-/** Latest `started` or `answered` event time, else the start: when a person last chose to go on with what the workflow showed them. */
-export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
+/** Up to when a person has seen each workflow's item and chose to go on with it, and when they last said so; its start without an event. */
+export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, GoneOn>> {
+  const out = new Map<number, GoneOn>();
   if (workflows.length === 0) return out;
   const q = queryDb(db);
-  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => eb.fn.max("e.at").as("at"))
-    .where("e.kind", "in", GO_ON_EVENTS).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; at: string | null }[];
-  const latest = new Map(rows.map((r) => [Number(r.workflow_id), r.at]));
+  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => [eb.fn.max(seenAt(eb, "e")).as("seen"), eb.fn.max("e.at").as("said")])
+    .where((eb: any) => isGoOn(eb, "e")).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; seen: string | null; said: string | null }[];
+  const latest = new Map(rows.map((r) => [Number(r.workflow_id), r]));
   for (const w of workflows) {
-    const at = latest.get(w.id) ?? null;
-    out.set(w.id, at !== null && at > w.startedAt ? at : w.startedAt);
+    const r = latest.get(w.id);
+    const from = (at: string | null | undefined): string => (at != null && at > w.startedAt ? at : w.startedAt);
+    out.set(w.id, { since: from(r?.seen), said: from(r?.said) });
   }
   return out;
 }
@@ -335,7 +335,7 @@ const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell
   approvedBy: (v) => ["approved_by", v], approvedAt: (v) => ["approved_at", v], approvedVia: (v) => ["approved_via", v],
   stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], blocker: (v) => ["blocker", v],
   blockerParams: (v) => ["blocker_params", v ? JSON.stringify(v) : null], rec: (v) => ["rec", v ? JSON.stringify(v) : null], recAt: (v) => ["rec_at", v],
-  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
+  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], reviewAskedAt: (v) => ["review_asked_at", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
 };
 
 /** The rows to write per distinct column set; patches of the same id merge in order. Every row sets `updated_at` (the live topic `workflows`). */
@@ -404,7 +404,7 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
     for (const batch of kx.batches(rows)) {
       await q.run((q.k as any).insertInto("main.workflow_events").values(batch.map((e) => ({
         workflow_id: e.workflowId, repo: e.repo, number: e.number, login: e.login, via: e.via ?? "cli", kind: e.kind,
-        parsed: e.parsed ? JSON.stringify(e.parsed) : null, line: e.line ?? null, at: e.at ?? now,
+        parsed: e.parsed ? JSON.stringify(e.parsed) : null, line: e.line ?? null, at: e.at ?? now, seen_at: e.seenAt ?? null,
       }))));
     }
   });

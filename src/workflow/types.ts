@@ -96,6 +96,8 @@ export type ItemWorkflow = {
   step: string | null;
   /** An implement workflow's PR as `linkWorkflows` stored it (data/workflow/link.ts); null before an attempt opened one. */
   prNumber: number | null;
+  /** A merge entry: a person asked for a model review of the head, made after this time. Null: it merges without one (core/evidence.ts neededReview). */
+  reviewAskedAt: string | null;
   legacyPreapprovalId: number | null;
   /** How often the row was written since it was made. */
   version: number;

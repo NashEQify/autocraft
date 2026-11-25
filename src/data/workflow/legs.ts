@@ -9,15 +9,14 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { FINAL_BUT_DROPPED, operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { mergedByUs } from "../merge/fragments.ts";
-import type { LandedApproval } from "../../core/evidence.ts";
+import { agreedAt, type LandedApproval } from "../../core/evidence.ts";
 import { addAudit } from "../control/audit.ts";
-import { LIVE_STATES } from "./fragments.ts";
+import { goOnAt, LIVE_STATES, saidAt } from "./fragments.ts";
 import type { Entry, FixupRequest, FixupRequestMove, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 /** A leg in one of these states no longer works its request. */
 const LEG_ENDS = ["cancelled", "failed", "merged"];
-const GO_ON_EVENTS = ["started", "answered"];
 const ACTOR = "pipeline";
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -64,14 +63,14 @@ export async function loadLandedApprovals(db: Db, keys: KeySource): Promise<Map<
   const rows = await q.all(k.selectFrom("main.preapprovals as p").innerJoin(resolveKeys(db, keys, "kl"), (j: any) => j.onRef("kl.repo", "=", "p.repo").onRef("kl.number", "=", "p.number"))
     .leftJoin("main.item_workflows as w", "w.id", "p.workflow_id")
     .leftJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number").on("w.kind", "=", "issue"))
-    .select((eb: any) => ["p.repo", "p.number", "p.head", "p.at", "w.approved_at", "w.started_at", "i.created_at as pr_opened_at",
-      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on")])
+    .select((eb: any) => ["p.repo", "p.number", "p.head", "p.at", "w.approved_at", "w.started_at", "i.created_at as pr_opened_at", goOnAt(eb, "w.id").as("seen"), saidAt(eb, "w.id").as("said")])
     .where("p.head", "is not", null).where((eb: any) => mergedByUs(eb, "p.repo", "p.number"))
-    .orderBy("p.id")) as { repo: string; number: number; head: string; at: string; approved_at: string | null; started_at: string | null; pr_opened_at: string | null; go_on: string | null }[];
+    .orderBy("p.id")) as { repo: string; number: number; head: string; at: string; approved_at: string | null; started_at: string | null; pr_opened_at: string | null; seen: string | null; said: string | null }[];
   for (const r of rows) {
     const key = refKey(r.repo, num(r.number));
     const approvedAt = r.approved_at ?? r.started_at ?? r.at;
-    const since = [approvedAt, r.started_at, r.go_on].filter((t) => t !== null).sort().at(-1)!;
+    const from = (at: string | null): string => (at !== null && at > r.started_at! ? at : r.started_at!);
+    const since = r.started_at === null ? approvedAt : agreedAt({ approvedAt: r.approved_at, since: from(r.seen), said: from(r.said) });
     (out.get(key) ?? out.set(key, new Map()).get(key)!).set(r.head, { approvedAt, since, prOpenedAt: r.pr_opened_at });
   }
   return out;
@@ -102,8 +101,8 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
       eb.and([eb("p.workflow_id", "is", null), eb("w.repo", "=", eb.ref("p.repo")), eb("w.number", "=", eb.ref("p.number")), eb("w.state", "in", LIVE_STATES)]),
     ])))
     .selectAll("p")
-    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.started_at as wf_started_at",
-      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("wf_go_on")])
+    .select((eb: any) => ["w.id as wf_id", "w.entry as wf_entry", "w.state as wf_state", "w.approved_by as wf_approved_by", "w.started_at as wf_started_at", "w.review_asked_at as wf_review_asked_at",
+      goOnAt(eb, "w.id").as("wf_go_on")])
     .where("p.state", "in", ACTIVE_LEGS)
     .where((eb: any) => trackedRepo(eb, "p.repo"))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "p.repo", f.repos!)))
@@ -112,15 +111,17 @@ export async function loadLegPass(db: Db, f: { repos?: string[] } = {}): Promise
     .where("o.preapproval_id", "in", k.selectFrom("main.preapprovals as pl").select("pl.id").where("pl.state", "in", ACTIVE_LEGS))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "o.repo", f.repos!)))
     .orderBy("o.id");
-  type Joined = Preapproval & { wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_started_at: string | null; wf_go_on: string | null };
+  type Joined = Preapproval & { wf_id: number | null; wf_entry: Entry | null; wf_state: WorkflowState | null; wf_approved_by: string | null; wf_started_at: string | null; wf_review_asked_at: string | null; wf_go_on: string | null };
   const [rows, requests] = await db.together(() => Promise.all([q.all(rowsQ), q.all(requestsQ)])) as [Joined[], FixupRequest[]];
   for (const r of rows) {
-    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_started_at, wf_go_on, ...rest } = r;
+    const { wf_id, wf_entry, wf_state, wf_approved_by, wf_started_at, wf_review_asked_at, wf_go_on, ...rest } = r;
     const p = legOf(rest as Preapproval);
     pass.rows.push(p);
     const live = wf_id !== null && wf_state !== null && LIVE_STATES.includes(wf_state);
     if (!live) { pass.context.set(p.id, p.workflow_id === null ? "unlinked" : "ended"); continue; }
-    const context: LegContext = { workflowId: num(wf_id), entry: wf_entry!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, approvedBy: wf_approved_by };
+    const context: LegContext = {
+      workflowId: num(wf_id), entry: wf_entry!, startedAt: wf_started_at!, since: wf_go_on !== null && wf_go_on > wf_started_at! ? wf_go_on : wf_started_at!, reviewAskedAt: wf_review_asked_at, approvedBy: wf_approved_by,
+    };
     pass.context.set(p.id, context);
   }
   pass.requests = requests.map(requestOf);

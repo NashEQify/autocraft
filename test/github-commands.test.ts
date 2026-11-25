@@ -6,7 +6,7 @@ import { drainCommands, prSince, STALE_MS, type CommandDeps, type CommentNow, ty
 import { handleDelivery, signatureOf } from "../src/github/webhooks.ts";
 import type { Exec } from "../src/fixup/git.ts";
 import { parseComment } from "../src/workflow/parse.ts";
-import { liveWorkflow } from "../src/workflow/store.ts";
+import { insertWorkflow, liveWorkflow } from "../src/workflow/store.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
 import { validating } from "./gql.ts";
 import type { AppPermission } from "../src/remote/permission.ts";
@@ -386,6 +386,22 @@ describe("comment-time checks", () => {
     assert.equal(await started(w, 1), null);
     assert.equal(await started(w, 3), "review");
     assert.match(gh.posted[0]!.body, /changed after the command was written/);
+  });
+
+  test("a yes to a question that was asked anew after the comment is refused; one written after it runs", async () => {
+    const w = await (await fresh()).pr(1);
+    const head = String((await w.rows("SELECT head_oid FROM items WHERE number = 1"))[0]!.head_oid);
+    const at = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+    const rec = { text: "Review it again.", parts: { fix: [], drop: [] }, merges: false, again: "review" as const };
+    await insertWorkflow(w.db, { repo: "app", number: 1, kind: "pr", entry: "review", state: "recommending", startedBy: OPERATOR, startedAt: at(90), startedVia: "github", baseHead: head, rec, recAt: at(30), recHead: head });
+    const gh = ghFake();
+    await deliver(w, payload({ body: `@${SLUG} yes`, created: new Date(at(40)) }));
+    await drained(w, { exec: gh.exec });
+    assert.equal((await rows(w))[0]!.state, "refused");
+    assert.match(gh.posted[0]!.body, /A new question follows/);
+    await deliver(w, payload({ body: `@${SLUG} yes`, comment: 5001, created: new Date(at(20)) }));
+    await drained(w, { exec: gh.exec });
+    assert.deepEqual((await rows(w)).map((r) => r.state), ["refused", "done"]);
   });
 
   test("an access GitHub cannot read is retried, and the command that expires that way is answered once", async () => {

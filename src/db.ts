@@ -349,6 +349,9 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // Why a merge leg ended, as a code with what it names (src/core/codes.ts StopCode).
   ["preapprovals", "reason_code", "TEXT"],
   ["preapprovals", "reason_params", "TEXT"],
+  // A review a person asked for of a PR that merges without one, and when the question an answer is for was asked.
+  ["item_workflows", "review_asked_at", "TEXT"],
+  ["workflow_events", "seen_at", "TEXT"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],
   // The workflow a held follow-up issue belongs to and its merge approval when it was held (src/data/conversations/held.ts).

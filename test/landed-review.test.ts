@@ -6,6 +6,7 @@ import type { LandedWhy } from "../src/core/plan.ts";
 import { loadLandedWhy } from "../src/data/views/landed.ts";
 import { recordAttempts, recordLanded } from "../src/data/merge/index.ts";
 import { savePostmerge } from "../src/data/review/index.ts";
+import { listWorkflows, recordEvents } from "../src/data/workflow/index.ts";
 import { runPostmergeFile } from "../src/postmerge/file.ts";
 import { planCtx, LANES } from "../src/runner/autopilot.ts";
 import { selectPostmerge } from "../src/postmerge/select.ts";
@@ -37,6 +38,8 @@ test("a merge is reviewed when nobody approved it or our push changed code after
     ["a fix-up the person saw when they approved", APPROVED, edge({ at: day(1) }), null],
     ["a fix-up the person saw when they answered later", { ...APPROVED, since: day(4) }, edge({}), null],
     ["a fix-up under a clean base merge", APPROVED, [...edge({}), ...ownPushes([], [{ ...push, kind: "conflict", from: "b", to: "c", state: "merged", ownDiff: "same" } as never], [], [])], "push"],
+    ["a fix-up under someone else's commits", APPROVED, ownPushes([{ action: "fixup-push", from: "x", to: "y", at: day(3), lines: 4, landed: true }], [], [], []), "push"],
+    ["a fix-up someone took back off the branch", APPROVED, ownPushes([{ action: "fixup-push", from: "a", to: "y", at: day(3), lines: 4, landed: true }], [], [], []), null],
     ["a fix-up of a commit that did not land", APPROVED, edge({ from: "x", to: "y" }), null],
     ["an implementation approved before its PR existed", { ...APPROVED, prOpenedAt: day(3) }, [], "implementation"],
     ["an implementation approved on its PR", { ...APPROVED, prOpenedAt: day(1) }, [], null],
@@ -84,6 +87,19 @@ test("each merge, batched or not, goes by its own approval and pushes, also wher
   assert.deepEqual((await selectPostmerge(db, "app", Date.parse(day(6)))).map((m) => m.number), [5]);
   await db.run(db.k.updateTable("settings").set({ value: day(6) }).where("key", "=", "postmerge_unscoped_since"));
   assert.deepEqual(await selectPostmerge(db, "app", Date.parse(day(6))), []);
+});
+
+test("an approving answer accepts our pushes up to when its question was asked, an approval without a question up to when it was made", async () => {
+  const { db } = await merged();
+  const why = async () => (await loadLandedWhy(db, [{ repo: "app", number: 2 }])).get("app#2");
+  const w = (await listWorkflows(db, { refs: [{ repo: "app", number: 2 }] }))[0]!;
+  await db.run(db.k.updateTable("item_workflows").set({ approved_at: day(4) }).where("id", "=", w.id));
+  assert.equal(await why(), null, "approved after the push");
+  const answered = (seenAt: string) => recordEvents(db, [{ workflowId: w.id, repo: "app", number: 2, login: OPERATOR, kind: "answered", at: day(4), seenAt }]);
+  await answered(day(2, 12));
+  assert.equal(await why(), "push", "the question was asked before the push");
+  await answered(day(3, 12));
+  assert.equal(await why(), null, "the question was asked after it");
 });
 
 test("the defects of a review outside the scope are filed", async () => {

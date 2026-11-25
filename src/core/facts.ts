@@ -27,7 +27,7 @@ import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_S
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { landedOpen } from "./decide.ts";
-import { ciAt, landedWhy, reviewOwed, type CiState } from "./evidence.ts";
+import { ciAt, landedWhy, neededReview, type CiState } from "./evidence.ts";
 import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
@@ -284,10 +284,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   for (const [stage, t] of d.control.trips) if (t.active) trips[stage] = t.reason;
   const outsideHold = d.outsideHolds.get(ref);
   const implementation = d.implement.byPr.get(ref);
-  // A merge entry's review is the one a push of ours since the approval asked for: an older review stays ignored.
-  const owed = state === "OPEN" && !!head && wfFact?.entry === "merge" && reviewOwed(ours, head, wfFact.since);
+  // A merge entry's review is the one it needs: an older review stays ignored.
   const stored = d.review.latest.get(ref);
-  const latest = owed && stored && stored.at <= wfFact.since ? undefined : stored;
+  const needed = state === "OPEN" && head && wfFact?.entry === "merge" ? neededReview(wfFact, ours, head, d.mergeEntryReviews.get(ref) ?? []) : null;
+  const owed = needed !== null;
+  const latest = stored && needed?.from != null && stored.at <= needed.from ? undefined : stored;
   const base: PrFacts = {
     repo, number, ...(pushedOff ? { pushedOff } : {}), ...(owed ? { reviewOwed: true } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
     tripped: tripsOfRepo(trips, repo), ghState: state, head, ...draftOf(i, ch),
