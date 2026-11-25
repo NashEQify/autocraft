@@ -31,7 +31,6 @@ import { jobItem } from "../runner/job-items.ts";
 import { slugOf } from "../owners.ts";
 import { saveVerifications as saveMerged, type SavedVerification, type VerificationState } from "../data/merge/index.ts";
 import { loadRepos } from "../data/mirror/index.ts";
-import { QueueFullError } from "../data/build/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -215,7 +214,7 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
         queued = true;
         await saveVerification(db, c, { kind: plan.kind, reason: plan.reason, plan: storedPlan(plan), model: deps.model, headTask: ids[0] ?? null, baseTask: ids[1] ?? null, baseSha: base, state: "planned", summary: plan.reason });
       } catch (e) {
-        if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e;
+        if (!(e instanceof BuildError)) throw e;
         log(`  ${ref}: tasks not queued: ${e.message}`);
         await saveVerification(db, c, { ...errorRow(`tasks not queued: ${e.message}`), model: deps.model });
         summary.errors++;

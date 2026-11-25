@@ -105,7 +105,7 @@ export type PrBuildView = {
   summary: string | null; ciOverall: string | null; disagree: boolean; createdAt: string; finishedAt: string | null; taskState: string | null;
 };
 export type PendingBuild = PrBuildView & { itemState: "OPEN" | "CLOSED"; currentHead: string | null };
-export type NewPrBuild = { repo: string; number: number; head: string; base: string | null; scope: "outside" | "all"; plan: TaskStep[]; warm: Warm | null };
+export type NewPrBuild = { repo: string; number: number; head: string; base: string | null; scope: "outside" | "all"; plan: TaskStep[]; warm: Warm | null; /** The job that queues the build. */ jobId: number | null };
 export type PrBuildSettle = { key: HeadRef; from?: "queued" | "failed"; set: { state: string; summary?: string | null; ciOverall?: string | null; disagree?: boolean; finishedAt?: string } };
 export type LateDisagreement = { repo: string; number: number; head: string; summary: string | null };
 

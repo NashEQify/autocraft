@@ -72,9 +72,9 @@ export async function loadLatestMainHeads(db: Db, repos?: string[]): Promise<Map
   if (repos && !repos.length) return out;
   const q = queryDb(db);
   const ranked = q.k.selectFrom("main.main_ci as m")
-    .select((eb) => ["m.repo", "m.head_sha", "m.state", "m.committed_at", eb.fn.agg<number>("row_number").over((o) => o.partitionBy("m.repo").orderBy("m.updated_at", "desc").orderBy("m.first_seen_at", "desc")).as("rn")])
+    .select((eb) => ["m.repo", "m.head_sha", "m.state", "m.committed_at", "m.updated_at", eb.fn.agg<number>("row_number").over((o) => o.partitionBy("m.repo").orderBy("m.updated_at", "desc").orderBy("m.first_seen_at", "desc")).as("rn")])
     .$if(!!repos, (b) => b.where(kx.inList(db, "m.repo", repos!)));
-  const rows = await q.all(q.k.selectFrom(ranked.as("t")).select(["t.repo", "t.head_sha", "t.state", "t.committed_at"]).where("t.rn", "=", 1));
-  for (const r of rows) out.set(r.repo, { head_sha: r.head_sha, state: r.state, committed_at: r.committed_at });
+  const rows = await q.all(q.k.selectFrom(ranked.as("t")).select(["t.repo", "t.head_sha", "t.state", "t.committed_at", "t.updated_at"]).where("t.rn", "=", 1));
+  for (const r of rows) out.set(r.repo, { head_sha: r.head_sha, state: r.state, committed_at: r.committed_at, updated_at: r.updated_at });
   return out;
 }

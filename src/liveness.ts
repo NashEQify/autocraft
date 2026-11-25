@@ -4,7 +4,7 @@
 // the Stuck items page and `autocraft-server liveness` read it.
 import { isOpenPrWait, TRIAGE_WAIT } from "./core/decide-item.ts";
 import { blockersOfWait } from "./review/blockers.ts";
-import { config, withConfig } from "./data/control/index.ts";
+import { readConfig } from "./data/control/index.ts";
 import { loadLiveness, loadLivenessInputs, loadLivenessState, saveLiveness } from "./data/planner/index.ts";
 import type { Liveness, LivenessInput, LivenessItem, LivenessPlanRow, LivenessVerdict } from "./data/planner/types.ts";
 import type { Db } from "./db/index.ts";
@@ -73,9 +73,8 @@ export function evaluateLiveness(input: LivenessInput, nowMs: number = Date.now(
   return { checkedAt: new Date(nowMs).toISOString(), stuck: items.filter((i) => i.verdict === "stuck").length, long: items.filter((i) => i.verdict === "long").length, open, causes, items };
 }
 
-/** Runs inside the caller's settings snapshot (`withConfig`). */
 export async function computeLiveness(db: Db, nowMs: number = Date.now()): Promise<Liveness> {
-  return evaluateLiveness(await loadLivenessInputs(db, { longDays: config(db).livenessLongDays }), nowMs);
+  return evaluateLiveness(await loadLivenessInputs(db, { longDays: (await readConfig(db, ["liveness_long_days"])).livenessLongDays }), nowMs);
 }
 
 /** Recomputes and stores the result unless one is newer than REFRESH_MS. Returns true when it ran. */
@@ -101,7 +100,7 @@ export const commands = {
     summary: "liveness [--json]: open items that are stuck (nothing due, nobody asked) or long; exit 1 when any is stuck",
     run: async (args: string[]) => {
       const db = await openDb();
-      const l = await withConfig(db, () => computeLiveness(db));
+      const l = await computeLiveness(db);
       if (args.includes("--json")) console.log(JSON.stringify(l, null, 2));
       else printReport(l);
       process.exit(l.stuck > 0 ? 1 : 0);

@@ -7,7 +7,7 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  addCalls, addFindings, countEnvWaits, listScans, loadActiveScans, loadFindingAttention, loadFindingsForLinking, loadFindingsToFix, loadFixPrFindings, loadOverview, loadScanGuard, addQuietPrs, addScan, advanceFinding, advanceFindings, beginScanCall, clearRounds, countFindings, endScanCall, finishArea, finishScanTests, finishScans, listQuietPrs,
+  addCalls, addFindings, addScanFindings, countEnvWaits, listScans, loadActiveScans, loadFindingAttention, loadFindingsForLinking, loadFindingsToFix, loadFixPrFindings, loadOverview, loadScanGuard, addQuietPrs, addScan, advanceFinding, advanceFindings, beginScanCall, clearRounds, countFindings, endScanCall, finishArea, finishScanTests, finishScans, listQuietPrs,
   loadFindingBoard, loadFindingDetail, loadFindings, loadFixesToAdvance, loadQuiet, loadRoundLog, loadRounds, loadScanDetail, loadScanRun, loadScans, markDuplicates, reconcileSecurity,
   resumeScan, saveRound, saveScanTest, saveThreatModel, setFindingEnvWait, type NewFinding,
 } from "../../src/data/security/index.ts";
@@ -81,10 +81,14 @@ both("finishScans ends only active scans and releases their unverified findings;
   assert.deepEqual((await finishScans(db, [{ id: a, state: "failed", error: "x" }, { id: b, state: "capped" }])).ended.sort(), [a, b]);
   assert.equal(await stateOf(db, "app", 1), "new");
   assert.equal(await stateOf(db, "app", 2), "disproved");
+  // The job of a scan that Stop ended stores findings until it notices; its own finish lists them.
+  const [first, repeat] = await addScanFindings(db, "app", [finding(0, { scan_id: a, state: "unverified" }), { ...finding(0, { scan_id: a, state: "duplicate" }), repeats: 0 }]);
   assert.deepEqual((await finishScans(db, [{ id: a, state: "done" }])).ended, []);
+  assert.equal(await stateOf(db, "app", first!), "new");
+  assert.equal((await loadFindings(db, [`app#${repeat}`], { internal: true })).get(`app#${repeat}`)!.duplicate_of, first);
   const scans = await loadScans(db, [a, b]);
   assert.equal(scans.get(a)!.state, "failed");
-  assert.equal(scans.get(a)!.finding_count, 1);
+  assert.equal(scans.get(a)!.finding_count, 2);
   // A capped scan with no threat model starts over; one with a threat model and an unchecked finding verifies first.
   assert.deepEqual(await resumeScan(db, { id: b, cap_usd: 9 }), { state: "modeling" });
   assert.equal(await resumeScan(db, { id: b, cap_usd: 9 }), null);
@@ -177,7 +181,6 @@ both("endScanCall records the call, costs and verdict together; finishArea estim
   assert.ok(s.estimate_usd! > s.cost_usd);
   const run = (await loadScanRun(db, scan))!;
   assert.deepEqual(run.callCosts, [{ kind: "verify", costUsd: 2 }]);
-  assert.equal(run.nextNumber, 2);
   assert.equal(run.areas[0]!.state, "done");
   assert.equal(run.areas[0]!.cost_usd, 2);
   const detail = (await loadScanDetail(db, scan))!;

@@ -1,6 +1,10 @@
 // Constants and pure helpers of the triage rules for issues and PRs, shared by decide-item.ts and the loader. No imports.
 // Each constant mirrors the old module named in its comment; test/decide-item.test.ts checks they stay equal.
 
+/** The scope labels: which of them an item is stays a person's call, so a disagreement among them is not refereed. */
+export const SCOPE_LABELS: readonly string[] = ["missing feature", "small extra", "plugin candidate"];
+export const isScope = (l: string | null): boolean => l !== null && SCOPE_LABELS.includes(l);
+
 /** Type labels, exclusive on an item (labels/set.ts TYPE_LABELS). */
 export const TYPE_LABEL_NAMES = ["bugfix", "performance", "missing feature", "small extra", "plugin candidate", "infra"];
 export const isTypeLabel = (name: string): boolean => TYPE_LABEL_NAMES.includes(name.toLowerCase());

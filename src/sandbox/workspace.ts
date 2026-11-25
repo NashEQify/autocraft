@@ -6,9 +6,8 @@
 // for it only briefly: it mounts the previous checkout when the new one is
 // not ready.
 import { existsSync, rmSync, statSync } from "node:fs";
-import { loadTrackedRepos, saveSettings } from "../data/control/index.ts";
+import { loadTrackedRepos, readConfig, saveSettings } from "../data/control/index.ts";
 import { loadRepos } from "../data/mirror/index.ts";
-import { settingsConfig } from "../build/scope.ts";
 import { SHARED_NAME } from "./command.ts";
 import { checkoutHeld, touchCheckout } from "./checkout.ts";
 import { checkoutForCommit, sandboxAvailable } from "./index.ts";
@@ -23,7 +22,7 @@ const clean = (names: unknown[]): string[] => [...new Set(names.map((n) => Strin
 
 /** Repositories left out of the workspace (sorted); none until the setting is saved. */
 export async function workspaceExcluded(db: Db): Promise<string[]> {
-  const v = (await settingsConfig(db, [EXCLUDE_KEY])).workspaceExclude;
+  const v = (await readConfig(db, [EXCLUDE_KEY])).workspaceExclude;
   return v.every((x) => SHARED_NAME.test(x)) ? clean(v) : [];
 }
 

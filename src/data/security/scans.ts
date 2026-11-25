@@ -59,7 +59,7 @@ export async function loadScanGuard(db: Db, id: number): Promise<{ state: ScanSt
 
 /**
  * Everything the scan job's start needs, in one `together` wave: scan, areas, every finding of the scan's repo in narrow
- * columns (`known`, and `nextNumber` = highest number + 1), the earlier ok call costs by kind, and the scan's findings by
+ * columns (`known`), the earlier ok call costs by kind, and the scan's findings by
  * area with their `unverified` rows (`leftover`). 5 statements.
  */
 export async function loadScanRun(db: Db, id: number): Promise<ScanRunData | undefined> {
@@ -82,7 +82,7 @@ export async function loadScanRun(db: Db, id: number): Promise<ScanRunData | und
     byArea.set(r.area_idx, e);
   }
   return {
-    scan: scan as ScanRow, areas: areas as AreaRow[], known, nextNumber: (known.at(-1)?.number ?? 0) + 1,
+    scan: scan as ScanRow, areas: areas as AreaRow[], known,
     callCosts: calls.map((c) => ({ kind: c.kind, costUsd: c.cost_usd! })), leftover: [...byArea.values()],
   };
 }
@@ -202,7 +202,10 @@ export async function finishArea(db: Db, a: { scanId: number; idx: number; faile
   });
 }
 
-/** Ends active scans (guarded, `RETURNING id`) and moves their `unverified` findings to `new` with the unchecked result. */
+/**
+ * Ends active scans (guarded, `RETURNING id`) and moves the `unverified` findings of every given scan to `new` with the unchecked
+ * result: a scan that Stop already ended may have stored findings since, before its job noticed.
+ */
 export async function finishScans(db: Db, rows: { id: number; state: ScanState; error?: string | null }[]): Promise<{ ended: number[] }> {
   if (rows.length === 0) return { ended: [] };
   const q = queryDb(db);
@@ -216,7 +219,7 @@ export async function finishScans(db: Db, rows: { id: number; state: ScanState; 
         .where((eb: any) => eb.and([eb("security_scans.id", "=", eb.ref("v.id")), eb("security_scans.state", "in", ACTIVE_STATES)])).returning("security_scans.id")) as { id: number }[];
       ended.push(...hit.map((h) => h.id));
     }
-    if (ended.length) await q.run(q.k.updateTable("security_findings").set({ state: "new", verification: UNCHECKED_VERIFICATION, updated_at: at }).where(kx.inList(db, "scan_id", ended, "bigint")).where("state", "=", "unverified"));
+    for (const chunk of kx.chunks(rows)) await q.run(q.k.updateTable("security_findings").set({ state: "new", verification: UNCHECKED_VERIFICATION, updated_at: at }).where(kx.inList(db, "scan_id", chunk.map((r) => r.id), "bigint")).where("state", "=", "unverified"));
   });
   return { ended };
 }

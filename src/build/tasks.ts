@@ -4,18 +4,17 @@
 import { currentJobId } from "../agents/call.ts";
 import type { BuildSummary, BuildTask, BuildTaskDetail, Capabilities, Requires, SandboxEnv, TaskFilter, TaskPage, TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import {
-  appendTaskLogs, cancelTasks, claimTasks, createTasks, failQueuedTasks, finishTask as saveFinish, loadCancelIds, loadClaimInputs, loadConfidentialReadyAt, loadEnvs, loadLogTails, loadMemorySummary, loadTaskDetail, loadTaskPage,
+  appendTaskLogs, cancelTasks, claimTasks, cloneTasks as cloneTaskRows, createTasks, failQueuedTasks, finishTask as saveFinish, loadCancelIds, loadClaimInputs, loadConfidentialReadyAt, loadEnvs, loadLogTails, loadMemorySummary, loadTaskDetail, loadTaskPage,
   loadTaskStates, loadTasks, loadWorkerTask, pruneTaskBatch, QueueFullError, reapStaleTasks, releaseClaims, startTasks, StatusError, TaskAccessError, touchTasks, loseTasks,
   LOG_TAIL_BYTES, LOST_AFTER_MS, loadTaskSummary, MAX_CHUNK_BYTES, warmKeyOfRepo,
 } from "../data/build/index.ts";
 import type { ClaimInputs, ClaimPick, NewTask, TaskRecord, TaskState, Warm } from "../data/build/index.ts";
-import type { Config } from "../data/control/index.ts";
+import { readConfig, type Config } from "../data/control/index.ts";
 import { removeArtifactDirs } from "./artifacts.ts";
 import { BuildError, envSettings } from "./envs.ts";
 import { toolchainImage } from "./pods.ts";
 import { chooseTasks, claimConfigKeys, satisfies, type ClaimFit } from "./choose.ts";
 import { slugOf } from "../owners.ts";
-import { settingsConfig } from "./scope.ts";
 import { autocraftVersion, warmMinInterval, WARM_PRODUCER_REV } from "./warm-queue.ts";
 import type { Db } from "../db/index.ts";
 
@@ -125,6 +124,16 @@ export async function createTask(db: Db, t: NewTask): Promise<number> {
   return (await createTaskSet(db, [t]))[0]!;
 }
 
+/** Queues a copy of each task under the running job; the whole set is refused (429) when the queue is full. Returns the new id per source id. */
+export async function cloneTasks(db: Db, ids: number[]): Promise<Map<number, number>> {
+  return await cloneTaskRows(db, ids, currentJobId()).catch(mapped);
+}
+
+/** Queues a copy of task `id`. */
+export async function cloneTask(db: Db, id: number): Promise<number> {
+  return (await cloneTasks(db, [id])).get(id)!;
+}
+
 export type ClaimedTask = { id: number; repo: string; headSha: string; baseSha: string | null; requires: Requires; plan: TaskStep[]; sourceUrl: string; patch?: string; warm?: Warm };
 export type ClaimResult = { tasks: ClaimedTask[]; cancel: number[] };
 
@@ -157,7 +166,7 @@ export async function pickTasks(
     if (s?.warmWriter) warm = { version: autocraftVersion(), rev: WARM_PRODUCER_REV, image: toolchainImage(s, ["rust-stable"]) };
   }
   const read = o.inputs ?? await loadClaimInputs(db, envId, nowMs, warm);
-  const config = o.config ?? await settingsConfig(db, claimConfigKeys(read));
+  const config = o.config ?? await readConfig(db, claimConfigKeys(read));
   const warmMinIntervalMinutes = o.warmMinIntervalMinutes ?? await warmMinInterval(db);
   const out = await chooseTasks(read, { free, nowMs, fit: o.fit, config, warmMinIntervalMinutes });
   return { inputs: read, ...out };

@@ -2,8 +2,7 @@
 // has one instance-wide switch, `build_feature:scan-tests`. A missing row means off. The pipeline switch stops them all,
 // since every feature step runs in a pipeline job.
 import { cancelTasks } from "../data/build/index.ts";
-import { listSettings, saveSettings } from "../data/control/index.ts";
-import { settingsConfig } from "./scope.ts";
+import { listSettings, readConfig, saveSettings } from "../data/control/index.ts";
 import { skipQueuedFeatureRuns } from "../data/merge/index.ts";
 import { listEnvs } from "./envs.ts";
 import { NIGHTLY_CHECKS } from "../nightly/checks.ts";
@@ -38,7 +37,7 @@ export const isFeature = (s: unknown): s is BuildFeature => typeof s === "string
 
 const featureKey = (f: BuildFeature, repo?: string): string => (repo ? `build_feature:${f}:${repo}` : `build_feature:${f}`);
 const readOn = async (db: Db, f: BuildFeature, repo?: string): Promise<boolean> => {
-  const c = await settingsConfig(db, [featureKey(f, repo)]);
+  const c = await readConfig(db, [featureKey(f, repo)]);
   return repo === undefined ? c.scanTestsEnabled : c.repo(repo).buildFeature(f);
 };
 

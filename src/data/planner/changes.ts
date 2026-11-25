@@ -12,6 +12,16 @@ const PRUNE_RANGES = 200;
 /** The transaction-local setting that turns the Postgres logging triggers off (src/db/pg-triggers.ts reads it). */
 const PG_BULK = "ac.bulk";
 
+/** How long the pass's snapshot may sit idle while the process parses a wave of 70 MB; it holds no lock, unlike the writes the server's shorter default is for. */
+const SNAPSHOT_IDLE_MS = 60_000;
+
+/** Lets the open read transaction sit idle for SNAPSHOT_IDLE_MS (Postgres). 1 statement, which rides in the caller's wave. */
+export async function allowIdleSnapshot(db: Db): Promise<void> {
+  if (db.dialect !== "postgres" || !db.inTransaction("read")) return;
+  const { k, all } = parts(db);
+  await all(k().selectNoFrom((eb) => eb.fn<string>("set_config", [eb.val("idle_in_transaction_session_timeout"), eb.val(String(SNAPSHOT_IDLE_MS)), eb.lit(true)]).as("v")));
+}
+
 /**
  * The change log's generation and the seqs already read. 2 statements in one wave; inside the pass's `together` they ride in its wave.
  * Read in the pass's snapshot: the log first, so the loads of the same wave cover every row it names.

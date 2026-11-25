@@ -319,7 +319,7 @@ export type PassFacts = {
 /** Where an open item stands in the triage steps (classify, referee), in the order Work's next-step text checks them. */
 export const ITEM_STATES = [
   "held-backlog", // sent to the backlog
-  "referee-due", // Jev and Haiku disagree, and the referee (Sonnet, then Opus when Sonnet was unsure) has not settled it
+  "referee-due", // Jev and Haiku disagree outside the scope labels, and the referee (Sonnet, then Opus when Sonnet was unsure) has not settled it
   "unclassified", // no Jev or Haiku verdict in the run
   "waiting-haiku", // Jev is unsure and Haiku has not given its second opinion
   "classified", // settled, nothing in the triage steps blocks it; later steps depend on its kind

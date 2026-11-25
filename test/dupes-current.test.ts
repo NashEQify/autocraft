@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { currentComparison, kindSets } from "../src/dupes/plan.ts";
-import { loadDupeState, saveComparisons, type ComparisonPut } from "../src/data/triage/index.ts";
+import { currentComparison, groupPlans, kindSets, waitingGroups } from "../src/dupes/plan.ts";
+import { loadDupeGroups, loadDupeState, saveComparisons, saveDupeGroups, type ComparisonPut } from "../src/data/triage/index.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
 import { T0, world } from "./world-db.ts";
 import type { Db } from "./helpers/raw-db.ts";
@@ -58,4 +58,22 @@ test("the stored sizes are those of the compared snapshot, and a size unknown th
   assert.ok(await current());
   await w.db.run(w.db.k.updateTable("items").set({ additions: 100 }).where("repo", "=", "app").where("number", "=", 2));
   assert.equal(await current(), null, "PR 2's size became known");
+});
+
+test("a stored group stays while its comparison is redone, and goes when its edge is gone", async () => {
+  const w = await (await (await (await world()).repo()).pr(1, { lines: 100 })).pr(2, { lines: 100 });
+  const load = async () => { await pair(w.db); return await loadDupeState(w.db); };
+  const s0 = kindSets(await load(), { repo: "app", members: [1, 2], edges: [] })[0]!;
+  await saveComparisons(w.db, [{ repo: "app", key: s0.key, kind: "pr", members: [1, 2], hash: s0.hash, kept: 1, source: "model", model: "m", reason: null, result: null, error: null, attempts: 0, at: T0, summary: null, why: null, sizes: { 1: 100, 2: 100 }, heads: null }]);
+  const plans = groupPlans(await load());
+  assert.equal(plans.length, 1);
+  await saveDupeGroups(w.db, "app", plans);
+  const stored = await loadDupeGroups(w.db);
+  assert.deepEqual(stored, plans);
+  assert.deepEqual(waitingGroups(await load(), stored), [], "a current group is planned, not kept");
+  await w.db.run(w.db.k.updateTable("items").set({ additions: 200 }).where("repo", "=", "app").where("number", "=", 2));
+  assert.deepEqual(groupPlans(await load()), []);
+  assert.deepEqual(waitingGroups(await load(), stored), stored);
+  await w.db.run(w.db.k.updateTable("duplicate_pairs").set({ verdict: "distinct" }).where("repo", "=", "app"));
+  assert.deepEqual(waitingGroups(await load(), stored), [], "no edge joins them any more");
 });

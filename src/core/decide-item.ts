@@ -4,7 +4,7 @@
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
 import { decidePr, implementOffWait, notStarted } from "./decide.ts";
-import { REFEREE_RETRY_MS, alreadyLabeled, labelsToAdd } from "./item-rules.ts";
+import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
@@ -53,8 +53,11 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   return row!.prOpen ? null : { bucket: "revise" };
 }
 
-/** Jev and Haiku chose different labels: a referee (Sonnet, then Opus when Sonnet was unsure) settles it. */
-const labelDisagreement = (f: ItemFacts): boolean => f.classification.status === "disagree";
+/**
+ * Jev and Haiku chose different labels, not both scope labels: a referee (Sonnet, then Opus when Sonnet was unsure) settles it.
+ * An item they both gave a scope label stays unlabelled, with no further model call.
+ */
+const labelDisagreement = ({ classification: c }: ItemFacts): boolean => c.status === "disagree" && !(isScope(c.jevLabel) && isScope(c.haikuLabel));
 
 /** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
 export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;

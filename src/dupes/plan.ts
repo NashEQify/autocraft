@@ -49,3 +49,21 @@ export function groupPlans(state: DupeState): DupeGroupPut[] {
   }
   return out;
 }
+
+/**
+ * The stored groups that stay beside `groupPlans`: those of a group waiting for a comparison, until it has been made. A stored group
+ * keeps its members that are still in such a group; one whose edges are gone, or whose comparisons are all current, is left out.
+ */
+export function waitingGroups(state: DupeState, stored: DupeGroupPut[]): DupeGroupPut[] {
+  const waiting = new Set<string>();
+  for (const g of dupeGroups(state)) {
+    const sets = kindSets(state, g).filter((s) => s.members.some((m) => m.state === "OPEN" && m.in_scope));
+    if (sets.some((s) => !currentComparison(state, s))) for (const n of g.members) waiting.add(`${g.repo}#${n}`);
+  }
+  const out: DupeGroupPut[] = [];
+  for (const g of stored) {
+    const items = g.items.filter((i) => waiting.delete(`${g.repo}#${i.number}`));
+    if (items.length > 1) out.push({ ...g, id: groupId(g.repo, Math.min(...items.map((i) => i.number))), items });
+  }
+  return out;
+}

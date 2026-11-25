@@ -97,9 +97,11 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
   let heads = 0;
   for (let i = 0; i < repos.length; i += REPOS_PER_QUERY) {
     const chunk = repos.slice(i, i + REPOS_PER_QUERY);
+    // The time the read started: a head counts as newer than what was read from GitHub before that (src/verify/results.ts).
+    const at = new Date().toISOString();
     const data = await client.query(mainCiQuery(chunk), mainCiVars(chunk));
     const parsed = parseHeads(chunk, data as Record<string, RepoNode>);
-    await saveHeads(db, parsed, new Date().toISOString());
+    await saveHeads(db, parsed, at);
     heads += parsed.length;
   }
   // A red head whose culprit is a PR we merged stops the merge path.

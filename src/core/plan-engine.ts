@@ -11,13 +11,13 @@ import { embedderId, modelName } from "../embed/model.ts";
 import { appSlug } from "../github/identity.ts";
 import { ownersStamp } from "../owners.ts";
 import { config } from "../data/control/index.ts";
-import { loadChangeCursor, pruneChanges, readChanges, recordPass, type ChangeCursor, type PassCount, type ShadowDiff } from "../data/planner/index.ts";
+import { allowIdleSnapshot, loadChangeCursor, pruneChanges, readChanges, recordPass, type ChangeCursor, type PassCount, type ShadowDiff } from "../data/planner/index.ts";
 import { decideItem } from "./decide-item.ts";
 import { decidePr } from "./decide.ts";
 import { loadPass } from "./facts.ts";
 import { loadPassBase } from "./pass-load.ts";
 import type { ItemFacts, PrFacts } from "./plan.ts";
-import { loadFacts, loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
+import { decided, loadFacts, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
@@ -140,65 +140,70 @@ export type PlanPassOptions = {
 };
 
 /**
- * One planner pass's PlanSet from the facts kept for `db`. Reads only; run it inside inReadSnapshot so the change log, the
- * loads and the shadow's full load see one state of the database.
+ * One planner pass's PlanSet from the facts kept for `db`. The change log, the loads and the shadow's full load are read in one
+ * snapshot (the caller's when one is open); the facts are built and decided after it ended, from the rows alone.
  */
 export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
   const { now } = o;
   const model = o.model ?? embedderId(modelName());
   // The meter counts the pass's loads and decisions; the writes of `finish` are not in their own row.
   const { value: loaded, stats } = await db.meter(async () => {
-  let state = states.get(db);
-  // The log first: the snapshot holds the rows the loads below read with it.
-  const [changes, start, base] = await db.together(() => Promise.all([
-    state ? readChanges(db, state.cursor) : null, state ? null : loadChangeCursor(db), loadPassBase(db, o.run), o.first?.(),
-  ]));
-  const run = base.run;
-  const shadow = shadowMode(db);
-  const print = fingerprint(run, model);
-  const reason: FullReason | null = !state || !changes ? "start" : changes.full ? (changes.cause ?? "marker") : state.fingerprint !== print ? "global" : now - state.fullAt >= o.fullEveryMs ? "floor" : null;
-  const load = { now, run, model, base };
-  let refs: number;
+  const s = states.get(db);
+  const read = await inReadSnapshot(db, async () => {
+    // The log first: the snapshot holds the rows the loads below read with it.
+    const [changes, start, base] = await db.together(() => Promise.all([
+      s ? readChanges(db, s.cursor) : null, s ? null : loadChangeCursor(db), loadPassBase(db, o.run), o.first?.(), allowIdleSnapshot(db),
+    ]));
+    const run = base.run;
+    const shadow = shadowMode(db);
+    const print = fingerprint(run, model);
+    const reason: FullReason | null = !s || !changes ? "start" : changes.full ? (changes.cause ?? "marker") : s.fingerprint !== print ? "global" : now - s.fullAt >= o.fullEveryMs ? "floor" : null;
+    const load = { now, run, model, base };
+    // The kept facts whose time has come, with their values before the reload.
+    const due = new Map<string, { pr?: PrFacts; item?: ItemFacts }>();
+    let reload: string[] = [];
+    if (!reason) {
+      const logged = new Set(changes!.refs);
+      for (const [ref, f] of s!.prs) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { pr: f });
+      for (const [ref, f] of s!.items) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { ...due.get(ref), item: f });
+      reload = [...logged, ...due.keys()];
+    }
+    const build = reason ? await loadFacts(db, load) : reload.length ? await loadFacts(db, { ...load, refs: reload }) : null;
+    const shadowRan = !reason && shadow !== "off";
+    const full = shadowRan ? await loadFacts(db, { now, run, model }) : null;
+    // readChanges read every row its cursor covers already.
+    return { run, print, shadow, reason, cursor: changes?.cursor ?? start!, due, reload, build, full };
+  });
+  const { run, reason, due, reload, shadow } = read;
+  const facts = read.build ? await read.build() : { prs: [], items: [] };
+  let refs = reload.length;
   let refreshUnchanged = 0;
   if (reason) {
-    // readChanges read every row its cursor covers already.
-    const cursor = changes?.cursor ?? start!;
-    const { prs, items } = await loadFacts(db, load);
-    state = { prs: new Map(prs.map((f) => [refOf(f), f])), items: new Map(items.map((f) => [refOf(f), f])), cursor, fullAt: now, fingerprint: print };
+    const state = { prs: new Map(facts.prs.map((f) => [refOf(f), f])), items: new Map(facts.items.map((f) => [refOf(f), f])), cursor: read.cursor, fullAt: now, fingerprint: read.print };
     states.set(db, state);
     refs = new Set([...state.prs.keys(), ...state.items.keys()]).size;
   } else {
-    const s = state!;
-    const logged = new Set(changes!.refs);
-    const due = new Map<string, { pr?: PrFacts; item?: ItemFacts }>();
-    for (const [ref, f] of s.prs) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { pr: f });
-    for (const [ref, f] of s.items) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { ...due.get(ref), item: f });
-    const reload = [...logged, ...due.keys()];
-    if (reload.length) {
-      const { prs, items } = await loadFacts(db, { ...load, refs: reload });
-      for (const ref of reload) { s.prs.delete(ref); s.items.delete(ref); }
-      for (const f of prs) s.prs.set(refOf(f), f);
-      for (const f of items) s.items.set(refOf(f), f);
-      // A reload at refreshAt that finds the same facts: a time registered for a change the facts do not show (a wasted
-      // reload), or a change still ahead that no kept time covers (the shadow check then finds it). Counted, not recorded.
-      for (const [ref, old] of due) {
-        if (old.pr && sameFacts(old.pr, s.prs.get(ref) ?? {})) refreshUnchanged++;
-        if (old.item && sameFacts(old.item, s.items.get(ref) ?? {})) refreshUnchanged++;
-      }
+    for (const ref of reload) { s!.prs.delete(ref); s!.items.delete(ref); }
+    for (const f of facts.prs) s!.prs.set(refOf(f), f);
+    for (const f of facts.items) s!.items.set(refOf(f), f);
+    // A reload at refreshAt that finds the same facts: a time registered for a change the facts do not show (a wasted
+    // reload), or a change still ahead that no kept time covers (the shadow check then finds it). Counted, not recorded.
+    for (const [ref, old] of due) {
+      if (old.pr && sameFacts(old.pr, s!.prs.get(ref) ?? {})) refreshUnchanged++;
+      if (old.item && sameFacts(old.item, s!.items.get(ref) ?? {})) refreshUnchanged++;
     }
-    s.cursor = changes!.cursor;
-    s.fingerprint = print;
-    refs = reload.length;
+    s!.cursor = read.cursor;
+    s!.fingerprint = read.print;
   }
   const kept = states.get(db)!;
   const pass = loadPass(now);
   const prs = [...kept.prs.values()].sort(byRef).map((facts): PrPlan => { facts.now = now; return { facts, plan: decidePr(facts, pass) }; });
   const items = [...kept.items.values()].sort(byRef).map((facts): ItemPlanned => { facts.now = now; return { facts, plan: decideItem(facts) }; });
   let plans: PlanSet = { run, now, pass, prs, items };
-  const shadowRan = !reason && shadow !== "off";
+  const shadowRan = read.full !== null;
   const diffs: Diff[] = [];
-  if (shadowRan) {
-    const full = await loadPlanSet(db, { now, run, model });
+  if (read.full) {
+    const full = decided(await read.full(), now);
     diffs.push(...shadowDiffs(plans, full));
     if (diffs.length && shadow === "throw") {
       states.delete(db);

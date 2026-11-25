@@ -110,7 +110,8 @@ export type MainHead = { repo: string; sha: string; branch: string; state: strin
 export type MainHeadRow = Selectable<DB["main_ci"]>;
 /** A stored head without its check list. */
 export type MainHeadSummary = Omit<MainHeadRow, "checks">;
-export type LatestMainHead = { head_sha: string; state: string; committed_at: string | null };
+/** `updated_at`: when the latest poll read it. */
+export type LatestMainHead = { head_sha: string; state: string; committed_at: string | null; updated_at: string };
 
 export type AuthorPermissionRow = Selectable<DB["author_permissions"]>;
 export type AuthorPermissionSave = { login: string; repo: string; authorId: number | null; at: string; permission: string | null };

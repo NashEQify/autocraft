@@ -34,7 +34,7 @@ import {
 import { autocraftVersion, recordTrimmedPublish, recordWarmBytes, releaseGc, takeGc, WARM_PRODUCER_REV, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
 import { claimConfigKeys } from "./choose.ts";
-import { settingsConfig } from "./scope.ts";
+import { readConfig } from "../data/control/index.ts";
 import { appendLog, finishTask, loseTask, pickTasks, satisfies, type ClaimFit, MAX_CHUNK_BYTES, MAX_LOG_BYTES, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import { appendTaskLogs, claimRun, failQueuedTasks, loadClaimInputs, loadEnvPass, loadEnvTasks, loadTasks, reportKubeEnv, releaseClaims, removePodRuns, savePodRuns, touchTasks } from "../data/build/index.ts";
 import type { ClaimInputs, EnvRecord, PodRun, PodRunPatch } from "../data/build/index.ts";
@@ -229,7 +229,7 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow, first
     // Read before claiming, outside its write transaction, and only when a task waits.
     const writer = s.warmWriter ? { version: autocraftVersion(), rev: WARM_PRODUCER_REV, image: toolchainImage(s, ["rust-stable"]) } : undefined;
     const inputs = !unschedulable && active < env.slots ? await loadClaimInputs(db, env.id, now(), writer) : null;
-    const cfg = await settingsConfig(db, [...(inputs ? claimConfigKeys(inputs) : []), "warm_min_interval_minutes"]);
+    const cfg = await readConfig(db, [...(inputs ? claimConfigKeys(inputs) : []), "warm_min_interval_minutes"]);
     ctx.inputs = inputs;
     const view: CapView | null = cluster && inputs && inputs.candidates.length ? await capacityView(ctx) : null;
     let waiting: Res | null = null, quotaFull = false;

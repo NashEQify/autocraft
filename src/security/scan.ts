@@ -4,8 +4,9 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { FindingVerification } from "../../web/src/api/types.ts";
-import { addAudit, config, withConfig } from "../data/control/index.ts";
+import { addAudit } from "../data/control/index.ts";
 import * as sec from "../data/security/index.ts";
+import { featureOn } from "../build/features.ts";
 import type { CratesResult } from "../verify/crates.ts";
 import { writeAndQueue } from "./scantest.ts";
 import { finishScan } from "./store.ts";
@@ -147,7 +148,8 @@ export async function linkRepeatedFindings(db: Db): Promise<number> {
   });
 }
 
-const UNVERIFIED: sec.StoredFindingState[] = ["unverified"];
+/** The states a verdict is stored over: `new` too, since Stop lists a finding that its verify call is still judging. */
+const VERDICT_FROM: sec.StoredFindingState[] = ["unverified", "new"];
 
 const parse = <T>(s: string): T => JSON.parse(s) as T;
 
@@ -160,10 +162,6 @@ class Stopped extends Error {}
  * Returns the summary line of the job.
  */
 export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<string> {
-  return await withConfig(db, () => scanJob(db, scanId, deps));
-}
-
-async function scanJob(db: Db, scanId: number, deps: ScanDeps): Promise<string> {
   const data = await sec.loadScanRun(db, scanId);
   if (!data) throw new Error(`no scan ${scanId}`);
   const { scan } = data;
@@ -250,7 +248,6 @@ async function scanJob(db: Db, scanId: number, deps: ScanDeps): Promise<string> 
     const guesses = sizes.map(areaGuessUsd);
 
     const known: Known[] = data.known.map(knownOf);
-    let nextNumber = data.nextNumber;
     const leftoverOf = new Map(data.leftover.map((l) => [l.areaIdx, l]));
     const toCandidate = (r: sec.UnverifiedRow): Candidate => ({ title: r.title, severity: r.severity as Candidate["severity"], urgent: r.urgent === 1, category: r.category ?? "", refs: parse<Candidate["refs"]>(r.refs), reach: r.reach, impact: r.impact });
 
@@ -275,25 +272,31 @@ async function scanJob(db: Db, scanId: number, deps: ScanDeps): Promise<string> 
       } else {
         if (!hasFindings) areaCalls.push(found.cost);
         const fresh: { number: number; c: Candidate }[] = [...leftover];
-        const rows: sec.NewFinding[] = [];
+        const rows: sec.NewScanFinding[] = [];
+        // The findings of this area, numbered when they are stored; until then a negative number names the row.
+        const stored: { known: Known; c: Candidate; repeat: boolean }[] = [];
         for (const c of found.value) {
           const refs = realRefs(co.dir, c.refs);
           // The first ref is the sink: a finding whose sink is not a real line is dropped.
           if (!refs.length || refs[0]!.path !== c.refs[0]!.path || refs[0]!.line !== c.refs[0]!.line) continue;
           const cand: Candidate = { ...c, refs };
           const dupe = earlierFinding(known, cand);
-          const number = nextNumber++;
           // A repeat is kept as a hidden row that points at the earlier finding, which shows it in its timeline.
           rows.push({
-            repo, number, scan_id: scanId, area: area.name, title: cand.title, severity: cand.severity, urgent: cand.urgent ? 1 : 0, state: dupe ? "duplicate" : "unverified",
+            scan_id: scanId, area: area.name, title: cand.title, severity: cand.severity, urgent: cand.urgent ? 1 : 0, state: dupe ? "duplicate" : "unverified",
             refs: JSON.stringify(cand.refs), category: cand.category, reach: cand.reach, impact: cand.impact, verification: null, fingerprint: fingerprintOf(cand),
             fix_commit: null, fix_pr: null, ghsa_id: null, fork: null, fix_patch: null, fix_title: null, fix_summary: null, fix_branch: null, fix_files: null, fix_ref: null,
-            note: null, env_wait_at: null, reason: null, decided_by: null, duplicate_of: dupe?.number ?? null, fix_attempts: 0, last_failure: null,
+            note: null, env_wait_at: null, reason: null, decided_by: null, duplicate_of: dupe && dupe.number > 0 ? dupe.number : null, fix_attempts: 0, last_failure: null,
+            ...(dupe && dupe.number < 0 ? { repeats: -dupe.number - 1 } : {}),
           });
-          known.push({ number, state: dupe ? "duplicate" : "unverified", fingerprint: fingerprintOf(cand), sink: cand.refs[0]!, refs: cand.refs, title: cand.title, category: cand.category ?? null });
-          if (!dupe) fresh.push({ number, c: cand });
+          const entry: Known = { number: -rows.length, state: dupe ? "duplicate" : "unverified", fingerprint: fingerprintOf(cand), sink: cand.refs[0]!, refs: cand.refs, title: cand.title, category: cand.category ?? null };
+          known.push(entry);
+          stored.push({ known: entry, c: cand, repeat: !!dupe });
         }
-        await sec.addFindings(db, repo, rows);
+        for (const [i, number] of (await sec.addScanFindings(db, repo, rows)).entries()) {
+          stored[i]!.known.number = number;
+          if (!stored[i]!.repeat) fresh.push({ number, c: stored[i]!.c });
+        }
         // ---- verify ----
         for (const f of fresh) {
           await setState("verifying");
@@ -302,16 +305,16 @@ async function scanJob(db: Db, scanId: number, deps: ScanDeps): Promise<string> 
           const checked = await call("verify", mean(verifyCalls) ?? VERIFY_GUESS_USD, { finding: f.number, bill: idx }, () => deps.ask("security.verify", vin), parseVerdict);
           if (!checked) {
             const v: FindingVerification = { kind: "reasoning", result: "Not verified: the verify call gave no readable answer.", notes: "", score: null, proposedTest: null };
-            await sec.advanceFinding(db, { repo, number: f.number, from: UNVERIFIED, to: "new", set: { verification: JSON.stringify(v) } });
+            await sec.advanceFinding(db, { repo, number: f.number, from: VERDICT_FROM, to: "new", set: { verification: JSON.stringify(v) } });
             continue;
           }
           verifyCalls.push(checked.cost);
           const verdict = checked.value;
           const v: FindingVerification = { kind: "reasoning", result: verdict.result, notes: verdict.notes, score: verdict.score, proposedTest: verdict.proposedTest };
-          await sec.advanceFinding(db, { repo, number: f.number, from: UNVERIFIED, to: survives(verdict) ? "new" : "disproved", set: { verification: JSON.stringify(v) } });
+          await sec.advanceFinding(db, { repo, number: f.number, from: VERDICT_FROM, to: survives(verdict) ? "new" : "disproved", set: { verification: JSON.stringify(v) } });
           if (survives(verdict)) {
             // The test row is written before `confirmed`, so the automatic fix sees it and waits for the result.
-            if (verdict.proposedTest?.trim() && deps.writeTest && deps.crates && config(db).scanTestsEnabled) {
+            if (verdict.proposedTest?.trim() && deps.writeTest && deps.crates && await featureOn(db, "scan-tests")) {
               const crates = await deps.crates(repo, co.sha).catch((e: Error): CratesResult => ({ ok: false, error: e.message }));
               await writeAndQueue(db, {
                 repo, number: f.number, sha: co.sha, crates, proposedTest: verdict.proposedTest, log: deps.log,

@@ -62,7 +62,7 @@ import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
 import { countMainFixes } from "../data/changes/index.ts";
 import { STEP_STAGE, tripKey, tripOf, type TripStage } from "../core/push-outcome.ts";
-import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
+import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
@@ -172,14 +172,12 @@ export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<str
     console.error(`autopilot: outside-author holds: ${(e as Error).message}`);
   }
   if (incremental) {
-    // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
-    return await inReadSnapshot(db, async () => {
-      let scope = new Set<string>(), names: string[] = [], seqs: Record<string, number> = {};
-      const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
-      const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
-      wakeAtRefresh(pass.plans, wake);
-      return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
-    });
+    // The pass reads the settings, the change log and every load in one transaction, so a write in between is either all seen or left for the next pass.
+    let scope = new Set<string>(), names: string[] = [], seqs: Record<string, number> = {};
+    const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
+    const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
+    wakeAtRefresh(pass.plans, wake);
+    return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
   }
   const [scope, names, seqs] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db), db.seqs()]));
   const plans = await loadPlanSet(db);

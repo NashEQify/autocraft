@@ -1,8 +1,6 @@
 // Build tasks for a validated plan, and the warm build of the default branch.
-import { parsePatch, parsePlan, parseRequires, parseWarm, warmKeyOf } from "../build/tasks.ts";
-import { BuildError } from "../build/envs.ts";
-import { cloneTasks, createTasks, hasWarmBuild, loadEnvs, type NewTask } from "../data/build/index.ts";
-import { currentJobId } from "../agents/call.ts";
+import { createTaskSet, warmKeyOf } from "../build/tasks.ts";
+import { hasWarmBuild, loadEnvs, type NewTask } from "../data/build/index.ts";
 import { rustPlan } from "../worker/rust.ts";
 import { WORKSPACE_TEST_TARGETS } from "../worker/rust-targets.ts";
 import type { TaskStep } from "../worker/types.ts";
@@ -35,33 +33,9 @@ export function tasksFor(plan: Planned, c: { repo: string; number: number; head:
   ];
 }
 
-const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
-const SHA_RE = /^[0-9a-f]{40}$/;
-const STEP_RE = /^[a-z][a-z0-9-]{0,39}$/;
-
-/** The task as the table stores it: every field validated, the job filled in from the running job. */
-function validated(t: NewTask): NewTask {
-  if (typeof t.step !== "string" || !STEP_RE.test(t.step)) throw new BuildError(400, "step is not valid");
-  if (typeof t.repo !== "string" || !REPO_RE.test(t.repo)) throw new BuildError(400, "repo is not valid");
-  if (!SHA_RE.test(t.headSha)) throw new BuildError(400, "headSha must be a full lowercase commit id");
-  if (t.baseSha != null && !SHA_RE.test(t.baseSha)) throw new BuildError(400, "baseSha must be a full lowercase commit id");
-  if (t.number != null && (!Number.isInteger(t.number) || t.number < 1)) throw new BuildError(400, "number is not valid");
-  const priority = t.priority ?? 0;
-  if (!Number.isInteger(priority) || priority < -100 || priority > 100) throw new BuildError(400, "priority must be -100 to 100");
-  return {
-    ...t, jobId: t.jobId ?? currentJobId(), priority, requires: parseRequires(t.requires), plan: parsePlan(t.plan),
-    ...(t.patch === undefined ? {} : { patch: parsePatch(t.patch) }), ...(t.warm === undefined ? {} : { warm: parseWarm(t.warm) }),
-  };
-}
-
-/** Validates and queues tasks in one statement pair; returns their ids in order. A refusal queues none. */
-export async function queueNewTasks(db: Db, tasks: NewTask[]): Promise<number[]> {
-  return await createTasks(db, tasks.map(validated));
-}
-
 /** Queues the tasks; returns their ids, head task first. */
 export async function queueTasks(db: Db, plan: Planned, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
-  return await queueNewTasks(db, tasksFor(plan, c));
+  return await createTaskSet(db, tasksFor(plan, c));
 }
 
 /**
@@ -73,7 +47,7 @@ export async function queueTasks(db: Db, plan: Planned, c: { repo: string; numbe
 export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
   const [envs, seen] = await db.together(() => Promise.all([loadEnvs(db, { enabled: true }), hasWarmBuild(db, repo, mainSha, new Date(nowMs - WARM_EVERY_MS).toISOString())]));
   if (seen || !envs.some((e) => e.kind !== "kubernetes")) return null;
-  return (await queueNewTasks(db, [{
+  return (await createTaskSet(db, [{
     step: "verify", repo, headSha: mainSha, baseSha: mainSha, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, priority: WARM_PRIORITY,
     plan: warmBuildPlan(), warm: { key: warmKeyOf(repo), role: "build" },
   }]))[0] ?? null;
@@ -83,11 +57,6 @@ export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowM
 function warmBuildPlan(): TaskStep[] {
   const [fetch, build] = rustPlan({ cargoArgs: ["--workspace"], test: false });
   return [fetch!, build!, { name: "build tests", cmd: ["cargo", "test", "--offline", "--locked", "--no-run", ...WORKSPACE_TEST_TARGETS], network: "none", timeoutSec: 3600 }];
-}
-
-/** Queues a new task with the same step, commits, requirements, plan, patch and warm role as task `id`. */
-export async function cloneTask(db: Db, id: number): Promise<number> {
-  return (await cloneTasks(db, [id])).get(id)!;
 }
 
 const RENDER_TIMEOUT_SEC = 120;
@@ -156,5 +125,5 @@ export function screenshotTasks(script: ShotStep[], config: Pick<ScreenshotConfi
 /** Queues the screenshot tasks; returns their ids, head task first, or [] when the repo's screenshots switch is off. */
 export async function queueScreenshotTasks(db: Db, script: ShotStep[], config: Pick<ScreenshotConfigBody, "package" | "example" | "driver" | "commands">, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
   if (!await featureOn(db, "screenshots", c.repo)) return [];
-  return await queueNewTasks(db, screenshotTasks(script, config, c));
+  return await createTaskSet(db, screenshotTasks(script, config, c));
 }

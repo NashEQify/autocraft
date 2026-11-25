@@ -14,10 +14,9 @@
 import { ownPrSelect } from "../github/adopt.ts";
 import { settlesLive, type RefreshDeps } from "../preapproval/permissions.ts";
 import { mkdirSync } from "node:fs";
-import { createTask, getTask, MAX_PATCH_BYTES, TERMINAL, warmKeyOf } from "../build/tasks.ts";
+import { cloneTask, createTask, getTask, MAX_PATCH_BYTES, TERMINAL, warmKeyOf } from "../build/tasks.ts";
 import { featureOn } from "../build/features.ts";
 import { failureTail } from "../build/rounds.ts";
-import { cloneTask } from "../verify/tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { scrub } from "../runner/scrub.ts";
 import { rustPlan } from "../worker/rust.ts";

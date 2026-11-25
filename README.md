@@ -15,7 +15,7 @@ Stages run in this order. Details, limits and rules for each are in [docs/pipeli
 |---|---|---|---|
 | Sync | Mirrors every issue, PR and comment of the tracked repos into the local database each minute, reads the CI state of each default branch every 2 minutes, and makes a vector of each item's title and body for similar-item search. | Local embedding model | no |
 | Duplicates | Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group. A duplicate is a signal on the items; it closes nothing and holds back only a pull request nobody started. | Jev, Haiku, Opus, Sonnet | no |
-| Classify | Gives each open item one type label and two flags (security, needs decision). Jev goes first, Haiku gives a second opinion, and a referee settles disagreements. | Jev, Haiku, Sonnet, Opus | no |
+| Classify | Gives each open item one type label and two flags (security, needs decision). Jev goes first, Haiku gives a second opinion, and a referee settles disagreements outside the scope labels. | Jev, Haiku, Sonnet, Opus | no |
 | Priority | Gives each open item a level from P0 to P4, then orders the candidates of later stages by a work rank. | Jev, Haiku | no |
 | Conversations | Answers what a maintainer or operator writes in an item's conversation; a reply may propose commands that a person runs with a button. | Opus | yes: a person runs the commands a reply proposes |
 | Label | Writes each settled type label and flag to GitHub. A label a person set is never changed. | none | yes: per-repo approval |

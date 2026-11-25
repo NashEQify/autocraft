@@ -1,12 +1,12 @@
 // One build round of a patch: a head task (the patch's crate tests, fmt, clippy and the regression test) and a base task
 // (the regression test alone, which must fail without the fix). A round is queued in one job and read in a later one, so no
 // job waits on a build.
-import { TERMINAL, createTask, getTask, type NewTask } from "./tasks.ts";
+import { TERMINAL, cloneTasks, createTask, getTask, type NewTask } from "./tasks.ts";
 import { tasksFor } from "./fix-tasks.ts";
 import { readLint } from "../prepush/index.ts";
 import { loadLogTails } from "../data/build/index.ts";
 import { loadBaseScope } from "./scope.ts";
-import { cloneTask, queueWarmBuild } from "../verify/tasks.ts";
+import { queueWarmBuild } from "../verify/tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
@@ -35,7 +35,10 @@ export async function queueRound(db: Db, r: RoundRequest): Promise<[number, numb
 }
 
 /** Queues the round's tasks again after an environment error. */
-export const requeueRound = async (db: Db, ids: [number, number]): Promise<[number, number]> => [await cloneTask(db, ids[0]), await cloneTask(db, ids[1])];
+export async function requeueRound(db: Db, ids: [number, number]): Promise<[number, number]> {
+  const again = await cloneTasks(db, ids);
+  return [again.get(ids[0])!, again.get(ids[1])!];
+}
 
 /** What the finished round says. `retried`: the tasks were already queued again once, so an environment error is a failure. */
 export async function readRound(db: Db, ids: [number, number], retried = false): Promise<RoundRead> {

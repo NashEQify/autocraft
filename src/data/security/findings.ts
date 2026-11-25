@@ -9,7 +9,7 @@ import { briefCols, nowIso, severityRank } from "./internal.ts";
 import {
   ENV_WAIT_NOTE, INTERNAL_FINDING_STATES, TRANSITIONS, findingKey,
   type CallRow, type FindingAttention, type FixAdvanceRow, type FindingBoardRow, type FindingDetailData, type FindingKey, type FindingMove, type FindingRow, type FindingState, type HiddenRepos,
-  type LandingWatch, type LinkRow, type LiveRound, type LogRound, type NewFinding, type Ref, type ScanTestView, type StaleWork,
+  type LandingWatch, type LinkRow, type LiveRound, type LogRound, type NewFinding, type NewScanFinding, type Ref, type ScanTestView, type StaleWork,
 } from "./types.ts";
 
 const INTERNAL: string[] = [...INTERNAL_FINDING_STATES];
@@ -184,6 +184,18 @@ export async function addFindings(db: Db, repo: string, rows: NewFinding[]): Pro
   const values = rows.map((r) => ({ ...r, repo, created_at: r.created_at ?? at, updated_at: r.updated_at ?? at }));
   await db.write(async () => {
     for (const chunk of kx.batches(values)) await q.run(q.k.insertInto("security_findings").values(chunk));
+  });
+}
+
+/** Stores a scan's findings under the repo's next numbers, taken in the same write, so scans of one repo never share one; returns the numbers in order. */
+export async function addScanFindings(db: Db, repo: string, rows: NewScanFinding[]): Promise<number[]> {
+  if (rows.length === 0) return [];
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const top = await q.get(q.k.selectFrom("security_findings").select((eb) => eb.fn.max<number | null>("number").as("n")).where("repo", "=", repo));
+    const first = Number(top?.n ?? 0) + 1;
+    await addFindings(db, repo, rows.map(({ repeats, ...r }, i) => ({ ...r, repo, number: first + i, duplicate_of: repeats === undefined ? r.duplicate_of : first + repeats })));
+    return rows.map((_, i) => first + i);
   });
 }
 

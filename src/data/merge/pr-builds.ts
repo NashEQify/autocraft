@@ -103,7 +103,7 @@ export async function queuePrBuilds(db: Db, rows: NewPrBuild[]): Promise<Map<Hea
     }
     if (fresh.length === 0) return;
     const ids = await createTasks(db, fresh.map((r) => ({
-      step: STEP, repo: r.repo, number: r.number, headSha: r.head, baseSha: r.base, priority: PR_BUILD_PRIORITY, plan: r.plan,
+      jobId: r.jobId, step: STEP, repo: r.repo, number: r.number, headSha: r.head, baseSha: r.base, priority: PR_BUILD_PRIORITY, plan: r.plan,
       requires: { os: "linux", toolchains: ["rust-stable"] }, ...(r.warm ? { warm: r.warm } : {}),
     })));
     await kx.updateFrom(db, "pr_builds", ["repo", "number", "head_sha"], fresh.map((r, i) => ({ repo: r.repo, number: r.number, head_sha: r.head, task_id: ids[i]! })));

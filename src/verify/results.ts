@@ -4,7 +4,8 @@
 import { leaseItem } from "../runner/leases.ts";
 import type { TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { BuildError } from "../build/envs.ts";
-import { cancelTasks, cloneTasks, loadLogTails, loadQueuedWarmBuilds, loadRetriesOf, loadTasks, QueueFullError, TERMINAL, type TaskRecord } from "../data/build/index.ts";
+import { cloneTasks } from "../build/tasks.ts";
+import { cancelTasks, loadLogTails, loadQueuedWarmBuilds, loadRetriesOf, loadTasks, TERMINAL, type TaskRecord } from "../data/build/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
 import { listVerifications as listMergeVerifications, loadPendingVerifications, loadVerifications, loadVerifyDue, restartVerifications, settleVerifications, type StageRow, type VerificationState, type VerificationView } from "../data/merge/index.ts";
@@ -205,7 +206,7 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
           await jobItem(db, v.repo, v.number, `${verdict.reason}; queued the tasks again`, log);
           return;
         } catch (e) {
-          if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e;
+          if (!(e instanceof BuildError)) throw e;
           verdict.reason = `${verdict.reason}; tasks not queued again: ${e.message}`;
         }
       }
@@ -240,11 +241,14 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
   return s;
 }
 
-/** Cancels queued warm builds whose branch head is no longer the commit they would build. */
+/**
+ * Cancels queued warm builds whose branch head is no longer the commit they would build: only on a main-CI reading made after the
+ * build was queued, since Verify queues it at the head GitHub gave it, which an earlier poll had not seen.
+ */
 async function cancelMovedWarmBuilds(db: Db, log: (line: string) => void): Promise<number> {
   const queued = await loadQueuedWarmBuilds(db);
   const heads = await loadLatestMainHeads(db, [...new Set(queued.map((t) => t.repo))]);
-  const ids = queued.filter((t) => { const main = heads.get(t.repo)?.head_sha; return !!main && main !== t.headSha; }).map((t) => t.id);
+  const ids = queued.filter((t) => { const main = heads.get(t.repo); return !!main && main.head_sha !== t.headSha && main.updated_at > t.queuedAt; }).map((t) => t.id);
   const out = await cancelTasks(db, { ids }, ACTOR);
   const n = out.filter((o) => o.result === "cancelled").length;
   for (const o of out) if (o.result === "cancelled") log(`  warm build ${o.id} of ${o.repo}: the branch moved on; cancelled`);

@@ -3,12 +3,15 @@
 // it never reads a real database.
 //
 //   AUTOCRAFT_TEST_PG_URL=<postgres admin url> node --no-warnings --import ./test/pg-suite-preload.ts scripts/planner-bench.ts
-//       [--delay MS] [--only NAME] [--sites N] [--sql] [--trace] [--unfused] [--width N] [--dump FILE]
+//       [--delay MS] [--only NAME] [--sites N] [--sql] [--trace] [--unfused] [--width N] [--dump FILE] [--large] [--passes]
 //
 // --sites N lists the N call sites with the most statements of each unit, --sql its statements, --trace its statements in order; --dump FILE freezes the clock and
 // writes what the passes decided (proposals, stored Plans, lane lists), to compare two versions. `scripts/pg-test.sh start`
-// gives a throwaway server.
+// gives a throwaway server. --large adds the rows of a production-sized pass (about 33,000 open items, 13,600 of them PRs, and 2,000
+// merged PRs); --passes runs the planner passes only. The longest time a transaction sat idle is printed at the end: the server
+// ends a session idle longer than the limit in src/db/postgres.ts, so run it on one CPU (`taskset -c 0 nice`) to see a slow node's.
 import { mock } from "node:test";
+import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { countQueries } from "../src/db/counter.ts";
 import type { Db } from "../src/db/index.ts";
@@ -93,6 +96,21 @@ const bundle = { promptId: "review.opus", promptVersion: "1", tier: "top", effor
 for (let i = 0; i < 30; i++) {
   await enqueueCall(w.db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", bundle: bundle as never, items: [{ repo: repo(i), number: 1 }], level: i % 5, maxAttempts: 2 });
 }
+if (args.includes("--large")) {
+  // Copies of one PR per repo without a review, one with, and of issues, at new numbers, so a pass loads a production-sized set.
+  const copy = async (table: keyof typeof COLUMNS, from: string, step: number, times: number, set: Record<string, string> = {}): Promise<void> => {
+    const cols = COLUMNS[table].filter((c) => c !== "id");
+    const q = (c: string) => `"${c}"`;
+    await direct.script(`INSERT INTO ${table} (${cols.map(q).join(", ")}) SELECT ${cols.map((c) => c === "number" ? `number + g * ${step}` : set[c] ?? q(c)).join(", ")} FROM ${table}, generate_series(1, ${times}) g WHERE ${from} ON CONFLICT DO NOTHING`);
+  };
+  const perItem = ["items", "classifications", "item_priority", "item_settled"] as const;
+  for (const t of perItem) await copy(t, "number BETWEEN 101 AND 180", 1000, 9);
+  for (const t of [...perItem, "pr_checks", "pr_files", "opus_reviews", "verifications", "premerge_reviews"] as const) {
+    await copy(t, "number = 2", 100_000, 200, t === "items" ? { title: "title || ' ' || g", body: "repeat('A sentence of the description. ', 60)", mergeable: "'MERGEABLE'" } : {});
+    if (t !== "opus_reviews") await copy(t, "number = 4", 100_000, 340, t === "items" ? { body: "repeat('A sentence of the description. ', 60)" } : t === "pr_checks" ? { checks: "(SELECT json_agg(json_build_object('name', 'check number ' || n, 'state', 'SUCCESS'))::text FROM generate_series(1, 30) n)" } : {});
+    await copy(t, "number = 1 AND repo <> 'app'", 1_000_000, 84, t === "items" ? { state: "'MERGED'", merged_at: "updated_at" } : {});
+  }
+}
 await direct.script("ANALYZE");
 const name = ((await direct.prepare("SELECT current_database() AS n").get()) as { n: string }).n;
 
@@ -102,6 +120,18 @@ const proxy = await startLatencyProxy({ host: url.hostname, port: Number(url.por
 url.host = `127.0.0.1:${proxy.port}`;
 url.pathname = `/${name}`;
 const db: Db = await connectDb(url.toString(), { role: "runner", migrate: false });
+
+// The longest idle time per transaction, read by another process: this one's event loop is busy exactly while a transaction idles.
+const idle = spawn(process.execPath, ["--input-type=module", "-e", `
+  import pg from "pg";
+  const c = new pg.Client({ connectionString: process.argv[1] }); await c.connect();
+  let max = 0, at = "";
+  process.on("SIGTERM", async () => { console.log("longest idle in transaction: " + Math.round(max) + " ms after " + at); process.exit(0); });
+  for (;;) {
+    const { rows } = await c.query("SELECT extract(epoch FROM clock_timestamp() - state_change) * 1000 AS ms, left(regexp_replace(query, '\\s+', ' ', 'g'), 120) AS q FROM pg_stat_activity WHERE datname = $1 AND state = 'idle in transaction'", [process.argv[2]]);
+    for (const r of rows) if (Number(r.ms) > max) { max = Number(r.ms); at = r.q; }
+    await new Promise((r) => setTimeout(r, 20));
+  }`, process.env.AUTOCRAFT_TEST_PG_URL, name], { stdio: "inherit", cwd: process.cwd() });
 
 // --unfused sends every read by itself, so the trace shows what each costs on the server.
 if (args.includes("--unfused")) (db as { together: Db["together"] }).together = (fn) => fn();
@@ -154,20 +184,24 @@ try {
   await pass("incremental, 1 item");
   await touch(20);
   await pass("incremental, 20 items");
-  await unit("job start: PRs to review", () => planned(db, "review", { repo: "app" }));
-  await unit("job start: PRs to fix up", () => planned(db, "fixup", { repo: "app1" }));
-  await unit("job start: items to label", () => plannedItems(db, "label", { repo: "app1" }));
-  await unit("due check, quiet", () => planDue(db));
-  await unit("due check, quiet again", () => planDue(db));
-  const defs = await loadSteps();
-  await unit("Next page: lane gates", () => laneGates(db, LANES, defs));
-  const found = await pass("incremental, before apply");
-  await unit(`apply ${found.proposals.length} proposals`, () => applyProposals(db, found.proposals, { wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) }));
-  if (dump) {
-    decided.queued = await direct.all(direct.k.selectFrom("jobs").select(["step", "params", "state", "requested_by"]).orderBy("id"));
-    writeFileSync(dump, JSON.stringify(decided, null, 1));
+  if (!args.includes("--passes")) {
+    await unit("job start: PRs to review", () => planned(db, "review", { repo: "app" }));
+    await unit("job start: PRs to fix up", () => planned(db, "fixup", { repo: "app1" }));
+    await unit("job start: items to label", () => plannedItems(db, "label", { repo: "app1" }));
+    await unit("due check, quiet", () => planDue(db));
+    await unit("due check, quiet again", () => planDue(db));
+    const defs = await loadSteps();
+    await unit("Next page: lane gates", () => laneGates(db, LANES, defs));
+    const found = await pass("incremental, before apply");
+    await unit(`apply ${found.proposals.length} proposals`, () => applyProposals(db, found.proposals, { wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) }));
+    if (dump) {
+      decided.queued = await direct.all(direct.k.selectFrom("jobs").select(["step", "params", "state", "requested_by"]).orderBy("id"));
+      writeFileSync(dump, JSON.stringify(decided, null, 1));
+    }
   }
 } finally {
+  idle.kill();
+  await new Promise((r) => idle.once("close", r));
   await db.close();
   await proxy.close();
   w.close();
