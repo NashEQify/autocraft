@@ -17,7 +17,7 @@ import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classi
 import { embedderId, modelName } from "../embed/model.ts";
 import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts";
 import { openPrsByRepo, textHash, type OpenPr } from "./open-prs.ts";
-import { inStep, loadItemPass, loadPassBase, type EndWave, type ItemPassData, type ItemPassNeeds, type PassBase } from "./pass-load.ts";
+import { inStep, loadItemPass, loadPassBase, type EndWave, type ItemPassData, type ItemPassNeeds, type PassBase, type SharedDupes } from "./pass-load.ts";
 import type { ItemFacts } from "./plan.ts";
 import type { Db } from "../db/index.ts";
 
@@ -102,14 +102,14 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
 }
 
 /** loadItemFacts() as one load of a group that runs in step. */
-export async function itemFacts(db: Db, opts: ItemLoadOptions & { base: PassBase }, endWave: EndWave): Promise<ItemFacts[]> {
+export async function itemFacts(db: Db, opts: ItemLoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<ItemFacts[]> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
   if (refs && !refs.size) return [];
   const model = opts.model ?? embedderId(modelName());
   const keys: KeySource = refs ? [...refs].map(asRef) : openItemKeys({ tracked: true, ...(opts.repo ? { repos: [opts.repo] } : {}) });
   const keep = { repo: opts.repo, refs };
-  const d = await loadItemPass(db, keys, { now, base: opts.base, model, repo: opts.repo, needs: (x) => needsOf(x, keep) }, endWave);
+  const d = await loadItemPass(db, keys, { now, base: opts.base, model, repo: opts.repo, dupes: opts.dupes, needs: (x) => needsOf(x, keep) }, endWave);
   return await withConfig(db, async () => factsOf(db, d, rowsOf(d, keep)), { preload: d.control });
 }
 

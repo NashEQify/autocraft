@@ -21,7 +21,7 @@ import type { CommentOut, ItemHashes, ItemOf, OpenPrRow } from "../data/mirror/t
 import { loadStageFacts, type StageFacts } from "../data/planner/index.ts";
 import { loadPremerge, loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { listQuietPrs } from "../data/security/index.ts";
-import { classifyRun, loadSettled, loadRanks, loadTriageFacts, type RankRow, type TriageFactsResult } from "../data/triage/index.ts";
+import { classifyRun, loadDupeState, loadSettled, loadRanks, loadTriageFacts, prDuplicates, type DupeState, type PrDuplicates, type RankRow, type TriageFactsResult } from "../data/triage/index.ts";
 import { listWorkflows, loadActions, loadActionsDue, loadInScope, loadWorkflowFacts, type DueAction, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { ACTION_WAITS } from "./may.ts";
@@ -49,6 +49,8 @@ export type PrPassData = {
   formal: Map<RefKey, ReviewFact[]>;
   gates: Map<RefKey, Gate>;
   ranks: Map<RefKey, RankRow>;
+  /** The open PRs that duplicate another open or merged one. */
+  duplicates: Map<RefKey, PrDuplicates>;
   merge: MergeFacts;
   patches: Map<RefKey, PatchFacts>;
   pushes: Map<RefKey, PushFacts>;
@@ -136,6 +138,14 @@ export async function inStep<T extends readonly unknown[]>(db: Db, ...loads: { [
 /** What every fact load of a pass reads first: our logins and the classification run. */
 export type PassBase = { own: Set<string>; run: string | null };
 
+/** The duplicate state of a pass whose PR and item loads both read it: one read, sent with the first wave that asks for it. */
+export type SharedDupes = () => Promise<DupeState>;
+
+export function sharedDupes(db: Db): SharedDupes {
+  let state: Promise<DupeState> | undefined;
+  return () => (state ??= loadDupeState(db));
+}
+
 export async function loadPassBase(db: Db, run?: string | null): Promise<PassBase> {
   const [own, r] = await db.together(() => Promise.all([loadOwnLogins(db), run !== undefined ? run : classifyRun(db)]));
   return { own, run: r };
@@ -148,6 +158,7 @@ export type PrPassOptions = {
   now: number; base: PassBase;
   /** Narrows the loads that are not keyed. */
   repo?: string | undefined;
+  dupes?: SharedDupes | undefined;
   /** From the loaded rows, the PR's current head when its live workflow's entry is merge: its pre-merge rows are read there. */
   mergeEntryHead: (d: PrPassData, key: RefKey) => string | null;
   /** From the loaded rows, the PRs whose facts are built, and of those the ones in scope (they alone need an author tier and a label). */
@@ -157,17 +168,19 @@ export type PrPassOptions = {
 /** Loads the PR facts inputs of `keys`, in step with the pass's other loads. */
 export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endWave: EndWave): Promise<PrPassData> {
   const own = [...o.base.own];
-  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds] =
+  const keyRepos = reposOf(keys);
+  const dupeRepo = o.repo ?? (keyRepos?.length === 1 ? keyRepos[0] : undefined);
+  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds] =
     await Promise.all([
       loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
-      loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
+      loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), o.dupes?.() ?? loadDupeState(db, dupeRepo ? { repo: dupeRepo } : {}), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
       loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
       loadReviewFacts(db, keys, { now: o.now, own }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
       loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
-      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, reposOf(keys)), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now),
+      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now),
     ]);
   const data: PrPassData = {
-    now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow,
+    now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
     inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
     tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
@@ -253,11 +266,11 @@ export type ItemPassNeeds = { texts: Ref[]; prs: Ref[]; asked: { ref: Ref; since
  * `needs` names from its rows (texts, implementation PRs, comments after a question, the people who started work). `repo` narrows the
  * loaders that are not keyed.
  */
-export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; base: PassBase; model: string; repo?: string | undefined; needs: (d: ItemPassData) => ItemPassNeeds }, endWave: EndWave): Promise<ItemPassData> {
+export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; base: PassBase; model: string; repo?: string | undefined; dupes?: SharedDupes | undefined; needs: (d: ItemPassData) => ItemPassNeeds }, endWave: EndWave): Promise<ItemPassData> {
   const repos = o.repo ? [o.repo] : undefined;
   const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs, due] =
     await Promise.all([
-      loadControl(db), loadItemsWithHashes(db, keys), loadTriageFacts(db, keys, { model: o.model, run: o.base.run, nowMs: o.now }), loadOutsideHolds(db, keys),
+      loadControl(db), loadItemsWithHashes(db, keys), loadTriageFacts(db, keys, { model: o.model, run: o.base.run, nowMs: o.now, dupes: o.dupes }), loadOutsideHolds(db, keys),
       loadStageFacts(db, keys), loadWorkflowFacts(db, keys, { nowMs: o.now }), loadImplementFacts(db, keys),
       loadInScope(db, keys),
       listQuietPrs(db, { repo: o.repo }), loadMainFixPrs(db, repos), loadOwnIntegration(db, repos),

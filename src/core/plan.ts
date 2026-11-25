@@ -161,6 +161,10 @@ export type PrFacts = {
   needsDecisionFlag: boolean;
   /** The label was settled by a referee that was unsure (Opus, or Sonnet then Opus failing): the PR never takes the rule path. */
   labelUnsure?: boolean;
+  /** The open or merged PRs this open PR duplicates (src/data/triage/dupe-sets.ts); `compared` false until the group is compared. Holds only what nobody started. */
+  duplicates?: { of: number[]; compared: boolean };
+  /** What the cached diff of the current head holds that keeps the PR outside the merge rule whatever a review says; absent when nothing, no diff is cached or it waits for its extras. */
+  ruledOut?: string[];
   // scope
   /** In scope: a maintainer started it, or its repo's Pipeline switch is on. */
   inScope: boolean;

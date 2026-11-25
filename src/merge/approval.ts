@@ -4,6 +4,7 @@
 import { loadPushOutcomeEdges, loadStepApprovals, loadTrackedRepos, repoStepApproval, setStepApproval } from "../data/control/index.ts";
 import type { StepApproval } from "../data/control/types.ts";
 import { loadPushEdges } from "../data/changes/index.ts";
+import { loadDupeState, prDuplicates } from "../data/triage/index.ts";
 import { loadEndedWorkflows, loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
 import { mayMerge, workflowGate, type MayResult } from "../core/may.ts";
 import type { Db } from "../db/index.ts";
@@ -21,25 +22,28 @@ export async function setMergeApproval(db: Db, by: string, repo: string, approve
 
 /**
  * Whether each PR of the repo may merge at the given head: the repo's approval, the live workflow that works on it (its own, or its
- * issue's) or how the latest one ended, that workflow's merge leg and our pushes to the PR, in one load.
+ * issue's) or how the latest one ended, that workflow's merge leg, the PRs it duplicates and our pushes to the PR, in one load.
  */
 export async function mergeVerdicts(db: Db, repo: string, items: { number: number; head: string }[]): Promise<Map<number, MayResult>> {
   const out = new Map<number, MayResult>();
   if (!items.length) return out;
   const refs = items.map((i) => ({ repo, number: i.number }));
-  const [approvals, workflows, ended, legs, edges, outcomes] = await db.together(() => Promise.all([
+  const [approvals, workflows, ended, legs, edges, outcomes, dupes] = await db.together(() => Promise.all([
     loadStepApprovals(db, [repo], ["merge"]),
     loadPrWorkflows(db, refs),
     loadEndedWorkflows(db, refs),
     loadLegs(db, refs, { activeOnly: true }),
     loadPushEdges(db, refs),
     loadPushOutcomeEdges(db, refs),
+    loadDupeState(db, { repo }),
   ]));
+  const duplicates = prDuplicates(dupes);
   const repoApproval = approvals.get(repo)?.merge ?? null;
   for (const i of items) {
     const key = `${repo}#${i.number}`;
     out.set(i.number, mayMerge({
       repoApproval, workflow: workflowGate(workflows.get(key), { legs: legs.get(key) ?? [] }), ended: ended.get(key) ?? null, head: i.head,
+      duplicates: duplicates.get(key)?.of.map((n) => `${repo}#${n}`),
       pushes: [...(edges.get(key) ?? []), ...(outcomes.get(key) ?? [])],
     }));
   }

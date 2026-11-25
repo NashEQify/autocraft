@@ -31,8 +31,12 @@ export const workflowOf = (f: Pick<PrFacts, "workflow">): WorkflowFact | null =>
  * Not once someone stopped it or sent it to the backlog: that means hands off until someone starts it.
  */
 export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && f.endedWorkflow !== "stopped" && f.endedWorkflow !== "backlog" && autoEligible(f);
+/** The head has no review that stands, so one is due once nothing holds it: a person who started the PR chose it, and the auto path chose by label and flags; a merge entry is never reviewed. */
+const reviewDue = (f: PrFacts): boolean => !f.draft && !!f.head && !mergeEntry(f) && !f.carriable && !(f.review && f.review.head === f.head && !f.review.staleActionable);
+/** An auto-path PR whose diff keeps it outside the merge rule before a review read it: the review could merge nothing, so it is not made. Our own push that broke CI is repaired first. */
+const ruledOut = (f: PrFacts): boolean => !!f.ruledOut?.length && !f.brokeByUs && onAutoPath(f) && reviewDue(f);
 /** An open PR that nobody started and that is not on the auto path: it gets no model work. */
-export const notStarted = (f: PrFacts): boolean => !workflowOf(f) && !onAutoPath(f);
+export const notStarted = (f: PrFacts): boolean => !workflowOf(f) && (!onAutoPath(f) || ruledOut(f));
 /** The merge entry: the PR goes to the merge queue with no Opus review; the pre-merge review, Verify, CI and GitHub's gates still apply. */
 export const mergeEntry = (f: PrFacts): boolean => workflowOf(f)?.entry === "merge";
 /** A started PR not approved for merge stops when its steps are done, for a person's answer to the recommendation. */
@@ -411,6 +415,12 @@ function fixupWait(f: PrFacts, fx: { bucket: FixupBucket; done: boolean } | null
 
 /** What an unstarted PR waits on. */
 export const NOT_STARTED_WAIT = "a maintainer to start it";
+/** What an unstarted PR waits on, with the reason that alone keeps it off the auto path. */
+function notStartedWait(f: PrFacts): string {
+  if (ruledOut(f)) return `${f.ruledOut!.join(", ")}; waits for a maintainer`;
+  if (!f.duplicates || !onAutoPath({ ...f, duplicates: undefined })) return NOT_STARTED_WAIT;
+  return `duplicates ${f.duplicates.of.map((n) => `${f.repo}#${n}`).join(", ")}; waits for ${f.duplicates.compared ? "a maintainer" : "their comparison or a maintainer"}`;
+}
 /** What a started PR waits on when its steps stopped for a person (its recommendation, or a blocker). */
 export const MAINTAINER_ANSWER_WAIT = "a maintainer's answer";
 
@@ -458,7 +468,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
 
   // A PR nobody started and that is off the auto path gets no model work and no question.
   if (open && notStarted(f)) {
-    return plan(held ? "backlog" : "not-started", { actions: unassignActions(f.assignment, open, true), wait: NOT_STARTED_WAIT, waitKind: "person" });
+    return plan(held ? "backlog" : "not-started", { actions: unassignActions(f.assignment, open, true), wait: notStartedWait(f), waitKind: "person" });
   }
   const mx = mergeEntry(f);
 
@@ -470,8 +480,6 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const inQueue = (takeReview && (merged || (open && !r.stale && r.head === f.head))) || (mx && open);
   // The head the queue's steps work on: the reviewed head, or a merge-entry PR's own head.
   const qHead = mx ? f.head : r?.head ?? null;
-  // The person who started the PR chose it, and the auto path chose by label and flags; a merge entry is never reviewed.
-  const reviewable = !f.draft && !!f.head && !mx;
 
   const actions: Action[] = [...extra];
   let e: Entry | null = null;
@@ -493,10 +501,10 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // A head whose earlier review carries over our checked fix-up is carried, not reviewed.
   // A due review waits while another item blocks the PR, CI at the head has not passed, or the day's review cap is used (src/review/gate.ts); a carry only waits for CI.
   let reviewWait: string | null = null;
-  if (!held && reviewable && f.carriable) {
+  if (!held && !f.draft && !!f.head && !mx && f.carriable) {
     if (f.reviewHold?.kind === "ci") reviewWait = f.reviewHold.wait;
     else actions.push(act("carry", f.head));
-  } else if (!held && reviewable && !(r && r.head === f.head && !r.staleActionable)) {
+  } else if (!held && reviewDue(f)) {
     if (f.reviewHold) reviewWait = f.reviewHold.wait;
     else actions.push(act("review", f.head));
   }

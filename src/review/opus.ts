@@ -10,6 +10,7 @@ import { Client, type Querier } from "../mirror.ts";
 import { checksOf, refreshChecks } from "./checks.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
 import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
+import { notDue, planNow } from "../core/select.ts";
 import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
 import type { DiscussionEntry } from "./parse.ts";
@@ -55,6 +56,8 @@ export type OpusDeps = {
 export type OpusSummary = {
   runId: string; repo: string; candidates: number; reviewed: number; dropped: number;
   verdicts: Record<string, number>; missing: string[]; skipped: string[];
+  /** Unstarted PRs whose diff (or a duplicate) took them off the automatic path: no model call. */
+  off: string[];
 };
 
 const now = () => new Date().toISOString();
@@ -128,6 +131,7 @@ async function reviewedBase(db: Db, c: { repo: string; number: number; head_oid:
 /** `base`: the earlier head a delta was read from; `baseRef`: the base branch the whole PR diff was read against. */
 export type PreparedOpus =
   | { kind: "no-diff"; error: string }
+  | { kind: "off"; why: string }
   | { kind: "large"; mode: "full" | "delta"; base: string | null; baseRef: string | null }
   | { kind: "no-threads"; error: string }
   | { kind: "ready"; input: OpusPr; snap: Snapshot; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** A maintainer's entry was left out of the discussion for length. */ maintDropped?: boolean };
@@ -145,8 +149,9 @@ export function scopeSettled(w: ItemWorkflow | undefined): { scope_settled?: Non
  * Builds the Opus prompt input of a candidate: diff (full, or the delta since the last Opus review),
  * size cap and discussion. `independent`: the whole diff with no earlier review, discussion or unapplied fixes, for a
  * review that must not be anchored on the first one (the pre-merge review); the snapshot then marks the time of the read.
+ * `off`: asked once the diff is read and its facts are stored, why the review is no longer wanted.
  */
-export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean } = {}): Promise<PreparedOpus> {
+export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean; off?: () => Promise<string | null> } = {}): Promise<PreparedOpus> {
   const ref = refOf(c);
   const [items, rows, repos, workflows] = await db.together(() => Promise.all([
     loadItems(db, [{ repo, number: c.number }], "pr"), loadReviewRows(db, [{ repo, number: c.number }]), loadRepos(db, { names: [repo] }),
@@ -159,6 +164,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const baseRef = d.base ?? liveBase ?? null;
   // The read saw the PR's live base: the mirror takes it at once, so the review is not compared with a base the next sync would replace.
   if (d.base && liveBase !== undefined && d.base !== liveBase) await recordLiveBase(db, repo, c.number, c.head_oid, d.base, { by: "opus-review", keepDiff: true });
+  const why = await opts.off?.();
+  if (why) return { kind: "off", why };
   const ch = await checksOf(db, repo, c.number);
   // Test files are shown while they fit the size cap; the merge rule sends a PR whose tests do not fit to a person.
   const cd = codeDiff(d.text, deps.maxChars);
@@ -223,7 +230,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
   const allStale = await staleReviews(db, repo);
   const capped = [...allStale].filter((k) => !uncapped.has(k));
   if (capped.length) log(`opus-review ${repo}: ${capped.join(", ")} not reviewed again: already ${MAX_RERUNS_PER_DAY} re-reviews today after new discussion`);
-  const summary: OpusSummary = { runId, repo, candidates: cands.length, reviewed: 0, dropped: 0, verdicts: {}, missing: [], skipped: [] };
+  const summary: OpusSummary = { runId, repo, candidates: cands.length, reviewed: 0, dropped: 0, verdicts: {}, missing: [], skipped: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
   if (params.dryRun || !cands.length) {
     log(`opus-review ${repo}: ${summary.candidates} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);
@@ -257,7 +264,13 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
   let handled = 0;
   const tally = async (c: { repo: string; number: number }, r: OpusReview) => { summary.verdicts[r.verdict] = (summary.verdicts[r.verdict] ?? 0) + 1; summary.reviewed++; await jobItem(db, c.repo, c.number, `Opus review: ${r.verdict}${r.sure ? "" : " (unsure)"}`, log); };
   await pool(cands.map((c) => async () => {
-    const p = await prepareOpusInput(db, repo, c, deps, log);
+    const p = await prepareOpusInput(db, repo, c, deps, log, c.auto ? { off: async () => notDue(await planNow(db, repo, c.number), "review", c.head_oid) } : {});
+    if (p.kind === "off") {
+      await jobItem(db, c.repo, c.number, `not reviewed: ${p.why}`, log);
+      summary.off.push(refOf(c));
+      params.onHandled?.(++handled);
+      return;
+    }
     if (p.kind === "no-diff") {
       await jobItem(db, c.repo, c.number, `no diff: ${p.error}`, log);
       summary.skipped.push(refOf(c));
@@ -310,7 +323,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
     }
     params.onHandled?.(++handled);
   }), poolRoom(db, (i) => [cands[i]!.repo], (i) => [cands[i]!]));
-  log(`opus-review ${repo}: ${summary.reviewed} reviewed (${Object.entries(summary.verdicts).map(([v, k]) => `${k} ${v}`).join(", ")}); ${summary.skipped.length} without a diff, ${summary.missing.length} without an answer`);
+  log(`opus-review ${repo}: ${summary.reviewed} reviewed (${Object.entries(summary.verdicts).map(([v, k]) => `${k} ${v}`).join(", ")}); ${summary.skipped.length} without a diff, ${summary.off.length} off the automatic path, ${summary.missing.length} without an answer`);
   return summary;
 }
 

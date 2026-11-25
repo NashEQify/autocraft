@@ -78,13 +78,21 @@ export type ComparisonPut = {
   sizes: Record<number, number> | null; heads: Record<number, string> | null;
 };
 export type DupeEdge = { repo: string; a: number; b: number; similarity: number; jev_p: number | null; haiku: string | null };
-/** A member of a duplicate edge with the columns the set logic reads; `in_scope` is the workflow scope of the item. */
+/**
+ * A member of a duplicate edge with the columns the set logic reads; `in_scope` is the workflow scope of the item, `started` whether
+ * a live workflow works on it, `ruled` the higher-numbered items a person ruled on as its pair (comma-joined, null for none).
+ */
 export type DupeMember = {
   repo: string; number: number; kind: "pr" | "issue"; state: string; title: string | null; head_oid: string | null; embed_hash: string | null;
-  comments_count: number | null; additions: number | null; deletions: number | null; closing_issues: string | null; state_reason: string | null; in_scope: boolean;
+  comments_count: number | null; additions: number | null; deletions: number | null; closing_issues: string | null; state_reason: string | null; in_scope: boolean; started: boolean; ruled: string | null;
 };
 /** `comparisons` and `drops` are keyed `repo\nkey`. */
 export type DupeState = { edges: DupeEdge[]; members: Map<RefKey, DupeMember>; comparisons: Map<string, Selectable<DB["dupe_comparisons"]>>; drops: Map<string, { hash: string; at: string }> };
+/**
+ * The open or merged PRs an open PR duplicates (ascending numbers), by the settled answers: the group's comparison, or the checked
+ * pairs while the group has none (`compared` false).
+ */
+export type PrDuplicates = { of: number[]; compared: boolean };
 export type DupeGroupPut = { id: string; repo: string; source: string; items: { number: number; kind: string; role: string; target: number | null; detail: string | null }[] };
 export type DupeSignal = { groupId: string; role: "keep" | "close" | "stay"; target: number | null; reason: string | null };
 
@@ -98,7 +106,8 @@ export type TriageFacts = {
   pairsToCheck: number;
   compare: "rule" | "model" | null;
 };
-export type TriageFactsCtx = { model: string; run: string | null; nowMs: number };
+/** `dupes`: the duplicate state, when the caller's other loads read it too. */
+export type TriageFactsCtx = { model: string; run: string | null; nowMs: number; dupes?: (() => Promise<DupeState>) | undefined };
 export type TriageFactsResult = { facts: Map<RefKey, TriageFacts>; compareDueAt: Map<RefKey, number> };
 
 /** One run of verdicts: its classifier pairs with the items both rated, the classifier with probabilities first. */

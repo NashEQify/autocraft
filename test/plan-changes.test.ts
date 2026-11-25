@@ -15,6 +15,7 @@ import { loadDueRefs } from "../src/data/planner/index.ts";
 import { planned } from "../src/core/select.ts";
 import { classifyRun as latestRun } from "../src/data/triage/index.ts";
 import { setReviewMinInterval } from "../src/review/gate.ts";
+import { fillEmbedHashes } from "../src/itemhash.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
@@ -231,6 +232,18 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
     assert.deepEqual(await pass(), { kind: "incremental", refs: 2 });
     await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 2));
     await pass();
+    // A duplicate pair of PRs 1 and 4: its verdict, a state or a start of either, and a person's ruling move the other's facts.
+    await fillEmbedHashes(w.db);
+    const hash = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
+    const held = async () => { await pass(); return (await loadPlanSet(w.db, { now })).prs.filter((x) => x.facts.duplicates).map((x) => x.facts.number); };
+    await w.db.run(w.db.k.insertInto("duplicate_pairs").values({ repo: "app", a: 1, b: 4, a_hash: await hash(1), b_hash: await hash(4), similarity: 0.9, by_operator: 0, created_at: T }));
+    assert.deepEqual(await held(), []);
+    await w.db.run(w.db.k.updateTable("duplicate_pairs").set({ verdict: "duplicate" }));
+    assert.deepEqual(await held(), [1, 4]);
+    await w.db.run(w.db.k.updateTable("items").set({ state: "MERGED" }).where("repo", "=", "app").where("number", "=", 4));
+    assert.deepEqual(await held(), [1]);
+    await w.db.run(w.db.k.updateTable("duplicate_pairs").set({ by_operator: 1 }));
+    assert.deepEqual(await held(), []);
     await w.db.prepare("INSERT INTO settings (key, value) VALUES ('plan_shadow', 'on')").run();
     assert.deepEqual(await pass(), { kind: "incremental", refs: 0 });
     now += 31 * 60_000;

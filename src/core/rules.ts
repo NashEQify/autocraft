@@ -11,11 +11,11 @@ export const RULE_TIERS: Tier[] = ["whitelisted", "allow"];
 
 /**
  * The PRs that go through review, fix-up and merge with nobody starting them: small and
- * medium bug fixes (and infra) from whitelisted authors, the merge rule's own criteria, with a label no unsure referee settled
- * and no needs-decision flag.
+ * medium bug fixes (and infra) from whitelisted authors, the merge rule's own criteria, with a label no unsure referee settled,
+ * no needs-decision flag and no duplicate among the repo's open and merged PRs.
  */
-export const autoEligible = (p: { label: string | null; size: string; tier: string; labelUnsure?: boolean; needsDecisionFlag: boolean }): boolean =>
-  !!p.label && RULE_LABELS.includes(p.label) && RULE_SIZES.includes(p.size) && (RULE_TIERS as string[]).includes(p.tier) && !p.labelUnsure && !p.needsDecisionFlag;
+export const autoEligible = (p: { label: string | null; size: string; tier: string; labelUnsure?: boolean; needsDecisionFlag: boolean; duplicates?: unknown }): boolean =>
+  !p.duplicates && !!p.label && RULE_LABELS.includes(p.label) && RULE_SIZES.includes(p.size) && (RULE_TIERS as string[]).includes(p.tier) && !p.labelUnsure && !p.needsDecisionFlag;
 
 /** Why an unsure Opus take waits for a person instead of merging by the rule. */
 export const UNSURE_REASON = "Opus was unsure";

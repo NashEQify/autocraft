@@ -18,7 +18,7 @@
 
 **Model.** Jev first, Haiku for the unclear pairs.
 
-**You see.** A duplicate signal on the items. It closes nothing and holds nothing back.
+**You see.** A duplicate signal on the items. It closes nothing and holds back only a pull request nobody started.
 
 **Can go wrong.** A pair you already ruled on is not asked again.
 

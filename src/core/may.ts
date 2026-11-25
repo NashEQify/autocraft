@@ -68,6 +68,8 @@ export type MergeInputs = {
   /** Without a live workflow: how the latest one of the PR, or of the issue it implements, ended. */
   ended: EndedWorkflow | null;
   head: string;
+  /** The open or merged PRs it duplicates, as "repo#number": without a live workflow it merges only once a person picks it. */
+  duplicates?: readonly string[] | undefined;
   /** Our recorded pushes to the PR. An autorepin's is none of them: the workflow's base head moves over it (src/workflow/advance.ts). */
   pushes: readonly OwnPush[];
 };
@@ -83,6 +85,7 @@ export function mergeApproved(f: MergeInputs): MayResult {
   }
   const ended = f.ended && ENDED_WHY[f.ended];
   if (ended) return refuse(ended);
+  if (f.duplicates?.length) return refuse(`It duplicates ${f.duplicates.join(", ")}; it merges once a maintainer starts it.`);
   return f.repoApproval ? { ok: true, as: "repo", by: f.repoApproval.by } : refuse(REPO_OFF);
 }
 

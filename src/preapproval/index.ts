@@ -14,7 +14,8 @@
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, notStarted, ownImplementation, reviseOf } from "../core/decide.ts";
+import { pushRefusal } from "../core/gates.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
 import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
@@ -376,7 +377,10 @@ async function whyNotPlanned(db: Db, f: PrFacts): Promise<string | null> {
   if (f.heldBacklog) return "the PR is held in the backlog";
   if (f.mergeable === "CONFLICTING") return "the PR conflicts with its base branch";
   if (!f.pushable) return "the PR's branch cannot be pushed to";
-  if (!f.repoFacts.pushApproved) return "pushing is not approved for the repo";
+  if (!f.inScope) return "the PR is out of the pipeline's scope";
+  if (notStarted(f)) return "nobody started the PR";
+  const refused = pushRefusal(f, "fixup", true);
+  if (refused) return `the push is not approved: ${refused.replace(/\.$/, "")}`;
   if (!await operatorTriesLeft(db, f.repo, f.number)) return "the fix-up tries are used up";
   return "the pipeline does not plan the fix-up";
 }

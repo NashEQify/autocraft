@@ -53,7 +53,7 @@ export const STAGES: StageDef[] = [
   },
   {
     id: "dupes", title: "Duplicates", order: 2, runStage: 3, docSection: "Duplicates", mode: "steps",
-    description: "Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group. A duplicate is a signal on the items; it closes and holds nothing.",
+    description: "Finds items that describe the same bug or request as another open item, or one closed in the last year, and compares each group. A duplicate is a signal on the items; it closes nothing and holds back only a pull request nobody started.",
     steps: [{ name: "dupes", maxMin: 10, label: "Duplicates", limit: null }, { name: "dupes-compare", maxMin: 50, label: "Compare duplicate groups", limit: 200 }],
     lanes: [{ name: "dupes", steps: ["dupes"], order: 4 }, { name: "dupes-compare", steps: ["dupes-compare"], order: 5 }],
     models: [

@@ -3,7 +3,7 @@
 // stored result is current while no member's state has changed, no member joined or left, no issue's text has changed and no
 // PR's diff size has moved by more than 20% since the compared head.
 import { createHash } from "node:crypto";
-import type { DupeEdge, DupeMember, DupeState, RefKey } from "./types.ts";
+import type { DupeEdge, DupeMember, DupeState, PrDuplicates, RefKey } from "./types.ts";
 
 export type DupeKind = "pr" | "issue";
 export type DupeGroup = { repo: string; members: number[]; edges: DupeEdge[] };
@@ -131,6 +131,61 @@ export function compareOf(sets: KindSet[]): Map<RefKey, "rule" | "model"> {
     for (const m of s.members) {
       const ref = `${s.repo}#${m.number}`;
       if (out.get(ref) !== "model") out.set(ref, how);
+    }
+  }
+  return out;
+}
+
+/** Whether a person ruled on the pair, at any text: no check or comparison makes the two duplicates of each other. */
+function ruledOn(x: DupeMember, y: DupeMember): boolean {
+  const [a, b] = x.number < y.number ? [x, y] : [y, x];
+  return !!a.ruled && a.ruled.split(",").includes(String(b.number));
+}
+
+/**
+ * Per PR of a model's comparison, the best one of those it duplicates (itself when it is the best): a PR the comparison found to be
+ * no duplicate leads the PRs that lost to it in an earlier round.
+ */
+function bestOf(c: StoredRow): (n: number) => number {
+  type Other = { number: number; duplicate?: boolean; via?: number };
+  let others: Other[] = [];
+  try { others = (JSON.parse(c.result ?? "null") as { others?: Other[] } | null)?.others ?? []; } catch { /* no answers: every PR duplicates the kept one */ }
+  const by = new Map(others.map((o) => [o.number, o]));
+  return (n) => {
+    const seen = new Set<number>();
+    for (let at = n; ; ) {
+      if (at === c.kept || seen.has(at)) return at;
+      seen.add(at);
+      const o = by.get(at);
+      if (o?.duplicate === false) return at;
+      at = o?.via ?? c.kept;
+    }
+  };
+}
+
+/**
+ * The open PRs that duplicate another open or merged PR, for the steps nobody started. A model's comparison of the group decides:
+ * its best PR is free while nobody started one of those that duplicate it, and a PR it found to be no duplicate is free. Every
+ * other outcome (a merged PR won, no valid answer) names no best one among the open PRs, so each of them duplicates the rest; so do
+ * the checked pairs of a group that was not compared since a member came, merged or closed. Closed unmerged PRs count for nothing.
+ */
+export function prDuplicates(state: Pick<DupeState, "edges" | "members" | "comparisons">): Map<RefKey, PrDuplicates> {
+  const out = new Map<RefKey, PrDuplicates>();
+  for (const g of dupeGroups(state)) {
+    const set = kindSets(state, g).find((s) => s.kind === "pr");
+    if (!set || set.members.length < 2) continue;
+    // A diff that grew since the comparison leaves its answer standing until the next one replaces it.
+    const stored = state.comparisons.get(`${set.repo}\n${set.key}`);
+    const cmp = stored?.hash === set.hash ? stored : currentComparison(state, set);
+    const best = cmp?.source === "model" ? bestOf(cmp) : null;
+    for (const m of set.members) {
+      if (m.state !== "OPEN") continue;
+      let of = set.members.filter((x) => x !== m && !ruledOn(m, x));
+      if (best) {
+        const mine = best(m.number);
+        of = mine === m.number ? of.filter((x) => x.started && best(x.number) === mine) : of.filter((x) => x.number === mine);
+      } else if (cmp && of.some((x) => x.number === cmp.kept)) of = of.filter((x) => x.number === cmp.kept);
+      if (of.length) out.set(`${set.repo}#${m.number}`, { of: of.map((x) => x.number).sort((a, b) => a - b), compared: cmp !== null });
     }
   }
   return out;

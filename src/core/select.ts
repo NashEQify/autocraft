@@ -1,6 +1,6 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
 import { decidePr } from "./decide.ts";
-import { loadPass, loadPrFacts } from "./facts.ts";
+import { loadPass, loadPrFact, loadPrFacts } from "./facts.ts";
 import { loadPassBase } from "./pass-load.ts";
 import { loadDueRefs } from "../data/planner/index.ts";
 import type { PlanSet } from "./plan-set.ts";
@@ -27,6 +27,19 @@ export type PlannedOptions = {
 };
 
 export { WAITS_ON_PERSON, inFlightNow };
+
+/** The PR decided on facts read now; null when the pass no longer holds it. */
+export async function planNow(db: Db, repo: string, number: number, now?: number): Promise<{ facts: PrFacts; plan: Plan } | null> {
+  const facts = await loadPrFact(db, repo, number, now !== undefined ? { now } : {});
+  return facts && { facts, plan: decidePr(facts, loadPass(now)) };
+}
+
+/** Why a plan has no action of `kind` at the head any more; null when it has. */
+export function notDue(p: { plan: Plan } | null, kind: ActionKind, head: string): string | null {
+  if (!p) return "no longer an open PR";
+  if (p.plan.actions.some((a) => a.kind === kind && a.head === head)) return null;
+  return [...p.plan.reasons, ...(p.plan.wait ? [p.plan.wait] : [])].join(", ") || `now ${p.plan.state}`;
+}
 
 /**
  * The PRs with an action of `kind` due, in selection order: rank score descending (unranked last), then repo and number.
