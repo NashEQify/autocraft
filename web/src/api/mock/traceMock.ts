@@ -66,7 +66,6 @@ const ISSUE_EVENTS: TraceEvent[] = [
     call: { model: "haiku", provider: "claude", state: "done", inputTokens: 1_900, outputTokens: 60, costUsd: 0.002, toolCalls: 0, endedAt: at(2 * 1440 - 4) } },
   { id: "run:811", kind: "model-call", at: at(2 * 1440 - 3.5), head: null, actor: { type: "model", name: "jev" }, summary: "Classify items: bugfix", ref: { runId: 811, jobId: 41 },
     call: { model: "jev", provider: "jev", state: "done", inputTokens: 1_800, outputTokens: 40, costUsd: 0, toolCalls: 0, endedAt: at(2 * 1440 - 4) } },
-  { id: "decision:dup:asked", kind: "decision", at: at(2 * 1440 - 20), head: null, actor: { type: "step", name: "Ask decisions" }, summary: "Asked: Is this a duplicate?", ref: {} },
   { id: "comment:i1", kind: "github", at: at(900), head: null, actor: { type: "person", name: "wren-h" }, summary: "Posted a comment, 120 characters", ref: { commentId: "i1" },
     body: "Same seams on a second machine. They only show up on 16-bit files, not on 8-bit ones." },
 ].sort((a, b) => (a.at < b.at ? -1 : 1)) as TraceEvent[];

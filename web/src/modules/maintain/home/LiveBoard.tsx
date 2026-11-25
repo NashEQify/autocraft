@@ -391,7 +391,7 @@ export function LiveBoard() {
           {workers.length === 0 ? (
             <p className="px-3 py-3 text-sm text-ink/55">No Task Runner is online, and none ran a call in the last hour.</p>
           ) : (
-            <div className="grid md:grid-cols-[minmax(15rem,22rem)_1fr]">
+            <div className="grid grid-cols-[minmax(0,1fr)] md:grid-cols-[minmax(15rem,22rem)_minmax(0,1fr)]">
               {axis}
               {workers.map((w) => (
                 <div key={w.key} className="contents">
@@ -424,7 +424,7 @@ export function LiveBoard() {
             ))}
             {switcher}
           </div>
-          <div className="grid md:grid-cols-[minmax(15rem,22rem)_1fr]">
+          <div className="grid grid-cols-[minmax(0,1fr)] md:grid-cols-[minmax(15rem,22rem)_minmax(0,1fr)]">
             {axis}
             {lanes.map((l) => (
               <div key={l.key} className={cn("contents", l.state !== "running" && l.state !== "queued" && "[&>*]:opacity-60")}>

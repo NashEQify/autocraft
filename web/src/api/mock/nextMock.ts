@@ -13,8 +13,8 @@ const STEPS: NextStep[] = ([
     items: [item(a!, 412, "classify", "Needs a first classification", { kind: "issue" }), item(a!, 418, "classify", "Changed since its last classification", { kind: "issue" }), item(b!, 77, "classify", "Needs a first classification", { kind: "issue" })],
   },
   {
-    lane: "decide", title: "Ask scope decisions", stage: "Decide", steps: ["decide"], canRun: false, kind: "account", why: "No Claude account has headroom (Main: five-hour limit reached; resets 14:20 UTC)", note: null,
-    items: [item(a!, 390, "decide", "Scope decision without a recommendation", { kind: "issue", rank: 71 }), item(b!, 64, "decide", "Scope decision without a recommendation", { kind: "issue", rank: 52 })],
+    lane: "premerge", title: "Review before merging", stage: "Merge queue", steps: ["premerge"], canRun: false, kind: "account", why: "No Task Runner takes Opus calls now", note: null,
+    items: [item(a!, 390, "premerge", "Pre-merge review of the head", { rank: 71 }), item(b!, 64, "premerge", "Pre-merge review of the head", { rank: 52 })],
   },
   {
     lane: "review", title: "Review pull requests", stage: "Review", steps: ["checks", "opus-review"], canRun: true, kind: "ok", why: null, note: null,
@@ -48,7 +48,7 @@ export function nextPageFixture(): NextPage {
     { repo: a!, number: 433, wait: "Waiting for CI", why: "Waits for CI on the new head" },
     { repo: a!, number: 429, wait: "Waiting for CI", why: "Waits for CI on the new head" },
     { repo: b!, number: 101, wait: "Waiting for the author", why: "Review asked for changes" },
-    { repo: c!, number: 14, wait: "Waiting for a decision", why: "Scope decision open" },
+    { repo: c!, number: 14, wait: "Waiting for an answer", why: "Its recommendation is open" },
   ].map((w) => ({ ...w, kind: "pr" as const, state: "open" as const, title: titleFor(w.repo, w.number) }));
   return { steps: STEPS, waiting, waitingTotal: waiting.length };
 }
