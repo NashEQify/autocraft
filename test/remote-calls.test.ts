@@ -26,6 +26,8 @@ import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
+import { dropQueueCache } from "../src/data/runners/calls-shared.ts";
+import { markHelperIdle } from "../src/data/runners/index.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-calls-"));
@@ -59,9 +61,13 @@ describe("user-local remote calls", async () => {
   };
   /** `login`'s helper asked for top-tier work a moment ago and found none; its write permission on the repo is cached. */
   const idle = async (login: string) => {
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now(), idle_tiers: '["top"]', idle_repos: null }).where("login", "=", login));
+    await markHelperIdle(db, callers[login]!, { now: Date.now(), tiers: ["top"], repos: null });
     await db.run(db.k.insertInto("repo_permissions").values({ login, repo: "photocraft", permission: "write", checked_at: new Date().toISOString() })
       .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
+  };
+  const noneIdle = async () => {
+    await db.run(db.k.updateTable("remote_helpers").set({ idle_claim_at: null }));
+    dropQueueCache(db);
   };
   const req = (login: string, role: string, json?: unknown) => ({ user: { login, role, canWrite: async () => true }, json }) as unknown as Req;
   const done = async (secret: string, text: string) => await submitCall(db, secret, { ok: true, text, model: "claude-opus-4-5", usage: { inputTokens: 100, outputTokens: 20 }, modelUsage: { "claude-opus-4-5": { inputTokens: 90, outputTokens: 15 }, "claude-haiku-4-5": { inputTokens: 10, outputTokens: 5 } }, costUsd: 0.25,
@@ -101,7 +107,7 @@ describe("user-local remote calls", async () => {
   });
 
   test("with no other helper asking for work, the PR's author gets the review", async () => {
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
+    await noneIdle();
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const lease = (await leaseFor("alice"))!;
     assert.ok(lease, "the author's helper takes it");
@@ -249,7 +255,7 @@ describe("user-local remote calls", async () => {
   });
 
   test("a user's repo picks limit their claims and next_task; the helper's own list narrows them, never widens them", async () => {
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
+    await noneIdle();
     await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1), ('fontcraft', 1), ('gridcraft', 0) ON CONFLICT (name) DO UPDATE SET pipeline = excluded.pipeline").run();
     const pick = (repos: string[]) => userSettings.setSettings(db, req("bob", "maintainer", { repos }));
     const got = await pick(["fontcraft", "gridcraft"]);
@@ -258,12 +264,12 @@ describe("user-local remote calls", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     while (!await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"))) await sleep(5);
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "photocraft is not picked");
-    assert.equal((await db.get(db.k.selectFrom("mcp_tokens").select("idle_repos").where("id", "=", callers.bob!.tokenId)))!.idle_repos, '["fontcraft","gridcraft"]', "the idle helper records what it takes");
+    assert.equal((await db.get(db.k.selectFrom("remote_helpers").select("idle_repos").where("token_id", "=", callers.bob!.tokenId)))!.idle_repos, '["fontcraft","gridcraft"]', "the idle helper records what it takes");
     assert.equal(await claimableCalls(db, callers.bob!, {}, canWrite), 0);
     await pick(["photocraft"]);
     assert.equal(await claimableCalls(db, callers.bob!, {}, canWrite), 1);
     assert.equal((await claimCall(db, callers.bob!, { ...claim(), repos: ["fontcraft"] }, canWrite)).lease, null, "the helper's list narrows");
-    assert.equal((await db.get(db.k.selectFrom("mcp_tokens").select("idle_repos").where("id", "=", callers.bob!.tokenId)))!.idle_repos, "[]");
+    assert.equal((await db.get(db.k.selectFrom("remote_helpers").select("idle_repos").where("token_id", "=", callers.bob!.tokenId)))!.idle_repos, "[]");
     const lease = (await claimCall(db, callers.bob!, { ...claim(), repos: ["photocraft", "fontcraft"] }, canWrite)).lease!;
     assert.match(lease.title, /photocraft#1287/);
     await done(lease.secret, "picked");
@@ -274,7 +280,7 @@ describe("user-local remote calls", async () => {
   const stateOf = async (id: number) => (await db.get(db.k.selectFrom("remote_calls").select("state").where("id", "=", id)))!.state;
 
   test("a repeated claim gets the same lease, and a dashboard outage ends no lease", async () => {
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
+    await noneIdle();
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     while (!await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"))) await sleep(5);
     const c = claim();
@@ -332,7 +338,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false });
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "not offered to the user whose helper failed it");
     assert.equal((await db.get(db.k.selectFrom("remote_cooloffs").select("failures").where("login", "=", "bob")))!.failures, 1, "counts toward bob's cool-off");
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
+    await noneIdle();
     const second = (await leaseFor("alice"))!;
     assert.equal(second.id, first.id);
     await done(second.secret, "second try");

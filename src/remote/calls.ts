@@ -534,7 +534,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     attempt,
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
     // (idleOthers). The fast lane and the own lane say nothing about the helper's other slots.
-    idle: async (now) => { if (!fast && !own && !tooLong) await runners.markHelperIdle(db, caller.tokenId, { now, tiers: [...tiers], repos: repos ? [...repos] : null }); },
+    idle: async (now) => { if (!fast && !own && !tooLong) await runners.markHelperIdle(db, caller, { now, tiers: [...tiers], repos: repos ? [...repos] : null }); },
     empty: async (now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: last?.at === now ? last.reserve : settingsOf(await runners.loadRunnerSnapshot(db, now), login).reserve,
       ...(tooLong && { reason: `${tooLong} queued call${tooLong === 1 ? " needs" : "s need"} more time than the ${Math.max(0, Math.floor((claim.maxTimeoutSeconds! * 1000 - (now - nowMs)) / 60_000))} min this Task Runner's harness login has before its refresh` }) }),
     slots: () => last?.slots ?? 0,
