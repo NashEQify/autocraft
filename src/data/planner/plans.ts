@@ -26,8 +26,8 @@ const sig = (r: PlanRow): string => JSON.stringify([r.kind, r.head, r.state, r.i
 const storedOf = (r: PlanRow): Stored => ({ sig: sig(r), status: (JSON.parse(r.view) as Partial<PlanView>).status, state: r.state, wait: r.wait, head: r.head });
 
 // The stored rows as of `item_plans_rev` rev, kept between passes: the table is read again only after a write this connection did
-// not make. A write joined to an outer transaction drops the memo and never sets it: only a commit this module sees may set it,
-// and the handle has no commit hook yet (planner.md risk 6, infra requirement 2).
+// not make. Only a commit may set it (db.afterCommit): a write joined to an outer transaction that rolls back takes the counter
+// back, and another connection's writes could bring it to the memo's value with different rows.
 const memo = new WeakMap<Db, { rev: number; rows: StoredRows }>();
 
 async function planRev(db: Db): Promise<number | null> {
@@ -83,7 +83,6 @@ export async function savePlans(db: Db, planned: PlanRow[], plannedAt: string, s
   let { changed, gone } = diff(rows);
   if (!changed.length && !gone.length) return { written: 0, deleted: 0 };
   memo.delete(db);
-  const own = !db.inTransaction("write");
   const q = queryDb(db);
   const rev = await db.write(async () => {
     // A write by another connection since the rows were read is in the table but not in `rows`.
@@ -110,10 +109,11 @@ export async function savePlans(db: Db, planned: PlanRow[], plannedAt: string, s
     // Read under the write lock: no other write can land between the rows this transaction diffed against (or wrote) and the counter.
     return await planRev(db);
   });
-  if (own && rev !== null) {
+  if (rev !== null) {
     for (const r of changed) rows.set(refKey(r.repo, r.number), storedOf(r));
     for (const k of gone) rows.delete(k);
-    memo.set(db, { rev, rows });
+    // Inside an outer write, later statements of it may bump the counter again; the memo is then older than it and the next load reads.
+    db.afterCommit(() => void memo.set(db, { rev, rows }));
   }
   return { written: changed.length, deleted: gone.length };
 }

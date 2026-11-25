@@ -22,6 +22,8 @@ export interface Tx {
   trx?: Kysely<DB>;
   /** Savepoints taken by `attempt`, for unique names. */
   savepoints?: number;
+  /** What `afterCommit` queued, run once the transaction committed. */
+  afterCommit?: (() => void | Promise<void>)[];
 }
 
 /** What a handle gives its engine. */
@@ -131,6 +133,15 @@ const SHARED_READS_MAX = 2000;
 const SETTINGS_WRITE = /^\s*(?:insert\s+into|update|delete\s+from)\s+"?(?:main"?\."?)?settings"?(?![\w.])/i;
 let settingsWriteHook: ((db: object) => void) | null = null;
 export const onSettingsWrite = (fn: (db: object) => void): void => { settingsWriteHook = fn; };
+
+/** Runs an `afterCommit` callback; its error is logged, since the transaction it waited for has committed. */
+async function runAfterCommit(fn: () => void | Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    console.warn(`db: afterCommit callback failed: ${(e as Error)?.message ?? String(e)}`);
+  }
+}
 
 /** The most reads one fused statement carries: its text, and the planner's work on it, grow with each. */
 const FUSED_MAX = 40;
@@ -486,6 +497,12 @@ export class Handle implements QueryDb {
     }
   }
 
+  afterCommit(fn: () => void | Promise<void>): void {
+    const tx = this.#current();
+    if (tx?.mode === "write") (tx.afterCommit ??= []).push(fn);
+    else void runAfterCommit(fn);
+  }
+
   /** Counts an external effect in the current meter: `effect()` in src/db/effects.ts. */
   noteEffect(): void {
     const m = this.#meters.getStore();
@@ -579,8 +596,9 @@ export class Handle implements QueryDb {
     const site = mode === "write" ? siteError() : undefined;
     const tx: Tx = { mode, state: "opening", lockTimeoutMs: opts.lockTimeoutMs, lock: opts.lock };
     let lockedAt: number | undefined;
+    let value: T;
     try {
-      return await this.#als.run(tx, () =>
+      value = await this.#als.run(tx, () =>
         this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
           tx.trx = trx as unknown as Kysely<DB>;
           tx.state = "open";
@@ -605,6 +623,9 @@ export class Handle implements QueryDb {
         if (this.#observers.size) this.#emit({ kind: "write-lock", holdMs, site: callSite(site) });
       }
     }
+    // Committed: outside the transaction and its lock now.
+    for (const fn of tx.afterCommit ?? []) await runAfterCommit(fn);
+    return value;
   }
 
   observe(fn: (e: DbEvent) => void): () => void {

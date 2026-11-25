@@ -183,6 +183,12 @@ export interface Db {
    */
   meter<T>(fn: () => Promise<T>): Promise<{ value: T; stats: DbStats }>;
   /**
+   * Inside a write transaction (a joined nested write included): queues `fn` to run once that transaction has committed,
+   * in the order queued, before `db.write` returns; a rollback drops the queue. Anywhere else it runs `fn` at once,
+   * synchronously. An error from `fn`, thrown or rejected, is logged and never reaches the caller.
+   */
+  afterCommit(fn: () => void | Promise<void>): void;
+  /**
    * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
    * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
    * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
