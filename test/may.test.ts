@@ -31,8 +31,8 @@ test("a started PR merges only through the leg that handed it over, and is appro
   }
 });
 
-test("what a person stopped, put in the backlog or closed does not merge on the repo's approval", () => {
-  for (const [ended, ok] of [["stopped", false], ["backlog", false], ["closed", false], ["done", true], [null, true]] as const) {
+test("what a person stopped, put in the backlog, closed or ended with an answer does not merge on the repo's approval", () => {
+  for (const [ended, ok] of [["stopped", false], ["backlog", false], ["closed", false], ["done", false], [null, true]] as const) {
     assert.equal(mayMerge({ repoApproval: repo, workflow: null, ended, head: "h1", pushes: [] }).ok, ok, String(ended));
   }
 });

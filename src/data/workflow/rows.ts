@@ -1,5 +1,5 @@
 // `item_workflows` and `workflow_events` (M10 workflow-a).
-// reads: implement.implementations, mirror.items (through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
+// reads: implement.implementations, mirror.items (also through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
@@ -60,13 +60,20 @@ const loginIn = (db: Db, eb: kx.AnyEb, col: string, logins: string[], alias: str
 
 type EndedRow = { repo: string; number: number | string; state: string };
 
-/** The newest workflow of each item of `keys`, or of the issue a PR of `keys` was opened for, whichever is newer, when it has ended. */
+/**
+ * The newest workflow of each item of `keys`, or of the issue a PR of `keys` was opened for, whichever is newer, when it has ended. An
+ * issue's workflow that ended as a PR of it merged says nothing about the issue's other PRs and is left out.
+ */
 const endedQuery = (db: Db, keys: KeySource) => {
   const k = queryDb(db).k as any;
   const on = (alias: string, repo: string, number: string) => (j: any) => j.onRef(`${alias}.repo`, "=", repo).onRef(`${alias}.number`, "=", number);
   const own = k.selectFrom("main.item_workflows as w").innerJoin(resolveKeys(db, keys, "ke"), on("ke", "w.repo", "w.number")).select(["w.repo as repo", "w.number as number", "w.state as state", "w.id as id"]);
   const ofPr = k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, keys, "kf"), on("kf", "i.repo", "i.pr_number"))
     .innerJoin("main.item_workflows as w", on("w", "i.repo", "i.number")).where("w.entry", "=", "implement")
+    .where((eb: any) => eb.or([eb("w.state", "<>", "done"), eb.not(eb.exists(
+      k.selectFrom("main.implementations as im").innerJoin("main.items as mi", on("mi", "im.repo", "im.pr_number")).select(one(eb))
+        .whereRef("im.repo", "=", "w.repo").whereRef("im.number", "=", "w.number").where("mi.state", "=", "MERGED")
+        .where((m: any) => m.or([m("mi.closed_at", "is", null), m("mi.closed_at", ">=", m.ref("w.started_at"))]))))]))
     .select(["i.repo as repo", "i.pr_number as number", "w.state as state", "w.id as id"]);
   const ranked = k.selectFrom(own.union(ofPr).as("u"))
     .select((e: any) => ["u.repo", "u.number", "u.state", e.fn.agg("row_number").over((o: any) => o.partitionBy(["u.repo", "u.number"]).orderBy("u.id", "desc")).as("rn")]);

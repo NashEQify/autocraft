@@ -485,6 +485,16 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     s.waiting.push(b.branch);
   }
 
+  /** Rebuilds the batch without the members that no longer pass the merge rule; false when all still do. */
+  async function dropRefused(b: BatchView, members: BatchMember[]): Promise<boolean> {
+    const verdicts = await mergeVerdicts(db, repo, members.map((m) => ({ number: m.number, head: m.head_oid })));
+    const refused = members.filter((m) => !verdicts.get(m.number)?.ok);
+    if (!refused.length) return false;
+    const v = verdicts.get(refused[0]!.number);
+    await supersede(b, members.filter((m) => !refused.includes(m)), `${refused.map((m) => refOf(m.number)).join(", ")} left the batch: ${v && !v.ok ? v.why : "no merge verdict"}`);
+    return true;
+  }
+
   async function publish(b: BatchView, members: BatchMember[]): Promise<void> {
     const moved = await movedAway(b);
     if (moved) return supersede(b, members, moved);
@@ -494,6 +504,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged or pushed to");
     // An operator may have stopped the batch while the checks were read.
     if ((await getBatch(db, b.id)).state !== "checking") return;
+    if (await dropRefused(b, members)) return;
     const who = await whoAmI(d.exec);
     const g = await grant(members);
     if (!g) return publishFailed(b, "not approved or the pipeline is off");
@@ -619,13 +630,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       if (gate.blocked) return supersede(b, members.filter((x) => x !== m), `a PR in the batch has a review: ${gate.blocked}`);
       if (gate.moved) return supersede(b, members.filter((x) => x !== m), "a PR in the batch has new comments or reviews to be reviewed first");
     }
-    // Every member must still pass the merge rule; a member a person approved needs that person's write access, read now.
-    const verdicts = await mergeVerdicts(db, repo, members.map((m) => ({ number: m.number, head: m.head_oid })));
-    const refused = members.filter((m) => !verdicts.get(m.number)?.ok);
-    if (refused.length) {
-      const v = verdicts.get(refused[0]!.number);
-      return supersede(b, members.filter((m) => !refused.includes(m)), `${refused.map((m) => refOf(m.number)).join(", ")} left the batch: ${v && !v.ok ? v.why : "no merge verdict"}`);
-    }
+    if (await dropRefused(b, members)) return;
+    // A member a person approved needs that person's write access, read now.
     const approvers = await approversGone(members.map((m) => ({ number: m.number, head: m.head_oid })));
     if (approvers.gone.length) {
       if ((await getBatch(db, b.id)).state !== "open") { log(`  ${b.branch}: ended meanwhile; left alone`); return; }

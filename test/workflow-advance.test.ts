@@ -15,7 +15,8 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { SNAPSHOT_CACHE_MS } from "../src/data/runners/snapshot-cache.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import type { Blocker } from "../src/workflow/types.ts";
-import { world, type World } from "./world-db.ts";
+import { mergeVerdicts } from "../src/merge/approval.ts";
+import { T0, T1, world, type World } from "./world-db.ts";
 import { setFeature } from "../src/build/features.ts";
 import { textHash } from "../src/core/open-prs.ts";
 import { implementStep } from "../src/core/decide-item.ts";
@@ -88,13 +89,14 @@ test("each blocker stops an approved item and keeps its approval", async () => {
 test("a yes after a blocker resumes the merge leg and does not stop again on what the person saw", async () => {
   const w = await approvedReview();
   const db = w.db;
-  await review(w, { head: "sha1", verdict: "hold" });
+  await new Promise((r) => setTimeout(r, 10));
+  await review(w, { head: "sha1", verdict: "hold", at: new Date().toISOString() });
   await advanceWorkflows(db);
   assert.equal((await liveWorkflow(db, "app", 1))!.state, "blocked");
 
   // The answer comes after the review: what it found is what the person chose to go on with.
   await new Promise((r) => setTimeout(r, 10));
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }], at: new Date(Date.now() + 10_000).toISOString() });
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }] });
   assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
   await advanceWorkflows(db);
   const wf = (await liveWorkflow(db, "app", 1))!;
@@ -103,6 +105,75 @@ test("a yes after a blocker resumes the merge leg and does not stop again on wha
   assert.deepEqual([leg.state, leg.workflow_id], ["review", wf.id], "a new merge leg works for the workflow");
   await advancePreapprovals(db);
   assert.equal(await legState(w), "ci", "the hold the person answered past counts as a take");
+
+  // It goes on like any approved merge: the pre-merge review, the hand-over, the merge.
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "premerge"), "the pre-merge review runs");
+  await (await w.premerge(1, "clean")).verified(1);
+  await advancePreapprovals(db);
+  assert.equal(await legState(w), "queued");
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "merge"), "the merge queue merges it");
+});
+
+test("a failed verification or a lasting refusal after the hand-over asks once, and a yes goes on past it", async () => {
+  for (const what of ["verification", "refusal"] as const) {
+    const w = await approvedReview();
+    const db = w.db;
+    const pass = async () => { await advanceWorkflows(db); for (let i = 0; i < 3; i++) await advancePreapprovals(db); await advanceWorkflows(db); };
+    const plansMerge = async () => (await w.prPlan(1)).actions.some((a) => a.kind === "merge");
+    await review(w, { head: "sha1", verdict: "take", at: new Date().toISOString() });
+    await w.premerge(1, "clean");
+    if (what === "refusal") await w.verified(1);
+    await pass();
+    assert.equal(await legState(w), "queued");
+    await new Promise((r) => setTimeout(r, 5));
+    const at = new Date().toISOString();
+    if (what === "verification") {
+      await w.verified(1, "failed");
+      await db.run(db.k.updateTable("main.verifications").set({ finished_at: at }));
+    } else {
+      await db.run(db.k.insertInto("main.merges").values({ repo: "app", number: 1, head_oid: "sha1", run_id: "r", at, path: "operator", method: "squash", outcome: "refused", reason: "safe-merge: a workflow file may not be changed", ci: "success", mergeable: "MERGEABLE" }));
+    }
+    await pass();
+    const wf = (await liveWorkflow(db, "app", 1))!;
+    assert.deepEqual([wf.state, wf.approvedBy], ["blocked", MAINT], what);
+    assert.ok(wf.rec?.text, what);
+    assert.equal(await plansMerge(), false, what);
+
+    await new Promise((r) => setTimeout(r, 5));
+    const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+    await pass();
+    await pass();
+    assert.equal((await liveWorkflow(db, "app", 1))!.state, "running", what);
+    assert.equal(await legState(w), "queued", what);
+    assert.equal(await plansMerge(), true, `${what}: the merge is tried`);
+    w.close();
+  }
+});
+
+test("an answer that runs nothing leaves the PR alone until someone starts it; an issue's workflow that ended as its PR merged leaves its other PRs as they were", async () => {
+  const w = current = await (await (await world()).repo()).acting();
+  const db = w.db;
+  for (const n of [1, 2]) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
+  const merges = async (n: number): Promise<boolean> => (await w.prPlan(n)).actions.some((a) => a.kind === "merge") && (await mergeVerdicts(db, "app", [{ number: n, head: `sha${n}` }])).get(n)!.ok;
+  assert.deepEqual([await merges(1), await merges(2)], [true, true], "the merge rule takes both");
+  const ended = (number: number, kind: "pr" | "issue", entry: "review" | "implement") =>
+    db.run(db.k.insertInto("main.item_workflows").values({ repo: "app", number, kind, entry, state: "done", started_by: MAINT, started_at: T0, started_via: "dashboard", plan: "[]", updated_at: T0 }));
+  await ended(1, "pr", "review");
+  assert.equal((await w.prPlan(1)).state, "not-started");
+  assert.equal((await mergeVerdicts(db, "app", [{ number: 1, head: "sha1" }])).get(1)!.ok, false);
+
+  // Issue 9's workflow: while its PR 2 is open an answer ended it, and once another PR of it merged the merge did.
+  await w.issue(9);
+  await ended(9, "issue", "implement");
+  const attempt = (number: number, state: string) =>
+    db.run(db.k.insertInto("main.implementations").values({ repo: "app", number: 9, queued_by: MAINT, state, attempt: 1, text_hash: `x${number}`, pr_number: number, created_at: T0, updated_at: T0 }));
+  await attempt(2, "cancelled");
+  assert.equal(await merges(2), false);
+  await w.pr(3);
+  await attempt(3, "merged");
+  await db.run(db.k.updateTable("main.items").set({ state: "MERGED", closed_at: T1 }).where("number", "=", 3));
+  assert.equal(await merges(2), true);
 });
 
 test("an approved review entry with minor findings is fixed, reviewed again and handed to the merge queue as the approver", async () => {

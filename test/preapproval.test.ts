@@ -6,10 +6,11 @@ import { advancePreapprovals, cancelPreapproval, preapprovalOf, preapproveMerge 
 import { mergeAllowed } from "../src/core/gates.ts";
 import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
+import { setOptionalCheck } from "../src/optional-checks.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
-import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { CHECK, OPERATOR, T0, world, type World } from "./world-db.ts";
 import { addOwnCommits } from "../src/data/control/index.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
 import { queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
@@ -153,6 +154,75 @@ describe("pre-approved merge", () => {
     assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "queued");
     await w.verified(5);
     assert.ok((await kindsOf(w, 5)).some((k) => k.startsWith("merge")), (await kindsOf(w, 5)).join());
+  });
+
+  test("a new review after the hand-over of a PR approved for merge: an unsure take still merges, a take-fix is fixed first and its push goes on", async () => {
+    const w = await (await take(await fresh(), 50)).review(50, { verdict: "take-fix" });
+    await inCi(w, 50);
+    await (await w.premerge(50, "clean")).verified(50);
+    await settle(w);
+    const again = (set: { sure: number; verdict?: string; fixes?: string }) =>
+      w.db.run(w.db.k.updateTable("opus_reviews").set({ ...set, at: new Date(Date.now() + 1000).toISOString() }).where("number", "=", 50).where("head_oid", "=", "sha50b"));
+    await again({ sure: 0 });
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 50))?.state, "queued");
+    assert.ok((await kindsOf(w, 50)).some((k) => k.startsWith("merge")), (await kindsOf(w, 50)).join());
+    // Not approved for merge, an unsure review merges nothing: on the automatic path, or after a start without approval.
+    for (const [n, entry] of [[53, null], [54, "review"], [55, "fixup"]] as const) {
+      await (await (await (await w.pr(n)).review(n, { sure: false })).verified(n)).premerge(n, "clean");
+      if (entry) await w.workflow(n, { entry, approved: false });
+      assert.ok(!(await kindsOf(w, n)).some((k) => k.startsWith("merge")), `${entry}: ${(await kindsOf(w, n)).join()}`);
+    }
+
+    await again({ sure: 0, verdict: "take-fix", fixes: JSON.stringify([{ file: "src/lib.rs", change: "rename a to b" }]) });
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 50))?.state, "review");
+    const kinds = await kindsOf(w, 50);
+    assert.ok(kinds.includes("fixup:review") && !kinds.some((k) => k.startsWith("merge")), kinds.join());
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 50, from_head: "sha50b", to_head: "sha50c", state: "pushed", attempt: 2, created_at: T0, source: "review" }));
+    await w.synced(50, "sha50c");
+    await settle(w);
+    const p = (await preapprovalOf(w.db, "app", 50))!;
+    assert.deepEqual([p.state, p.head], ["review", "sha50c"]);
+  });
+
+  test("a queued PR leaves the queue for a failed verification, and not for a transient refusal, a hold, a batch or a running merge", async () => {
+    const w = await (await take(await fresh(), 51)).review(51, { verdict: "take-fix" });
+    await inCi(w, 51);
+    await (await w.premerge(51, "clean")).verified(51);
+    await settle(w);
+    const state = async () => { await settle(w); return (await preapprovalOf(w.db, "app", 51))?.state; };
+    await w.db.run(w.db.k.insertInto("merges").values({ repo: "app", number: 51, head_oid: "sha51b", run_id: "r", at: new Date(Date.now() + 1000).toISOString(), path: "operator", method: "squash", outcome: "refused", reason: "safe-merge: HTTP 502 bad gateway", ci: "success", mergeable: "MERGEABLE" }));
+    assert.equal(await state(), "queued");
+    assert.ok((await kindsOf(w, 51)).some((k) => k.startsWith("merge")), "a transient refusal is tried again");
+
+    await w.db.run(w.db.k.updateTable("verifications").set({ state: "failed", finished_at: new Date(Date.now() + 1000).toISOString() }).where("number", "=", 51));
+    await w.db.run(w.db.k.insertInto("merge_holds").values({ repo: "app", number: 51, held_by: OPERATOR, held_at: T0 }));
+    assert.equal(await state(), "queued", "held");
+    await w.db.run(w.db.k.deleteFrom("merge_holds"));
+    await w.db.run(w.db.k.insertInto("merge_batches").values({ id: 5, repo: "app", branch: "integration-app-1", state: "open", base_sha: "b", commit_sha: "t", created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 5, number: 51, head_oid: "sha51b", position: 1 }));
+    assert.equal(await state(), "queued", "in a batch");
+    await w.db.run(w.db.k.updateTable("merge_batches").set({ state: "superseded" }));
+    const job = (await w.db.get(w.db.k.insertInto("jobs").values({ step: "merge", params: "{}", requested_by: "pipeline", requested_at: T0, state: "running", repo: "app" }).returning("id")))!;
+    assert.equal(await state(), "queued", "a merge of the repo runs");
+    await w.db.run(w.db.k.updateTable("jobs").set({ state: "done" }).where("id", "=", job.id));
+    assert.equal(await state(), "failed");
+    assert.match((await preapprovalOf(w.db, "app", 51))!.reason!, /verification failed/);
+  });
+
+  test("red CI on an optional check only does not stop the leg, and approved runs that have not finished hold it", async () => {
+    const w = await (await take(await fresh(), 52)).review(52, { verdict: "take-fix" });
+    await inCi(w, 52);
+    await w.premerge(52, "clean");
+    await setOptionalCheck(w.db, OPERATOR, "app", "docs", true);
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "docs", state: "failure" }, { name: CHECK, state: "success" }]) }).where("number", "=", 52));
+    await w.db.run(w.db.k.insertInto("ci_run_approvals").values({ repo: "app", number: 52, head_oid: "sha52b", runs: "[]", approved: "[7]", failed: "{}", checked_at: new Date().toISOString(), approved_at: new Date().toISOString() }));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 52))?.state, "ci");
+    await w.db.run(w.db.k.updateTable("ci_run_approvals").set({ approved: "[]" }));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 52))?.state, "queued");
   });
 
   test("an operator fix-up stored for linting is planned for its lint check, and a dropped one ends the request instead of looping", async () => {
