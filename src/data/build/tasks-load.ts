@@ -66,16 +66,6 @@ export function taskEnded(states: ReadonlyMap<number, { state: string }>, id: nu
   return !s || (TERMINAL as readonly string[]).includes(s.state);
 }
 
-/** The planner's `tasksSig`: the newest ended task id and end time. Both come from indexes, so the cost stays flat as history grows. */
-export async function loadEndedTaskSignature(db: Db): Promise<string> {
-  const q = queryDb(db);
-  const [byId, byTime] = await db.together(async () => await Promise.all([
-    q.get(q.k.selectFrom("build_tasks").select((eb) => eb.fn.max<number | null>("id").as("m")).where("state", "in", [...TERMINAL]), { label: "build.loadEndedTaskSignature" }),
-    q.get(q.k.selectFrom("build_tasks").select((eb) => eb.fn.max<string | null>("ended_at").as("m")).where("ended_at", "is not", null), { label: "build.loadEndedTaskSignature" }),
-  ]));
-  return `${byId?.m ?? 0}:${byTime?.m ?? ""}`;
-}
-
 /** Queued count and oldest queue time, optionally only older than a time, private steps only or excluded. 1 statement. */
 export async function loadQueuedStats(db: Db, opt: { olderThan?: string; privateOnly?: boolean; excludePrivate?: boolean }): Promise<{ n: number; oldest: string | null }> {
   const q = queryDb(db);

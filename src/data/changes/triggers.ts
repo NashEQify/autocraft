@@ -14,3 +14,8 @@ registerTriggerSource("verify",
   { table: "fixups" },
   { table: "ci_fixes" },
 );
+
+// Planner input no other input topic reports (src/db/plan-inputs.ts). 
+registerTriggerSource("plan-inputs",
+  { table: "conflict_merges" },
+);

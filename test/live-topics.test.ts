@@ -33,5 +33,5 @@ test("a page setting bumps the settings topic, bookkeeping and the classificatio
   assert.deepEqual(await moved(() => db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }))), ["settings"]);
   assert.deepEqual(await moved(() => db.run(db.k.insertInto("repo_step_approvals").values({ repo: "app", step: "merge", by: "op", at: T }))), ["settings"]);
   assert.deepEqual(await moved(() => db.run(db.k.insertInto("classify_state").values({ kind: "current_run", repo: "", number: 0, value: "run-1", at: T }))), ["rank-inputs", "steps"]);
-  assert.deepEqual(await moved(() => db.run(db.k.insertInto("classify_state").values({ kind: "jev_failed", repo: "app", number: 1, value: "h", at: T }))), []);
+  assert.deepEqual(await moved(() => db.run(db.k.insertInto("classify_state").values({ kind: "jev_failed", repo: "app", number: 1, value: "h", at: T }))), ["plan-inputs"], "it ends the item's prioritize hold; no page reads it");
 });

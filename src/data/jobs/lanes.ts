@@ -112,19 +112,6 @@ export async function removeLaneState(db: Db, keys: { kind: LaneStateKind; step:
   return (await q.run(q.k.deleteFrom("lane_state").where(kx.tupleIn(db, ["kind", "step", "repo"], keys.map((k) => [k.kind, k.step, k.repo ?? ""]), ["text", "text", "text"])))).changes;
 }
 
-/**
- * Whether a pipeline job ended after `since`: an ISO time, or `{ mark }`, the value of that planner mark read in the same statement
- * (no mark counts as the beginning of time). 1 statement.
- */
-export async function loadPipelineEndedSince(db: Db, since: string | { mark: string }): Promise<boolean> {
-  const q = queryDb(db);
-  const row = await q.get(q.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", PIPELINE_USER)
-    .where((eb) => eb("ended_at", ">", typeof since === "string" ? eb.val(since)
-      : eb.fn.coalesce(eb.selectFrom("lane_state").select("value").where("kind", "=", "mark").where("step", "=", since.mark).where("repo", "=", ""), eb.val(""))))
-    .limit(1));
-  return row !== undefined;
-}
-
 /** State rows of the kinds (all without `kinds`), keyed "kind|step|repo". */
 export async function loadLaneState(db: Db, kinds?: LaneStateKind[]): Promise<Map<string, LaneStateRow>> {
   if (kinds && !kinds.length) return new Map();

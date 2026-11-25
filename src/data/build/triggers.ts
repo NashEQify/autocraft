@@ -1,5 +1,6 @@
 // The live topics this module's tables feed (src/db/live.ts).
 import { registerTriggerSource } from "../../db/live.ts";
+import { TERMINAL } from "./types.ts";
 
 // Every worker poll writes last_seen_at; only changes to what an environment is or reports matter.
 // The runner's caches report (build_state row `warm_report`) is shown on the environments page.
@@ -25,4 +26,11 @@ registerTriggerSource("tasks",
   { table: "build_tasks" },
   { table: "build_task_logs" },
   { table: "build_artifacts" },
+);
+
+// Sandbox tasks that ended: the lanes that read their results.
+const ENDED = `new.state IN (${TERMINAL.map((s) => `'${s}'`).join(", ")})`;
+registerTriggerSource("task-ends",
+  { table: "build_tasks", ops: ["INSERT"], when: ENDED },
+  { table: "build_tasks", ops: ["UPDATE"], when: `${ENDED} AND (old.state IS NOT new.state OR old.ended_at IS NOT new.ended_at)` },
 );

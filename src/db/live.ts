@@ -44,7 +44,11 @@ export function shownSettings(key: string): string {
 }
 
 /** One table's contribution to a topic: its writes bump the topic's counter when `when` (SQLite syntax, `new`/`old` rows) holds. */
-export type Source = { table: string; ops?: ("INSERT" | "UPDATE" | "DELETE")[]; when?: string };
+export type Source = {
+  table: string; ops?: ("INSERT" | "UPDATE" | "DELETE")[]; when?: string;
+  /** The Postgres form of `when`, for a condition the mechanical rewrite (pgExpr in src/core/pg-expr.ts) cannot translate. */
+  pg?: string;
+};
 
 /**
  * The live topics, in the order their triggers are made. A table that two non-private topics both list gets one trigger, the
@@ -54,8 +58,11 @@ export const TOPICS: string[] = [
   "repos", "sync", "items", "ranks", "stages", "checks", "mainci", "classify", "dupes", "reviews", "queue", "workflows", "workflow-events",
   "outside", "plans", "jobs", "limits", "usage", "agents", "envs", "build-features", "pr-builds", "nightly", "workspaces", "tasks", "actions",
   "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "downloads", "security", "postmerge", "access", "settings",
-  "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "github",
+  "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "plan-inputs", "job-ends", "task-ends", "github",
 ];
+
+/** Topics that read tables other topics already watch: their triggers have names of their own. */
+const OWN_NAMES = new Set(["steps", "trace", "limits", "build-features", "rank-inputs", "remote-queue", "plan-inputs", "job-ends", "task-ends"]);
 
 /** Topics whose counter moves also send a notification on the channel of the same name (Postgres), for `Db.listen`. */
 export const NOTIFY_TOPICS = ["settings"];
@@ -99,7 +106,7 @@ export function columnsOf(db: DatabaseSync): Map<string, string[]> {
 }
 
 /** One live trigger: an AFTER `op` on `table` that bumps `topic` when `cond` (SQLite syntax, `new`/`old` rows) holds. */
-export type LiveTrigger = { name: string; topic: string; table: string; op: "INSERT" | "UPDATE" | "DELETE"; cond: string };
+export type LiveTrigger = { name: string; topic: string; table: string; op: "INSERT" | "UPDATE" | "DELETE"; cond: string; /** The Postgres form of `cond`, when it is not the mechanical rewrite. */ pg?: string };
 
 /**
  * The topics' triggers. With `columns`, an UPDATE trigger fires only when a watched column changed. Two sources that make the
@@ -108,12 +115,10 @@ export type LiveTrigger = { name: string; topic: string; table: string; op: "INS
 export function liveTriggers(columns?: Map<string, string[]>): LiveTrigger[] {
   const out = new Map<string, LiveTrigger>();
   for (const [topic, sources] of Object.entries(topicTables())) {
-    for (const { table, ops = ALL_OPS, when } of sources) {
+    for (const { table, ops = ALL_OPS, when, pg } of sources) {
       for (const op of ops) {
-        // `steps`, `trace`, `limits`, `build-features`, `rank-inputs` and `remote-queue` read tables other topics already watch, and a
-        // settings source outside the `settings` topic reads that topic's table; their triggers need names of their own.
-        const own = topic === "steps" || topic === "trace" || topic === "limits" || topic === "build-features" || topic === "remote-queue" || topic === "rank-inputs"
-          || (table === "settings" && topic !== "settings");
+        // A settings source outside the `settings` topic reads that topic's table.
+        const own = OWN_NAMES.has(topic) || (table === "settings" && topic !== "settings");
         const name = `live_${own ? `${topic.replace(/\W/g, "_")}_` : ""}${table}_${op[0]!.toLowerCase()}`;
         const key = op === "DELETE" ? "old.key" : "new.key";
         let cond = when ? when.replaceAll("new_key", key) : "";
@@ -122,7 +127,7 @@ export function liveTriggers(columns?: Map<string, string[]>): LiveTrigger[] {
           if (watched?.length) cond = watched.map((c) => `old."${c}" IS NOT new."${c}"`).join(" OR ");
         }
         out.delete(name);
-        out.set(name, { name, topic, table, op, cond });
+        out.set(name, { name, topic, table, op, cond, ...(pg ? { pg } : {}) });
       }
     }
   }

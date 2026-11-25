@@ -12,3 +12,10 @@ registerTriggerSource("postmerge",
   { table: "postmerge_followups" },
   { table: "premerge_reviews" },
 );
+
+// Planner input no other input topic reports (src/db/plan-inputs.ts). 
+// A failed review's count and the day's rerun count only hold reviews back, and their jobs end.
+registerTriggerSource("plan-inputs",
+  { table: "review_state", ops: ["INSERT"], when: "new.stale_at IS NOT NULL" },
+  { table: "review_state", ops: ["UPDATE"], when: "old.stale_at IS NOT new.stale_at" },
+);
