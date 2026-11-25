@@ -12,6 +12,7 @@
 // again and overwrites its slot. Deleted rows and changed tracked repos need a
 // rebuild, done on the side and swapped in when complete; a rebuild also runs
 // every REBUILD_MS to drop vectors of deleted rows.
+import { apart } from "../apart.ts";
 import type { Embedder } from "./model.ts";
 import type { Db } from "../db/index.ts";
 import { embeddingIndexMark, streamEmbeddings } from "../data/triage/index.ts";
@@ -112,7 +113,7 @@ export class VectorIndex {
       return;
     }
     this.loading = true;
-    this.job = this.load(db, rebuild ? null : cur, tracked, s.rows).catch((e) => {
+    this.job = apart(() => this.load(db, rebuild ? null : cur, tracked, s.rows)).catch((e) => {
       console.error(`vector index: ${(e as Error).message}`);
     });
   }

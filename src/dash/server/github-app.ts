@@ -44,7 +44,7 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
       return { json: { identity, signIn: "/auth/signin" } };
     },
   }, {
-    method: "GET", pattern: "/api/admin/github-app", operator: true,
+    method: "GET", pattern: "/api/admin/github-app", operator: true, external: true,
     handler: async (db, r): Promise<Res> => ({
       json: {
         ...(await githubAppStatus(db, config, deps)),

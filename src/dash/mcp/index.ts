@@ -306,11 +306,8 @@ async function needWorkflowItem(env: McpEnv, r: { repo: string }): Promise<User>
 async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const r = itemArg(args(raw, { item: "item" }, ["item"]).item);
   const ref = refText(r);
-  // The item's rows are read alongside the checks, which decide whether they count.
-  const reads = env.db.together(() => Promise.all([loadItems(env.db, [r], "card"), loadQuiet(env.db, [ref]), liveWorkflow(env.db, r.repo, r.number), eventsOf(env.db, r.repo, r.number)]));
-  void reads.catch(() => {});
   const { role } = await needWorkflowItem(env, r);
-  const [found, quiet, wf, stored] = await reads;
+  const [found, quiet, wf, stored] = await env.db.together(() => Promise.all([loadItems(env.db, [r], "card"), loadQuiet(env.db, [ref]), liveWorkflow(env.db, r.repo, r.number), eventsOf(env.db, r.repo, r.number)]));
   const it = found.get(ref);
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
   // A quiet pull request (the landing fix of a security finding) shows viewers no workflow text, as on the item page.
@@ -601,6 +598,9 @@ export const RUN_TOOLS = [
 
 /** Whether a tools/call writes (so the server can tell its live watchers). */
 export const writes = (msg: Msg): boolean => msg.method === "tools/call" && ["pick_model_call", "unpick_model_call", "set_my_settings", "command"].includes(String(msg.params?.name));
+
+/** Whether a tools/call that writes nothing for its user ends expired leases and asks GitHub, so its reads must be its own. */
+export const external = (msg: Msg): boolean => msg.method === "tools/call" && msg.params?.name === "next_task";
 
 /** One MCP server over JSON-RPC: what initialize reports, the tools it lists and how a tool call runs. */
 export type McpServerDef = { name: string; title: string; instructions?: string; tools: readonly unknown[]; call: (name: unknown, args: unknown) => Promise<ToolResult> };

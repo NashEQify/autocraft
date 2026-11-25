@@ -7,7 +7,7 @@ import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemImplementation, 
 import { statusFromItem, type ItemStatus } from "../../core/item-status.ts";
 import { triggerWhy } from "../../review/trigger.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
-import { context, contextScope, eventsFrom, shape, traceScope, writeActions, obj, arr, type Ctx, type Ev } from "./trace.ts";
+import { context, contextScope, eventsFrom, shape, traceScope, visibleItem, writeActions, obj, arr, type Ctx, type Ev } from "./trace.ts";
 import { timelineOf } from "./item-timeline.ts";
 import { implementationFrom, implementationView } from "./item-implementation.ts";
 import { barOf } from "./item-bar.ts";
@@ -268,9 +268,9 @@ const prBuildOf = (c: Ctx, f: ItemPageFacts, on: boolean): ItemPrBuild | null =>
 // ---- the route -------------------------------------------------------------------------------------------------------------
 
 export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPageUnchanged> {
-  const ref = { repo: req.params.repo!, number: Number(req.params.n) };
+  const ref = await visibleItem(db, req);
   // The stamp is read before the page, so it is never newer than the data it goes with, and an unchanged page costs only the stamp.
-  // It and the parts the view does not read (the Discord counts, the releases, the queue slot) go out with the context, whose checks decide whether they count.
+  // It and the parts the view does not read (the Discord counts, the releases, the queue slot) go out with the context, which decides whether they count.
   const stamped = Promise.all([
     contextScope(db, req).then((s) => loadItemStamp(db, s, ref)), discordOf(db, ref.repo, ref.number), releasesOf(db, ref.repo, ref.number),
     Promise.all([visibleRepos(db, req), computeStages(db)]).then(([v, stages]) => slotsOf(stages, v)), loadItems(db, [ref], "card"),

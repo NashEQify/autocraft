@@ -5,6 +5,7 @@
 //    requests, transfers, fix-up pushes, CI approvals, edits, and every rule, review and automatic write.
 // The instance-wide setting `github_identity` decides whether that is used at all: under `box` (the default) the box
 // account makes every write, and `as` only appears in the audit row as a record of what it would be.
+import { apart } from "../apart.ts";
 import * as access from "../data/access/index.ts";
 import * as control from "../data/control/index.ts";
 import type { Grant, Guarded, GuardedFiling } from "../core/guard.ts";
@@ -101,7 +102,7 @@ export function coverageSnapshot(db: Db, refresh = true): { uncovered: string[];
   if (!coverageMemo || (!coverageMemo.running && Date.now() - coverageMemo.at > maxAge)) {
     const prev = coverageMemo;
     coverageMemo = { at: Date.now(), running: true, uncovered: prev?.uncovered ?? [], unconfirmed: prev?.unconfirmed ?? [] };
-    void trackedCoverage(db).then((r) => { coverageMemo = { at: Date.now(), running: false, ...r }; }, () => { coverageMemo = { at: Date.now(), running: false, uncovered: [], unconfirmed: prev?.unconfirmed ?? [] }; });
+    void apart(() => trackedCoverage(db)).then((r) => { coverageMemo = { at: Date.now(), running: false, ...r }; }, () => { coverageMemo = { at: Date.now(), running: false, uncovered: [], unconfirmed: prev?.unconfirmed ?? [] }; });
   }
   return { uncovered: coverageMemo.uncovered, unconfirmed: coverageMemo.unconfirmed };
 }

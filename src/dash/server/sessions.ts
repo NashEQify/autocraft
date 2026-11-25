@@ -62,6 +62,31 @@ export async function loadSessionPermissions(db: Db, id: string | undefined): Pr
   return !id || id.length > 100 ? new Map() : await access.loadPermissionsOfSession(db, sha256hex(id));
 }
 
+/** The most sessions KnownSessions keeps. */
+const KNOWN_SESSIONS_MAX = 5000;
+
+/**
+ * Sessions this process has read lately, with their role then. A hint only: it decides what a request reads ahead alongside its
+ * session row, which still decides what it may do. A cookie that names no session is never in it.
+ */
+export class KnownSessions {
+  #roles = new Map<string, Role>();
+
+  roleOf(id: string | undefined): Role | undefined {
+    return id ? this.#roles.get(sha256hex(id)) : undefined;
+  }
+
+  /** Records what reading the session of cookie `id` answered. */
+  note(id: string | undefined, session: Session | null): void {
+    if (!id) return;
+    const key = session?.idHash ?? sha256hex(id);
+    this.#roles.delete(key);
+    if (!session) return;
+    this.#roles.set(key, session.role);
+    if (this.#roles.size > KNOWN_SESSIONS_MAX) this.#roles.delete(this.#roles.keys().next().value!);
+  }
+}
+
 export async function deleteSession(db: Db, id: string): Promise<void> {
   await access.endSession(db, sha256hex(id));
 }

@@ -428,19 +428,25 @@ const fingerprint = (c: Ctx, qkey: string, sources: unknown[]): string => {
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
 };
 
-/** What the trace's reads narrow by, before the item's own checks: the caller reads alongside `context` and drops the rows when that throws. */
+/** The item a request names, once its repo is visible to the requester: no read of the item starts before that. */
+export async function visibleItem(db: Db, req: Req): Promise<{ repo: string; number: number }> {
+  const repo = req.params.repo!, number = Number(req.params.n);
+  if (!Number.isInteger(number)) throw new HttpError(400, "not an item number");
+  await needVisible(db, req, repo);
+  return { repo, number };
+}
+
+/** What the trace's reads narrow by. The caller reads alongside `context`, which says whether the item exists, and drops the rows when that throws. */
 export const contextScope = async (db: Db, req: Req) => ({ staff: canSeeInternals(req), operator: req.user.role === "operator", hidden: await hiddenRepos(db, req) });
 
 export async function context(db: Db, req: Req): Promise<Ctx> {
-  const repo = req.params.repo!;
-  const n = Number(req.params.n);
-  if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
-  // The rest reads alongside, and counts only once both checks passed.
+  const { repo, number: n } = await visibleItem(db, req);
+  // The rest reads alongside the item, and counts only when the mirror has it.
   const staff = canSeeInternals(req);
   const rest = Promise.all([setting(db, "pipeline_login"), ownLogins(db, repo), staff ? new Set<string>() : loadQuiet(db, [`${repo}#${n}`]), hiddenRepos(db, req)]);
   void rest.catch(() => {});
-  const [, found] = await Promise.all([needVisible(db, req, repo), loadShown(db, [{ repo, number: n }])]);
+  const found = await loadShown(db, [{ repo, number: n }]);
   if (!found.has(`${repo}#${n}`)) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   const [box, own, quiet, hidden] = await rest;
   return { db, repo, n, ref: `${repo}#${n}`, own, box: box ?? "", staff, veiled: quiet.has(`${repo}#${n}`), operator: req.user.role === "operator", hidden };
@@ -467,8 +473,9 @@ export async function trace(db: Db, req: Req): Promise<ItemTrace | { unchanged: 
     if (!at) throw new HttpError(400, "bad cursor");
     after = { at, id: cursor.slice(i + 1) };
   }
-  // The stamp's sources are read with the context, whose checks decide whether they count.
-  const sources = contextScope(db, req).then((s) => loadItemTraceStamp(db, s, { repo: req.params.repo!, number: Number(req.params.n) }));
+  // The stamp's sources are read with the context, which decides whether they count.
+  const ref = await visibleItem(db, req);
+  const sources = contextScope(db, req).then((s) => loadItemTraceStamp(db, s, ref));
   void sources.catch(() => {});
   const c = await context(db, req);
   const stamp = fingerprint(c, JSON.stringify([kq ?? "", only, limit]), await sources);
