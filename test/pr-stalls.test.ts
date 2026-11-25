@@ -24,9 +24,45 @@ test("a CI fix whose comment failed, or did not reach GitHub after the last retr
   }
 });
 
-test("a PR whose label once got no review is planned for one, so it does not wait on a person", () => {
+test("a PR with a documentation label is planned for a review and does not wait on a person", () => {
   const p = decidePr(prFacts({ review: null, label: "documentation" }));
   assert.equal(p.state, "not-reviewed");
   assert.deepEqual(p.actions.map((a) => a.kind), ["review"]);
   assert.equal(p.waitKind, null);
+});
+
+test("a failed or errored verification blocks the merge with the failure as the reason", () => {
+  for (const state of ["failed", "error"]) {
+    const p = decidePr(prFacts({ verification: { state, kind: "tests", summary: "2 tests fail", note: null } }));
+    assert.equal(p.state, "needs-decision");
+    assert.ok(p.reasons.some((r) => r.startsWith("verification") && r.includes("2 tests fail")));
+  }
+});
+
+test("a mergeable state still unknown after GitHub was asked to compute it blocks the merge; before that the wait says how often it was asked", () => {
+  const since = new Date(NOW - 10 * 3600_000).toISOString();
+  const reading = decidePr(prFacts({ mergeable: "UNKNOWN", unknown: { since, reads: 3, rereads: 0, stuck: false } }));
+  assert.equal(reading.state, "waiting-ci");
+  assert.match(reading.wait ?? "", /3 checks reads/);
+  const stuck = decidePr(prFacts({ mergeable: "UNKNOWN", unknown: { since, reads: 6, rereads: 1, stuck: true } }));
+  assert.equal(stuck.state, "needs-decision");
+  assert.ok(stuck.reasons.some((r) => r.includes("unknown")));
+});
+
+test("a merge refused for a reason other than CI or mergeable blocks the merge; a state refusal waits for the change", () => {
+  const refused = (reason: string) => ({ lastMerge: { outcome: "refused", reason, ci: "success", mergeable: "MERGEABLE" } });
+  const other = decidePr(prFacts(refused("REFUSED app#1: the PR touches a protected file")));
+  assert.equal(other.state, "needs-decision");
+  assert.ok(other.reasons.some((r) => r.includes("protected file")));
+  const state = decidePr(prFacts(refused("not ready at merge time: CI pending, mergeable unknown")));
+  assert.equal(state.state, "refused");
+});
+
+test("from database rows: red CI at a new head with an earlier non-take review asks the contributor once", async () => {
+  const { world } = await import("./world-db.ts");
+  const w = await (await (await (await world()).repo()).pr(1, { ci: "failure" })).review(1, { verdict: "close", head: "oldhead" });
+  try {
+    const p = await w.prPlan(1);
+    assert.deepEqual(p.actions.filter((a) => a.kind === "cifix").map((a) => a.params?.bucket), ["ask"]);
+  } finally { w.close(); }
 });
