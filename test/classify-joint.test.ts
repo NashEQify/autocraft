@@ -29,7 +29,7 @@ test("one Jev request per item answers its type, priority and area, and the othe
   const ctx: StepContext = {
     db: w.db, job: { id: 1, requestedBy: "pipeline", startedAt: new Date().toISOString(), resumes: 0 }, params: { limit: 50 },
     progress: async () => {}, log: () => {}, usageRun: () => {}, handled: () => {}, acted: () => {},
-    cancelled: async () => false, stopping: async () => false, timeUp: () => false,
+    cancelled: async () => false, stopping: async () => false, timeUp: async () => false,
   };
   try { await classifyNew(ctx); } finally { restore(); }
   const asked = bodies.map((b) => JSON.parse(b) as { state: string; questions: Record<string, unknown> }).filter((b) => b.state.includes("app#2"));
