@@ -31,7 +31,7 @@ export async function addTrackedRepo(db: Db, o: { name: string; by: string; at?:
   const q = queryDb(db);
   return await db.write(async () => {
     const at = o.at ?? new Date().toISOString();
-    const r = await q.run(q.k.insertInto("main.tracked_repos").values({ name: o.name, added_by: o.by, added_at: at }).onConflict((oc) => oc.doNothing()));
+    const r = await q.run(q.k.insertInto("main.tracked_repos").values({ name: o.name, added_by: o.by, added_at: at, workflow: "new" }).onConflict((oc) => oc.doNothing()));
     if (r.changes > 0) await addAudit(db, [{ login: o.by, action: "repo-track", target: o.name, at }]);
     return r.changes > 0;
   });

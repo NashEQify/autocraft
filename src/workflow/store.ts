@@ -40,9 +40,9 @@ export async function workflowHistory(db: Db, repo: string, number: number): Pro
   return (await loadWorkflowHistory(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
 }
 
-/** The item's events, oldest first. */
+/** The item's events, oldest first, archived rows aside. */
 export async function eventsOf(db: Db, repo: string, number: number): Promise<StoredEvent[]> {
-  return (await loadEvents(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
+  return ((await loadEvents(db, [{ repo, number }])).get(`${repo}#${number}`) ?? []).filter((e) => e.kind !== "archived");
 }
 
 export async function addEvent(db: Db, e: WorkflowEvent): Promise<void> {

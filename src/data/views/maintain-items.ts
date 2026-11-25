@@ -66,7 +66,7 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
         .whereRef("lw.repo", "=", "i.repo").whereRef("lw.number", "=", "i.number").where("lw.state", "in", LIVE_STATES)))
     .leftJoin("main.workflow_events as ev", (j: any) => j.onRef("ev.repo", "=", "i.repo").onRef("ev.number", "=", "i.number")
       .on("ev.id", "=", (eb: kx.AnyEb) => eb.selectFrom("main.workflow_events as le").select((e) => e.fn.max<number>("le.id").as("m"))
-        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number")));
+        .whereRef("le.repo", "=", "i.repo").whereRef("le.number", "=", "i.number").where("le.kind", "<>", "archived")));
   const cols = (b: ReturnType<typeof base>) => b.select((eb: kx.Eb) => [
     "i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.updated_at", "i.merged_at", "i.closed_at", eb.ref("r.score").as("score"),
     "p.state as plan_state", "p.item_state as plan_item_state", phaseOf(db, eb).as("phase"),

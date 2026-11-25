@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import type { DB } from "../../db/types.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
+import { retiredColumns } from "../../db/retired-names.ts";
 import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { Ref } from "../keys.ts";
@@ -180,11 +181,11 @@ export async function saveDupeGroups(db: Db, repo: string, groups: DupeGroupPut[
     await q.run(k.deleteFrom("dupe_group_items").where("repo", "=", repo));
     await q.run(k.deleteFrom("dupe_groups").where("repo", "=", repo));
     for (const chunk of kx.batches(uniqueGroups)) {
-      await q.run(k.insertInto("dupe_groups").values(chunk.map((g) => ({ decision_id: g.id, id: g.id, repo, source: g.source, applied_answer: null }))));
+      await q.run(k.insertInto("dupe_groups").values(chunk.map((g) => ({ ...retiredColumns({ decision_id: g.id }), id: g.id, repo, source: g.source }))));
     }
     for (const chunk of kx.batches(items)) {
       await q.run(k.insertInto("dupe_group_items").values(chunk.map(({ g, i }) => ({
-        decision_id: g.id, group_id: g.id, repo, number: i.number, kind: i.kind, role: i.role, target: i.target, detail: i.detail, base_role: i.role, base_target: i.target, head: null,
+        ...retiredColumns({ decision_id: g.id }), group_id: g.id, repo, number: i.number, kind: i.kind, role: i.role, target: i.target, detail: i.detail, base_role: i.role, base_target: i.target,
       }))));
     }
   });
@@ -197,8 +198,8 @@ export async function loadDupeSignals(db: Db, keys: KeySource): Promise<Map<RefK
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("dupe_group_items as gi").innerJoin(resolveKeys(db, keys, "kk"), onKey("kk", "gi"))
     .leftJoin("dupe_comparisons as c", (j: any) => j.onRef("c.repo", "=", "gi.repo").onRef("c.kind", "=", "gi.kind").on((w: any) =>
       w.exists(w.selectFrom(kx.jsonEach(db, "c.members", "je", "bigint")).select(w.lit(1).as("one")).whereRef("je.value", "=", "gi.number"))))
-    .select(["gi.repo", "gi.number", "gi.role", "gi.target", "c.reason", sql<string>`coalesce(gi.group_id, gi.decision_id)`.as("group_id"),
-      sql<number>`row_number() over (partition by gi.repo, gi.number order by c.at desc nulls last, gi.decision_id desc)`.as("rn")]).as("t"))
+    .select(["gi.repo", "gi.number", "gi.role", "gi.target", "c.reason", "gi.group_id",
+      sql<number>`row_number() over (partition by gi.repo, gi.number order by c.at desc nulls last, gi.group_id desc)`.as("rn")]).as("t"))
     .select(["t.repo", "t.number", "t.role", "t.target", "t.reason", "t.group_id"]).where("t.rn", "=", 1)) as { repo: string; number: number; role: string; target: number | null; reason: string | null; group_id: string }[];
   return new Map(rows.map((r) => [refKey(r.repo, Number(r.number)), { groupId: r.group_id, role: r.role as DupeSignal["role"], target: r.target === null ? null : Number(r.target), reason: r.reason }]));
 }

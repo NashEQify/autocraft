@@ -179,14 +179,14 @@ export async function loadEvents(db: Db, refs: { repo: string; number: number }[
   return out;
 }
 
-/** Latest event kind per item. */
+/** Latest event kind per item, archived rows aside: they are written later than what they record. */
 export async function loadLastEventKinds(db: Db, keys: KeySource): Promise<Map<RefKey, WorkflowEventKind>> {
   const out = new Map<RefKey, WorkflowEventKind>();
   if (isEmpty(keys)) return out;
   const q = queryDb(db);
   const k = q.k as any;
   const newest = k.selectFrom("main.workflow_events as m").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "m.repo").onRef("kk.number", "=", "m.number"))
-    .select((eb: any) => eb.fn.max("m.id").as("id")).groupBy(["m.repo", "m.number"]);
+    .select((eb: any) => eb.fn.max("m.id").as("id")).where("m.kind", "<>", "archived").groupBy(["m.repo", "m.number"]);
   for (const r of await q.all(k.selectFrom("main.workflow_events as e").select(["e.repo", "e.number", "e.kind"]).where("e.id", "in", newest)) as { repo: string; number: number; kind: string }[]) {
     out.set(refKey(r.repo, Number(r.number)), r.kind as WorkflowEventKind);
   }
