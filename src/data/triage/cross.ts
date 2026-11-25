@@ -198,6 +198,10 @@ const edgeQuery = (db: Db, repo?: string) => kOf(db).selectFrom("duplicate_pairs
   .where("p.verdict", "=", "duplicate").where("p.by_operator", "=", 0)
   .$if(!!repo, (b: any) => b.where("p.repo", "=", repo!));
 
+/** Whether the item is on either side of an edge. */
+export const onEdgeExpr = (db: Db, eb: any, repo: string, number: string) => eb.or((["p.a", "p.b"]).map((side) =>
+  eb.exists(edgeQuery(db).whereRef("p.repo", "=", repo).whereRef(side, "=", number))));
+
 export async function dupeEdgeRows(db: Db, repo?: string): Promise<DupeEdge[]> {
   return await queryDb(db).all(edgeQuery(db, repo).orderBy("p.repo").orderBy("p.a").orderBy("p.b")) as DupeEdge[];
 }

@@ -505,6 +505,32 @@ test("a person's stop, approval or drop during the pass wins over what the pass 
   }
 });
 
+test("one workflow's change that cannot be stored loses no other's, and the pass is told to run again", async () => {
+  const w = await approvedReview();
+  const db = w.db;
+  await w.pr(2, { label: "feature" });
+  await runCommand(db, actor, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 2 }] });
+  for (const number of [1, 2]) await w.synced(number, `sha9${number}`);
+  const write = db.write;
+  // The joint write fails, then the first workflow's own.
+  let failures = 2;
+  let woken = 0;
+  const pass = async () => {
+    db.write = (async (f: () => Promise<unknown>, o?: never) => {
+      const joint = /moveWorkflows/.test(String(f));
+      if (joint && failures > 0) { failures--; throw new Error("not stored"); }
+      return await write.call(db, f, o);
+    }) as typeof write;
+    woken = 0;
+    try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
+    return (await Promise.all([1, 2].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
+  };
+  assert.deepEqual(await pass(), ["blocked", "running"]);
+  assert.ok(woken > 0);
+  assert.deepEqual(await pass(), ["blocked", "blocked"]);
+  assert.equal(woken, 0);
+});
+
 test("the third attempt on an issue text offers no Try again, whatever became of the first two", async () => {
   const w = await implementIssue();
   const db = w.db;

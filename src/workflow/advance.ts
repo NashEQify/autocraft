@@ -142,10 +142,10 @@ function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours
 }
 
 /**
- * One pass over the live workflows. Writes only what changed, in one write at the end; returns the workflows that moved to
- * another state.
+ * One pass over the live workflows. Writes only what changed, in one write at the end, or each workflow by itself when that
+ * write fails; returns the workflows that moved to another state. `wake` is told when a workflow failed, so the pass runs again.
  */
-export async function advanceWorkflows(db: Db, log: (line: string) => void = () => {}): Promise<Moved[]> {
+export async function advanceWorkflows(db: Db, log: (line: string) => void = () => {}, wake: (at: number) => void = () => {}): Promise<Moved[]> {
   return await withConfig(db, async () => {
     const live = await listWorkflows(db, { live: true });
     if (!live.length) return [];
@@ -179,15 +179,35 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
         if (to) moved.push({ id: w.id, repo: w.repo, number: w.number, to });
       } catch (e) {
         log(`workflow ${w.repo}#${w.number}: ${(e as Error).message}`);
+        wake(Date.now());
       }
     }
     if (!writes.workflows.length && !writes.adopt.length) return moved;
-    const written = await db.write(async () => {
-      const ids = await moveWorkflows(db, writes.workflows);
-      await recordEvents(db, writes.events.filter((e) => ids.has(e.workflowId)));
-      await adoptLegs(db, writes.adopt);
+    const store = (o: Writes): Promise<Set<number>> => db.write(async () => {
+      const ids = await moveWorkflows(db, o.workflows);
+      await recordEvents(db, o.events.filter((e) => ids.has(e.workflowId)));
+      await adoptLegs(db, o.adopt);
       return ids;
     });
+    let written: Set<number>;
+    try {
+      written = await store(writes);
+    } catch (e) {
+      const changed = live.filter((w) => writes.workflows.some((r) => r.id === w.id) || writes.adopt.some((r) => r.workflowId === w.id));
+      log(`workflows: ${changed.length} changes not stored together, now one by one: ${(e as Error).message}`);
+      wake(Date.now());
+      written = new Set();
+      for (const w of changed) {
+        try {
+          const ids = await store({
+            workflows: writes.workflows.filter((r) => r.id === w.id), events: writes.events.filter((r) => r.workflowId === w.id), adopt: writes.adopt.filter((r) => r.workflowId === w.id),
+          });
+          for (const id of ids) written.add(id);
+        } catch (err) {
+          log(`workflow ${w.repo}#${w.number}: ${(err as Error).message}`);
+        }
+      }
+    }
     return moved.filter((m) => written.has(m.id));
   });
 }

@@ -739,7 +739,7 @@ type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
  * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
  * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
  * queued call's poll carries the waits' fields. A failed read of the wave fails every call waiting on it (no reply is taken by
- * then); a write that fails after it fails only the calls it was for.
+ * then); a write that fails after it fails only the calls it was for, and a stamp that fails none: the next poll stamps again.
  */
 class CallPoller {
   readonly #db: Db;
@@ -787,8 +787,12 @@ class CallPoller {
       const now = Date.now();
       // The caller's liveness stamp; claims and the room count a call while it is fresher than CALLER_STALE_MS.
       if (now - this.#seenAt >= SEEN_EVERY_MS && this.#held.size) {
-        await runners.markCallersSeen(db, [...this.#held.keys()], now);
-        this.#seenAt = now;
+        try {
+          await runners.markCallersSeen(db, [...this.#held.keys()], now);
+          this.#seenAt = now;
+        } catch (e) {
+          console.error(`the liveness of this process's model calls is not stored: ${(e as Error).message}`);
+        }
       }
       const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
       const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));

@@ -27,7 +27,7 @@ export type TakerRow = { id: number; login: string; role: string; slots: string 
 
 export type HealthFacts = {
   heartbeat: string | null;
-  /** The runner's passes fail since then (src/runner/runner.ts TickFailure). */
+  /** A part of the runner's work fails since then (src/runner/runner.ts TickFailure). */
   tickFailure: { since: string; state: "warn" | "fail"; error: string } | null;
   leaders: LeaderFacts[];
   endpoint: EndpointStatus | null;

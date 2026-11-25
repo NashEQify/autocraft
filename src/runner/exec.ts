@@ -60,7 +60,7 @@ export async function execJob(id: number): Promise<number> {
   // The runner signals this process alone: GitHub writes in flight finish and are recorded, and a write asked for now is
   // not made (its caller waits, and a resumed run makes it); then what the job handled, counted and used so far is stored and
   // the rest of its process group (model calls, builds) is stopped. The process exits 143, or with the step's own code when
-  // the step returned during the stop.
+  // the step returned during the stop, once its outcome is stored.
   const ran: { code: number | null; ending: Promise<void> | null; stop: Promise<void> | null } = { code: null, ending: null, stop: null };
   let stepEnded = (): void => {};
   const ended = new Promise<void>((r) => { stepEnded = r; });
@@ -69,13 +69,14 @@ export async function execJob(id: number): Promise<number> {
       const left = await stopWrites("the job is stopping", WRITE_SETTLE_MS, ended);
       if (left) console.log(`${left} GitHub writes still running at the stop; their outcome is unknown`);
       try {
-        if (ran.ending) await ran.ending;
-        else {
+        if (!ran.ending) {
           const patch = await pulse.end();
           await recordResult(db, id, { patch, usage: await usageJson() });
-          console.log("stopped");
+          if (!ran.ending) console.log("stopped");
         }
       } catch (e) { console.error(`the stopped job's counts are not stored: ${(e as Error).message}`); }
+      // Also a step that returned while the counts were stored.
+      try { await ran.ending; } catch (e) { console.error(`the job's outcome is not stored: ${(e as Error).message}`); }
       process.on("SIGTERM", () => {});
       try { process.kill(-process.pid, "SIGTERM"); } catch { /* not a group leader (a command-line run) */ }
       process.exit(ran.code ?? 143);
@@ -86,9 +87,9 @@ export async function execJob(id: number): Promise<number> {
   ran.ending = (async () => {
     const patch = await pulse.end();
     await recordResult(db, id, { ...result, patch, stats: { statements: loaded.statements + stats.statements, roundTrips: loaded.roundTrips + stats.roundTrips, ms: loaded.ms + stats.ms, effects: stats.effects } });
+    ran.code = code;
   })();
   await ran.ending;
-  ran.code = code;
   stepEnded();
   // Stopping: the handler exits once the writes in flight are recorded.
   if (ran.stop) await ran.stop;

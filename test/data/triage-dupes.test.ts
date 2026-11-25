@@ -105,6 +105,11 @@ both("duplicate state holds the edges, their members, comparisons and drops; gro
   const sig = await loadDupeSignals(db, [{ repo: "app", number: 2 }, { repo: "app", number: 3 }]);
   assert.deepEqual(sig.get("app#2"), { groupId: "app:dupegroup:1", role: "close", target: 1, reason: "same bug" });
   assert.equal(sig.has("app#3"), false);
+  const text = (hash: string) => queryDb(db).run((queryDb(db).k as any).updateTable("items").set({ embed_hash: hash }).where("repo", "=", "app").where("number", "=", 1));
+  await text("edited");
+  assert.equal((await loadDupeSignals(db, items(2))).size, 0, "the stored group is no signal while its edge does not hold");
+  await text("h1");
+  assert.deepEqual([...(await loadDupeSignals(db, items(2))).keys()].sort(), ["app#1", "app#2"]);
   await saveDupeGroups(db, "app", []);
   assert.equal((await loadDupeSignals(db, items(2))).size, 0, "saving replaces the repo's groups");
 
