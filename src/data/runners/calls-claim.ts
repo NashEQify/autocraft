@@ -32,7 +32,7 @@ export async function loadClaimFacts(db: Db, caller: ClaimCaller, opts: { reques
     q.get(q.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => [
       eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("c.own_lane", "=", 1).then(0).else(1).end()), eb.lit(0)).as("leased"),
       eb.fn.coalesce(eb.fn.sum<number>(eb.case().when(eb.and([eb("c.own_lane", "=", 1), eb.or(INTERACTIVE_PROMPTS.map((p) => eb("c.prompt_id", "like", `${p}%`)))])).then(1).else(0).end()), eb.lit(0)).as("interactive")])
-      .where("c.state", "=", literal("leased")).where(ciEq(db, "c.user_login", caller.login))),
+      .where("c.state", "=", literal("leased")).where((eb) => ciEq(db, "c.user_login", eb.val(caller.login)))),
     loadQueueSignature(db),
     first ? q.get(q.k.selectFrom("main.remote_calls").select(["id", "run_id", "lease_secret_hash"]).where("token_id", "=", caller.tokenId).where("claim_id", "=", opts.requestId!).where("state", "=", literal("leased"))) : Promise.resolve(undefined),
     loadLiveness(db, now),

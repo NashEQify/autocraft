@@ -19,7 +19,7 @@ class Missed extends Error {
 }
 
 const interactiveCount = (db: Db, eb: any, login: string) => schemaEb(eb).selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_own", "il")).select((e) => e.fn.countAll<number>().as("n"))
-  .where("il.state", "=", literal("leased")).where("il.own_lane", "=", literal(1)).where(ciEq(db, "il.user_login", login)).where((e) => e.or(INTERACTIVE_PROMPTS.map((p) => e("il.prompt_id", "like", `${p}%`))));
+  .where("il.state", "=", literal("leased")).where("il.own_lane", "=", literal(1)).where(ciEq(db, "il.user_login", (eb as any).val(login))).where((e) => e.or(INTERACTIVE_PROMPTS.map((p) => e("il.prompt_id", "like", `${p}%`))));
 
 /**
  * Leases a call inside one transaction under the module lock `remote-lease:<login>`: opens the agent run, then one compare-and-set

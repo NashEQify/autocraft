@@ -3,10 +3,10 @@ import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { batches, inList, schemaEb, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
-import { finishRuns } from "../inference/index.ts";
 import { resumingJobs } from "../jobs/fragments.ts";
 import { loadJobs } from "../jobs/index.ts";
 import { adoptableCall } from "./fragments.ts";
+import { finishCalls } from "./calls-unlease.ts";
 import { dropQueueCache, bundleHash, judges, queuedMsAfter } from "./calls-shared.ts";
 import { loadAuthors } from "./cross.ts";
 import type { NewCall } from "./types.ts";
@@ -115,7 +115,7 @@ async function withdrawWhere(db: Db, reason: string, now: number, where: (eb: Eb
   const ended = await db.write(async () => {
     const rows = await q.all(q.k.updateTable("main.remote_calls").set((eb) => ({ state: "failed", error: reason, ended_at: now, queued_ms: queuedMsAfter(db, eb, now), queued_since: null }) as any)
       .where((eb) => where(eb)).returning(["id", "run_id"]));
-    await finishRuns(db, rows.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reason, summary: "withdrawn" })));
+    await finishCalls(db, rows.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reason, summary: "withdrawn" })));
     return rows;
   });
   if (ended.length) dropQueueCache(db);
@@ -137,7 +137,7 @@ export async function withdrawCalls(db: Db, rows: { id: number; reason: string }
         .where((eb: Eb) => eb.and([eb("remote_calls.id", "=", eb.ref("v.id")), eb("remote_calls.state", "in", states)])).returning(["remote_calls.id as id", "remote_calls.run_id as run_id"]));
       out.push(...got.map((r: any) => ({ id: Number(r.id), run_id: r.run_id as number | null })));
     }
-    await finishRuns(db, out.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reasons.get(r.id)!, summary: "withdrawn" })));
+    await finishCalls(db, out.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reasons.get(r.id)!, summary: "withdrawn" })));
     return out;
   });
   if (ended.length) dropQueueCache(db);

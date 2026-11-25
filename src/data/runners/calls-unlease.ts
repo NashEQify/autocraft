@@ -2,6 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { finishRuns } from "../inference/index.ts";
+import type { RunEnd } from "../inference/types.ts";
 import { dropQueueCache } from "./calls-shared.ts";
 
 /** Keeps the secret hash of a lease that ended or went back to the queue, so its routes answer 410. */
@@ -46,3 +47,6 @@ export async function requeue(db: Db, l: { id: number; runId: number | null; att
   dropQueueCache(db);
   return fail ? "failed" : "queued";
 }
+
+/** Ends the runs of withdrawn or lost calls; nothing is sent for none. */
+export const finishCalls = async (db: Db, ends: RunEnd[]): Promise<void> => void (ends.length && await finishRuns(db, ends));

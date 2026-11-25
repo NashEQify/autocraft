@@ -2,12 +2,11 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { inList, least, ref, schemaEb, type Eb } from "../../db/kx.ts";
-import { finishRuns } from "../inference/index.ts";
 import { earlierRunCall } from "../jobs/fragments.ts";
 import { noteDrops } from "./cooloffs.ts";
 import { deleteOrphanHelpers } from "./cross.ts";
 import { ALIVE_STALE_MS, CALLER_GONE_MS, DROP_WINDOW_MS, FAILURE_WINDOW_MS, KEEP_MS, LEASE_PREFIX, dropQueueCache, lostLeaseExpr, lostReasonExpr, queuedMsAfter, sha256hex } from "./calls-shared.ts";
-import { bury } from "./calls-unlease.ts";
+import { bury, finishCalls } from "./calls-unlease.ts";
 import type { ClaimFacts, ExpiryResult } from "./types.ts";
 
 /** Queued and leased calls whose caller stopped polling. The calls of a resumed job's earlier runs have no caller until the resumed run adopts them. */
@@ -55,7 +54,7 @@ export async function expireLeases(db: Db, o: { now: number; ids?: number[]; fac
       const was = new Map(pre.map((r) => [Number(r.id), r]));
       for (const u of ups) (u.state === "failed" ? out.failed : out.requeued).push(Number(u.id));
       await bury(db, ups.map((u) => ({ id: Number(u.id), hash: was.get(Number(u.id))?.lease_secret_hash ?? null })), now);
-      await finishRuns(db, ups.filter((u) => u.run_id !== null).map((u) => ({ id: u.run_id!, state: "failed" as const, error: u.error, summary: "lease ended" })));
+      await finishCalls(db, ups.filter((u) => u.run_id !== null).map((u) => ({ id: u.run_id!, state: "failed" as const, error: u.error, summary: "lease ended" })));
       // A lease that never had a heartbeat does not count toward a cool-off: the helper most likely never got the claim's reply.
       const drops = ups.flatMap((u) => {
         const r = was.get(Number(u.id));
@@ -69,7 +68,7 @@ export async function expireLeases(db: Db, o: { now: number; ids?: number[]; fac
       .where((eb) => goneCallExpr(db, eb, now)).$if(!lost.length, (b) => b.where(inList(db, "id", gone, "bigint"))).$if(!!o.ids, (b) => b.where(inList(db, "id", o.ids!, "bigint")))
       .returning(["id", "run_id"]));
     out.withdrawn = ended.map((r) => Number(r.id));
-    await finishRuns(db, ended.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reason, summary: "withdrawn" })));
+    await finishCalls(db, ended.filter((r) => r.run_id !== null).map((r) => ({ id: r.run_id!, state: "failed" as const, error: reason, summary: "withdrawn" })));
     if (out.requeued.length || out.failed.length || out.withdrawn.length) dropQueueCache(db);
     return out;
   });
