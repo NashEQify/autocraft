@@ -47,7 +47,7 @@ export async function loadItemTrace(db: Db, scope: TraceScope, ref: { repo: stri
     loadItemDetail(db, key, parts), loadStageLog(db, [key]), loadPlanHistory(db, [key]), loadPlans(db, refs), loadItemJobTrail(db, refs),
     loadItemRuns(db, [key], { hidden: scope.hidden, staff: scope.staff }), loadModelChecksAfter(db, 0, { repo: ref.repo, number: ref.number }), loadPatchChecks(db, refs),
     loadItemTaskEvents(db, ref, { hiddenRepos: scope.hidden, staff: scope.staff }), listPushOutcomes(db, { refs: [key] }), loadPatchTimeline(db, refs, { internals: scope.staff }),
-    loadReviewRecord(db, refs), loadVerifications(db, refs), listMerges(db, { refs }), loadEvents(db, refs), loadTurnEvents(db, { refs: [key] }),
+    loadReviewRecord(db, refs), loadVerifications(db, refs), listMerges(db, { refs }), loadEvents(db, refs, { archived: true }), loadTurnEvents(db, { refs: [key] }),
     listAudit(db, { targets: [key], ...(writeActions ? { actions: writeActions } : {}), order: "asc" }), loadMergeHolds(db, { refs }),
   ]));
   // A write event links the batch of its integration branch.
@@ -68,7 +68,7 @@ export async function loadItemTraceStamp(db: Db, scope: TraceScope, ref: { repo:
   const [detail, versions, stages, comments, activity, jobs, runs, tasks, pushes, patches, review, verifications, merges, turns, workflowEvents, holds, audit] = await db.together(() => Promise.all([
     loadItemDetail(db, key, ["item"]), loadPlanVersions(db, [key]), loadStageVersions(db, [key]), loadCommentStats(db, refs), loadActivityStats(db, refs), loadItemJobTrail(db, refs),
     loadItemRuns(db, [key], { hidden: scope.hidden, staff: scope.staff }), loadTaskHistoryStats(db, refs), countPushOutcomes(db, [key]), loadPatchSignature(db, refs),
-    loadReviewSignature(db, refs), loadVerifications(db, refs, { tasks: false }), listMerges(db, { refs }), loadTurnDigests(db, [key]), loadEvents(db, refs), loadMergeHolds(db, { refs }), loadAuditCounts(db, key),
+    loadReviewSignature(db, refs), loadVerifications(db, refs, { tasks: false }), listMerges(db, { refs }), loadTurnDigests(db, [key]), loadEvents(db, refs, { archived: true }), loadMergeHolds(db, { refs }), loadAuditCounts(db, key),
   ]));
   const it = detail.item;
   const jobRows = jobs.get(key) ?? [], runRows = runs.get(key) ?? [];

@@ -98,7 +98,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const breakers = await Promise.all(mineTrips.map(async (t) => ({
     key: t.stage, reason: blankIfHidden(t.reason, hidden), since: t.trippedAt, canResume: may && await mayResumeTrip(db, req.user, t.stage),
   })));
-  const shown: MaintainEvent[] = events.flatMap((e) => (e.kind === "archived" ? [] : [{ id: e.id, at: e.at, login: e.login, via: e.via ?? "cli", kind: e.kind, line: e.line ?? "" }]));
+  const shown: MaintainEvent[] = events.map((e) => ({ id: e.id, at: e.at, login: e.login, via: e.via ?? "cli", kind: e.kind, line: e.line ?? "" }));
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
     repo, number: n, kind: facts.kind, canAct: may,

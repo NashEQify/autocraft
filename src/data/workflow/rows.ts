@@ -8,10 +8,10 @@ import { canActExpr } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { LIVE_STATES } from "./fragments.ts";
+import { LIVE_STATES, notArchived } from "./fragments.ts";
 import type {
   Blocker, EndedWorkflow, Entry, FixupRequest, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
-  StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
+  SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
 } from "./types.ts";
 import type { Parsed } from "../../workflow/types.ts";
 
@@ -196,8 +196,14 @@ export async function loadWorkflowHistory(db: Db, refs: { repo: string; number: 
 
 type EventRow = { id: number; workflow_id: number | null; repo: string; number: number; login: string; via: string; kind: string; parsed: string | null; line: string | null; at: string };
 
-/** Events oldest first; `lastPerRef` keeps the newest n of each item. */
-export async function loadEvents(db: Db, refs: { repo: string; number: number }[], o: { lastPerRef?: number; kinds?: WorkflowEventKind[] } = {}): Promise<Map<RefKey, StoredEvent[]>> {
+type EventFilter = { lastPerRef?: number; kinds?: WorkflowEventKind[] };
+/**
+ * Events in the order written; `lastPerRef` keeps the newest n of each item. `archived` adds the history of the decision system before the
+ * maintainer workflow, whose rows are written later than their `at`.
+ */
+export async function loadEvents(db: Db, refs: { repo: string; number: number }[], o: EventFilter & { archived: true }): Promise<Map<RefKey, StoredEvent[]>>;
+export async function loadEvents(db: Db, refs: { repo: string; number: number }[], o?: EventFilter): Promise<Map<RefKey, SaidEvent[]>>;
+export async function loadEvents(db: Db, refs: { repo: string; number: number }[], o: EventFilter & { archived?: true } = {}): Promise<Map<RefKey, StoredEvent[]>> {
   const out = new Map<RefKey, StoredEvent[]>();
   if (refs.length === 0 || o.kinds?.length === 0) return out;
   const q = queryDb(db);
@@ -205,6 +211,7 @@ export async function loadEvents(db: Db, refs: { repo: string; number: number }[
   const base = k.selectFrom("main.workflow_events as e")
     .select(["e.id", "e.workflow_id", "e.repo", "e.number", "e.login", "e.via", "e.kind", "e.parsed", "e.line", "e.at"])
     .where(kx.refIn(db, "e", pairs(refs)))
+    .$if(!o.archived, (b: any) => b.where((eb: any) => notArchived(eb, "e.kind")))
     .$if(!!o.kinds, (b: any) => b.where(kx.inList(db, "e.kind", o.kinds!)));
   const query = o.lastPerRef === undefined
     ? base.orderBy("e.id")
@@ -219,14 +226,14 @@ export async function loadEvents(db: Db, refs: { repo: string; number: number }[
   return out;
 }
 
-/** Latest event kind per item, archived rows aside: they are written later than what they record. */
+/** Latest event kind per item. */
 export async function loadLastEventKinds(db: Db, keys: KeySource): Promise<Map<RefKey, WorkflowEventKind>> {
   const out = new Map<RefKey, WorkflowEventKind>();
   if (isEmpty(keys)) return out;
   const q = queryDb(db);
   const k = q.k as any;
   const newest = k.selectFrom("main.workflow_events as m").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "m.repo").onRef("kk.number", "=", "m.number"))
-    .select((eb: any) => eb.fn.max("m.id").as("id")).where("m.kind", "<>", "archived").groupBy(["m.repo", "m.number"]);
+    .select((eb: any) => eb.fn.max("m.id").as("id")).where((eb: any) => notArchived(eb, "m.kind")).groupBy(["m.repo", "m.number"]);
   for (const r of await q.all(k.selectFrom("main.workflow_events as e").select(["e.repo", "e.number", "e.kind"]).where("e.id", "in", newest)) as { repo: string; number: number; kind: string }[]) {
     out.set(refKey(r.repo, Number(r.number)), r.kind as WorkflowEventKind);
   }
@@ -265,7 +272,8 @@ export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: str
 /** Command rate limit count: events of `login` on `via` after `since`. */
 export async function countEventsSince(db: Db, c: { login: string; via: Surface; since: string }): Promise<number> {
   const q = queryDb(db);
-  const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", c.login).where("via", "=", c.via).where("at", ">", c.since));
+  const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", c.login).where("via", "=", c.via).where("at", ">", c.since)
+    .where((eb) => notArchived(eb, "kind")));
   return Number(r?.n ?? 0);
 }
 

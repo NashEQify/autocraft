@@ -1,11 +1,11 @@
 // One-item reads of the maintainer workflow's rows (item_workflows, workflow_events) over the workflow module. Code that works on
 // many items calls the module's set loaders (src/data/workflow) directly; callers change a row only through the command core.
-import { listWorkflows, loadEvents, loadWorkflowHistory, recordEvents, saveWorkflows, startWorkflows, workflowOf, type StoredEvent, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { listWorkflows, loadEvents, loadWorkflowHistory, recordEvents, saveWorkflows, startWorkflows, workflowOf, type SaidEvent, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { WEIGHT_NORMAL, type ItemWorkflow, type WorkflowState } from "./types.ts";
 
 export { workflowOf };
-export type { StoredEvent, WorkflowEvent };
+export type { SaidEvent, WorkflowEvent };
 export type { WorkflowPatch };
 
 /** States of a live row; the unique index item_workflows_live allows one per item. */
@@ -27,9 +27,9 @@ export async function workflowHistory(db: Db, repo: string, number: number): Pro
   return (await loadWorkflowHistory(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
 }
 
-/** The item's events, oldest first, archived rows aside. */
-export async function eventsOf(db: Db, repo: string, number: number): Promise<StoredEvent[]> {
-  return ((await loadEvents(db, [{ repo, number }])).get(`${repo}#${number}`) ?? []).filter((e) => e.kind !== "archived");
+/** The item's events, oldest first. */
+export async function eventsOf(db: Db, repo: string, number: number): Promise<SaidEvent[]> {
+  return (await loadEvents(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
 }
 
 export async function addEvent(db: Db, e: WorkflowEvent): Promise<void> {
