@@ -42,6 +42,8 @@ export type Recommendation = {
   close?: boolean;
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
+  /** The PR conflicts with its base branch, and this one has to resolve it: a yes approves the merge, and nothing is fixed or merged before. */
+  waits?: "contributor" | "person";
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */

@@ -18,7 +18,7 @@ import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
-import { decidePr, fixedAfterMerge, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
+import { conflictPath, decidePr, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { approvedHead, chainsOwn, reviewOwed, type RecordedPush } from "../core/evidence.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -74,8 +74,13 @@ const key = (repo: string, n: number): string => `${repo}#${n}`;
 /** Whether our own pushes lead from `from` to `to`. */
 const ownChain = (pass: Pass, ref: string, from: string, to: string): boolean => chainsOwn(pass.moves.get(ref) ?? [], from, to);
 
-type Review = { at: string; verdict: string; sure: boolean; fixes: ReviewRow["fixes"]; workflow: ReviewRow["workflow"] };
-const reviewAt = (pass: Pass, ref: string, head: string): Review | null => pass.reviews.get(ref)?.find((r) => r.head === head) ?? null;
+const reviewAt = (pass: Pass, ref: string, head: string): ReviewRow | null => pass.reviews.get(ref)?.find((r) => r.head === head) ?? null;
+
+/** When a model read what the review says: a review carried over our own push says nothing a person has not been asked about at the head it was carried from. */
+function readAt(pass: Pass, ref: string, r: ReviewRow): string {
+  const from = r.mode === "carried" && r.base_head !== null ? reviewAt(pass, ref, r.base_head) : null;
+  return from && from.at < r.at ? readAt(pass, ref, from) : r.at;
+}
 
 /** Tries of a step on the PR that failed after `since`. */
 function failures(pass: Pass, ref: string, since: string): { step: string; count: number }[] {
@@ -136,8 +141,8 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
       await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, fromHead: approvedHead(pass.moves.get(key(repo, pr)) ?? [], head, since), workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
-      // A leg that became active meanwhile is adopted, or waited for, on the next pass.
-      if (e instanceof PreapprovalRefused) return e.active ? null : e.message;
+      // A leg that became active meanwhile is adopted, or waited for, on the next pass, and a draft is waited for as with a leg.
+      if (e instanceof PreapprovalRefused) return e.active || e.draft ? null : e.message;
       throw e;
     }
   } else if (active.workflow_id === null) writes.adopt.push({ id: active.id, workflowId: w.id });
@@ -414,14 +419,15 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     else beyond = implementationBeyond(pass, w, target);
   }
   const approved = w.approvedBy !== null;
-  const fresh = review && review.at > since ? review : null;
+  const fresh = review && readAt(pass, ref, review) > since ? review : null;
   const fixed = pushedWork(pass, w, ref, since, agreed);
   const f = pass.facts.get(ref);
-  const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { fixedAfter: fixedAfterMerge(f) } : null;
+  const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts), conflict);
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
-    review: fresh ? { verdict: fresh.verdict, sure: fresh.sure, majors: plan.filter((p) => p.major && p.state === "planned").map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0 } : null,
+    // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.
+    review: fresh ? { verdict: fresh.verdict, sure: fresh.sure, majors: leg === "fixup" ? [] : plan.filter((p) => p.major && p.state === "planned").map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0 } : null,
     failures: failures(pass, ref, since),
     fix: fixed.fix,
     plannedFiles: fixed.plannedFiles,

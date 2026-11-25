@@ -133,6 +133,7 @@ export function yesClause(rec: Recommendation): string | null {
     const what = rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   }
+  if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
   const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
@@ -180,8 +181,9 @@ function byText(how: Run["how"], login: string, time: string): string {
 /**
  * The one-line confirmation of an accepted command, the same on every surface:
  * "Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply stop to halt."
+ * `waits`: who has to resolve the PR's conflict with its base branch before anything is fixed or merged.
  */
-export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock): string {
+export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock, waits: Recommendation["waits"] | null = null): string {
   const who = byText(r.how, by, clock(at));
   if (r.end === "stop") return t("Stopped {by}. Nothing more runs.", { by: who });
   if (r.end === "close") {
@@ -201,7 +203,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.start === "fixup") did.push(t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
-  else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
   if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {
@@ -211,6 +213,8 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   }
   const end = r.start === "merge"
     ? t("updating from main, then merging in the next batch when CI is green")
+    : waits
+      ? waits === "contributor" ? t("keeping the merge approved until the contributor resolves the conflict with the base branch") : t("keeping the merge approved until someone resolves the conflict with the base branch")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
