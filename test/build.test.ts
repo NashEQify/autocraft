@@ -118,7 +118,7 @@ describe("worker API", () => {
   test("a task queued again belongs to the job that queues it, and a full queue refuses it as a status error", async () => {
     await clear();
     const id = await task();
-    setCallContext({ jobId: 77, step: "verify", stage: "verify", class: 0, cancelled: async () => false });
+    setCallContext({ jobId: 77, step: "verify", stage: 5, class: 0, cancelled: async () => false });
     try {
       assert.equal((await getTask(db, await cloneTask(db, id)))!.jobId, 77);
     } finally { setCallContext(null); }

@@ -31,7 +31,7 @@ import { longLivedAll } from "../fixup/pushable.ts";
 import type { Settled } from "../classify/settled.ts";
 import { redMainRepos } from "../mainci/index.ts";
 import { loadBlockerReads, type BlockerReads } from "../review/blockers.ts";
-import { CARRIED } from "../review/carry.ts";
+import { CARRIED, carriedReviews, type Carried } from "../review/carry.ts";
 import { loadHoldInputs } from "../review/gate.ts";
 import { postSourcesOf } from "../review/post-source.ts";
 import { tiersOf } from "../whitelist.ts";
@@ -87,6 +87,8 @@ export type PrPassData = {
   /** Tiers of the authors of the PRs in scope. */
   tiers: Awaited<ReturnType<typeof tiersOf>>;
   postSource: Awaited<ReturnType<typeof postSourcesOf>>;
+  /** The reviews that may carry to the PR's head (`carryHead`), whether or not they are stale. */
+  carried: Map<RefKey, Carried>;
 };
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -161,6 +163,8 @@ export type PrPassOptions = {
   dupes?: SharedDupes | undefined;
   /** From the loaded rows, the PR's current head when its live workflow's entry is merge: its pre-merge rows are read there. */
   mergeEntryHead: (d: PrPassData, key: RefKey) => string | null;
+  /** The head of an open PR that its latest review, of another head, may carry to; null when there is none. */
+  carryHead: (d: PrPassData, key: RefKey) => string | null;
   /** From the loaded rows, the PRs whose facts are built, and of those the ones in scope (they alone need an author tier and a label). */
   rows: (d: PrPassData) => { all: RefKey[]; scoped: RefKey[] };
 };
@@ -184,7 +188,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
     inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
     tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
-    settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() },
+    settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() }, carried: new Map(),
   };
   await endWave();
 
@@ -221,7 +225,9 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   await endWave();
 
   const ids = statementIds(data.review, []);
-  if (ids.length) data.statements = await loadStatements(db, ids);
+  const toCarry = rows.all.flatMap((key) => { const head = o.carryHead(data, key); return head ? [{ ...asRef(key), head_oid: head }] : []; });
+  const [statements, carried] = await Promise.all([ids.length ? loadStatements(db, ids) : data.statements, carriedReviews(db, toCarry)]);
+  Object.assign(data, { statements, carried });
   return data;
 }
 

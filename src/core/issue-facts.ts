@@ -10,7 +10,7 @@ import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
-import { assignmentIn, ownPrSet, refreshTimes, weightScore } from "./facts.ts";
+import { assignmentIn, ownPrSet, refreshTimes, weightScore, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
@@ -95,22 +95,22 @@ function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<stri
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
 export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise<ItemFacts[]> {
-  return await db.read(async () => {
+  return await (await db.read(async () => {
     const base = opts.base ?? await loadPassBase(db, opts.run);
-    return (await inStep<[ItemFacts[]]>(db, (endWave) => itemFacts(db, { ...opts, base }, endWave)))[0];
-  });
+    return (await inStep<[FactsOf<ItemFacts>]>(db, (endWave) => itemFacts(db, { ...opts, base }, endWave)))[0];
+  }))();
 }
 
-/** loadItemFacts() as one load of a group that runs in step. */
-export async function itemFacts(db: Db, opts: ItemLoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<ItemFacts[]> {
+/** loadItemFacts() as one load of a group that runs in step: loads the rows and returns what builds the facts from them. */
+export async function itemFacts(db: Db, opts: ItemLoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<FactsOf<ItemFacts>> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
-  if (refs && !refs.size) return [];
+  if (refs && !refs.size) return async () => [];
   const model = opts.model ?? embedderId(modelName());
   const keys: KeySource = refs ? [...refs].map(asRef) : openItemKeys({ tracked: true, ...(opts.repo ? { repos: [opts.repo] } : {}) });
   const keep = { repo: opts.repo, refs };
   const d = await loadItemPass(db, keys, { now, base: opts.base, model, repo: opts.repo, dupes: opts.dupes, needs: (x) => needsOf(x, keep) }, endWave);
-  return await withConfig(db, async () => factsOf(db, d, rowsOf(d, keep)), { preload: d.control });
+  return () => withConfig(db, async () => factsOf(db, d, rowsOf(d, keep)), { preload: d.control });
 }
 
 function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): ItemFacts[] {

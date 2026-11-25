@@ -39,7 +39,7 @@ export async function postSource(db: Db, repo: string, number: number, head: str
 
 /**
  * postSource() for the given PRs ("repo#number"), with their reviews read once. The public text and claims are read for each PR's
- * latest head up front and for another head (a carried review's source) when the walk reaches it.
+ * latest head and the reviews it was carried from up front, and for another head when it is asked for.
  */
 export async function postSourcesOf(db: Db, refs: readonly string[]): Promise<(repo: string, number: number, head: string) => Promise<PostSource | null>> {
   const rows = new Map<string, ReviewRow>();
@@ -47,12 +47,16 @@ export async function postSourcesOf(db: Db, refs: readonly string[]): Promise<(r
   if (refs.length) {
     const keys = refs.map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) }));
     const all = await loadReviewRows(db, keys);
-    const latest: { repo: string; number: number; head: string }[] = [];
+    const heads: { repo: string; number: number; head: string }[] = [];
     for (const [ref, list] of all) {
       for (const r of list) rows.set(`${ref}@${r.head}`, r);
-      if (list[0]) latest.push({ repo: list[0].repo, number: list[0].number, head: list[0].head });
+      let r: ReviewRow | undefined = list[0];
+      for (let i = 0; r && i <= MAX_STEPS; i++) {
+        heads.push({ repo: r.repo, number: r.number, head: r.head });
+        r = isCarried(r) && r.base_head ? rows.get(`${ref}@${r.base_head}`) : undefined;
+      }
     }
-    for (const [k, t] of await loadReviewTexts(db, latest)) texts.set(k, t);
+    for (const [k, t] of await loadReviewTexts(db, heads)) texts.set(k, t);
   }
   const get = async (repo: string, number: number, h: string): Promise<Row | undefined> => {
     const k = `${repo}#${number}@${h}`, r = rows.get(k);

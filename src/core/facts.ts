@@ -2,7 +2,7 @@
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
 import { loadOwnLogins } from "../data/access/index.ts";
-import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
+import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
 import { prPass } from "../data/planner/index.ts";
@@ -20,7 +20,7 @@ import { parsePublic } from "../review/opus-parse.ts";
 import { rereadPaceAt } from "../review/diff.ts";
 import { slugOf } from "../owners.ts";
 import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
-import { CARRIED, carriedReviews } from "../review/carry.ts";
+import { CARRIED } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
@@ -96,6 +96,14 @@ function integrationOf(d: PrPassData, ref: string): boolean {
   return d.merge.batchPrs.has(ref) && !!m?.item.author && d.ownLogins.has(m.item.author.toLowerCase());
 }
 
+/** The head a PR's facts are about: an integration PR's is the batch tip, where the run approvals are recorded. */
+const headOf = (d: PrPassData, ref: string, m: Mirrored): string | null =>
+  (integrationOf(d, ref) ? d.merge.integration.get(ref)?.commitSha : undefined) ?? currentHead(m);
+
+/** Our own plain fix-up, or a base merge that left the diff the same, made `head`. */
+const madeByUs = (pushes: PushEdge[], head: string): boolean =>
+  pushes.some((e) => e.to === head && ((e.kind === "fixup" && e.source === null && e.state === "pushed") || (e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same")));
+
 /** The pass universe: open PRs, merged PRs with a take review or merged by us, PRs of a live implementation attempt. */
 function inUniverse(d: PrPassData, ref: string, state: string): boolean {
   if (state === "OPEN") return true;
@@ -111,14 +119,17 @@ export const ownPrSet = (mainFix: Set<string>, quiet: Set<string>, login: string
 
 /** Facts of every open PR (and merged PRs with a take or take-fix review, merged by us, or of a live implementation) of the keys given. One load for all PRs. */
 export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
-  return await db.read(async () => {
+  return await (await db.read(async () => {
     const base = opts.base ?? await loadPassBase(db, opts.run);
-    return (await inStep<[PrFacts[]]>(db, (endWave) => prFacts(db, { ...opts, base }, endWave)))[0];
-  });
+    return (await inStep<[FactsOf<PrFacts>]>(db, (endWave) => prFacts(db, { ...opts, base }, endWave)))[0];
+  }))();
 }
 
-/** loadPrFacts() as one load of a group that runs in step. */
-export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<PrFacts[]> {
+/** Builds the facts from rows already loaded: no statement, so a caller ends its read transaction first. */
+export type FactsOf<F> = () => Promise<F[]>;
+
+/** loadPrFacts() as one load of a group that runs in step: loads the rows and returns what builds the facts from them. */
+export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupes?: SharedDupes }, endWave: EndWave): Promise<FactsOf<PrFacts>> {
   const now = opts.now ?? Date.now();
   const refs = opts.refs ? new Set(opts.refs) : undefined;
   const keys: KeySource = opts.keys ?? (refs ? [...refs].map(asRef) : prPass(opts.repo));
@@ -126,6 +137,11 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     const m = d.mirror.get(ref);
     if (!m || m.item.kind !== "pr" || m.item.state !== "OPEN" || integrationOf(d, ref)) return null;
     return workflowFactOf(d, ref)?.entry === "merge" ? currentHead(m) : null;
+  };
+  const carryHead = (d: PrPassData, ref: string): string | null => {
+    const m = d.mirror.get(ref)!, latest = d.review.latest.get(ref);
+    const head = m.item.state === "OPEN" && latest ? headOf(d, ref, m) : null;
+    return head && head !== latest!.head && madeByUs(d.patches.get(ref)?.pushes ?? [], head) ? head : null;
   };
   const keep = (ref: string): boolean => (!opts.repo || asRef(ref).repo === opts.repo) && (!refs || refs.has(ref));
   const rowsOf = (d: PrPassData) => {
@@ -136,24 +152,20 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
   };
   // Clock-driven changes the facts below do not show as a time of their own (expiries, daily counts, cache lifetimes), per PR.
   const refresh = refreshTimes(now);
-  const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, dupes: opts.dupes, mergeEntryHead, rows: rowsOf }, endWave);
+  const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, dupes: opts.dupes, mergeEntryHead, carryHead, rows: rowsOf }, endWave);
   const ownPrs = ownPrSet(d.mainFixPrs, d.quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
   const openPrs = new Map([...d.mirror].filter(([, m]) => m.item.kind === "pr" && m.item.state === "OPEN").map(([ref, m]) => [ref, m.item] as const));
   const staleOf = (respectCap: boolean): Promise<Set<string>> => staleFrom({ facts: d.review, items: openPrs, repos: d.repos, reads: d.blockers }, respectCap, { now, refresh: refresh.soon });
-  return await withConfig(db, async () => {
+  return () => withConfig(db, async () => {
     const cfg = config(db);
     const ctx: Ctx = {
-      now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, toCarry: new Map(),
+      now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs,
       holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])) }, now),
     };
     const out: PrFacts[] = [];
     for (const ref of rowsOf(d).all) {
       const f = await buildPr(db, d, ref, d.mirror.get(ref)!, ctx);
       if (f) out.push(f);
-    }
-    if (ctx.toCarry.size) {
-      const carried = await carriedReviews(db, [...ctx.toCarry.values()], ctx.stale);
-      for (const f of out) if (carried.has(`${f.repo}#${f.number}`)) f.carriable = true;
     }
     // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
     const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
@@ -173,8 +185,6 @@ export type { PrTier };
 
 type Ctx = {
   now: number; refresh: ReturnType<typeof refreshTimes>; stale: Set<string>; staleActionable: Set<string>; ownPrs: Set<string>; holdOf: HoldCheck;
-  /** The PRs whose earlier review may carry to their head, which is read for all of them at once. */
-  toCarry: Map<string, { repo: string; number: number; head_oid: string }>;
 };
 
 function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"] {
@@ -209,11 +219,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const ciOf = (overall: string | null | undefined): string => effectiveCiWith(optional, overall ?? "none", ch?.checks ?? null);
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const fresh = !!ch?.fetched_at && (!i.updated_at || ch.fetched_at > i.updated_at);
-  // An integration PR's head is the batch tip, where the run approvals are recorded.
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
   const inScope = integration ? pipelineRepo || (!!batchRow && batchRow.members.length > 0 && batchRow.members.every((x) => d.inScope.has(`${repo}#${x.number}`))) : itemScope;
-  const head = batchRow?.commitSha ?? currentHead(m);
+  const head = headOf(d, ref, m);
   const patch = d.patches.get(ref) ?? { fixups: [], cifixes: [], conflicts: [], pushes: [] };
   const push = d.pushes.get(ref);
   const movedAt = head ? push?.movedOffAt.get(head) : undefined;
@@ -327,9 +336,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
       head: qh, at: qAt, verdict: verdict!, unsure, mode: latest!.mode, reason: latest!.reason ?? "", fixes: latest!.fixes.length,
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
-    // Our own plain fix-up, or a base merge that left the diff the same, made the head: the review of the earlier head may carry to it.
-    const ours = patch.pushes.some((e) => e.to === head && ((e.kind === "fixup" && e.source === null && e.state === "pushed") || (e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same")));
-    if (state === "OPEN" && head && head !== qh && ours) c.toCarry.set(ref, { repo, number, head_oid: head });
+    // A stale review does not carry: it has not read the discussion as it is now.
+    const carried = d.carried.get(ref);
+    if (carried && head !== qh && !c.stale.has(`${ref}@${carried.from}`)) base.carriable = true;
   }
   base.pushChain = chain;
   if (state === "OPEN" && (chain.length > 1 || (!!head && !!push?.pushed.has(head)))) base.inFlight = true;
