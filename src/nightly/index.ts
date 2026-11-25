@@ -11,7 +11,7 @@ import { createTask, getTask, TERMINAL } from "../build/tasks.ts";
 import { BuildError } from "../build/envs.ts";
 import type { By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
-import { issueMade, type GhRead } from "../github/made.ts";
+import { byUs, issueMade, type GhRead } from "../github/made.ts";
 import { createIssue, IssueError, PACE_MAX_WAIT_MS, unclearWrite } from "../github/write.ts";
 import { ghExec } from "../merge/safe-merge.ts";
 import { exec } from "../fixup/git.ts";
@@ -291,7 +291,7 @@ export async function openNightlyIssue(db: Db, o: { repo: string; checkId: strin
     }
     for (const a of began.filter((a) => unclearWrite(a.details))) {
       let made: { number: number; url: string } | null;
-      try { made = await issueMade(deps.read, { repo: o.repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at }); } catch (e) { return await lost(e); }
+      try { made = await issueMade(deps.read, { repo: o.repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at, mine: await byUs(db) }); } catch (e) { return await lost(e); }
       if (made) return await mark(made);
     }
   }

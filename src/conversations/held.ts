@@ -154,7 +154,7 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
       const reason = oneLine(e);
       // The network or GitHub is likely failing: the rest waits for the next run.
       if (!(e instanceof IssueError) || !e.clear) { s.unknown++; break; }
-      // The write pacing sent nothing: no try is counted; the job fails with the pacing message, which the failure backoff ignores, so the next pass runs it again.
+      // The write pacing or a rate limit of GitHub's: nothing was made and no try is counted. The job fails; the failure backoff ignores the pacing's message, so the next pass runs it again.
       if (e.paced) {
         await markHeld(db, [{ id: h.id, from: "filing", set: { state: "held", attempts: h.attempts } }]);
         s.paced = reason;

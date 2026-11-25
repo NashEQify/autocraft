@@ -77,6 +77,8 @@ test("a row left in filing is settled from its audit row, and a merged PR files 
   assert.deepEqual(filingOutcome(await due(), later), { state: "held" }, "another row's create does not settle this one");
   await audit("act-open-issue", "2025-12-31T08:00:00Z", "app#1", JSON.stringify({ held: id, state: "failed", error: "HTTP 403" }));
   assert.deepEqual(filingOutcome(await due(), later), { state: "held" }, "a refused earlier try does not settle this filing");
+  await audit("act-open-issue", "2026-01-02T08:01:10Z", "app#1", JSON.stringify({ held: id, state: "failed", error: "GraphQL: API rate limit already exceeded" }));
+  assert.deepEqual(filingOutcome(await due(), later), { state: "held" }, "a create GitHub refused made nothing");
   for (const state of ["started", "failed"]) {
     await audit("act-open-issue", "2026-01-02T08:01:30Z", "app#1", JSON.stringify({ held: id, state }));
     assert.equal(filingOutcome(await due(), later), null, `a create that is ${state} may have opened the issue`);

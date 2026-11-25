@@ -519,8 +519,14 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     await rec.set(c, kind, "pushed", null, { files: v.files, toHead: commit });
     summary.pushed.push(ref);
     log(`  ${ref}: pushed ${short(commit)} on ${short(head)}: ${v.files.join(", ")}`);
-    const cm = await ghComment(gw, g, d.exec, "cifix-comment", { repo, number: c.number, pr: true }, kind === "format" ? { by: "fixed" } : codeNote, commentText(v.files), { run: runId });
-    if (cm.code !== 0) log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
+    // The push is recorded: a comment that throws must not record the fix as failed.
+    try {
+      const cm = await ghComment(gw, g, d.exec, "cifix-comment", { repo, number: c.number, pr: true }, kind === "format" ? { by: "fixed" } : codeNote, commentText(v.files), { run: runId, to: commit });
+      if (cm.code !== 0) log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
+    } catch (e) {
+      if (isHalt(e)) throw e;
+      log(`  ${ref}: comment failed: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`);
+    }
   };
 
   /** The formatter task ended: its diff, if any, is validated and delivered. Every exit records a state, which closes the `formatting` row. */

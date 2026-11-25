@@ -353,6 +353,8 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     if (!release) return;
     const ref = refOf(c);
     let files = [...new Set(c.fixes.map((f) => f.file))];
+    // The push is recorded: what fails after it (the comment) changes nothing about it.
+    let pushed = false;
     const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
       const reason = scrubReason(raw, d.root);
       await rec.fixup(c, state, reason, files);
@@ -518,6 +520,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         return;
       }
       await rec.fixup(c, "pushed", testsNote, v.files, commit);
+      pushed = true;
       summary.pushed.push(ref);
       await jobItem(db, repo, c.number, `pushed ${short(commit)} on ${short(head)}: ${v.files.join(", ")}`, log);
 
@@ -528,10 +531,11 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const prevLines = prev ? fixupCommentLines(prev.body) : null;
       const cm = prev && prevLines
         ? await ghEditComment(gw, g, d.exec, "fixup-comment-edit", { repo, number: c.number, commentId: prev.id }, note, fixupCommentEdited(prevLines, v.files), { run: runId })
-        : await ghComment(gw, g, d.exec, "fixup-comment", { repo, number: c.number, pr: true }, note, body, { run: runId });
+        : await ghComment(gw, g, d.exec, "fixup-comment", { repo, number: c.number, pr: true }, note, body, { run: runId, to: commit });
       if (cm.code !== 0) log(`  ${ref}: comment failed: ${oneLine(cm.stderr)}`);
     } catch (e) {
       if (isHalt(e)) throw e;
+      if (pushed) { log(`  ${ref}: after the push: ${scrubReason(oneLine(String((e as Error).message ?? e)), d.root)}`); return; }
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
       try { await release(); } finally { giveBack(); }

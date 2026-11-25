@@ -18,7 +18,7 @@ import { loadMainCiAt } from "../data/mirror/index.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { exec, fixupDir, type Exec } from "../fixup/git.ts";
-import { issueMade } from "../github/made.ts";
+import { byUs, issueMade } from "../github/made.ts";
 import { createIssue, ghRerunMainFailed, IssueError, unclearWrite, type Writer } from "../github/write.ts";
 import { askClaude, saveUsage, type Usage } from "../classify/run.ts";
 import { checkoutForCommit } from "../sandbox/index.ts";
@@ -132,6 +132,9 @@ const codeState = (why: string) => ({ verdict: "code" as const, state: "needs-fi
 
 type Current = { headSha: string; branch: string; state: string; culprit: string; culpritPr: number | null; redSince: string; /** When the culprit was first seen: everything recorded about this red streak is from then on. */ culpritAt: string; stateChangedAt: string };
 
+/** The head's CI ended. */
+const known = (c: Current): boolean => c.state === "red" || c.state === "green" || c.state === "optional";
+
 /** The default branch's head of each of `repos` that has one read. */
 async function currentHeads(db: Db, repos: readonly string[]): Promise<Map<string, Current>> {
   const wanted = new Set(repos);
@@ -155,8 +158,8 @@ export async function mainFixDueRepos(db: Db, repos: readonly string[]): Promise
     const cur = heads.get(repo)!, due = facts.get(`${repo}@${cur.headSha}`)!;
     // A stored patch is collected once its lint task ended, or closed when its head is no longer the current one.
     if (cur.state !== "running" && await lintReadyIn(db, due.lintingHeads, cur.headSha)) return true;
-    // An issue whose create was interrupted is settled whatever the head is now.
-    if (due.opening) return true;
+    // An issue whose create was interrupted or held back is settled once the head's result is known.
+    if (due.opening && known(cur)) return true;
     if (cur.state === "red") return due.rows.length === 0 || due.rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
     // A row left at needs-fix by an older head is closed by the next run.
     return due.rows.some((r) => r.state === "rerun-requested") || due.staleNeedsFix;
@@ -262,10 +265,12 @@ async function openInfraIssue(db: Db, repo: string, check: string, cur: Current,
   const began = (await listAudit(db, { actions: ["postmerge-file"], targets: rows.map(issueTarget), order: "desc" })).filter((a) => a.details?.check === check && a.at >= rows[0]!.createdAt);
   const done = began.map((a) => /\/issues\/(\d+)$/.exec(a.details?.state === "done" ? String(a.details.url ?? "") : "")).find((m) => m !== null);
   if (done) return await end("issue-opened", { issueNumber: Number(done[1]) });
+  // The next result tells whether the streak goes on.
+  if (!known(cur)) return null;
   for (const a of began.filter((a) => unclearWrite(a.details))) {
     let made: { number: number; url: string } | null;
     try {
-      made = await issueMade(deps.gh, { repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at });
+      made = await issueMade(deps.gh, { repo, title: String(a.details?.title ?? ""), body: String(a.details?.text ?? ""), since: a.at, mine: await byUs(db) });
     } catch (e) { return `${repo}: whether the issue for ${check} was opened is not known: ${oneLine(String((e as Error).message ?? e))}`; }
     if (made) { log(`  ${repo}: the issue for ${check} was opened before: ${made.url}`); return await end("issue-opened", { issueNumber: made.number }); }
   }

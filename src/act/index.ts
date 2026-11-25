@@ -23,7 +23,7 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import type { Exec } from "../fixup/git.ts";
 import { authFailure, laneForAction, noWriteReason, setExecState, SIGN_IN_REASON, type LaneDeps } from "../github/user-lane.ts";
-import { closeItem, commentOn, duplicateClose, WritePacedError, type CloseHow, type Writer } from "../github/write.ts";
+import { closeItem, commentOn, duplicateClose, UnsettledError, WritePacedError, type CloseHow, type Writer } from "../github/write.ts";
 import { Client, Transient, type Querier } from "../mirror.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { commentApprovalOf } from "./approval.ts";
@@ -81,6 +81,7 @@ const stands = async (db: Db, a: DueAction): Promise<boolean> =>
 /** An error that points at GitHub or the network, not at the target: a 5xx status, a timeout, a dropped connection or a rate limit. */
 export function githubWide(e: unknown): boolean {
   if (e instanceof Transient) return true;
+  if (e instanceof UnsettledError) return githubWide(e.cause);
   const status = Number((e as { status?: unknown })?.status ?? 0);
   if (status >= 500 || status === 429) return true;
   return /\b(HTTP|status)\s*:?\s*5\d\d\b|timed? ?out|ETIMEDOUT|ECONN\w*|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network|rate.?limit|abuse detection|bad gateway|service unavailable/i.test(String((e as Error)?.message ?? e));

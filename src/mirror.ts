@@ -168,8 +168,10 @@ export class Client {
     } catch {
       // gh prints errors on stderr when there is no JSON body
     }
-    const text = `${p.stdout.length < 5000 ? p.stdout : ""}${p.stderr}`.toLowerCase();
-    return { data: json.data, errors: json.errors ?? [], text, failed: p.status !== 0, stderr: p.stderr };
+    // Never the data: it holds text people wrote. gh writes GitHub's error message to stderr.
+    const errors: Node[] = json.errors ?? [];
+    const text = `${p.stderr}${errors.length ? JSON.stringify(errors) : ""}`.toLowerCase();
+    return { data: json.data, errors, text, failed: p.status !== 0, stderr: p.stderr };
   }
 
   /** The `owner/name` GitHub's REST endpoint redirects a moved repo to, or null when it does not answer with another name. */
@@ -189,7 +191,7 @@ export class Client {
       await this.sleepUntilReset(`${this.remaining} points left, reserve ${this.reserve}`);
     }
     const r = await this.run(query, variables, env);
-    if (r.text.includes("secondary rate limit") || r.text.includes("abuse")) {
+    if ((r.failed || r.errors.length > 0) && (r.text.includes("secondary rate limit") || r.text.includes("abuse"))) {
       console.log("  secondary rate limit: sleeping 90s");
       await sleep(90_000);
       throw new Transient("secondary");
