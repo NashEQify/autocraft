@@ -55,7 +55,7 @@ export async function loadActRoom(db: Db, now: Date): Promise<ActRoom> {
   const reset = limits.get("act")?.resetAt;
   const [used, written] = await db.together(() => Promise.all([
     control.loadActUsage(db, reset && reset > day ? reset : day),
-    running.length ? control.countCardWrites(db, running.map((r) => String(r.id))) : Promise.resolve(new Map<number, number>()),
+    running.length ? control.countCardWrites(db, running.map((r) => ({ id: r.id, since: r.acted_at ?? undefined }))) : Promise.resolve(new Map<number, number>()),
   ]));
   return { limit, used, running: running.map((r): RunningCard => ({ id: r.id, params: r.params, text: r.text, queue_args: r.queue_args, written: written.get(r.id) ?? 0 })) };
 }

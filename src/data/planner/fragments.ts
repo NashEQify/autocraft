@@ -5,7 +5,8 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { schemaEb, type Eb } from "../../db/kx.ts";
 import { PASS_SOURCES, registerKeySource, resolveKeys, type KeyRow, type KeySource, type Ref } from "../keys.ts";
-import { ENDED_STATES } from "../implement/types.ts";
+import { attemptOfPr } from "../implement/fragments.ts";
+import { itemsOfRepos } from "../mirror/fragments.ts";
 import { hasTakeReview } from "../review/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { mergedByUs } from "../merge/fragments.ts";
@@ -21,19 +22,19 @@ const QUEUE_STATES = [
   "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested", "waiting-main-ci",
 ] as const;
 
-registerKeySource<undefined>(PASS_SOURCES.full, (db) => {
-  const k = queryDb(db).k;
-  return k.selectFrom("items as i").select(["i.repo as repo", "i.number as number"])
-    .where((eb) => eb.or([
-      eb.and([eb("i.kind", "=", "pr"), eb.or([
-        eb("i.state", "=", "OPEN"),
-        eb.and([eb("i.state", "=", "MERGED"), hasTakeReview(eb, "i.repo", "i.number")]),
-        mergedByUs(eb, "i.repo", "i.number"),
-        eb.exists(eb.selectFrom("implementations as im").select(eb.lit(1).as("one")).whereRef("im.repo", "=", "i.repo").whereRef("im.pr_number", "=", "i.number").where("im.state", "not in", [...ENDED_STATES])),
+registerKeySource<undefined>(PASS_SOURCES.full, (db) =>
+  // The mirror's item rows (alias `ir`), narrowed to the pass universe: open PRs, merged PRs with a take review or merged by us, PRs of
+  // a current implementation attempt, and open issues of tracked repos.
+  itemsOfRepos(db).clearSelect().select(["ir.repo as repo", "ir.number as number"])
+    .where((eb: any) => eb.or([
+      eb.and([eb("ir.kind", "=", "pr"), eb.or([
+        eb("ir.state", "=", "OPEN"),
+        eb.and([eb("ir.state", "=", "MERGED"), hasTakeReview(eb, "ir.repo", "ir.number")]),
+        mergedByUs(eb, "ir.repo", "ir.number"),
+        attemptOfPr(eb, eb.ref("ir.repo"), eb.ref("ir.number"), { current: true }),
       ])]),
-      eb.and([eb("i.kind", "=", "issue"), eb("i.state", "=", "OPEN"), trackedRepo(eb, "i.repo")]),
-    ])) as SelectQueryBuilder<any, any, KeyRow>;
-});
+      eb.and([eb("ir.kind", "=", "issue"), eb("ir.state", "=", "OPEN"), trackedRepo(eb, "ir.repo")]),
+    ])) as unknown as SelectQueryBuilder<any, any, KeyRow>);
 
 registerKeySource<{ due: Ref[]; seen: number }>(PASS_SOURCES.changed, (db, args) => {
   const k = queryDb(db).k;

@@ -1,8 +1,8 @@
 // Predicates other modules embed.
-import type { Expression, SelectQueryBuilder, SqlBool } from "kysely";
+import { sql, type Expression, type RawBuilder, type SelectQueryBuilder, type SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { ref, schemaEb, type Eb, type Ex } from "../../db/kx.ts";
+import { exprOf, ref, schemaEb, type AnyEb, type Eb, type Ex } from "../../db/kx.ts";
 
 import { earlierRunCall as jobsEarlierRunCall, resumingJobs } from "../jobs/fragments.ts";
 
@@ -11,6 +11,11 @@ const MANUAL_ONLY_KEY = "manual_only";
 /** The run of the call's live lease: only calls queued under it are served. */
 export function leasedRunOf(db: Db, callId: number): SelectQueryBuilder<any, any, { run_id: number | null }> {
   return queryDb(db).k.selectFrom("remote_calls").select("run_id").where("id", "=", callId).where("state", "=", "leased");
+}
+
+/** The run of the call in any state: what its last lease ran under. */
+export function runOfCall(db: Db, callId: number): SelectQueryBuilder<any, any, { run_id: number | null }> {
+  return queryDb(db).k.selectFrom("remote_calls").select("run_id").where("id", "=", callId);
 }
 
 /** A `remote_calls` row (unaliased) that a resumed run may adopt: open, or answered and not yet read. */
@@ -43,4 +48,18 @@ export function userSettingExpr(eb: Eb, loginCol: Ex, key: string, value?: strin
   const w = schemaEb(eb);
   return w.exists(w.selectFrom("user_settings as us").select(w.lit(1).as("one")).where("us.login", "=", ref<string>(loginCol)).where("us.key", "=", key)
     .$if(value !== undefined, (q) => q.where("us.value", "=", value!)));
+}
+
+/** Scalar: 1 when a call of the job waits in the queue for a caller that polls it (seen within `staleMs`), else 0. */
+export function remoteQueuedOf(eb: AnyEb, jobIdRef: Ex, nowMs: number, staleMs: number): RawBuilder<number> {
+  const t = schemaEb(eb);
+  return sql<number>`${eb.fn.coalesce(t.selectFrom("main.remote_calls as rq").select((e) =>
+    e.fn.max<number>(e.case().when(e.and([e("rq.state", "=", "queued"), e("rq.seen_at", ">=", nowMs - staleMs)])).then(e.lit(1)).else(e.lit(0)).end()).as("q"))
+    .where("rq.job_id", "=", exprOf(eb, jobIdRef)), eb.lit(0))}`;
+}
+
+/** Scalar: when the job's latest remote call was leased (ms), or null. */
+export function lastLeaseOf(eb: AnyEb, jobIdRef: Ex): RawBuilder<number | null> {
+  return sql<number | null>`${schemaEb(eb).selectFrom("main.remote_calls as rl").select((e) => e.fn.max<number | null>("rl.leased_at").as("l"))
+    .where("rl.job_id", "=", exprOf(eb, jobIdRef))}`;
 }

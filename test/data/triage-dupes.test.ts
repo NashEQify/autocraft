@@ -5,6 +5,9 @@ import type { Db, Dialect } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
+import { compareOf, dueSets } from "../../src/data/triage/dupe-sets.ts";
+import { loadTriageFacts } from "../../src/data/triage/facts.ts";
+import type { DupeMember, DupeState } from "../../src/data/triage/types.ts";
 import {
   listDisagreements, loadClassifiedCount, loadClassifierReport, loadDupeSignals, loadDupeState, loadDuplicatesOf, loadScanContext, loadUncheckedPairCounts, loadUncheckedPairs,
   loadVerdictStamp, markComparisonsStale, saveComparisons, saveDrops, saveDupeGroups, savePairVerdicts, saveScans,
@@ -134,6 +137,10 @@ test("duplicate loaders and writers issue the same number of statements at 2 and
   await expectFlat(unit((db, n) => loadDupeSignals(db, items(n)), duplicates), 2, 12);
   await expectFlat(unit((db, n) => loadDuplicatesOf(db, items(n)), duplicates), 2, 12);
   await expectFlat(unit((db, n) => saveComparisons(db, pairs(n).map((p) => ({ repo: "app", key: `issue:${p.a},${p.b}`, kind: "issue" as const, members: [p.a, p.b], hash: "h", kept: p.a, source: "model", model: null, reason: null, result: null, error: null, attempts: 1, at: T0, summary: null, why: null, sizes: null, heads: null })))), 2, 12);
+  await expectFlat(unit(async (db, n) => {
+    const r = await loadTriageFacts(db, items(n), { model: "m", run: null, nowMs: Date.parse(T0) });
+    assert.equal(r.facts.get("app#1")!.compare, "model", "a duplicate pair with no comparison is due for the model");
+  }, duplicates), 2, 12);
   await expectFlat(unit((db, n) => saveDrops(db, pairs(n).map((p) => ({ repo: "app", key: `issue:${p.a},${p.b}`, hash: "h", at: T0 })))), 2, 12);
 });
 
@@ -181,4 +188,32 @@ test("the classifier read models issue the same number of statements at 2 and 12
   await expectFlat(unit((db) => loadClassifierReport(db, { hidden: [] })), 2, 12);
   await expectFlat(unit((db) => listDisagreements(db, { run: "r1", a: "jev", b: "haiku", hidden: [], limit: 50, offset: 0 })), 2, 12);
   await expectFlat(unit((db) => loadClassifiedCount(db, { run: "r1" })), 2, 12);
+});
+
+test("due comparison sets: an uncompared set is due for the model, a fresh rule result waits for its retry, a dropped snapshot pauses", () => {
+  const member = (number: number, o: Partial<DupeMember> = {}): DupeMember => ({
+    repo: "o/a", number, kind: "issue", state: "OPEN", title: null, head_oid: null, embed_hash: `e${number}`, comments_count: 0, additions: null, deletions: null,
+    closing_issues: null, state_reason: null, in_scope: true, ...o,
+  });
+  const now = Date.parse("2026-03-01T12:00:00.000Z");
+  const edge = (a: number, b: number) => ({ repo: "o/a", a, b, similarity: 0.9, jev_p: null, haiku: null });
+  const base = (members: DupeMember[]): DupeState => ({ edges: [edge(1, 2), edge(3, 4)], members: new Map(members.map((m) => [`o/a#${m.number}`, m])), comparisons: new Map(), drops: new Map() });
+  const state = base([member(1), member(2), member(3), member(4, { state: "CLOSED" })]);
+  const fresh = dueSets(state, now);
+  assert.deepEqual(fresh.sets.map((s) => s.key), ["issue:1,2", "issue:3,4"]);
+  assert.deepEqual([...compareOf(fresh.sets)], [["o/a#1", "model"], ["o/a#2", "model"], ["o/a#3", "rule"], ["o/a#4", "rule"]]);
+
+  const [set12] = fresh.sets;
+  const ruleAt = new Date(now - 60_000).toISOString();
+  state.comparisons.set(`o/a\n${set12!.key}`, { repo: "o/a", key: set12!.key, kind: "issue", members: "[1,2]", hash: set12!.hash, kept: 1, source: "rule", model: null, reason: null,
+    result: null, error: null, attempts: 1, at: ruleAt, heads: null, summary: null, why: null, sizes: null });
+  state.drops.set(`o/a\n${fresh.sets[1]!.key}`, { hash: fresh.sets[1]!.hash, at: new Date(now - 60_000).toISOString() });
+  const waiting = dueSets(state, now);
+  assert.deepEqual(waiting.sets, []);
+  assert.equal(waiting.dueAt.get("o/a#1"), Date.parse(ruleAt) + 15 * 60_000);
+  assert.equal(waiting.dueAt.get("o/a#3"), now - 60_000 + 10 * 60_000);
+  assert.deepEqual(dueSets(state, now + 20 * 60_000).sets.map((s) => s.key), ["issue:1,2", "issue:3,4"], "both waits over");
+
+  const out = base([member(1, { in_scope: false }), member(2, { in_scope: false }), member(3), member(4, { state_reason: "DUPLICATE" })]);
+  assert.deepEqual(dueSets(out, now).sets.map((s) => s.key), ["issue:3"], "out of scope sets and items closed as duplicates are left out");
 });

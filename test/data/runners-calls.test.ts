@@ -1,5 +1,5 @@
 // The runners module's call lifecycle: statement counts of the hot paths (queue, claim, poll) and the lease's compare-and-set. Each case runs on SQLite,
-// and on Postgres when AUTOCRAFT_TEST_PG_URL names a server. Cases that read other modules' loaders skip until those are built.
+// and on Postgres when AUTOCRAFT_TEST_PG_URL names a server.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Db, Dialect } from "../../src/db/index.ts";
@@ -15,6 +15,7 @@ import { loadClaimFacts, loadLeaseSource } from "../../src/data/runners/calls-cl
 import { loadQueueFor } from "../../src/data/runners/calls-queue-load.ts";
 import { leaseCall } from "../../src/data/runners/calls-lease.ts";
 import type { LeaseRequest, NewCall } from "../../src/data/runners/types.ts";
+import { packPrompt } from "../../src/data/inference/types.ts";
 
 const dialects: Dialect[] = TEST_PG_URL ? ["sqlite", "postgres"] : ["sqlite"];
 const NOW = 1_700_000_000_000;
@@ -43,10 +44,6 @@ async function runners(db: Db, n: number): Promise<{ tokenId: number; login: str
   return out;
 }
 
-/** Whether the loaders of other modules this case reads exist yet. */
-async function built(fn: () => Promise<unknown>): Promise<boolean> {
-  try { await fn(); return true; } catch (e) { return !/not built/.test((e as Error).message); }
-}
 
 for (const dialect of dialects) {
   test(`enqueue writes one row per item set-based and keeps the item table equal to the items (${dialect})`, async () => {
@@ -73,11 +70,7 @@ for (const dialect of dialects) {
     }, 1, 8);
   });
 
-  test(`a claim reads its facts and the queue in a fixed number of statements (${dialect})`, async (c) => {
-    const probe = await fresh(dialect);
-    const ready = await built(async () => { const [r] = await runners(probe.db, 1); await loadClaimFacts(probe.db, { tokenId: r!.tokenId, login: r!.login, role: "maintainer" }, { now: NOW }); await loadQueueFor(probe.db, NOW); });
-    await probe.t.close();
-    if (!ready) return c.skip("needs the runners settings loaders and the inference run counts");
+  test(`a claim reads its facts and the queue in a fixed number of statements (${dialect})`, async () => {
     const claim = async (queued: number, runnerCount: number) => {
       const x = await fresh(dialect);
       const rs = await runners(x.db, runnerCount);
@@ -88,7 +81,7 @@ for (const dialect of dialects) {
     await expectFlat((n) => claim(2, n), 1, 4);
   });
 
-  test(`two claims of one call: exactly one leases it, and a login at its cap is refused (${dialect})`, async (c) => {
+  test(`two claims of one call: exactly one leases it, and a login at its cap is refused (${dialect})`, async () => {
     const { t, db } = await fresh(dialect);
     try {
       const [a, b] = await runners(db, 2);
@@ -96,14 +89,8 @@ for (const dialect of dialects) {
       const source = (await loadLeaseSource(db, id!))!;
       const req = (who: { tokenId: number; login: string }, callId: number, over: Partial<LeaseRequest> = {}): LeaseRequest => ({
         id: callId, caller: { ...who, role: "maintainer" }, claim: { harness: "claude", harnessVersion: "1", requestId: `req-${who.login}` }, model: "m", now: NOW,
-        caps: { perLogin: null, interactive: null }, started: false, clearIdle: false, source, prompt: "p", rewrite: null, live: () => true, ...over });
-      let results;
-      try {
-        results = await Promise.all([leaseCall(db, req(a!, id!)), leaseCall(db, req(b!, id!))]);
-      } catch (e) {
-        if (/not built/.test((e as Error).message)) return c.skip("needs inference.openRun");
-        throw e;
-      }
+        caps: { perLogin: null, interactive: null }, started: false, clearIdle: false, source, prompt: packPrompt("p", (x) => x), rewrite: null, live: () => true, ...over });
+      const results = await Promise.all([leaseCall(db, req(a!, id!)), leaseCall(db, req(b!, id!))]);
       assert.equal(results.filter((r) => typeof r === "object" && r !== null).length, 1, "one lease");
       assert.equal(results.filter((r) => r === null).length, 1, "the other claim found the call taken");
       const winner = results.findIndex((r) => r !== null) === 0 ? a! : b!;
@@ -115,19 +102,18 @@ for (const dialect of dialects) {
     } finally { await t.close(); }
   });
 
-  test(`a lease runs its life: heartbeat, lost lease back to the queue, failure, release, submit (${dialect})`, async (c) => {
+  test(`a lease runs its life: heartbeat, lost lease back to the queue, failure, release, submit (${dialect})`, async () => {
     const { t, db } = await fresh(dialect);
     try {
       const [a] = await runners(db, 1);
       const ids = await enqueueCalls(db, [call(1), call(2), call(3), call(4)], NOW);
       const lease = async (id: number, at: number) => {
         const r = await leaseCall(db, { id, caller: { ...a!, role: "maintainer" }, claim: { harness: "claude", harnessVersion: "1" }, model: "m", now: at, caps: { perLogin: null, interactive: null }, started: false, clearIdle: false,
-          source: (await loadLeaseSource(db, id))!, prompt: "p", rewrite: null, live: () => true });
+          source: (await loadLeaseSource(db, id))!, prompt: packPrompt("p", (x) => x), rewrite: null, live: () => true });
         assert.ok(typeof r === "object" && r !== null);
         return r;
       };
-      let l1;
-      try { l1 = await lease(ids[0]!, NOW); } catch (e) { if (/not built/.test((e as Error).message)) return c.skip("needs the inference run writers"); throw e; }
+      const l1 = await lease(ids[0]!, NOW);
       const live = (await loadLiveLease(db, l1.secret, NOW + 1000))!;
       assert.equal(live.id, ids[0]);
       assert.deepEqual(await heartbeatLease(db, l1.secret, { progress: "step", phase: "running" }, NOW + 1000), { runId: l1.runId });

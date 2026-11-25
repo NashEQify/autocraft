@@ -90,10 +90,14 @@ export async function markJevFailed(db: Db, rows: JevFailed[]): Promise<number> 
   return last.size;
 }
 
-/** Deletes `jev_failed` rows of items no longer in the mirror. */
+/**
+ * Deletes `jev_failed` rows of items no longer in the mirror or whose classify input changed since the failure (`class_hash` moved):
+ * a changed item is asked again.
+ */
 export async function pruneClassifyState(db: Db): Promise<number> {
   const q = queryDb(db);
-  const gone = (eb: kx.AnyEb) => eb.not(eb.exists(itemsOfRepos(db).whereRef("ir.repo", "=", "main.classify_state.repo" as never).whereRef("ir.number", "=", "main.classify_state.number" as never)));
+  const gone = (eb: kx.AnyEb) => eb.not(eb.exists(itemsOfRepos(db).whereRef("ir.repo", "=", "main.classify_state.repo" as never).whereRef("ir.number", "=", "main.classify_state.number" as never)
+    .whereRef("ir.class_hash" as never, "=", "main.classify_state.value" as never)));
   return Number((await q.run((q.k as any).deleteFrom("main.classify_state").where("kind", "=", "jev_failed").where(gone))).changes);
 }
 

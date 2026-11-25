@@ -4,7 +4,6 @@ import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { ciEq, indexedBy, literal, ref, schemaEb, type Eb, type Ex } from "../../db/kx.ts";
-import { loadItems } from "../mirror/index.ts";
 import { setRunProgress } from "../inference/index.ts";
 import { LIVE_STATES } from "../workflow/fragments.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
@@ -44,17 +43,6 @@ export async function loadRunnerRole(db: Db, tokenId: number, now: number): Prom
   const r = await q.get(q.k.selectFrom("main.mcp_tokens as t").innerJoin("main.access as a", "a.login", "t.login").leftJoin("main.remote_helpers as h", "h.token_id", "t.id")
     .select(["a.role", "h.idle_claim_at"]).where("t.id", "=", tokenId).where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(now).toISOString()));
   return r ? { role: r.role, idleClaimAt: r.idle_claim_at } : null;
-}
-
-/**
- * The lowercase logins that authored the items of each ref ("repo#number"). Provisional: the primary author only, until mirror
- * exports a loader that adds the commit authors and co-authors (`mirror.loadItemAuthors`).
- */
-export async function loadAuthors(db: Db, refs: { repo: string; number: number }[]): Promise<Map<string, string[]>> {
-  const rows = await loadItems(db, refs.map((r) => ({ repo: r.repo, number: r.number })), "card");
-  const out = new Map<string, string[]>();
-  for (const [key, item] of rows) if (item.author) out.set(key, [item.author.toLowerCase()]);
-  return out;
 }
 
 const LEASE_COLS = ["c.id", "c.job_id", "c.run_id", "c.user_login", "c.prompt_id", "c.items", "c.repo", "c.root", "c.lease_secret_hash", "c.token_id", "c.tier", "c.model", "c.asked_model", "c.step", "c.attempt", "c.max_attempts", "c.leased_at", "c.parent_id", "c.for_login", "c.refusals"] as const;

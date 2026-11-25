@@ -80,23 +80,31 @@ export async function endPermissions(db: Db, logins: Login[]): Promise<number> {
 }
 
 /**
- * Cached rows below write permission, checked within `PERM_READ_TTL` (Task Runner claim snapshot). Given logins, their rows;
- * given item keys, the rows of every login on the repos of those items. The map holds the permission.
+ * Cached rows below write permission, checked within `PERM_READ_TTL` (Task Runner claim snapshot), with the permission and when it was
+ * checked. Given logins, their rows; given `{ runners: true }`, the rows of every login with a live Task Runner credential (one
+ * statement, so the snapshot reads it in its own wave); given item keys, the rows of every login on the repos of those items.
  */
-export async function loadPermissionDenials(db: Db, logins: Login[] | KeySource, nowMs: number): Promise<Map<PermKey, string>> {
-  const out = new Map<PermKey, string>();
+export async function loadPermissionDenials(db: Db, logins: Login[] | { runners: true } | KeySource, nowMs: number): Promise<Map<PermKey, PermEntry>> {
+  const out = new Map<PermKey, PermEntry>();
+  const nowIso = new Date(nowMs).toISOString();
   const since = new Date(nowMs - PERM_READ_TTL).toISOString();
   const q = queryDb(db);
-  const base = () => q.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission"]).where("checked_at", ">", since)
+  const base = () => q.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where("checked_at", ">", since)
     .where("permission", "not in", [...WRITE_PERMISSIONS]);
+  const keep = (rows: { login: string; repo: string; permission: string; checked_at: string }[]): void => {
+    for (const r of rows) out.set(permKey(r.login, r.repo), { permission: r.permission, checkedAt: r.checked_at });
+  };
+  if (!Array.isArray(logins) && "runners" in logins) {
+    keep(await q.all(base().where("login", "in", (eb) => eb.selectFrom("main.mcp_tokens").select("login").where("kind", "=", "runner").where("expires_at", ">", nowIso))));
+    return out;
+  }
   if (Array.isArray(logins) && logins.every((l) => typeof l === "string")) {
-    for (const part of kx.chunks(logins as Login[])) for (const r of await q.all(base().where(kx.inList(db, "login", part, "citext")))) out.set(permKey(r.login, r.repo), r.permission);
+    for (const part of kx.chunks(logins as Login[])) keep(await q.all(base().where(kx.inList(db, "login", part, "citext"))));
     return out;
   }
   const keys = logins as KeySource;
   if (Array.isArray(keys) && !keys.length) return out;
-  const rows = await q.all(base().where((eb) => eb("repo", "in", eb.selectFrom(resolveKeys(db, keys, "kr")).select("kr.repo"))));
-  for (const r of rows) out.set(permKey(r.login, r.repo), r.permission);
+  keep(await q.all(base().where((eb) => eb("repo", "in", eb.selectFrom(resolveKeys(db, keys, "kr")).select("kr.repo")))));
   return out;
 }
 

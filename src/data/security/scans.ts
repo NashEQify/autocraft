@@ -5,7 +5,7 @@ import { queryDb, type QueryDb } from "../../db/query-db.ts";
 import type { RunVisibility } from "../inference/types.ts";
 import { loadItemRuns } from "../inference/index.ts";
 import { liveJobOfFinding, jobEnded } from "../jobs/fragments.ts";
-import { jobStateOf } from "./cross.ts";
+import { jobStateOf } from "../jobs/fragments.ts";
 import { advanceFindings } from "./findings.ts";
 import { clearRounds } from "./rounds.ts";
 import { briefCols, LISTED_NOT_IN, nowIso, severityRank } from "./internal.ts";

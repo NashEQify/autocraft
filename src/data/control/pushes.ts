@@ -5,7 +5,9 @@ import { queryDb } from "../../db/query-db.ts";
 import { BREAKER_WINDOW, breakerTripped, classifyPush, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
-import { closeMovedPushOutcomes, loadMainCiStates, loadOpenHeadPushes, loadStoredChecks } from "./cross.ts";
+import { loadChecks } from "../mirror/checks.ts";
+import { loadMainCi, loadMainCiAt } from "../mirror/mainci.ts";
+import { closeMovedPushOutcomes, loadOpenHeadPushes } from "./cross.ts";
 import { REPO_SETTINGS } from "./settings.ts";
 import { loadTrips, tripStage } from "./trips.ts";
 import type { NewPush, PushFacts, PushOutcomeRow, TripRow } from "./types.ts";
@@ -33,6 +35,18 @@ async function loadOptionalChecks(db: Db, repos: readonly string[]): Promise<(re
   return (repo) => REPO_SETTINGS.optionalChecks.read(rows.get(`${name}:${repo}`) ?? undefined) as string[];
 }
 
+/** The state of the default branch's newest head: by commit time (unknown last), then by when it was first seen. */
+function latestMainState(heads: { state: string; committed_at: string | null; first_seen_at: string }[]): string | undefined {
+  let best: (typeof heads)[number] | undefined;
+  for (const h of heads) {
+    if (!best) { best = h; continue; }
+    const a = h.committed_at, b = best.committed_at;
+    const newer = a !== null && b === null ? true : a === null && b !== null ? false : a !== b ? a! > b! : h.first_seen_at > best.first_seen_at;
+    if (newer) best = h;
+  }
+  return best?.state;
+}
+
 /**
  * Records pushes that succeeded: the required-check result at the head before each (from the stored checks, when they are for
  * that head). A branch the push created has no earlier head: it takes the CI result of the commit it was built on (`base`),
@@ -45,20 +59,22 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
   const list = [...first.values()];
   if (!list.length) return;
   const fresh = list.filter((p) => !p.from), moved = list.filter((p) => p.from && p.number !== null);
-  const [ci, stored, optional] = await db.together(() => Promise.all([
-    loadMainCiStates(db, { at: fresh.filter((p) => p.base).map((p) => [p.repo, p.base!] as const), latestOf: [...new Set(fresh.map((p) => p.repo))] }),
-    loadStoredChecks(db, moved.map((p) => [p.repo, p.number!] as const)),
+  const freshRepos = [...new Set(fresh.map((p) => p.repo))];
+  const [ciAt, ciHeads, stored, optional] = await db.together(() => Promise.all([
+    loadMainCiAt(db, fresh.filter((p) => p.base).map((p) => ({ repo: p.repo, sha: p.base! }))),
+    freshRepos.length ? loadMainCi(db, { repos: freshRepos }) : Promise.resolve(new Map<string, { state: string; committed_at: string | null; first_seen_at: string }[]>()),
+    loadChecks(db, moved.map((p) => ({ repo: p.repo, number: p.number! }))),
     loadOptionalChecks(db, moved.map((p) => p.repo)),
   ]));
   const now = new Date().toISOString();
   const rows = list.map((p) => {
     let before: Required | "unknown" = "unknown";
     if (!p.from) {
-      const m = (p.base ? ci.at.get(`${p.repo}@${p.base}`) : undefined) ?? ci.latest.get(p.repo);
+      const m = (p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined) ?? latestMainState(ciHeads.get(p.repo) ?? []);
       before = m === "green" || m === "optional" ? "green" : m === "red" ? "red" : "unknown";
     } else if (p.number !== null) {
       const row = stored.get(`${p.repo}#${p.number}`);
-      if (row && row.head === p.from) before = requiredResult(parse(row.checks), optional(p.repo));
+      if (row && row.head_oid === p.from) before = requiredResult(parse(row.checks), optional(p.repo));
     }
     return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before };
   });

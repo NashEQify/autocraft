@@ -2,9 +2,36 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
-import type { AuthorHistory, AuthorPermissionRow, AuthorPermissionSave } from "./types.ts";
+import type { Ref } from "../keys.ts";
+import type { AuthorHistory, AuthorPermissionRow, AuthorPermissionSave, RefKey } from "./types.ts";
 
 const stateSum = (eb: kx.AnyEb, state: string) => eb.fn.sum<number>(eb.case().when("state", "=", state).then(eb.lit(1)).else(eb.lit(0)).end());
+
+/**
+ * The lowercase logins that authored each item, or authored or co-authored a commit of it (the git author and the Co-authored-by
+ * trailers, as GitHub lists them), keyed `repo#number`; items with none are absent. 1 statement per 10,000 refs.
+ */
+export async function loadItemAuthors(db: Db, refs: Ref[]): Promise<Map<RefKey, string[]>> {
+  const out = new Map<RefKey, Set<string>>();
+  if (!refs.length) return new Map();
+  const q = queryDb(db), k = q.k as any;
+  const add = (key: RefKey, login: unknown): void => { if (typeof login === "string" && login) (out.get(key) ?? out.set(key, new Set()).get(key)!).add(login.toLowerCase()); };
+  for (const part of kx.chunks(refs)) {
+    const pairs = part.map((r) => [r.repo, r.number] as const);
+    const rows = await q.all(k.selectFrom("main.items as i").select(["i.repo", "i.number", "i.author", (eb: kx.AnyEb) => eb.cast(eb.val(null), "text").as("co_authors")])
+      .where("i.author", "is not", null).where(kx.refIn(db, "i", pairs))
+      .unionAll(k.selectFrom("main.pr_commits as c").select(["c.repo", "c.number", "c.author", "c.co_authors"]).where(kx.refIn(db, "c", pairs)))) as
+      { repo: string; number: number; author: string | null; co_authors: string | null }[];
+    for (const r of rows) {
+      const key = `${r.repo}#${r.number}`;
+      add(key, r.author);
+      let co: unknown = [];
+      try { co = r.co_authors ? JSON.parse(r.co_authors) : []; } catch { /* not JSON: no co-authors */ }
+      if (Array.isArray(co)) for (const x of co) add(key, x);
+    }
+  }
+  return new Map([...out].map(([key, set]) => [key, [...set]]));
+}
 
 /** Bound GitHub account id per login. */
 export async function loadAuthorIds(db: Db, logins: string[] | "all"): Promise<Map<string, number>> {

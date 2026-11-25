@@ -1,15 +1,13 @@
 // Picks: "Run on my Task Runner" (package runners-b).
-import type { AliasableExpression, SqlBool } from "kysely";
 import type { ItemRef } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import * as kx from "../../db/kx.ts";
 import { scaled } from "../../remote/time-scale.ts";
 import { setting } from "../control/index.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { loadRunnerSnapshot } from "./runner-snapshot.ts";
-import { dropSnapshotCache } from "./snapshot-cache.ts";
-import { MAX_CALLS_MAX } from "./user-settings.ts";
+import { dropQueueCache } from "./calls-shared.ts";
+import { pickLapsedExpr } from "./cross.ts";
 import type { CallState, PickContext, PickResult, QueuedCall, RunnerSnapshot, Tier } from "./types.ts";
 
 /** Setting: minutes a pick counts; 0 means until it ends otherwise. */
@@ -26,33 +24,7 @@ export function pickCapOf(value: string | undefined): number | null {
   return minutes === 0 ? null : scaled(minutes * 60_000);
 }
 
-/**
- * The login in `login` can take its picks at `now`, so they count: it has a live Task Runner credential with a fresh status, is not
- * cooling off and holds fewer leases than its "Max calls at once". A picker who cannot take a call does not hold it away from other
- * runners. For statements inside this module and its siblings (the claim's queue read, `savePick`).
- */
-export function pickerCanTake(db: Db, eb: kx.Eb, login: kx.Ex, now: number): AliasableExpression<SqlBool> {
-  const k = queryDb(db).k;
-  const max = eb.cast<number>(eb.case().when("ps.key", "=", "max_calls").then(eb.ref("ps.value")).end(), "bigint");
-  const ownLane = k.selectFrom(kx.indexedBy(db, "main.remote_calls", "remote_calls_leased_own", "bl")).select((e) => e.fn.countAll<number>().as("n"))
-    .where("bl.state", "=", kx.literal("leased")).where("bl.own_lane", "=", kx.literal(1)).where(kx.ciEq(db, "bl.user_login", login));
-  const leased = k.selectFrom(kx.indexedBy(db, "main.remote_calls", "remote_calls_leased", "pl")).select((e) => e(e.fn.countAll<number>(), "-", ownLane).as("n"))
-    .where("pl.state", "=", kx.literal("leased")).where(kx.ciEq(db, "pl.user_login", login));
-  return eb.and([
-    eb.exists(k.selectFrom("main.remote_helpers as ph").innerJoin("main.mcp_tokens as pt", "pt.id", "ph.token_id").select(eb.lit(1).as("one"))
-      .where("ph.login", "=", kx.ref<string>(login)).where("pt.kind", "=", "runner").where("pt.expires_at", ">", new Date(now).toISOString()).where("ph.reported_at", ">=", now - STATUS_FRESH_MS)),
-    eb.not(eb.exists(k.selectFrom("main.remote_cooloffs as pc").select(eb.lit(1).as("one")).where("pc.login", "=", kx.ref<string>(login)).where("pc.until", ">", now))),
-    eb.not(eb.exists(k.selectFrom("main.user_settings as ps").select(eb.lit(1).as("one"))
-      .where("ps.login", "=", kx.ref<string>(login)).where("ps.key", "=", "max_calls")
-      .where(eb.between(max, 1, MAX_CALLS_MAX)).where(eb(leased, ">=", max)))),
-  ]);
-}
-
-/** On an unaliased `remote_calls` row that has a pick: the pick no longer counts at `now`, as its time is up or its picker cannot take it. */
-export const pickLapsed = (db: Db, eb: kx.Eb, now: number): AliasableExpression<SqlBool> =>
-  eb.or([eb("pick_until", "<", now), eb.not(pickerCanTake(db, eb, "remote_calls.picked_by", now))]);
-
-/** The lowercase logins whose picks count at `now`, from a snapshot: the same rule as `pickerCanTake`. Pure. */
+/** The lowercase logins whose picks count at `now`, from a snapshot: the same rule as `cross.pickLapsedExpr`. Pure. */
 export function pickerLoginsOf(s: RunnerSnapshot, now: number): Set<string> {
   const out = new Set<string>();
   for (const r of s.runners) {
@@ -67,7 +39,7 @@ export function pickerLoginsOf(s: RunnerSnapshot, now: number): Set<string> {
 }
 
 const CALL_COLUMNS = ["id", "state", "prompt_id", "prompt_version", "tier", "step", "parent_id", "sticky_login", "seen_at", "timeout_ms", "items", "repo", "authors", "released_by",
-  "released_at", "for_login", "bound_slot", "refused_token", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "level", "job_id", "since"] as const;
+  "released_at", "for_login", "bound_slot", "refused_token", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "level", "job_id", "since", "class as cls"] as const;
 
 /** Live picks of `login` at `now` (a pick counts while its time is not up), not counting call `except`. */
 const livePickCount = (db: Db, login: string, now: number, except = -1) => {
@@ -103,6 +75,7 @@ export async function loadPickContext(db: Db, user: string, callId: number, now:
       pickedBy: row.picked_by?.toLowerCase() ?? null, pickedAt: row.picked_at === null ? null : Number(row.picked_at), pickUntil: row.pick_until === null ? null : Number(row.pick_until),
       askedModel: row.asked_model, queuedMs: Number(row.queued_ms), queuedSince: row.queued_since === null ? null : Number(row.queued_since), error: row.error,
       level: Number(row.level), jobId: row.job_id === null ? null : Number(row.job_id), since: Number(row.since),
+      cls: Number(row.cls), repo: row.repo,
     };
   }
   return {
@@ -122,9 +95,10 @@ export async function savePick(db: Db, a: { callId: number; login: string; cap: 
     if (Number((await livePickCount(db, a.login, a.now, a.callId))!.n) >= a.max) return "limit";
     const r = await q.run(q.k.updateTable("main.remote_calls").set({ picked_by: a.login, picked_at: a.now, pick_until: a.cap === null ? null : a.now + a.cap })
       .where("id", "=", a.callId).where("state", "=", "queued").where("parent_id", "is", null).where("for_login", "is", null)
-      .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", a.login), pickLapsed(db, eb, a.now)])));
+      .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", a.login), pickLapsedExpr(db, eb, a.now)])));
     return Number(r.changes) === 1 ? "picked" : "taken";
   });
-  if (result === "picked") dropSnapshotCache(db);
+  // The pick is on the queued row: the queue cache drops, and the snapshot with it.
+  if (result === "picked") dropQueueCache(db);
   return result;
 }

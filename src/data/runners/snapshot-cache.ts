@@ -1,6 +1,7 @@
 // The 2 s cache of the runner snapshot, per handle. Writers of runner state drop it in their own process; other processes' changes show
 // within the window, as the queue cache's do.
 import type { Db } from "../../db/index.ts";
+import { onQueueDrop } from "./calls-shared.ts";
 import type { RunnerSnapshot } from "./types.ts";
 
 export const SNAPSHOT_CACHE_MS = 2_000;
@@ -24,3 +25,6 @@ export function keepSnapshot(db: Db, now: number, snapshot: Promise<RunnerSnapsh
 
 /** Forgets the cached snapshot: a runner status, cool-off, pick, lease or setting changed in this process. */
 export const dropSnapshotCache = (db: Db): void => { caches.delete(db); };
+
+// The snapshot embeds the queue: every drop of the queue cache drops it too.
+onQueueDrop(dropSnapshotCache);

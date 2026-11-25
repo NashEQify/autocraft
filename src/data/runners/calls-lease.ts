@@ -1,4 +1,5 @@
 // The lease writer (package runners-a).
+// reads: access.mcp_tokens (the credential is live at the instant of the lease, inside the lease update)
 import { randomBytes } from "node:crypto";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";

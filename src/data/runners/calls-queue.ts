@@ -8,7 +8,7 @@ import { loadJobs } from "../jobs/index.ts";
 import { adoptableCall } from "./fragments.ts";
 import { finishCalls } from "./calls-unlease.ts";
 import { dropQueueCache, bundleHash, judges, queuedMsAfter } from "./calls-shared.ts";
-import { loadAuthors } from "./cross.ts";
+import { loadItemAuthors } from "../mirror/authors.ts";
 import type { NewCall } from "./types.ts";
 
 /** Calls this process queued or adopted: a resumed run adopts each earlier call once. */
@@ -67,7 +67,7 @@ export async function enqueueCalls(db: Db, calls: NewCall[], now: number = Date.
   const [jobs, parents, authors] = await db.together(async () => await Promise.all([
     jobIds.length ? loadJobs(db, jobIds) : Promise.resolve(new Map<number, { resumes: number; started_at: string | null }>()),
     parentIds.length ? q.all(q.k.selectFrom("main.remote_calls").select(["id", "user_login", "for_login", "bound_slot"]).where(inList(db, "id", parentIds, "bigint"))) : Promise.resolve([]),
-    judged.size ? loadAuthors(db, [...judged.values()]) : Promise.resolve(new Map<string, string[]>()),
+    judged.size ? loadItemAuthors(db, [...judged.values()].map((r) => ({ repo: r.repo, number: r.number }))) : Promise.resolve(new Map<string, string[]>()),
   ]));
   const parentRow = new Map(parents.map((r) => [Number(r.id), r]));
   const ids: (number | null)[] = [];

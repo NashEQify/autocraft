@@ -31,14 +31,15 @@ const parse = <T>(s: string | null, fallback: T): T => {
 const flag = (v: unknown): boolean => v === true || Number(v) === 1;
 const pairs = (refs: { repo: string; number: number }[]) => refs.map((r) => [r.repo, r.number] as const);
 
-type WorkflowRow = {
+export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
   updated_at: string; step: string | null;
 };
 
-function workflowOf(r: WorkflowRow): ItemWorkflow {
+/** An `item_workflows` row as the domain type (the module's one mapper). */
+export function workflowOf(r: WorkflowRow): ItemWorkflow {
   return {
     id: Number(r.id), repo: r.repo, number: Number(r.number), kind: r.kind as ItemKind, entry: r.entry as Entry, weight: Number(r.weight), state: r.state as WorkflowState,
     startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head,

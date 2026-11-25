@@ -32,6 +32,10 @@ export const jobEnded = (eb: kx.AnyEb, jobIdRef: kx.Ex): AliasableExpression<Sql
 export const jobRepoOf = (eb: kx.AnyEb, jobIdRef: kx.Ex): Expression<string | null> =>
   kx.schemaEb(eb).selectFrom("main.jobs as jr").select("jr.repo").where("jr.id", "=", kx.exprOf(eb, jobIdRef)) as unknown as Expression<string | null>;
 
+/** Scalar: the state of the job in `jobIdRef` (null when there is none). */
+export const jobStateOf = (eb: kx.AnyEb, jobIdRef: kx.Ex): AliasableExpression<string | null> =>
+  kx.schemaEb(eb).selectFrom("main.jobs as jsx").select("jsx.state").where("jsx.id", "=", kx.exprOf(eb, jobIdRef)) as unknown as AliasableExpression<string | null>;
+
 /** Ids of jobs waiting in the queue to resume. */
 export const resumingJobs = (db: Db) => queryDb(db).k.selectFrom("main.jobs").select("id").where("state", "=", "queued").where("resumes", ">", 0);
 

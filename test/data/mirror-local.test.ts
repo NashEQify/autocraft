@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { addAudit } from "../../src/data/control/index.ts";
 import { applyLocal, closeGoneItems, fillItemHashes, loadChecks, loadItems, saveChecks, saveDiffFacts, saveItems } from "../../src/data/mirror/index.ts";
 import type { ItemEntry } from "../../src/data/mirror/index.ts";
 import type { Db } from "../../src/db/index.ts";
-import { both, bothFlat, comment, entry, needsBuilt, seedItems } from "./mirror-fixture.ts";
+import { both, bothFlat, comment, entry, seedItems } from "./mirror-fixture.ts";
 
 const item = async (db: Db, number: number, repo = "app") => (await loadItems(db, [{ repo, number }], "full")).get(`${repo}#${number}`)!;
 const one = (repo: string, number: number) => [{ repo, number }];
@@ -47,7 +46,6 @@ both("applyLocal live: the mirrored mergeable moves for the same head only, and 
 });
 
 both("applyLocal base: a changed base is stored and audited, the cached diff of the head goes unless kept", async (db) => {
-  await needsBuilt("control.addAudit", () => addAudit(db, []));
   await seedItems(db, "app", [1, 2, 3], { base_ref: "main", head_oid: "h" });
   await saveDiffFacts(db, [1, 2, 3].map((n) => ({ repo: "app", number: n, head_oid: "h", reasons: "[]", lines: 1, pending: 0, last_read: null })) as never, "insert-ignore");
   const r = await applyLocal(db, [
@@ -64,7 +62,6 @@ both("applyLocal base: a changed base is stored and audited, the cached diff of 
 });
 
 both("closeGoneItems closes open items once and audits each", async (db) => {
-  await needsBuilt("control.addAudit", () => addAudit(db, []));
   await seedItems(db, "app", [1, 2], { closed_at: null });
   await seedItems(db, "app", [3], { state: "MERGED" });
   assert.equal(await closeGoneItems(db, ["app#1", "app#2", "app#3", "app#9"], "now"), 2);
