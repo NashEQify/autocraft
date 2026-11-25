@@ -10,9 +10,9 @@ import * as access from "../data/access/index.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
-import { loadItems } from "../data/mirror/index.ts";
+import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, dropWorkflows, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, dropWorkflows, endFixupRequests, loadFixupRequests, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -25,6 +25,7 @@ import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { claimLevels } from "../remote/level.ts";
 import { actRefusal } from "../github/identity.ts";
+import { mirrorBehind } from "../preapproval/index.ts";
 import { settlesNow } from "../preapproval/permissions.ts";
 import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
@@ -92,14 +93,15 @@ function trackedRepo(tracked: ReadonlySet<string>, written: string): string | nu
 type ItemNow = { kind: ItemKind; state: string; head: string | null };
 /**
  * Items' live workflows, the live workflow of another item (the issue it implements) that works on each PR, the held workflow of each item
- * that has no live one (for a PR, its own or the one of its issue, whichever is newer), and the closes still to be made.
+ * that has no live one (for a PR, its own or the one of its issue, whichever is newer; for an issue held with the PR it worked on, the PR's
+ * when that was held later), the closes still to be made, and for an issue whose work ended, the live workflow its PR has of its own (`ownPr`).
  */
-type Work = { live: Map<string, ItemWorkflow>; works: Map<string, ItemWorkflow>; held: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]> };
+type Work = { live: Map<string, ItemWorkflow>; works: Map<string, ItemWorkflow>; held: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]>; ownPr: Map<string, ItemWorkflow> };
 /** What a command batch reads once for all its items. `many`: a list; a run may change the work on an item later in it, which is read again. */
 type Batch = Work & { tracked: Set<string>; items: Map<string, ItemNow>; many: boolean };
 
 async function loadWork(db: Db, refs: { repo: string; number: number }[]): Promise<Work> {
-  if (!refs.length) return { live: new Map(), works: new Map(), held: new Map(), closing: new Map() };
+  if (!refs.length) return { live: new Map(), works: new Map(), held: new Map(), closing: new Map(), ownPr: new Map() };
   const open = { kinds: CLOSE_KINDS, states: OPEN_ACTIONS };
   const [history, works, closes, links] = await db.together(() => Promise.all([
     loadWorkflowHistory(db, refs), loadPrWorkflows(db, refs, { others: true }), loadActions(db, { refs, ...open }), loadLinks(db, { prs: refs }, { ended: true }),
@@ -114,17 +116,31 @@ async function loadWork(db: Db, refs: { repo: string; number: number }[]): Promi
   const latest = new Map<string, number>();
   for (const l of links) if (!live.has(`${l.repo}#${l.pr}`) && !works.has(`${l.repo}#${l.pr}`)) latest.set(`${l.repo}#${l.pr}`, l.workflowId);
   const ofIssue = latest.size ? new Map((await listWorkflows(db, { ids: [...latest.values()] })).map((w) => [w.id, w])) : new Map<number, ItemWorkflow>();
+  // The PRs the ended work of an issue was linked to, with their own workflows.
+  const ended = [...history].filter(([key, all]) => !live.has(key) && all.at(-1)?.kind === "issue").map(([, all]) => all.at(-1)!);
+  const prLinks = ended.length ? await loadLinks(db, { issues: ended.map((w) => ({ repo: w.repo, number: w.number })) }, { ended: true }) : [];
+  const prHistory = prLinks.length ? await loadWorkflowHistory(db, prLinks.map((l) => ({ repo: l.repo, number: l.pr }))) : new Map<string, ItemWorkflow[]>();
+  const ownPr = new Map<string, ItemWorkflow>(), prLast = new Map<string, ItemWorkflow>();
+  for (const l of prLinks) {
+    const key = `${l.repo}#${l.issue}`, all = (prHistory.get(`${l.repo}#${l.pr}`) ?? []).filter((w) => w.kind === "pr");
+    const running = all.findLast((w) => isLive(w)), last = all.at(-1);
+    if (running && (ownPr.get(key)?.id ?? 0) < running.id) ownPr.set(key, running);
+    if (last && (prLast.get(key)?.id ?? 0) < last.id) prLast.set(key, last);
+  }
   for (const { repo, number } of refs) {
     const key = `${repo}#${number}`;
     if (live.has(key) || works.has(key)) continue;
     const own = history.get(key)?.at(-1), other = ofIssue.get(latest.get(key) ?? -1);
-    const last = own && (!other || own.id > other.id) ? own : other;
+    let last = own && (!other || own.id > other.id) ? own : other;
+    // An issue held, and the PR it worked on held later: a resume of the issue goes on with that.
+    const pr = prLast.get(key);
+    if (last?.state === "stopped" && pr?.state === "stopped" && (pr.stoppedAt ?? "") > (last.stoppedAt ?? "")) last = pr;
     if (last?.state === "stopped") held.set(key, last);
   }
   // An issue whose work ended with a close of its implementation PR.
   const ofIssues = closed.size ? [...(await loadActions(db, { workflowIds: [...closed.keys()], ...open })).values()].flat() : [];
   for (const a of ofIssues) closing.set(closed.get(a.workflow_id)!, [a]);
-  return { live, works: new Map(works), held, closing };
+  return { live, works: new Map(works), held, closing, ownPr };
 }
 
 async function loadBatch(db: Db, written: readonly ItemRef[]): Promise<Batch> {
@@ -146,6 +162,7 @@ async function refresh(db: Db, batch: Batch, repo: string, number: number): Prom
   put(batch.works, now.works.get(key));
   put(batch.held, now.held.get(key));
   put(batch.closing, now.closing.get(key));
+  put(batch.ownPr, now.ownPr.get(key));
 }
 
 /** Runs parsed text from `actor` on each item, and returns one outcome and line per item. */
@@ -241,8 +258,12 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   // (hold, resume, an answer, the approval, the weight, a close) acts on the issue's workflow, as if it were written there.
   const own = batch.live.get(key) ?? null;
   const issue = kind === "pr" ? batch.works.get(key) ?? null : null;
-  const covered = own === null && !says(input.parsed, "autorepin") ? issue : null;
-  if (covered && startsWork(input.parsed)) return out("refused", worksElsewhere(ref, covered, input.clock), covered.id);
+  // An issue whose work ended, and whose PR has work of its own: an end written on the issue ends that; going on with the issue's waits for it.
+  const prOwn = kind === "issue" && own === null ? batch.ownPr.get(key) ?? null : null;
+  const ends = says(input.parsed, "hold", "close", "backlog");
+  if (prOwn && !ends && (input.parsed.kind === "yes" || says(input.parsed, "resume"))) return out("refused", worksElsewhere(ref, prOwn, input.clock), prOwn.id);
+  const covered = own === null && !says(input.parsed, "autorepin") ? issue ?? (prOwn && ends ? prOwn : null) : null;
+  if (covered && covered === issue && startsWork(input.parsed)) return out("refused", worksElsewhere(ref, covered, input.clock), covered.id);
   const work = covered ?? own;
   const held = work ? null : batch.held.get(key) ?? null;
   // An approval whose maker may no longer act on the repo, or that the item asks to have made again, approves nothing: whoever goes on with the merge approves it anew.
@@ -251,7 +272,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const said: fx.Target = { repo, number: target.number, kind, head };
   // A resume of a PR its issue's work holds resumes that work.
   const of = covered ?? (held && held.number !== target.number && (input.parsed.kind === "yes" || says(input.parsed, "resume")) ? held : null);
-  const on: fx.Target = of ? { repo, number: of.number, kind: of.kind, head: null } : said;
+  const on: fx.Target = of ? { repo, number: of.number, kind: of.kind, head: of.kind === "pr" ? (await openPr(db, repo, of.number))?.head ?? null : null } : said;
   const reply = (line: string): string => (of ? t("{ref}: {line}", { ref: refText(on.repo, on.number), line }) : line);
   const noted = (line: string): string => (of ? t("{line} Sent on {ref}.", { line, ref }) : line);
   const closing = batch.closing.get(key)?.at(-1) ?? null;
@@ -438,6 +459,11 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const ends = r.replaces ? wf! : null;
     const pr = ends?.kind === "issue" ? await issuePr(ends) : item;
     if (!pr) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
+    if (ends && pr.head) {
+      // The head the question was asked at is the one this merges: not while the mirror is behind a push of ours.
+      const [pushes, repos] = await db.together(() => Promise.all([loadOwnPushes(db, [{ repo: pr.repo, number: pr.number }]), loadRepos(db, { names: [pr.repo] })]));
+      if (mirrorBehind(pushes.get(`${pr.repo}#${pr.number}`) ?? [], pr.head, repos.get(pr.repo)?.synced_at ?? null)) throw new fx.EffectError(CHANGED());
+    }
     const weight = r.weight ?? ends?.weight ?? WEIGHT_NORMAL;
     const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve);
     // What was dropped stays dropped in a review the new work may owe.
@@ -449,6 +475,9 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
           const now = (await listWorkflows(db, { ids: [ends.id], live: true }))[0];
           if (!now || !sameWorkflow(now, ends)) throw new Moved();
           await saveWorkflows(db, [{ id: ends.id, patch: holdPatch(ends, by, at, undefined), at }]);
+          // The fix-ups asked for in that work go with it.
+          const queued = (await loadFixupRequests(db, { open: true, refs: [{ repo: pr.repo, number: pr.number }], anyMaker: true })).filter((x) => x.state === "queued");
+          await endFixupRequests(db, queued.map((x) => ({ id: x.id, reason: `ended by ${by}` })));
         }
         const id = (await startWorkflows(db, [{
           repo: pr.repo, number: pr.number, kind: pr.kind, entry, weight, startedBy: by, startedVia: via, baseHead: pr.head,
@@ -529,7 +558,7 @@ async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
   const pr = held.kind === "issue" ? await openPr(db, held.repo, linked) : c.item;
   const asHeld = async (): Promise<void> => {
     const [now] = await listWorkflows(db, { ids: [held.id], states: ["stopped"] });
-    if (!now || !sameWorkflow(now, held) || (await listWorkflows(db, { live: true, refs: [held] })).length) throw new Moved();
+    if (!now || !sameWorkflow(now, held) || (await listWorkflows(db, { live: true, refs: [held, ...(pr && pr.number !== held.number ? [pr] : [])] })).length) throw new Moved();
   };
   if (work.unstarted) return { failed: [], commit: async () => { await asHeld(); await dropWorkflows(db, [held.id]); return null; } };
   if (held.kind === "issue" && held.entry === "implement" && linked === null) {

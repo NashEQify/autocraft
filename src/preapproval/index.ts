@@ -429,7 +429,7 @@ const neededAt = (leg: LegContext | null, pf: PassFacts, ref: string, head: stri
 const needsReview = (leg: LegContext | null, pf: PassFacts, ref: string, head: string): boolean => neededAt(leg, pf, ref, head) !== null;
 
 /** A push of ours moved the PR off the head the mirror shows, until a sync that began after the push has finished: no step works the old head any more, and the new one is not here yet. */
-function mirrorBehind(pushes: readonly RecordedPush[], head: string | null, syncedAt: string | null): boolean {
+export function mirrorBehind(pushes: readonly RecordedPush[], head: string | null, syncedAt: string | null): boolean {
   return pushes.some((x) => x.landed && x.from === head && x.to !== head && (syncedAt === null || syncedAt <= x.at));
 }
 

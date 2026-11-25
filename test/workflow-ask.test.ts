@@ -380,7 +380,8 @@ test("an earlier review of the commit whose review failed is named, and the word
   assert.equal((await wf(v)).entry, "review");
 });
 
-test("an implementation whose review failed for good goes to the merge queue as its pull request", async () => {
+/** Issue 7 implemented by PR 1, whose review failed for good at sha1; `before` runs before that question is answered. */
+async function implementedFailed(): Promise<World> {
   const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
   await w.issue(7);
   await setFeature(w.db, "implement", true, MAINT, "app");
@@ -392,9 +393,16 @@ test("an implementation whose review failed for good goes to the merge queue as 
   await settle(w);
   await w.db.run(w.db.k.insertInto("main.review_state").values({ repo: "app", number: 1, fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() })));
   await settle(w);
+  return w;
+}
+
+test("an implementation whose review failed for good goes to the merge queue as its pull request; queued fix-ups end with the work it replaces", async () => {
+  const w = await implementedFailed();
   const asked = await wf(w, 7);
   assert.deepEqual([asked.state, asked.rec?.again], ["blocked", "review"]);
+  await w.db.run(w.db.k.insertInto("main.operator_fixups").values({ repo: "app", number: 1, from_head: "sha1", instructions: "x", by: MAINT, at: T0 }));
   await say(w, "merge", ANN, 7);
+  assert.deepEqual((await w.rows("SELECT state FROM operator_fixups")).map((x) => x.state), ["ended"]);
   await settle(w);
   const now = await wf(w);
   assert.deepEqual([now.kind, now.entry, now.approvedBy, await leg(w)], ["pr", "merge", ANN, "queued"]);
@@ -403,6 +411,45 @@ test("an implementation whose review failed for good goes to the merge queue as 
   const row = { repo: "app", number: 1, head_oid: "sha1", state: "OPEN", overall: "success", mergeable: "UNKNOWN" } as unknown as PrChecks;
   await noteMergeable(w.db, [row], T1);
   assert.ok(await unknownOf(w.db, "app", 1, "sha1"));
+});
+
+test("hold, close and backlog on the issue reach its pull request's own work; resume there goes on with what the hold ended, and is refused while that work runs", async () => {
+  for (const by of ["merge", "hand"] as const) {
+    const w = await implementedFailed();
+    if (by === "merge") await say(w, "merge", ANN, 7);
+    else { await say(w, "stop", MAINT, 7); await say(w, "merge", ANN, 1); }
+    await settle(w);
+    for (const text of ["resume", "yes"]) {
+      const o = await sendAs(w, text, 7);
+      assert.deepEqual([o.outcome, o.workflowId], ["refused", (await wf(w)).id], o.line);
+      assert.match(o.line, /Send the command on \S*app#1\./);
+    }
+    assert.match(await say(w, "stop", MAINT, 7), /On hold/);
+    assert.equal(await liveWorkflow(w.db, "app", 1), null, by);
+    await settle(w);
+    assert.ok(!(await actions(w)).includes("merge"), by);
+    assert.match(await say(w, "resume", MAINT, 7), /app#1/);
+    await settle(w);
+    assert.deepEqual([(await wf(w)).entry, await leg(w)], ["merge", "queued"], by);
+    assert.equal(await liveWorkflow(w.db, "app", 7), null);
+    assert.match(await say(w, "backlog", MAINT, 7), /backlog/);
+    assert.equal(await liveWorkflow(w.db, "app", 1), null, by);
+    w.close();
+  }
+  const w = await implementedFailed();
+  await say(w, "merge", ANN, 7);
+  assert.match(await say(w, "close", MAINT, 7), /app#7 closes; \S*app#1 stays open/);
+  assert.equal(await liveWorkflow(w.db, "app", 1), null);
+  assert.deepEqual(await w.rows("SELECT number, kind FROM workflow_actions"), [{ number: 7, kind: "comment-close" }]);
+});
+
+test("the word merge where the review failed for good waits for the mirror to show a push of ours", async () => {
+  const w = await implementedFailed();
+  await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "cifix", action: "cifix-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1x", before_res: "unknown" }));
+  const o = await sendAs(w, "merge", 7);
+  assert.equal(o.outcome, "refused", o.line);
+  assert.match(o.line, /changed after the command was written/);
+  assert.equal((await wf(w, 7)).kind, "issue");
 });
 
 test("the word merge on red CI that nothing repairs is refused and the question stays; green CI closes it and the approved merge goes on", async () => {
