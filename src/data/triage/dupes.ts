@@ -211,7 +211,7 @@ export async function loadDuplicatesOf(db: Db, keys: KeySource): Promise<Map<Ref
   const side = (self: "a" | "b", other: "a" | "b") => k.selectFrom("duplicate_pairs as p").innerJoin(resolveKeys(db, keys, `k${self}`), (j: any) => j.onRef(`k${self}.repo`, "=", "p.repo").onRef(`k${self}.number`, "=", `p.${self}`))
     .select((eb: any) => ["p.repo", `p.${self} as number`, `p.${other} as other`, eb.case().when(eb("p.canonical", "=", eb.ref(`p.${other}`))).then(eb.lit(1)).else(eb.lit(0)).end().as("canonical")])
     .where("p.verdict", "=", "duplicate");
-  const rows = await q.all(side("a", "b").unionAll(side("b", "a")).orderBy("repo").orderBy("number").orderBy("other")) as { repo: string; number: number; other: number; canonical: number }[];
+  const rows = await q.all(k.selectFrom(side("a", "b").unionAll(side("b", "a")).as("u")).select(["u.repo", "u.number", "u.other", "u.canonical"]).orderBy("u.repo").orderBy("u.number").orderBy("u.other")) as { repo: string; number: number; other: number; canonical: number }[];
   const seen = new Map<string, { other: number; canonical: boolean }>();
   for (const r of rows) {
     const key = refKey(r.repo, Number(r.number)), other = Number(r.other);
