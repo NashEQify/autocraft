@@ -1,5 +1,5 @@
-// Items API: the top-bar search and the hover card. The classic Items list and status list are retired and answer with empty lists.
-import type { ItemList, ItemPeek, ItemStatus, ItemStatusList, SearchHit } from "../../../web/src/api/types.ts";
+// Items API: the top-bar search and the hover card.
+import type { ItemPeek, ItemStatus, SearchHit } from "../../../web/src/api/types.ts";
 import { loadItemPeek, loadQuickSearch } from "../../data/views/items.ts";
 import { statusFromItem } from "../../core/item-status.ts";
 import type { PlanView } from "../../core/plan-cache.ts";
@@ -7,7 +7,6 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { itemState } from "./shown.ts";
 import { readerOf, statusFor } from "./reader.ts";
-import { ITEM_PHASES, type ItemPhase } from "./home-types.ts";
 import { needVisible, hiddenRepos } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
 
@@ -15,14 +14,6 @@ import type { Db } from "../../db/index.ts";
 export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
   const rows = await loadQuickSearch(db, { hidden: await hiddenRepos(db, req) }, req.query.get("q") ?? "", { limit: 20 });
   return rows.map((r) => ({ repo: r.repo, number: r.number, kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", author: r.author ?? "", state: itemState(r.state) }));
-}
-
-export async function listItems(_db: Db, _req: Req): Promise<ItemList> {
-  return { total: 0, rows: [], byStatus: { settled: 0, waiting: 0, disagree: 0, unclassified: 0 }, run: null };
-}
-
-export async function statusList(_db: Db, _req: Req): Promise<ItemStatusList> {
-  return { rows: [], byPhase: Object.fromEntries(ITEM_PHASES.map((p) => [p, 0])) as Record<ItemPhase, number>, total: 0, nextCursor: null };
 }
 
 /** The issue numbers in an item's stored closing list; a malformed list counts as none. */

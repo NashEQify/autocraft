@@ -8,7 +8,6 @@ import { queueRoom, queueRoomPass, setCallContext } from "../src/agents/call.ts"
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { enqueueCall } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { setUserTasks, TASK_CHOICES } from "../src/remote/my-tasks.ts";
 import { remoteRoom } from "../src/remote/room.ts";
@@ -20,7 +19,6 @@ mkdirSync(SCRATCH, { recursive: true });
 
 test("room is counted per repo: runners with disjoint repos, a call nobody may take", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-room-repos-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   const at = new Date().toISOString();
   const runner = async (login: string, role: string) => {
     await db.run(db.k.insertInto("access").values({ login, role }));
@@ -80,7 +78,6 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
 
 test("room and takers count only the runners whose users take the call's task (My tasks)", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-room-tasks-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));

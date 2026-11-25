@@ -20,7 +20,6 @@ const { STEPS } = await import("../src/runner/steps.ts");
 const { FAKE_TOKEN } = await import("./runner-steps.ts");
 const { inputHash } = await import("../src/runner/classify.ts");
 const { RUNNER_STOPPED, endJob } = await import("../src/runner/jobs.ts");
-const { setInferenceMode } = await import("../src/remote/mode.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { claimCall, submitCall } = await import("../src/remote/calls.ts");
 const { PROTOCOL_VERSION } = await import("../src/remote/protocol.ts");
@@ -83,7 +82,7 @@ describe("runner", () => {
     const pgDb = await connectDb(join(pgDir, "jobs.db"));
     process.env.AUTOCRAFT_DB_URL = `postgres://autocraft@127.0.0.1:${port}/childjob`;
     delete process.env.AUTOCRAFT_DB;
-    const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }), refreshFlow: async () => undefined });
+    const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }) });
     try {
       const job = await enqueue(pgDb, "test-echo", { n: 1 }, "boss");
       const end = Date.now() + 20_000;
@@ -104,7 +103,6 @@ describe("runner", () => {
   });
 
   test("a job stopped by a runner stop resumes under the same id and reads the reply its Task Runner sent meanwhile", async () => {
-    await setInferenceMode(db, "user-local", "test");
     await db.run(db.k.insertInto("access").values({ login: "bob", role: "maintainer" }));
     const bob = { tokenId: (await createToken(db, "bob", "helper", { kind: "runner" })).row.id, login: "bob", role: "maintainer" as const };
     const opts = { db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} };

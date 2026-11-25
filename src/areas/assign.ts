@@ -3,7 +3,6 @@
 // decides alone while Jev is unavailable. Repos without a list are skipped. An item asked against the current
 // list version is not asked again unless a re-scan asks for the unassigned ones.
 import { jobItem } from "../runner/job-items.ts";
-import { freeSlots } from "../agents/accounts.ts";
 import { takersFirst } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { parseRef, refOf } from "../classify/parse.ts";
@@ -107,7 +106,7 @@ async function assignRepo(db: Db, repo: string, list: AskedList, due: Due[], p: 
       const g = p.given?.get(refOf(x));
       if (g && g.version === version) given.set(refOf(x), g.answer);
     }
-    if (!given.size && !await jevAvailable(db) && await freeSlots(db) <= 0 && !p.paths) { p.log?.(`areas: no model available for ${repo}`); break; }
+    if (!given.size && !await jevAvailable(db) && !p.paths) { p.log?.(`areas: no model available for ${repo}`); break; }
     const chunk = await withPaths(due.slice(i, i + CHUNK), paths);
     const t = await runTiered(db, AREAS, chunk, {
       ctx: { repo, areas: list.areas },

@@ -6,7 +6,6 @@ import type { VectorIndex } from "../src/embed/vectors.ts";
 import { checkPairs, type PairKey } from "../src/dupes/check.ts";
 import { runDupes } from "../src/dupes/index.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { T0, world } from "./world-db.ts";
 
 test("pairs of a repo no Task Runner takes are neither sent to Jev nor counted as handled", async () => {
@@ -19,7 +18,6 @@ test("pairs of a repo no Task Runner takes are neither sent to Jev nor counted a
   const lines: string[] = [];
   await runDupes(w.db, { dryRun: true }, (l) => lines.push(l), { index, check: {} as never });
   assert.match(lines.join("\n"), /1 pairs to check/, "in the server-account mode the pair is checked");
-  await setInferenceMode(w.db, "user-local", "test");
 
   let jev = 0, haiku = 0;
   const handled: number[] = [];

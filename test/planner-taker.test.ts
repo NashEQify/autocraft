@@ -16,7 +16,6 @@ const { noRunnerFor, noRunnerForTask, setStepParallel } = await import("../src/r
 const { applyProposals, detectAutopilot, reservedByJobs } = await import("../src/runner/autopilot.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { parseStatus, storeStatus } = await import("../src/remote/helpers.ts");
-const { setInferenceMode } = await import("../src/remote/mode.ts");
 const { setUserRepos } = await import("../src/remote/my-repos.ts");
 const { setUserTasks, taskOfStep, TASK_CHOICES } = await import("../src/remote/my-tasks.ts");
 
@@ -24,7 +23,6 @@ mkdirSync(SCRATCH, { recursive: true });
 
 test("a Task Runner that takes only deckcraft: deckcraft is planned, photocraft waits with a reason and blocks nothing", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "planner-taker-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   for (const r of ["deckcraft", "photocraft"]) await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES (?, 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run(r);
   await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
   const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
@@ -53,7 +51,6 @@ test("a Task Runner that takes only deckcraft: deckcraft is planned, photocraft 
 
 test("a Task Runner whose user unticked the step's task: nothing is planned, a queued job waits with the task as the reason", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "planner-taker-task-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('deckcraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run();
   await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
   const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;

@@ -27,7 +27,6 @@ import { endJob, recoverJobs } from "./lifecycle.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
-import { groupsFile, killGroups, removeGroupsFile } from "./groups.ts";
 import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { jobBlock, stepParallel } from "./concurrency.ts";
@@ -56,8 +55,6 @@ export function runnerLockPath(): string {
 
 /** The lane_state mark the runner writes on every tick. */
 export const HEARTBEAT_MARK = "heartbeat";
-/** How often the runner brings the flowchart summary up to date (src/flow/summary.ts). */
-export const FLOW_EVERY_MS = 20_000;
 /** How often queued webhook items are read again from GitHub. */
 export const WEBHOOK_DRAIN_MS = 5_000;
 /** How often the runner checks for a repo due for its daily reconcile. */
@@ -80,8 +77,6 @@ export type RunnerOptions = {
   log?: (line: string) => void;
   /** The planner's detection pass (default: a worker thread on its own connection to `dbTarget`). Tests pass a fake. */
   detect?: (nowMs: number) => Promise<Detected>;
-  /** The flowchart summary refresh (default: a worker thread). */
-  refreshFlow?: () => Promise<unknown>;
   /** Longest run of a job of a step in minutes, given the job's `limit` param (default: stepDeadlineMin). Tests pass a short one. */
   maxMin?: (step: string, items?: number) => number;
   /** Minutes a job may show no progress, by step (default: stepNoProgressMin). */
@@ -124,7 +119,6 @@ export class Runner {
   /** Ended jobs whose end could not be recorded: every tick records them again, so their rows reach a final state. */
   private readonly unrecorded = new Map<number, { code: number | null; signal: NodeJS.Signals | null; spawnError: string | null }>();
   private stopping = false;
-  private flowAt = 0;
   private webhookAt = 0;
   private webhooking: Promise<void> | null = null;
   /** The autorepin drain (src/repin), apart from the webhook pass so its git work never delays re-reads and comment commands. */
@@ -137,12 +131,9 @@ export class Runner {
   private detected: Detected | null = null;
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
   private preapprovalMark: { sig: string; wakeAt: number } | null = null;
-  private flowing: Promise<void> | null = null;
   private readonly planThread: OffThread;
-  private readonly flowThread: OffThread;
-  private readonly o: Required<Omit<RunnerOptions, "db" | "lockFile" | "detect" | "refreshFlow" | "maxMin" | "graceMs" | "noProgressMin">> & { lockFile: string | null };
+  private readonly o: Required<Omit<RunnerOptions, "db" | "lockFile" | "detect" | "maxMin" | "graceMs" | "noProgressMin">> & { lockFile: string | null };
   private readonly detect: (nowMs: number) => Promise<Detected>;
-  private readonly refreshFlow: () => Promise<unknown>;
   private readonly maxMin: (step: string, items?: number) => number;
   private readonly graceMs: number;
   private readonly noProgressMin: (step: string) => number;
@@ -155,12 +146,10 @@ export class Runner {
     };
     mkdirSync(this.o.logs, { recursive: true });
     this.planThread = new OffThread(this.o.dbTarget);
-    this.flowThread = new OffThread(this.o.dbTarget);
     this.detect = opts.detect ?? ((t) => this.planThread.plan(t));
     this.maxMin = opts.maxMin ?? stepDeadlineMin;
     this.graceMs = opts.graceMs ?? 600_000;
     this.noProgressMin = opts.noProgressMin ?? stepNoProgressMin;
-    this.refreshFlow = opts.refreshFlow ?? (() => this.flowThread.flow());
   }
 
   /**
@@ -212,10 +201,6 @@ export class Runner {
     this.workerUpdateTick();
     await this.autopilot();
     await this.startJobs();
-    if (!this.flowing && Date.now() - this.flowAt >= FLOW_EVERY_MS) {
-      this.flowAt = Date.now();
-      this.flowing = this.refreshFlow().then(() => undefined, (e) => this.o.log(`flowchart summary: ${(e as Error).message}`)).finally(() => (this.flowing = null));
-    }
   }
 
   /** Reads the items GitHub App webhooks named again from GitHub, off the tick, while no sync run holds its lock. The poll covers any that fail. */
@@ -542,15 +527,13 @@ export class Runner {
     // One guarded statement: a command-line run cannot take the step in between.
     const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
     if (!claimed) return null;
-    const groups = groupsFile(this.o.logs, id);
-    removeGroupsFile(groups);
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
     try {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...dbEnv(this.o.dbTarget), AUTOCRAFT_JOB_GROUPS: groups, [JOB_DEADLINE_ENV]: String(deadlineMin) },
+        env: { ...dbEnv(this.o.dbTarget), [JOB_DEADLINE_ENV]: String(deadlineMin) },
       });
     } finally {
       closeSync(fd);
@@ -560,7 +543,6 @@ export class Runner {
     child.on("error", (e) => (spawnError = e.message));
     const exited = new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
-        removeGroupsFile(groups);
         void this.finish(id, code, signal, spawnError)
           .catch((e) => {
             this.unrecorded.set(id, { code, signal, spawnError });
@@ -602,8 +584,6 @@ export class Runner {
   abandon(): void {
     this.stopping = true;
     for (const r of this.running.values()) if (r.child.pid) killGroup(r.child.pid, "SIGKILL");
-    // Model calls run in groups of their own; the jobs list theirs in their groups files.
-    killGroups([...this.running.keys()].map((id) => groupsFile(this.o.logs, id)));
   }
 
   /** Resolves when every running job has ended. */
@@ -620,7 +600,7 @@ export class Runner {
     await this.idle();
     clearInterval(timer);
     await this.recordEnds();
-    await Promise.all([this.planThread.close(), this.flowThread.close()]);
+    await this.planThread.close();
   }
 
   /** Polls until `signal` aborts, then stops running jobs. */

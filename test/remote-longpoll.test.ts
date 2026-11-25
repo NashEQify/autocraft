@@ -21,7 +21,6 @@ const { connect } = await import("../src/db.ts");
 const { CLAIM_RETRY_S, enqueueCall } = await import("../src/remote/calls.ts");
 const { ClaimWaits, Ticket } = await import("../src/remote/claim-wait.ts");
 const { setUserMaxCalls } = await import("../src/remote/max-calls.ts");
-const { setInferenceMode } = await import("../src/remote/mode.ts");
 const { ROUTES } = await import("../src/remote/protocol.ts");
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -32,7 +31,6 @@ describe("long-polling claims", async () => {
   const file = join(dir, "t.db"), perms = join(dir, "perms.json");
   writeFileSync(perms, "{}");
   const db = await connectDb(file), remoteDb = await connectDb(file, { busyTimeoutMs: 100 }), other = await connectDb(file);
-  await setInferenceMode(db, "user-local", "test");
   const tokens: Record<string, { token: string; id: number }> = {};
   for (const login of ["bob", "carol", "dave", "erin", "frank"]) {
     await addLogin(db, "cli", login, "maintainer", null);

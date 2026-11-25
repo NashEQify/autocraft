@@ -1,6 +1,6 @@
 // The pair check: Jev for every pair, accepted at 0.9 either way; Haiku for the
 // pairs Jev is not sure about, and for every pair while Jev is unavailable.
-import { jevParallel } from "../agents/accounts.ts";
+import { loadLiveConfig } from "../data/control/index.ts";
 import { poolRoom, repoBatches } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
 import { askClaude, pool } from "../classify/run.ts";
@@ -97,7 +97,7 @@ export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, onHan
     if (p === null && !(await deps.jevUsable?.() ?? true)) alone.add(ref);
     else c.jev++;
     onHandled?.(++handled);
-  }), await jevParallel(db));
+  }), (await loadLiveConfig(db)).jevParallel);
   const at = deps.now().toISOString();
   const done = (out: Verdicted[], ref: string, haiku: PairVerdict | null, verdict: PairVerdict) => {
     out.push({ key: pairs.get(ref)!.k, jev: jevP.get(ref) ?? null, haiku, verdict });

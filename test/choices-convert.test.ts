@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { currentChoices } from "../src/decide/choices.ts";
 import { convertOpenDecisions } from "../src/decide/choices-convert.ts";
@@ -19,7 +18,6 @@ test("open decisions' proposed cards convert to choices", async () => {
   const db: Db = await connectDb(join(mkdtempSync(join(SCRATCH, "choices-convert-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
-  await useTestAccount(db);
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "issue", state: "OPEN", title: "Issue 1", body: "Body", author: "someone", created_at: T0, updated_at: T0, labels: "[]" }));
   await ask(db, [{ id: "app#1:scope", kind: "scope", repo: "app", number: 1, question: "Scope?", options: [{ key: "take", label: "Wanted" }, { key: "close", label: "Out of scope" }] }]);
   await db.run(db.k.updateTable("decisions").set({ recommended: "take", recommended_reason: "fits" }).where("id", "=", "app#1:scope"));

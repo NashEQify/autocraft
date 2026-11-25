@@ -1,5 +1,5 @@
 // The shared database builder for journeys: a temp database filled through the same writes sync and the stages make, a fake
-// GitHub that answers live reads and records writes, and a model runner with canned replies.
+// GitHub that answers live reads and records writes, and a fake Task Runner with canned replies.
 //
 //   const w = world().repo().pr(1).review(1).verified(1).premerge(1, "clean");
 //   w.gh.writes            // what reached GitHub: { kind, number, head?, ... }
@@ -7,8 +7,7 @@
 //   w.models((input) => reply | undefined)
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { syncAccounts } from "../src/agents/accounts.ts";
-import { setRunner } from "../src/classify/run.ts";
+import { fakeTaskRunner } from "./fake-runner.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
 import { ask } from "../src/decisions.ts";
@@ -243,21 +242,10 @@ export async function world() {
     },
 
     // ---- models ----
-    /** Installs a model runner: it gets each prompt's text and returns the reply text, or undefined for "no reply". One enabled Claude account is set up. */
+    /** Starts a fake Task Runner (test/fake-runner.ts): it gets each call's prompt text and returns the reply text, or undefined for "no reply". */
     async models(reply: (input: string) => string | undefined) {
-      const dir = tmpdir("box");
-      mkdirSync(join(dir, "usage"));
-      writeFileSync(join(dir, "accounts.json"), JSON.stringify([{ id: "t", configDir: join(dir, "config-t") }]));
-      process.env.AUTOCRAFT_ACCOUNTS = join(dir, "accounts.json");
-      process.env.AUTOCRAFT_USAGE_DIR = join(dir, "usage");
-      await syncAccounts(db);
-      await db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
-      restore.push(setRunner(async (_cmd, _args, input) => {
-        const text = reply(input);
-        return text === undefined
-          ? { code: 1, stdout: "", stderr: "no reply" }
-          : { code: 0, stdout: JSON.stringify({ type: "result", result: text, usage: { input_tokens: 100, output_tokens: 10 } }), stderr: "" };
-      }));
+      const runner = await fakeTaskRunner(db, (c) => reply(c.stdin));
+      restore.push(() => void runner.stop());
       return w;
     },
 

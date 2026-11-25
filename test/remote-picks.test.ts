@@ -17,7 +17,6 @@ import { defaultSemanticDeps } from "../src/reference-lint.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import { setUserMaxCalls } from "../src/remote/max-calls.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { pickCall, setPickMinutes, unpickCall } from "../src/remote/picks.ts";
 import { PROTOCOL_VERSION, type Claim, type Tier } from "../src/remote/protocol.ts";
 import { whyWaiting, type ReadyRunner } from "../src/remote/queue-view.ts";
@@ -39,7 +38,6 @@ const dir = mkdtempSync(join(SCRATCH, "remote-picks-"));
 
 describe("picks and Manual only", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
   await db.run(db.k.insertInto("repos").values({ name: "photocraft", visibility: "public" }).onConflict((oc) => oc.column("name").doUpdateSet(excluded(["visibility"]))));
   const callers: Record<string, Caller> = {};
@@ -249,7 +247,7 @@ describe("picks and Manual only", async () => {
     const a = await q();
     await pickCall(db, user("bob"), a);
     const b = await q();
-    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0, userLocal: true });
+    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0 });
     const rpc = async (login: string, role: Role, method: string, params?: Record<string, unknown>) => (await handleMcp(env(login, role), { jsonrpc: "2.0", id: 1, method, ...(params && { params }) }))!.result as any;
     const names = async (login: string, role: Role) => (await rpc(login, role, "tools/list")).tools.map((t: { name: string }) => t.name).filter((n: string) => n.includes("model_call"));
     assert.deepEqual(await names("eve", "viewer"), ["list_model_calls"]);

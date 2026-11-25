@@ -9,7 +9,6 @@ import { ackDeadline, LimitError, pipelineState as rawPipelineState, resetLimitC
 import { HEARTBEAT_MARK } from "../../runner/runner.ts";
 import { loadLaneState } from "../../data/jobs/index.ts";
 import { loadSteps, type StepDef } from "../../runner/steps.ts";
-import { JUDGEMENT_MODELS, judgementModel, setJudgementModel } from "../../decide/judgement.ts";
 import { audit } from "../audit.ts";
 import { outsideState } from "../../outside.ts";
 import { mayResumeTrip, resumeStage, TripError } from "../../data/control/index.ts";
@@ -208,19 +207,6 @@ export async function putState(db: Db, req: Req) {
   const was = (await rawPipelineState(db)).enabled;
   await setEnabled(db, b.enabled, req.user.login);
   await audit(db, req.user.login, "pipeline-switch", "pipeline", { enabled: b.enabled, was });
-  return pipelineState(db, req);
-}
-
-/** The model of the prepare step and the models an operator may pick. */
-export const getJudgementModel = async (db: Db) => ({ judgementModel: await judgementModel(db), judgementModels: [...JUDGEMENT_MODELS] });
-
-export async function putJudgementModel(db: Db, req: Req) {
-  requireOperator(req);
-  const m = body(req).model;
-  if (typeof m !== "string" || !(JUDGEMENT_MODELS as readonly string[]).includes(m)) throw new HttpError(400, `model must be one of ${JUDGEMENT_MODELS.join(", ")}`);
-  const was = await judgementModel(db);
-  await setJudgementModel(db, m);
-  await audit(db, req.user.login, "judgement-model", "pipeline", { model: m, was });
   return pipelineState(db, req);
 }
 

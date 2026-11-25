@@ -17,7 +17,6 @@ import { FakeProvider } from "../src/dash/server/provider.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import type { Embedder } from "../src/embed/model.ts";
 import { awaitCall, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, ROUTES, type TaskBundle } from "../src/remote/protocol.ts";
 import { buildReferenceIndex } from "../src/data/external/index.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
@@ -48,7 +47,6 @@ describe("per-lease tools of remote calls", async () => {
   before(async () => {
     allocation.pollMs = 10;
     referenceOptions.embedder = fake;
-    await setInferenceMode(db, "user-local", "test");
     const now = new Date().toISOString();
     await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold", visibility: "public" }));
     await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 7, kind: "issue", state: "OPEN", title: "Wave filter crashes", body: "b", author: "alice", created_at: now, updated_at: now }));

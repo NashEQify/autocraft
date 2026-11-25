@@ -8,7 +8,6 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { excluded } from "../src/db/kx.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { noRunnerFor } from "../src/runner/concurrency.ts";
 import { detectAutopilot, LANES } from "../src/runner/autopilot.ts";
@@ -17,7 +16,6 @@ import { OPERATOR, T0, world } from "./world-db.ts";
 test("prioritize waits for a Task Runner or Jev while its items need one", async () => {
   const w = await (await (await world()).repo()).issue(1);
   await fillEmbedHashes(w.db);
-  await setInferenceMode(w.db, "user-local", "test");
   await setJevEnabled(w.db, false, "test");
   assert.equal((await plannedItems(w.db, "prioritize")).length, 1, "the item has no priority");
   const lanes = LANES.filter((l) => l.name === "priority");
@@ -42,7 +40,6 @@ test("dupes-compare runs without a Task Runner only for a set settled by rule", 
   await fillEmbedHashes(w.db);
   const hash = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
   await w.db.run(w.db.k.insertInto("duplicate_pairs").values({ repo: "app", a: 1, b: 2, a_hash: await hash(1), b_hash: await hash(2), similarity: 0.9, created_at: T0, verdict: "duplicate" }));
-  await setInferenceMode(w.db, "user-local", "test");
   const lanes = LANES.filter((l) => l.name === "dupes-compare");
   const proposed = async () => (await detectAutopilot(w.db, { lanes })).proposals.map((p) => p.step);
 

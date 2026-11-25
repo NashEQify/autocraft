@@ -16,7 +16,6 @@ import { mcpReply } from "../src/dash/mcp/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { connectDb } from "../src/db/open.ts";
 import { awaitCall, claimCall, submitCall, type Caller } from "../src/remote/calls.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type TaskBundle } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 
@@ -31,7 +30,6 @@ describe("workspace relay", async () => {
 
   before(async () => {
     allocation.pollMs = 10;
-    await setInferenceMode(db, "user-local", "test");
     await addLogin(db, "cli", "bob", "maintainer", null);
     const now = new Date().toISOString();
     await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold", visibility: "public" }));

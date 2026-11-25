@@ -19,7 +19,6 @@ import type { DeadlineStop, StepRun } from "../jobs/types.ts";
 import type { Liveness } from "../planner/types.ts";
 import type { RepoErrorRow, SyncRunRow, SyncState } from "../mirror/types.ts";
 import type { TrackedRepo, TripRow } from "../control/types.ts";
-import type { InferenceMode } from "./types.ts";
 
 export type HealthEnv = { id: string; label: string; kind: string; last_seen_at: string | null; created_at: string; health: string | null; health_at: string | null };
 export type LeaderFacts = { role: string; status: { leader: { at: string; since: string } | null; standbys: number; unwatched: boolean } | null };
@@ -52,8 +51,8 @@ export type HealthFacts = {
 };
 
 export type HealthOptions = {
-  mode: InferenceMode; thresholds: HealthThresholds; leaderStaleMs: number; taskQueuedMs: number; foreignWarnMs: number;
-  /** Whether Discord is configured: the Interactive taker rows are read only then (user-local mode). */
+  thresholds: HealthThresholds; leaderStaleMs: number; taskQueuedMs: number; foreignWarnMs: number;
+  /** Whether Discord is configured: the Interactive taker rows are read only then. */
   discord: boolean; stepWindow: number; stepDays: number;
 };
 
@@ -71,7 +70,6 @@ export async function loadTakerRows(db: Db, nowMs: number): Promise<TakerRow[]> 
 export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): Promise<HealthFacts> {
   const q = queryDb(db);
   const cutoff = new Date(nowMs - o.taskQueuedMs).toISOString();
-  const userLocal = o.mode === "user-local";
   const from = new Date(nowMs - o.foreignWarnMs).toISOString();
   const [lanes, endpoint, envs, queuedAll, queuedPublic, confidentialReadyAt, privateQueued, envWaits, syncRuns, syncState, tracked, repoErrors, deadlines, stepRuns, liveness,
     userTokens, ack, removalRows, trip, held, runner, takers, leaders] = await db.together(() => Promise.all([
@@ -97,8 +95,8 @@ export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): 
     q.all(q.k.selectFrom("audit").select(["at", "target", "details"]).where("action", "=", "app-install-removed").where("at", ">=", from).orderBy("at", "desc")),
     control.loadTrip(db, "outside-surge"),
     intake.countHolds(db, { reason: "surge" }),
-    userLocal ? runners.loadRunnerHealth(db, nowMs, o.thresholds) : Promise.resolve(null),
-    userLocal && o.discord ? loadTakerRows(db, nowMs) : Promise.resolve(null),
+    runners.loadRunnerHealth(db, nowMs, o.thresholds),
+    o.discord ? loadTakerRows(db, nowMs) : Promise.resolve(null),
     Promise.all(LEADER_ROLES.map(async (role): Promise<LeaderFacts> => ({ role, status: await leaderStatus(db, role, o.leaderStaleMs, nowMs) }))),
   ]));
   // Reading the unbound logins costs a scan, so it waits for an error that could make it matter.

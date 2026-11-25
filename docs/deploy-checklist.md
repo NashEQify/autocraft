@@ -23,7 +23,7 @@ On one VPS, `deploy/compose/compose.yaml` runs the same three processes (dashboa
 - **Proxy.** Any TLS reverse proxy on the VPS forwards the origin to `127.0.0.1:3005`, the only published port. It must pass `Host`, set `X-Forwarded-For` and not buffer `GET /api/live`.
 - **DNS.** Point the origin's record at the VPS. If the origin stays the same, the GitHub App's callback, setup and webhook URLs and the OAuth callback URL stay as they are.
 - **Build workers.** None on the VPS. A separate build box reaches the worker API (8981) through a TLS proxy on its own hostname that accepts only its address, never through the dashboard's site. Register it with `autocraft-server envs add <id> --label TEXT --kind remote --slots N --print` (the full command with the key handling is under "Build workers" in the migration runbook). Disable the old install's `local-sandbox` environments (`envs set <id> --enabled no`), or their health checks fail.
-- **`jev`.** Not in the image. Set the `AUTOCRAFT_JEV_CLOUDFLARE_*` variables to use Cloudflare Workers AI; until then Haiku does the classify, priority, duplicate and signal work through the Claude accounts.
+- **`jev`.** Not in the image. Set the `AUTOCRAFT_JEV_CLOUDFLARE_*` variables to use Cloudflare Workers AI; until then Haiku does the classify, priority, duplicate and signal work through the Task Runners.
 - **Backups.** The daily snapshot sits on the VPS disk. Copy it, and `/config`, off the VPS on a schedule.
 
 ## Processes
@@ -64,7 +64,6 @@ The image sets every path (`/data/...`, `/config/...`). A deployment sets only t
 | `AUTOCRAFT_ATTACH_SECRET_ACCESS_KEY` | with the endpoint | none | Its secret access key. Keep it in a Secret. |
 | `AUTOCRAFT_ATTACH_PUBLIC_URL` | with the endpoint | none | Public read origin of the bucket, `https://files.example.com`, no trailing slash. Issue bodies link `<this>/<object key>`. |
 | `AUTOCRAFT_MERGE_CMD` | no | built-in `safe-merge` | External merge command; it must accept `--head <sha>`. |
-| `AUTOCRAFT_CALL_IDLE_MIN` | no | `15` | Minutes a model call may stay silent before it is stopped. |
 
 Never set `AUTOCRAFT_DEV_AUTH`: it signs in as any login and is allowed only on a loopback address.
 
@@ -73,9 +72,9 @@ Never set `AUTOCRAFT_DEV_AUTH`: it signs in as any login and is allowed only on 
 | Volume | Mount | Holds | Secrets |
 |---|---|---|---|
 | data (20 Gi in the manifest) | `/data` | `mirror.db` (SQLite), the git cache and checkouts, job logs, task artifacts, `HOME`, backups in `/data/backups` | The database holds encrypted GitHub user tokens, agent token hashes and sessions. Treat it, and its backups, as secret. |
-| config (1 Gi) | `/config` | `secrets.json` (mode 0600, owner uid 10001), `accounts.json`, the Claude account directories in `/config/claude`, the `gh` config if `gh auth login` is used instead of `GH_TOKEN` (needed only while the GitHub identity is the box account; under the GitHub App identity every read and write uses installation tokens) | All of it. `secrets.json` holds the OAuth client secret, the session key and the GitHub App private key; the account directories hold Claude logins. |
+| config (1 Gi) | `/config` | `secrets.json` (mode 0600, owner uid 10001), the `gh` config if `gh auth login` is used instead of `GH_TOKEN` (needed only while the GitHub identity is the box account; under the GitHub App identity every read and write uses installation tokens) | All of it. `secrets.json` holds the OAuth client secret, the session key and the GitHub App private key. |
 
-Both are read-write: the dashboard rewrites `secrets.json` (a temporary file in `/config`, then a rename) when the GitHub App is registered, and writes account files, logins and usage readings. `session_key` seals the stored GitHub tokens (`user_tokens` and each session's token set). With a different key those read as unavailable until each user signs in again. Sessions and agent tokens do not depend on it.
+Both are read-write: the dashboard rewrites `secrets.json` (a temporary file in `/config`, then a rename) when the GitHub App is registered. `session_key` seals the stored GitHub tokens (`user_tokens` and each session's token set). With a different key those read as unavailable until each user signs in again. Sessions and agent tokens do not depend on it.
 
 ## Ports and health checks
 
@@ -119,7 +118,7 @@ The proxy must pass `Host`, set `X-Forwarded-For` when `AUTOCRAFT_TRUST_PROXY=1`
 
 ## Backups
 
-The periodic container writes `daily-<timestamp>.db.zst` to `/data/backups` once a day and keeps 7. The snapshot is consistent while the services run and passes an integrity check. It sits on the same volume as the database, so it does not protect against losing the volume: copy the files off it on a schedule (a sidecar, a volume snapshot of `data`, or a job that mounts it on the same node). Also keep a copy of `secrets.json` and `accounts.json` and the Claude account directories somewhere safe; the database alone cannot sign anyone in or run a job.
+The periodic container writes `daily-<timestamp>.db.zst` to `/data/backups` once a day and keeps 7. The snapshot is consistent while the services run and passes an integrity check. It sits on the same volume as the database, so it does not protect against losing the volume: copy the files off it on a schedule (a sidecar, a volume snapshot of `data`, or a job that mounts it on the same node). Also keep a copy of `secrets.json` somewhere safe; the database alone cannot sign anyone in or run a job.
 
 To restore, stop the pod (or scale to 0) and stream the snapshot into the volume from a helper container: `zstd -dc daily-<time>.db.zst | <run in the image> sh -c 'rm -f /data/mirror.db-wal /data/mirror.db-shm; cat > /data/mirror.db'`. Then start it. The migration runbook ([migration.md](migration.md)) has the full commands.
 

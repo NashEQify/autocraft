@@ -7,7 +7,6 @@ import { test } from "node:test";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { claimCall, enqueueCall } from "../src/remote/calls.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -16,7 +15,6 @@ mkdirSync(SCRATCH, { recursive: true });
 
 test("a claim limited by its login's refresh leases the short call, leaves the long one and is no idle helper", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-claim-timeout-")), "t.db"));
-  await setInferenceMode(db, "user-local", "test");
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const tokenId = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, tokenId, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));

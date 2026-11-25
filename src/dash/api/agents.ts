@@ -1,11 +1,8 @@
-// Claude accounts, agent runs and rates over JSON. Everyone signed in reads;
-// only operators change an account (audited as `account-change`). The box
-// config's directories never reach a response: accounts are returned by id and label.
-import type { AgentRunFilter, AgentRunState, ClaudeAccount, JevStatus } from "../../../web/src/api/types.ts";
-import { AccountError, setUsagePause, usagePause } from "../../agents/accounts.ts";
-import { accountAction, accountList } from "../../agents/account-actions.ts";
+// Agent runs and rates over JSON, and the usage pause and Jev switch. Everyone signed in reads; only operators change a setting.
+import type { AgentRunFilter, AgentRunState, JevStatus, UsagePause } from "../../../web/src/api/types.ts";
 import { jevEnabled, jevOutage, setJevEnabled } from "../../agents/jev.ts";
 import { getRun, listRuns, rates as ratesOf, RunQueryError } from "../../agents/runs.ts";
+import { loadLiveConfig, saveSettings } from "../../data/control/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { hiddenRepos } from "./visible.ts";
@@ -17,22 +14,23 @@ const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
   try {
     return await f();
   } catch (e) {
-    if (e instanceof AccountError || e instanceof RunQueryError) throw new HttpError(e.status, e.message);
+    if (e instanceof RunQueryError) throw new HttpError(e.status, e.message);
     throw e;
   }
 };
 
-/** Operators see every account; others only the enabled ones. */
-export const accounts = async (db: Db, req: Req): Promise<ClaudeAccount[]> =>
-  (await accountList(db, Date.now(), true, req.user.login))
-    .filter((a) => a.enabled || req.user.role === "operator")
-    // The sign-in URL belongs to the operator who started it.
-    .map((a) => (req.user.role === "operator" ? a : { ...a, login: null }));
+const validPct = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 100;
 
-export const putAccount = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "update", req.params.id, req.json, req.user.login));
-
-export const getPause = async (db: Db) => await usagePause(db);
-export const putPause = async (db: Db, req: Req) => wrap(async () => await setUsagePause(db, req.json, req.user.login));
+export const getPause = async (db: Db): Promise<UsagePause> => (await loadLiveConfig(db)).usagePause;
+export const putPause = async (db: Db, req: Req): Promise<UsagePause> => {
+  const v = req.json as Partial<UsagePause> | null;
+  if (!v || typeof v !== "object" || !validPct(v.fiveHour) || !validPct(v.weekly)) throw new HttpError(400, "pause levels must be whole numbers from 1 to 100");
+  const was = await getPause(db), next = { fiveHour: v.fiveHour, weekly: v.weekly };
+  if (next.fiveHour !== was.fiveHour || next.weekly !== was.weekly) {
+    await saveSettings(db, [{ key: "usage_pause", value: JSON.stringify(next) }], req.user.login, { action: "account-change", target: "usage-pause", details: { ...next, was } });
+  }
+  return next;
+};
 
 export const getJev = async (db: Db): Promise<JevStatus> => {
   const o = await jevOutage(db);
@@ -44,17 +42,6 @@ export const putJev = async (db: Db, req: Req) => wrap(async () => {
   await setJevEnabled(db, enabled, req.user.login);
   return await getJev(db);
 });
-
-export const postAccount = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "add", undefined, req.json, req.user.login));
-export const loginStart = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "login-start", req.params.id, undefined, req.user.login));
-export const loginCode = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "login-code", req.params.id, req.json, req.user.login));
-export const loginCancel = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "login-cancel", req.params.id, undefined, req.user.login));
-export const tokenStart = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "token-start", req.params.id, undefined, req.user.login));
-export const tokenCode = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "token-code", req.params.id, req.json, req.user.login));
-export const tokenCancel = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "token-cancel", req.params.id, undefined, req.user.login));
-export const tokenRemove = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "token-remove", req.params.id, undefined, req.user.login));
-export const accountSignOut = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "sign-out", req.params.id, undefined, req.user.login));
-export const accountRefresh = async (db: Db, req: Req) => wrap(async () => await accountAction(db, "refresh", req.params.id, undefined, req.user.login));
 
 function intParam(req: Req, name: string): number | undefined {
   const v = req.query.get(name);

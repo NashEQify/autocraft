@@ -65,10 +65,8 @@ export type McpEnv = {
   canAnswer: boolean;
   /** Spends one of the token's expensive calls (list_repos, list_fixups, list_merge_queue); the number of seconds to wait when it has none left, else 0. */
   expensive: () => number;
-  /** The instance is in the user-local inference mode and one of the login's Task Runners reports in: the task tools are offered. `canWrite` reads the user's live write permission on a repo. */
+  /** One of the login's Task Runners reports in: the task tools are offered. `canWrite` reads the user's live write permission on a repo. */
   run?: { canWrite: (repo: string) => Promise<boolean> };
-  /** The instance is in the user-local inference mode: the model call tools are offered (picks to maintainers and operators). */
-  userLocal?: boolean;
 };
 
 export type Msg = { jsonrpc?: unknown; id?: string | number | null; method?: unknown; params?: Record<string, unknown> };
@@ -366,7 +364,6 @@ const MAINTAINER_QUEUE_PR = {
   inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
 };
 
-/** Offered in the user-local inference mode (McpEnv.userLocal). */
 export const MODEL_CALL_TOOLS = [
   {
     name: "list_model_calls",
@@ -768,12 +765,7 @@ async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
   return show(`${rows.length}${more ? "+" : ""} pull request${rows.length === 1 ? "" : "s"} wait for a fix-up the pipeline could not make. Once the fixes land on the PR, the pipeline reviews the new head by itself.`, "fix-ups", rows);
 }
 
-const needLocal = (env: McpEnv): void => {
-  if (!env.userLocal) throw new HttpError(403, "model calls run on the server's accounts: the instance is not in the user-local inference mode");
-};
-
 async function listModelCalls(env: McpEnv, raw: unknown): Promise<ToolResult> {
-  needLocal(env);
   args(raw, {});
   const q = await modelQueue.get(env.db, reqOf(await env.user(false)));
   const calls = q.calls.map((c) => ({
@@ -786,7 +778,6 @@ async function listModelCalls(env: McpEnv, raw: unknown): Promise<ToolResult> {
 
 /** pick_model_call and unpick_model_call: the dashboard's pick and unpick, with "mcp" in the audit row. */
 async function pickModelCall(env: McpEnv, raw: unknown, pick: boolean): Promise<ToolResult> {
-  needLocal(env);
   const a = args(raw, { id: "id" }, ["id"]);
   const req = reqOf(await env.user(pick), { method: "POST", params: { id: a.id as string } });
   await (pick ? modelQueue.pick(env.db, req, "mcp") : modelQueue.unpick(env.db, req, "mcp"));
@@ -993,12 +984,12 @@ export async function handleMcp(env: McpEnv, msg: Msg): Promise<Reply | null> {
   const queue = role === "operator";
   const steers = queue || role === "maintainer";
   const addsToQueue = env.canAnswer && (queue || role === "maintainer");
-  const picks = !!env.userLocal && (role === "operator" || role === "maintainer");
+  const picks = role === "operator" || role === "maintainer";
   return mcpReply({
     name: "autocraft", title: "AutoCraft",
     instructions: INSTRUCTIONS + (env.canAnswer ? ANSWER_INSTRUCTIONS : "") + (queue ? QUEUE_INSTRUCTIONS + (env.canAnswer ? QUEUE_APPROVE_INSTRUCTIONS : "") : addsToQueue ? MAINTAINER_QUEUE_INSTRUCTIONS : "") + (env.canAnswer && steers ? COMMAND_INSTRUCTIONS : "") + (env.run ? RUN_INSTRUCTIONS : "")
-      + (env.userLocal ? MODEL_CALL_INSTRUCTIONS + (picks ? MODEL_PICK_INSTRUCTIONS : "") : ""),
+      + MODEL_CALL_INSTRUCTIONS + (picks ? MODEL_PICK_INSTRUCTIONS : ""),
     tools: [...TOOLS, ...WORKFLOW_READ_TOOLS, ...(env.canAnswer && steers ? WORKFLOW_COMMAND_TOOLS : []), ...(env.canAnswer ? ANSWER_TOOLS : []), ...(steers ? QUEUE_TOOLS : []), ...(queue && env.canAnswer ? QUEUE_APPROVE_TOOLS : addsToQueue ? [MAINTAINER_QUEUE_PR, ...QUEUE_APPROVE_TOOLS.filter((t) => t.name === "cancel_queued")] : []), ...(env.run ? RUN_TOOLS : []),
-      ...(env.userLocal ? MODEL_CALL_TOOLS : []), ...(picks ? MODEL_PICK_TOOLS : []), ...(steers ? SETTINGS_TOOLS : [])], call: (name, raw) => callTool(env, name, raw),
+      ...MODEL_CALL_TOOLS, ...(picks ? MODEL_PICK_TOOLS : []), ...(steers ? SETTINGS_TOOLS : [])], call: (name, raw) => callTool(env, name, raw),
   }, msg);
 }

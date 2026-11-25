@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { writeChoices } from "../src/decide/choices.ts";
@@ -36,7 +35,6 @@ class FakeRest implements DmRest {
 test("alerts: opt-in, a new decision reaches only people who may settle it, a press runs as the presser, an answer edits the messages", async () => {
   const T0 = "2026-01-01T00:00:00Z";
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "discord-alerts-")), "t.db"));
-  await useTestAccount(db);
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   for (const n of [2, 3, 4, 5]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: `PR ${n}`, body: "Body", author: "someone", head_oid: "sha", created_at: T0, updated_at: T0, labels: "[]" }));

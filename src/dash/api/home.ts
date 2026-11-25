@@ -1,5 +1,5 @@
 // What the Home page shows about problems: what the pipeline stopped, what is unhealthy and what gave up. The facts come from
-// src/data/views; this file words them. The classic Home read is retired and answers with empty values.
+// src/data/views; this file words them.
 import type { HomeProblem } from "../../../web/src/api/types.ts";
 import { itemPath } from "../../../web/src/lib/links.ts";
 import { parseTripKey } from "../../core/push-outcome.ts";
@@ -10,7 +10,6 @@ import type { AttentionFacts } from "../../data/views/types.ts";
 import type { Req } from "../types.ts";
 import { healthProblems, type ProblemFacts } from "./health.ts";
 import { stepTitle } from "./trace.ts";
-import { ITEM_PHASES, type Home, type ItemPhase } from "./home-types.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Something the pipeline stopped; `to` is the page where it goes on again. */
@@ -47,12 +46,4 @@ export async function problems(db: Db, o: Omit<ProblemFacts, "facts"> & { stops:
       out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
   }
   return out;
-}
-
-/** The classic Home is retired: the shape stays, every part empty. */
-export async function home(_db: Db, _req: Req, _deps: { progress: (hidden: HiddenRepos) => Promise<unknown> }): Promise<Home> {
-  return {
-    needs: { total: 0, byKind: {}, oldest: [] }, problems: [], phases: Object.fromEntries(ITEM_PHASES.map((p) => [p, 0])) as Record<ItemPhase, number>, running: "",
-    progress: { openNow: 0, openAtStart: 0, done24h: 0, byAutoCraftPct: 0, perHour: [], spendTodayUsd: 0 }, done: [],
-  };
 }

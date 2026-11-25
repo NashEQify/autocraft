@@ -54,8 +54,6 @@ import { prompts } from "./prompts.ts";
 import { queue, queueBatches } from "./queue.ts";
 import { next } from "./next.ts";
 import { work } from "./work.ts";
-import { flow } from "./flow.ts";
-import { now, nowFeed } from "./now.ts";
 import { health } from "./health.ts";
 import { queueSlots } from "../../rank/position.ts";
 import * as items from "./items.ts";
@@ -75,9 +73,6 @@ import { loadQuiet } from "../../data/security/index.ts";
 import { classificationsOf, itemState, relatedOf } from "./decisions.ts";
 import * as sim from "./similar.ts";
 import * as inference from "./inference.ts";
-import { inferenceMode } from "../../remote/mode.ts";
-import { fixes as needsFixes, needs } from "./needs.ts";
-import { home } from "./home.ts";
 import { localEmbedder, type Embedder } from "../../embed/model.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { batchOne } from "./batch-page.ts";
@@ -131,7 +126,7 @@ async function me(db: Db, req: Req): Promise<User> {
     runRepos: await runRepos(db, req),
     maintainerWrites: false,
     maintainerSettles: await maintainersSettle(db),
-    inference: await inferenceMode(db),
+    inference: "user-local",
     uiV2: await uiV2(db, req.user.login),
   };
 }
@@ -467,7 +462,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/area-proposals/:id/accept", handler: ok(areas.acceptProposalApi) },
     { method: "POST", pattern: "/api/area-proposals/:id/dismiss", handler: ok(areas.dismiss) },
     { method: "POST", pattern: "/api/items/:repo/:n/batch-again", handler: ok(operator.batchItemAgain) },
-    scoped(get("/api/items", items.listItems)),
     heavy(get("/api/search", async (db, req) => req.query.get("mode") === "semantic" ? sim.semanticSearch(db, req, vectors) : items.quickSearch(db, req)), (q) => q.get("mode") === "semantic"),
     get("/api/progress", async (db, req) => await progress(db, await hiddenRepos(db, req))),
     get("/api/main-ci", async (db, req) => {
@@ -541,8 +535,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/pipeline/jobs/:id/cancel", handler: ok(pipeline.cancel) },
     get("/api/pipeline/state", pipeline.state),
     { method: "PUT", pattern: "/api/pipeline/state", operator: true, handler: ok(pipeline.putState) },
-    { method: "GET", pattern: "/api/pipeline/judgement-model", operator: true, handler: ok(async (db) => await pipeline.getJudgementModel(db)) },
-    { method: "PUT", pattern: "/api/pipeline/judgement-model", operator: true, handler: ok(pipeline.putJudgementModel) },
     { method: "PUT", pattern: "/api/pipeline/blocker-thresholds", operator: true, handler: ok(pipeline.putBlockers) },
     { method: "PUT", pattern: "/api/pipeline/limits/:step", operator: true, handler: ok(pipeline.putLimit) },
     { method: "POST", pattern: "/api/pipeline/limits/:step/reset", operator: true, handler: ok(pipeline.resetLimit) },
@@ -556,22 +548,10 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/items/:repo/:n/release-outside", handler: ok(outside.release) },
     scoped(get("/api/needs/outside/:author", outside.held)),
     get("/api/prompts", prompts),
-    get("/api/accounts", agents.accounts),
     get("/api/accounts/pause", agents.getPause),
     { method: "PUT", pattern: "/api/accounts/pause", operator: true, handler: ok(agents.putPause) },
     get("/api/accounts/jev", agents.getJev),
     { method: "PUT", pattern: "/api/accounts/jev", operator: true, handler: ok(agents.putJev) },
-    { method: "PUT", pattern: "/api/accounts/:id", operator: true, handler: ok(agents.putAccount) },
-    { method: "POST", pattern: "/api/accounts", operator: true, handler: ok(agents.postAccount) },
-    { method: "POST", pattern: "/api/accounts/:id/login", operator: true, handler: ok(agents.loginStart) },
-    { method: "POST", pattern: "/api/accounts/:id/login/code", operator: true, handler: ok(agents.loginCode) },
-    { method: "POST", pattern: "/api/accounts/:id/login/cancel", operator: true, handler: ok(agents.loginCancel) },
-    { method: "POST", pattern: "/api/accounts/:id/token", operator: true, handler: ok(agents.tokenStart) },
-    { method: "POST", pattern: "/api/accounts/:id/token/code", operator: true, handler: ok(agents.tokenCode) },
-    { method: "POST", pattern: "/api/accounts/:id/token/cancel", operator: true, handler: ok(agents.tokenCancel) },
-    { method: "POST", pattern: "/api/accounts/:id/token/remove", operator: true, handler: ok(agents.tokenRemove) },
-    { method: "POST", pattern: "/api/accounts/:id/sign-out", operator: true, handler: ok(agents.accountSignOut) },
-    { method: "POST", pattern: "/api/accounts/:id/refresh", operator: true, handler: ok(agents.accountRefresh) },
     get("/api/agents", agents.list),
     get("/api/agents/:id", agents.detail),
     get("/api/rates", agents.rates),
@@ -624,17 +604,10 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/security/scans/:id/continue", security.continueScan),
     get("/api/security/findings/:repo/:n", security.finding),
     post("/api/security/findings/:repo/:n", security.actOnFinding),
-    scoped(get("/api/needs", needs)),
-    get("/api/needs/fixes/:repo", needsFixes),
-    get("/api/flow", flow),
-    scoped(get("/api/now", now)),
     scoped(get("/api/live", live)),
     get("/api/health", health),
-    scoped(get("/api/now/feed", nowFeed)),
     heavy(get("/api/similar/:repo/:n", async (db, req) => sim.similar(db, req, vectors))),
     get("/api/security/findings", securityPage.securityFindings),
     get("/api/security/findings/:repo/:n/page", securityPage.findingPage),
-    scoped(get("/api/home", async (db, req) => home(db, req, { progress: async (hidden) => await progress(db, hidden) }))),
-    scoped(get("/api/items/status", items.statusList)),
   ];
 }

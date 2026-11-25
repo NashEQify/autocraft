@@ -1,23 +1,8 @@
-// The instance's inference mode. Claude model calls are queued as remote calls that maintainers' helpers claim, run on their
-// own machines and submit (src/remote/calls.ts). Jev calls and embeddings run on this host. The `server` mode, which ran
-// Claude calls on this host's accounts, is retired: there are no server accounts.
+// The model tiers and the model families each tier accepts. Claude model calls are queued as remote calls that Task Runners
+// claim, run on their own machines and submit (src/remote/calls.ts). Jev calls and embeddings run on this host.
 import { EFFORTS, type Effort, type HarnessId, type Tier } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
 import { saveSettings, setting } from "../data/control/index.ts";
-
-export const INFERENCE_MODES = ["server", "user-local"] as const;
-export type InferenceMode = (typeof INFERENCE_MODES)[number];
-
-export const isInferenceMode = (v: unknown): v is InferenceMode => typeof v === "string" && (INFERENCE_MODES as readonly string[]).includes(v);
-
-export const inferenceMode = async (db: Db): Promise<InferenceMode> => { void db; return "user-local"; };
-
-/** The mode is always `user-local`: false for it, and an error for the retired `server` mode. */
-export async function setInferenceMode(db: Db, mode: InferenceMode, by: string): Promise<boolean> {
-  void db; void by;
-  if (mode === "server") throw new Error("the server inference mode is retired: Claude calls run on Task Runners");
-  return false;
-}
 
 /** The tier a model name of the prompt registry belongs to. */
 export function tierOfModel(model: string): Tier {

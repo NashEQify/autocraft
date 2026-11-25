@@ -41,7 +41,7 @@ import { setting } from "../../settings-read.ts";
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;
 const AUDIT_PAGE = 50;
-// Accounts and access (who can sign in, sessions, the Claude accounts) are audited for operators only.
+// Accounts and access (who can sign in, sessions) are audited for operators only.
 export const operatorOnly = (a: string) => a.startsWith("access-") || a.startsWith("github-app-") || a.startsWith("github-mention-") || a.startsWith("app-") || a.startsWith("account-") || a.startsWith("mcp-token-") || a.startsWith("runner-") || ["session-revoke", "sign-in", "sign-in-refused", "usage-reserve", "my-repos", "max-calls", "interactive-slots", "manual-only"].includes(a);
 export const AUDIT_ACTIONS = [
   "answer", "undo", "dispute", "dispute-resolve", "answer-sweep", "adopt", "opinion", "opinion-retract", "comment", "override", "rule", "access-add", "access-remove", "access-role",

@@ -4,14 +4,13 @@
 // usage rows and the error result.
 import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
-import { jevParallel } from "./accounts.ts";
 import { add, askClaude, askJev, pool, promptVersion, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
-import { loadTrackedRepos } from "../data/control/index.ts";
+import { loadLiveConfig, loadTrackedRepos } from "../data/control/index.ts";
 import { keepEarlierUsage, loadUnsure, pruneUnsure, saveUnsure } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { createHash } from "node:crypto";
@@ -263,7 +262,7 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
       if (!await jevAvailable(db)) return;
       const r = await runModelStep(db, tier.jev, x, { ctx: opts.ctx, usage: opts.jevUsage?.(x), cancelled: opts.cancelled });
       out.jev.set(tier.ref(x), r.ok ? r.value : null);
-    }), opts.jevWidth ?? (async () => await jevParallel(db)));
+    }), opts.jevWidth ?? (async () => (await loadLiveConfig(db)).jevParallel));
   }
   const down = !await jevAvailable(db);
   const ask: It[] = [];

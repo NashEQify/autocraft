@@ -66,7 +66,7 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
         }
       }
       // A reply arrived and left an item out (or was invalid): count the failure on Sonnet's row (rewritten, so the settled table sees it); the planner backs off, and the third failure ends the referee's turn.
-      // No reply at all (no Claude account free, a failed call) and a cancelled job are not the item's failure.
+      // No reply at all (no Task Runner took it, a failed call) and a cancelled job are not the item's failure.
       const replied = r.ok || r.error !== "no answer";
       if (opts.model && opts.pipeline && replied && !await opts.cancelled?.()) {
         const answered = new Set(r.ok ? r.values.flat().map((v) => v.ref) : []);
