@@ -110,10 +110,10 @@ export async function hasWarmBuild(db: Db, repo: string, headSha: string, since:
 }
 
 /** Queued warm-build tasks with the head each would build, oldest first. 1 statement. */
-export async function loadQueuedWarmBuilds(db: Db): Promise<{ id: number; repo: string; headSha: string }[]> {
+export async function loadQueuedWarmBuilds(db: Db): Promise<{ id: number; repo: string; headSha: string; queuedAt: string }[]> {
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("build_tasks").select(["id", "repo", "head_sha"]).where("warm_role", "=", "build").where("state", "=", "queued").orderBy("id"), { label: "build.loadQueuedWarmBuilds" });
-  return rows.map((r) => ({ id: Number(r.id), repo: r.repo, headSha: r.head_sha }));
+  const rows = await q.all(q.k.selectFrom("build_tasks").select(["id", "repo", "head_sha", "queued_at"]).where("warm_role", "=", "build").where("state", "=", "queued").orderBy("id"), { label: "build.loadQueuedWarmBuilds" });
+  return rows.map((r) => ({ id: Number(r.id), repo: r.repo, headSha: r.head_sha, queuedAt: r.queued_at }));
 }
 
 /** The time the private clock started (the earliest first call of an enabled confidential environment), null when none has called. 1 statement. */
