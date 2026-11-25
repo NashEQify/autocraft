@@ -34,8 +34,8 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
   ["maintain-repos", ["workflows", "items", "repos", "limits", "settings", "access"]],
   ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
-  // The list of the pull requests AutoCraft merged.
-  ["maintain-items:merged:", ["queue", "items", "access", "repos"]],
+  // The list of the pull requests AutoCraft merged: each merge moves the queue topic.
+  ["maintain-items:merged:", ["queue", "access", "repos"]],
   ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "outside", "access", "security", "repos"]],
   ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
   // One opened event row: its detail reads what the timeline does; the run and the task behind it read one table each.

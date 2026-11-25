@@ -45,6 +45,29 @@ test("the lists leave out repos the viewer may not see, filter by hold and count
   }
 });
 
+test("Recently merged lists what AutoCraft merged, by a merge or in a batch, newest first", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    const pr = (number: number, o: Record<string, unknown> = {}) => ({ repo: "app", number, kind: "pr", state: "MERGED", title: `t${number}`, author: "ann", updated_at: NOW, ...o });
+    await db.run(db.k.insertInto("main.items").values([
+      pr(1, { merged_at: "2026-11-10T01:00:00.000Z" }), pr(2, { merged_at: "2026-11-10T02:00:00.000Z" }), pr(3, { state: "OPEN" }), pr(4, { merged_at: "2026-11-10T05:00:00.000Z" }), pr(5, { state: "OPEN" }),
+    ]));
+    const merge = (number: number, path: string, outcome = "merged", at = "2026-11-10T01:00:00.000Z") => ({ repo: "app", number, head_oid: "h", run_id: "r", at, path, outcome });
+    await db.run(db.k.insertInto("main.merges").values([merge(1, "rule"), merge(2, "operator", "refused"), merge(2, "operator"), merge(5, "rule", "refused")]));
+    const batch = { repo: "app", branch: "b", base_sha: "b", commit_sha: "c", created_at: NOW };
+    await db.run(db.k.insertInto("main.merge_batches").values([{ ...batch, id: 1, state: "merged", updated_at: "2026-11-10T03:00:00.000Z" }, { ...batch, id: 2, state: "failed", updated_at: NOW }]));
+    await db.run(db.k.insertInto("main.merge_batch_prs").values([[1, 2], [1, 3], [2, 5]].map(([batch_id, number]) => ({ batch_id: batch_id!, number: number!, head_oid: "h", position: number! }))));
+    const f = { show: "merged" as const, filters: [], areas: [], text: null, refs: [], sort: "priority" as const, normalWeight: 5, limit: 50 };
+    const shown = await loadItemsBase(db, { repos: ["app"], hidden: [] }, f);
+    // 3 merged in a batch the mirror has not read; 4 was merged by someone else, 5 not at all.
+    assert.deepEqual(shown.rows.map((r) => [r.number, r.merged!.how]), [[3, "batch"], [2, "approval"], [1, "rule"]]);
+    const first = await loadItemsBase(db, { repos: ["app"], hidden: [] }, { ...f, limit: 1 });
+    assert.deepEqual([first.rows.map((r) => r.number), first.closedTotal], [[3], 3]);
+  } finally {
+    await db.close?.();
+  }
+});
+
 test("a viewer sees public repos and those with a cached permission; an operator sees every tracked repo", () => {
   const repo = (name: string, visibility: string) => ({ name, visibility }) as never;
   const inputs = {

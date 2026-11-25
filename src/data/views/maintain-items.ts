@@ -2,7 +2,7 @@
 //        planner.liveness_items, triage.item_areas, triage.item_settled, triage.dupe_group_items, security.security_findings, merge.merges,
 //        merge.merge_batches, merge.merge_batch_prs
 // The Items page: one statement for the filtered rows with their workflow and plan signals, and the facts of the rows a page shows.
-import type { AliasableExpression, Expression, SqlBool } from "kysely";
+import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { parseSearch } from "../../db/search.ts";
@@ -12,7 +12,7 @@ import { heldExpr } from "../intake/fragments.ts";
 import * as intake from "../intake/index.ts";
 import { stuckItem } from "../planner/fragments.ts";
 import * as planner from "../planner/index.ts";
-import { inMergedBatch, mergedAt, mergedByUs, mergedOnApproval } from "../merge/fragments.ts";
+import { mergedPrs } from "../merge/fragments.ts";
 import { quietPrExpr } from "../security/fragments.ts";
 import { hasNoArea, inAreas, isDuplicateClose, rankJoin, settledJoin } from "../triage/fragments.ts";
 import * as triage from "../triage/index.ts";
@@ -29,9 +29,6 @@ export const phaseOf = (db: Db, eb: kx.Eb) => eb.fn.coalesce(
 );
 
 const NO_AREA = "none";
-const as = (e: Expression<SqlBool>, name: string) => (e as AliasableExpression<SqlBool>).as(name);
-/** When GitHub merged the item, or our merge step did while the mirror has not read it. */
-const mergeTime = (eb: kx.Eb) => eb.fn.coalesce("i.merged_at", mergedAt(eb, "i.repo", "i.number"));
 
 /** What decides an open item's group, and nothing else of it. */
 const PLACE = ["wf_state", "has_rec", "last_event", "plan_state", "plan_item_state", "phase"] as const;
@@ -50,7 +47,7 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
   const fts = f.text ? parseSearch(f.text) : null;
   const merged = f.show === "merged", closed = f.show === "closed" || merged;
   const conds = (eb: kx.AnyEb): Expression<SqlBool>[] => {
-    const c: Expression<SqlBool>[] = [kx.inList(db, "i.repo", scope.repos), merged ? eb.and([eb("i.kind", "=", "pr"), eb.or([mergedByUs(eb, "i.repo", "i.number"), inMergedBatch(eb, "i.repo", "i.number")])]) : closed ? eb("i.state", "<>", "OPEN") : eb("i.state", "=", "OPEN")];
+    const c: Expression<SqlBool>[] = [kx.inList(db, "i.repo", scope.repos), merged ? eb("i.kind", "=", "pr") : closed ? eb("i.state", "<>", "OPEN") : eb("i.state", "=", "OPEN")];
     if (f.refs.length) c.push(kx.refIn(db, "i", f.refs.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))] as const)));
     if (fts) c.push(textHit(eb, db, fts));
     for (const x of f.filters) {
@@ -83,7 +80,6 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
   const cols = (b: ReturnType<typeof base>) => b.select((eb: kx.Eb) => [
     "i.repo", "i.number", "i.updated_at", eb.ref("r.score").as("score"),
     "p.state as plan_state", "p.item_state as plan_item_state", kx.bytewise<string>(db, phaseOf(db, eb)).as("phase"),
-    ...(merged ? [mergeTime(eb).as("merge_time"), as(mergedByUs(eb, "i.repo", "i.number"), "own_merge"), as(mergedOnApproval(eb, "i.repo", "i.number"), "approved")] : []),
     "w.weight as weight", "w.state as wf_state", eb.case().when("w.rec", "is", null).then(0).else(1).end().as("has_rec"), "w.started_by", "w.approved_by", "w.stopped_by", "ev.kind as last_event",
   ]);
   const where = <B extends { where: (...a: any[]) => any }>(b: B): B => b.where((eb: kx.AnyEb) => eb.and(conds(eb))) as B;
@@ -99,12 +95,18 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
       return b.orderBy(eb.fn.coalesce("k.updated_at", eb.val("")), "desc");
     }).as("place_rank"),
   ]);
+  // The closed or merged items that match: the page is cut from their narrow rows before any is joined. The merged ones start from what AutoCraft merged.
+  const ended = (): any => where(merged ? (q.k.selectFrom(mergedPrs(db, scope.repos).as("mg")) as any).innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "mg.repo").onRef("i.number", "=", "mg.number")) : q.k.selectFrom("main.items as i"));
+  // A merge GitHub's copy does not show yet has the time of our merge step.
+  const shown = ended().select((eb: any) => ["i.repo as repo", "i.number as number", ...(merged ? [eb.fn.coalesce("i.merged_at", "mg.at").as("at"), "mg.own as own_merge", "mg.approved as approved"] : [eb.fn.coalesce("i.updated_at", eb.val("")).as("at")])])
+    .orderBy("at", "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit);
   const [rows, total] = await db.together(() => Promise.all([
     closed
-      ? q.all(where(cols(base())).select(ITEM.map((c) => `i.${c}` as const)).orderBy((eb: kx.Eb) => eb.fn.coalesce(merged ? mergeTime(eb) : "i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(f.limit))
+      ? q.all((cols(base()) as any).innerJoin(shown.as("sh"), (j: any) => j.onRef("sh.repo", "=", "i.repo").onRef("sh.number", "=", "i.number")).select(ITEM.map((c) => `i.${c}`))
+        .$if(merged, (b: any) => b.select(["sh.at as merge_time", "sh.own_merge", "sh.approved"])).orderBy("sh.at", "desc").orderBy("i.repo").orderBy("i.number", "desc"))
       : q.all((q.k.selectFrom(first().as("y") as never) as any).innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "y.repo").onRef("i.number", "=", "y.number"))
         .selectAll("y").select(ITEM.map((c) => `i.${c}`)).where("y.place_rank", "<=", f.limit)),
-    closed ? q.get(where(q.k.selectFrom("main.items as i").select((eb) => eb.fn.countAll<number>().as("n")))) : Promise.resolve(null),
+    closed ? q.get(ended().select((eb: any) => eb.fn.countAll().as("n"))) : Promise.resolve(null),
   ]));
   const of = (r: Record<string, any>): ItemBase => ({
     repo: r.repo, number: Number(r.number), kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", author: r.author, state: r.state, updatedAt: r.updated_at ?? "",
