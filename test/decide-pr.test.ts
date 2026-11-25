@@ -22,7 +22,7 @@ const MERGE_ENTRY = { entry: "merge", approved: true, startedBy: "maint", starte
 const HANDED = { handOver: true } as const;
 /** The merge leg of an approved PR waits in `ci`: for CI, then the pre-merge review. */
 const IN_CI = { operator: { fix: null, hold: true, premerge: true } } as const;
-const BLOCKED_GATE = { live: true, entry: "review", state: "blocked", startedBy: "maint", approvedBy: "maint", approvedAt: "2026-11-04T09:00:00.000Z", blocker: "other", baseHead: "h1", fixupAsked: false, leg: null } as const;
+const BLOCKED_GATE = { live: true, entry: "review", state: "blocked", startedBy: "maint", approvedBy: "maint", approvedAt: "2026-11-04T09:00:00.000Z", blocker: "other", baseHead: "h1", leg: null } as const;
 const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, minor: 0, error: null, ...o });
 const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });

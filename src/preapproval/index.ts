@@ -129,7 +129,7 @@ const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): 
 function mergeGate(wf: WorkflowFact | null, head: string, by: string): { ok: true } | { ok: false; why: string } {
   const workflow: WorkflowGate | null = wf ? {
     live: true, entry: wf.entry as WorkflowGate["entry"], state: wf.state, startedBy: wf.startedBy, approvedBy: wf.approvedBy ?? by, approvedAt: null,
-    blocker: null, baseHead: head, fixupAsked: false, leg: null,
+    blocker: null, baseHead: head, leg: null,
   } : null;
   const r = mergeApproved({ repoApproval: null, workflow, ended: null, head, pushes: [] });
   return r.ok ? { ok: true } : { ok: false, why: r.why };
@@ -198,9 +198,9 @@ export async function checkFixup(db: Db, o: { repo: string; number: number; by: 
   const { repo, number, by, merge } = o;
   const ref = refOf(repo, number);
   const it = await openPr(db, repo, number);
-  // The fix-up step and the review of its push only see PRs the planner works: out of scope and integration PRs would wait for ever.
+  // The fix-up step and the review of its push only see PRs the planner works, which an integration PR is not. The workflow puts the PR in scope.
   const fact = await loadPrFact(db, repo, number);
-  if (!fact?.inScope || fact.integration) throw outOfScope(ref);
+  if (!fact || fact.integration) throw outOfScope(ref);
   if (merge && fact.draft) throw isDraft(ref);
   const instructions = o.instructions.trim();
   if (!instructions) throw new Error("the fix-up needs instructions");

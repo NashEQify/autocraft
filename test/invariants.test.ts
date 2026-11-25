@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decideItem } from "../src/core/decide-item.ts";
 import { decidePr, premergeFix } from "../src/core/decide.ts";
-import { gates, mergeMay, type Want } from "../src/core/gates.ts";
+import { permit, wantOf } from "../src/core/authority.ts";
+import type { RefusalCode } from "../src/core/codes.ts";
+import { gates, mergeMay } from "../src/core/gates.ts";
 import { isWork } from "../src/core/assignment.ts";
 import type { Action, ItemFacts, Plan, PrFacts } from "../src/core/plan.ts";
 import type { PlanSet } from "../src/core/plan-set.ts";
@@ -17,9 +19,6 @@ import { randomItem } from "./random-item.ts";
 
 const CASES = Number(process.env.INVARIANT_CASES ?? 4000);
 
-const wantOf = (a: Action): Want => ({
-  kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}), ...(typeof a.params?.source === "string" ? { source: a.params.source } : {}),
-});
 const has = (p: Plan, kind: string, pred: (a: Action) => boolean = () => true) => p.actions.filter((a) => a.kind === kind && pred(a));
 const label = (a: Action) => a.kind + (a.params?.bucket ? `:${String(a.params.bucket)}` : "") + (a.params?.source ? `/${String(a.params.source)}` : "");
 /** An action that pushes a commit to the PR's branch. */
@@ -38,6 +37,7 @@ function mergeUncovered(w: PrRows): string | null {
   if (!wf.approvedBy) return "nobody approved the merge";
   const leg = w.legs.find((l) => l.workflow === wf.id);
   if (!leg || leg.state !== "queued" || leg.head !== head) return "the leg did not hand it over at the head";
+  if (w.standing && w.standing.merge !== "yes") return `the approver's standing is ${w.standing.merge}`;
   // An issue's workflow accepts the heads its leg accepted.
   return wf.kind === "issue" || reached(w, wf.baseHead, head) ? null : "someone else's commits are on the accepted head";
 }
@@ -45,10 +45,18 @@ function mergeUncovered(w: PrRows): string | null {
 /** Why nobody's approval covers the action's push; null when one does. */
 function pushUncovered(w: PrRows, a: Action): string | null {
   const wf = w.workflow;
+  if (wf && w.standing && w.standing.work !== "yes") return `the standing of whom it acts for is ${w.standing.work}`;
   if (a.params?.source === "operator") return w.request?.from === headOf(w) ? null : "nobody asked for a fix-up of the head";
   if (!wf) return w.ended !== null ? `it ended ${w.ended}` : w.approvals.push ? null : "the repo does not approve pushes";
   return wf.entry !== "review" || wf.approvedBy ? null : "a review nobody approved anything after";
 }
+
+/** What goes on while the workflow waits for a person: bookkeeping. */
+const GOES_ON = ["unassign", "post-review", "postmerge"];
+/** The refusals of a planned action that name what the PR waits for: the question that is asked, the one the next workflow pass asks, or GitHub's answer on a person. */
+const NAMED: readonly RefusalCode[] = ["blocked", "unaccepted-head", "actor-gone", "actor-unknown", "box-identity"];
+const refusalOf = (f: PrFacts, a: Action): RefusalCode | null => { const r = permit(f, wantOf(a)); return r.ok ? null : r.why.code; };
+const named = (f: PrFacts, a: Action): boolean => { const c = refusalOf(f, a); return c !== null && NAMED.includes(c); };
 
 type Case = { w: PrRows; f: PrFacts; p: Plan };
 type Violation = { rule: string; detail: string };
@@ -69,10 +77,15 @@ function safety({ w, f, p }: Case): Violation[] {
       const why = pushUncovered(w, a);
       need("push-approved", why === null, `${label(a)}: ${why}`);
       need("blocked-push", w.workflow?.state !== "blocked", `${label(a)} while the workflow is blocked`);
-      need("unaccepted-push", !w.workflow || w.workflow.kind === "issue" || a.params?.source === "operator" || !w.workflow.approvedBy || reached(w, w.workflow.baseHead, headOf(w)), `${label(a)} on commits the workflow did not accept`);
+      need("unaccepted-push", !w.workflow || w.workflow.kind === "issue" || !w.workflow.approvedBy || reached(w, w.workflow.baseHead, headOf(w)), `${label(a)} on commits the workflow did not accept`);
     }
     if (a.kind === "implement" && f.ghState === "OPEN") need("revise-standing", w.workflow?.kind === "issue" && f.implementation?.standing === "yes", "a revision nobody who may act commanded");
-    if (a.kind === "review") need("blocked-review", w.workflow?.state !== "blocked", "review while the workflow is blocked");
+    // Bookkeeping aside (the end of an attempt, too), nothing runs while the workflow asks a person, or for people who are gone.
+    if (!GOES_ON.includes(a.kind) && !(a.kind === "implement" && f.ghState !== "OPEN") && runs(a)) {
+      need("blocked-work", w.workflow?.state !== "blocked", `${label(a)} while the workflow is blocked`);
+      need("gone-work", !w.workflow || !w.standing || (a.kind === "merge" ? w.standing.merge : w.standing.work) !== "no", `${label(a)} for a person who may not act on the repo`);
+    }
+    if (a.kind === "implement" && f.ghState === "OPEN" && runs(a)) need("revise-unknown", !w.standing || w.standing.work === "yes", "a revision for a person nobody knows may act");
   }
   // The verdict of every merge, planned or not: the gates let exactly the covered ones through.
   if (f.inScope && !f.integration) {
@@ -118,7 +131,7 @@ function safety({ w, f, p }: Case): Violation[] {
     need("premerge-fix", p.wait !== null || has(p, "fixup").length || f.operator.fix || f.draft || !f.review || f.review.stale, "a pre-merge fix-up that can be made is not planned");
   }
   // A refused merge of a started PR is never all there is: something says what it waits for.
-  if (w.workflow) for (const a of merges) if (runs(a) === false && f.pipelineOn && !f.tripped?.merge) {
+  if (w.workflow) for (const a of merges) if (runs(a) === false && f.pipelineOn && !f.tripped?.merge && !named(f, a)) {
     need("refused-merge", p.wait !== null || f.operator?.hold, `a merge its gate refuses (${gates(f, wantOf(a), "pipeline")}) with no wait and no leg at work`);
   }
   return out;
@@ -136,7 +149,7 @@ async function taken({ f, p }: Pick<Case, "f" | "p">): Promise<string | null> {
   for (const name of ["review", "merge", "fixup", "verify", "ci-approve"]) {
     for (const k of name === "fixup" ? [...LANE_KINDS[name]!, "lint" as const] : LANE_KINDS[name]!) {
       const due = (await planned(NO_DB, k, { plans })).filter((x) => k !== "lint" || x.action.params?.bucket !== "cifix");
-      if (due.some((x) => name === "review" || name === "verify" || gates(f, wantOf(x.action), "pipeline") === null)) return name;
+      if (due.some((x) => gates(f, wantOf(x.action), "pipeline") === null)) return name;
     }
   }
   return null;
@@ -166,7 +179,7 @@ async function progress(c: Case): Promise<Violation[]> {
   const out: Violation[] = [];
   for (const a of p.actions) if (isWork(a) && gates(f, wantOf(a), "pipeline") === null && !await taken({ f, p: { ...p, actions: [a] } })) out.push({ rule: "untaken", detail: `no lane takes ${label(a)}` });
   if (await taken(c)) return out;
-  if (p.wait === null) return [...out, { rule: "dead-end", detail: `state ${p.state}, actions [${p.actions.map(label).join(", ")}], no lane takes one and nothing is waited for` }];
+  if (p.wait === null) return p.actions.some((a) => isWork(a) && named(f, a)) ? out : [...out, { rule: "dead-end", detail: `state ${p.state}, actions [${p.actions.map(label).join(", ")}], no lane takes one and nothing is waited for` }];
   const ends = p.waitKind === "system" ? OWN_WAITS[p.wait] : undefined;
   return ends && !ends(c) ? [...out, { rule: "false-wait", detail: `waits for ${p.wait}, which nothing is working on` }] : out;
 }
@@ -181,17 +194,19 @@ function checkItem(f: ItemFacts): void {
   // A closed item has only its close left.
   if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act"), "action for a closed item other than its close");
   // A person's command is the approval of the implementation or the close, whatever the repo approves.
-  const bare: ItemFacts = { ...f, repoFacts: { labelsApproved: false, commentApproved: false, fixIssueApproved: false } };
+  const bare: ItemFacts = { ...f, repoFacts: { labelsApproved: false, commentApproved: false } };
   for (const a of decideItem(bare).actions) if (["implement", "act"].includes(a.kind) && f.pipelineOn) assert.equal(gates(bare, wantOf(a), "pipeline"), null, `${label(a)} needs a repo approval`);
   if (!f.pipelineOn) for (const a of p.actions) assert.ok(gates(f, wantOf(a), "pipeline"), `${label(a)} passes the gates with the pipeline off`);
   for (const a of writes) if (a.kind === "implement") assert.equal(f.kind, "issue", "implement for a PR");
+  // A blocked item runs no implementation, but the end of its attempt.
+  const blocked: ItemFacts = { ...f, workflow: { entry: "implement", state: "blocked", approved: true, startedBy: "maint", startedAt: "2026-11-04T08:00:00.000Z", own: true } };
+  const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
+  for (const a of decideItem(blocked).actions) if (a.kind === "implement") assert.equal(a.permission?.ok, ending, `${label(a)} while the workflow is blocked`);
   // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending
   // an attempt whose PR merged or closed is bookkeeping and needs no switch.
-  const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
   if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.standing === "yes" && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
 }
 
-const BLOCKED = startedAs("fixup", { state: "blocked", blocker: "other" });
 /** Every planned action is refused at the gates, some of them for `why`. */
 const refusedFor = (c: Case, why: RegExp): boolean => {
   const refusals = c.p.actions.filter(isWork).map((a) => gates(c.f, wantOf(a), "pipeline"));
@@ -201,15 +216,6 @@ const refusedFor = (c: Case, why: RegExp): boolean => {
 /** A failure of a rule that stands: the cases it covers and why. `example` still fails, so an entry does not outlive its reason. */
 type Exception = { id: string; rules: string[]; why: string; covers: (c: Case) => boolean; example: PrRows };
 const EXCEPTIONS: Exception[] = [
-  {
-    id: "blocked-work", rules: ["blocked-push", "blocked-review"], why: "The planner does not read the workflow's blocker: a blocked item keeps its reviews and pushes until its person answers.",
-    covers: ({ w }) => w.workflow?.state === "blocked", example: greenRows({ workflow: BLOCKED, legs: [], mergeable: "CONFLICTING" }),
-  },
-  {
-    id: "author-push-window", rules: ["unaccepted-push", "refused-merge", "dead-end"], why: "The planner does not read the accepted head: after someone else's push our pushes, and a merge its gate refuses, stay planned until the next workflow pass blocks the item.",
-    covers: ({ w }) => w.workflow?.kind === "pr" && !!w.workflow.approvedBy && !reached(w, w.workflow.baseHead, headOf(w)),
-    example: greenRows({ commits: [{ sha: "c0", by: "author" }, { sha: "c1", by: "author" }], review: reviewed("take", "c1"), checks: { head: "c1", overall: "success", approvedRuns: false }, mergeable: "CONFLICTING" }),
-  },
   {
     id: "asked-wait", rules: ["false-wait"], why: "An item whose workflow asks a person (blocked, or a question) keeps a plan that names its next step, not the question.",
     covers: ({ w }) => w.workflow?.state === "blocked" || w.workflow?.state === "recommending", example: greenRows({ workflow: startedAs("merge", { state: "blocked", blocker: "other" }), legs: [], review: null }),

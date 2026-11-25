@@ -7,7 +7,7 @@ export type MayApproval = { by: string; at: string };
 /** A live workflow as src/core/may.ts reads it (its WorkflowGate). */
 export type MayWorkflow = {
   live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
-  blocker: string | null; baseHead: string | null; accepted?: readonly string[]; fixupAsked: boolean; leg: { state: string; head: string | null } | null;
+  blocker: string | null; baseHead: string | null; accepted?: readonly string[]; leg: { state: string; head: string | null } | null;
 };
 
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
@@ -100,6 +100,8 @@ export type MergePath = "rule" | "operator" | "maintainer" | null;
 /** The live maintainer workflow of an item (src/workflow/types.ts ItemWorkflow), as the planner reads it. */
 export type WorkflowFact = {
   entry: "review" | "fixup" | "implement" | "merge";
+  /** Where it is (src/workflow/types.ts WorkflowState). */
+  state?: string;
   /** Approved for merge, at the start or later. */
   approved: boolean;
   startedBy: string;
@@ -219,8 +221,6 @@ export type PrFacts = {
     noCi: boolean;
     /** The default branch's CI is red. */
     mainRed: boolean;
-    /** Issue implementations are approved for the repo: the gate of an implementation PR's revisions. */
-    fixIssueApproved?: boolean;
     /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
     implementOn: boolean;
   };
@@ -389,7 +389,7 @@ export type ItemFacts = {
   inFlight?: boolean;
   assignment: AssignFacts;
   /** The repo's approvals for the writes below (decideItem does not apply them: gates() does). */
-  repoFacts: { labelsApproved: boolean; commentApproved: boolean; fixIssueApproved: boolean };
+  repoFacts: { labelsApproved: boolean; commentApproved: boolean };
   /** As on PrFacts. */
   workflow?: WorkflowFact | null;
   /** As on PrFacts. */

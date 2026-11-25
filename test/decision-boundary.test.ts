@@ -12,7 +12,7 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const HOME = ["src/core/", "src/data/", "src/db/", "src/db.ts"];
 
 const READS = {
-  approvals: /\b(?:loadStepApprovals|repoStepApproval|loadRepoGuards|repoApprovals|loadActBlocked|mainFixApprovals|approvalOf|(?:mainFix|fixIssue|comment|status|ci)ApprovalOf)\(|\b(?:commentApproved|ciApproved|labelsApproved|fixIssueApproved)\b/,
+  approvals: /\b(?:loadStepApprovals|repoStepApproval|loadRepoGuards|repoApprovals|loadActBlocked|mainFixApprovals|approvalOf|(?:mainFix|fixIssue|comment|status|ci)ApprovalOf)\(|\b(?:commentApproved|ciApproved|labelsApproved)\b/,
   workflow: /(?<!\.\.)\.(?:approvedBy|startedBy|blocker|baseHead|acceptedHead)\b|\{[^{}\n]*\b(?:approvedBy|startedBy|blocker|baseHead|acceptedHead)\b[^{}:\n]*\}\s*=/,
 } as const;
 type Kind = keyof typeof READS;

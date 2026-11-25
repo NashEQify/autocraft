@@ -50,7 +50,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   // pr-opened: the open PR is the wait (openPr); a PR that merged or closed while the issue stayed open ends the attempt with
   // it (the revise work records that and ends the workspace). Its revisions, and the end of an attempt whose issue is closed
   // too, are planned on the PR (decidePr).
-  // Ending the attempt is bookkeeping: it needs neither the Implement feature nor the approval (gates()).
+  // Ending the attempt is bookkeeping: it needs neither the Implement feature nor a person's command (gatePermission).
   return row!.prOpen ? null : { bucket: "revise" };
 }
 
