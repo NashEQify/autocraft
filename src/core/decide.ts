@@ -334,13 +334,21 @@ const system = (text: string): Wait => ({ text, kind: "system" });
 const unsentWait = (what: string, until?: number): Wait => system(`${what} again ${until === undefined ? "later" : `after ${new Date(until).toISOString().slice(11, 16)}`}: the last one did not reach GitHub`);
 const unsentUntil = (u: UnsentAsk | undefined): number | undefined => (u && u !== "final" ? u.until : undefined);
 
+/** What stops a started PR whose fixes nobody approved: a conflict or red CI (not a red main's). */
+export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
+  !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && !f.repoFacts.mainRed ? "ci" : null;
+
 /** What a PR waits on when its conflict or CI fix is left to the contributor. */
 const stuckWait = (f: PrFacts): Wait | null => {
+  // A started PR nobody approved gets no fix work: what stops it is a maintainer's to settle.
+  if (unapprovedStop(f)) return person(MAINTAINER_ANSWER_WAIT);
   const approval = person("comment approval for the repo");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped") return system("conflict merge cap for today reached; next merge tomorrow");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") return unsentWait("the comment asking the contributor to resolve the conflict", f.conflict.until);
   if (f.mergeable === "CONFLICTING" && f.conflict && ["ask", "asked", "held"].includes(f.conflict.bucket)) return f.conflict.bucket === "held" ? (f.repoFacts.commentApproved ? person("a person to resolve the conflict") : approval) : contributor("the contributor to resolve the conflict");
+  if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "unapproved" && fixAllowed(f)) return person("push approval for the repo");
   const cf = cifixBucket(f);
+  if (cf === "unapproved") return person("push approval for the repo");
   if (cf === "comment-wait") return unsentWait("the CI fix comment", unsentUntil(f.cifix?.unsent));
   if (cf === "done" && f.cifix?.states.includes("asked")) return contributor("the contributor to fix CI");
   if (cf === "done" && (f.cifix?.states.includes("comment-failed") || f.cifix?.unsent === "final")) return person("a person: the CI fix comment failed");

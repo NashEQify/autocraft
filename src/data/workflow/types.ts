@@ -15,7 +15,8 @@ export type WorkflowFact = {
 };
 /** Live workflows of PRs, by the PR. */
 export type PrWorkflows = Map<RefKey, ItemWorkflow>;
-export type OperatorWork = { requests: FixupRequest[]; legs: Preapproval[] };
+/** `maker_checked_at`: when GitHub last confirmed the maker's write permission; the request counts until `HOLD_MAX` after it. */
+export type OperatorWork = { requests: (FixupRequest & { maker_checked_at?: string | null })[]; legs: Preapproval[] };
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;
   ofPr: Map<RefKey, WorkflowFact>;
@@ -41,7 +42,7 @@ export type StartedWork = {
   live: { repo: string; number: number; entry: Entry; state: WorkflowState; startedBy: string; approvedBy: string | null }[];
   prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[];
 };
-export type StartedFilter = { refs?: { repo: string; number: number }[]; login?: string; repos?: string[]; openOnly?: boolean };
+export type StartedFilter = { /** Live states only. */ states?: WorkflowState[]; refs?: { repo: string; number: number }[]; login?: string; repos?: string[]; openOnly?: boolean };
 
 export type LegState = "fixup" | "review" | "ci" | "queued" | "merged" | "cancelled" | "failed";
 export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { state: LegState };

@@ -83,6 +83,17 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
     assert.deepEqual([c.refs, c.full], [["app#9"], false]);
     seq = c.cursor;
   }
+  // Its state is also a fact of the PRs held for it (a person is asked or not), the implementation PR of its issue reads it, and neither needs a full pass.
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 12, head_oid: "h12", at: T, mode: "full", verdict: "hold", blocked_by: '["app#9"]' }));
+  await db.run(db.k.insertInto("implementations").values({ repo: "app", number: 9, pr_number: 13, state: "pr-opened", text_hash: "h", attempt: 1, created_at: T, updated_at: T, queued_by: "op" }));
+  for (const n of [12, 13]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "t", created_at: T }));
+  seq = (await since(seq)).cursor;
+  for (const state of ["recommending", "running"]) {
+    await workflow({ state });
+    c = await since(seq);
+    assert.deepEqual([c.refs, c.full], [["app#12", "app#13", "app#9"], false]);
+    seq = c.cursor;
+  }
   await workflow({ rec: "{}" });
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [[], false]);
@@ -209,6 +220,18 @@ test("a PR's facts change with the clock alone no earlier than its refreshAt: a 
   const after = await load(f.refreshAt!);
   assert.notEqual(after.reviewHold?.kind, "blocked");
   assert.equal(after.review?.stale, true);
+});
+
+test("a person's fix-up request stops counting at the PR's refreshAt, when GitHub has not confirmed their write access again", async () => {
+  const w = await (await (await (await world()).repo()).acting("mira")).pr(1, { head: "h1" });
+  const now = Date.now(), checked = new Date(now - 30 * 60_000).toISOString();
+  await w.db.run(w.db.k.updateTable("repo_permissions").set({ checked_at: checked }).where("login", "=", "mira"));
+  await w.db.run(w.db.k.insertInto("operator_fixups").values({ repo: "app", number: 1, from_head: "h1", instructions: "x", by: "Mira", at: checked, state: "queued" }));
+  const load = async (at: number) => (await loadPrFacts(w.db, { now: at, refs: ["app#1"] }))[0]!;
+  const f = await load(now);
+  assert.ok(f.operator?.fix);
+  assert.ok(f.refreshAt! > now && f.refreshAt! <= now + 30 * 60_000);
+  assert.equal((await load(f.refreshAt!)).operator?.fix ?? null, null);
 });
 
 test("the incremental pass reloads only logged and due items, and its PlanSet equals a full load after each write", async () => {

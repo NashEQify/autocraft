@@ -20,7 +20,7 @@ export type FixCandidate = { repo: string; number: number; head: string; reason:
 /** The fixups row of a stored patch: `lint_state` is `pending` (first task) or `requeued` (the lost task was queued once more). */
 export type LintWork = { rowid: number; round: number; task: number | null; state: string; patch: string; /** The kept model session that wrote the patch (src/prepush/resume.ts). */ session: string | null; /** An operator fix-up model's list of what the patch changes. */ changes: string[] };
 export type FixSelection = {
-  /** Take-fix PRs we may push to, in a repo with push approval. */
+  /** Take-fix PRs we may push to, with our push approved. */
   fix: FixCandidate[];
   /** Take-fix PRs we can't push to that have no hold row at this head yet. */
   cannotPush: FixCandidate[];

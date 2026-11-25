@@ -45,12 +45,23 @@ function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; 
   return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
 }
 
+const STOPS = {
+  conflict: (text: string) => t("It conflicts with its base branch. {text}", { text }),
+  ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),
+};
+
 /**
  * What the item comes back with when its steps are done and the merge is not approved: the review's recommendation when it gave
  * one (without the parts a person dropped; its sentence written again when the parts changed), else one built from its verdict: fix
- * the planned parts then merge, merge, close, or review again. A yes always runs something.
+ * the planned parts then merge, merge, close, or review again. A yes always runs something. `stop`: what the PR ran into besides the
+ * review (unapprovedStop), which the sentence names.
  */
-export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
+export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null): Recommendation {
+  const rec = recommended(review, plan);
+  return stop && !rec.close ? { ...rec, text: STOPS[stop](rec.text) } : rec;
+}
+
+function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
   const drop = droppedOf(plan);
   const rec = review?.rec;
   if (rec) {

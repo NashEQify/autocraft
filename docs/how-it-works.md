@@ -32,7 +32,7 @@ Opus reads every wanted pull request at its current head, with read access to th
 
 ## Implement
 
-Implements an issue a maintainer queued: Opus plans it in a workspace on the queuer's Task Runner, asks the author or a maintainer when the issue leaves something open, writes the change and its tests, and opens a pull request after AutoCraft's own checks pass. A stuck attempt comes back with its options. It needs the repo's issue implementations approval.
+Implements an issue a maintainer queued: Opus plans it in a workspace on the queuer's Task Runner, asks the author or a maintainer when the issue leaves something open, writes the change and its tests, and opens a pull request after AutoCraft's own checks pass. A stuck attempt comes back with its options. It needs the repo's `implement` feature.
 
 ## Fix-up
 

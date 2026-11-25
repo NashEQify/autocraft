@@ -14,6 +14,8 @@ export type CifixCandidate = {
   attempt: number;
   /** branch: the branch accepts our push. comment: it does not, and the repo allows comments. */
   route: "branch" | "comment";
+  /** Why our push to the PR is not approved (src/core/may.ts); null when it is. */
+  pushRefused: string | null;
   /** The one rerun of this head was done; the failure is read again as something to fix. */
   rerun: boolean;
   /** When the rerun was requested (ISO), else null. */

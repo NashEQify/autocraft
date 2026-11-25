@@ -34,6 +34,11 @@ export function writePermission(db: Db, eb: kx.AnyEb, loginCol: kx.Ex, repoCol: 
     .$if(!!afterIso, (b) => b.where("wp.checked_at", ">", afterIso!)));
 }
 
+/** When GitHub last confirmed the login's write permission on the repo, or null. */
+export const writeCheckedAt = (db: Db, eb: kx.AnyEb, loginCol: kx.Ex, repoCol: kx.Ex): AliasableExpression<string | null> =>
+  kx.schemaEb(eb).selectFrom("main.repo_permissions as wc").select((e: kx.AnyEb) => e.fn.max("wc.checked_at").as("at"))
+    .where(kx.ciEq(db, "wc.login", kx.exprOf(eb, loginCol))).where("wc.repo", "=", kx.exprOf(eb, repoCol)).where("wc.permission", "in", WRITE) as unknown as AliasableExpression<string | null>;
+
 /** `discord_links.login` of a user hash. */
 export const linkedLogin = (eb: kx.AnyEb, userHashCol: kx.Ex): Expression<string | null> =>
   kx.schemaEb(eb).selectFrom("main.discord_links as dl").select("dl.login").where("dl.user_hash", "=", kx.exprOf(eb, userHashCol)) as unknown as Expression<string | null>;

@@ -1,7 +1,7 @@
 // Merging a few clean ready PRs one at a time instead of through an integration batch. Only the way a PR that
-// may merge already does changes here: the merge rule, per-repo approval, Verify and the final review still decide whether.
+// may merge already does changes here: the merge rule, its approval, Verify and the final review still decide whether.
 import { cachedDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
-import type { By } from "../core/gates.ts";
+import { mayMergeNow, type By } from "../core/gates.ts";
 import { runMerge, type MergeDeps, type MergeSummary } from "./index.ts";
 import { planned } from "../core/select.ts";
 import { SETTINGS, saveSettings, setting } from "../data/control/index.ts";
@@ -43,7 +43,7 @@ export function pathsOfDiff(text: string): string[] | null {
 export async function planSingles(db: Db, repo: string, fetchDiff: DiffFetcher = ghDiff): Promise<Set<number> | null> {
   const max = await singleMergeMax(db);
   // A PR aimed at a non-default branch merges singly on its own path and takes no part in this count or the file overlap.
-  const ready = (await planned(db, "merge", { repo })).filter((p) => !p.facts.baseOffDefault);
+  const ready = (await planned(db, "merge", { repo })).filter((p) => !p.facts.baseOffDefault && mayMergeNow(p.facts));
   if (max === 0 || !ready.length || ready.length > max) return null;
   const seen = new Set<string>();
   for (const { facts, action } of ready) {

@@ -5,23 +5,34 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
-import { CLI_BY } from "../src/core/gates.ts";
-import { guard, liveOf } from "../src/core/guard.ts";
+import { withConfig } from "../src/data/control/index.ts";
+import { MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../src/core/decide.ts";
+import { CLI_BY, gates } from "../src/core/gates.ts";
+import { guard, guardItem, guardRepo, liveOf } from "../src/core/guard.ts";
+import { writePlanCache } from "../src/core/plan-cache.ts";
+import { implementMay, implementRefusal } from "../src/implement/gate.ts";
+import { computeLiveness } from "../src/liveness.ts";
+import { afterSteps } from "../src/workflow/recommend.ts";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
+import { selectFixups } from "../src/fixup/select.ts";
 import type { Querier } from "../src/mirror.ts";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { setFeature } from "../src/build/features.ts";
 import { runAct } from "../src/act/index.ts";
 import { runBatches } from "../src/merge/batch.ts";
 import { runMerge } from "../src/merge/index.ts";
+import { runSingles } from "../src/merge/single.ts";
 import { prepareOpusInput, saveOpus, type OpusDeps } from "../src/review/opus.ts";
-import { runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
+import { premergeCandidates, runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
+import { savePremerge } from "../src/premerge/store.ts";
 import type { LaneDeps } from "../src/github/user-lane.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
+import { LANES, planCtx } from "../src/runner/autopilot.ts";
+import { checkRequest } from "../src/runner/jobs.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { CHECK, OPERATOR, T1, tmpdir, world, type World } from "./world-db.ts";
@@ -391,6 +402,180 @@ describe("CI fix journey", () => {
 });
 
 /** The sandbox finished a lint task: the formatter's diff (if it changed anything) and clippy's JSON lines come back as artifacts. */
+describe("a repo with no step approvals", () => {
+  /** No approvals; `mira` and the operator may act. The Task Runner takes every call. */
+  const unapproved = async (): Promise<World> => {
+    current = await (await (await world()).repo(["merge", "push", "comment", "ci", "fixissue"])).acting("mira", OPERATOR);
+    await reportingTaskRunner(current.db);
+    return current;
+  };
+  const say = async (w: World, text: string, n: number, login = "mira") => {
+    const r = await runCommand(w.db, { login, canWrite: async () => true }, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: n }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join());
+    for (let i = 0; i < 3; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); }
+  };
+  /** The jobs the lane proposes, each taken by the queue's own check. */
+  const jobs = async (w: World, lane: string): Promise<string[]> => {
+    const found = await LANES.find((l) => l.name === lane)!.detect(w.db, await planCtx(w.db));
+    for (const c of found) await checkRequest(w.db, c.step, c.params);
+    return found.map((c) => c.step);
+  };
+  const actions = async (w: World, n: number) => (await w.prPlan(n)).actions.map((a) => [a.kind, a.params?.bucket, a.params?.source].filter(Boolean).join(":"));
+  /** Pushes go out as the box account in these fakes; the app has no keys here. */
+  const boxWrites = async (w: World) => void await w.db.run(w.db.k.deleteFrom("settings").where("key", "=", "github_identity"));
+  const lastTask = async (w: World) => ((await w.rows("SELECT id FROM build_tasks ORDER BY id DESC LIMIT 1"))[0] as { id: number }).id;
+
+  test("a merge a person started runs as them; a PR nobody started is left alone, also when the same job works the repo", async () => {
+    const w = await unapproved();
+    // #1 nobody started: ready by the rule. #2 is started.
+    for (const n of [1, 2]) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
+    assert.equal((await w.prPlan(1)).state, "ready");
+    assert.deepEqual(await jobs(w, "merge"), []);
+    await say(w, "merge", 2);
+    assert.deepEqual(await actions(w, 2), ["merge"]);
+    assert.deepEqual(await jobs(w, "merge"), ["merge"]);
+    const lane: LaneDeps = { vault: { userToken: async () => ({ ok: true, access: "token" }) }, permission: async () => "write" };
+    const s = await runSingles(w.db, { repo: "app", by: "pipeline" }, quiet, { ...w.gh.mergeDeps(), lane }, async () => ({ ok: true, text: DIFF }));
+    assert.deepEqual(s?.merged, ["app#2"]);
+    assert.deepEqual(w.gh.writesOf("merge").map((x) => x.number), [2]);
+    assert.deepEqual(await jobs(w, "merge"), []);
+  });
+
+  test("the checks of a merge a person started are read again while its CI runs; a PR nobody started is not polled", async () => {
+    const w = await unapproved();
+    await (await w.pr(1, { ci: "pending" })).review(1);
+    assert.equal((await w.prPlan(1)).state, "waiting-ci");
+    assert.deepEqual(await jobs(w, "merge"), []);
+    await say(w, "merge", 1);
+    assert.equal((await w.prPlan(1)).state, "waiting-ci");
+    assert.deepEqual(await jobs(w, "merge"), ["checks"]);
+  });
+
+  test("the failed pre-merge review of an approved PR wakes the planner for its retry", async () => {
+    const w = await unapproved();
+    await (await (await w.pr(1)).review(1)).verified(1);
+    await w.workflow(1, { by: "mira" });
+    const at = Date.now();
+    await savePremerge(w.db, { repo: "app", number: 1, head: "sha1", at: new Date(at).toISOString(), runId: "pm", error: "retry: no answer" });
+    const wake: number[] = [];
+    assert.deepEqual(await premergeCandidates(w.db, { repo: "app", at, wake }), []);
+    assert.equal(wake.length, 1);
+    assert.deepEqual((await premergeCandidates(w.db, { repo: "app", at: wake[0]! })).map((c) => c.number), [1]);
+  });
+
+  test("a person's fix-up is pushed; the review fixes of a PR nobody started are not", async () => {
+    const git = gitWorld(2);
+    const w = await unapproved();
+    await (await w.pr(1)).review(1, { verdict: "take-fix" });
+    await (await w.pr(2, { head: git.head })).review(2, { verdict: "take-fix" });
+    assert.deepEqual(await jobs(w, "fixup"), []);
+    await say(w, "fix-up", 2);
+    await w.db.run(w.db.k.updateTable("opus_reviews").set({ at: new Date().toISOString() }).where("number", "=", 2));
+    assert.deepEqual((await actions(w, 2)).filter((a) => a.startsWith("fixup")), ["fixup:fix:review"]);
+    assert.deepEqual(await jobs(w, "fixup"), ["fixup"]);
+    await boxWrites(w);
+    await runFixup(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.deps(w));
+    await endLint(w, await lastTask(w));
+    assert.deepEqual(await jobs(w, "fixup"), ["fixup"]);
+    const s = await runFixup(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.deps(w));
+    assert.deepEqual(s.pushed, ["app#2"]);
+    assert.deepEqual(git.pushes.map((p) => p.lease), [git.head]);
+  });
+
+  test("the CI fix of an approved PR is pushed; the red CI of a PR nobody started is left alone", async () => {
+    const git = gitWorld(2, "fn a() {}\nfn main() { b(); }\n");
+    const w = await unapproved();
+    await (await w.pr(1, { ci: "failure" })).review(1);
+    await (await w.pr(2, { head: git.head, ci: "failure" })).review(2);
+    assert.deepEqual(await jobs(w, "cifix"), []);
+    assert.deepEqual([(await w.prPlan(1)).wait, (await w.prPlan(1)).waitKind], ["push approval for the repo", "person"]);
+    await say(w, "merge", 2);
+    assert.deepEqual(await actions(w, 2), ["cifix:work"]);
+    assert.deepEqual(await jobs(w, "cifix"), ["cifix"]);
+    await boxWrites(w);
+    await runCifix(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.cifixDeps(w));
+    await endLint(w, await lastTask(w));
+    assert.deepEqual(await jobs(w, "cifix"), ["cifix"]);
+    const s = await runCifix(w.db, { repo: "app", dryRun: false, by: "pipeline" }, quiet, git.cifixDeps(w));
+    assert.deepEqual(s.pushed, ["app#2"]);
+  });
+
+  test("the base is merged into a conflicting PR that was queued without a review, and its pre-merge fix-up is worked", async () => {
+    const git = gitWorld(2, undefined, true);
+    const w = await unapproved();
+    await w.pr(2, { head: git.head, mergeable: "CONFLICTING" });
+    await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }).where("number", "=", 2));
+    await say(w, "merge", 2);
+    assert.deepEqual((await actions(w, 2)).filter((a) => a !== "verify:plan"), ["conflict:merge"]);
+    assert.deepEqual(await jobs(w, "fixup"), ["fixup"]);
+    assert.equal((await selectFixups(w.db, "app")).conflictMerge.length, 1);
+
+    await (await (await (await w.pr(3)).review(3)).verified(3)).premerge(3, "defect");
+    await w.workflow(3, { by: "mira" });
+    assert.deepEqual(await actions(w, 3), ["fixup:fix:premerge"]);
+    assert.deepEqual((await selectFixups(w.db, "app")).fix.map((c) => [c.number, c.source]), [[3, "premerge"]]);
+  });
+
+  test("a person's implement command reaches its job; an issue nobody queued does not, and the implementation's PR is revised on the command", async () => {
+    const w = await unapproved();
+    await setFeature(w.db, "implement", true, OPERATOR, "app");
+    await (await w.issue(4)).issue(5);
+    assert.deepEqual(await jobs(w, "implement"), []);
+    assert.match(await implementRefusal(w.db, "app", 5) ?? "", /not queued/);
+    await say(w, "implement", 5);
+    const found = await LANES.find((l) => l.name === "implement")!.detect(w.db, await planCtx(w.db));
+    assert.deepEqual(found.map((c) => [c.step, c.params.number, c.params.bucket]), [["implement", 5, "plan"]]);
+    await checkRequest(w.db, found[0]!.step, found[0]!.params);
+    const grant = async (n: number) => await guardItem(w.db, { repo: "app", number: n }, { kind: "implement", bucket: "plan" }, "pipeline");
+    assert.ok(!("refused" in await grant(5)));
+    assert.match((await grant(4) as { refused: string }).refused, /Issue implementations in app are not approved/);
+    const repoGrant = async (n: number) => await guardRepo(w.db, "app", "fix-issue", "pipeline", undefined, { members: [await implementMay(w.db, "app", n)] });
+    assert.ok(!("refused" in await repoGrant(5)));
+    assert.ok("refused" in await repoGrant(4));
+
+    // Its PR came back with fixes: the session revises it.
+    await (await w.pr(6, { author: "pipeline-bot" })).review(6, { verdict: "take-fix" });
+    await w.db.run(w.db.k.insertInto("implementations").values({ repo: "app", number: 5, pr_number: 6, state: "pr-opened", text_hash: "h", attempt: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), queued_by: "mira" }));
+    const f = (await w.plan()).prs.find((p) => p.facts.number === 6)!.facts;
+    assert.equal(gates(f, { kind: "implement", bucket: "revise" }, "pipeline"), null);
+    assert.match(gates({ ...f, implementation: { ...f.implementation!, queuedBy: null } }, { kind: "implement", bucket: "revise" }, "pipeline") ?? "", /not approved/);
+  });
+
+  test("a started PR nobody approved that conflicts or has red CI comes back with one recommendation", async () => {
+    const w = await unapproved();
+    await w.pr(1, { mergeable: "CONFLICTING" });
+    await w.pr(2, { ci: "failure" });
+    for (const n of [1, 2]) {
+      await (await (await w.review(n)).verified(n)).workflow(n, { by: "mira", approved: false });
+      assert.deepEqual([(await w.prPlan(n)).wait, (await w.prPlan(n)).waitKind], [MAINTAINER_ANSWER_WAIT, "person"]);
+    }
+    await advanceWorkflows(w.db);
+    for (const n of [1, 2]) {
+      const wf = await liveWorkflow(w.db, "app", n);
+      assert.equal(wf?.state, "recommending");
+      assert.ok(wf?.rec?.merges);
+    }
+    await writePlanCache(w.db, await w.plan());
+    assert.deepEqual((await withConfig(w.db, () => computeLiveness(w.db))).items.filter((i) => i.verdict === "stuck"), []);
+    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 1)!.facts)).text, /conflicts/);
+    assert.match(afterSteps({ verdict: "take", sure: true, rec: null }, [], unapprovedStop((await w.plan()).prs.find((p) => p.facts.number === 2)!.facts)).text, /CI fails/);
+  });
+
+  test("a repo whose fix-up selection fails leaves the lane to the others", async () => {
+    const w = await unapproved();
+    await w.db.run(w.db.k.insertInto("tracked_repos").values({ name: "bad", added_by: OPERATOR, added_at: T1, pipeline: 1 }));
+    await (await w.pr(2)).review(2, { verdict: "take-fix" });
+    await w.fixup(2, false);
+    const ctx = await planCtx(w.db);
+    assert.deepEqual(await actions(w, 2), ["fixup:fix:operator"]);
+    const good = ctx.plans!.prs.find((p) => p.facts.number === 2)!;
+    ctx.plans!.prs.push({ facts: { ...good.facts, repo: "bad", review: null, may: { ...good.facts.may!, repoPush: { by: OPERATOR, at: T1 } } }, plan: { ...good.plan, repo: "bad", actions: [{ kind: "fixup", head: good.plan.head, params: { bucket: "fix", source: "review" } }] } });
+    ctx.tracked = ["bad", "app"];
+    assert.deepEqual((await LANES.find((l) => l.name === "fixup")!.detect(w.db, ctx)).map((c) => c.params.repo), ["app"]);
+    assert.match(ctx.notes!.fixup ?? "", /bad/);
+  });
+});
+
 async function putLint(w: World, id: number, o: { format?: string; diagnostics?: { line: number }[]; file?: string } = {}): Promise<void> {
   const put = async (name: string, text: string) => { const tmp = tempPath(id); writeFileSync(tmp, text); await storeArtifact(w.db, id, name, tmp); };
   const diag = (line: number) => JSON.stringify({ reason: "compiler-message", message: { level: "warning", message: "needless", code: { code: "clippy::needless_return" }, spans: [{ file_name: o.file ?? "src/lib.rs", line_start: line, line_end: line, is_primary: true }], rendered: `warning: needless at line ${line}\n` } });

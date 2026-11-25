@@ -56,6 +56,7 @@ export type StageEvent = { rowid: number; stage: Stage; at: string; actor: strin
 
 export type LivenessVerdict = "stuck" | "long";
 export type LivenessPlanRow = { kind: "pr" | "issue"; state: string; itemState: string | null; phase: string; wait: string | null; waitKind: WaitKind | null; actions: number; since: string; repo: string; number: number };
-export type LivenessInput = { plans: LivenessPlanRow[]; asked: Set<RefKey>; longDays: number };
+/** `asked`: items a person has been asked about; `started`: items with a live workflow. Both include the implementation PR of an issue's implement workflow. */
+export type LivenessInput = { plans: LivenessPlanRow[]; asked: Set<RefKey>; started: Set<RefKey>; longDays: number };
 export type LivenessItem = { repo: string; number: number; kind: "pr" | "issue"; verdict: LivenessVerdict; cause: string; state: string; wait: string | null; phase: string; since: string };
 export type Liveness = { checkedAt: string; stuck: number; long: number; open: number; causes: Record<string, number>; items: LivenessItem[] };

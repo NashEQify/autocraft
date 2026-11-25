@@ -12,6 +12,7 @@ import { applyLocal, loadItems } from "../data/mirror/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import { diffStat } from "../build/workspaces.ts";
 import { guardItem, guardRepo, type GuardedItem, type ItemWant } from "../core/guard.ts";
+import { implementMay } from "./gate.ts";
 import type { By } from "../core/gates.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
 import { hasOpenPr } from "../core/open-prs.ts";
@@ -317,7 +318,7 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
       const gi = await guard();
       if (typeof gi === "string") return fail(gi, true);
       g = gi;
-      const rg = await guardRepo(db, repo, "fix-issue", input.by);
+      const rg = await guardRepo(db, repo, "fix-issue", input.by, undefined, { members: [await implementMay(db, repo, number)] });
       if ("refused" in rg) return fail(rg.refused, true);
       const fork = await forkOnce(repo, () => forkOf(w, rg, d.exec, who.login, repo, run));
       // Kept before the push: a rerun pushes to the same branch and finds the PR on it, whatever the issue's title is by then.

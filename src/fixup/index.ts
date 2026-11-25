@@ -18,8 +18,8 @@ import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
 import { audit } from "../dash/audit.ts";
 import { withNote } from "../github/note.ts";
-import { CLI_BY, type By } from "../core/gates.ts";
-import { guard, guardRepo, liveOf } from "../core/guard.ts";
+import { CLI_BY, type By, type Want } from "../core/gates.ts";
+import { guard, guardClaim, guardRepo, liveOf } from "../core/guard.ts";
 import { ghAskComment, ghComment, ghEditComment, pushBranch, type Note, type Writer } from "../github/write.ts";
 import { loadAuditActions, loadStepApprovals, loadTrackedRepos } from "../data/control/index.ts";
 import { finishPatch, loadPatchFacts, recordPushing, storePatch } from "../data/changes/index.ts";
@@ -37,7 +37,6 @@ import { CheckTool, applyCheck, refusal } from "../checktool/index.ts";
 import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { dropSessions, SessionLedger, sessionAsk, storeSessions, sweepSessions, type SessionAsk } from "../prepush/resume.ts";
-import { pushApprovalOf } from "./approval.ts";
 import { parseFixes, type FixCandidate } from "./candidates.ts";
 import { selectFixups } from "./select.ts";
 import { Git, exec, fixupDir, type Exec } from "./git.ts";
@@ -232,7 +231,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const cAsks = await takersCut(db, sel.conflictAsk, left === Infinity ? undefined : left, repo, (c) => c.number);
   const cMerges = sel.conflictMerge.slice(0, Math.max(0, left - cAsks.length));
   log(`fixup ${repo}: ${sel.conflictMerge.length} conflicted PRs to merge into, ${sel.conflictAsk.length} to ask`);
-  log(`fixup ${repo}: ${sel.fix.length} PRs to fix up, ${sel.cannotPush.length + sel.ask.length} we can't push to${await pushApprovalOf(db, repo) ? "" : " (pushing is not approved for this repo)"}`);
+  log(`fixup ${repo}: ${sel.fix.length} PRs to fix up, ${sel.cannotPush.length + sel.ask.length} we can't push to`);
   if (dryRun) {
     for (const c of picks.slice(0, budget)) log(`  would fix up ${refOf(c)} at ${short(c.head)} (try ${c.attempt}): ${[...new Set(c.fixes.map((f) => f.file))].join(", ")}`);
     for (const c of asks) log(`  would comment the fixes on ${refOf(c)} at ${short(c.head)}`);
@@ -308,15 +307,15 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   /** The author of our commits and comments here: the app's bot user on an app-lane repo, else the box account. */
   const ident = (): Promise<CommitIdentity> => (identP ??= commitIdentity(db, repo, () => (whoP ??= whoAmI(d.exec))));
   /** The stage starts work on a PR: the pipeline's account is assigned when nobody is. */
-  const claim = async (c: { number: number }): Promise<void> => {
-    const g = await guardRepo(db, repo, "push", params.by ?? CLI_BY);
+  const claim = async (c: { number: number }, want: Want): Promise<void> => {
+    const g = await guardClaim(db, { repo, number: c.number }, want, params.by ?? CLI_BY);
     if ("refused" in g) { log(`  ${repo}#${c.number}: not assigned: ${g.refused}`); return; }
     await claimForWork(gw, g, d.querier, repo, c.number, "pr", async () => { const who = await (whoP ??= whoAmI(d.exec)); return { id: who.nodeId, login: who.login }; }, { run: runId }, log);
   };
   const conflictRun: ConflictRun = {
     ledger,
     repo, runId, log, d, gw, at, summary, prQuery: PR_QUERY, scrub: (raw) => scrubReason(raw, d.root), git: () => git,
-    who: ident, onHandled: params.onHandled, handled, claim, by: params.by ?? CLI_BY,
+    who: ident, onHandled: params.onHandled, handled, claim: (c) => claim(c, { kind: "conflict", bucket: "merge" }), by: params.by ?? CLI_BY,
   };
   await pool(cAsks.map((c) => () => leased(c, () => askConflict(db, conflictRun, c))), poolRoom(db, () => [repo], (i) => [{ repo, number: cAsks[i]!.number }]));
   if (!picks.length && !cMerges.length) return summary;
@@ -412,7 +411,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       }
       if (bad) { await fail("refused", bad); return; }
       if (tooBig) { await hold("too-large", tooBig); return; }
-      await claim(c);
+      await claim(c, { kind: "fixup", bucket: "fix", source: sourceOf(c) });
       // A stored patch: the lint task's outcome decides whether it is pushed (clean), asked for again (findings) or queued again (lost task).
       let findings: string[] = [];
       let folded: string | null = null;
@@ -508,7 +507,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
         }
       }
       // The planner may have released the PR while the model worked (our own unassign is no one's final word).
-      await claim(c);
+      await claim(c, { kind: "fixup", bucket: "fix", source: sourceOf(c) });
       await rec.pushing(c, commit, v.files);
       const push = await pushBranch(gw, git, "fixup-push", g, { remote: pr.headRepository.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: runId, from: head, to: commit, files: v.files, changed: v.changed });
       if (push.code !== 0) {

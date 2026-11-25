@@ -1,19 +1,12 @@
 // Merge approval. A repo's `merge` step approval lets the pipeline merge PRs nobody approved one by one (the automatic
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
 // approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
-import { loadPushOutcomeEdges, loadStepApprovals, loadTrackedRepos, repoStepApproval, setStepApproval } from "../data/control/index.ts";
-import type { StepApproval } from "../data/control/types.ts";
+import { loadPushOutcomeEdges, loadStepApprovals, loadTrackedRepos, setStepApproval } from "../data/control/index.ts";
 import { loadPushEdges } from "../data/changes/index.ts";
 import { loadDupeState, prDuplicates } from "../data/triage/index.ts";
 import { loadEndedWorkflows, loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
 import { mayMerge, workflowGate, type MayResult } from "../core/may.ts";
 import type { Db } from "../db/index.ts";
-
-export type MergeApproval = StepApproval;
-
-export async function mergeApprovalOf(db: Db, repo: string): Promise<MergeApproval | null> {
-  return await repoStepApproval(db, repo, "merge");
-}
 
 // Returns false when nothing changed.
 export async function setMergeApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {

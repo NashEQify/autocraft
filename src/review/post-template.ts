@@ -95,8 +95,9 @@ export type RecommendInput = {
   verdict: string;
   /** The PR's merge queue entry (take and take-fix reviews only), or null when it has none. */
   queue: { path: MergePath; state: string } | null;
+  /** A person or the repo approved the merge (src/core/may.ts). */
   mergeApproved: boolean;
-  /** Push approval for the repo and maintainers allow edits on the PR. */
+  /** Our pushes to the PR are approved and its branch accepts them. */
   canPush: boolean;
 };
 
@@ -107,7 +108,7 @@ export function recommendation(r: RecommendInput): string {
   switch (r.verdict) {
     case "take":
       if (!r.queue || r.queue.state === "merged") return WAIT;
-      return r.queue.path === "rule" && r.mergeApproved
+      return r.queue.path !== null && r.mergeApproved
         ? "Recommendation: merge after CI and checks pass."
         : "Recommendation: merge, after a maintainer's decision.";
     case "take-fix":

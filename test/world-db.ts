@@ -52,6 +52,7 @@ export type IssueOpts = { label?: string; flags?: string[]; title?: string; body
 
 export async function world() {
   const db: Db = await connectDb(join(tmpdir("world"), "t.db"));
+  process.env.AUTOCRAFT_ARTIFACT_DIR = tmpdir("artifacts");
   const restore: (() => void)[] = [];
   const live = new Map<number, Live>();
   const writes: Write[] = [];

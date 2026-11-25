@@ -20,7 +20,7 @@ import { failureTail } from "../build/rounds.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { scrub } from "../runner/scrub.ts";
 import { rustPlan } from "../worker/rust.ts";
-import { CLI_BY, type By } from "../core/gates.ts";
+import { CLI_BY, mayMergeNow, type By } from "../core/gates.ts";
 import { guard, guardBatchMerge, guardRepo, liveOf, type GuardedRepo } from "../core/guard.ts";
 import { claimForWork } from "../github/claim.ts";
 import { ghClosePr, ghOpenPr, ghRerunMainFailed, mergeViaCommand, pushOwnBranch, type Writer } from "../github/write.ts";
@@ -739,7 +739,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   if (!(await batchesNow()).mine.length && (params.limit === undefined || params.limit > 0)) {
     // PRs in a repo Verify cannot build, or with no CI for a batch PR to wait on, are left to the single-PR merge (the plan's merge action is not batchable).
-    const due = (await planned(db, "merge", { repo })).filter((p) => p.action.params?.batchable);
+    const due = (await planned(db, "merge", { repo })).filter((p) => p.action.params?.batchable && mayMergeNow(p.facts));
     if (due.length) {
       const keys = due.map((p) => ({ repo, number: p.facts.number }));
       const [scores, sizes, areas] = await db.together(() => Promise.all([loadWorkScores(db, keys), loadBatchSizes(db, [repo]), loadItemAreas(db, keys)]));

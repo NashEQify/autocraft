@@ -1,5 +1,7 @@
 // The PRs the fix-up and conflict steps work on: those whose Plan holds a `fixup` or `conflict` action.
 import { planned } from "../core/select.ts";
+import { pushAllowed } from "../core/gates.ts";
+import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { type FixCandidate, type FixSelection, parseFixes } from "./candidates.ts";
@@ -52,18 +54,22 @@ function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Prom
   return r;
 }
 
-export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet): Promise<FixSelection> {
+/** Why the PR's conflict is resolved, for the models: its review's reason, or the approval that stands in for one. */
+const wantedFor = (f: PrFacts): string => f.review?.reason ?? "a maintainer approved the merge; it has no review";
+
+/** `allow`: only the planned actions it accepts. */
+export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, allow: (p: Planned[number]) => boolean = () => true): Promise<FixSelection> {
   const opts = { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
   const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], conflictMerge: [], conflictAsk: [] };
-  const conflicts = await planned(db, "conflict", opts), fixups = await planned(db, "fixup", opts);
-  const lintFixups = await planned(db, "lint", { ...opts, bucket: "fixup" }), lintConflicts = await planned(db, "lint", { ...opts, bucket: "conflict" });
+  const conflicts = (await planned(db, "conflict", opts)).filter(allow), fixups = (await planned(db, "fixup", opts)).filter(allow);
+  const lintFixups = (await planned(db, "lint", { ...opts, bucket: "fixup" })).filter(allow), lintConflicts = (await planned(db, "lint", { ...opts, bucket: "conflict" })).filter(allow);
   // Read once for the repo, or with a planner pass's Plans once for every repo of the pass.
   const reads = plans ? await passReads(db, plans, run) : await fixReads(db, conflicts, fixups, lintFixups, lintConflicts);
   const titleOf = (n: number) => (reads.titles.get(`${repo}#${n}`) ?? "").slice(0, 300);
   for (const { facts: f, action } of conflicts) {
     const c: ConflictCandidate = {
       repo, number: f.number, head: action.head!, base: f.conflict!.base, title: titleOf(f.number),
-      reason: f.review!.reason, attempt: triesIn(reads.conflictRows.get(`${repo}#${f.number}`) ?? [], action.head!) + 1, pushable: f.pushable,
+      reason: wantedFor(f), attempt: triesIn(reads.conflictRows.get(`${repo}#${f.number}`) ?? [], action.head!) + 1, pushable: f.pushable,
     };
     (action.params?.bucket === "merge" ? out.conflictMerge : out.conflictAsk).push(c);
   }
@@ -75,7 +81,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       if (o) fix.push({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: (f.operator?.fix?.attempts ?? 0) + 1, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions } });
     } else if (action.params?.source === "premerge") {
       // Only a branch we may push to gets a pre-merge round; otherwise the step leaves it alone.
-      if (!f.pushable || !f.repoFacts.pushApproved) continue;
+      if (!f.pushable || !pushAllowed(f, "fixup")) continue;
       const row = await premergeAt(db, repo, f.number, head);
       const defects = findingsOf(row).filter((x) => x.severity === "defect");
       fix.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map((x) => x.fix))), attempt: 1, model: row?.model ?? null, source: "premerge" });
@@ -118,7 +124,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       if (w.kind !== "conflict" || w.repo !== repo || w.number !== f.number || w.head !== head || !w.baseSha) continue;
       out.conflictMerge.unshift({
         repo, number: f.number, head, base: f.conflict!.base, title: titleOf(f.number),
-        reason: f.review!.reason, attempt: w.attempt, pushable: f.pushable,
+        reason: wantedFor(f), attempt: w.attempt, pushable: f.pushable,
         lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, baseSha: w.baseSha, resolved: w.patch, files: w.files, session: w.session },
       });
     }
