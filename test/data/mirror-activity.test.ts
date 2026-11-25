@@ -9,7 +9,7 @@ import { expectFlat } from "../helpers/query-count.ts";
 import {
   bindAuthorIds, bindKnownAuthorIds, countItemEvents, foldDeltas, listActivityDue, loadActivity, loadActivityStats, loadAuthorHistory, loadAuthorIds, loadAuthorPermissions, loadCommits,
   loadDownloadsReport, loadFiles, loadLongLivedBranches, loadMergedClosures, loadReleaseState, loadUnboundLoginPrs, saveActivity, saveAuthorPermissions, saveReleaseReadings,
-  type ReleaseReading,
+  type ActivityRead, type ReleaseReading,
 } from "../../src/data/mirror/index.ts";
 
 const T0 = "2026-01-01T00:00:00Z";
@@ -36,7 +36,7 @@ async function seedItems(db: Db, rows: Record<string, unknown>[]): Promise<void>
   await q.run((q.k as any).insertInto("main.items").values(rows.map((r) => ({ kind: "pr", state: "OPEN", ...r }))));
 }
 
-const read = (n: number, head = "h1", files = 2) => ({
+const read = (n: number, head = "h1", files = 2): ActivityRead => ({
   repo: "app", number: n, head, updatedAt: T0, readAt: T1,
   events: [{ id: `e${n}a`, kind: "labeled", at: T0, actor: "bob", label: "bug", before_oid: null, after_oid: null }, { id: `e${n}b`, kind: "force-push", at: T1, actor: "bob", label: null, before_oid: "x", after_oid: "y" }],
   pr: {
@@ -58,7 +58,7 @@ both("activity: a read replaces the PR's files, keeps stored commit text when th
   assert.equal((await listActivityDue(db, { since: "2025-01-01T00:00:00Z", now: T1, limit: 10 })).length, 0, "the read item is not due");
 
   const again = read(1, "h1", 1);
-  again.pr.commits = [{ oid: "c1", committed_at: T1, author: "bob", message: null, co_authors: null }];
+  again.pr!.commits = [{ oid: "c1", committed_at: T1, author: "bob", message: null, co_authors: null }];
   await saveActivity(db, { reads: [again], attempts: [] });
   assert.equal((await loadFiles(db, prs(1))).get("app#1")!.length, 1);
   assert.equal((await loadCommits(db, prs(1))).get("app#1")![0]!.message, "msg");
