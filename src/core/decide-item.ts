@@ -66,6 +66,10 @@ const labelDisagreement = (f: ItemFacts): boolean => f.classification.status ===
 const scopeNeeded = (f: ItemFacts): boolean => scopeReason(f) !== null && !f.scope.covered && f.repoFacts.workflow !== "new";
 
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
+/** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
+export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
+export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+( mentions it)?$/.test(wait);
+
 export const TRIAGE_WAIT = "an open request for a person to pick up";
 /** The wait of an issue whose fix attempt of the retired Fix stage was skipped or failed; the planner no longer gives it. */
 export const fixStoppedWait = (state: string): string => `a person to retry the ${state} fix`;
@@ -158,7 +162,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // A queued issue waits on what holds its implementation.
   if (step && "wait" in step && f.open && actions.every((x) => !isWork(x))) { wait = step.wait; waitKind = step.waitKind; }
   if (wait === null && f.kind === "issue" && f.open && f.inScope && !backlog && !f.held && actions.every((x) => !isWork(x))) {
-    if (fix.openPr !== null) { wait = `open PR #${fix.openPr.number}${fix.openPr.closes ? "" : " mentions it"}`; waitKind = "system"; }
+    if (fix.openPr !== null) { wait = openPrWait(fix.openPr.number, fix.openPr.closes); waitKind = "system"; }
     else if (state === "classified") { wait = TRIAGE_WAIT; waitKind = "system"; }
   }
   return { repo: f.repo, number: f.number, kind: f.kind, state, actions, wait, waitKind };
