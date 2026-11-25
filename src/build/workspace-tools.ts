@@ -7,7 +7,8 @@
 // control characters; images are only checked for their signature and size, never decoded.
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
+import { loadToolCalls, loadWorkspaces, markCalls, patchWorkspaces } from "../data/build/index.ts";
+import type { WorkspaceCallRow } from "../data/build/index.ts";
 import type { ExecOptions, KubeApi } from "./kube-api.ts";
 import {
   ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, imageSize, isToolName, OUTPUT_CAP, podPath,
@@ -115,6 +116,14 @@ class Gate {
  * The owning job keeps one instance per workspace for the session's life. `call` settles the row itself: state
  * done (failed when the exec could not run) and `result` = the WorkspaceToolResult as JSON, plus `acct` bookkeeping.
  */
+const jsonOf = (text: string | null): unknown => {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+};
+
 export class WorkspaceSession {
   readonly db: Db;
   readonly api: KubeApi;
@@ -131,6 +140,8 @@ export class WorkspaceSession {
   private readonly pathLocks = new Map<string, Promise<void>>();
   /** The wait for the workspace to be ready that the session's calls share. */
   private ready: Promise<void> | null = null;
+  /** When each row started, so the row's settling keeps the first time. */
+  private readonly startedAt = new Map<number, string | null>();
 
   constructor(db: Db, api: KubeApi, workspaceId: number) {
     this.db = db;
@@ -145,7 +156,8 @@ export class WorkspaceSession {
       throw e;
     }));
     // A row that already has its result (a job restarted after settling it) is answered from it, never run again.
-    const prior = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["state", "result"]).where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    const prior = await this.rowOf(row);
+    this.startedAt.set(row, prior?.started_at ?? null);
     const stored = prior && (prior.state === "done" || prior.state === "failed") ? storedResult(prior.result) : null;
     if (stored) return stored;
     let out: Out;
@@ -169,9 +181,8 @@ export class WorkspaceSession {
     }
     const { acct, ...result } = out;
     const at = new Date().toISOString();
-    await this.db.run(this.db.k.updateTable("workspace_calls")
-      .set((eb) => ({ state, result: JSON.stringify({ ...result, ...(acct ? { acct } : {}) }), started_at: eb.fn.coalesce("started_at", eb.val(at)), finished_at: at }))
-      .where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    await markCalls(this.db, [{ id: row, set: { state, result: JSON.stringify({ ...result, ...(acct ? { acct } : {}) }), started_at: this.startedAt.get(row) ?? at, finished_at: at } }]);
+    this.startedAt.delete(row);
     await this.touch();
     return result;
   }
@@ -179,15 +190,16 @@ export class WorkspaceSession {
   /** Call counts, shell time and background commands from the workspace's rows. */
   private async load(): Promise<void> {
     const db = this.db;
-    const rows = await db.all(db.k.selectFrom("workspace_calls")
-      .select((eb) => {
-        const res = eb.case().when(kx.jsonValid(db, "result")).then(eb.ref("result")).end();
-        const arg = eb.case().when(kx.jsonValid(db, "args")).then(eb.ref("args")).end();
-        const num = (path: string) => kx.jsonNum(db, res, `$.acct.${path}`);
-        return ["id", "n", "tool", "state", "started_at", num("ms").as("ms"), num("bytes").as("bytes"), num("bg").as("bg"), num("limit").as("lim"), num("ref").as("ref"),
-          num("ended").as("ended"), num("images").as("images"), kx.jsonBool(db, arg, "$.background").as("background"), kx.jsonNum(db, arg, "$.timeout_sec").as("timeout")] as const;
-      })
-      .where("workspace_id", "=", this.workspaceId).where("tool", "not in", OWN_CALLS).orderBy("id"));
+    // NEEDS build.loadCallAccounting: the bookkeeping fields only (acct numbers, background and timeout of the arguments), not whole results.
+    const rows = (await loadToolCalls(db, this.workspaceId, {})).filter((r) => !OWN_CALLS.includes(r.tool)).map((r) => {
+      const acct = (jsonOf(r.result) as { acct?: Record<string, unknown> } | null)?.acct ?? {};
+      const args = (jsonOf(r.args) ?? {}) as Record<string, unknown>;
+      const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      return {
+        id: r.id, n: r.n, tool: r.tool, state: r.state, started_at: r.started_at, ms: num(acct.ms), bytes: num(acct.bytes), bg: num(acct.bg), lim: num(acct.limit), ref: num(acct.ref),
+        ended: num(acct.ended), images: num(acct.images), background: args.background === true ? 1 : 0, timeout: num(args.timeout_sec),
+      };
+    });
     // Background commands a restart caught mid-launch: their limit was the time left when they started.
     const launching: Cmd[] = [];
     for (const r of rows) {
@@ -224,7 +236,7 @@ export class WorkspaceSession {
   private async untilReady(): Promise<void> {
     const from = Date.now();
     for (;;) {
-      const w = await this.db.get(this.db.k.selectFrom("workspaces").select(["state", "error"]).where("id", "=", this.workspaceId));
+      const w = (await loadWorkspaces(this.db, { ids: [this.workspaceId] })).get(this.workspaceId);
       if (w?.state === "ready") return;
       if (!w || w.state === "ended" || w.state === "failed") throw new Refused(`the workspace is ${w?.state ?? "gone"}${w?.error ? ` (${w.error})` : ""}; submit your work`);
       if (w.state === "parked" && !await resumeWorkspace(this.db, this.workspaceId)) throw new Refused(`the workspace could not be resumed${w.error ? ` (${w.error})` : ""}; submit your work`);
@@ -235,15 +247,20 @@ export class WorkspaceSession {
 
   private async touch(): Promise<void> {
     const at = new Date().toISOString();
-    await this.db.run(this.db.k.updateTable("workspaces").set({ last_call_at: at, updated_at: at }).where("id", "=", this.workspaceId));
+    await patchWorkspaces(this.db, [{ id: this.workspaceId, set: { last_call_at: at, updated_at: at } }]);
+  }
+
+  /** One call row of this workspace. */
+  private async rowOf(id: number): Promise<WorkspaceCallRow | undefined> {
+    return (await loadToolCalls(this.db, this.workspaceId, { id }))[0];
   }
 
   /** Marks the row running once its exec starts. */
   private async begin(row: number, timeoutMs: number, n: number | null = null): Promise<void> {
     const at = new Date();
-    await this.db.run(this.db.k.updateTable("workspace_calls")
-      .set((eb) => ({ state: "running", ...(n !== null ? { n } : {}), started_at: eb.fn.coalesce("started_at", eb.val(at.toISOString())), deadline_at: new Date(at.getTime() + timeoutMs + CALL_GRACE_MS).toISOString() }))
-      .where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    const started = this.startedAt.get(row) ?? at.toISOString();
+    this.startedAt.set(row, started);
+    await markCalls(this.db, [{ id: row, set: { state: "running", ...(n !== null ? { n } : {}), started_at: started, deadline_at: new Date(at.getTime() + timeoutMs + CALL_GRACE_MS).toISOString() } }]);
     await this.touch();
   }
 
@@ -352,7 +369,7 @@ export class WorkspaceSession {
 
   /** A shell row a restarted job already ran: picks the command up in the pod instead of running it again. */
   private async reattach(a: Args, row: number, background: boolean): Promise<Out | null> {
-    const prior = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["state", "n", "started_at"]).where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    const prior = await this.rowOf(row);
     if (prior?.state !== "running" || prior.n === null) return null;
     const n = Number(prior.n);
     const st = await this.exec(["status", String(n), "--since", NO_OUTPUT], { maxOut: SMALL_OUT, timeoutMs: 30_000 });
@@ -399,7 +416,7 @@ export class WorkspaceSession {
 
   /** The `ws` call number of shell call `id` of this workspace. */
   private async shellCall(id: number): Promise<number> {
-    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["tool", "n"]).where("id", "=", id).where("workspace_id", "=", this.workspaceId));
+    const r = await this.rowOf(id);
     if (r?.tool !== "shell" || r.n === null) throw new Refused(`there is no shell call ${id} in this workspace`);
     return Number(r.n);
   }
@@ -583,20 +600,20 @@ export class WorkspaceSession {
 
   /** Row `row`'s `ws` call number: the one it already has (a resumed job runs the row again), else a new one. */
   private async callNumber(row: number): Promise<number> {
-    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select("n").where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    const r = await this.rowOf(row);
     return r?.n != null ? Number(r.n) : await takeCallNumber(this.db, this.workspaceId);
   }
 
   /** The `ws` call number of app `id` (its app_start row) of this workspace. */
   private async appCall(id: number): Promise<number> {
-    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["tool", "n"]).where("id", "=", id).where("workspace_id", "=", this.workspaceId));
+    const r = await this.rowOf(id);
     if (r?.tool !== "app_start" || r.n === null) throw new Refused(`there is no app ${id} in this workspace`);
     return Number(r.n);
   }
 
   /** The app id (app_start row) of `ws` call number `n`. */
   private async appId(n: number): Promise<number | null> {
-    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", this.workspaceId).where("tool", "=", "app_start").where("n", "=", n));
+    const r = (await loadToolCalls(this.db, this.workspaceId, { tool: "app_start", n }))[0];
     return r ? Number(r.id) : null;
   }
 

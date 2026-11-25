@@ -4,7 +4,8 @@
 import { TERMINAL, createTask, getTask, type NewTask } from "./tasks.ts";
 import { tasksFor } from "./fix-tasks.ts";
 import { readLint } from "../prepush/index.ts";
-import { baseScopeRepos } from "../pilot.ts";
+import { loadLogTails } from "../data/build/index.ts";
+import { loadBaseScope } from "./scope.ts";
 import { cloneTask, queueWarmBuild } from "../verify/tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { mapSeq } from "../async-seq.ts";
@@ -21,15 +22,15 @@ const oneLine = (s: string, max = 300): string => s.replace(/\s+/g, " ").trim().
 
 /** The last part of the failing step's log of a finished task, for the next round's prompt. */
 export async function failureTail(db: Db, taskId: number, step: string): Promise<string> {
-  const rows = await db.all(db.k.selectFrom("build_task_logs").select("chunk").where("task_id", "=", taskId).where("step", "=", step).orderBy("seq", "desc").limit(40));
-  return rows.reverse().map((r) => r.chunk).join("").slice(-2500);
+  const tail = (await loadLogTails(db, [{ id: taskId, step }], { maxBytes: 2500, maxChunks: 40 })).get(taskId);
+  return (tail?.text ?? "").slice(-2500);
 }
 
 /** Queues the round's two tasks, [head, base]. Throws BuildError when they cannot be queued. */
 export async function queueRound(db: Db, r: RoundRequest): Promise<[number, number]> {
   const ids = await mapSeq(tasksFor({ repo: r.repo, number: null, main_sha: r.sha, crate: r.crate, test: r.test }, r.patch, r.testPatch, r.step ?? "fix-check"), async (t: NewTask) => await createTask(db, t));
   // The warm build is a pipeline task: it would never be claimed for a repo outside the pipeline scope.
-  if ((await baseScopeRepos(db)).has(r.repo)) await queueWarmBuild(db, r.repo, r.sha);
+  if ((await loadBaseScope(db)).has(r.repo)) await queueWarmBuild(db, r.repo, r.sha);
   return [ids[0]!, ids[1]!];
 }
 
