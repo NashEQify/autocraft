@@ -44,7 +44,9 @@ export type Followup = Selectable<DB["postmerge_followups"]>;
 export type FollowupKey = { repo: string; number: number; review_at: string; finding: number };
 /** What a claim writes: the follow-up key with the finding's title and the attempt number this try is. */
 export type FollowupClaim = FollowupKey & { title: string; attempts: number };
-export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number; note: string | null };
+export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number; note: string | null; /** Its row now. */ was: Followup | null };
+/** A row in `filing`, with the create its claim began (null: none was begun, or GitHub refused it), and the issue that made when it is known. */
+export type Filing = Followup & { create: { issue: { number: number; url: string } | null } | null };
 export type DiscussionStat = { newest: string; maint: string; counted: { id: string; body: string | null }[] | null };
 export type MirrorEntry = { id: string; kind: string | null; author: string | null; created_at: string | null; body: string | null; review_state: string | null; counted: boolean; maint: boolean };
 

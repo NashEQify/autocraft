@@ -253,6 +253,7 @@ export const STAGES: StageDef[] = [
     promptIds: ["postmerge.opus"], promptStage: "Post-merge review",
     waits: [
       { name: "Failed post-merge review", why: "The model gave no valid reply twice", howLong: "1 hour, three tries in all", showsAs: "Post-merge review on the item page: no review yet", kind: "backoff" },
+      { name: "Stopped post-merge filing", why: "A process stopped while it opened a follow-up issue; its audit row tells whether the issue was opened or never sent only once no create can still be running", howLong: "10 minutes after the create started; no timer runs, the planner wakes then", showsAs: "Post-merge review on the item page: the outcome is unknown", kind: "backoff" },
       { name: "Failed post-merge filing", why: "GitHub refused to create the issue", howLong: "1 hour, then 6 hours; stops after three attempts", showsAs: "Post-merge review on the item page: not filed, with the attempts", kind: "backoff" },
     ],
     writes: [{ what: "Follow-up issue", approval: "comment" }],
