@@ -9,6 +9,9 @@ import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { inReadSnapshot, planPass } from "../src/core/plan-engine.ts";
+import { writePlanCache } from "../src/core/plan-cache.ts";
+import { dueCandidates } from "../src/core/plan-read.ts";
+import { planned } from "../src/core/select.ts";
 import { latestRun } from "../src/classify/settled.ts";
 import { setReviewMinInterval } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
@@ -211,6 +214,29 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
   } finally {
     if (prev === undefined) delete process.env.AUTOCRAFT_PLAN_SHADOW; else process.env.AUTOCRAFT_PLAN_SHADOW = prev;
   }
+});
+
+test("a step outside the planner decides the items its stored Plans hold and the changes no stored Plan covers yet", async () => {
+  const w = await (await (await (await (await world()).repo()).pr(1)).pr(2)).review(1);
+  const pass = async () => {
+    const p = await inReadSnapshot(w.db, async () => await planPass(w.db, { now: Date.now(), run: await latestRun(w.db), fullEveryMs: 30 * 60_000 }));
+    await writePlanCache(w.db, p.plans);
+    await p.finish();
+  };
+  const candidates = async () => (await dueCandidates(w.db, "verify", "pr"))!.sort();
+  const due = async () => (await planned(w.db, "verify")).map((p) => p.facts.number);
+  // A pass that writes an item's Plan logs the item (item_plans is a planner input); the next pass covers that.
+  await pass();
+  await pass();
+  assert.deepEqual(await candidates(), ["app#1"], "only the reviewed PR's stored Plan holds verify");
+  await w.db.run(w.db.k.insertInto("comments").values({ id: "c2", repo: "app", number: 2, author: "someone", body: "ping", created_at: T }));
+  await w.pr(3);
+  assert.deepEqual(await candidates(), ["app#1", "app#2", "app#3"], "a change after the stored Plans and a PR without one are decided again");
+  assert.deepEqual(await due(), [1]);
+  await pass();
+  await pass();
+  assert.deepEqual(await candidates(), ["app#1"], "the passes that planned the changes took them out of the log");
+  assert.deepEqual(await due(), [1]);
 });
 
 test("a held PR is logged when its blocker closes; a bulk write logs nothing and takes one full mark; malformed rows and a lost marker row fail no write", async () => {
