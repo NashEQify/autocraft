@@ -108,22 +108,17 @@ test("the live board reads the same number of statements for 2 and 12 jobs", asy
   }), 2, 12);
 });
 
-test("a job's detail reads its row, items and log in one wave and hides a hidden repo's job", async (t) => {
+test("a job's detail reads its row, items and log in one wave and hides a hidden repo's job", async () => {
   const { withDb } = await import("./jobs-fixture.ts");
   await withDb("sqlite", async (db) => {
     const [id, secret] = await seedJobs(db, [{ state: "done", repo: "app" }, { state: "done", repo: "secret" }]);
     const q = queryDb(db);
     await q.run(q.k.insertInto("job_items").values({ job_id: id!, repo: "app", number: 1, outcome: "ok", at }));
     await addLogChunks(db, [{ job_id: id!, seq: 1, start: 0, next_start: 6, chunk: "hello\n", at }]);
-    try {
-      const d = await loadJobDetail(db, id!, { logs: true, hidden: ["secret"] });
-      assert.deepEqual([d!.items.length, d!.logTail?.log], [1, "hello\n"]);
-      assert.equal((await loadJobDetail(db, id!, { logs: false }))!.logTail, null);
-      assert.equal(await loadJobDetail(db, secret!, { logs: true, hidden: ["secret"] }), null);
-    } catch (e) {
-      if (/not built: mirror/.test((e as Error).message)) return void t.skip("mirror.loadShown is not built yet");
-      throw e;
-    }
+    const d = await loadJobDetail(db, id!, { logs: true, hidden: ["secret"] });
+    assert.deepEqual([d!.items.length, d!.logTail?.log], [1, "hello\n"]);
+    assert.equal((await loadJobDetail(db, id!, { logs: false }))!.logTail, null);
+    assert.equal(await loadJobDetail(db, secret!, { logs: true, hidden: ["secret"] }), null);
   });
 });
 

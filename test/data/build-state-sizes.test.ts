@@ -7,7 +7,6 @@ import {
   AUTO_MIN_BUILDS, clearWorkerUpdate, loadBusyLocalTasks, loadSizings, loadTrimmedPublish, loadWarmBytes, loadWarmFacts, loadWarmReport, loadWorkerUpdate,
   recordTrimmedPublish, releaseWarmGc, saveWarmBytes, saveWarmReport, saveWorkerUpdate, setSizes, takeWarmGc, warmClaimGate, warmGate, WARM_GC_EVERY_MS, WARM_GC_RETRY_MS,
 } from "../../src/data/build/index.ts";
-import { addAudit } from "../../src/data/control/index.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import { testDatabase } from "../test-db.ts";
 import { both } from "./planner-helpers.ts";
@@ -100,10 +99,9 @@ test("loadSizings: statements do not grow with the number of repos", async () =>
   }, 2, 12);
 });
 
-test("setSizes: tidy removes rows left automatic, reset and clear report what they changed", async (t) => {
+test("setSizes: tidy removes rows left automatic, reset and clear report what they changed", async () => {
   const { db, close } = await fresh();
   try {
-    try { await addAudit(db, []); } catch { return t.skip("control.addAudit is not built yet"); }
     const q = queryDb(db);
     await setSizes(db, [{ repo: "o/a", memory: { requestBytes: 10, limitBytes: 20 } }, { repo: "o/b", warmTarget: "pvc" }, { repo: "o/c", memory: { requestBytes: 5, limitBytes: 6 }, memorySource: "oom" }], "me");
     const rows = (await q.all(q.k.selectFrom("main.build_sizes").select(["repo", "memory_source", "warm_target"]).orderBy("repo"))).map((r) => `${r.repo}:${r.memory_source}:${r.warm_target}`);

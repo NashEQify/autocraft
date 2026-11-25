@@ -17,23 +17,12 @@ export async function withDb<T>(dialect: Dialect, fn: (db: Db) => Promise<T>): P
   }
 }
 
-class Skip extends Error {}
-
-/** Skips the test (from inside `both`) while a function of another module it calls is still a stub. */
-export async function needsBuilt(label: string, probe: () => Promise<unknown>): Promise<void> {
-  try { await probe(); } catch (e) { if (/not built/.test(String((e as Error).message))) throw new Skip(`${label} is not built yet`); throw e; }
-}
 
 /** Runs `fn` on SQLite, then on Postgres when configured; `fn` asserts, and its result on Postgres must equal SQLite's. */
 export function both(name: string, fn: (db: Db) => Promise<unknown>): void {
-  test(name, async (t) => {
-    try {
-      const lite = await withDb("sqlite", fn);
-      if (TEST_PG_URL) assert.deepEqual(await withDb("postgres", fn), lite);
-    } catch (e) {
-      if (e instanceof Skip) { t.skip(e.message); return; }
-      throw e;
-    }
+  test(name, async () => {
+    const lite = await withDb("sqlite", fn);
+    if (TEST_PG_URL) assert.deepEqual(await withDb("postgres", fn), lite);
   });
 }
 

@@ -63,12 +63,12 @@ both("saveJevChunk stores verdicts and failed marks together, and a failed mark 
   assert.equal(await markJevFailed(db, []), 0);
 });
 
-both("pruneClassifyState drops marks of items that left the mirror", async ({ db }) => {
+both("pruneClassifyState drops marks of items that left the mirror or whose classify input changed", async ({ db }) => {
   const q = queryDb(db);
-  await q.run(q.k.insertInto("main.items").values([{ repo: "o/a", number: 1, kind: "issue", state: "OPEN" }]));
-  await markJevFailed(db, [{ repo: "o/a", number: 1, hash: "h" }, { repo: "o/a", number: 2, hash: "h" }]);
-  assert.equal(await pruneClassifyState(db), 1);
-  assert.deepEqual([...(await loadJevFailed(db, refs("o/a", 2))).keys()], ["o/a#1"]);
+  await q.run(q.k.insertInto("main.items").values([{ repo: "o/a", number: 1, kind: "issue", state: "OPEN", class_hash: "h" }, { repo: "o/a", number: 3, kind: "issue", state: "OPEN", class_hash: "h2" }]));
+  await markJevFailed(db, [{ repo: "o/a", number: 1, hash: "h" }, { repo: "o/a", number: 2, hash: "h" }, { repo: "o/a", number: 3, hash: "h" }]);
+  assert.equal(await pruneClassifyState(db), 2);
+  assert.deepEqual([...(await loadJevFailed(db, refs("o/a", 3))).keys()], ["o/a#1"]);
 });
 
 both("markHaikuAlone sets the hash on this pass's Haiku rows and removes only the item's Jev rows of another hash", async ({ db }) => {

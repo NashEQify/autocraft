@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { listItems, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, loadStackedHeads, countItems, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
+import { listItems, loadItemAuthors, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, loadStackedHeads, countItems, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
+import { queryDb } from "../../src/db/query-db.ts";
 import { both, bothFlat, seedItems } from "./mirror-fixture.ts";
 
 const refs = (repo: string, n: number) => Array.from({ length: n }, (_, i) => ({ repo, number: i + 1 }));
@@ -79,4 +80,17 @@ bothFlat("the item loaders issue the same number of statements for 2 and 12 keys
     await Promise.all([loadItems(db, keys, "card"), loadItems(db, keys, "text"), loadPrMirror(db, keys), loadShown(db, keys), loadOpenNumbers(db, ["app"]), loadStackedHeads(db, ["app"]),
       loadOpenPrLinks(db, ["app"]), countItems(db, { repos: ["app"] }, "kind"), listItems(db, { repos: ["app"] }, "pr")]);
   });
+});
+
+both("loadItemAuthors: the item author with its commits' authors and co-authors, lowercase, once each", async (db) => {
+  await seedItems(db, "app", [1], { author: "Ann" });
+  await seedItems(db, "app", [2], { author: null });
+  const q = queryDb(db);
+  await q.run(q.k.insertInto("main.pr_commits").values([
+    { repo: "app", number: 1, oid: "a", committed_at: "t", author: "ann", co_authors: '["Bob","ann"]' },
+    { repo: "app", number: 2, oid: "b", committed_at: "t", author: "Cid", co_authors: "not json" },
+  ]));
+  const m = await loadItemAuthors(db, [{ repo: "app", number: 1 }, { repo: "app", number: 2 }, { repo: "app", number: 3 }]);
+  assert.deepEqual([...m].map(([k, v]) => [k, [...v].sort()]).sort(), [["app#1", ["ann", "bob"]], ["app#2", ["cid"]]]);
+  return [...m.keys()].sort();
 });
