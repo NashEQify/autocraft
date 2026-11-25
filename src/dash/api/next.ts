@@ -3,7 +3,8 @@ import type { NextItem, NextPage, NextStep, NextWaiting } from "../../../web/src
 import { LANES, laneGate, stageStatus, storedLaneItems } from "../../runner/autopilot.ts";
 import { lanesInOrder, STAGES } from "../../stages/registry.ts";
 import { loadSteps } from "../../runner/steps.ts";
-import { trackedNames } from "../../repos.ts";
+import * as control from "../../data/control/index.ts";
+import * as planner from "../../data/planner/index.ts";
 import type { Req } from "../types.ts";
 import { shownLookup } from "./shown.ts";
 import { blankIfHidden, visibleRepos } from "./visible.ts";
@@ -13,21 +14,23 @@ import type { Db } from "../../db/index.ts";
 
 const WAITING_LIMIT = 500;
 
-const parseView = (view: string): { next?: string; scope?: true } => { try { return (JSON.parse(view) as { next?: string; scope?: true } | null) ?? {}; } catch { return {}; } };
-const nextText = (view: string): string | null => parseView(view).next ?? null;
+type View = { next?: string; scope?: boolean };
+const viewOf = (p: { view: unknown } | undefined): View => (p?.view as View | null) ?? {};
+const nextText = (p: { view: unknown } | undefined): string | null => viewOf(p).next ?? null;
 
 /** `reader`: what the requester may read of the stored texts; without one (tests), every repo outside `visibleNames` is hidden. */
 export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: number; reader?: Reader } = {}): Promise<NextPage> {
   const visible = new Set(visibleNames), ms = opts.nowMs ?? Date.now();
-  const reader = opts.reader ?? { staff: true, quiet: new Set<string>(), hidden: Object.assign((await trackedNames(db)).filter((r) => !visible.has(r)), { visible: visibleNames }) };
+  const reader = opts.reader ?? { staff: true, quiet: new Set<string>(), hidden: Object.assign([...(await control.loadTrackedRepos(db)).keys()].filter((r) => !visible.has(r)), { visible: visibleNames }) };
   const hidden = reader.hidden;
   const stored = await storedLaneItems(db);
   const shown = shownLookup(db);
   const stepDefs = await loadSteps();
   const status = await stageStatus(db);
-  const plan = async (repo: string, number: number) => await db.get(db.k.selectFrom("item_plans").select(["repo", "number", "wait", "view"]).where("repo", "=", repo).where("number", "=", number));
+  const wanted = Object.values(stored).flatMap((l) => (l?.items ?? []).filter((i) => visible.has(i.repo)).map((i) => ({ repo: i.repo, number: i.number })));
+  const plans = await planner.loadPlans(db, wanted);
   const why = async (repo: string, number: number, action: string): Promise<string> =>
-    (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText((await plan(repo, number))?.view ?? "{}"), hidden) || null) ?? action;
+    (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText(plans.get(`${repo}#${number}`)), hidden) || null) ?? action;
   const stageOf = new Map(lanesInOrder().map((l) => [l.name, STAGES.find((s) => s.id === l.stage)?.title ?? l.stage]));
   const steps: NextStep[] = [];
   for (const lane of LANES) {
@@ -44,10 +47,10 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
       note: blankIfHidden((lane.steps ?? []).map((s) => status[s]).find(Boolean) ?? null, hidden) || null, total, items,
     });
   }
-  const rows = await db.all(db.k.selectFrom("item_plans").select(["repo", "number", "wait", "view"]).where("wait", "is not", null).orderBy("repo").orderBy("number"));
-  const scoped = rows.filter((r) => visible.has(r.repo) && parseView(r.view).scope);
+  const rows = await planner.listPlans(db, { hasWait: true });
+  const scoped = rows.filter((r) => visible.has(r.repo) && viewOf(r).scope);
   const waiting: NextWaiting[] = await mapSeq(scoped.slice(0, WAITING_LIMIT), async (r) => {
-    const s = statusFor(reader, r.repo, r.number, { waiting: r.wait, next: nextText(r.view) });
+    const s = statusFor(reader, r.repo, r.number, { waiting: r.wait, next: nextText(r) });
     return { repo: r.repo, number: r.number, ...await shown(r.repo, r.number), wait: s.waiting ?? "", why: s.next };
   });
   return { steps, waiting, waitingTotal: scoped.length };

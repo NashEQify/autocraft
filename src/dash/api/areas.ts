@@ -7,6 +7,7 @@ import { audit } from "../audit.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { needVisible } from "./visible.ts";
+import * as triage from "../../data/triage/index.ts";
 import type { Db } from "../../db/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 
@@ -80,12 +81,12 @@ export async function edit(db: Db, req: Req): Promise<RepoAreas> {
 
 export async function acceptProposalApi(db: Db, req: Req): Promise<RepoAreas> {
   const id = Number(req.params.id);
-  const repo = (await db.get(db.k.selectFrom("area_proposals").select("repo").where("id", "=", id)))?.repo;
-  if (!repo) throw new HttpError(404, "no such proposal");
+  const proposal = await triage.loadProposal(db, id);
+  if (!proposal) throw new HttpError(404, "no such proposal");
+  const { repo, kind } = proposal;
   await needVisible(db, req, repo);
   const by = await runnerOf(req, repo);
   const b = req.json && typeof req.json === "object" && !Array.isArray(req.json) ? (req.json as Record<string, unknown>) : {};
-  const kind = (await db.get(db.k.selectFrom("area_proposals").select("kind").where("id", "=", id)))!.kind;
   const version = await wrap(async () => kind === "suggest"
     ? await decideSuggestion(db, id, by, names(b.accept), names(b.ignore))
     : await acceptProposal(db, id, by, b.areas === undefined ? undefined : listOf(b.areas)));
@@ -96,7 +97,7 @@ export async function acceptProposalApi(db: Db, req: Req): Promise<RepoAreas> {
 
 export async function dismiss(db: Db, req: Req): Promise<{ ok: true }> {
   const id = Number(req.params.id);
-  const repo = (await db.get(db.k.selectFrom("area_proposals").select("repo").where("id", "=", id)))?.repo;
+  const repo = (await triage.loadProposal(db, id))?.repo;
   if (!repo) throw new HttpError(404, "no such proposal");
   await needVisible(db, req, repo);
   const by = await runnerOf(req, repo);
