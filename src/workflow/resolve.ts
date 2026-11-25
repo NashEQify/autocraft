@@ -186,18 +186,24 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const fix: number[] = [];
   const drop: number[] = [];
   for (const p of named) {
-    let n: number;
+    let ns: number[];
     if (typeof p.part === "number") {
       if (!wf.plan.some((q) => q.n === p.part)) return ambiguous({ why: "no-such-part", part: p.part });
-      n = p.part;
+      ns = [p.part];
+    } else if (p.part === "all" || p.part === "both") {
+      // Every planned part (of the open question's options, where it has them); "both" only when there are two.
+      const pool = wf.plan.filter((q) => q.state === "planned" && (q.option === undefined || sameQuestion(q.question, wf.rec?.question))).map((q) => q.n);
+      if (!pool.length || (p.part === "both" && pool.length < 2)) return ambiguous({ why: "part-matches-none", words: p.part });
+      if (p.part === "both" && pool.length > 2) return ambiguous({ why: "part-matches-several", words: p.part, parts: pool });
+      ns = pool;
     } else {
       const hits = partsMatching(wf.plan, p.part);
       if (hits.length === 0) return ambiguous({ why: "part-matches-none", words: p.part });
       if (hits.length > 1) return ambiguous({ why: "part-matches-several", words: p.part, parts: hits.map((h) => h.n) });
-      n = hits[0]!.n;
+      ns = [hits[0]!.n];
     }
     const into = p.word === "fix" ? fix : drop;
-    if (!into.includes(n)) into.push(n);
+    for (const n of ns) if (!into.includes(n)) into.push(n);
   }
   // A ready plan's parts are what the implementation builds; after it, the review's parts can be fixed or dropped.
   // An option of a question that is no longer the open one is no part any more.

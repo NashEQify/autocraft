@@ -10,6 +10,13 @@
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
 //   yes / lgtm / go                  runs the open recommendation
 //   stop / no, wait / hold for now   a message that only says to hold, with nothing else asked for, is a hold
+//
+// Ordinary phrasing reads as the same commands (normalise): politeness and approval around a command ("looks good, can you merge
+// it please"), the other words in vocab.ts (land, park, carry on, skip ...), "it's a dupe of #12" after a close, conditions AutoCraft
+// applies anyway beside a merge ("once CI is green", "when ready"), exceptions to a yes ("yes except 3", "all but the export change"),
+// number words, ordinals and ranges for parts ("drop the second one", "fix 1 to 3", "fix both"), and a typo of one letter in a
+// command word of five letters or more. Negation, hedges and questions (not, don't, never, maybe, perhaps, unless, ?) leave a
+// message unread, except the hold phrases "not yet", "not now" and "don't merge yet". Quoted lines and code are not read.
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
@@ -61,9 +68,14 @@ export function describe(parts: readonly CommandPart[], items: readonly ItemRef[
 
 /** Reads text written to AutoCraft. */
 export function parse(text: string, opts: ParseOptions = {}): Parsed {
-  let s = text.trim();
+  let s = text.trim().replace(/[\u2018\u2019]/g, "'");
   const names = [opts.slug ?? []].flat().filter(Boolean);
   if (names.length) s = s.replace(mentionRe(names), "");
+  // Quoted lines and code blocks are someone else's words; inline code only names a part (readWords).
+  const code: string[] = [];
+  s = commentLines(s).filter(Boolean).join("\n").replace(/`([^`\n]+)`/g, (_m, c: string) => `${CODE}${code.push(c) - 1}${CODE}`);
+  const normal = normalise(s);
+  s = normal.text;
   // The list form: the command, a colon, then the items. A colon that starts `://` belongs to a URL.
   const list = /^([^:\n]+?):(?!\/\/)([\s\S]*)$/.exec(s);
   const head = list ? list[1]! : s;
@@ -80,17 +92,35 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     const read = readItems(list[2]!, inline.last ?? opts.repo);
     items = addItems(items, read.items);
     if (read.bad.length || !read.items.length) {
-      const r = readWords(marked.text, marked.marks);
+      const r = readWords(marked.text, marked.marks, code);
       return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: [...r.unknown, ...read.bad].join(" ") };
     }
   }
-  const yes = readYes(s);
-  if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
-  if (saysHold(s)) return { kind: "commands", items, parts: [{ word: "hold" }] };
-  const r = readWords(marked.text, marked.marks);
-  if (r.unknown.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: r.unknown.join(", ") };
+  const plain = s.replace(CODE_RE, " ");
+  // A condition is read only beside the command it belongs to, so a bare yes or hold with one stays unread.
+  if (!normal.conditions.length) {
+    const yes = readYes(plain);
+    if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
+    if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
+  }
+  const r = readWords(marked.text, marked.marks, code);
+  const has = (w: CommandPart["word"]) => r.parts.some((p) => p.word === w);
+  const unmet = normal.conditions.filter((c) => !has("merge") || (c.needs === "entry" && !["review", "fix-up", "implement"].some((w) => has(w as CommandPart["word"])))).map((c) => c.text);
+  const guard = GUARD.exec(marked.text.replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
+  const rest = [...r.unknown, ...unmet, ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
+  if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
 }
+
+/** Wraps the index of an inline code span taken out of the text. */
+const CODE = "\u0002";
+const CODE_RE = /\u0002(\d+)\u0002/g;
+
+/**
+ * Words that turn or soften what they stand beside. A message holding one is never read as a command, whatever else it says; the
+ * hold phrases that hold one ("not yet", "don't merge yet") are read before this.
+ */
+const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|cant|wont|shouldnt)(?![\w-])|n't(?![\w-])|\?/i;
 
 /**
  * The command in a GitHub comment, or null when no line of it is addressed to the app. A command starts on a line of its own with
@@ -173,6 +203,7 @@ function readYes(s: string): { weight: number | null } | null {
   for (let again = true; again;) {
     again = false;
     for (const tr of YES_TRAILERS) if (rest.endsWith(` ${tr}`)) { rest = rest.slice(0, -tr.length - 1); again = true; }
+    for (const lead of YES_LEADS) if (rest.startsWith(`${lead} `)) { rest = rest.slice(lead.length + 1); again = true; }
   }
   return !bad && YES_WORDS.includes(rest) ? { weight } : null;
 }
@@ -182,7 +213,16 @@ function readYes(s: string): { weight: number | null } | null {
  * explicit list; words that change a meaning (don't, not, no, wait, hold, later, unless, but, if, instead) are never in it, so such
  * a reply stays unread.
  */
-const FILLER = /(?<![\w-])(?:thank you|the pull request|the pr|the rest|go ahead|sounds good|lgtm|yes|yep|yeah|ok|okay|sure|please|pls|thanks|thx|now|it|this|that)(?![\w-])/gi;
+const FILLER_WORDS = [
+  "thank you", "thanks", "thx", "please", "pls", "the pull request", "the pr", "this pull request", "this pr", "its pull request", "its pr",
+  "the issue", "this issue", "this one", "the rest", "go ahead", "sounds good", "lgtm", "looks good to me", "looks good", "looks great",
+  "approve", "approved", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "great", "nice", "perfect", "cool", "nice work", "great work",
+  "good work", "can you", "could you", "would you", "will you", "let's", "lets", "let us", "for now", "now", "it", "this", "that",
+];
+const THANKS_FOR = String.raw`thanks?(?: you)? for (?:the |this |your )?(?:fix|pr|pull request|change|changes|work|contribution|patch|report)`;
+const FILLER = new RegExp(`(?<![\\w-])(?:${THANKS_FOR}|${FILLER_WORDS.map(escape).sort((a, b) => b.length - a.length).join("|")})(?![\\w-])`, "gi");
+/** Words a yes may carry before it: "thanks, looks good", "let's do it". */
+const YES_LEADS: readonly string[] = ["please", "pls", "ok", "okay", "thanks", "thank you", "thx", "great", "nice", "perfect", "cool", "let's", "lets"];
 const stripFiller = (seg: string): string => seg.replace(FILLER, " ").replace(/\s+/g, " ").trim();
 const saysYes = (seg: string): boolean => (seg.match(FILLER) ?? []).some((w) => YES_WORDS.includes(w.toLowerCase()));
 
@@ -201,8 +241,122 @@ function saysHold(s: string): boolean {
   return false;
 }
 
+type Condition = { text: string; /** What must stand beside it: a merge, or a merge and a start whose steps hold the review. */ needs: "merge" | "entry" };
+
+const ITEM_AHEAD = String.raw`(?=\s*(?:https?:\/\/|(?:[\w.-]+\/)?[\w.-]*#\d))`;
+/** "it's a dupe of #12", "same as #12" and a close beside them, as `close as duplicate of #12`; "close it, not planned" as `close as not planned`. */
+const DUPLICATE: readonly [RegExp, string][] = [
+  [/(?<![\w-])(?:it's|its|it is|this is|that's|that is)\s+(?:a\s+)?(?:dupe|duplicate)\s+of(?![\w-])/gi, "duplicate of"],
+  [/(?<![\w-])(?:a\s+)?dupe\s+of(?![\w-])/gi, "duplicate of"],
+  [new RegExp(String.raw`(?<![\w-])(?:it's\s+|it is\s+|this is\s+)?(?:the\s+)?same\s+(?:issue\s+|thing\s+|bug\s+)?as${ITEM_AHEAD}`, "gi"), "duplicate of"],
+  [/(?<![\w-])close((?:\s+(?:the pull request|this pull request|the issue|this issue|the pr|this pr|this one|this|it|that))?)\s*(?:[,;]|\s[-\u2013\u2014])?\s*(?:as\s+)?(?:a\s+)?duplicate\s+of(?![\w-])/gi, "close$1 as duplicate of"],
+  [/(?<![\w-])close((?:\s+(?:the pull request|this pull request|the issue|this issue|the pr|this pr|this one|this|it|that))?)\s*(?:[,;]|\s[-\u2013\u2014])\s*(?:as\s+)?(not[-\s]planned|completed)(?![\w-])/gi, "close$1 as $2"],
+];
+const CI = String.raw`(?:the\s+)?(?:ci(?:\s+checks)?|checks|tests|build)`;
+const PASSES = String.raw`(?:is\s+|are\s+|goes\s+|turns\s+|has\s+|have\s+)?(?:green|pass(?:es|ed)?|succeeds?|succeeded|done|finished|finishes)`;
+/** Conditions every merge meets anyway: green CI, mergeable, and (with a start that reviews) the review. */
+const CONDITIONS: readonly { re: RegExp; needs: Condition["needs"] }[] = [
+  { re: new RegExp(String.raw`(?<![\w-])(?:only\s+)?(?:once|when|after|as soon as)\s+(?:${CI}\s+${PASSES}|(?:it's|it is|it)\s+(?:green|passes|goes green|turns green))(?![\w-])`, "gi"), needs: "merge" },
+  { re: /(?<![\w-])(?:only\s+)?on\s+green\s+ci(?![\w-])/gi, needs: "merge" },
+  { re: /(?<![\w-])(?:only\s+)?(?:once|when)\s+(?:it's\s+|it is\s+|you're\s+|you are\s+)?ready(?![\w-])/gi, needs: "merge" },
+  { re: /(?<![\w-])(?:only\s+)?(?:(?:after|once|when)\s+(?:the\s+|a\s+)?review(?:\s+(?:is\s+)?(?:done|passes|finished|clean))?|(?:after|once|when)\s+(?:it's\s+|it is\s+|it has been\s+)?reviewed)(?![\w-])/gi, needs: "entry" },
+];
+const ALL_WORDS = String.raw`all(?:\s+of\s+(?:them|it))?|everything`;
+/** `yes except 3`, `all but the export change`, `merge everything except 2`: the yes, or the command, with those parts dropped. */
+const EXCEPT_RE = new RegExp(String.raw`^((?:(?:${any([...YES_WORDS.filter((w) => w.length > 1), "sure"])})[\s,]+)*)(?:(merge|land|fix)\s+)?(${ALL_WORDS})?[\s,]*(?<![\w-])(but|except(?:\s+for)?|apart\s+from|other\s+than|minus|save\s+for)\s+([\s\S]+)$`, "i");
+const DROP_VERB = /^(?:drop|skip|leave\s+out)\s+(.+)$/i;
+/** Words that make an exception a condition, not a list of parts. */
+const NOT_PARTS = /(?<![\w-])(?:if|when|once|unless|until|after|before|wait|not|never|maybe|perhaps)(?![\w-])|n't|\?/i;
+
+/** Ordinary phrasing rewritten into the command words it means; anything else is left as written for readWords to judge. */
+function normalise(text: string): { text: string; conditions: Condition[] } {
+  let s = text.replace(/(?<![\w-])(urgent|high|low)[-\s]+priority(?![\w-])/gi, "$1");
+  for (const [re, to] of DUPLICATE) s = s.replace(re, to);
+  const conditions: Condition[] = [];
+  for (const { re, needs } of CONDITIONS) s = s.replace(re, (m) => { conditions.push({ text: m.trim(), needs }); return " "; });
+  const ex = EXCEPT_RE.exec(s.trim());
+  if (ex) {
+    const [, lead, cmd, all, sep, list] = ex as unknown as [string, string, string | undefined, string | undefined, string, string];
+    const pieces = list.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and\s+then|then|and|&|or)\s+/i).map((x) => x.trim().replace(/[.!]+$/, "")).filter(Boolean);
+    const ok = (lead.trim() || all) && (!cmd || all) && !NOT_PARTS.test(list) && pieces.length && (sep.toLowerCase() !== "but" || all || DROP_VERB.test(pieces[0]!));
+    if (ok) {
+      const out = pieces.map((x) => {
+        if (DROP_VERB.test(x)) return x;
+        const c = commandOf(norm(stripFiller(x)));
+        return (c && !c.answer) || isWeightWord(x.toLowerCase()) || /^weight\s+\d+$/i.test(x) ? x : `drop ${x}`;
+      });
+      const word = cmd?.toLowerCase();
+      s = [word ? null : "yes", word === "fix" ? "fix-up" : null, ...out, word === "merge" || word === "land" ? "merge" : null].filter(Boolean).join(", ");
+    }
+  }
+  return { text: s, conditions };
+}
+
+const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+const ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+
+/** A part number written as digits, `#n`, a number word or an ordinal (`second`, `2nd`), else null. */
+function numberOf(w: string): number | null {
+  const d = /^#?(\d+)(?:st|nd|rd|th)?$/.exec(w);
+  if (d) return Number(d[1]) > 0 ? Number(d[1]) : null;
+  const i = NUMBER_WORDS.indexOf(w), j = ORDINALS.indexOf(w);
+  return i >= 0 ? i + 1 : j >= 0 ? j + 1 : null;
+}
+
+/**
+ * The parts named only by number, as digit tokens (weight words kept): `the second one`, `1-3`, `first to third`, `two and four`.
+ * Null when any word is no number, so the text names a part by its title instead.
+ */
+function partNumbers(arg: string): string[] | null {
+  const t = arg.toLowerCase().replace(/[,&]/g, " ").replace(/(\S+?)\s*(?:-|\u2013|\s(?:to|through|thru)\s)\s*(\S+)/g, (m, a: string, b: string) => {
+    const x = numberOf(a), y = numberOf(b);
+    return x === null || y === null || x >= y || y - x > 20 ? m : Array.from({ length: y - x + 1 }, (_v, k) => String(x + k)).join(" ");
+  });
+  const out: string[] = [];
+  let ordinal = false;
+  for (const w of t.split(/\s+/).filter(Boolean)) {
+    if (["the", "and", "part", "parts", "finding", "findings", "change", "changes", "number"].includes(w) || (w === "one" && ordinal)) continue;
+    const n = numberOf(w);
+    ordinal = ORDINALS.includes(w) || /^\d+(?:st|nd|rd|th)$/.test(w);
+    if (n !== null) out.push(String(n));
+    else if (isWeightWord(w)) out.push(w);
+    else return null;
+  }
+  return out.some((w) => /^\d+$/.test(w)) ? out : null;
+}
+
+/** "both" and "all of them" where parts are expected; resolve.ts reads them against the plan. */
+const ALL_PARTS = /^(?:(?:all|each)(?:\s+of\s+(?:them|it|these|those))?|everything|every\s+one|each\s+one)$/i;
+const BOTH_PARTS = /^both(?:\s+of\s+them)?$/i;
+const POSITION = /^(?:the\s+)?(?:last|final|latter|former|other|previous|next|rest)(?:\s+(?:one|two|three|part|parts))?$/i;
+
+/** Command words a one-letter typo of reads as (five letters or more); their inflections and real words a letter away do not. */
+const TYPO_WORDS: readonly string[] = [...COMMANDS.filter((c) => c.word.length >= 5 && c.word !== "autorepin").map((c) => c.word), "fixup"];
+const NOT_TYPOS = new Set(["clone", "closer", "cloned"]);
+
+/** The command word `w` misspells by one letter (an insertion, deletion, substitution or swap), when exactly one fits. */
+function typoOf(w: string): string | null {
+  if (w.length < 4 || NOT_TYPOS.has(w)) return null;
+  const hits = TYPO_WORDS.filter((c) => c !== w && !(w.startsWith(c) && w.length === c.length + 1 && /[dsr]$/.test(w)) && oneEdit(w, c));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+function oneEdit(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) {
+    if (a.slice(i + 1) === b.slice(i + 1)) return true;
+    return a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2);
+  }
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+
+/** A fix or drop with the parts it names; drop's other words (skip, leave out) too. */
+const NAMED_RE = new RegExp(`^(${any(COMMANDS.filter((c) => c.answer).flatMap((c) => [c.word, ...c.aliases]))})\\s+(.+)$`, "i");
+
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
-function readWords(src: string, marks: readonly { tok: string }[] = []): Read {
+function readWords(src: string, marks: readonly { tok: string }[] = [], code: readonly string[] = []): Read {
   const tainted = new Set<number>();
   const parts: CommandPart[] = [];
   const unknown: string[] = [];
@@ -242,9 +396,27 @@ function readWords(src: string, marks: readonly { tok: string }[] = []): Read {
       yes ||= saysYes(seg);
       if (!bare) return;
       // "yes?" asks, so what is left of it says nothing: the words as written are what was not understood.
-      if (!/[\p{L}\p{N}]/u.test(bare)) { unknown.push(seg); return; }
+      if (!/[\p{L}\p{N}]/u.test(bare.replace(CODE_RE, ""))) { if (bare.replace(CODE_RE, "").trim()) unknown.push(seg.replace(CODE_RE, " ").trim()); return; }
       seg = bare;
     }
+    // Inline code counts only as words of a part's title.
+    const named = NAMED_RE.exec(seg);
+    seg = seg.replace(CODE_RE, " ").replace(/\s+/g, " ").trim();
+    if (named && !/^fix\s+up(?:\s|$)/i.test(seg)) {
+      const word = /^fix$/i.test(named[1]!) ? "fix" : "drop";
+      const arg = named[2]!.replace(CODE_RE, (_m, i: string) => ` ${code[Number(i)] ?? ""} `).trim().replace(/\s+/g, " ");
+      // "skip review" means a step, not a part.
+      if (word === "drop" && !/^drop$/i.test(named[1]!) && /^(?:the\s+)?(?:review|fix-?up|ci|checks|tests|build|merge)$/i.test(arg)) { unknown.push(seg); return; }
+      if (BOTH_PARTS.test(arg) || ALL_PARTS.test(arg)) { push({ word, part: BOTH_PARTS.test(arg) ? "both" : "all" }); return; }
+      const numbers = partNumbers(arg);
+      // A position other than a number ("the last one") or a range too long to be parts would match titles by accident.
+      if (!numbers && (POSITION.test(arg) || /^[#\d][#\d\s,&\-\u2013]*$/.test(arg))) { unknown.push(seg); return; }
+      const rest = takeWeightsIfNumbers(numbers ?? arg.split(/\s+/), weights);
+      if (rest) for (const n of rest) push({ word, part: n });
+      else push({ word, part: arg });
+      return;
+    }
+    if (!seg) return;
     const repin = /^auto[-\s]?repin(?:\s+(.+))?$/i.exec(seg);
     if (repin) {
       const args = repin[1]?.trim().replace(/\s+/g, " ") ?? "";
@@ -254,20 +426,12 @@ function readWords(src: string, marks: readonly { tok: string }[] = []): Read {
     }
     const reason = readClose(seg);
     if (reason) { push({ word: "close", reason }); return; }
-    const named = /^(drop|fix)\s+(.+)$/i.exec(seg);
-    if (named && !/^fix\s+up(?:\s|$)/i.test(seg)) {
-      const word = named[1]!.toLowerCase() as "drop" | "fix";
-      const tokens = named[2]!.split(/\s+/);
-      const rest = takeWeightsIfNumbers(tokens, weights);
-      if (rest) for (const n of rest) push({ word, part: n });
-      else push({ word, part: named[2]!.trim().replace(/\s+/g, " ") });
-      return;
-    }
-    if (/^#?\d+(?:\s+#?\d+)*$/.test(seg)) {
-      // "fix 1 and 2": a bare number continues the fix or drop before it.
+    const numbers = partNumbers(seg);
+    if (numbers?.every((n) => /^\d+$/.test(n))) {
+      // "fix 1 and 2", "drop the first, the third": a bare number continues the fix or drop before it.
       const last = parts[parts.length - 1];
       if (last && (last.word === "fix" || last.word === "drop") && typeof last.part === "number") {
-        for (const n of seg.split(/\s+/)) push({ word: last.word, part: Number(n.replace("#", "")) });
+        for (const n of numbers) push({ word: last.word, part: Number(n) });
       } else unknown.push(seg);
       return;
     }
@@ -281,11 +445,11 @@ function readWords(src: string, marks: readonly { tok: string }[] = []): Read {
       else { weights.push({ text: legacy[1]!, w }); push({ word: "merge" }); }
       return;
     }
-    const c = commandOf(text);
+    const c = commandOf(text) ?? commandOf(typoOf(text) ?? "");
     if (c && c.word !== "drop" && c.word !== "fix" && c.word !== "autorepin") push({ word: c.word });
     else unknown.push(seg);
   };
-  for (const raw of s.split(/\s*[,;\n]\s*|\s+(?:and\s+then|then|and|&)\s+/i)) readSeg(raw);
+  for (const raw of s.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and\s+then|then|and|&)\s+/i)) readSeg(raw);
   const distinct = [...new Set(weights.map((w) => w.w))];
   const conflict = distinct.length > 1;
   if (conflict) unknown.push(...weights.map((w) => w.text));
