@@ -8,7 +8,7 @@ import { mergeVerdicts } from "../src/merge/approval.ts";
 import { advancePreapprovals, preapprovalOf, preapproveMerge } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
-import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
@@ -61,7 +61,7 @@ async function approved(w: World, c: Pick<Case, "n" | "state" | "entry">): Promi
   await preapproveMerge(w.db, { repo: "app", number: c.n, by: OPERATOR });
   await w.db.run(w.db.k.updateTable("preapprovals").set({ state: c.state }).where("number", "=", c.n));
 }
-const tick = async (w: World, times = 3): Promise<void> => { for (let i = 0; i < times; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+const tick = (w: World, times = 3): Promise<void> => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], times);
 const legOf = async (w: World, n: number) => (await preapprovalOf(w.db, "app", n))!;
 
 test("a push of ours keeps the merge approval, whatever made it and wherever the leg is, and asks nobody", async () => {
@@ -71,6 +71,8 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
   for (const c of all) { await c.push(w, c.n, `sha${c.n}`, `sha${c.n}b`); await w.synced(c.n, `sha${c.n}b`); await w.verified(c.n); }
   await tick(w);
   const plans = new Map((await w.plan()).prs.map((p) => [p.facts.number, p.plan]));
+  const heads = all.map((c) => ({ number: c.n, head: `sha${c.n}b` }));
+  const early = await mergeVerdicts(w.db, "app", heads);
   for (const c of all) {
     const label = `${c.name}, ${c.state}, ${c.entry}`;
     const wf = (await liveWorkflow(w.db, "app", c.n))!, leg = await legOf(w, c.n);
@@ -81,7 +83,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
     const kinds = plans.get(c.n)!.actions.map((a) => a.kind);
     assert.ok(kinds.includes(unreviewed ? "premerge" : c.name === "clean base merge" ? "carry" : "review"), `${label}: ${kinds.join()}`);
     assert.ok(!kinds.includes("merge"), label);
-    const may = (await mergeVerdicts(w.db, "app", [{ number: c.n, head: `sha${c.n}b` }])).get(c.n)!;
+    const may = early.get(c.n)!;
     assert.ok(!may.ok && may.why.code === "not-handed-over", `${label}: ${JSON.stringify(may)}`);
   }
 
@@ -91,7 +93,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
     await w.premerge(c.n, "clean");
   }
   await tick(w);
-  const verdicts = await mergeVerdicts(w.db, "app", all.map((c) => ({ number: c.n, head: `sha${c.n}b` })));
+  const verdicts = await mergeVerdicts(w.db, "app", heads);
   for (const c of all) {
     assert.equal((await legOf(w, c.n)).state, "queued", `${c.name}, ${c.state}, ${c.entry}`);
     assert.deepEqual(verdicts.get(c.n), { ok: true, as: `user:${OPERATOR}`, by: { kind: "person", login: OPERATOR } }, `${c.name}, ${c.state}, ${c.entry}`);

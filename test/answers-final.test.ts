@@ -5,7 +5,7 @@ import { advancePreapprovals, preapprovalOf } from "../src/preapproval/index.ts"
 import { markReviewsStale } from "../src/review/discussion.ts";
 import { recordReviewFailure, reviewHold } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
-import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 const fresh = async (): Promise<World> => (current = await (await world()).repo());
@@ -17,7 +17,7 @@ const startPushed = async (w: World, n: number, to: string) => {
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state: "pushed", attempt: 1, created_at: T0, source: "operator", operator_fix: fix }));
   await w.synced(n, to);
 };
-const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePreapprovals(w.db); };
+const settle = (w: World) => untilQuiet(w.db, [() => advancePreapprovals(w.db)], 5);
 
 describe("a review that failed for good", () => {
   test("a request newer than the last failure grants exactly one more try", async () => {

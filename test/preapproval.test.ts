@@ -15,7 +15,7 @@ import { legBlocker } from "../src/workflow/blockers.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import { expectFlat } from "./helpers/query-count.ts";
 import { premergeFix } from "../src/core/decide.ts";
-import { CHECK, OPERATOR, T0, world, type World } from "./world-db.ts";
+import { CHECK, OPERATOR, T0, untilQuiet, world, type World } from "./world-db.ts";
 import { addOwnCommits } from "../src/data/control/index.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
 import { queueOriginOf, queuePage } from "../src/dash/api/queue-page.ts";
@@ -56,7 +56,7 @@ const inCi = async (w: World, n: number) => {
   await settle(w);
   assert.equal((await preapprovalOf(w.db, "app", n))?.state, "ci");
 };
-const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePreapprovals(w.db); };
+const settle = (w: World) => untilQuiet(w.db, [() => advancePreapprovals(w.db)], 5);
 
 describe("pre-approved merge", () => {
   test("fix-up pushed, review take, pre-merge review clean, CI green: the merge queue gets it", async () => {

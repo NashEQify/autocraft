@@ -2,7 +2,7 @@
 import { loadOwnPushes } from "../src/data/views/own-pushes.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
@@ -162,20 +162,34 @@ type Setup = { w: World; fork: string; head: string; comments: string[]; pushes:
 let current: World | null = null;
 afterEach(() => current?.close());
 
+/** The bare fork contrib/app of each kind of setup, built once and copied for every test. */
+const forks = new Map<boolean, { dir: string; head: string }>();
+function forkTemplate(lock: boolean): { dir: string; head: string } {
+  let made = forks.get(lock);
+  if (!made) {
+    const root = mkdtempSync(join(SCRATCH, "repin-fork-"));
+    const work = join(root, "work");
+    mkdirSync(work);
+    git(work, "init", "-q", "-b", "fix");
+    writeFileSync(join(work, "Cargo.toml"), MANIFEST);
+    if (lock) writeFileSync(join(work, "Cargo.lock"), lockOf(OLD));
+    git(work, "add", "-A");
+    git(work, "commit", "-q", "-m", "contributor");
+    const head = git(work, "rev-parse", "HEAD");
+    const dir = join(root, "fork.git");
+    git(root, "clone", "-q", "--bare", work, dir);
+    git(dir, "update-ref", "refs/pull/1/head", head);
+    forks.set(lock, made = { dir, head });
+  }
+  return made;
+}
+
 /** app#1 from the fork contrib/app (branch `fix`), pinned to libs at OLD; libs#12 is open in the mirror. */
 async function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } = {}): Promise<Setup> {
   const root = mkdtempSync(join(SCRATCH, "repin-"));
-  const work = join(root, "work");
-  mkdirSync(work);
-  git(work, "init", "-q", "-b", "fix");
-  writeFileSync(join(work, "Cargo.toml"), MANIFEST);
-  if (o.lock !== false) writeFileSync(join(work, "Cargo.lock"), lockOf(OLD));
-  git(work, "add", "-A");
-  git(work, "commit", "-q", "-m", "contributor");
-  const head = git(work, "rev-parse", "HEAD");
+  const { dir, head } = forkTemplate(o.lock !== false);
   const fork = join(root, "fork.git");
-  git(root, "clone", "-q", "--bare", work, fork);
-  git(fork, "update-ref", "refs/pull/1/head", head);
+  cpSync(dir, fork, { recursive: true });
 
   const w = (current = await (await (await world()).repo(o.off)).pr(1, { head }));
   await w.db.run(w.db.k.updateTable("access").set({ github_id: 101 }).where("login", "=", OPERATOR));

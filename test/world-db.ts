@@ -41,6 +41,26 @@ export const CHECK = "gate / test";
 export type Write = { kind: "merge" | "assign" | "comment" | "close" | "pr" | "push"; number: number; head?: string; detail?: string };
 type Live = { head: string; state: string; draft?: boolean; mergeable: string; ci: string; authors: string[]; assignees: string[] };
 
+/**
+ * Runs `passes` in turn, up to `most` rounds, until each has run and written nothing since the last write: a pass reads the
+ * database and the clock, so it would decide the same again. It does not wait for the permission reads advancePreapprovals starts and
+ * leaves running (refreshSettlers): without an injected `permission` there is no app token and they write nothing; a test that injects
+ * one waits for its answer itself.
+ */
+export async function untilQuiet(db: Db, passes: (() => Promise<unknown>)[], most: number): Promise<void> {
+  let wrote = false;
+  const stop = db.observe((e) => { wrote ||= e.kind === "write-lock" || /\binsert\b|\breplace\s+into\b|\bupdate\b|\bdelete\s+from\b/i.test(e.sql); });
+  try {
+    for (let i = 0, quiet = 0; i < most * passes.length && quiet < passes.length; i++) {
+      wrote = false;
+      await passes[i % passes.length]!();
+      quiet = wrote ? 0 : quiet + 1;
+    }
+  } finally {
+    stop();
+  }
+}
+
 mkdirSync(SCRATCH, { recursive: true });
 export const tmpdir = (name: string): string => mkdtempSync(join(SCRATCH, `${name}-`));
 

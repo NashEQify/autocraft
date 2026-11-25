@@ -121,7 +121,8 @@ const LOCAL_HOSTS = new Set(["", "localhost", "[::1]"]);
  */
 export function pgConnectionString(url: string): string {
   const u = new URL(url);
-  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || u.searchParams.get("sslmode") === "disable") return url;
+  // A host that is a path (%2F...) names a Unix socket's directory.
+  if (LOCAL_HOSTS.has(u.hostname) || u.hostname.startsWith("127.") || /^%2f/i.test(u.hostname) || u.searchParams.get("sslmode") === "disable") return url;
   u.searchParams.set("sslmode", "verify-full");
   // libpq's "use the system CAs"; pg would read it as a file name. Node verifies against the system CAs by default.
   if (u.searchParams.get("sslrootcert") === "system") u.searchParams.delete("sslrootcert");
@@ -184,22 +185,21 @@ function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
 /**
  * Kysely's counterpart of the `main.`/`temp.` rewrite raw statements get (src/db/params.ts rewriteForPostgres): table
  * names `main.x` and `temp.x` (typed in src/db/types.ts for code that reads past the scoped views or writes a shadowed
- * table) lose the schema, or with `mainSchema` (a scoped handle) `main.x` names `<mainSchema>.x`, past the views.
+ * table) lose the schema, or with `mainSchema` (a scoped handle) `main.x` names `<mainSchema>.x`, past the views. Done
+ * while compiling: a plugin would copy every query's tree.
  */
-function schemaPlugin(k: typeof K, mainSchema: string | undefined): K.KyselyPlugin {
-  class Transformer extends k.OperationNodeTransformer {
-    protected override transformSchemableIdentifier(node: K.SchemableIdentifierNode, queryId?: K.QueryId): K.SchemableIdentifierNode {
-      const t = super.transformSchemableIdentifier(node, queryId);
-      const schema = t.schema?.name.toLowerCase();
-      if (schema !== "main" && schema !== "temp") return t;
-      return { ...t, schema: schema === "main" && mainSchema ? k.IdentifierNode.create(mainSchema) : undefined };
+function schemaCompiler(k: typeof K, mainSchema: string | undefined): K.QueryCompiler {
+  class Compiler extends k.PostgresQueryCompiler {
+    protected override visitSchemableIdentifier(node: K.SchemableIdentifierNode): void {
+      const schema = node.schema?.name.toLowerCase();
+      if (schema !== "main" && schema !== "temp") return super.visitSchemableIdentifier(node);
+      if (schema === "main" && mainSchema) {
+        this.append(`"${this.sanitizeIdentifier(mainSchema)}".`);
+      }
+      this.visitNode(node.identifier);
     }
   }
-  const transformer = new Transformer();
-  return {
-    transformQuery: (args) => transformer.transformNode(args.node, args.queryId),
-    transformResult: async (args) => args.result,
-  };
+  return new Compiler();
 }
 
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
@@ -298,9 +298,13 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     override createDriver(): K.Driver {
       return new Driver({ pool, onCreateConnection: prepareConnection });
     }
+
+    override createQueryCompiler(): K.QueryCompiler {
+      return schemaCompiler(k, opts.scope);
+    }
   }
 
-  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }), plugins: [schemaPlugin(k, opts.scope)] });
+  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }) });
   const parsed = new Map<string, ParsedParams>();
   const parse = (text: string): ParsedParams => {
     let p = parsed.get(text);
@@ -356,8 +360,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     },
     script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text, opts.scope))))),
     // Each read becomes `(select coalesce(json_agg(agg), '[]') from (<read>) as agg) AS qN`, as Kysely's jsonArrayFrom
-    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL. Compiling for `kysely` runs
-    // its plugins (schemaPlugin) over the reads again, which leaves them as they are.
+    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL.
     fuse: (kysely, nodes) => {
       const parts = nodes.map((n, i) => k.sql`(select coalesce(json_agg(agg), '[]') from ${{ toOperationNode: () => n }} as agg) as ${k.sql.ref(`q${i}`)}`);
       return k.sql<Row>`select ${k.sql.join(parts)}`.compile(kysely);

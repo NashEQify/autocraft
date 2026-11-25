@@ -207,7 +207,7 @@ The planner, gates, Jev calls, embeddings, GitHub writes and builds always stay 
 ## Development
 
 ```sh
-pnpm test        # node --test
+pnpm test        # the test suite on SQLite
 pnpm check       # typecheck and verify generated documentation
 pnpm -C web dev  # frontend on http://127.0.0.1:5173 with mock data
 VITE_MOCK=1 pnpm -C web build   # static mockup build, no server needed

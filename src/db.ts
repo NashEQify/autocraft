@@ -13,6 +13,7 @@ import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
 import { isLockTimeout } from "./db/errors.ts";
+import { newDbSeed } from "./db/role.ts";
 import { NO_CI_SAMPLE, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
 import { MENTION_KEY, SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
@@ -879,24 +880,18 @@ export function connect(path: string = dbPath(), opts: { busyTimeoutMs?: number 
 /** Whether `e` is a lock wait that ran out (SQLITE_BUSY or Postgres 55P03): another connection held the write lock past the timeout. */
 export const isBusy = isLockTimeout;
 
-let newDbSeed: (() => string | undefined) | undefined;
-
-/**
- * Test hook: a SQLite file that does not exist yet starts as a copy of the file `seed()` names (a database migrated to
- * the current schema), so opening it takes the up-to-date path instead of migrating from nothing. Files that exist,
- * and `:memory:`, open as they are.
- */
-export function setNewDbSeed(seed: (() => string | undefined) | undefined): void {
-  newDbSeed = seed;
-}
-
 function open(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
-  if (newDbSeed && path !== ":memory:" && !existsSync(path)) {
-    const from = newDbSeed();
+  const seed = newDbSeed();
+  if (seed && path !== ":memory:" && !existsSync(path)) {
+    const from = seed.file();
     if (from) copyFileSync(from, path);
   }
   const db = new DatabaseSync(path, { timeout: 30_000 });
+  if (seed && path === ":memory:") {
+    const bytes = seed.bytes();
+    if (bytes) db.deserialize(bytes);
+  }
   // WAL so the dashboard can read while a sync writes
   db.exec("PRAGMA journal_mode=WAL");
   // WAL needs no fsync per commit for consistency; a power cut can lose the last commits, not corrupt the file

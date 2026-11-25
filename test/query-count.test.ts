@@ -66,7 +66,7 @@ const POINTS: { pr?: Parameters<World["pr"]>[1]; review?: Parameters<World["revi
 ];
 
 /** `n` pull requests at each point, numbered from 1, so both sizes of a unit meet the same cases. */
-async function seedPrs(w: World, n: number): Promise<void> {
+const seedPrs = (w: World, n: number): Promise<void> => w.db.write(async () => {
   for (const i of numbers(n, 0)) {
     for (const [k, p] of POINTS.entries()) {
       const pr = i * POINTS.length + k + 1;
@@ -76,7 +76,7 @@ async function seedPrs(w: World, n: number): Promise<void> {
       if (p.started) await insertWorkflow(w.db, { kind: "pr", entry: p.started, startedBy: "op", startedAt: iso(60), startedVia: "github", repo: "app", number: pr, state: "running" });
     }
   }
-}
+});
 
 /** More tracked repos, each with the rows of "app". */
 async function addRepos(w: World, names: readonly string[]): Promise<void> {
@@ -89,7 +89,7 @@ async function addRepos(w: World, names: readonly string[]): Promise<void> {
 }
 
 /** A job over `list` with one model call and one build task per item. */
-async function seedJob(w: World, state: "running" | "done", list: readonly number[]): Promise<number> {
+const seedJob = (w: World, state: "running" | "done", list: readonly number[]): Promise<number> => w.db.write(async () => {
   const { db } = w;
   const ended = state === "done" ? iso(2) : null;
   const id = Number((await db.get(db.k.insertInto("jobs").values({ step: "opus-review", params: JSON.stringify({ repo: "app" }), requested_by: "pipeline", requested_at: iso(6), state, started_at: iso(5), ended_at: ended }).returning("id")))!.id);
@@ -102,7 +102,7 @@ async function seedJob(w: World, state: "running" | "done", list: readonly numbe
     await db.run(db.k.insertInto("build_tasks").values({ job_id: id, step: "verify", repo: "app", number: n, head_sha: `sha${n}`, requires: "{}", plan: "[]", state: state === "done" ? "done" : "running", queued_at: iso(4) }));
   }
   return id;
-}
+});
 
 test("a full planner pass, and one over the items that changed, read in sets", async (t) => {
   // Reads kept for a second or so (the Task Runner snapshot) must not expire in a slow pass.
@@ -138,7 +138,7 @@ test("the lanes of repos with the write steps on, and the queueing of a pass's p
     for (const i of numbers(4, 100)) await w.issue(i);
     await addRepos(w, repos(n).slice(1));
     const k = w.db.k as unknown as Kysely<Record<string, Record<string, unknown>>>;
-    for (const repo of repos(n)) {
+    await w.db.write(async () => { for (const repo of repos(n)) {
       for (const step of ["prstatus", "labels"]) await w.db.run(k.insertInto("repo_step_approvals").values({ repo, step, by: "op", at: iso(60) }));
       await w.db.run(k.insertInto("settings").values({ key: `build_feature:pr-builds:${repo}`, value: "on" }));
       for (const pr of numbers(POINTS.length)) {
@@ -147,7 +147,7 @@ test("the lanes of repos with the write steps on, and the queueing of a pass's p
         await w.db.run(k.insertInto("item_workflows").values({ repo, number: 100 + (pr % 4), kind: "issue", entry: "implement", state: "done", started_by: "op", started_at: iso(50), started_via: "github", updated_at: iso(50) }));
       }
       await w.db.run(k.insertInto("item_workflows").values({ repo, number: 1, kind: "pr", entry: "review", state: "waiting", started_by: "op", started_at: iso(50), started_via: "github", updated_at: iso(50) }));
-    }
+    } });
   };
   await expectFlat(unit(async (w, n) => {
     await seeded(w, n);
@@ -283,7 +283,7 @@ test("the live board reads its lanes in sets", async () => {
 });
 
 /** One PR with `n` of each thing its pages list. */
-async function seedBusyPr(w: World, n: number): Promise<void> {
+const seedBusyPr = (w: World, n: number): Promise<void> => w.db.write(async () => {
   const { db } = w;
   await w.pr(1);
   await w.review(1, { verdict: "take-fix", fixes: numbers(n).map((i) => ({ file: `src/f${i}.rs`, change: "rename" })) });
@@ -296,7 +296,7 @@ async function seedBusyPr(w: World, n: number): Promise<void> {
     await addEvent(db, { workflowId: wf, repo: "app", number: 1, login: "op", via: "github", kind: "answered" });
   }
   await db.run(db.k.updateTable("items").set({ closing_issues: JSON.stringify(numbers(n, 101)) }).where("number", "=", 1));
-}
+});
 
 test("an item's pages read its history in sets", async () => {
   const at = { repo: "app", n: "1" };
@@ -307,7 +307,7 @@ test("an item's pages read its history in sets", async () => {
 });
 
 /** `n` more repos the pipeline works, each with an approval, an optional check and an open PR. */
-async function seedRepos({ db }: World, n: number): Promise<string[]> {
+const seedRepos = ({ db }: World, n: number): Promise<string[]> => db.write(async () => {
   const names = numbers(n).map((i) => `r${i}`);
   for (const r of names) {
     await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES (?, 1)").run(r);
@@ -319,7 +319,7 @@ async function seedRepos({ db }: World, n: number): Promise<string[]> {
     await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('Mia', ?, 'write', ?)").run(r, new Date().toISOString());
   }
   return names;
-}
+});
 
 test("the Repos page reads every repo's settings in sets", async () => {
   await expectFlat(unit(async (w, n) => {
