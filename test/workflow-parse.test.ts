@@ -68,7 +68,9 @@ describe("workflow commands", () => {
 
   test("a comment that goes on with a condition is ambiguous; thanks and reasons don't matter, and a hold stands", () => {
     const kind = (body: string) => parseComment(body.replace("@", `@${SLUG} `), SLUG)?.kind;
-    for (const body of ["@yes\n\nbut wait for CI", "@merge\nafter CI is green", "@merge\n\nThanks! Only when the tests pass.", "@merge\n\nPlease don't merge it before Friday"]) assert.equal(kind(body), "ambiguous", body);
+    for (const body of ["@yes\n\nbut wait for CI", "@merge\nafter #12 merges", "@merge\n\nThanks! Only when Dylan has looked.", "@merge\n\nPlease don't merge it before Friday", "@review\nafter CI"]) assert.equal(kind(body), "ambiguous", body);
+    // A condition every merge meets reads on a later line as it does beside the command.
+    for (const body of ["@merge\nafter CI is green", "@merge\nafter CI", "@merge\n\nThanks! Only when the tests pass."]) assert.equal(kind(body), "commands", body);
     for (const body of ["@merge\n\nThanks, great work!", "@yes\nIt crashed when a file was empty. This does not.", "@merge\n\nFine.\n\nBut that is another issue.", "@hold\n\nuntil the release is out"]) assert.equal(kind(body), body.startsWith("@yes") ? "yes" : "commands", body);
   });
 

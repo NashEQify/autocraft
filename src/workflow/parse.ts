@@ -104,8 +104,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   }
   const r = readWords(marked.text, marked.marks, code);
-  const has = (w: CommandPart["word"]) => r.parts.some((p) => p.word === w);
-  const unmet = normal.conditions.filter((c) => !has("merge") || (c.needs === "entry" && !["review", "fix-up", "implement"].some((w) => has(w as CommandPart["word"])))).map((c) => c.text);
+  const unmet = unmetConditions(normal.conditions, r.parts);
   const guard = GUARD.exec(marked.text.replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
   if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
@@ -132,24 +131,38 @@ export const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|ca
 export function parseComment(body: unknown, slug: string | readonly string[], opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
   const a = addressed(body, slug);
   if (!a) return null;
-  const { texts, condition } = a;
+  const { texts, condition, accepted } = a;
   const p = parse(texts.join("\n"), opts);
-  if (condition === null || (p.kind === "commands" && p.parts.every((x) => x.word === "hold"))) return p;
-  if (p.kind === "ambiguous") return { ...p, rest: [p.rest, condition].filter(Boolean).join(", ") };
-  return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest: condition };
+  if (p.kind === "commands" && p.parts.every((x) => x.word === "hold")) return p;
+  // A condition every merge meets on a later line counts as it does on the command's own line: only beside a merge.
+  const unmet = condition ?? (p.kind === "commands" ? unmetConditions(accepted, p.parts)[0] ?? null : accepted[0]?.text ?? null);
+  if (unmet === null) return p;
+  const rest = unmet;
+  if (p.kind === "ambiguous") return { ...p, rest: [p.rest, rest].filter(Boolean).join(", ") };
+  return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest };
 }
 
-/** The condition a GitHub comment sets after its addressed lines ("but wait for CI"), as parseComment reads it, or null. */
-export const commentCondition = (body: unknown, slug: string | readonly string[]): string | null => addressed(body, slug)?.condition ?? null;
+/** The conditions that do not stand beside what they need: a merge, and for the review, a start that reviews. */
+function unmetConditions(conditions: readonly Condition[], parts: readonly CommandPart[]): string[] {
+  const has = (w: string) => parts.some((p) => p.word === w);
+  return conditions.filter((c) => !has("merge") || (c.needs === "entry" && !["review", "fix-up", "implement"].some(has))).map((c) => c.text);
+}
+
+/** The condition a GitHub comment sets after its addressed lines ("but wait for CI", "after CI"), or null. */
+export const commentCondition = (body: unknown, slug: string | readonly string[]): string | null => {
+  const a = addressed(body, slug);
+  return a ? a.condition ?? a.accepted[0]?.text ?? null : null;
+};
 
 /** The addressed texts of a comment and the first condition after them; null when no line is addressed to the app. */
-function addressed(body: unknown, slug: string | readonly string[]): { texts: string[]; condition: string | null } | null {
+function addressed(body: unknown, slug: string | readonly string[]): { texts: string[]; condition: string | null; accepted: Condition[] } | null {
   const names = [slug].flat().filter(Boolean);
   if (typeof body !== "string" || !names.length) return null;
   const lines = commentLines(body.slice(0, BODY_MAX));
   const mention = mentionRe(names);
   const texts: string[] = [];
   let condition: string | null = null;
+  const accepted: Condition[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (!mention.test(line)) continue;
@@ -158,22 +171,24 @@ function addressed(body: unknown, slug: string | readonly string[]): { texts: st
       while (i + 1 < lines.length && lines[i + 1] && !mention.test(lines[i + 1]!)) text += `\n${lines[++i]}`;
     }
     texts.push(text);
-    condition ??= conditionIn(lines.slice(i + 1), mention);
+    condition ??= conditionIn(lines.slice(i + 1), mention, accepted);
   }
-  return texts.length ? { texts, condition } : null;
+  return texts.length ? { texts, condition, accepted } : null;
 }
 
 /** Words that open a condition on what was said before. */
 export const CONDITION = /^(?:if|unless|but|wait|after|when|until|not)$/;
 /** Words a condition may start with before its own ("please only merge it when ..."). */
 const LEAD_IN = new Set(["and", "so", "then", "only", "just", "please", "pls", "also", "though", "maybe", "perhaps", "thanks", "ok", "okay", "yes", "no", "let", "us", "lets", "let's", "i", "i'd", "we", "we'd", "would", "should", "do", "go", "land", "merge", "it", "this", "that", "the"]);
+/** Words beside an accepted condition that leave it the only thing its clause says. */
+const ACCEPTED_FILLER = new Set(["thanks", "thank", "you", "thx", "pls"]);
 
 /**
  * The sentence with a condition in what follows an addressed line, up to the end of the next paragraph, or null. A condition opens its line or
  * clause ("but wait for CI", "only merge it when CI is green"); the same word inside another sentence ("it crashed when a file was empty") is a reason.
  * `don't` counts as `do not`; unless and until count anywhere.
  */
-function conditionIn(after: readonly string[], mention: RegExp): string | null {
+function conditionIn(after: readonly string[], mention: RegExp, accepted: Condition[]): string | null {
   let gaps = 0, text = false;
   for (const line of after) {
     if (mention.test(line)) return null;
@@ -182,6 +197,11 @@ function conditionIn(after: readonly string[], mention: RegExp): string | null {
     if (gaps > 1) return null;
     for (const sentence of line.split(/(?<=[.!?])\s+/)) {
       for (const clause of sentence.toLowerCase().replace(/\u2019/g, "'").replace(/\bdon'?t\b/g, "do not").split(/[,;:()]|\s[-\u2013\u2014]\s/)) {
+        // A clause that is only a condition every merge meets ("after CI", "only when the tests pass") goes to `accepted`.
+        const found: Condition[] = [];
+        let left = clause;
+        for (const { re, needs } of CONDITIONS) left = left.replace(re, (m) => { found.push({ text: m.trim(), needs }); return " "; });
+        if (found.length && left.replace(/[^\p{L}\p{N}' -]+/gu, " ").split(/\s+/).every((w) => !w || LEAD_IN.has(w) || ACCEPTED_FILLER.has(w))) { accepted.push(...found); continue; }
         const words = clause.replace(/[^\p{L}\p{N}' -]+/gu, " ").replace(/^[\s-]+/, "").split(/\s+/).filter(Boolean);
         if (CONDITION.test(words.find((w) => !LEAD_IN.has(w)) ?? "") || words.some((w) => w === "unless" || w === "until")) return sentence.replace(/[.!]+$/, "").slice(0, 200);
       }
@@ -267,6 +287,8 @@ const PASSES = String.raw`(?:is\s+|are\s+|goes\s+|turns\s+|has\s+|have\s+)?(?:gr
 /** Conditions every merge meets anyway: green CI, mergeable, and (with a start that reviews) the review. */
 const CONDITIONS: readonly { re: RegExp; needs: Condition["needs"] }[] = [
   { re: new RegExp(String.raw`(?<![\w-])(?:only\s+)?(?:once|when|after|as soon as)\s+(?:${CI}\s+${PASSES}|(?:it's|it is|it)\s+(?:green|passes|goes green|turns green))(?![\w-])`, "gi"), needs: "merge" },
+  // "after CI" means after it passes: a merge never runs on red CI.
+  { re: new RegExp(String.raw`(?<![\w-])(?:only\s+)?after\s+(?:green\s+)?${CI}(?![\w-])`, "gi"), needs: "merge" },
   { re: /(?<![\w-])(?:only\s+)?on\s+green\s+ci(?![\w-])/gi, needs: "merge" },
   { re: /(?<![\w-])(?:only\s+)?(?:once|when)\s+(?:it's\s+|it is\s+|you're\s+|you are\s+)?ready(?![\w-])/gi, needs: "merge" },
   { re: /(?<![\w-])(?:only\s+)?(?:(?:after|once|when)\s+(?:the\s+|a\s+)?review(?:\s+(?:is\s+)?(?:done|passes|finished|clean))?|(?:after|once|when)\s+(?:it's\s+|it is\s+|it has been\s+)?reviewed)(?![\w-])/gi, needs: "entry" },
