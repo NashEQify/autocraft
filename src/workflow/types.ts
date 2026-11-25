@@ -42,6 +42,8 @@ export type Recommendation = {
   close?: boolean;
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
+  /** The author pushed commits nobody reviewed: a yes merges only after a model review of them, which the merge leg waits for (a merge-queue PR asks for it with `again`). */
+  newCommits?: true;
   /** The PR conflicts with its base branch, and this one has to resolve it: a yes approves the merge, and nothing is fixed or merged before. */
   waits?: "contributor" | "person";
   /** A yes runs no step of its own: the work goes on in the name of the person who says it, or AutoCraft looks again at what they settled on GitHub. */

@@ -145,7 +145,7 @@ export function yesClause(rec: Recommendation): string | null {
   if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
   if (rec.goes === "look") return rec.merges ? t("Reply yes to look again, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to look again.");
   if (rec.goes === "on" && !fix.length && !rec.again) return rec.merges ? t("Reply yes to go on in your name, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to go on in your name.");
-  const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
+  const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.newCommits ? t("review the new commits") : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
 }

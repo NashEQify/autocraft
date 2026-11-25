@@ -139,7 +139,7 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
-    case "author-commits": return go(t("Review the new commits, then merge."), mergeEntry ? { again: "review" } : {});
+    case "author-commits": return go(t("Review the new commits, then merge."), { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
     case "failed-twice": {
       if (p.step === "fix-up") {
         const fix = planned(plan);
