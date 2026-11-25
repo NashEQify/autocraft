@@ -77,22 +77,22 @@ test("after the merge leg was cancelled or failed nothing merges before the work
   }
 });
 
-test("a stopped PR does not merge on the repo's approval until someone starts it again", async () => {
+test("a held PR does not merge on the repo's approval until someone resumes it or starts it again", async () => {
   const w = await ready();
   assert.deepEqual(await merges(w), ALL, "the rule merges it unstarted");
   await command(w, "review and merge");
   await command(w, "stop");
   assert.deepEqual(await merges(w), NONE);
-  assert.match((await refusedBy(w))!, /stopped/);
+  assert.match((await refusedBy(w))!, /^Someone holds this/);
 });
 
-test("the pull request of a stopped issue does not merge on the repo's approval", async () => {
+test("the pull request of a held issue does not merge on the repo's approval", async () => {
   const w = await (await ready()).issue(7);
   await w.db.run(w.db.k.insertInto("main.implementations").values({ repo: "app", number: 7, attempt: 1, state: "pr-opened", pr_number: 1, text_hash: "h", queued_by: MAINT, created_at: new Date().toISOString(), updated_at: new Date().toISOString() } as never));
   await command(w, "implement", 7);
   await command(w, "stop", 7);
   assert.deepEqual(await merges(w), NONE);
-  assert.match((await refusedBy(w))!, /stopped/);
+  assert.match((await refusedBy(w))!, /^Someone holds this/);
 });
 
 test("our push on top of an author's push does not merge; two pushes of ours do", async () => {

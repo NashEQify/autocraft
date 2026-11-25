@@ -145,7 +145,7 @@ test("a stop comment on the pull request of an implementation halts the issue's 
   await drain(w);
   const [review, stop] = await commands(w);
   assert.deepEqual([review!.state, stop!.state], ["refused", "done"], `${review!.result} / ${stop!.result}`);
-  assert.match(stop!.result!, /app#7: Stopped/);
+  assert.match(stop!.result!, /app#7: On hold \(held by /);
   assert.equal(await liveWorkflow(w.db, "app", 7), null);
   assert.equal((await w.db.get(w.db.k.selectFrom("main.item_workflows").select("stopped_by").where("id", "=", id)))!.stopped_by, OPERATOR);
 });

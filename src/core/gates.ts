@@ -102,7 +102,8 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
   if (a.kind === "implement" && endsAttempt(f)) return { ok: true, as: "app", by: null };
   const need = approvalOf(f as { pushable?: boolean }, a);
   const prefix = need ? `${WHAT[need]} in ${f.repo} are not approved` : "";
-  const unapproved = (code: RefusalCode, why: string, params: Params = {}): Permission => (need === "merge" || need === "push" ? refuse(code, `${prefix}: ${why}`, { need, repo: f.repo, ...params }) : refuse(code, why, params));
+  const unapproved = (code: RefusalCode, why: string, params: Params = {}): Permission =>
+    (need === "merge" || need === "push" ? refuse(code, code === "repo-approval" ? `${prefix}: ${why}` : why, { need, repo: f.repo, ...params }) : refuse(code, why, params));
   if (!f.inScope && !ANY_SCOPE.has(a.kind)) {
     // A person's end of its workflow takes an item out of the scope, and says more than that it is out.
     const left = pr && !pr.may.workflow?.live ? handsOff({ ended: pr.may.ended }) : null;

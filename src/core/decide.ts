@@ -212,6 +212,8 @@ export const waitFields = (w: Wait | null): Pick<Plan, "wait" | "waitKind"> & { 
 export const MAINTAINER_ANSWER_WAIT = "a maintainer's answer";
 const ANSWER = person("answer", MAINTAINER_ANSWER_WAIT);
 const LEG = system("leg", "its pre-approved merge");
+/** What an item stopped at a blocker waits on. */
+const ASKS_AGAIN = person("blocked", "a maintainer's answer to the question it stopped with");
 const BATCH = system("batch", "its batch");
 const MAIN_RED = system("main-red", "a green main");
 const COMMENT_OFF = person("repo-approval", "comment approval for the repo");
@@ -275,7 +277,7 @@ function waitOf(why: Refusal): Wait {
     case "actor-gone": return goneWait(login, repo);
     case "actor-unknown": return unknownWait(login, repo);
     case "box-identity": return person(why.code, BOX_IDENTITY_WAIT);
-    case "blocked": return person(why.code, "a maintainer's answer to the question it stopped with");
+    case "blocked": return ASKS_AGAIN;
     case "unaccepted-head": return person(why.code, "a maintainer to accept the author's new commits");
     case "not-approved": return person(why.code, "a maintainer's approval of the work");
     case "not-handed-over": return system(why.code, "the workflow's steps before the merge");
@@ -788,6 +790,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (st === "refused" && refusalStuck(f)) return person("merge-refused", `a person: the merge was refused (${excerpt(f.lastMerge!.reason!)})`);
     // A started PR nobody approved gets no CI fix, and its red CI may be the default branch's: nobody is asked about it until that is green.
     if (st === "ci-failed" && workflowOf(f) && !fixAllowed(f)) return MAIN_RED;
+    // Nothing moves the merge of a PR that asks: its question is what it waits on.
+    const asking = f.may.workflow?.state === "blocked" ? ASKS_AGAIN : f.may.workflow?.state === "recommending" ? ANSWER : null;
+    if (asking && (st === "waiting-premerge" || (st === "ready" && e?.path === "maintainer"))) return asking;
     if (st === "ready" && e?.path === "maintainer") return system("hand-over", "the approved merge to be handed over to its approver");
     return WAITS[st] ?? null;
   };
