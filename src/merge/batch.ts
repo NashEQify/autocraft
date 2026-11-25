@@ -500,8 +500,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (moved) return supersede(b, members, moved);
     // Time passes between building and pushing (and between retries of a failed push): the members must still be open at the batched heads.
     const checks = await refreshChecks(db, d.querier, repo, members.map((m) => m.number));
-    const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && c.head_oid === m.head_oid));
-    if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged or pushed to");
+    const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && !c.is_draft && c.head_oid === m.head_oid));
+    if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged, pushed to or turned into a draft");
     // An operator may have stopped the batch while the checks were read.
     if ((await getBatch(db, b.id)).state !== "checking") return;
     if (await dropRefused(b, members)) return;
@@ -584,8 +584,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       log(`  ${b.branch}: the batch PR was closed; its PRs are held until they change`);
       return;
     }
-    const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && c.head_oid === m.head_oid));
-    if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged or pushed to");
+    const live = members.filter((m) => checks.some((c) => c.number === m.number && c.state === "OPEN" && !c.is_draft && c.head_oid === m.head_oid));
+    if (live.length < members.length) return supersede(b, live, "a PR in the batch was closed, merged, pushed to or turned into a draft");
     const ci = await effectiveCi(db, repo, ch.overall, ch.checks);
     if (ci === "failure") return red(b, members, ch.checks.filter((c) => c.state === "failure").map((c) => c.name));
     if (ch.mergeable === "CONFLICTING") return supersede(b, members, `the batch PR conflicts with ${branch}`);

@@ -25,7 +25,7 @@ export const OTHER_PR_STATES = [
   "integration", // an integration batch PR the pipeline opened itself
   "pushed", // our push moved the PR off the head the mirror still shows: nothing is planned until a sync shows the new head
   "backlog", // sent to the backlog (no take review at its head)
-  "draft", // a draft, or closed on GitHub, with no take review
+  "draft", // a draft, or closed on GitHub with no take review
   "opus-hold", // the review at the head says hold
   "opus-close", // the review at the head says close
   "review-stale", // reviewed, but the head moved or the discussion moved on: due a new review
@@ -149,8 +149,9 @@ export type PrFacts = {
   ghState: "OPEN" | "MERGED" | "CLOSED";
   /** The PR's current head commit (checks fetched after the mirror's last update win over the mirror). */
   head: string | null;
-  /** A draft, or not open on GitHub, as the freshest of mirror and checks says. */
+  /** A draft, or not open on GitHub (`gone`), as the freshest of mirror and checks says. */
   draft: boolean;
+  gone?: true;
   author: string | null;
   authorIsPipeline: boolean;
   tier: PrTier;

@@ -239,6 +239,8 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     if (!ch) { await refuse(e, null, "GitHub returned no such PR"); continue; }
     if (ch.state !== "OPEN") { await refuse(e, null, `no longer open on GitHub (${ch.state.toLowerCase()})`); continue; }
     if (ch.head_oid !== e.head) { await refuse(e, null, `head moved from ${short(e.head)} to ${short(ch.head_oid)} since the review`); continue; }
+    // Not a refusal: the PR goes on once it is marked ready for review.
+    if (ch.is_draft) { log(`  ${refOf(e)}: a draft; not merged until it is marked ready for review`); continue; }
     const ver = await verificationOf(db, repo, e.number, ch.head_oid);
     if (!verifyAllows(e.path, ver?.state, mergeDue.get(e.number)!.verifyOverride)) { await refuse(e, null, `verification at ${short(ch.head_oid)} is ${ver?.state ?? "missing"}, not passed`); continue; }
     const ci = await effectiveCi(db, repo, ch.overall, ch.checks);
@@ -287,6 +289,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
         summary.attempted.pop();
         continue;
       }
+      if (why.includes(DRAFT_REFUSAL)) { log(`  ${refOf(e)}: turned into a draft; not merged`); continue; }
       await refuse(e, method, `${d.mergeCommand}: ${why}`);
       continue;
     }

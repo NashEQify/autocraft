@@ -211,6 +211,19 @@ describe("pre-approved merge", () => {
     assert.match((await preapprovalOf(w.db, "app", 51))!.reason!, /verification failed/);
   });
 
+  test("a leg on a draft waits where it is until the PR is ready for review", async () => {
+    const w = await (await take(await fresh(), 56)).review(56, { verdict: "take-fix" });
+    await inCi(w, 56);
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ is_draft: 1, overall: "failure" }).where("number", "=", 56));
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 56))?.state, "ci");
+    assert.equal((await w.prPlan(56)).wait, "the pull request to be marked ready for review");
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ is_draft: 0, overall: "success" }).where("number", "=", 56));
+    await w.premerge(56, "clean");
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 56))?.state, "queued");
+  });
+
   test("red CI on an optional check only does not stop the leg, and approved runs that have not finished hold it", async () => {
     const w = await (await take(await fresh(), 52)).review(52, { verdict: "take-fix" });
     await inCi(w, 52);

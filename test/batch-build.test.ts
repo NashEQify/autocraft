@@ -70,9 +70,7 @@ describe("batch-build", () => {
 
   test("a member that lost its merge approval while the batch is checking is left out, and the others go on", async () => {
     const t = await setup([1, 2], true);
-    await (await t.w.acting()).workflow(2);
-    const wf = (await t.w.rows("SELECT id FROM item_workflows WHERE number = 2"))[0]!.id as number;
-    await t.w.db.run(t.w.db.k.insertInto("preapprovals").values({ repo: "app", number: 2, by: "op", at: "2026-01-01T00:00:00Z", instructions: "", state: "queued", from_head: "sha2", head: "sha2", updated_at: "2026-01-02T00:00:00Z", workflow_id: wf }));
+    await (await (await t.w.acting()).workflow(2)).handedOver(2);
     await run(t);
     assert.deepEqual((await t.w.rows("SELECT number FROM merge_batch_prs ORDER BY number")).map((x) => x.number), [1, 2]);
     await t.w.db.run(t.w.db.k.updateTable("preapprovals").set({ state: "cancelled" }));

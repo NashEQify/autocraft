@@ -3,7 +3,8 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import { finalTakeAtLatestHead } from "../review/fragments.ts";
+import { finalTakeAtLatestHead, premergeClean } from "../review/fragments.ts";
+import { handedOverAt } from "../workflow/fragments.ts";
 import { batchViews, headOf, holdsMembers, mergedInfoOf, refOf, toBatchView } from "./read.ts";
 import { ACTIVE_BATCH } from "./types.ts";
 import type { BatchMembership, BatchOfPr, MergeAttempt, MergeFacts, RefKey, RunApproval, UnknownState, VerificationFact, VerificationState, WaitingRun } from "./types.ts";
@@ -15,7 +16,7 @@ const parse = <T>(text: string | null | undefined, fallback: T): T => {
 /**
  * Every merge fact the planner needs for `keys`: attempts, merged history, verifications, run approvals, unknown state, batch
  * membership. 7 statements in one `together` wave whatever the key count. An integration PR's `membersReviewed` is true while every member
- * has a final take or take-fix review at its batched head.
+ * has a final take or take-fix review at its batched head, or is approved for merge and handed over there with a clean pre-merge review.
  */
 export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFacts> {
   const q = queryDb(db);
@@ -39,7 +40,10 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
     // Batches whose PR or any member is in the keys. A member's repo is its batch's repo.
     q.all(batchViews(db)
       .select((eb) => eb.case().when(eb.not(eb.exists(eb.selectFrom("merge_batch_prs as mr").select(eb.lit(1).as("one")).whereRef("mr.batch_id", "=", "b.id")
-        .where((w) => w.not(finalTakeAtLatestHead(w, "b.repo", "mr.number", "mr.head_oid")))))).then(1).else(0).end().as("members_reviewed"))
+        .where((w) => w.not(w.or([
+          finalTakeAtLatestHead(w, "b.repo", "mr.number", "mr.head_oid"),
+          w.and([handedOverAt(w, "b.repo", "mr.number", "mr.head_oid"), premergeClean(db, w, "b.repo", "mr.number", "mr.head_oid")]),
+        ])))))).then(1).else(0).end().as("members_reviewed"))
       .where("b.state", "in", [...ACTIVE_BATCH, "failed"]).where((eb: any) => eb.or([
       eb.exists(eb.selectFrom("merge_batch_prs as bp").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "b.repo").onRef("kk.number", "=", "bp.number"))
         .select(eb.lit(1).as("one")).whereRef("bp.batch_id", "=", "b.id")),
