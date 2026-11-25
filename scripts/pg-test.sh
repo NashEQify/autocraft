@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 IMAGE="${AUTOCRAFT_TEST_PG_IMAGE:-postgres:18}"
 # Size of the tmpfs the data lives on; a copy of a production database needs more than tests do.
 TMPFS_SIZE="${AUTOCRAFT_TEST_PG_TMPFS:-2g}"
-DEFAULT_TESTS=(test/pg-db.test.ts test/itemtools-pg.test.ts test/pg-copy.test.ts test/kx.test.ts test/portable.test.ts)
+DEFAULT_TESTS=(test/pg-db.test.ts test/itemtools-pg.test.ts test/pg-copy.test.ts test/kx.test.ts test/portable.test.ts test/pg-upgrade.test.ts)
 
 # Rootless Docker listens on a per-user socket; use it when DOCKER_HOST is unset and it exists.
 if [[ -z "${DOCKER_HOST:-}" && -S "/run/user/$(id -u)/docker.sock" ]]; then
