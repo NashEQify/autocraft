@@ -43,7 +43,7 @@ const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
  */
 const ANSWER_MARGIN_MS = 30_000;
 /**
- * Idle time before the client's first TCP keepalive probe on a pool connection; the system default is two hours. With the
+ * Idle time before the client's first TCP keepalive probe on a pool, lock or listening connection; the system default is two hours. With the
  * system's probe interval and count, a connection whose server vanished fails within minutes instead of hours.
  */
 const CLIENT_KEEPALIVE_MS = 10_000;
@@ -376,7 +376,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       // A connection of its own, outside the pool (a job's pool has one connection), closed with the lock: closing the
       // session releases it, and so does the server when this process dies (SERVER_KEEPALIVE).
       const wait = Math.max(1, Math.floor(waitMs));
-      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, connectionTimeoutMillis: 10_000, query_timeout: wait + 5_000 });
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, keepAliveInitialDelayMillis: CLIENT_KEEPALIVE_MS, connectionTimeoutMillis: 10_000, query_timeout: wait + 5_000 });
       let held = false;
       c.on("error", () => (held = false));
       c.on("end", () => (held = false));
@@ -486,7 +486,7 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
     if (client) return Promise.resolve(client);
     connecting ??= (async () => {
       const reconnect = failures > 0 || warned;
-      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-listen", keepAlive: true, connectionTimeoutMillis: LISTEN_CONNECT_MS });
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-listen", keepAlive: true, keepAliveInitialDelayMillis: CLIENT_KEEPALIVE_MS, connectionTimeoutMillis: LISTEN_CONNECT_MS });
       c.on("error", (e) => lost(c, e.message));
       c.on("end", () => lost(c, "closed"));
       try {
