@@ -70,8 +70,8 @@ const snapshot = async (db: Db): Promise<Record<string, string[]>> => {
 };
 
 test("a database of an earlier release comes to the current schema and switches once", { skip: needsPg }, async () => {
-  const t = await testDatabase("", "postgres");
-  const fresh = await testDatabase("", "postgres");
+  const t = await testDatabase("", "postgres", { empty: true });
+  const fresh = await testDatabase("", "postgres", { empty: true });
   try {
     const pg = new (await loadPg()).Client({ connectionString: t.target });
     await pg.connect();

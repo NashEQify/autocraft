@@ -2,7 +2,7 @@
 // the latency proxy: a full pass, quiet passes, passes over changed items, the due check, and queueing the proposals. Dev only;
 // it never reads a real database.
 //
-//   AUTOCRAFT_TEST_PG_URL=<postgres admin url> node --no-warnings --import ./test/pg-suite-preload.ts scripts/planner-bench.ts
+//   AUTOCRAFT_TEST_PG_URL=<postgres admin url> node --no-warnings --import ./test/suite-preload.ts scripts/planner-bench.ts
 //       [--delay MS] [--only NAME] [--sites N] [--sql] [--trace] [--unfused] [--width N] [--dump FILE] [--large] [--passes]
 //
 // --sites N lists the N call sites with the most statements of each unit, --sql its statements, --trace its statements in order; --dump FILE freezes the clock and
