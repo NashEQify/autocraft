@@ -4,7 +4,7 @@ import { PIPELINE_LOGIN_KEY } from "../core/rules.ts";
 import { slugOf } from "../owners.ts";
 import { gh } from "../review/diff.ts";
 import { sameRepo } from "./pushable.ts";
-import { setting } from "../settings-read.ts";
+import { setting } from "../data/control/index.ts";
 import { loadAuthorPermissions, loadItems, saveAuthorPermissions } from "../data/mirror/index.ts";
 import type { AuthorPermissionRow } from "../data/mirror/types.ts";
 import type { Db } from "../db/index.ts";

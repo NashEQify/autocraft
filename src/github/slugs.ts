@@ -1,5 +1,5 @@
 // The GitHub App slugs ever seen, kept in settings so the bot stays ours after the app is replaced or its secrets cannot be read.
-import { setting, writeSetting } from "../settings-read.ts";
+import { setting, writeSetting } from "../data/control/index.ts";
 import type { Db } from "../db/index.ts";
 
 export const SLUGS_KEY = "app_slugs";

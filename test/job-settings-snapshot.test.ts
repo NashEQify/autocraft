@@ -1,7 +1,7 @@
 // A job's settings snapshot serves repeated reads from one reading of the table, yet a step reads back what it wrote, however it wrote it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setting, withSettingsSnapshot } from "../src/settings-read.ts";
+import { setting, withSettingsSnapshot } from "../src/data/control/index.ts";
 import { world } from "./world-db.ts";
 
 test("a watching snapshot shows the step's own raw writes", async () => {

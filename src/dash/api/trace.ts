@@ -15,7 +15,7 @@ import { reasonsFor, waitFor, type Reader } from "./reader.ts";
 import type { HiddenRepos } from "../../hidden-sql.ts";
 import { ownLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
-import { setting } from "../../settings-read.ts";
+import { setting } from "../../data/control/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { loadShown } from "../../data/mirror/index.ts";
 import { loadItemTrace, loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";

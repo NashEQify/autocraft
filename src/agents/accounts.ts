@@ -9,7 +9,7 @@ import { JEV_PARALLEL_DEFAULT } from "../prompts/index.ts";
 import { loginInfo } from "./login.ts";
 import { credentialsNearExpiry, tokenView } from "./token.ts";
 import { boxAccounts, iso, readUsage, type BoxAccount, type Reading } from "./box.ts";
-import { setting } from "../settings-read.ts";
+import { setting } from "../data/control/index.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
