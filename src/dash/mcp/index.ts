@@ -27,7 +27,6 @@ import { toolContent, type HarnessId, type Tier } from "../../remote/protocol.ts
 import type { ToolImage } from "../../build/workspace-tools.ts";
 import { HttpError, RateLimiter, share } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
-import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import { t } from "../../i18n/index.ts";
 import { COMMANDS } from "../../workflow/vocab.ts";
@@ -38,7 +37,10 @@ import { eventsOf, liveWorkflow, repoWorkflow } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
 import { slugOf } from "../../owners.ts";
-import { ciEq, inList, jsonText, jsonValid, rowid } from "../../db/kx.ts";
+import { loadItems } from "../../data/mirror/index.ts";
+import { loadLegPass } from "../../data/workflow/index.ts";
+import { loadUserRuns } from "../../data/inference/index.ts";
+import { loadHeldFixups } from "../../data/views/held-fixups.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BODY_MAX = 20_000;
@@ -608,7 +610,7 @@ async function workflowItem(env: McpEnv, raw: unknown): Promise<{ repo: string; 
 async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const r = await workflowItem(env, raw);
   const ref = refText(r);
-  const it = await env.db.get(env.db.k.selectFrom("main.items").select(["kind", "title", "state"]).where("repo", "=", r.repo).where("number", "=", r.number));
+  const it = (await loadItems(env.db, [r], "card")).get(ref);
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
   const wf = await liveWorkflow(env.db, r.repo, r.number);
   const wait = wf ? await legWait(env.db, wf) : null;
@@ -682,7 +684,7 @@ async function setWeight(env: McpEnv, raw: unknown): Promise<ToolResult> {
       return { text: removed ? `Took ${refText(r)} off the fast-track list; it goes back to the work rank. An approved merge stays (cancel_queued withdraws it).` : `${refText(r)} was not fast-tracked.` };
     }
     const w = (a.weight as number | undefined) ?? WEIGHT_DEFAULT;
-    const listed = !!await env.db.get(env.db.k.selectFrom("main.fast_track").select((eb) => eb.lit(1).as("one")).where("repo", "=", r.repo).where("number", "=", r.number));
+    const listed = (await fastPositions(env.db)).has(refText(r));
     if (listed) await setFastTrackWeight(env.db, user.login, refText(r), w, "mcp");
     else await addFastTrack(env.db, user.login, refText(r), w, "mcp");
     return { text: `${listed ? "Set the weight" : "Fast-tracked it; its merge is not approved by this (queue_pr does that)"}. ${await placeOf(env, r)}` };
@@ -728,8 +730,8 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   // visible repo (or the one asked for), not only the pipeline's scope the queue rows default to.
   const visible = new Set(await visibleTo(env.db, user));
   const queued = new Set((await cachedQueue(env.db, { merged: "exclude" })).map(item));
-  const pendingAll = (pendingDone ? [] : await env.db.all(env.db.k.selectFrom("preapprovals").select(["id", "repo", "number", "state", "by", "at"])
-    .where("state", "in", ["fixup", "review", "ci"]).where("id", ">", Number(c?.[2] ?? 0)).orderBy("id")))
+  const pendingAll = (pendingDone ? [] : (await loadLegPass(env.db, { repos: [...visible] })).rows)
+    .filter((p) => ["fixup", "review", "ci"].includes(p.state) && p.id > Number(c?.[2] ?? 0))
     .filter((p) => visible.has(p.repo) && (a.repo === undefined || p.repo === a.repo) && !queued.has(item(p)));
   const shown = pendingAll.slice(0, limit);
   const pending = shown.map((p) => ({ item: item(p), state: p.state, by: staff ? p.by : null, at: p.at }));
@@ -745,23 +747,6 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   return show(header, "merge queue", data);
 }
 
-type Held = { repo: string; number: number; head: string; title: string | null; author: string | null; note: string | null };
-
-/** Open PRs the planner left in the fix-up `hold` bucket at their current head that are not in a try of ours. */
-async function heldFixups(db: Db, repos: string[], repo: string | null, limit: number): Promise<Held[]> {
-  const want = repo ? repos.filter((r) => r === repo) : repos;
-  if (!want.length) return [];
-  return await db.all(db.k.selectFrom("item_plans as p")
-    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-    .select(["p.repo", "p.number", "p.head", "i.title", "i.author", "p.note"])
-    .$narrowType<{ head: string }>()
-    .where("p.kind", "=", "pr").where(inList(db, "p.repo", want)).where("i.state", "=", "OPEN").whereRef("p.head", "=", "i.head_oid")
-    .where(jsonValid(db, "p.view")).where((eb) => eb(jsonText(db, "p.view", "$.fixup"), "=", "hold"))
-    .where((eb) => eb.not(eb.exists(eb.selectFrom("fixups as f").select(eb.lit(1).as("one"))
-      .whereRef("f.repo", "=", "p.repo").whereRef("f.number", "=", "p.number").whereRef("f.from_head", "=", "p.head").where("f.state", "in", ["pushing", "linting", "pushed"]))))
-    .orderBy("i.created_at", (o) => o.asc().nullsFirst()).orderBy("p.repo").orderBy("p.number").limit(limit));
-}
-
 async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { repo: "repo", limit: "limit" });
   spend(env);
@@ -770,20 +755,15 @@ async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const repos = await visibleTo(env.db, user);
   if (a.repo !== undefined && !repos.includes(a.repo as string)) throw new HttpError(404, `${a.repo} is not a tracked repo`);
   const limit = (a.limit as number | undefined) ?? 10;
-  const held = await heldFixups(env.db, repos, (a.repo as string | undefined) ?? null, limit + 1);
-  const list = (s: string | null): unknown[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; } };
-  const rows = await mapSeq(held.slice(0, limit), async (h) => {
-    const review = await env.db.get(env.db.k.selectFrom("final_reviews").select(["reason", "fixes"]).where("repo", "=", h.repo).where("number", "=", h.number).where("head_oid", "=", h.head));
-    const last = await env.db.get(env.db.k.selectFrom("fixups").select(["state", "reason"]).where("repo", "=", h.repo).where("number", "=", h.number).where("from_head", "=", h.head).where("state", "<>", "superseded")
-      .orderBy("created_at", "desc").orderBy(rowid("fixups"), "desc").limit(1));
-    return {
-      item: `${h.repo}#${h.number}`, title: h.title, author: h.author, head: h.head.slice(0, 12),
-      github: githubItemUrl(h.repo, h.number, "pr"), link: link(env, itemPath(h.repo, h.number)),
-      // Job errors and the review's text are for operators and maintainers; a viewer gets the state only.
-      stopped: last ? `${last.state}${internals && last.reason ? `: ${last.reason}` : ""}` : (internals ? h.note ?? "held" : "held"),
-      review: internals ? review?.reason ?? null : null, fixes: internals ? list(review?.fixes ?? null) : [],
-    };
-  });
+  const held = await loadHeldFixups(env.db, { repos, repo: (a.repo as string | undefined) ?? null, limit: limit + 1 });
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+  const rows = held.slice(0, limit).map((h) => ({
+    item: `${h.repo}#${h.number}`, title: h.title, author: h.author, head: h.head.slice(0, 12),
+    github: githubItemUrl(h.repo, h.number, "pr"), link: link(env, itemPath(h.repo, h.number)),
+    // Job errors and the review's text are for operators and maintainers; a viewer gets the state only.
+    stopped: h.latestFixup ? `${h.latestFixup.state}${internals && h.latestFixup.reason ? `: ${h.latestFixup.reason}` : ""}` : (internals ? h.note ?? "held" : "held"),
+    review: internals ? h.reason : null, fixes: internals ? list(h.fixes) : [],
+  }));
   const more = held.length > limit;
   return show(`${rows.length}${more ? "+" : ""} pull request${rows.length === 1 ? "" : "s"} wait for a fix-up the pipeline could not make. Once the fixes land on the PR, the pipeline reviews the new head by itself.`, "fix-ups", rows);
 }
@@ -891,12 +871,10 @@ async function myWork(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const login = (await env.user(false)).login;
   const start = new Date();
   start.setUTCHours(0, 0, 0, 0);
-  const rows = (await env.db.all(env.db.k.selectFrom("agent_runs")
-    .select(["id", "prompt_id", "items", "state", "started_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd"])
-    .where((eb) => ciEq(env.db, "user_login", eb.val(login))).where("started_at", ">=", start.toISOString()).orderBy("id", "desc").limit(200)))
+  const rows = (await loadUserRuns(env.db, login, start.toISOString(), 200))
     .map((r) => ({
-      promptId: r.prompt_id, items: (JSON.parse(r.items) as { repo: string; number: number }[]).slice(0, 6).map((i) => `${i.repo}#${i.number}`), state: r.state, startedAt: r.started_at,
-      tokens: { input: r.input_tokens, output: r.output_tokens, cacheRead: r.cache_read_tokens, cacheWrite: r.cache_write_tokens }, costUsd: r.cost_usd,
+      promptId: r.promptId, items: r.items.slice(0, 6).map((i) => `${i.repo}#${i.number}`), state: r.state, startedAt: r.startedAt,
+      tokens: { input: r.tokens.input, output: r.tokens.output, cacheRead: r.tokens.cacheRead, cacheWrite: r.tokens.cacheWrite }, costUsd: r.costUsd,
     }));
   // The user's Task Runners with their last status: whether each takes calls now, and why not.
   const runners = (await listHelpers(env.db, login)).map((h) => ({

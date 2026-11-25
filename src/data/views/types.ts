@@ -147,4 +147,4 @@ export type PublicStatsFacts = {
   reviews: { repo: string; n: number }[]; queues: { repo: string; n: number }[];
 };
 export type StatusInputs = { workflows: ItemWorkflow[]; stages: Map<Ref, unknown>; batches: BatchView[]; items: unknown[] };
-export type HeldFixupFacts = { repo: string; number: number; title: string; head: string; reason: string | null; fixes: unknown; latestFixup: { state: string; reason: string | null } | null };
+export type HeldFixupFacts = { repo: string; number: number; title: string | null; author: string | null; note: string | null; head: string; reason: string | null; fixes: unknown; latestFixup: { state: string; reason: string | null } | null };
