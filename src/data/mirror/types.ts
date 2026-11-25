@@ -42,6 +42,7 @@ export type PrChecksRow = Selectable<DB["pr_checks"]>;
 export type PrChecksView = Omit<PrChecksRow, "checks"> & { checks: string | null };
 export type PrMirror = { item: ItemOf<"pr">; checks: PrChecksView | null };
 export type OpenPrRow = { repo: string; number: number; author: string | null; closing_issues: string | null; text_refs: string | null; title?: string | null; body?: string | null };
+/** PR counts of one account under a login (`author_id` null for rows mirrored before ids were stored); `repos` are the repos of those PRs. */
 export type AuthorHistory = { login: string; author_id: number | null; merged: number; closed: number; open: number; lastMerge: string | null; repos: string[] };
 /** `score`: lower is better. `snippets` holds the title and body snippets that contain a match. */
 export type ItemHit = { ref: RefKey; score?: number; snippets?: string[] };
@@ -100,15 +101,24 @@ export type ItemHashes = { embed_hash: string | null; class_hash: string | null;
 export type ItemEntry = { repo: string; kind: ItemKind; detail: "full" | "light"; row: ItemRowInput; comments: CommentInsert[]; readAt?: string };
 export type SaveItemsOptions = { readAt: string; force?: boolean; advanceOrgHighWater?: string };
 
-export type MainHead = { repo: string; sha: string; state: string; committed_at?: string | null; checks?: string | null };
+/** One head of a poll with its state classified by the caller; `failing` and `checks` are JSON text. */
+export type MainHead = { repo: string; sha: string; branch: string; state: string; failing: string; checks: string; committed_at: string | null; headline: string | null };
 export type MainHeadRow = Selectable<DB["main_ci"]>;
+/** A stored head without its check list. */
+export type MainHeadSummary = Omit<MainHeadRow, "checks">;
 export type LatestMainHead = { head_sha: string; state: string; committed_at: string | null };
 
 export type AuthorPermissionRow = Selectable<DB["author_permissions"]>;
 export type AuthorPermissionSave = { login: string; repo: string; authorId: number | null; at: string; permission: string | null };
 
-export type ActivityRead = { repo: string; number: number; events: unknown[]; files?: unknown[]; commits?: unknown[]; head?: string; readAt: string };
-export type ActivityAttempt = { repo: string; number: number; at: string; error?: string | null };
+export type ActivityEventIn = { id: string; kind: string; at: string; actor: string | null; label: string | null; before_oid: string | null; after_oid: string | null };
+export type ActivityFileIn = { path: string; additions: number; deletions: number; change_type: string };
+export type ActivityCommitIn = { oid: string; committed_at: string; author: string | null; message: string | null; co_authors: string | null };
+/** A finished read of one item: the item's head and update time as the due list gave them, and for a PR its files and commits at `pr.head`. */
+export type ActivityRead = { repo: string; number: number; head: string | null; updatedAt: string | null; readAt: string; events: ActivityEventIn[]; pr?: { head: string; files: ActivityFileIn[]; commits: ActivityCommitIn[] } };
+/** A read that found no node or failed: only the attempt is recorded, with the retry time of a failure. */
+export type ActivityAttempt = { repo: string; number: number; head: string | null; updatedAt: string | null; at: string; error?: string | null; retryAt?: string | null };
+export type ActivityDue = { repo: string; number: number; head: string | null; updated_at: string | null };
 export type ActivityRow = Selectable<DB["item_activity"]>;
 export type CommitRow = Selectable<DB["pr_commits"]>;
 export type FileRow = Selectable<DB["pr_files"]>;
@@ -116,6 +126,21 @@ export type ActivityStats = { events: number; newest: string | null; commits: nu
 export type ItemDetailPart = "item" | "comments" | "activity" | "commits" | "files" | "checks" | "read";
 export type ItemDetail = { item: ItemOf<"full"> | null; comments: CommentRow[]; activity: ActivityRow[]; commits: CommitRow[]; files: FileRow[]; checks: PrChecksRow | null; read: string | null };
 
-export type ReleaseReading = { repo: string; app: string | null; assets: { id: number; name: string; downloads: number }[]; stars: number | null; readAt: string };
+export type ReleaseAssetIn = {
+  asset_id: number; repo: string; release_id: number; tag: string; release_name: string | null; published_at: string | null; prerelease: number;
+  name: string; platform: string | null; processor: string | null; format: string | null; downloads: number;
+  /** Downloads gained since the stored count (0 for a baseline or an uncounted file); the caller decides it from `loadReleaseState`. */
+  delta: number;
+};
+/** One repo's reading with every decision made: `gone` are the stored assets GitHub no longer lists; `app` is null when no counted release is left. */
+export type ReleaseReading = { repo: string; assets: ReleaseAssetIn[]; gone: number[]; app: { name: string; stars: number } | null };
 export type ReleaseState = { assets: Map<number, { downloads: number; repo: string }>; lastRead: Map<string, string>; lastStars: Map<string, number> };
-export type DownloadsView = { repos: Map<string, { apps: string[]; firstSeen: string | null; assets: number; deltas: number[]; starsAtStart: number | null; starsFirst: number | null; starsEnd: number | null; items: number[] }> };
+export type DownloadAsset = {
+  asset_id: number; repo: string; tag: string; release_id: number; published_at: string | null; prerelease: number; platform: string | null; processor: string | null;
+  format: string | null; downloads: number; first_seen: string; gone_at: string | null;
+  /** Increases recorded in [from, end); 0 when `from` is null. */
+  delta: number;
+};
+/** Stars of a repo: the last sample before the range start, the first sample, and the last sample before `to`. */
+export type StarReadings = { atStart: number | null; first: number | null; atEnd: number | null };
+export type DownloadsView = { apps: { repo: string; name: string; stars: number }[]; assets: DownloadAsset[]; stars: Map<string, StarReadings> };
