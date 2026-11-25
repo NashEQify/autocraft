@@ -19,9 +19,10 @@ export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again"
 
 /**
  * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no live implement
- * workflow) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
+ * workflow) or another rule says what it waits on (a hold).
  * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
- * Implement feature and room among the repo's live implementations. A question is planned again when its answer may have
+ * Implement feature and room among the repo's live implementations, and waits while an open PR closes the issue (a PR that only mentions
+ * it holds nothing). A question is planned again when its answer may have
  * come: the issue text changed, a person commented after it, or the workflow's recommendation is answered.
  */
 export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wait: Wait } | null {
@@ -34,7 +35,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   if (held) return { wait: held };
   const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: system("implement-off", implementOffWait(f.repo)) });
   if (ended) {
-    if (f.openPr !== null) return null;
+    if (f.openPr?.closes) return { wait: system("open-pr", answerPrWait(f.openPr.number)) };
     if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: person("implement-ended", IMPLEMENT_ENDED_WAIT) };
     if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: system("implement-room", `${im.liveInRepo} implementations already running in ${f.repo}`) };
     return due("plan");
@@ -60,9 +61,11 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
  */
 const labelDisagreement = ({ classification: c }: ItemFacts): boolean => c.status === "disagree" && !(isScope(c.jevLabel) && isScope(c.haikuLabel));
 
-/** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
-export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
-export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+( mentions it)?$/.test(wait);
+/** An issue's wait on the open PR that closes it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
+export const openPrWait = (n: number): string => `open PR #${n}`;
+/** The same wait of a queued issue: its implementation starts once someone merged, closed or took up that PR. */
+export const answerPrWait = (n: number): string => `open PR #${n}, which closes it: answer that pull request`;
+export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+(, which closes it: answer that pull request)?$/.test(wait);
 
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
 export const TRIAGE_WAIT = "an open request for a person to pick up";
@@ -143,7 +146,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
   if (step && "wait" in step && f.open && idle) wait = step.wait;
   // An issue with nothing else due waits on the PR that closes it.
   if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && idle) {
-    if (f.openPr !== null) wait = system("open-pr", openPrWait(f.openPr.number, f.openPr.closes));
+    if (f.openPr?.closes) wait = system("open-pr", openPrWait(f.openPr.number));
     else if (state === "classified") wait = system("triage", TRIAGE_WAIT);
   }
   return { repo: f.repo, number: f.number, kind: f.kind, state, actions: permitted(f, actions), ...waitFields(wait) };

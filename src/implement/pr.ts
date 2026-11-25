@@ -15,7 +15,7 @@ import { guardItem, guardRepo, type GuardedItem, type ItemWant } from "../core/g
 import { implementMay } from "./gate.ts";
 import type { By } from "../core/gates.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
-import { hasOpenPr } from "../core/open-prs.ts";
+import { closedByOpenPr } from "../core/open-prs.ts";
 import { EMPTY_TREE, exec as realExec, fixupDir, Git, type Exec } from "../fixup/git.ts";
 import { buildScriptsAt, type BuildScripts } from "../fixup/patch.ts";
 import { ownPrSelect } from "../github/adopt.ts";
@@ -312,7 +312,7 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
     let pushed: { commit: string; compileTime: CompileTimeChange[] };
 
     if (url === null) {
-      if (await hasOpenPr(db, repo, number)) return fail("another pull request already covers the issue", false);
+      if (await closedByOpenPr(db, repo, number)) return fail("another pull request already covers the issue", false);
       const git = new Git(d.exec, d.root, repo);
       if (!await git.fetchBranch(ownerOf(repo), repo, base, im.baseSha)) return fail("the base commit is no longer in the repository", false);
       const author = await commitIdentity(db, repo, async () => who);

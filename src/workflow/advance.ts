@@ -13,7 +13,7 @@ import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
-import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
+import { loadReviewRows, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, moveWorkflows, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { isFenced } from "../db/fence.ts";
@@ -28,11 +28,11 @@ import type { ItemFacts, PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
-import { findingsOf } from "../premerge/store.ts";
 import { t } from "../i18n/index.ts";
 import { itemQuestion, questionFor, type Question } from "./ask.ts";
 import { blockWorkflow } from "./block.ts";
 import { detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
@@ -127,14 +127,6 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
   const fixed = latest ? reviewAt(pass, ref, latest.fromHead) : null;
   const plannedFiles = fixed ? planOf(fixed.fixes, w.plan).filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!) : [];
   return { fix: { lines, files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
-}
-
-/** The pre-merge review's findings at the head, as plan parts numbered after `plan`'s. */
-async function premergeParts(db: Db, repo: string, number: number, head: string, plan: readonly PlanPart[]): Promise<PlanPart[]> {
-  const row = (await loadPremerge(db, [{ repo, number, head }])).get(`${key(repo, number)}@${head}`) ?? null;
-  const fs = findingsOf(row).filter((f) => f.fix);
-  const from = plan.reduce((m, p) => Math.max(m, p.n), 0);
-  return fs.map((f, i) => ({ n: from + i + 1, title: f.title, source: "review" as const, file: f.file, ...(f.severity === "defect" ? { major: true } : {}), state: "planned" as const }));
 }
 
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
@@ -484,7 +476,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
     let blockPlan = plan;
     if (ended && found.params.reason === ended.reason && premergeStop(ended)) {
-      const extra = await premergeParts(db, w.repo, target, head, plan);
+      const extra = await premergeParts(db, { repo: w.repo, number: target, head }, plan, "fixable");
       blockPlan = [...plan, ...extra];
       found.params.premerge = extra.map((p) => p.n);
     }

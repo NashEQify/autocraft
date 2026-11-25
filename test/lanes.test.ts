@@ -9,6 +9,8 @@ import { plannedItems } from "../src/core/select-items.ts";
 import { selectCifix } from "../src/cifix/select.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { selectFixups } from "../src/fixup/select.ts";
+import { runBatches } from "../src/merge/batch.ts";
+import { runUnassign } from "../src/unassign/index.ts";
 import { resumeTrips } from "../src/data/control/index.ts";
 import { setApproval } from "../src/labels/approval.ts";
 import { detectAutopilot, LANE_KINDS, LANES, planDue, type PlanCtx } from "../src/runner/autopilot.ts";
@@ -113,5 +115,31 @@ test("a label in a repo not approved for labels is neither proposed nor selected
     assert.equal((await plannedItems(w.db, "label", { repo: "app", refused: true })).length, 1, "it is planned");
     await setApproval(w.db, "op", "app", true);
     assert.deepEqual(await due(), [1, 1]);
+  } finally { w.close(); }
+});
+
+test("once a Pipeline-off repo's last workflow ends, our assignment is released and its batch is closed; nothing else runs there", async () => {
+  const w = await (await world()).repo();
+  try {
+    for (const n of [1, 2]) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
+    await runBatches(w.db, { repo: "app" }, () => {}, w.gh.batchDeps());
+    const batch = async () => (await w.rows("SELECT state, pr_number FROM merge_batches ORDER BY id")).map((r) => [r.state, Number(r.pr_number)]);
+    assert.deepEqual(await batch(), [["open", 900]]);
+    for (const n of [1, 2]) await w.workflow(n, { approved: true });
+    await w.db.run(w.db.k.insertInto("audit").values({ at: T0, login: "assign", action: "assign", target: "app#1", details: '{"assignee":"bot"}' }));
+    await w.db.run(w.db.k.updateTable("items").set({ assignees: JSON.stringify(["bot"]) }).where("number", "=", 1));
+    w.gh.live(1, { assignees: ["bot"] });
+    await reportingTaskRunner(w.db);
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
+    const steps = async () => [...new Set((await detectAutopilot(w.db)).proposals.filter((p) => p.params.repo === "app").map((p) => p.step))].sort();
+    assert.ok(!(await steps()).includes("unassign"), "the batch goes on for the started pull requests");
+    await w.db.run(w.db.k.updateTable("item_workflows").set({ state: "stopped" }));
+    assert.deepEqual(await steps(), ["merge", "unassign"]);
+    const r = await runBatches(w.db, { repo: "app" }, () => {}, w.gh.batchDeps());
+    assert.deepEqual([r.superseded.length, r.started, r.published, r.merged], [1, [], [], []]);
+    assert.deepEqual(await batch(), [["superseded", 900]]);
+    assert.deepEqual((await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: async () => ({ code: 0, stdout: JSON.stringify({ login: "bot", id: 9, node_id: "NB" }), stderr: "" }) })).unassigned, ["app#1"]);
+    assert.deepEqual((await w.rows("SELECT action, target FROM audit WHERE action IN ('batch-pr-close', 'unassign', 'merge', 'batch-merge') ORDER BY action")).map((x) => `${x.action} ${x.target}`), ["batch-pr-close app#900", "unassign app#1"]);
+    assert.ok(!(await steps()).includes("merge"));
   } finally { w.close(); }
 });

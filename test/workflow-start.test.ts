@@ -750,3 +750,64 @@ test("a PR started into the merge queue whose merge state stays unknown is follo
   await noteMergeable(w.db, [row], T1);
   assert.equal((await unknownOf(w.db, "app", 1, "sha1"))?.reads, 1);
 });
+
+test("a merge nobody can make is refused with the reason, as an entry and on a started PR, and nothing is written: off the default branch, or no CI", async () => {
+  for (const [why, set] of [
+    [/aimed at release/, (w: World) => w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "release" }).where("number", "=", 1))],
+    [/no CI/, (w: World) => w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "none", checks: "[]" }))],
+  ] as const) {
+    const w = await unstarted(false);
+    await set(w);
+    for (const text of ["merge", "review and merge"]) {
+      const o = await send(w, text);
+      assert.equal(o.outcome, "refused", o.line);
+      assert.match(o.line, why);
+    }
+    assert.deepEqual([await liveWorkflow(w.db, "app", 1), await w.rows("SELECT id FROM preapprovals")], [null, []]);
+    await run(w, "review");
+    const o = await send(w, "merge");
+    assert.equal(o.outcome, "refused", o.line);
+    assert.equal((await liveWorkflow(w.db, "app", 1))!.approvedBy, null);
+    w.close();
+  }
+});
+
+test("an approved start of a conflicting PR says who settles the conflict, before any review of it", async () => {
+  for (const [canModify, text] of [[false, /until (the contributor|someone) resolves the conflict/], [true, /AutoCraft merges that branch into it first/]] as const) {
+    for (const start of ["merge", "review and merge", "fix-up and merge"]) {
+      const w = await unstarted(false);
+      await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING", maintainer_can_modify: canModify ? 1 : 0 }).where("number", "=", 1));
+      await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING", maintainer_can_modify: canModify ? 1 : 0 }));
+      const o = await send(w, start);
+      assert.equal(o.outcome, "run", o.line);
+      assert.match(o.line, text, start);
+      w.close();
+    }
+    // Nothing to say without the approval.
+    const w = await unstarted(false);
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING" }).where("number", "=", 1));
+    assert.doesNotMatch((await send(w, "review")).line, /conflict/);
+    w.close();
+  }
+});
+
+test("merge at a stop on defects the pre-merge review gave no fix for is refused and asks to fix them first; the yes has them fixed", async () => {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await run(w, "merge");
+  await w.premerge(1, "defect", false);
+  await settle(w);
+  const stopped = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([stopped.state, stopped.rec!.parts.fix, stopped.rec!.again], ["blocked", [], "review"], stopped.rec?.text ?? "");
+  const o = await send(w, "merge");
+  assert.equal(o.outcome, "refused", o.line);
+  assert.match(o.line, /nothing merges past them.*Fix them first\?.*Reply yes to fix 1, then merge/);
+  const asked = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([asked.state, asked.rec!.parts.fix, asked.plan.map((p) => p.title), o.question?.recAt], ["blocked", [1], ["off by one"], asked.recAt]);
+  // Saying it again asks the same question again.
+  assert.match((await send(w, "merge")).line, /Reply yes to fix 1, then merge/);
+  await settle(w);
+  await run(w, "yes");
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.match(String((await w.rows("SELECT instructions FROM operator_fixups WHERE state = 'queued'"))[0]!.instructions), /off by one/);
+});

@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import * as kx from "../../src/db/kx.ts";
+import { addTrackedRepo } from "../../src/data/control/index.ts";
 import { loadImplementFacts } from "../../src/data/implement/index.ts";
 import { startedWorkAllows } from "../../src/data/runners/cross.ts";
 import { liveWorkflowExpr, worksOnPr } from "../../src/data/workflow/fragments.ts";
 import {
-  linkWorkflows, listWorkflows, loadEndedWorkflows, loadLinks, loadPrWorkflows, loadStartedRefs, loadStartedWork, loadWorkflowFacts, loadWorkScores, moveWorkflows, saveWorkflows, startWorkflows,
+  linkWorkflows, listWorkflows, loadEndedWorkflows, loadInScope, loadLinks, loadPrWorkflows, loadStartedRefs, loadStartedWork, loadWorkflowFacts, loadWorkScores, moveWorkflows, saveWorkflows, startWorkflows,
   type WorkflowState,
 } from "../../src/data/workflow/index.ts";
 import { workOf } from "../../src/workflow/work.ts";
@@ -293,6 +294,8 @@ both(`over ${CASES} random histories the link, stored or not, gives what the rul
     for (const ns of kx.chunks(numbers.filter(() => step === STEPS - 1 || x() < 0.5), KEYS)) await linkWorkflows(db, { issues: refs("o/linked", ns) });
   }
   for (const ns of kx.chunks(numbers, KEYS)) assert.deepEqual(await linkWorkflows(db, { issues: refs("o/linked", ns) }), [], "a second run");
+  for (const name of ["o/linked", "o/plain"]) await addTrackedRepo(db, { name, by: "op" });
+  await queryDb(db).run((queryDb(db).k as any).updateTable("main.tracked_repos").set({ pipeline: 1 }));
   const last = all.map((h) => h.at(-1)!);
   const linked = await reading(db, "o/linked", 0, numbers), plain = await reading(db, "o/plain", SHIFT, numbers);
   const keyed = async <T>(ns: number[], load: (part: number[]) => Promise<T[]>): Promise<T[]> => { const out: T[] = []; for (const part of kx.chunks(ns, KEYS)) out.push(...await load(part)); return out; };
@@ -320,6 +323,11 @@ both(`over ${CASES} random histories the link, stored or not, gives what the rul
     const rule = await keyed(prNumbers, async (ns) => [...await legacy.loadEndedWorkflows(db, refs(repo, ns))]);
     assert.ok(rule.length > 0);
     assert.deepEqual(ends, rule);
+    // In a repo with the Pipeline on, a PR is out of scope exactly when nobody works it and a person ended its issue.
+    const left = new Set(ends.flatMap(([key, s]) => (s === "done" ? [] : [Number(key.split("#")[1])])));
+    const inScope = await keyed(prNumbers, async (ns) => [...await loadInScope(db, refs(repo, ns))].map((key) => Number(key.split("#")[1])));
+    assert.deepEqual(prsOf(inScope), prsOf(prNumbers.filter((n) => got.live.has(n) || !left.has(n))));
+    assert.ok(inScope.length > 0 && inScope.length < prNumbers.length);
   }
 
   const oldLive = new Map(await keyed(prNumbers, async (ns) => [...await legacy.loadPrWorkflows(db, refs("o/plain", ns), { others: true })]));
@@ -401,4 +409,26 @@ async function flat(n: number) {
 
 both("loadLinks and linkWorkflows issue as many statements for 40 workflows as for 4", async () => {
   await expectFlat(flat, 4, 40);
+});
+
+both("a PR of an issue a person ended is in scope again once someone starts it on its own, and as before once that ends with nothing to do", async ({ db }) => {
+  const q = queryDb(db), k = q.k as any;
+  await addTrackedRepo(db, { name: REPO, by: "op" });
+  await q.run(k.updateTable("main.tracked_repos").set({ pipeline: 1 }));
+  for (const number of [11, 12]) await q.run(k.insertInto("main.items").values({ repo: REPO, number, kind: "pr", state: "OPEN", title: "t", created_at: at(0), updated_at: at(0) }));
+  const id = (await startWorkflows(db, [start(1, 1)])).get(`${REPO}#1`)!;
+  await q.run(k.insertInto("main.implementations").values({ repo: REPO, number: 1, queued_by: "ann", state: "pr-opened", attempt: 1, text_hash: "h", pr_number: 11, created_at: at(2), updated_at: at(2) }));
+  const scope = async () => [...await loadInScope(db, [11, 12].map((number) => ({ repo: REPO, number })))].sort();
+  const both = [`${REPO}#11`, `${REPO}#12`];
+  assert.deepEqual(await scope(), both);
+  await q.run(k.updateTable("main.item_workflows").set({ state: "done" }).where("id", "=", id));
+  assert.deepEqual(await scope(), both, "an answer that runs nothing");
+  for (const state of ["stopped", "backlog", "closed"]) {
+    await q.run(k.updateTable("main.item_workflows").set({ state }).where("id", "=", id));
+    assert.deepEqual(await scope(), [both[1]], state);
+  }
+  const own = (await startWorkflows(db, [{ ...start(11, 5), kind: "pr", entry: "review" }])).get(both[0]!)!;
+  assert.deepEqual(await scope(), both);
+  await q.run(k.updateTable("main.item_workflows").set({ state: "done" }).where("id", "=", own));
+  assert.deepEqual(await scope(), both, "the newest end is not a person's");
 });

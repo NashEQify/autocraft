@@ -13,7 +13,7 @@ const MENTION = /(?<![\w/])#(\d+)/g;
 /** Text without links: a reference inside a URL, an HTML link or a markdown link (dependabot's release notes) is not a reference to the repo's own issue. */
 const withoutLinks = (t: string): string => t.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, " ").replace(/\[[^\]]*\]\([^)]*\)/g, " ").replace(/https?:\/\/\S+/g, " ");
 
-/** The open PR that holds an issue: `closes` when it has a closing-issue link or a Fixes/Closes/Resolves/Addresses #n, else it only mentions the issue. */
+/** The open PR of an issue: `closes` (it holds the issue) when it has a closing-issue link or a Fixes/Closes/Resolves/Addresses #n, else it only mentions the issue. */
 export type OpenPr = { number: number; closes: boolean };
 
 /**
@@ -72,5 +72,5 @@ function openPrMap(prs: readonly OpenPrRow[]): Map<number, OpenPr> {
   return out;
 }
 
-/** Whether an open PR in the repo closes issue `n` or a person's open PR mentions it. */
-export const hasOpenPr = async (db: Db, repo: string, n: number): Promise<boolean> => (await issuesWithOpenPr(db, repo)).has(n);
+/** Whether an open PR in the repo closes issue `n`. */
+export const closedByOpenPr = async (db: Db, repo: string, n: number): Promise<boolean> => !!(await issuesWithOpenPr(db, repo)).get(n)?.closes;

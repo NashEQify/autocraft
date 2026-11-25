@@ -8,6 +8,7 @@ import { mayRun } from "./authority.ts";
 import { CLI_BY, type By } from "./gates.ts";
 import { WAITS_ON_PERSON, inFlightNow } from "./assignment.ts";
 import type { Action, ActionKind, ItemFacts, Plan, PrFacts } from "./plan.ts";
+import { byScore } from "./work-score.ts";
 import type { Db } from "../db/index.ts";
 
 export type Planned = { facts: PrFacts; plan: Plan; action: Action };
@@ -87,6 +88,6 @@ export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {
       if (action.kind === kind && (bucket === undefined || action.params?.bucket === bucket) && (refused || mayRun({ facts, action }, by).ok)) out.push({ facts, plan, action });
     }
   }
-  return out.sort((a, b) => (b.facts.brokeByUs ? 1 : 0) - (a.facts.brokeByUs ? 1 : 0) || (inFlightNow(b.facts, b.plan.state) ? 1 : 0) - (inFlightNow(a.facts, a.plan.state) ? 1 : 0) || (a.facts.score === null ? 1 : 0) - (b.facts.score === null ? 1 : 0) || (b.facts.score ?? 0) - (a.facts.score ?? 0)
+  return out.sort((a, b) => (b.facts.brokeByUs ? 1 : 0) - (a.facts.brokeByUs ? 1 : 0) || (inFlightNow(b.facts, b.plan.state) ? 1 : 0) - (inFlightNow(a.facts, a.plan.state) ? 1 : 0) || byScore(a.facts.score, b.facts.score)
     || (a.facts.repo < b.facts.repo ? -1 : a.facts.repo > b.facts.repo ? 1 : 0) || a.facts.number - b.facts.number);
 }

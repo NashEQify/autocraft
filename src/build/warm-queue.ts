@@ -17,11 +17,11 @@ import {
   loadEnvs, loadTrimmedPublish, loadWarmBytes, loadWarmFacts, QueueFullError, queueWarmTasks, recordTrimmedPublish, releaseWarmGc, saveWarmBytes, takeWarmGc, warmClaimGate, warmGate, WARM_PRIORITY,
 } from "../data/build/index.ts";
 import type { WarmFacts } from "../data/build/index.ts";
-import { addAudit, loadTrackedRepos, readConfig, saveSettings } from "../data/control/index.ts";
+import { addAudit, readConfig, saveSettings } from "../data/control/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
 import { BuildError, envSettings } from "./envs.ts";
 import { currentJobId } from "../agents/call.ts";
-import { baseScope } from "./scope.ts";
+import { scopeRepos } from "../runner/scope.ts";
 import { toolchainImage, type KubeSettings } from "./pods.ts";
 
 export { recordTrimmedPublish, WARM_PRIORITY };
@@ -46,10 +46,10 @@ export type WarmCoverage = {
 };
 
 export async function warmCoverage(db: Db): Promise<WarmCoverage> {
-  const [c, tracked, trimmed] = await Promise.all([readConfig(db, CONFIG_KEYS), loadTrackedRepos(db), loadTrimmedPublish(db)]);
+  const [c, inScope, trimmed] = await Promise.all([readConfig(db, CONFIG_KEYS), scopeRepos(db, { for: "builds" }), loadTrimmedPublish(db)]);
   const added = c.warmRepos, excluded = c.warmReposExcluded;
   const allSince = trimmed ? trimmed.at : null;
-  const repos = [...baseScope(tracked.values())].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
+  const repos = [...inScope].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
     .map((repo) => ({ repo, why: added.includes(repo) ? "added" as const : "pipeline" as const }));
   return { allSince, added, excluded, repos };
 }
