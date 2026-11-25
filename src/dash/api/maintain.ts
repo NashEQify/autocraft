@@ -76,9 +76,8 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
 
 function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>["runner"]>, login: string): MaintainRunnerLine {
   const me = login.toLowerCase();
-  // NEEDS runners.HelperInfo.busy: the helper's running count; shown as 0 until the loader carries it.
   return {
-    mine: r.mine.map((h) => ({ name: h.label ?? t("Task Runner"), online: h.fresh, running: 0 })),
+    mine: r.mine.map((h) => ({ name: h.label ?? t("Task Runner"), online: h.fresh, running: h.busy ?? 0 })),
     others: r.ready.filter((x) => x.login.toLowerCase() !== me && !x.manual).length,
   };
 }

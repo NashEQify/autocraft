@@ -3,13 +3,13 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 
-export type RowPatch = { id: number; /** The row must be in one of these states. */ from?: readonly string[]; set: Record<string, unknown> };
+export type RowPatch = { id: number; /** The row must be in one of these states. */ from?: readonly string[]; set: Record<string, unknown>; /** Columns that must still hold these values (null-safe); the row then has a statement of its own. */ where?: Record<string, string | number | null> };
 
 const isBlob = (v: unknown): boolean => v instanceof Uint8Array;
 
 /**
  * Patches rows by id. Rows with the same columns and the same `from` go in one statement (`UPDATE ... FROM (JSON values)`); a row
- * that sets a blob, or the only row of its shape, has a statement of its own. Returns the ids that matched, so a `from` that no
+ * that sets a blob or has a `where`, or the only row of its shape, has a statement of its own. Returns the ids that matched, so a `from` that no
  * longer holds is seen as a row that did not move. Joins the caller's transaction.
  */
 export async function patchRows(db: Db, table: "workspaces" | "workspace_sessions" | "workspace_calls", rows: RowPatch[], numeric: readonly string[]): Promise<Set<number>> {
@@ -20,7 +20,7 @@ export async function patchRows(db: Db, table: "workspaces" | "workspace_session
   const groups = new Map<string, RowPatch[]>();
   for (const r of rows) {
     const cols = Object.keys(r.set).filter((c) => r.set[c] !== undefined).sort();
-    const key = JSON.stringify([r.from ? [...r.from].sort() : null, cols, cols.some((c) => isBlob(r.set[c])) ? r.id : null]);
+    const key = JSON.stringify([r.from ? [...r.from].sort() : null, cols, r.where || cols.some((c) => isBlob(r.set[c])) ? r.id : null]);
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(r);
   }
   await db.write(async () => {
@@ -32,7 +32,8 @@ export async function patchRows(db: Db, table: "workspaces" | "workspace_session
       if (byId.length === 1) {
         const r = byId[0]!;
         const out = await q.all(k.updateTable(`main.${table}`).set(Object.fromEntries(cols.map((c) => [c, r.set[c]])))
-          .where("id", "=", r.id).$if(!!from, (b: any) => b.where("state", "in", [...from!])).returning("id"));
+          .where("id", "=", r.id).$if(!!from, (b: any) => b.where("state", "in", [...from!]))
+          .$if(!!r.where, (b: any) => b.where((eb: any) => eb.and(Object.entries(r.where!).map(([c, v]) => eb(c, v === null ? "is" : "=", v))))).returning("id"));
         for (const o of out as { id: number }[]) moved.add(Number(o.id));
         continue;
       }

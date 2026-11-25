@@ -156,15 +156,9 @@ export async function workspacePass(d: LauncherDeps, state: WorkspaceState): Pro
 const liveRows = async (c: Ctx): Promise<WorkspaceRow[]> =>
   [...(await loadWorkspaces(c.d.db, { env: c.env.id, states: LIVE_STATES })).values()].sort((a, b) => a.id - b.id);
 
-/**
- * Patches a row only while columns of it still hold what the pass read: the row is read again here, which narrows the race with
- * another process but does not close it.
- * NEEDS build.patchWorkspaces: a compare-and-set on `pvc`, `pod` and `checkpoint_error` next to the state.
- */
-async function patchIf(c: Ctx, w: WorkspaceRow, whereState: WorkspaceStateName[], guard: Partial<Pick<WorkspaceRow, "pvc" | "pod" | "checkpoint_error">>, set: Partial<Omit<WorkspaceRow, "id">>): Promise<boolean> {
-  const now = await getWorkspace(c.d.db, w.id);
-  if (!now || !(Object.keys(guard) as (keyof typeof guard)[]).every((k) => now[k] === guard[k])) return false;
-  return await patchWorkspaces(c.d.db, [{ id: w.id, whereState, set }]) > 0;
+/** Patches a row only while columns of it still hold what the pass read. */
+async function patchIf(c: Ctx, w: WorkspaceRow, whereState: WorkspaceStateName[], where: Partial<Pick<WorkspaceRow, "pvc" | "pod" | "checkpoint_error">>, set: Partial<Omit<WorkspaceRow, "id">>): Promise<boolean> {
+  return await patchWorkspaces(c.d.db, [{ id: w.id, whereState, where, set }]) > 0;
 }
 
 async function envPass(c: Ctx): Promise<void> {

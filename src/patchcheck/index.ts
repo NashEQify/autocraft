@@ -1,13 +1,13 @@
 // The Opus check of a patch we wrote, before it reaches GitHub (Fix-up pushes, Fix PRs). The model's reply is
 // text our code validates; every check is recorded in patch_checks for the Item page.
-import { loadPatchChecks, patchHash, recordPatchChecks, type PatchCheckInput, type PatchCheckRow as StoredCheck } from "../data/changes/index.ts";
+import { loadPatchChecks, patchHash, recordPatchChecks, type PatchCheckRow } from "../data/changes/index.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { CHECK_MAX_PROBLEMS, CHECK_PROBLEM_CHARS, CHECK_REASON_WORDS, type CheckKind, type PatchCheck } from "./types.ts";
 import type { Db } from "../db/index.ts";
 
 export { patchHash };
 
-export type PatchCheckRow = Omit<StoredCheck, "kind"> & { kind: CheckKind };
+export type { PatchCheckRow };
 
 const words = (s: string, n: number): string => s.replace(/\s+/g, " ").trim().split(" ").slice(0, n).join(" ");
 
@@ -27,12 +27,11 @@ export function parseCheck(reply: string): { ok: true; check: PatchCheck } | { o
 
 /** `subject` is the commit the patch applies to: the PR head (fixup) or the default branch head (fix). */
 export async function recordCheck(db: Db, r: { kind: CheckKind; repo: string; number: number; subject: string; patch: string; round: number; model: string; check: PatchCheck; at: string }): Promise<void> {
-  // NEEDS changes types: CheckKind is "fixup" | "fix"; the stored kinds are "fixup" and "fixissue".
-  await recordPatchChecks(db, [r as unknown as PatchCheckInput]);
+  await recordPatchChecks(db, [r]);
 }
 
 export async function checksOf(db: Db, repo: string, number: number): Promise<PatchCheckRow[]> {
-  return ((await loadPatchChecks(db, [{ repo, number }])).get(`${repo}#${number}`) ?? []) as PatchCheckRow[];
+  return (await loadPatchChecks(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
 }
 
 /** Reasons and problems as one line for a hold note or the next round's prompt. */

@@ -246,6 +246,6 @@ export function poolRoom(db: Db, reposOf: (i: number) => readonly string[] | und
 export class WaitLimitError extends Error {}
 
 /** Records a Jev call (no account, no slot). */
-export async function startJevRun(db: Db, s: Omit<RunStart, "accountId" | "jobId" | "step" | "stage">): Promise<number> {
+export async function startJevRun(db: Db, s: Omit<RunStart, "jobId" | "step" | "stage">): Promise<number> {
   return await openRun(db, { ...s, ...stepOf(s.promptId) }, scrub);
 }

@@ -20,7 +20,7 @@ export async function loadTasks(db: Db, ids: IdSource, opt?: { patch?: boolean }
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("build_tasks as t").select((eb) => [...TASK_COLUMNS, hasPatchExpr(eb), ...(opt?.patch ? [eb.ref("t.patch").as("patch")] : [])])
     .where((eb) => idsIn(db, eb, "t.id", ids)).orderBy("t.id"), { label: "build.loadTasks" });
-  return new Map(rows.map((r) => [r.id, toTask(r as TaskDbRow)]));
+  return new Map(rows.map((r) => [r.id, opt?.patch ? { ...toTask(r as TaskDbRow), patch: (r as { patch?: string | null }).patch ?? null } : toTask(r as TaskDbRow)]));
 }
 
 /** State, step and end time per task id. 1 statement. */
@@ -111,14 +111,19 @@ export async function loadCloneSources(db: Db, ids: number[]): Promise<Map<numbe
   }]));
 }
 
-/** Queued warm-build tasks whose head is no longer the repo's main head (to cancel); heads come from the mirror in the caller's wave. 1 statement. */
-export async function loadMovedWarmBuilds(db: Db, mainHeads: Map<string, string>): Promise<number[]> {
+/** Whether the repo has a warm-build task for `headSha`, or one queued after `since` (ISO time). 1 statement. */
+export async function hasWarmBuild(db: Db, repo: string, headSha: string, since: string): Promise<boolean> {
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("build_tasks").select(["id", "repo", "head_sha"]).where("warm_role", "=", "build").where("state", "=", "queued").orderBy("id"), { label: "build.loadMovedWarmBuilds" });
-  return rows.filter((r) => {
-    const main = mainHeads.get(r.repo);
-    return !!main && main !== r.head_sha;
-  }).map((r) => r.id);
+  const r = await q.get(q.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("warm_role", "=", "build")
+    .where((eb) => eb.or([eb("head_sha", "=", headSha), eb("queued_at", ">", since)])).limit(1), { label: "build.hasWarmBuild" });
+  return r !== undefined;
+}
+
+/** Queued warm-build tasks with the head each would build, oldest first. 1 statement. */
+export async function loadQueuedWarmBuilds(db: Db): Promise<{ id: number; repo: string; headSha: string }[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("build_tasks").select(["id", "repo", "head_sha"]).where("warm_role", "=", "build").where("state", "=", "queued").orderBy("id"), { label: "build.loadQueuedWarmBuilds" });
+  return rows.map((r) => ({ id: Number(r.id), repo: r.repo, headSha: r.head_sha }));
 }
 
 /** The time the private clock started (the earliest first call of an enabled confidential environment), null when none has called. 1 statement. */

@@ -15,6 +15,7 @@ import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { setting } from "../data/control/index.ts";
 import * as runners from "../data/runners/index.ts";
+import { LEASE_IDLE_MS } from "../data/runners/index.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
 import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
@@ -42,11 +43,8 @@ import type { Db } from "../db/index.ts";
 export { judges, roleFits, runnerTakes };
 export type { Cand };
 
-// NEEDS runners.index: export calls-shared's constants (LEASE_IDLE_MS, LEASE_MARGIN_MS, CALLER_GONE_MS, QUEUE_CACHE_MS, REFUSED_PREFIX), so they have one home.
-/** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
-export const LEASE_IDLE_MS = scaled(2 * 60_000);
-/** A lease also ends this long after the bundle's own time limit, counted from its first `running` heartbeat. */
-export const LEASE_MARGIN_MS = scaled(2 * 60_000);
+// The lease and caller limits live in the runners module, which applies them in SQL.
+export { CALLER_GONE_MS, LEASE_IDLE_MS, LEASE_MARGIN_MS, QUEUE_CACHE_MS, REFUSED_PREFIX } from "../data/runners/index.ts";
 /**
  * How long a follow-up turn waits for the helper that holds its session before the caller falls back to a fresh call, while
  * that login runs no live lease. While it does (the helper is busy, and its fast lane takes the turn as soon as it is free),
@@ -54,8 +52,6 @@ export const LEASE_MARGIN_MS = scaled(2 * 60_000);
  */
 export const STICKY_MS = LEASE_IDLE_MS;
 export const STICKY_CAP_MS = scaled(15 * 60_000);
-/** A call whose caller has not polled for this long has lost it (the process died): the call fails. */
-export const CALLER_GONE_MS = scaled(5 * 60_000);
 /** Seconds a helper waits before claiming again when nothing could be taken. */
 export const CLAIM_RETRY_S = scaledS(15);
 /** The oldest helper version that may run a lease. */
@@ -74,8 +70,6 @@ export const RELEASE_SKIP_MS = scaled(10 * 60_000);
 export const REMOTE_WAIT_CAP_MS = 12 * 3600_000;
 /** The start of the error of a call withdrawn because no Task Runner could take it (takers.ts sweepTakers). */
 export const NO_TAKER_PREFIX = "no Task Runner can take calls";
-/** How long claims reuse the queued calls and the runner snapshot before reading them again (the runners module's caches). */
-export const QUEUE_CACHE_MS = 2_000;
 const PROGRESS_MAX = 200;
 const REPLY_MAX = 4_000_000;
 
@@ -479,8 +473,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     accepted = x.accepted;
     const w = await claimWave(db, caller, f, now, x.accepted);
     const reads = orderReadsOf(w.view, login);
-    // NEEDS runners.loadClaimFacts: cooled.until in ms (it parses the cool-off's ISO time with Number); the snapshot's ISO time is read meanwhile.
-    const cooled = f.cooled && { reason: f.cooled.reason, until: Date.parse(w.view.snapshot.cooled.get(login)?.until ?? "") || now + CLAIM_RETRY_S * 1000 };
+    const cooled = f.cooled;
     // A cool-off holds back every call but those for work the user started or approved (started.ts), which a slot or the fast
     // lane still takes while one is queued; the claim is then asked again soon instead of at the cool-off's end.
     const coolStarted = cooled !== null && !own && !lane && w.q.all.some((r) => r.seen_at >= now - CALLER_STALE_MS && startedBy(reads.started, r, login));
@@ -692,8 +685,6 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
 
 /** The harness's text for a request the model's safety filter declined, for helpers that do not say so (Submit.refused). */
 export const SAFETY_REFUSAL = /safeguards flagged this message|appears to violate our usage policy/i;
-/** Starts the error of a call that ended because the model's safety filter declined it (Outcome.error). */
-export const REFUSED_PREFIX = "refused by the model's safety filter";
 
 const loadViewFor = async (db: Db, nowMs: number): Promise<RemoteView> => {
   const [snapshot, models] = await db.together(() => Promise.all([runners.loadRunnerSnapshot(db, nowMs), setting(db, REMOTE_MODELS_KEY)]));
@@ -732,18 +723,14 @@ export type Outcome =
   /** A follow-up turn that the session's helper did not take in time (STICKY_MS, STICKY_CAP_MS); it was withdrawn. */
   | { state: "unclaimed" };
 
-/** One poll of a waiting call: its row, liveness and parent flags, and, while it is queued, its queue entry. */
-type Polled = { poll: runners.CallPoll; queued: runners.QueuedCall | null };
-
 /**
  * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
  * with the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. A lost lease or a gone call among them is ended
- * (runners.expireLeases) and read again in the same poll. While one of them is queued, the queue is read with it for the
- * waits' fields.
+ * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields.
  */
 class CallPoller {
   readonly #db: Db;
-  #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
+  #waiting = new Map<number, { resolve: (p: runners.CallPoll) => void; reject: (e: unknown) => void }[]>();
   /** Calls awaited now, with how many awaits hold each. */
   #held = new Map<number, number>();
   #timer: NodeJS.Timeout | null = null;
@@ -760,7 +747,7 @@ class CallPoller {
   }
 
   /** The next poll of call `id`: the first at once, later ones a poll interval after the one before. */
-  next(id: number): Promise<Polled> {
+  next(id: number): Promise<runners.CallPoll> {
     return new Promise((resolve, reject) => {
       const list = this.#waiting.get(id);
       if (list) list.push({ resolve, reject });
@@ -794,10 +781,7 @@ class CallPoller {
         await runners.expireLeases(db, { now, ids: ended });
         for (const [id, p] of await runners.loadCallPolls(db, ended, now)) polls.set(id, p);
       }
-      // NEEDS runners.loadCallPolls: the waits' fields of a queued call (parentId, queuedMs, queuedSince, since, promptId, tier, repos) and the progress line; the queue is read meanwhile.
-      const queue = [...polls.values()].some((p) => p.call?.state === "queued") ? await runners.loadQueue(db, now) : null;
-      const byId = new Map(queue?.calls.map((c) => [c.id, c]) ?? []);
-      for (const [id, list] of batch) for (const w of list) w.resolve({ poll: polls.get(id)!, queued: byId.get(id) ?? null });
+      for (const [id, list] of batch) for (const w of list) w.resolve(polls.get(id)!);
     } catch (e) {
       for (const list of batch.values()) for (const w of list) w.reject(e);
     } finally {
@@ -853,7 +837,8 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
   // The repos the call names, from its queue entry: a call withdrawn for want of a taker skips them.
   let repos: string[] | null = null;
   for (;;) {
-    const { poll, queued } = await poller.next(id);
+    const poll = await poller.next(id);
+    const queued = poll.queued;
     const nowMs = Date.now();
     const r: PollRow | null = poll.call;
     if (queued) repos = queued.repos;

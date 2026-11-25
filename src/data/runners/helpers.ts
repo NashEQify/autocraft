@@ -112,6 +112,7 @@ export async function loadHelpers(db: Db, logins: string[], now: number): Promis
       lastSeen: Number.isFinite(seen) ? new Date(seen).toISOString() : null, harness: row.harness, models: row.models, reserve: row.reserve, usage: row.usage, slots: row.slots,
       machine: row.machine, helperVersion: row.helperVersion, createdAt: row.createdAt, expiresAt: row.expiresAt, canAgent: row.canAgent, canAnswer: row.canAnswer,
       cooledUntil: c && row.readiness !== "cooled-off" ? new Date(Number(c.until)).toISOString() : null, cooledReason: c && row.readiness !== "cooled-off" ? c.reason : null,
+      busy: row.busy, lastError: json<{ text: string; at: string } | null>(row.lastError, null),
     };
     const list = out.get(key);
     if (list) list.push(info);

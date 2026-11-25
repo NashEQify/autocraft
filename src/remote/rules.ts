@@ -7,9 +7,7 @@ import type { Tier } from "./protocol.ts";
 import { itemsFit, type ItemFilter } from "./task-items.ts";
 
 /** Prompts that judge an item: an author or co-author of an item they judge gets their calls only when no other helper that could take them is asking for work. */
-// NEEDS runners.index: export calls-shared's judges and the call constants, so feature code takes them from the module.
-const JUDGING = new Set(["review.opus", "premerge.opus", "postmerge.opus", "fixup.check", "conversation.turn", "verify.compare", "classify.haiku", "security.verify", "security.fixcheck"]);
-export const judges = (promptId: string): boolean => JUDGING.has(promptId) || promptId.startsWith("dupes.compare-");
+export { judges } from "../data/runners/index.ts";
 
 export const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLowerCase() === b.toLowerCase();
 

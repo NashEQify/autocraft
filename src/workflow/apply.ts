@@ -10,12 +10,14 @@ import { loadAccess } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { setCallLevels } from "../data/runners/index.ts";
 import { adoptLegs, countEventsSince, listWorkflows, recordEvents, saveWorkflows, startWorkflows, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { ownerOf, slugOf } from "../owners.ts";
+import { claimLevels } from "../remote/level.ts";
 import { actRefusal, type ActRefusal } from "../settlers.ts";
 import * as fx from "./effects.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
@@ -219,7 +221,6 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // A started item: weight, an answer, a step again, approval.
   const live = wf!;
   const patch: WorkflowPatch = {};
-  // NEEDS remote/level.claimLevel (C04): with it, a weight change also rewrites the claim level of the item's queued calls (runners.setCallLevels).
   if (r.weight !== null && r.weight !== live.weight) patch.weight = r.weight;
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
@@ -231,6 +232,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     if (pr) on = { ...c, item: pr, workflowId: live.id };
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
+  // A new weight also orders the queued calls of the item and of the PR that implements it.
+  const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await implementationPr(db, live)] : [])].filter((x) => x !== null);
   let preapproval: number | null = null;
   if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
   if (runs) preapproval = (await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges })).preapproval;
@@ -248,6 +251,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     failed: [],
     commit: async () => {
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
+      if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
       if (preapproval !== null) await adoptLegs(db, [{ id: preapproval, workflowId: live.id }]);
       return live.id;
     },

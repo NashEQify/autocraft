@@ -1,6 +1,9 @@
 // The command core of the maintainer workflow (src/workflow/apply.ts): who may act, lists of items, and stop.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { loadQueue } from "../src/data/runners/index.ts";
+import { enqueueCall } from "../src/remote/calls.ts";
+import { callLevel } from "../src/remote/level.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { insertWorkflow, liveWorkflow } from "../src/workflow/store.ts";
@@ -76,6 +79,32 @@ test("stop ends the pre-approved merge, the queued fix-up and the item's queued 
   assert.equal(await liveWorkflow(db, "app", 1), null);
   const row = (await db.get(db.k.selectFrom("main.item_workflows").select(["state", "stopped_by", "approved_by"]).where("id", "=", wfId)))!;
   assert.deepEqual([row.state, row.stopped_by, row.approved_by], ["stopped", MAINT, MAINT], "who approved stays recorded");
+});
+
+test("a weight word re-orders the queued calls of a started item", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.pr(1);
+  await w.pr(2);
+  await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "review", state: "running", startedBy: MAINT, startedAt: T0, startedVia: "dashboard" });
+  for (const number of [1, 2]) {
+    const item = { repo: "app", number };
+    await enqueueCall(db, { promptId: "fixup.patch", promptVersion: "1", tier: "top", effort: "high", askedModel: "opus", items: [item], level: 2, maxAttempts: 1, bundle: {
+      promptId: "fixup.patch", promptVersion: "1", tier: "top", effort: "high", timeoutSeconds: 60, maxTurns: null, stdin: `fix ${number}`, system: null, mounts: [], mcpServers: [], keepSession: false, hints: { claude: { args: [] } },
+    } });
+  }
+  const level = async (n: number) => (await loadQueue(db, Date.now())).calls.find((c) => c.refs.some((r) => r.number === n))!.level;
+  const plain = await level(2);
+  const set = async (text: string) => {
+    const r = await runCommand(db, actor(MAINT), "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 1 }] });
+    assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
+    return await level(1);
+  };
+  const urgent = await set("urgent");
+  const low = await set("low");
+  assert.ok(urgent > low && low > plain, `urgent ${urgent}, low ${low}, not started ${plain}`);
+  assert.equal(await level(2), plain, "another item's call keeps its level");
+  assert.equal(await callLevel(db, { repo: "app", number: 1 }), low, "the item's next call is queued at the same level");
 });
 
 test("stop on an issue ends the merge leg of its implementation PR", async () => {

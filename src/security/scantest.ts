@@ -99,8 +99,7 @@ export async function advanceScanTests(db: Db): Promise<{ repo: string; number: 
         end(r, "could-not-build", "the build did not finish in time");
         continue;
       }
-      // NEEDS verify.outcomeOf: accept the build module's TaskRecord (state, plan, results and summary are all it reads).
-      const o = outcomeOf(task as unknown as Parameters<typeof outcomeOf>[0]);
+      const o = outcomeOf(task);
       if (o.kind === "pass") { end(r, "not-shown", NOT_SHOWN_NOTE); continue; }
       if (o.kind === "fail") {
         if (o.step === "test" && !o.timedOut) end(r, "confirmed", "The test failed on the pinned commit.");

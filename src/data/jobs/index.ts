@@ -7,3 +7,4 @@ export * from "./lanes.ts";
 export * from "./views.ts";
 export * from "./stats.ts";
 export type * from "./types.ts";
+export { RUNNER_STOPPED } from "./fragments.ts";

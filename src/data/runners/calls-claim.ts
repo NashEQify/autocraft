@@ -41,7 +41,7 @@ export async function loadClaimFacts(db: Db, caller: ClaimCaller, opts: { reques
   ]));
   const c = cooled.get(login);
   return {
-    role: (role?.role as ClaimFacts["role"]) ?? null, idle: role?.idleClaimAt != null, cooled: c ? { until: Number(c.until), reason: c.reason } : null, settings: settings.get(login) ?? NO_SETTINGS,
+    role: (role?.role as ClaimFacts["role"]) ?? null, idle: role?.idleClaimAt != null, cooled: c ? { until: Date.parse(c.until), reason: c.reason } : null, settings: settings.get(login) ?? NO_SETTINGS,
     leased: Number(counts?.leased ?? 0), interactive: Number(counts?.interactive ?? 0), signature,
     orphan: orphan ? { id: Number(orphan.id), runId: orphan.run_id, leaseSecretHash: orphan.lease_secret_hash } : null, liveness,
     lost: lost.map((r) => Number(r.id)), gone: gone.map((r) => Number(r.id)),

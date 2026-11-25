@@ -1,7 +1,7 @@
 // Build tasks for a validated plan, and the warm build of the default branch.
 import { parsePatch, parsePlan, parseRequires, parseWarm, warmKeyOf } from "../build/tasks.ts";
 import { BuildError } from "../build/envs.ts";
-import { cloneTasks, createTasks, loadEnvs, type NewTask } from "../data/build/index.ts";
+import { cloneTasks, createTasks, hasWarmBuild, loadEnvs, type NewTask } from "../data/build/index.ts";
 import { currentJobId } from "../agents/call.ts";
 import { rustPlan } from "../worker/rust.ts";
 import { WORKSPACE_TEST_TARGETS } from "../worker/rust-targets.ts";
@@ -70,9 +70,9 @@ export async function queueTasks(db: Db, plan: Planned, c: { repo: string; numbe
  * dirs (src/worker/warm.ts), so none is queued without an enabled worker environment: build pods start from the warm
  * store, which the warm producer fills (src/build/warm-queue.ts).
  */
-export async function queueWarmBuild(db: Db, repo: string, mainSha: string): Promise<number | null> {
-  if (!(await loadEnvs(db, { enabled: true })).some((e) => e.kind !== "kubernetes")) return null;
-  // NEEDS build.queueLocalWarmBuild: skip a head that already has a warm build task, and a repo with one queued in the last 24 hours (WARM_EVERY_MS); no loader reads warm-role build tasks.
+export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
+  const [envs, seen] = await db.together(() => Promise.all([loadEnvs(db, { enabled: true }), hasWarmBuild(db, repo, mainSha, new Date(nowMs - WARM_EVERY_MS).toISOString())]));
+  if (seen || !envs.some((e) => e.kind !== "kubernetes")) return null;
   return (await queueNewTasks(db, [{
     step: "verify", repo, headSha: mainSha, baseSha: mainSha, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, priority: WARM_PRIORITY,
     plan: warmBuildPlan(), warm: { key: warmKeyOf(repo), role: "build" },

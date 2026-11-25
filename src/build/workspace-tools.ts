@@ -7,7 +7,7 @@
 // control characters; images are only checked for their signature and size, never decoded.
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
-import { loadToolCalls, loadWorkspaces, markCalls, patchWorkspaces } from "../data/build/index.ts";
+import { loadCallAccounting, loadToolCalls, loadWorkspaces, markCalls, patchWorkspaces } from "../data/build/index.ts";
 import type { WorkspaceCallRow } from "../data/build/index.ts";
 import type { ExecOptions, KubeApi } from "./kube-api.ts";
 import {
@@ -116,14 +116,6 @@ class Gate {
  * The owning job keeps one instance per workspace for the session's life. `call` settles the row itself: state
  * done (failed when the exec could not run) and `result` = the WorkspaceToolResult as JSON, plus `acct` bookkeeping.
  */
-const jsonOf = (text: string | null): unknown => {
-  try {
-    return text ? JSON.parse(text) : null;
-  } catch {
-    return null;
-  }
-};
-
 export class WorkspaceSession {
   readonly db: Db;
   readonly api: KubeApi;
@@ -190,16 +182,7 @@ export class WorkspaceSession {
   /** Call counts, shell time and background commands from the workspace's rows. */
   private async load(): Promise<void> {
     const db = this.db;
-    // NEEDS build.loadCallAccounting: the bookkeeping fields only (acct numbers, background and timeout of the arguments), not whole results.
-    const rows = (await loadToolCalls(db, this.workspaceId, {})).filter((r) => !OWN_CALLS.includes(r.tool)).map((r) => {
-      const acct = (jsonOf(r.result) as { acct?: Record<string, unknown> } | null)?.acct ?? {};
-      const args = (jsonOf(r.args) ?? {}) as Record<string, unknown>;
-      const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-      return {
-        id: r.id, n: r.n, tool: r.tool, state: r.state, started_at: r.started_at, ms: num(acct.ms), bytes: num(acct.bytes), bg: num(acct.bg), lim: num(acct.limit), ref: num(acct.ref),
-        ended: num(acct.ended), images: num(acct.images), background: args.background === true ? 1 : 0, timeout: num(args.timeout_sec),
-      };
-    });
+    const rows = await loadCallAccounting(db, this.workspaceId, OWN_CALLS);
     // Background commands a restart caught mid-launch: their limit was the time left when they started.
     const launching: Cmd[] = [];
     for (const r of rows) {

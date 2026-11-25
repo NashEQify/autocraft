@@ -331,6 +331,12 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
   return out;
 }
 
+/** The weight behind each item's work score (loadWorkScores): its live workflow's, or that of the issue its PR implements. One statement. */
+export async function loadWorkWeights(db: Db, keys: KeySource): Promise<Map<RefKey, number>> {
+  // Workflow ids stay below the score's weight step of 1e12.
+  return new Map([...await loadWorkScores(db, keys)].map(([key, s]) => [key, Math.ceil((s - 1e15) / 1e12)]));
+}
+
 /** Open items with a live workflow ordered by weight then id, with `row_number()` and `count(*) OVER ()` over the whole queue; `repos` narrows the result, not the positions. */
 export async function loadQueuePositions(db: Db, f: { repos?: string[] } = {}): Promise<Map<RefKey, QueuePosition>> {
   const out = new Map<RefKey, QueuePosition>();
