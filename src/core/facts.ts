@@ -27,6 +27,7 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
+import { reviewOwed } from "./evidence.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import { keptFixes, settlerOf, verdictKept } from "../workflow/work.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
@@ -249,7 +250,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const wfFact = workflowFactOf(d, ref);
   const wfRow = wfFact ? d.workflowRows.get(wfFact.id) : undefined;
   const operator = d.workflow.operator.get(ref);
-  const moves = [...patch.pushes, ...(push?.moves ?? [])].map(({ from, to }) => ({ from, to }));
+  const ours = d.ownPushes.get(ref) ?? [];
+  const moves = ours.map(({ from, to }) => ({ from, to }));
   // A commit we pushed to a branch of our own, or our later pushes on top of one. Our commit on someone else's has a recorded parent that is neither.
   const ownHead = (h: string): boolean => pushChainOf(moves, h).some((x) => d.ownCommits.has(`${repo}@${x}`) && !moves.some((m) => m.to === x && m.from !== x));
   const assignment = assignmentIn(d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null, d.assignments.get(ref), i.assignees);
@@ -257,9 +259,12 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   for (const [stage, t] of d.control.trips) if (t.active) trips[stage] = t.reason;
   const outsideHold = d.outsideHolds.get(ref);
   const implementation = d.implement.byPr.get(ref);
-  const latest = d.review.latest.get(ref);
+  // A merge entry's review is the one a push of ours since the approval asked for: an older review stays ignored.
+  const owed = state === "OPEN" && !!head && wfFact?.entry === "merge" && reviewOwed(ours, head, wfFact.since);
+  const stored = d.review.latest.get(ref);
+  const latest = owed && stored && stored.at <= wfFact.since ? undefined : stored;
   const base: PrFacts = {
-    repo, number, ...(pushedOff ? { pushedOff } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
+    repo, number, ...(pushedOff ? { pushedOff } : {}), ...(owed ? { reviewOwed: true } : {}), assignment, now, pipelineOn: pipelineWrites(d.control.settings.get("pipeline_enabled") ?? undefined),
     tripped: tripsOfRepo(trips, repo), ghState: state, head, ...draftOf(i, ch),
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
@@ -314,7 +319,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.tier = tierOf(head);
   const pm = d.merge.merged.get(ref);
   if (pm) base.postmerge = { mergedAt: pm.firstAt, head: pm.lastHead, since: d.control.settings.get("postmerge_since") ?? "9999", review: d.review.postmerge.get(ref) ?? null };
-  const mxh = state === "OPEN" && wfFact?.entry === "merge" ? head : null;
+  const mxh = state === "OPEN" && wfFact?.entry === "merge" && !owed ? head : null;
   // Checks describe the PR when they were fetched for the reviewed head (or, without a review, the current one).
   const checksAtHead = ch?.head_oid === (mxh ?? latest?.head ?? head);
   base.mergeable = (checksAtHead ? ch?.mergeable : i.mergeable) ?? "UNKNOWN";

@@ -4,6 +4,7 @@
 import { conflictAskRetryAtOf, conflictBucketOf, attemptsIn, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../src/data/changes/index.ts";
 import type { CifixRow, ConflictRow, FixupRow, PatchFacts, PushEdge, TaskStates } from "../src/data/changes/types.ts";
 import { pushAllowed } from "../src/core/gates.ts";
+import { ownPushes, reviewOwed } from "../src/core/evidence.ts";
 import { workflowGate } from "../src/core/may.ts";
 import type { EndedWorkflow, PrFacts } from "../src/core/plan.ts";
 import { FIXUP_MAX_ATTEMPTS, sizeOf } from "../src/core/rules.ts";
@@ -34,7 +35,7 @@ const ref = "app#1";
 /** The author's accounts and ours. */
 const AUTHOR = "dev", OURS = "bot";
 
-type CommitBy = "author" | "fixup" | "fixup-premerge" | "fixup-operator" | "cifix" | "conflict" | "revision";
+type CommitBy = "author" | "fixup" | "fixup-premerge" | "fixup-operator" | "cifix" | "conflict" | "revision" | "repin";
 export type Leg = { state: "fixup" | "review" | "ci" | "queued"; head: string | null; fromHead: string; workflow: number; updatedAt: string; fixId: number | null };
 export type WorkflowRow = {
   id: number; kind: "pr" | "issue"; entry: "review" | "fixup" | "implement" | "merge"; state: "running" | "waiting" | "blocked" | "recommending";
@@ -44,8 +45,8 @@ export type WorkflowRow = {
 export type PrRows = {
   approvals: { merge: boolean; push: boolean; comment: boolean; ci: boolean; fixissue: boolean };
   pipelineOn: boolean; pipelineRepo: boolean; outsideHold: boolean; tripped: PrFacts["tripped"]; noCi: boolean; mainRed: boolean; implementOn: boolean; publicRepo: boolean;
-  /** Oldest first; the last one is the head. */
-  commits: { sha: string; by: CommitBy }[];
+  /** Oldest first; the last one is the head. `at`: when an autorepin or a revision was pushed (the others have a patch row). */
+  commits: { sha: string; by: CommitBy; at?: string }[];
   /** We pushed off the head and the mirror does not show it yet. */
   pushedOff: boolean;
   ghState: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; /** The checks already say it is not open. */ gone: boolean; ours: boolean; mainFix: boolean; tier: PrFacts["tier"]; lines: number; label: string | null; labelUnsure: boolean; needsDecision: boolean;
@@ -93,7 +94,8 @@ function randomPatches(x: Rnd, w: Pick<PrRows, "commits" | "checks" | "mergeable
     void cifixes.push({ ...row(++id, when), head, toHead, kind: state === "infra" ? "infra" : "code", state, files: [], taskId: state === "formatting" ? task() : null, lintTask: state === "linting" ? task() : null, runs: state === "infra" ? [1] : null });
   const addConflict = (fromHead: string, toHead: string | null, state: string, when: string): void =>
     void conflicts.push({ ...row(++id, when), fromHead, toHead, baseSha: "b1", state, lintTask: state === "linting" ? task() : null, ownDiff: toHead ? x.pick(["same", "changed"] as const) : null });
-  const when = (i: number): string => (x.bool(0.8) ? `2026-11-0${1 + i}T08:00:00.000Z` : at(`0${i}:00`));
+  // Some of them after the start (09:00).
+  const when = (i: number): string => (x.bool(0.6) ? `2026-11-0${1 + i}T08:00:00.000Z` : x.bool() ? at(`09:${20 + i}`) : at(`0${i}:00`));
   w.commits.forEach((c, i) => {
     const from = w.commits[i - 1]?.sha;
     if (!from) return;
@@ -121,7 +123,7 @@ function randomPatches(x: Rnd, w: Pick<PrRows, "commits" | "checks" | "mergeable
 export function randomPrRows(x: Rnd): PrRows {
   const impl = x.bool(0.15), mainFix = !impl && x.bool(0.05), ours = impl || mainFix;
   const commits: PrRows["commits"] = [{ sha: "c0", by: ours ? "revision" : "author" }];
-  for (let i = 1; i < 1 + x.int(4); i++) commits.push({ sha: `c${i}`, by: x.pick(["author", "fixup", "fixup", "fixup-premerge", "fixup-operator", "cifix", "conflict", ...(impl ? ["revision" as const] : [])] as const) });
+  for (let i = 1; i < 1 + x.int(4); i++) commits.push({ sha: `c${i}`, by: x.pick(["author", "fixup", "fixup", "fixup-premerge", "fixup-operator", "cifix", "conflict", "repin", ...(impl ? ["revision" as const] : [])] as const), at: x.bool() ? at(`09:${20 + i}`) : at(`0${i}:00`) });
   const head = commits.at(-1)!.sha, some = (p = 0.85): string => (x.bool(p) ? head : x.pick(commits).sha);
 
   // Its workflow: none, its own, or (an implementation PR) its issue's.
@@ -241,12 +243,15 @@ export function factsOf(w: PrRows): PrFacts {
   const legRows = w.legs.map((l) => ({ workflow_id: l.workflow, state: l.state, head: l.head }));
   const wfRow = live ? itemWorkflow(live) : null;
   const outEdge = w.pushedOff ? [{ from: head, to: "next" }] : [];
-  // Revisions of our implementation are recorded with the push outcomes, the other pushes by their patch rows too.
-  const moves = [...w.patches.pushes.map(({ from, to }) => ({ from, to })), ...w.commits.flatMap((c, i) => (i > 0 && c.by === "revision" ? [{ from: w.commits[i - 1]!.sha, to: c.sha }] : [])), ...outEdge];
+  // Revisions of our implementation are recorded with the push outcomes, autorepins with their requests, the other pushes by their patch rows.
+  const made = (by: CommitBy) => w.commits.flatMap((c, i) => (i > 0 && c.by === by ? [{ from: w.commits[i - 1]!.sha, to: c.sha, at: c.at ?? at("08:00") }] : []));
+  const ours = ownPushes(w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push", lines: null })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50"), lines: null }))], made("repin"));
+  const moves = ours.map(({ from, to }) => ({ from, to }));
+  const owed = open && live?.entry === "merge" && reviewOwed(ours, head, at("09:00"));
   const ownCommit = (h: string): boolean => w.commits.some((c) => c.sha === h && isOurs(c));
   const ownHead = pushChainOf(moves, head).some((h) => ownCommit(h) && !moves.some((m) => m.to === h && m.from !== h));
   const f: PrFacts = {
-    repo: "app", number: 1, now: NOW, ...(w.pushedOff && open && !w.integration ? { pushedOff: true } : {}), assignment: { login: OURS, assignees: [w.assignedToUs ? OURS : AUTHOR], ours: w.assignedToUs },
+    repo: "app", number: 1, now: NOW, ...(owed ? { reviewOwed: true } : {}), ...(w.pushedOff && open && !w.integration ? { pushedOff: true } : {}), assignment: { login: OURS, assignees: [w.assignedToUs ? OURS : AUTHOR], ours: w.assignedToUs },
     pipelineOn: w.pipelineOn, tripped: w.tripped, ghState: w.ghState, head, draft: w.draft || w.gone, ...(w.gone ? { gone: true as const } : {}), author: w.ours ? OURS : AUTHOR, authorIsPipeline: w.ours, tier: "not", lines: w.lines, size: sizeOf(w.lines),
     label: null, needsDecisionFlag: false, inScope: w.integration ? w.pipelineRepo : inScope, ...(w.outsideHold ? { outsideHold: { reason: "limit", author: AUTHOR, kind: "pr", limit: 5 } as const } : {}),
     integration: w.integration, batchPr: w.integration, heldBacklog, quiet: w.quiet, mergeHeld: w.mergeHeld, score: 1,
@@ -269,7 +274,7 @@ export function factsOf(w: PrRows): PrFacts {
   if (open && w.ruledOut) f.ruledOut = ["changes the README"];
   f.label = w.label; f.labelUnsure = w.labelUnsure; f.needsDecisionFlag = w.needsDecision;
   f.tier = w.tier === "not" && w.ours && ownHead ? "whitelisted" : w.tier;
-  const mx = open && live?.entry === "merge", r = w.review;
+  const mx = open && live?.entry === "merge" && !owed, r = w.review;
   const fresh = w.checks.head === (mx ? head : r?.head ?? head);
   f.mergeable = fresh ? w.mergeable : w.mergeable === "CONFLICTING" ? "CONFLICTING" : "UNKNOWN";
   f.pushable = w.pushable;

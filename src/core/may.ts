@@ -1,22 +1,7 @@
 import type { StepApproval } from "../data/control/types.ts";
 import type { ActionState, EndedWorkflow, Preapproval, WorkflowAction } from "../data/workflow/types.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
-
-/** A push of ours that moved a PR's head: the head it was made on and its commit. */
-export type OwnPush = { from: string; to: string };
-
-/**
- * Whether `head` is `base`, or is reached from it through our own pushes alone, step by step. A head whose parent is not recorded,
- * or whose chain passes through a commit we did not push, is not: someone else's commits are under it.
- */
-export function chainsOwn(pushes: readonly OwnPush[], base: string, head: string): boolean {
-  const reached = new Set([head]);
-  for (const h of reached) {
-    if (h === base) return true;
-    for (const p of pushes) if (p.to === h) reached.add(p.from);
-  }
-  return false;
-}
+import { chainsOwn, type OwnPush } from "./evidence.ts";
 
 export type WorkflowGate = {
   live: boolean;
@@ -71,7 +56,7 @@ export type MergeInputs = {
   head: string;
   /** The open or merged PRs it duplicates, as "repo#number": without a live workflow it merges only once a person picks it. */
   duplicates?: readonly string[] | undefined;
-  /** Our recorded pushes to the PR. An autorepin's is none of them: the workflow's base head moves over it (src/workflow/advance.ts). */
+  /** Every push we made to the PR (src/core/evidence.ts ownPushes). */
   pushes: readonly OwnPush[];
 };
 

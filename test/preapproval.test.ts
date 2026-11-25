@@ -299,13 +299,13 @@ describe("pre-approved merge", () => {
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "review");
   });
 
-  test("the pipeline's own CI fix push ends the pre-approval like a foreign push", async () => {
+  test("the pipeline's own CI fix push carries the pre-approval to its head, and a foreign push ends it", async () => {
     const w = await (await take(await (await take(await fresh(), 16)).review(16, { verdict: "take-fix" }), 17)).review(17, { verdict: "take-fix" });
     await inCi(w, 16);
     await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 16, head: "sha16b", to_head: "sha16c", kind: "format", state: "pushed", attempt: 1, created_at: T0 }));
     await w.synced(16, "sha16c");
     await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 16))?.state, "cancelled");
+    assert.deepEqual([(await preapprovalOf(w.db, "app", 16))?.state, (await preapprovalOf(w.db, "app", 16))?.head], ["review", "sha16c"]);
 
     await inCi(w, 17);
     await w.synced(17, "foreign17");

@@ -1813,6 +1813,7 @@ export interface PushOutcomes {
   after_res: string | null;
   outcome: string | null;
   resolved_at: string | null;
+  lines: number | null;
 }
 
 export interface ReleaseApps {
@@ -3094,7 +3095,7 @@ export const COLUMNS = {
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
-  push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
+  push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at", "lines"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
   remote_call_items: ["call_id", "pos", "repo", "number"],

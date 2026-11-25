@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Db } from "../db/index.ts";
+import { patchLines } from "../data/changes/index.ts";
 import { listAudit } from "../data/control/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewsAt } from "../data/review/index.ts";
@@ -568,7 +569,7 @@ export async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, 
     // Without the ref a later gc may prune `made`; builtTree then rebuilds it.
     await git.git(["update-ref", `${BUILT_REF}/${impl.id}`, made.commit]);
     const push = await pushOwnBranch(w, g, git, "implement-push", { repo, number, remote: fork, branch: impl.branch, sha: commit },
-      { fork, base: impl.baseSha, impl: impl.id, from: head, built: made.commit, revise: req.prNumber, ...(made.check.compileTime.length && { compileTime: made.check.compileTime }) });
+      { fork, base: impl.baseSha, impl: impl.id, from: head, built: made.commit, revise: req.prNumber, changed: patchLines(delta), ...(made.check.compileTime.length && { compileTime: made.check.compileTime }) });
     if (push.code !== 0 && /stale info/i.test(push.stderr)) return moved(`the head of #${req.prNumber} moved from ${short(head)} during the push`);
     if (push.code !== 0) return fail(`the push failed: ${oneLine(push.stderr)}`, true);
     log(`  ${ref(impl)}: pushed ${short(commit)} onto ${short(head)} of #${req.prNumber}`);
