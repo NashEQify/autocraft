@@ -159,13 +159,18 @@ export type CallActivity = {
 export type WorkspacePass = { rows: WorkspaceRow[]; calls: Map<number, CallActivity>; bound: Map<number, "queued" | "leased"> };
 export type NewWorkspaceCall = Omit<WorkspaceCallRow, "id">;
 export type ToolCallQuery = { tool?: string; n?: number; id?: number; ids?: number[] };
+/** A tool call's bookkeeping: its `acct` numbers (from the result) and the background flag and time limit of its arguments. */
+export type CallAccounting = {
+  id: number; n: number | null; tool: string; state: string; started_at: string | null; ms: number | null; bytes: number | null; bg: number | null; lim: number | null; ref: number | null;
+  ended: number | null; images: number | null; background: 0 | 1; timeout: number | null;
+};
 export type CallListRow = {
   id: number; n: number | null; tool: string; args: string; state: string; created_at: string; started_at: string | null; finished_at: string | null;
   has_result: number; is_error: number | null; images: number | null; image_data: string | null; image_bytes: number | null; image_sha: string | null; image_note: string | null;
 };
 /** `more`: older calls exist (the default and `before` pages only). */
 export type CallPage = { rows: CallListRow[]; more: boolean };
-export type SessionSource = { ids: number[] } | { workspaceIds: number[] } | { remoteCallId: number };
+export type SessionSource = { ids: number[] } | { workspaceIds: number[] } | { remoteCallId: number } | { jobId: number };
 export type SweptSession = { id: number; workspaceId: number | null; keep: boolean; jobId: number | null; jobState: string | null; error: string | null };
 export type WorkspaceQuery = { state: "live" | "all"; cursor?: string; limit: number };
 export type WorkspaceListRow = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; created_at: string; ended_at: string | null };

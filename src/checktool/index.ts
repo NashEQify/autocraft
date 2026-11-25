@@ -11,7 +11,7 @@ import { scrub } from "../runner/scrub.ts";
 import type { Git } from "../fixup/git.ts";
 import { artifactText, changedRsFiles, lintPlan, lintSteps, readLint } from "../prepush/index.ts";
 import { rustPlan } from "../worker/rust.ts";
-import { endModelCheck, loadCheckDurations, startModelCheck, type ModelCheckStep } from "../data/changes/index.ts";
+import { endModelCheck, loadCheckDurations, startModelCheck } from "../data/changes/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -192,8 +192,7 @@ export class CheckTool {
     this.calls++;
     const started = Date.now();
     const perCheck = this.checkLimitMs?.(i.command) ?? await checkLimitMs(t.db, t.recordRepo ?? t.repo, i);
-    // NEEDS changes.ModelCheckStep: it lacks the "fix-check" step this tool also records.
-    const row = await startModelCheck(t.db, { runId, step: t.step as ModelCheckStep, repo: t.recordRepo ?? t.repo, number: t.number, head: t.head, command: i.command, crate: i.crate ?? null, testName: i.test_name ?? null, startedAt: new Date().toISOString() });
+    const row = await startModelCheck(t.db, { runId, step: t.step, repo: t.recordRepo ?? t.repo, number: t.number, head: t.head, command: i.command, crate: i.crate ?? null, testName: i.test_name ?? null, startedAt: new Date().toISOString() });
     const end = async (outcome: string, taskId: number | null) => await endModelCheck(t.db, row, { outcome, taskId, endedAt: new Date().toISOString() });
     let taskId: number | null = null;
     try {

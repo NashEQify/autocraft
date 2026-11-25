@@ -166,7 +166,6 @@ export async function readLint(db: Db, taskId: number, o: { /** A diff whose add
   // A tests step that timed out fails the task, but everything before it finished: its output is read as an inconclusive test run.
   const testsTimedOut = t.state === "failed" && t.plan.some((p) => p.name === TESTS_STEP) && t.results.some((r) => r.step === TESTS_STEP && r.timedOut) && t.results.filter((r) => r.step !== TESTS_STEP).every((r) => r.exitCode === 0 && !r.timedOut);
   if (t.state !== "done" && !testsTimedOut) return { kind: "infra-failed", reason: `the lint task ${t.state}${t.summary ? `: ${t.summary.slice(0, 200)}` : ""}` };
-  // NEEDS build.loadTasks: with `patch: true` the returned record has no `patch` (toTask in src/data/build/rows.ts leaves it out), so the findings are matched against an empty diff.
   const patch = (await loadTasks(db, [taskId], { patch: true })).get(taskId)?.patch ?? "";
   const fmt = await artifactText(db, taskId, FORMAT_ARTIFACT);
   const clippy = await artifactText(db, taskId, CLIPPY_ARTIFACT);

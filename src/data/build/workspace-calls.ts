@@ -6,7 +6,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { callSince, leasedRunOf, runOfCall } from "../runners/fragments.ts";
 import { patchRows } from "./row-patch.ts";
-import type { NewWorkspaceCall, ToolCallQuery, WorkspaceCallRow } from "./types.ts";
+import type { CallAccounting, NewWorkspaceCall, ToolCallQuery, WorkspaceCallRow } from "./types.ts";
 
 /** Tools whose results carry images. */
 export const IMAGE_TOOLS = ["screenshot", "read"];
@@ -100,6 +100,25 @@ export async function loadToolCalls(db: Db, workspaceId: number, f: ToolCallQuer
     .$if(f.tool !== undefined, (b) => b.where("tool", "=", f.tool!))
     .$if(f.n !== undefined, (b) => b.where("n", "=", f.n!))
     .orderBy("id"));
+}
+
+/** The bookkeeping of the workspace's calls of tools other than `skipTools`, oldest first; whole results are not read. 1 statement. */
+export async function loadCallAccounting(db: Db, workspaceId: number, skipTools: readonly string[]): Promise<CallAccounting[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.workspace_calls")
+    .select((eb) => {
+      const res = eb.case().when(kx.jsonValid(db, "result")).then(eb.ref("result")).end();
+      const arg = eb.case().when(kx.jsonValid(db, "args")).then(eb.ref("args")).end();
+      const num = (path: string) => kx.jsonNum(db, res, `$.acct.${path}`);
+      return ["id", "n", "tool", "state", "started_at", num("ms").as("ms"), num("bytes").as("bytes"), num("bg").as("bg"), num("limit").as("lim"), num("ref").as("ref"),
+        num("ended").as("ended"), num("images").as("images"), kx.jsonBool(db, arg, "$.background").as("background"), kx.jsonNum(db, arg, "$.timeout_sec").as("timeout")] as const;
+    })
+    .where("workspace_id", "=", workspaceId).$if(skipTools.length > 0, (b) => b.where("tool", "not in", [...skipTools])).orderBy("id"));
+  const n = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  return rows.map((r) => ({
+    id: Number(r.id), n: n(r.n), tool: r.tool, state: r.state, started_at: r.started_at, ms: n(r.ms), bytes: n(r.bytes), bg: n(r.bg), lim: n(r.lim), ref: n(r.ref),
+    ended: n(r.ended), images: n(r.images), background: Number(r.background) === 1 ? 1 : 0, timeout: n(r.timeout),
+  }));
 }
 
 /** Image calls of the run (`runId` null: calls with no run) before call `beforeId` that still keep their image bytes. */

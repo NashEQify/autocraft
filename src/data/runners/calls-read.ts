@@ -6,7 +6,7 @@ import type { ItemRef } from "../../../web/src/api/types.ts";
 import { aliveOf, goneCallExpr } from "./calls-expiry.ts";
 import { loadQueueFor } from "./calls-queue-load.ts";
 import { CALLER_STALE_MS, STICKY_LIVE_MS, lostLeaseExpr } from "./calls-shared.ts";
-import type { CallPoll, CallState, CallSummary, LowerLogin, PollRow, QueueSnapshot } from "./types.ts";
+import type { CallPoll, CallState, CallSummary, LowerLogin, PollRow, QueuedWait, QueueSnapshot, Tier } from "./types.ts";
 
 const items = (text: string): ItemRef[] => JSON.parse(text) as ItemRef[];
 
@@ -26,6 +26,15 @@ export async function loadCallReply(db: Db, id: number): Promise<{ promptId: str
   return r ? { promptId: r.prompt_id, items: items(r.items), reply: r.reply, state: r.state, runId: r.run_id } : null;
 }
 
+/** The usage (and with `reply`, the reply, up to 4 MB each, so the read runs alone) of calls by id. 1 statement. */
+export async function loadCallUsage(db: Db, ids: number[], o: { reply?: boolean } = {}): Promise<Map<number, { usage: string | null; reply: string | null }>> {
+  if (!ids.length) return new Map();
+  const q = queryDb(db);
+  const b = q.k.selectFrom("main.remote_calls").select(["id", "usage"]).where(inList(db, "id", ids, "bigint"));
+  const rows = o.reply ? await q.all(b.select("reply"), { alone: true, label: "runners.loadCallUsage" }) : (await q.all(b)).map((r) => ({ ...r, reply: null }));
+  return new Map(rows.map((r) => [Number(r.id), { usage: r.usage, reply: r.reply }]));
+}
+
 /** The call row, liveness stamp, lost-lease and gone-caller reads in one wave. */
 export async function loadCallPoll(db: Db, id: number, now: number): Promise<CallPoll> {
   return (await loadCallPolls(db, [id], now)).get(id)!;
@@ -40,7 +49,8 @@ export async function loadCallPolls(db: Db, ids: number[], nowMs: number): Promi
   const q = queryDb(db);
   const [rows, stamp, lost, gone, parentLive] = await db.together(async () => await Promise.all([
     // The reply only of a done call: it is up to 4 MB and every poll would carry it.
-    q.all(q.k.selectFrom("main.remote_calls").select((eb) => ["id", "state", eb.case().when("state", "=", "done").then(eb.ref("reply")).end().as("reply"), "error", "run_id", "leased_at", "attempt", "consumed_at", "usage", "turns", "session_id"])
+    q.all(q.k.selectFrom("main.remote_calls").select((eb) => ["id", "state", eb.case().when("state", "=", "done").then(eb.ref("reply")).end().as("reply"), "error", "run_id", "leased_at", "attempt", "consumed_at", "usage", "turns", "session_id",
+      "parent_id", "queued_ms", "queued_since", "since", "prompt_id", "tier", "items", "repo"])
       .where(inList(db, "id", ids, "bigint"))),
     q.get(q.k.selectFrom("main.remote_liveness").select(["alive_at", "since"]).where("id", "=", 1)),
     q.all(q.k.selectFrom("main.remote_calls").select("id").where(inList(db, "id", ids, "bigint")).where((eb) => lostLeaseExpr(db, eb, nowMs))),
@@ -57,11 +67,15 @@ export async function loadCallPolls(db: Db, ids: number[], nowMs: number): Promi
     await q.run(q.k.updateTable("main.remote_calls").set({ reply: null, consumed_at: nowMs }).where(inList(db, "id", fresh, "bigint")).where("state", "=", "done").where("consumed_at", "is", null));
   }
   const out = new Map<number, CallPoll>();
-  for (const id of ids) out.set(id, { call: null, liveness, lost: false, gone: false, parentLive: false });
+  for (const id of ids) out.set(id, { call: null, liveness, lost: false, gone: false, parentLive: false, queued: null });
   for (const r of rows) {
     const id = Number(r.id);
     const call: PollRow = { id, state: r.state as CallState, reply: r.reply, error: r.error, runId: r.run_id, leasedAt: r.leased_at, attempt: Number(r.attempt), consumedAt: fresh.includes(id) ? nowMs : r.consumed_at, usage: r.usage, turns: r.turns, sessionId: r.session_id };
-    out.set(id, { call, liveness, lost: lostIds.has(id), gone: goneIds.has(id), parentLive: parentIds.has(id) });
+    const queued: QueuedWait | null = r.state !== "queued" ? null : {
+      parentId: r.parent_id === null ? null : Number(r.parent_id), queuedMs: Number(r.queued_ms), queuedSince: r.queued_since === null ? null : Number(r.queued_since), since: Number(r.since),
+      promptId: r.prompt_id, tier: r.tier as Tier, repos: [...new Set([...items(r.items).map((i) => i.repo), ...(r.repo ? [r.repo] : [])])],
+    };
+    out.set(id, { call, liveness, lost: lostIds.has(id), gone: goneIds.has(id), parentLive: parentIds.has(id), queued });
   }
   return out;
 }

@@ -56,7 +56,7 @@ import { scopeRepos } from "./scope.ts";
 import { refreshOutsideHolds } from "../outside.ts";
 import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadTrips, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withConfig, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
-import { loadDeadlineStops, loadLaneInputs, loadLaneState, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { loadDeadlineStops, loadLaneInputs, loadLaneState, loadPipelineEndedSince, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadEndedTaskSignature } from "../data/build/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -940,10 +940,7 @@ export async function setEnabled(db: Db, enabled: boolean, by: string, mode: "of
 
 /** Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has beaten. */
 export async function deadlineStops(db: Db): Promise<DeadlineStop[]> {
-  const stops = await loadDeadlineStops(db);
-  // NEEDS jobs.loadDeadlineStops: it reads the acknowledgements by action (loadAuditMax without targets), so none matches a step; they are applied here until it passes the `step:<name>` targets.
-  const acked = await loadAuditMax(db, "deadline-ack", stops.map((d) => `step:${d.step}`));
-  return stops.filter((d) => { const ack = acked.get(`step:${d.step}`); return !(ack && d.endedAt !== null && ack >= d.endedAt); });
+  return await loadDeadlineStops(db);
 }
 
 /** An operator acknowledges the deadline stops of a step: they leave the warnings until the next one. */
@@ -1272,9 +1269,8 @@ const inputSignature = (seqs: Record<string, number>, limits: string, tasks: str
  */
 export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
   const t = nowMs;
-  // NEEDS jobs.loadPipelineEndedSince(db, since): a boolean statement for "a pipeline job ended after `since`"; the ends of loadLaneInputs stand in for it.
-  const [marks, limits, tasks, seqs, takers, inputs, released] = await db.together(() => Promise.all([
-    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, t), loadLaneInputs(db, t), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  const [marks, limits, tasks, seqs, takers, finished, released] = await db.together(() => Promise.all([
+    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, t), loadPipelineEndedSince(db, { mark: MARK_PLANNED_AT }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
   ]));
   const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
   const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];
@@ -1282,7 +1278,6 @@ export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boole
   const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
   const since = plannedAt ?? "";
-  const finished = inputs.ends.some((e) => e.requested_by === AUTOPILOT_USER && e.ended_at !== null && e.ended_at > since);
   const releasedNow = [...released.values()].some((at) => at > since);
   const woken = wake !== null && Date.parse(wake) <= t;
   if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !releasedNow && !woken) return false;

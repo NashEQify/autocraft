@@ -4,7 +4,7 @@
 import { leaseItem } from "../runner/leases.ts";
 import type { TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { BuildError } from "../build/envs.ts";
-import { cancelTasks, cloneTasks, loadLogTails, loadMovedWarmBuilds, loadRetriesOf, loadTasks, QueueFullError, TERMINAL, type TaskRecord } from "../data/build/index.ts";
+import { cancelTasks, cloneTasks, loadLogTails, loadQueuedWarmBuilds, loadRetriesOf, loadTasks, QueueFullError, TERMINAL, type TaskRecord } from "../data/build/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
 import { listVerifications as listMergeVerifications, loadPendingVerifications, loadVerifications, loadVerifyDue, restartVerifications, settleVerifications, type StageRow, type VerificationState, type VerificationView } from "../data/merge/index.ts";
@@ -242,8 +242,9 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
 
 /** Cancels queued warm builds whose branch head is no longer the commit they would build. */
 async function cancelMovedWarmBuilds(db: Db, log: (line: string) => void): Promise<number> {
-  // NEEDS build.loadQueuedWarmBuilds: the repos with a queued warm build, so only their heads are compared (the main heads of every repo are read now).
-  const ids = await loadMovedWarmBuilds(db, new Map([...await loadLatestMainHeads(db)].map(([repo, h]) => [repo, h.head_sha])));
+  const queued = await loadQueuedWarmBuilds(db);
+  const heads = await loadLatestMainHeads(db, [...new Set(queued.map((t) => t.repo))]);
+  const ids = queued.filter((t) => { const main = heads.get(t.repo)?.head_sha; return !!main && main !== t.headSha; }).map((t) => t.id);
   const out = await cancelTasks(db, { ids }, ACTOR);
   const n = out.filter((o) => o.result === "cancelled").length;
   for (const o of out) if (o.result === "cancelled") log(`  warm build ${o.id} of ${o.repo}: the branch moved on; cancelled`);

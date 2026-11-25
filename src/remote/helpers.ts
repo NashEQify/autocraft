@@ -85,22 +85,14 @@ export async function hasFreshRunner(db: Db, login: string, nowMs: number = Date
 
 /** The login's helpers: every live Task Runner credential, with its last status. */
 export async function listHelpers(db: Db, login: string, nowMs: number = Date.now()): Promise<HelperInfo[]> {
-  // NEEDS runners.loadHelpers: busy and lastError (taken from the runner snapshot meanwhile).
-  const [helpers, snapshot] = await db.together(() => Promise.all([runners.loadHelpers(db, [login], nowMs), runners.loadRunnerSnapshot(db, nowMs)]));
-  const rows = new Map(snapshot.runners.map((r) => [r.tokenId, r]));
+  const helpers = await runners.loadHelpers(db, [login], nowMs);
   return (helpers.get(login.toLowerCase()) ?? []).map((h) => {
-    const row = rows.get(h.tokenId);
     // The server's own cool-off of the login shows even before the helper has reported it.
     const cooled = h.cooledUntil !== null;
     return {
-      tokenId: h.tokenId, label: h.label, slots: h.slots, busy: row?.busy ?? null, lastError: lastErrorOf(row?.lastError ?? null),
+      tokenId: h.tokenId, label: h.label, slots: h.slots, busy: h.busy, lastError: h.lastError,
       ...(cooled ? { readiness: "cooled-off" as const, until: h.cooledUntil, reason: h.cooledReason } : { readiness: h.readiness, until: h.until, reason: h.reason }),
       fresh: h.fresh, lastSeen: h.lastSeen, harness: h.harness as HarnessId | null, models: h.models, reserve: h.reserve, usage: h.usage as UsageReading | null,
     };
   });
 }
-
-const lastErrorOf = (v: string | null): { text: string; at: string } | null => {
-  if (!v) return null;
-  try { return JSON.parse(v) as { text: string; at: string }; } catch { return null; }
-};
