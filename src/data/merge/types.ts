@@ -69,6 +69,8 @@ export type MergeFacts = {
   runs: Map<HeadRef, RunApproval>;
   unknown: Map<RefKey, UnknownState>;
   batchStates: Map<HeadRef, "batch-checking" | "in-batch" | "batch-failed">;
+  /** When the batch of each `batch-failed` head failed. */
+  batchFailedAt: Map<HeadRef, string>;
   /** Members of a checking or open batch. */
   activeBatched: Set<RefKey>;
   /** The active batch each of its integration PRs belongs to, members in order. */

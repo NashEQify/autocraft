@@ -3,11 +3,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAINTAINER_ANSWER_WAIT, NOT_STARTED_WAIT, decidePr } from "../src/core/decide.ts";
 import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../src/core/rules.ts";
+import type { WaitCode, Who } from "../src/core/codes.ts";
 import { QUEUE_STATES, type Plan, type PrFacts } from "../src/core/plan.ts";
 import { NOW, REVIEW_AT, prFacts } from "./world.ts";
 
 type Over = Parameters<typeof prFacts>[0];
-type Row = { name: string; facts: Over; expect: { state?: string; path?: "rule" | "operator" | "maintainer" | null; actions?: string[]; reasons?: string[]; eligible?: boolean; note?: string | null; conflictNote?: string | null; wait?: string | null } };
+type Row = { name: string; facts: Over; expect: { state?: string; path?: "rule" | "operator" | "maintainer" | null; actions?: string[]; reasons?: string[]; eligible?: boolean; note?: string | null; conflictNote?: string | null; wait?: string | null; code?: WaitCode | null; who?: Who } };
 
 const tokens = (p: Plan): string[] => p.actions.map((a) => {
   const bucket = typeof a.params?.bucket === "string" ? a.params.bucket : null;
@@ -19,6 +20,7 @@ const SIZE_L = { size: "L", lines: 900 } as const;
 const UNSTARTED = { workflow: null } as const;
 const MERGE_ENTRY = { entry: "merge", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } as const;
 const HANDED = { handOver: true } as const;
+const BLOCKED_GATE = { live: true, entry: "review", state: "blocked", startedBy: "maint", approvedBy: "maint", approvedAt: "2026-11-04T09:00:00.000Z", blocker: "other", baseHead: "h1", fixupAsked: false, leg: null } as const;
 const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, minor: 0, error: null, ...o });
 const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });
@@ -26,7 +28,7 @@ const conflicting = (o: Partial<NonNullable<PrFacts["conflict"]>> = {}) => ({ me
 const CI_FAIL = { ci: "failure" } as const;
 const cifix = (o: Partial<NonNullable<PrFacts["cifix"]>> = {}) => ({ states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, checksAt: "2026-11-04T11:00:00.000Z", ...o });
 const merged = (o: Partial<NonNullable<PrFacts["postmerge"]>> = {}) => ({ mergedAt: "2026-11-04T09:00:00.000Z", head: "h1", since: "2026-11-01T00:00:00.000Z", review: null, ...o });
-const runs = (o: Partial<NonNullable<PrFacts["runs"]>> = {}) => ({ waiting: 1, reread: false, crossRepo: true, approvable: 1, ...o });
+const runs = (o: Partial<NonNullable<PrFacts["runs"]>> = {}) => ({ waiting: 1, reread: false, crossRepo: true, approvable: 1, blocked: null, ...o });
 
 const rows: Row[] = [
   // ---- the rule path
@@ -50,19 +52,37 @@ const rows: Row[] = [
   { name: "no CI in the repo puts it outside the rule", facts: { ci: "none", repoFacts: { noCi: true } }, expect: { state: "needs-decision", reasons: ["the repo has no CI checks"] } },
   { name: "several reasons keep the queue's order", facts: { ...SIZE_L, label: "infra", tier: "not", review: { verdict: "take-fix" } }, expect: { state: "needs-fix-up", reasons: ["review asks for fixes", "size L", "author not on the whitelist"] } },
 
+  // ---- an approved merge on its way to the hand-over
+  { name: "a merge approved past the rule waits for its leg, not for an answer", facts: { ...SIZE_L, ci: "pending", operator: { fix: null, hold: true, premerge: false } }, expect: { state: "needs-decision", code: "leg", who: "system" } },
+  { name: "before the workflow's next pass starts the leg too", facts: SIZE_L, expect: { state: "needs-decision", code: "leg", who: "system" } },
+  { name: "a blocked workflow's approved merge waits for the answer", facts: { ...SIZE_L, may: { workflow: BLOCKED_GATE } }, expect: { state: "needs-decision", code: "answer", who: "person" } },
+  { name: "a merge nobody approved waits for the answer", facts: { ...SIZE_L, workflow: { entry: "review", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } }, expect: { state: "needs-decision", code: "answer", who: "person" } },
+  { name: "a merge state that stays unknown is a person's, before the hand-over too", facts: { mergeable: "UNKNOWN", unknown: { since: "2026-11-04T02:00:00.000Z", reads: 6, rereads: 1, stuck: true } }, expect: { state: "needs-decision", code: "mergeable-stuck", who: "person" } },
+  { name: "a merge entry aimed off the default branch waits on a person", facts: { workflow: MERGE_ENTRY, baseOffDefault: true }, expect: { code: "base-off-default", who: "person" } },
+  { name: "signing in does not help a merge aimed off the default branch", facts: { ...SIZE_L, ...HANDED, mergeWaiting: true, baseOffDefault: true }, expect: { actions: [], code: "base-off-default", who: "person" } },
+
+  // ---- a review that waits
+  ...([
+    ["its review failed for good", { kind: "failed", wait: "its review failed 4 times at this commit" }, "review-failed", "person"],
+    ["its review is tried again later", { kind: "failed", wait: "the review after 1 failed try at this commit, from 12:05", until: NOW + 300_000 }, "review-failed", "system"],
+    ["another item blocks it", { kind: "blocked", wait: "app#9, which blocks its review" }, "review-hold", "system"],
+    ["the item that blocks it has an open question", { kind: "blocked", wait: "app#9, which blocks its review", person: true }, "review-hold", "person"],
+    ["CI runs", { kind: "ci", wait: "CI on the latest commit to finish" }, "ci", "system"],
+  ] as const).map(([name, reviewHold, code, who]): Row => ({ name: `a review waits: ${name}`, facts: { review: null, reviewHold }, expect: { actions: [], code, who } })),
+
   // ---- nothing to do and somebody to wait for
-  { name: "a draft is not merged, also handed over", facts: { ...HANDED, draft: true }, expect: { state: "draft", actions: [], eligible: false, wait: "the pull request to be marked ready for review" } },
+  { name: "a draft is not merged, also handed over", facts: { ...HANDED, draft: true }, expect: { state: "draft", actions: [], eligible: false, wait: "the pull request to be marked ready for review", code: "draft" } },
   { name: "an implementation PR whose issue's work was closed is not taken up", facts: { ...UNSTARTED, endedWorkflow: "closed" }, expect: { state: "not-started", actions: [] } },
-  { name: "a stale review at its daily cap waits for tomorrow", facts: { review: { stale: true, staleActionable: false } }, expect: { state: "review-stale", actions: [], wait: "review cap for today reached; next on a maintainer's request or tomorrow" } },
-  { name: "a review that asks for fixes and lists none waits for an answer", facts: { ...TAKE_FIX, fixup: fixup({ fixes: 0 }) }, expect: { actions: [], wait: "a maintainer's answer" } },
-  { name: "a CI fix that could not push waits on a person", facts: { ...CI_FAIL, cifix: cifix({ states: ["push-denied"] }) }, expect: { actions: [], wait: "a person to fix CI: the CI fix could not push" } },
-  { name: "a formatter run is waited for", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 4, formatterEnded: false }) }, expect: { actions: [], wait: "the formatter or lint run of the CI fix" } },
-  { name: "a conflict of a batch member waits for its batch", facts: { ...conflicting(), inActiveBatch: true }, expect: { actions: [], wait: "its batch" } },
-  { name: "without merge approval the pre-merge review waits for it", facts: { ...UNSTARTED, premerge: null, may: { repoMerge: null } }, expect: { state: "waiting-premerge", actions: [], wait: "merge approval for the repo" } },
+  { name: "a stale review at its daily cap waits for tomorrow", facts: { review: { stale: true, staleActionable: false } }, expect: { state: "review-stale", actions: [], wait: "review cap for today reached; next on a maintainer's request or tomorrow", code: "review-cap" } },
+  { name: "a review that asks for fixes and lists none waits for an answer", facts: { ...TAKE_FIX, fixup: fixup({ fixes: 0 }) }, expect: { actions: [], wait: "a maintainer's answer", code: "answer" } },
+  { name: "a CI fix that could not push waits on a person", facts: { ...CI_FAIL, cifix: cifix({ states: ["push-denied"] }) }, expect: { actions: [], wait: "a person to fix CI: the CI fix could not push", code: "ci-fix-failed" } },
+  { name: "a formatter run is waited for", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 4, formatterEnded: false }) }, expect: { actions: [], wait: "the formatter or lint run of the CI fix", code: "ci-running" } },
+  { name: "a conflict of a batch member waits for its batch", facts: { ...conflicting(), inActiveBatch: true }, expect: { actions: [], wait: "its batch", code: "batch" } },
+  { name: "without merge approval the pre-merge review waits for it", facts: { ...UNSTARTED, premerge: null, may: { repoMerge: null } }, expect: { state: "waiting-premerge", actions: [], wait: "merge approval for the repo", code: "repo-approval" } },
 
   // ---- unsure heads and operator answers
   { name: "unsure head does not merge by rule", facts: { review: { unsure: true } }, expect: { state: "needs-decision", path: null, actions: [], reasons: [UNSURE_REASON] } },
-  { name: "a handed-over merge waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, ...HANDED, mergeWaiting: true }, expect: { state: "decision-answered-merge", path: "operator", actions: [], wait: "the sign-in or access of the person who approved the merge" } },
+  { name: "a handed-over merge waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, ...HANDED, mergeWaiting: true }, expect: { state: "decision-answered-merge", path: "operator", actions: [], wait: "the sign-in or access of the person who approved the merge", code: "sign-in" } },
   { name: "the same merge runs once the sign-in arrived", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
   { name: "unsure head, handed over, merges as its approver", facts: { review: { unsure: true }, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
   { name: "a handed-over large PR merges as its approver", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], eligible: true } },
@@ -112,9 +132,9 @@ const rows: Row[] = [
   { name: "approved runs after a refusal release it", facts: { ...UNSTARTED, lastMerge: { outcome: "refused", reason: "x", ci: "success", mergeable: "MERGEABLE" }, runsApprovedAfterMerge: true }, expect: { state: "refused", actions: ["merge"] } },
   { name: "held PR keeps its state and never merges", facts: { ...UNSTARTED, mergeHeld: true }, expect: { state: "ready", path: "rule", actions: [], eligible: false } },
   { name: "held PR that was handed over never merges", facts: { ...SIZE_L, ...HANDED, mergeHeld: true }, expect: { state: "decision-answered-merge", actions: [], eligible: false } },
-  { name: "batch state replaces ready", facts: { batch: "in-batch" }, expect: { state: "in-batch", actions: [] } },
+  { name: "batch state replaces ready", facts: { batch: "in-batch" }, expect: { state: "in-batch", actions: [], code: "batch", who: "system" } },
   { name: "batch state replaces waiting-ci", facts: { batch: "batch-checking", ci: "pending" }, expect: { state: "batch-checking" } },
-  { name: "failed batch state", facts: { batch: "batch-failed" }, expect: { state: "batch-failed", actions: [] } },
+  { name: "a failed batch waits on a person", facts: { batch: "batch-failed" }, expect: { state: "batch-failed", actions: [], code: "batch-failed", who: "person" } },
   { name: "batch does not take a rule PR without a clean pre-merge review", facts: { batch: "in-batch", premerge: null }, expect: { state: "waiting-premerge" } },
   { name: "batch takes a handed-over PR", facts: { ...SIZE_L, ...HANDED, batch: "in-batch", premerge: null }, expect: { state: "in-batch" } },
   { name: "red main holds a ready PR", facts: { repoFacts: { mainRed: true } }, expect: { state: "waiting-main-ci", actions: [] } },
@@ -154,9 +174,10 @@ const rows: Row[] = [
   { name: "newer review than the post is posted again", facts: { ...UNSTARTED, post: { posted: { head: "h1", at: "2026-11-04T09:00:00.000Z", opusAt: "2026-11-04T09:00:00.000Z" } } }, expect: { state: "ready", actions: ["merge", "post-review"] } },
   { name: "no public text, nothing posted", facts: { ...UNSTARTED, post: { postable: false, posted: null } }, expect: { state: "ready", actions: ["merge"] } },
   { name: "the pipeline's own PR gets no posted review", facts: { ...UNSTARTED, post: { posted: null }, authorIsPipeline: true }, expect: { state: "ready", actions: ["merge"] } },
-  { name: "waiting runs of a fork PR are approved", facts: { runs: runs(), ci: "pending" }, expect: { state: "ci-approval", actions: ["approve-ci"] } },
-  { name: "runs that failed twice are left to a person", facts: { runs: runs({ approvable: 0 }) }, expect: { state: "ci-approval", actions: [] } },
-  { name: "runs of a same-repo PR are not approved", facts: { runs: runs({ crossRepo: false }) }, expect: { state: "ci-approval", actions: [] } },
+  { name: "waiting runs of a fork PR are approved", facts: { runs: runs(), ci: "pending" }, expect: { state: "ci-approval", actions: ["approve-ci"], code: "ci-approval", who: "system" } },
+  { name: "runs that failed twice are left to a person", facts: { runs: runs({ approvable: 0, blocked: "failed" }) }, expect: { state: "ci-approval", actions: [], code: "ci-approval-failed", who: "person" } },
+  { name: "runs of a same-repo PR are not approved", facts: { runs: runs({ crossRepo: false, blocked: "unsupported" }) }, expect: { state: "ci-approval", actions: [], code: "ci-approval-failed", who: "person" } },
+  { name: "runs wait for the repo's CI approval while it is off", facts: { runs: runs({ blocked: "off" }), repoFacts: { ciApproved: false } }, expect: { state: "ci-approval", code: "repo-approval", who: "person" } },
   { name: "no approval of runs for a held merge", facts: { runs: runs(), mergeHeld: true }, expect: { state: "ci-approval", actions: [] } },
   { name: "checks of another head: nothing to approve", facts: { runs: runs(), checksHere: false, ci: "unknown" }, expect: { state: "ci-approval", actions: [] } },
   { name: "failing CI is not verified", facts: { ci: "failure", verification: null }, expect: { state: "ci-failed", actions: [] } },
@@ -192,7 +213,7 @@ const rows: Row[] = [
   { name: "lint: a stored CI fix patch of our own breakage is collected at the pushed head", facts: { head: "pushed1", ci: "unknown", brokeByUs: true, cifix: cifix({ states: ["linting"] }), lint: [{ step: "cifix", source: "review", ended: true }] }, expect: { actions: ["lint:cifix", "review"] } },
   { name: "lint: a stored pre-merge patch is collected and the pre-merge fix-up waits", facts: { premerge: premerge({ defects: 1 }), lint: [{ step: "fixup", source: "premerge", ended: true }] }, expect: { state: "needs-fix-up", actions: ["lint:fixup"] } },
   { name: "pre-merge fix-up of a rule PR", facts: { premerge: premerge({ defects: 1 }) }, expect: { state: "needs-fix-up", actions: ["fixup:premerge"] } },
-  { name: "pre-merge fix-up needs safe fix paths", facts: { premerge: premerge({ defects: 1, fixesSafe: false }) }, expect: { state: "needs-decision", actions: [], reasons: [PREMERGE_DEFECT_REASON], wait: "a maintainer's answer" } },
+  { name: "pre-merge fix-up needs safe fix paths", facts: { premerge: premerge({ defects: 1, fixesSafe: false }) }, expect: { state: "needs-decision", actions: [], reasons: [PREMERGE_DEFECT_REASON], wait: "its pre-approved merge", code: "leg" } },
   { name: "pre-merge fix-up not for a conflicting PR", facts: { premerge: premerge({ defects: 1 }), mergeable: "CONFLICTING" }, expect: { state: "conflict", actions: [] } },
   { name: "pre-merge fix-up not for a held merge", facts: { premerge: premerge({ defects: 1 }), mergeHeld: true }, expect: { state: "needs-fix-up", actions: [] } },
 
@@ -203,8 +224,8 @@ const rows: Row[] = [
   { name: "conflict: a stored resolution is collected while the PR still conflicts, and waits for its lint task", facts: { ...conflicting({ bucket: "linting" }), lint: [{ step: "conflict", source: "review", ended: true }] }, expect: { state: "conflict", actions: ["lint:conflict"] } },
   { name: "conflict: a resolution whose lint task still runs is waited for", facts: { ...conflicting({ bucket: "linting" }), lint: [{ step: "conflict", source: "review", ended: false }] }, expect: { actions: [] } },
   { name: "conflict: already asked, held or unapproved", facts: conflicting({ bucket: "asked" }), expect: { actions: [] } },
-  { name: "conflict: held bucket", facts: { ...conflicting({ bucket: "held" }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo" } },
-  { name: "conflict: asked waits on the contributor", facts: conflicting({ bucket: "asked" }), expect: { wait: "the contributor to resolve the conflict" } },
+  { name: "conflict: held bucket", facts: { ...conflicting({ bucket: "held" }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo", code: "repo-approval" } },
+  { name: "conflict: asked waits on the contributor", facts: conflicting({ bucket: "asked" }), expect: { wait: "the contributor to resolve the conflict", code: "conflict-contributor" } },
   { name: "conflict: unapproved bucket", facts: conflicting({ bucket: "unapproved" }), expect: { actions: [] } },
   { name: "conflict: base branch name not allowed", facts: conflicting({ baseOk: false }), expect: { actions: [] } },
   { name: "conflict: merge held", facts: { ...conflicting(), mergeHeld: true }, expect: { state: "conflict", actions: [] } },
@@ -216,18 +237,18 @@ const rows: Row[] = [
 
   // ---- CI fixes
   { name: "cifix: failing CI is worked on", facts: { ...CI_FAIL, cifix: cifix() }, expect: { state: "ci-failed", actions: ["cifix:work"] } },
-  { name: "cifix: no push approval", facts: { ...UNSTARTED, ...CI_FAIL, cifix: cifix(), may: { repoPush: null } }, expect: { actions: [], wait: "push approval for the repo" } },
+  { name: "cifix: no push approval", facts: { ...UNSTARTED, ...CI_FAIL, cifix: cifix(), may: { repoPush: null } }, expect: { actions: [], wait: "push approval for the repo", code: "repo-approval" } },
   { name: "cifix: not pushable, comments approved: work (comment route)", facts: { ...CI_FAIL, cifix: cifix(), pushable: false }, expect: { actions: ["cifix:work"] } },
   { name: "cifix: not pushable, no comment approval", facts: { ...CI_FAIL, cifix: cifix(), pushable: false, repoFacts: { commentApproved: false } }, expect: { actions: [] } },
   { name: "cifix: formatter task running", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 7, formatterEnded: false, tries: 1 }) }, expect: { actions: [] } },
   { name: "cifix: formatter task ended is collected", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 7, formatterEnded: true, tries: 1 }) }, expect: { actions: ["cifix:collect"] } },
-  { name: "cifix: PR at its push limit asks the contributor", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }) }, expect: { actions: ["cifix:ask"], wait: "the contributor to fix CI" } },
+  { name: "cifix: PR at its push limit asks the contributor", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }) }, expect: { actions: ["cifix:ask"], wait: "the contributor to fix CI", code: "ci-contributor" } },
   { name: "cifix: PR at its push limit, no comment approval: a capped note", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }), repoFacts: { commentApproved: false } }, expect: { actions: ["cifix:capped"] } },
   { name: "cifix: PR at its try limit", facts: { ...CI_FAIL, cifix: cifix({ totalTries: 4 }) }, expect: { actions: ["cifix:ask"] } },
   { name: "cifix: two tries at this head", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }) }, expect: { actions: ["cifix:ask"] } },
-  { name: "cifix: two tries at this head, no comment approval: waits on approval", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo" } },
+  { name: "cifix: two tries at this head, no comment approval: waits on approval", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo", code: "repo-approval" } },
   { name: "cifix: our own breakage is not asked", facts: { ...CI_FAIL, brokeByUs: true, cifix: cifix({ totalTries: 4 }) }, expect: { actions: ["cifix:capped"] } },
-  { name: "cifix: asked at this head: waits on the contributor", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed", "asked"] }) }, expect: { actions: [], wait: "the contributor to fix CI" } },
+  { name: "cifix: asked at this head: waits on the contributor", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed", "asked"] }) }, expect: { actions: [], wait: "the contributor to fix CI", code: "ci-contributor" } },
   { name: "cifix: infra failure is rerun once", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra"], infraRuns: [11] }) }, expect: { actions: ["cifix:rerun"] } },
   { name: "cifix: rerun needs CI run approval in the repo", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra"], infraRuns: [11] }), repoFacts: { ciApproved: false } }, expect: { actions: [] } },
   { name: "cifix: rerun done, checks not read since", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra", "rerun"], infraRuns: [11], rerunAt: "2026-11-04T11:30:00.000Z" }) }, expect: { actions: [] } },
@@ -259,11 +280,11 @@ const rows: Row[] = [
   { name: "postmerge: nothing for a closed PR the pipeline did not merge", facts: { ghState: "CLOSED", review: null }, expect: { state: "closed", actions: [] } },
 
   // ---- started, unstarted and merge-entry PRs
-  { name: "an unstarted PR off the auto path plans no model work", facts: { ...UNSTARTED, review: null, label: "missing feature" }, expect: { state: "not-started", actions: [], wait: NOT_STARTED_WAIT } },
+  { name: "an unstarted PR off the auto path plans no model work", facts: { ...UNSTARTED, review: null, label: "missing feature" }, expect: { state: "not-started", actions: [], wait: NOT_STARTED_WAIT, code: "not-started" } },
   { name: "an unstarted reviewed PR off the auto path is neither merged nor asked about", facts: { ...UNSTARTED, ...SIZE_L }, expect: { state: "not-started", actions: [] } },
   { name: "a stopped auto-eligible PR is left alone", facts: { ...UNSTARTED, endedWorkflow: "stopped" }, expect: { state: "not-started", actions: [] } },
   { name: "an auto-eligible PR is reviewed", facts: { ...UNSTARTED, review: null }, expect: { state: "not-reviewed", actions: ["review"] } },
-  { name: "an auto-eligible PR whose diff the rule leaves to a person is not reviewed", facts: { ...UNSTARTED, review: null, ruledOut: ["changes the README"] }, expect: { state: "not-started", actions: [], wait: "changes the README; waits for a maintainer" } },
+  { name: "an auto-eligible PR whose diff the rule leaves to a person is not reviewed", facts: { ...UNSTARTED, review: null, ruledOut: ["changes the README"] }, expect: { state: "not-started", actions: [], wait: "changes the README; waits for a maintainer", code: "not-started" } },
   { name: "a started PR is reviewed whatever its diff holds", facts: { review: null, ruledOut: ["changes the README"] }, expect: { state: "not-reviewed", actions: ["review"] } },
   { name: "a reviewed auto-path PR whose diff the rule leaves to a person asks for an answer", facts: { ...UNSTARTED, sensitive: ["changes the README"], ruledOut: ["changes the README"] }, expect: { state: "needs-decision", actions: [] } },
   { name: "our push that broke CI on an auto-path PR is repaired, whatever its diff holds", facts: { ...UNSTARTED, head: "pushed1", ci: "unknown", brokeByUs: true, cifix: cifix(), reviewHold: { kind: "ci", wait: "CI", red: true }, ruledOut: ["changes the README"] }, expect: { actions: ["cifix:work"] } },
@@ -287,6 +308,8 @@ for (const row of rows) {
     if (row.expect.eligible !== undefined) assert.equal(p.eligible, row.expect.eligible);
     if (row.expect.note !== undefined) assert.equal(p.note, row.expect.note);
     if (row.expect.wait !== undefined) assert.equal(p.wait, row.expect.wait);
+    if (row.expect.code !== undefined) assert.equal(p.waitCode, row.expect.code);
+    if (row.expect.who !== undefined) assert.equal(p.waitKind, row.expect.who);
     if (row.expect.conflictNote !== undefined) assert.equal(p.conflictNote, row.expect.conflictNote);
   });
 }

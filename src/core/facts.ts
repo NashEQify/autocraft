@@ -448,6 +448,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.cifix = cifixOf(cfHead ?? qh);
   }
   base.batch = d.merge.batchStates.get(`${ref}@${qh}`) ?? null;
+  // A hand-over after the batch failed (a person answered): the merge is tried again.
+  if (base.batch === "batch-failed" && handed && handed.updated_at > (d.merge.batchFailedAt.get(`${ref}@${qh}`) ?? "")) base.batch = null;
   if (i.base_ref) base.stackedOn = (d.stacked.get(`${repo} ${i.base_ref} ${`${slugOf(repo)}`.toLowerCase()}`) ?? []).find((n) => n !== number) ?? null;
   base.baseOffDefault = !!i.base_ref && !!defaultBranch && i.base_ref !== defaultBranch;
   base.mainFix = !!i.head_ref?.startsWith(MAIN_FIX_BRANCH_PREFIX) && ownHere;
