@@ -14,23 +14,22 @@ import { fileURLToPath } from "node:url";
 import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
 import { advancePreapprovals, preapprovalInputs } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
-import { recordUsageSamples } from "../agents/accounts.ts";
-import { AccountWatcher } from "../agents/manage.ts";
-import { failRunning, pruneRuns } from "../agents/runs.ts";
+import { pruneRuns } from "../agents/runs.ts";
 import { pruneJevUnsure } from "../agents/step.ts";
 import { pruneTasks, reapLost } from "../build/tasks.ts";
 import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
-import { commandWorkExpr, drainCommands, pruneCommands } from "../github/commands.ts";
+import { drainCommands, pruneCommands } from "../github/commands.ts";
 import { checkPendingUpdate } from "../build/worker-update.ts";
-import { endJob, JOB_KEEP_MS, now, pruneJobs, resumeJob, RUNNER_STOPPED } from "./jobs.ts";
+import { JOB_KEEP_MS, now, pruneJobs } from "./jobs.ts";
+import { endJob, recoverJobs } from "./lifecycle.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
 import { groupsFile, killGroups, removeGroupsFile } from "./groups.ts";
 import { buildDiffFacts } from "../review/diff.ts";
-import { loadSteps, modelsOf, usesClaude, type Params } from "./steps.ts";
-import { jobBlock } from "./concurrency.ts";
+import { loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
+import { jobBlock, stepParallel } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
@@ -38,11 +37,14 @@ import { noTakerFor } from "../remote/takers.ts";
 import { JOB_DEADLINE_ENV, stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
-import { jobRemoteQueue, REMOTE_WAIT_CAP_MS, withdrawJobCalls } from "../remote/calls.ts";
+import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
+import { CALLER_STALE_MS } from "../remote/room.ts";
+import { claimJob, failQueued, loadLiveJobs, loadRunnerTick, markDeadlineStops, saveLaneState, setPids, type LogCursor, type QueuedJob, type RunningState } from "../data/jobs/index.ts";
+import { loadSyncState, hasSyncRequests } from "../data/mirror/index.ts";
+import { hasCommandWork } from "../data/workflow/index.ts";
 import { exclusive } from "../async-seq.ts";
 import { refreshReadIdentity } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
-import { excluded, jsonNum } from "../db/kx.ts";
 
 export const logsDir = (): string => envVar("RUNNER_LOGS") ?? join(homedir(), ".cache/autocraft-logs/jobs");
 
@@ -51,7 +53,8 @@ export function runnerLockPath(): string {
   return join(dir, `runner-${dbLockName()}.lock`);
 }
 
-export const HEARTBEAT_KEY = "runner_heartbeat";
+/** The lane_state mark the runner writes on every tick. */
+export const HEARTBEAT_MARK = "heartbeat";
 /** How often the runner brings the flowchart summary up to date (src/flow/summary.ts). */
 export const FLOW_EVERY_MS = 20_000;
 /** How often queued webhook items are read again from GitHub. */
@@ -109,6 +112,11 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/** The `number` param of a job (a security finding), or null. */
+function numberOfParams(params: string): number | null {
+  try { const n = (JSON.parse(params) as { number?: unknown }).number; return typeof n === "number" ? n : null; } catch { return null; }
+}
+
 export class Runner {
   readonly db: Db;
   readonly running = new Map<number, Running>();
@@ -160,39 +168,22 @@ export class Runner {
    * resuming jobs stay; other calls of jobs, model-queue waits and work leases of the gone runner end.
    */
   async recover(): Promise<number> {
-    const rows = await this.db.all(this.db.k.selectFrom("jobs").select(["id", "pid", "cancel_requested_at"]).where("state", "=", "running"));
-    for (const r of rows) {
-      if (this.running.has(r.id)) continue;
-      if (r.pid && isJobProcess(r.pid, r.id)) {
+    return await recoverJobs(this.db, {
+      skip: (id) => this.running.has(id),
+      stop: (r) => {
+        if (!r.pid || !isJobProcess(r.pid, r.id)) return;
         killGroup(r.pid, "SIGKILL");
         // A command-line run's process leads no group of its own.
         try { process.kill(r.pid, "SIGKILL"); } catch { /* gone with its group */ }
-      }
-      const cancelled = r.cancel_requested_at !== null;
-      if (!cancelled && await resumeJob(this.db, r.id, "the runner restarted", "crash")) {
-        this.o.log(`job ${r.id}: left running by an earlier runner, queued to resume`);
-        continue;
-      }
-      await this.db.run(this.db.k.updateTable("jobs")
-        .set((eb) => ({ state: cancelled ? "cancelled" : "failed", ended_at: now(), pid: null, error: cancelled ? eb.ref("error") : eb.fn.coalesce("error", eb.val(RUNNER_STOPPED)) }))
-        .where("id", "=", r.id).where("state", "=", "running"));
-      // Replies an earlier run of the job left unread are not kept (as in endJob).
-      await this.db.run(this.db.k.updateTable("main.remote_calls").set({ reply: null }).where("job_id", "=", r.id).where("state", "=", "done").where("reply", "is not", null));
-      this.o.log(`job ${r.id}: left running by an earlier runner, marked ${cancelled ? "cancelled" : "failed"}`);
-    }
-    // Model calls of a runner that is gone no longer hold an account slot.
-    const orphans = await failRunning(this.db, "The runner stopped during this call.");
-    if (orphans) this.o.log(`${orphans} agent runs left running by an earlier runner, marked failed`);
-    await this.db.run(this.db.k.deleteFrom("model_waits"));
-    await withdrawJobCalls(this.db, "The runner stopped during this call.");
-    await this.db.run(this.db.k.deleteFrom("work_leases"));
-    return rows.length;
+      },
+      log: this.o.log,
+    });
   }
 
   /** One pass: heartbeat, cancels, autopilot, new jobs. */
   async tick(): Promise<void> {
     const t = now();
-    await this.db.run(this.db.k.insertInto("settings").values({ key: HEARTBEAT_KEY, value: t }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: t }]);
     if (this.o.lockFile) {
       try {
         utimesSync(this.o.lockFile, new Date(), new Date());
@@ -216,7 +207,7 @@ export class Runner {
     }
     await this.webhookTick();
     this.reconcileTick();
-    await this.usageTick();
+    await this.pruneTick();
     this.workerUpdateTick();
     await this.autopilot();
     await this.startJobs();
@@ -230,10 +221,10 @@ export class Runner {
   private async webhookTick(): Promise<void> {
     if (this.webhooking || Date.now() - this.webhookAt < WEBHOOK_DRAIN_MS) return;
     this.webhookAt = Date.now();
-    const commands = !!await this.db.get(this.db.k.selectFrom("main.github_commands").select((eb) => eb.lit(1).as("one")).where((eb) => commandWorkExpr(eb)).limit(1));
     // Autorepins whose pull request was merged or closed, or whose lockfile task ended (src/repin).
-    const repins = !this.repinning && await anyRepinDue(this.db);
-    if (!commands && !repins && !await this.db.get(this.db.k.selectFrom("main.sync_requests").select((eb) => eb.lit(1).as("one")).limit(1))) return;
+    const [commands, repinDue, requests] = await this.db.together(() => Promise.all([hasCommandWork(this.db), anyRepinDue(this.db), hasSyncRequests(this.db)]));
+    const repins = !this.repinning && repinDue;
+    if (!commands && !repins && !requests) return;
     this.webhooking = (async () => {
       const { lockHeld, lockPath, fullLockPath, Client, SYNC_RESERVE } = await import("../mirror.ts");
       if (lockHeld(lockPath()) || lockHeld(fullLockPath())) return;
@@ -263,9 +254,9 @@ export class Runner {
    * Below the reserve nothing is read until the limit resets; the sync's reading is newer than ours when it is the later one.
    */
   private async seedRate(c: import("../mirror.ts").Client): Promise<import("../mirror.ts").Client> {
-    const get = async (k: string): Promise<string | undefined> => (await this.db.get(this.db.k.selectFrom("main.settings").select("value").where("key", "=", k)))?.value ?? undefined;
-    const seen = Number(await get("sync_rate_remaining"));
-    const reset = Date.parse(await get("sync_rate_reset_at") ?? "");
+    const state = await loadSyncState(this.db);
+    const seen = state.rate_remaining ?? NaN;
+    const reset = Date.parse(state.rate_reset_at ?? "");
     if (Number.isFinite(seen) && Number.isFinite(reset) && reset > Date.now()) {
       c.remaining = c.remaining === null ? seen : Math.min(c.remaining, seen);
       c.resetAt = new Date(reset);
@@ -364,26 +355,11 @@ export class Runner {
       .finally(() => (this.updating = false));
   }
 
-  private usageAt = 0;
-  private refreshAt = 0;
   private pruneAt = 0;
-  private watcher: AccountWatcher | undefined;
 
-  /** Records usage readings that changed (at most every 15 s), reads sign-in state (every 15 minutes) and plan usage (every 5) of accounts through the claude command, and prunes old agent data hourly. */
-  private async usageTick(): Promise<void> {
+  /** Prunes old jobs, logs and agent data hourly. */
+  private async pruneTick(): Promise<void> {
     const t = Date.now();
-    if (t - this.usageAt >= 15_000) {
-      this.usageAt = t;
-      try {
-        await recordUsageSamples(this.db, t);
-      } catch (e) {
-        this.o.log(`usage samples: ${(e as Error).message}`);
-      }
-    }
-    if (t - this.refreshAt >= 60_000) {
-      this.refreshAt = t;
-      void (this.watcher ??= new AccountWatcher(this.db, (m) => this.o.log(m))).tick(t);
-    }
     if (t - this.pruneAt >= 3600_000) {
       this.pruneAt = t;
       try {
@@ -435,17 +411,18 @@ export class Runner {
   }
 
   private async cancels(): Promise<void> {
-    await this.checkRunning();
+    if (this.running.size) await this.checkRunning((await loadRunnerTick(this.db, Date.now(), CALLER_STALE_MS)).running);
     // The new log lines of every running job, in one write (each job at most every JOB_LOG_FLUSH_MS).
     await copyLogs(this.db, [...this.running.values()].map((r) => r.logCopy)).catch((e: Error) => this.o.log(`job logs not stored: ${e.message}`));
   }
 
-  private async checkRunning(): Promise<void> {
+  private async checkRunning(states: RunningState[]): Promise<void> {
+    const byId = new Map(states.map((r) => [r.id, r]));
     for (const [id, r] of this.running) {
-      const row = await this.db.get(this.db.k.selectFrom("jobs").select("cancel_requested_at").where("id", "=", id));
+      const row = byId.get(id);
       // Time a user-local model call waits for a helper counts like waiting for an account slot: not toward the deadline, and not as a time without progress.
       const nowMs = Date.now();
-      const remote = await jobRemoteQueue(this.db, id);
+      const remote = { queued: row?.queued ?? false, lastLeaseAt: row?.lastLeaseAt ?? null };
       if (r.remoteSeen?.queued) r.remoteWaitMs += nowMs - r.remoteSeen.at;
       r.remoteSeen = { at: nowMs, queued: remote.queued };
       // Up to REMOTE_WAIT_CAP_MS of it; past that a call nobody takes no longer holds the job and its item.
@@ -461,7 +438,7 @@ export class Runner {
       if ((late || idle) && !cancel && r.flaggedAt === null && r.termAt === null) {
         r.flaggedAt = Date.now();
         const msg = r.stopMsg = idle && !late ? noProgressError(r.noProgressMin) : deadlineError(r.deadlineMin);
-        await this.db.run(this.db.k.updateTable("jobs").set({ error: msg }).where("id", "=", id).where("state", "=", "running"));
+        await markDeadlineStops(this.db, [{ id, error: msg }]);
         try { appendFileSync(r.logPath, `${now()} ${msg}; the job may finish its current item, and is stopped ${Math.round(this.graceMs / 60_000)} min from now\n`); } catch { /* the log is gone */ }
         this.o.log(`job ${id}: ${msg}; finishing its current item`);
       }
@@ -494,74 +471,75 @@ export class Runner {
    */
   private async startJobs(): Promise<void> {
     const steps = await loadSteps();
-    const queued = (await this.db.all(this.db.k.selectFrom("jobs").select(["id", "step", "params", "requested_by", "repo"]).where("state", "=", "queued").orderBy("id")))
-      .sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
+    const [tick, live, cap] = await this.db.together(() => Promise.all([loadRunnerTick(this.db, Date.now(), CALLER_STALE_MS), loadLiveJobs(this.db), stepParallel(this.db)]));
+    const queued = tick.queued.sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
     if (!queued.length) return;
+    const running = live.filter((j) => j.state === "running");
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
     const [on, draining] = await Promise.all([isEnabled(this.db), isDraining(this.db)]);
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
     const room = new Map<number, Map<string, number>>();
     const pass = await queueRoomPass(this.db);
     let started = 0;
-    for (const q of queued) {
-      if (draining || (q.requested_by === AUTOPILOT_USER && !on)) continue;
-      if (this.running.size >= this.o.maxJobs) return;
-      const step = steps.get(q.step);
-      if (!step) {
-        await this.db.run(this.db.k.updateTable("jobs").set({ state: "failed", ended_at: now(), error: "This step does not exist in this build." }).where("id", "=", q.id).where("state", "=", "queued"));
-        continue;
+    const pids: { id: number; pid: number }[] = [];
+    const failed: { id: number; error: string }[] = [];
+    try {
+      for (const q of queued) {
+        if (draining || (q.requested_by === AUTOPILOT_USER && !on)) continue;
+        if (this.running.size >= this.o.maxJobs) return;
+        const step = steps.get(q.step);
+        if (!step) {
+          failed.push({ id: q.id, error: "This step does not exist in this build." });
+          continue;
+        }
+        // The claim checks the same rules in one statement; this test spares the model-queue questions for a job that cannot start.
+        if (await jobBlock(this.db, steps, { step: q.step, repo: q.repo, number: numberOfParams(q.params) }, { states: ["running"], mutex: true, active: running, cap })) continue;
+        let claude = false;
+        try { claude = usesClaude(modelsOf(step, JSON.parse(q.params) as Params)); } catch { /* params are checked when the job runs */ }
+        const cls = step.priority ?? 0;
+        let byRepo = room.get(cls);
+        if (!byRepo) room.set(cls, (byRepo = new Map()));
+        const key = `${q.step}\n${q.repo ?? ""}`;
+        const roomOf = async (): Promise<number> => byRepo.get(key) ?? await pass.room(cls, q.repo ? [q.repo] : undefined, q.step) - started;
+        if (claude && q.repo && !await pass.taker([q.repo], q.step)) {
+          // A pipeline job waits for a Task Runner; a command-line session job (`workspace try`) is not replanned, so it fails.
+          const why = q.step === TRY_STEP ? await noTakerFor(this.db, q.repo, q.step) : null;
+          if (why) failed.push({ id: q.id, error: why });
+          continue;
+        }
+        if (claude && !running.some((j) => j.step === step.name)) {
+          // Nothing of the step runs: it starts anyway, and takes a slot of the room.
+        } else if (claude) {
+          byRepo.set(key, await roomOf());
+          if (byRepo.get(key)! <= 0) continue;
+        }
+        const spawned = await this.start(q, step, steps, cap, tick.logCursors.get(q.id));
+        if (spawned) {
+          if (spawned.pid !== null) pids.push({ id: q.id, pid: spawned.pid });
+          running.push({ id: q.id, step: step.name, state: "running", repo: q.repo, number: numberOfParams(q.params), params: q.params, items: null, requested_by: q.requested_by, resumes: q.resumes, cancel_requested_at: null, started_at: null, pid: spawned.pid });
+          if (claude) {
+            byRepo.set(key, await roomOf());
+            started++;
+            for (const m of room.values()) for (const [k, n] of m) m.set(k, n - 1);
+          }
+        }
       }
-      if (await this.blocked(steps, q.id)) continue;
-      let claude = false;
-      try { claude = usesClaude(modelsOf(step, JSON.parse(q.params) as Params)); } catch { /* params are checked when the job runs */ }
-      const cls = step.priority ?? 0;
-      let byRepo = room.get(cls);
-      if (!byRepo) room.set(cls, (byRepo = new Map()));
-      const key = `${q.step}\n${q.repo ?? ""}`;
-      const roomOf = async (): Promise<number> => byRepo.get(key) ?? await pass.room(cls, q.repo ? [q.repo] : undefined, q.step) - started;
-      if (claude && q.repo && !await pass.taker([q.repo], q.step)) {
-        // A pipeline job waits for a Task Runner; a command-line session job (`workspace try`) is not replanned, so it fails.
-        const why = q.step === TRY_STEP ? await noTakerFor(this.db, q.repo, q.step) : null;
-        if (why) await this.db.run(this.db.k.updateTable("jobs").set({ state: "failed", ended_at: now(), error: why }).where("id", "=", q.id).where("state", "=", "queued"));
-        continue;
-      }
-      if (claude && !await this.db.get(this.db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", step.name).where("state", "=", "running").limit(1))) {
-        // Nothing of the step runs: it starts anyway, and takes a slot of the room.
-      } else if (claude) {
-        byRepo.set(key, await roomOf());
-        if (byRepo.get(key)! <= 0) continue;
-      }
-      if (await this.start(q.id, step.name, steps) && claude) {
-        byRepo.set(key, await roomOf());
-        started++;
-        for (const m of room.values()) for (const [k, n] of m) m.set(k, n - 1);
-      }
+    } finally {
+      await failQueued(this.db, failed);
+      if (pids.length) await setPids(this.db, pids);
     }
   }
 
-  /** Why the queued job cannot start: a running job (of this runner or a command-line run) of the same step and repo, a full step, or a held mutex. */
-  private async blocked(steps: Awaited<ReturnType<typeof loadSteps>>, id: number): Promise<string | null> {
-    const r = await this.db.get(this.db.k.selectFrom("jobs").select(["step", "repo", jsonNum(this.db, "params", "$.number").as("number")]).where("id", "=", id));
-    return r ? await jobBlock(this.db, steps, r, { states: ["running"], mutex: true }) : "gone";
-  }
-
-  /** The job's `limit` param (its items), when it has one. */
-  private async limitOf(id: number): Promise<number | undefined> {
-    try {
-      const p = JSON.parse((await this.db.get(this.db.k.selectFrom("jobs").select("params").where("id", "=", id)))!.params) as { limit?: unknown };
-      return typeof p.limit === "number" ? p.limit : undefined;
-    } catch { return undefined; }
-  }
-
-  private async start(id: number, stepName: string, steps: Awaited<ReturnType<typeof loadSteps>>): Promise<boolean> {
+  /** The job's claim, then its process; null when another job holds the step or the claim failed. */
+  private async start(q: QueuedJob, step: StepDef, steps: Map<string, StepDef>, cap: number, cursor: LogCursor | undefined): Promise<{ pid: number | null } | null> {
+    const id = q.id, stepName = step.name;
     const logPath = join(this.o.logs, `job-${id}.log`);
-    // The check and the claim are one write transaction, so a command-line run cannot take the step in between.
-    // Read before the claim: nothing may wait between the claim and the spawn.
-    const logCopy = await JobLogCopy.open(this.db, id, logPath);
-    const deadlineMin = this.maxMin(stepName, await this.limitOf(id));
-    const claimed = await this.db.write(async () => await this.blocked(steps, id) ? 0
-      : (await this.db.run(this.db.k.updateTable("jobs").set({ state: "running", started_at: now(), log_path: logPath }).where("id", "=", id).where("state", "=", "queued"))).changes);
-    if (!claimed) return false;
+    const logCopy = JobLogCopy.open(id, logPath, cursor);
+    const deadlineMin = this.maxMin(stepName, q.limit ?? undefined);
+    const mutexSteps = step.exclusive ? [...steps.values()].filter((x) => x.exclusive === step.exclusive).map((x) => x.name) : [];
+    // One guarded statement: a command-line run cannot take the step in between.
+    const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
+    if (!claimed) return null;
     const groups = groupsFile(this.o.logs, id);
     removeGroupsFile(groups);
     const fd = openSync(logPath, "a");
@@ -595,9 +573,8 @@ export class Runner {
       });
     });
     this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin, logPath, logCopy, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
-    await this.db.run(this.db.k.updateTable("jobs").set({ pid: child.pid ?? null }).where("id", "=", id));
     this.o.log(`job ${id}: started (pid ${child.pid})`);
-    return true;
+    return { pid: child.pid ?? null };
   }
 
   private async finish(id: number, code: number | null, signal: NodeJS.Signals | null, spawnError: string | null): Promise<void> {

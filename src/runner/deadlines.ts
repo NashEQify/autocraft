@@ -21,7 +21,6 @@ const item = (id: ClaudePromptId, lint = false): Call => ({ id, ...(lint && { li
 export const STEP_PLANS: Record<string, Plan> = {
   referee: { calls: [item("referee.sonnet")], items: 100 },
   "dupes-compare": { calls: [item("dupes.compare-prs.opus"), item("dupes.compare-issues.sonnet")], items: 20 },
-  decide: { calls: [item("decide.prepare")], items: 50 },
   conversation: { calls: [item("conversation.turn")], items: 30 },
   "areas-propose": { calls: [item("areas.propose")], items: 1 },
   "areas-suggest": { calls: [item("areas.suggest")], items: 1 },

@@ -17,7 +17,6 @@ import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
 import { openGroupExpr, unsureAtQuery } from "../src/core/rule-queries.ts";
 import { currentHeadExpr } from "../src/verify/results.ts";
-import { ADOPTABLE_CALL, EARLIER_RUN_CALL, KEPT_RUNS, RESUMING_JOBS, adoptableCallExpr, earlierRunCallExpr, keptRunsExpr, resumingJobsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";
 
 /** The text version of `currentHeadExpr`, kept here as the reference the twin is checked against. */
@@ -195,14 +194,6 @@ function cases(db: Db): Case[] {
   }
   out.push({ name: "manualSql", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE ${manualSql("t.login")} ORDER BY t.login`], expect: ["alice"],
     built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualExpr(d, eb, "t.login")).orderBy("t.login") });
-  out.push({ name: "KEPT_RUNS", text: [`SELECT id AS k FROM agent_runs WHERE id NOT IN (${KEPT_RUNS}) ORDER BY id`], expect: ["2", "3"],
-    built: (d) => d.k.selectFrom("agent_runs").select("id as k").where("id", "not in", keptRunsExpr(d)).orderBy("id") });
-  out.push({ name: "RESUMING_JOBS", text: [`SELECT id AS k FROM main.jobs WHERE id IN (${RESUMING_JOBS}) ORDER BY id`], expect: ["1"],
-    built: (d) => d.k.selectFrom("main.jobs").select("id as k").where("id", "in", resumingJobsExpr(d)).orderBy("id") });
-  out.push({ name: "EARLIER_RUN_CALL", text: [`SELECT id AS k FROM main.remote_calls WHERE job_id IS NOT NULL AND ${EARLIER_RUN_CALL} ORDER BY id`], expect: ["9", "10", "11", "12", "14"],
-    built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where("job_id", "is not", null).where((eb) => earlierRunCallExpr(d, eb)).orderBy("id") });
-  out.push({ name: "ADOPTABLE_CALL", text: [`SELECT id AS k FROM main.remote_calls WHERE ${ADOPTABLE_CALL} ORDER BY id`], expect: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "12", "13", "14", "15"],
-    built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where((eb) => adoptableCallExpr(eb)).orderBy("id") });
   out.push({ name: "COMMAND_WORK_SQL", text: [`SELECT comment_id AS k FROM main.github_commands WHERE ${COMMAND_WORK_SQL} ORDER BY comment_id`], expect: ["1", "2"],
     built: (d) => d.k.selectFrom("main.github_commands").select("comment_id as k").where((eb) => commandWorkExpr(eb)).orderBy("comment_id") });
   out.push({ name: "OPEN_GROUP_SQL", text: [`SELECT g.id AS k FROM decisions g WHERE ${OPEN_GROUP_SQL} ORDER BY g.id`], expect: ["app:dupegroup:1", "app:dupegroup:3", "app:dupegroup:4"],

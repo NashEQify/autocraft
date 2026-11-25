@@ -2,7 +2,7 @@
 // A lease whose job is not running counts as free, so a crash leaves nothing behind.
 import { currentJob } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { releaseLeases, takeLeases } from "../data/jobs/index.ts";
 
 let skipped = 0;
 /** Items this process skipped because another job held their lease. */
@@ -23,22 +23,11 @@ export function skipItem(key: string, log: (line: string) => void, why: string):
 
 /** Takes the lease for the job. False when another running job holds it. */
 export async function take(db: Db, key: string, jobId: number, step: string): Promise<boolean> {
-  return await db.write(async () => {
-    const held = await db.get(db.k.selectFrom("work_leases as l").leftJoin("jobs as j", "j.id", "l.job_id")
-      .select(["l.job_id as job", "j.state as state"]).where("l.key", "=", key));
-    if (held && held.job !== jobId && held.state === "running") return false;
-    await db.run(db.k.insertInto("work_leases").values({ key, job_id: jobId, step, taken_at: new Date().toISOString() })
-      .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["job_id", "step", "taken_at"]))));
-    return true;
-  });
+  return (await takeLeases(db, [key], { id: jobId, step })).has(key);
 }
 
 export async function release(db: Db, key: string, jobId: number): Promise<void> {
-  await db.run(db.k.deleteFrom("work_leases").where("key", "=", key).where("job_id", "=", jobId));
-}
-
-export async function releaseJob(db: Db, jobId: number): Promise<void> {
-  await db.run(db.k.deleteFrom("work_leases").where("job_id", "=", jobId));
+  await releaseLeases(db, { keys: [key], jobId });
 }
 
 /**

@@ -1,15 +1,13 @@
 // Which jobs may run together: one queued or running job per (step, repo), at most `step_parallel` repos per step,
 // and the named mutexes of StepDef.exclusive. The planner, the command-line gate and the runner use the same rules.
-// In the user-local mode a queued job that no Task Runner may take (untakenTest) holds no repo of the step.
-import { audit } from "../dash/audit.ts";
-import { inferenceMode } from "../remote/mode.ts";
+// A queued job that no Task Runner may take (untakenTest) holds no repo of the step.
+import { freshConfig, saveSettings } from "../data/control/index.ts";
+import { loadLiveJobs } from "../data/jobs/index.ts";
 import { taskOfStep, TASK_CHOICES } from "../remote/my-tasks.ts";
 import { takerTest } from "../remote/takers.ts";
 import { knownStep, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
-import { setting } from "../settings-read.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { excluded, jsonNum } from "../db/kx.ts";
 
 export const STEP_PARALLEL_KEY = "step_parallel";
 export const STEP_PARALLEL_DEFAULT = 1;
@@ -21,14 +19,11 @@ export class ParallelError extends Error {
 
 /** The setting as shown and stored: a positive integer or "none". */
 export async function stepParallelSetting(db: Db): Promise<string> {
-  const v = await setting(db, STEP_PARALLEL_KEY);
-  if (v === "none") return v;
-  const n = Number(v);
-  return Number.isInteger(n) && n >= 1 && n <= STEP_PARALLEL_MAX ? String(n) : String(STEP_PARALLEL_DEFAULT);
+  return (await freshConfig(db, [STEP_PARALLEL_KEY])).stepParallelSetting;
 }
 
 /** The most repos one step may have running at once (Infinity for "none"). */
-export const stepParallel = async (db: Db): Promise<number> => { const s = await stepParallelSetting(db); return s === "none" ? Infinity : Number(s); };
+export const stepParallel = async (db: Db): Promise<number> => (await freshConfig(db, [STEP_PARALLEL_KEY])).stepParallel;
 
 export async function setStepParallel(db: Db, input: unknown, by: string): Promise<string> {
   const v = typeof input === "number" ? String(input) : input;
@@ -36,9 +31,8 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
     throw new ParallelError(`repos at once per step must be a whole number from 1 to ${STEP_PARALLEL_MAX}, or none`);
   }
   const was = await stepParallelSetting(db);
-  await db.run(db.k.insertInto("settings").values({ key: STEP_PARALLEL_KEY, value: v as string })
-    .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
-  if (v !== was) await audit(db, by, "step-parallel", "pipeline", { stepParallel: v, was });
+  if (v === was) return v as string;
+  await saveSettings(db, [{ key: STEP_PARALLEL_KEY, value: v as string }], by, { action: "step-parallel", target: "pipeline", details: { stepParallel: v, was } });
   return v as string;
 }
 
@@ -46,8 +40,7 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
 export type Active = { id: number; step: string; state: string; repo: string | null; number: number | null; params?: string };
 
 export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> {
-  return await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "repo", jsonNum(db, "params", "$.number").as("number"), "params"])
-    .where("state", "in", states));
+  return (await loadLiveJobs(db)).filter((j) => (states as string[]).includes(j.state)).map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
 }
 
 /** A job or proposal as untakenTest reads it: `params` as an object or the stored JSON. */
@@ -65,14 +58,12 @@ export const noRunnerForTask = (repo: string, step: string): string => {
 };
 
 /**
- * Why a job waits for a Task Runner, or null: in the user-local mode, a job of a step that calls Claude, for a repo no Task
+ * Why a job waits for a Task Runner, or null: a job of a step that calls Claude, for a repo no Task
  * Runner may take now or whose step's task none of those takes (src/remote/takers.ts, the rule the runner's job starts and the
- * pools use). The runners are read once, on the first such job, so one test serves a whole pass. Never in the server-account
- * mode, nor for a job with no repo. A job names no item (a `number` param is a security finding), so a runner that takes only some
+ * pools use). The runners are read once, on the first such job, so one test serves a whole pass. Never for a job with no repo. A job names no item (a `number` param is a security finding), so a runner that takes only some
  * items counts on the repos with such an item (src/remote/task-items.ts); the job's pools then ask about each unit's items.
  */
 export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: number = Date.now()): Promise<UntakenTest> {
-  if (await inferenceMode(db) !== "user-local") return async () => null;
   const takes = takerTest(db, nowMs);
   const claude = (j: JobOfRepo): boolean => {
     let params: Params = {};
@@ -101,7 +92,7 @@ export type Want = { step: string; repo: string | null; number?: number | null }
  * A queued job that `untaken` says waits for a Task Runner counts as the same work but takes no repo of the capacity; a
  * pass that asks many times passes one test.
  */
-export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, o: { states?: ("queued" | "running")[]; extra?: Active[]; reserved?: Active[]; mutex?: boolean; precheck?: boolean; untaken?: UntakenTest; active?: Active[] } = {}): Promise<string | null> {
+export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, o: { states?: ("queued" | "running")[]; extra?: Active[]; reserved?: Active[]; mutex?: boolean; precheck?: boolean; untaken?: UntakenTest; active?: Active[]; cap?: number } = {}): Promise<string | null> {
   // `active`: the queued and running jobs, read once by a caller that asks many times while no job changes.
   const jobsIn = async (states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> => (o.active ? o.active.filter((j) => (states as string[]).includes(j.state)) : await activeJobs(db, states));
   const held = [...await jobsIn(o.states), ...(o.reserved ?? [])].filter((j) => j.step === want.step);
@@ -110,7 +101,7 @@ export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, 
     const clash = same.find((j) => sameWork(want.step, j, { repo: want.repo, number: want.number ?? null }));
     if (clash) return `job ${clash.id} of ${want.step} is ${clash.state}`;
   }
-  const cap = await stepParallel(db);
+  const cap = o.cap ?? await stepParallel(db);
   if (cap !== Infinity) {
     let untaken = o.untaken;
     const holds = async (j: Active): Promise<boolean> => j.state !== "queued" || j.params === undefined || !await (untaken ??= await untakenTest(db, steps))(j);
