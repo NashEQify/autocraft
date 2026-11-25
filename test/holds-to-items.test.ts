@@ -24,7 +24,7 @@ async function move(run: Run, convert: () => Promise<void>): Promise<void> {
   await wf(4, "pr", "review", "backlog");
   // The workflow's PR is known by its attempt alone, as in a database whose workflows were never linked.
   await wf(7, "issue", "implement", "running");
-  await run(`INSERT INTO implementations (repo, number, attempt, state, queued_by, queued_at, text_hash, pr_number, created_at, updated_at) VALUES ('app', 7, 1, 'pr', 'mira', '${T}', 'h', 6, '${T}', '${T}')`);
+  await run(`INSERT INTO implementations (repo, number, attempt, state, queued_by, text_hash, pr_number, created_at, updated_at) VALUES ('app', 7, 1, 'pr', 'mira', 'h', 6, '${T}', '${T}')`);
   const read = async () => (await run("SELECT number, state, stopped_by, blocker, rec, blocker_params, started_by FROM item_workflows ORDER BY number"))
     .map((r) => [Number(r.number), r.state, r.stopped_by, r.blocker, r.rec, JSON.parse((r.blocker_params as string | null) ?? "null"), r.started_by]);
   await convert();
