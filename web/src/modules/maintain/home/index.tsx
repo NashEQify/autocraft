@@ -15,5 +15,4 @@ export const maintainHomeModule: FeatureModule = {
     { id: "go-stats", keys: "g s", label: t("Go to stats"), group: "Go to" },
   ],
   routes: [{ path: "/", scoped: true, view: { id: "maintain-home", title: t("Home"), phone: HomeView, panels: [{ id: "main", title: t("Home"), component: HomeView, defaultSize: 100 }] } }],
-  prefetch: (api) => void api.maintain.home(),
 };

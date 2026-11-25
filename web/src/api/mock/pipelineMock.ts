@@ -64,7 +64,7 @@ const job = (id: number, step: string, state: Job["state"], startMin: number | n
 
 const pr = (repo: string, number: number, title: string) => ({ repo, number, kind: "pr" as const, state: "open" as const, title });
 const JOB_ITEMS: Record<number, JobDetail["items"]> = {
-  49: [{ ...pr("designcraft", 65, "Replace the fixed page grid with snap guides"), outcome: "asked Merge?", decision: "merge:designcraft:65:3f9a2c1" }],
+  49: [{ ...pr("designcraft", 65, "Replace the fixed page grid with snap guides"), outcome: "take" }],
   50: ["Fix overset detection for locked frames", "Add snap guides to the ruler", "Crash when ungrouping nested frames", "Export drops the bleed box", "Guides ignore locked layers", "Undo skips the last move", "Text frame loses its style on paste"].map((t, i) => ({
     ...pr("designcraft", 1484 + i * 3, t), outcome: i % 3 === 2 ? "labelled bugfix, needs-review" : "labelled bugfix", decision: null })),
 };

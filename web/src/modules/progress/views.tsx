@@ -153,7 +153,7 @@ function RepoTable({ p }: { p: Progress }) {
             return (
               <tr key={r.repo} className="h-9 border-b border-line last:border-0 hover:bg-ink/[0.03]">
                 <td className="px-3">
-                  <Link to={`/needs?repo=${r.repo}`} className="font-medium hover:text-accent-ink hover:underline">
+                  <Link to={`/items?repo=${r.repo}`} className="font-medium hover:text-accent-ink hover:underline">
                     {r.repo}
                   </Link>
                 </td>

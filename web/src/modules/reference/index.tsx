@@ -13,7 +13,6 @@ const page = (id: string, title: string, component: typeof PromptsView) => ({ id
 export const referenceModule: FeatureModule = {
   id: "reference",
   permission: "viewer",
-  commands: [],
   routes: [
     { path: "prompts", view: page("prompts", t("Prompts"), PromptsView) },
     { path: "envs/:id?", view: page("envs", t("Environments"), EnvironmentsView) },

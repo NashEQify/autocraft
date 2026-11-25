@@ -136,7 +136,7 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
       async home(): Promise<MaintainHome> {
         const repo = requestProject();
         const rows = ROWS.filter((r) => !repo || r.repo === repo);
-        const attention: MaintainHome["attention"] = (!repo || repo === "photocraft") ? [{ kind: "stopped", title: "Fix-up stopped by the breaker in photocraft", detail: me.role === "viewer" ? "" : "3 pushes in a row broke CI on photocraft; resume after a look.", to: "/needs/stopped" }] : [];
+        const attention: MaintainHome["attention"] = (!repo || repo === "photocraft") ? [{ kind: "stopped", title: "Fix-up stopped by the breaker in photocraft", detail: me.role === "viewer" ? "" : "3 pushes in a row broke CI on photocraft; resume after a look.", to: "/queue" }] : [];
         const by = (l: string | null) => l === me.login;
         const home: MaintainHome =
           me.role === "viewer"

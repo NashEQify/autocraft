@@ -10,5 +10,4 @@ export const maintainQueueModule: FeatureModule = {
   id: "maintain-queue",
   permission: "viewer",
   routes: [{ path: "queue", scoped: true, view: { id: "maintain-queue", title: t("Work queue"), phone: QueueView, panels: [{ id: "main", title: t("Work queue"), component: QueueView, defaultSize: 100 }] } }],
-  prefetch: (api) => void api.next(),
 };

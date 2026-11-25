@@ -1,7 +1,7 @@
 // Admin pages, operator only. Each page hosts a view or controls under its heading, with a link back to the Admin index.
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { CaretRightIcon, CheckCircleIcon, GearSixIcon, WarningCircleIcon, WarningIcon } from "@phosphor-icons/react";
+import { CaretRightIcon, CheckCircleIcon, WarningCircleIcon, WarningIcon } from "@phosphor-icons/react";
 import { t, tk } from "../../../../src/i18n/index.ts";
 import type { FeatureModule, ViewProps } from "../../registry/types";
 import { lazyView } from "../../registry/lazyView";
@@ -64,6 +64,10 @@ function HealthView(_: ViewProps) {
                       <Button className="h-10" loading={write.busy === p.id} onClick={() => void write.run(p.id, () => (p.ackStep ? api.pipeline.ackDeadline(p.ackStep) : api.githubApp.ackForeignInstalls()))}>
                         {t("Acknowledge")}
                       </Button>
+                    ) : p.fullPage ? (
+                      <a href={`${p.to}?${new URLSearchParams({ return_to: window.location.pathname })}`} className="inline-flex h-10 items-center rounded-md border border-line-strong px-3 text-sm hover:bg-ink/[0.06]">
+                        {t("Open")}
+                      </a>
                     ) : (
                       <Link to={to(p)} className="inline-flex h-10 items-center rounded-md border border-line-strong px-3 text-sm hover:bg-ink/[0.06]">
                         {t("Open")}
@@ -190,7 +194,6 @@ const routeFor = (p: AdminPage) => {
 export const adminHubModule: FeatureModule = {
   id: "admin-hub",
   permission: "operator",
-  nav: { label: "Admin", icon: GearSixIcon, to: "/admin" },
   routes: [
     { path: "admin", permission: "operator", view: { id: "admin", title: "Admin", panels: [{ id: "main", title: "Admin", component: AdminIndex, defaultSize: 100 }] } },
     ...PAGES.map(routeFor),
