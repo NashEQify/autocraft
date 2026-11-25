@@ -64,11 +64,12 @@ export type CancelOutcome = { id: number; repo: string; was: TaskState; result: 
 export type PodRun = Selectable<DB["build_pod_runs"]>;
 export type NewPodRun = Omit<PodRun, "id">;
 export type PodRunPatch = Partial<Omit<PodRun, "task_id">>;
-export type WorkspaceRow = Selectable<DB["workspaces"]>;
+/** A workspace row; `checkpoint` is present only when it was asked for. */
+export type WorkspaceRow = Omit<Selectable<DB["workspaces"]>, "checkpoint"> & { checkpoint?: Uint8Array | null };
 export type SessionRow = Selectable<DB["workspace_sessions"]>;
 export type WorkspaceCallRow = Selectable<DB["workspace_calls"]>;
-export type NewSession = Omit<SessionRow, "id">;
-export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string };
+export type NewSession = import("kysely").Insertable<DB["workspace_sessions"]>;
+export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string; createdAt: string };
 
 export type TaskCard = {
   id: number; jobId: number | null; step: string; state: TaskState; repo: string; number: number | null; queuedAt: string; startedAt: string | null; endedAt: string | null;
@@ -132,24 +133,46 @@ export type RepoSizing = {
   history: (StepMemory & { builds: number }) | null;
   warmTarget: WarmTarget; warmSource: WarmSource; autoWarmTarget: WarmTarget; warmBytes: number | null; updatedAt: string | null; reason: string | null;
 };
-export type SizePatch = { repo: string; memory?: StepMemory | null; warmTarget?: WarmTarget | null; reset?: boolean; clear?: boolean; reason?: string | null };
-export type WarmFacts = {
-  head: string | null; atHead: { id: number; state: TaskState; claimedAt: string | null }[]; open: number; newestClaimedAt: string | null; forced: boolean;
-};
+/** One kind of change per row: `memory` (`memorySource` "oom" is a floor and is not audited), `warmTarget` (null: automatic), `reset` (memory back to automatic) or `clear` (the row removed). */
+export type SizePatch = { repo: string; memory?: StepMemory; memorySource?: "operator" | "oom"; warmTarget?: WarmTarget | null; reset?: boolean; clear?: boolean; reason?: string };
+/** What the warm gates read per repo: the default-branch head, whether a finished warm build at it counts, open warm tasks (queued, claimed or running), those claimed or running, the newest warm claim, and the task a forced rebuild queued. */
+export type WarmFacts = { head: string | null; attempted: boolean; open: number; active: number; newestClaimedAt: string | null; forcedTask: number | null };
+/** A warm build to queue: the plan is the producer's (it depends on the writer environment), `version` and `rev` are the AutoCraft version and producer revision it is queued under. */
+export type WarmQueueRow = { repo: string; head: string; image: string; plan: TaskStep[]; version: string; rev: number; force: boolean };
 export type StoredCaches = { version: 1; readAt: number | null; nodes: unknown[]; placement: unknown; placementNote: string | null; mirror: { allowlist: string[] | null; error: string | null; readAt: number } | null };
 export type UpdateSpec = { sha: string; ssh: string; keyFile: string; gitDir: string };
 export type WorkerUpdate = { pending: UpdateSpec | null; failures: { count: number; error: string } | null };
-export type EndpointStatus = Record<string, unknown>;
-export type WarmNote = { source: string | null; note: string | null };
+/** `ip` and `port`: what the EndpointSlice should name. `slice`: the addresses it named at the last read, null when it could not be read. `wrongSince`: when it was first seen naming anything else, null while it names the leader. */
+export type EndpointStatus = { ip: string; port: number; slice: string[] | null; wrongSince: string | null; at: string; error?: string };
+/** How a workspace started its build dir: the stored `warm` JSON and the warm commit (null for a cold start). */
+export type WarmNote = { warm: string | null; warmCommit: string | null };
 
-export type WorkspaceRequest = { env: string; repo: string; number: number | null; head: string; baseSha?: string | null; purpose: string; requestedBy: string; deadlineSec?: number; warm?: boolean };
+/** `ciCheckout`: the repository works at the CI paths when it has a warm target (the caller knows whether it has a CI checkout path). */
+export type WorkspaceRequest = { repo: string; baseSha: string; envId: string; app?: string | null; limits?: { deadlineSec?: number }; owner: string | null; ciCheckout: boolean };
 export type WorkspaceMove = { id: number; from: WorkspaceStateName[]; to: WorkspaceStateName; set?: Partial<Omit<WorkspaceRow, "id">> };
-export type WorkspaceSource = { ids: number[] } | { env: string; states: WorkspaceStateName[] } | { remoteCallIds: number[] } | KeySource;
-export type CallActivity = { running: { id: number; tool: string; deadlineAt: string }[]; shell: number };
+export type WorkspaceSource = { ids: number[] } | { env: string; states: WorkspaceStateName[] } | { remoteCallIds: number[] } | { idsFrom: import("kysely").SelectQueryBuilder<any, any, { id: number }> };
+/** `running`: calls in `running` state within their deadline. `background`: the done shell, shell_status and shell_kill calls since the pod was created, with the bookkeeping of `result.acct`. */
+export type CallActivity = {
+  running: { id: number; tool: string; deadlineAt: string }[];
+  background: { id: number; tool: string; startedAt: string | null; bg: number | null; limit: number | null; ref: number | null; ended: number | null }[];
+};
 export type WorkspacePass = { rows: WorkspaceRow[]; calls: Map<number, CallActivity>; bound: Map<number, "queued" | "leased"> };
 export type NewWorkspaceCall = Omit<WorkspaceCallRow, "id">;
 export type ToolCallQuery = { tool?: string; n?: number; id?: number; ids?: number[]; field?: "text" | "image" };
-export type CallPage = { calls: WorkspaceCallRow[]; more: boolean };
+export type CallListRow = {
+  id: number; n: number | null; tool: string; args: string; state: string; created_at: string; started_at: string | null; finished_at: string | null;
+  has_result: number; is_error: number | null; images: number | null; image_data: string | null; image_bytes: number | null; image_sha: string | null; image_note: string | null;
+};
+/** `more`: older calls exist (the default and `before` pages only). */
+export type CallPage = { rows: CallListRow[]; more: boolean };
 export type SessionSource = { ids: number[] } | { workspaceIds: number[] } | { remoteCallId: number };
-export type SweptSession = { id: number; workspaceId: number; keep: boolean; jobId: number | null; jobState: string | null; error: string | null };
-export type WorkspaceQuery = { state: string; cursor?: string; limit: number };
+export type SweptSession = { id: number; workspaceId: number | null; keep: boolean; jobId: number | null; jobState: string | null; error: string | null };
+export type WorkspaceQuery = { state: "live" | "all"; cursor?: string; limit: number };
+export type WorkspaceListRow = { id: number; repo: string; base_sha: string; app: string | null; state: string; state_at: string; node: string | null; warm: string | null; created_at: string; ended_at: string | null };
+export type WorkspaceListPage = { rows: WorkspaceListRow[]; next: string | null };
+export type CacheTaskRow = { id: number; repo: string; state: string; summary: string | null; head_sha: string; ended_at: string | null; sandbox_env: string | null; warm_image: string | null };
+/** The database half of the Caches page (the caller adds coverage and builds the node view). `bytes` is keyed by warm key, the rest by repo. */
+export type CacheReportInputs = {
+  stored: StoredCaches | null; taskRepos: string[]; last: Map<string, CacheTaskRow>; done: Map<string, CacheTaskRow>; bytes: Map<string, number>;
+  warmTargets: Map<string, string>; heads: Map<string, string>; kubeEnvs: { id: string; settings: string | null }[];
+};
