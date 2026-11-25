@@ -45,7 +45,7 @@ both("savePlans against a stale read diffs again under the lock, so a concurrent
 });
 
 both("recordPass sums counts of one kind and hour, adds to earlier hours, and keeps the newest shadow diffs", async ({ db }) => {
-  const c = (kind: string, hour: string, passes: number, maxMs: number) => ({ kind, passes, refs: 2, at: `${hour}:30:00.000Z`, ms: 10, maxMs, dbStatements: 5, dbRoundTrips: 1, dbMs: 3, hour });
+  const c = (kind: string, hour: string, passes: number, maxMs: number) => ({ kind, passes, refs: 2, at: `${hour}:30:00.000Z`, ms: 10, maxMs, dbStatements: 5, dbRoundTrips: 1, dbMs: 3.25, hour });
   await recordPass(db, [c("incremental", "2026-01-01T10", 1, 40), c("incremental", "2026-01-01T10", 2, 90), c("full:start", "2026-01-01T10", 1, 5)], []);
   await recordPass(db, [c("incremental", "2026-01-01T11", 1, 7), c("incremental", "2026-01-01T10", 1, 20)], []);
   const diffs = Array.from({ length: SHADOW_ROWS + 5 }, (_, i) => ({ at: new Date(Date.parse(AT) + i * 1000).toISOString(), ref: `o/a#${i}`, side: "pr" as const, fields: "state", detail: "x" }));

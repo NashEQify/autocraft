@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { listItems, loadItemAuthors, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, loadStackedHeads, countItems, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
+import { listItems, loadItemAuthors, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, loadStackedHeads, countItems, listMentioning, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { both, bothFlat, seedItems } from "./mirror-fixture.ts";
 
@@ -70,6 +70,24 @@ both("searchItems finds items by their text, best first, within the repos asked 
   const withSnippets = await searchItems(db, "capacitor", { snippets: true, kind: "pr" });
   assert.ok(withSnippets.every((h) => (h.snippets ?? []).every((s) => s.includes("\u0002"))));
   return hits.map((h) => h.ref);
+});
+
+both("a path is found by the search as a word of its own, and by listMentioning inside a URL too", async (db) => {
+  await seedItems(db, "app", [1], { title: "Broken save", body: "Seen in crates/io/src/lib.rs:20" });
+  await seedItems(db, "app", [2], { title: "Broken load", body: "https://github.com/o/app/blob/main/crates/io/src/lib.rs#L3" });
+  await seedItems(db, "app", [3], { title: "Version", body: "Since v1.2.3, with Cargo.toml's 'quoted' part" });
+  await seedItems(db, "app", [4], { title: "Closed long ago", body: "crates/io/src/lib.rs", state: "CLOSED", closed_at: "2025-01-01T00:00:00Z" });
+  const found = async (s: string) => (await searchItems(db, s, { repos: ["app"] })).map((h) => h.ref).sort();
+  assert.ok((await found("crates/io/src/lib.rs")).includes("app#1"));
+  assert.ok((await found('"in crates/io/src/lib.rs"')).includes("app#1"));
+  assert.deepEqual(await found("Cargo.toml"), ["app#3"]);
+  assert.deepEqual(await found("cargo.to*"), ["app#3"]);
+  assert.deepEqual(await found("v1.2.3"), ["app#3"]);
+  assert.ok(!(await found("broken -crates/io/src/lib.rs")).includes("app#1"));
+  for (const odd of ["it's a\\b", "a'b", "x\\'y", "a&b|c!d", "a:b*", "<->.<->x/y"]) await found(odd);
+  const mentioning = (await listMentioning(db, "app", ["#77", "crates/io/src/lib.rs"], { since: "2026-01-01T00:00:00Z" })).map((i) => i.number);
+  assert.deepEqual(mentioning, [1, 2]);
+  return mentioning;
 });
 
 bothFlat("the item loaders issue the same number of statements for 2 and 12 keys", async (db, size) => {

@@ -66,13 +66,28 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.deepEqual([c.refs, c.full], [["app#3", "app#4", "app#50"], false]);
   seq = c.cursor;
 
-  // Cross-item without a readable set: a full pass, and later logged items after it still count.
-  await db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 9, 'op', ?)").run(T);
+  // Cross-item without a readable set (a workflow's start moves its item's scope): a full pass, and later logged items after it still count.
+  await db.run(db.k.insertInto("item_workflows").values({ repo: "app", number: 9, kind: "pr", entry: "review", state: "running", started_by: "op", started_at: T, started_via: "dashboard", updated_at: T }));
   c = await since(seq);
   assert.equal(c.full, true);
   assert.ok(c.cursor.gen > seq.gen);
   // The mark is counted under the trigger that made it, with the generation it made.
-  assert.deepEqual({ ...await db.get(db.k.selectFrom("plan_full_causes").select(["n", "last_seq"]).where("source", "=", "plan_fast_track_full_i")) }, { n: 1, last_seq: c.cursor.gen });
+  assert.deepEqual({ ...await db.get(db.k.selectFrom("plan_full_causes").select(["n", "last_seq"]).where("source", "=", "plan_item_workflows_full_i")) }, { n: 1, last_seq: c.cursor.gen });
+  seq = c.cursor;
+  // Its weight and approval are the item's alone, its recommendation is no fact, and its end is cross-item again.
+  const workflow = (set: { weight?: number; approved_by?: string; rec?: string; state?: string }) => db.run(db.k.updateTable("item_workflows").set({ ...set, updated_at: new Date().toISOString() }).where("number", "=", 9));
+  for (const set of [{ weight: 8 }, { approved_by: "op" }]) {
+    await workflow(set);
+    c = await since(seq);
+    assert.deepEqual([c.refs, c.full], [["app#9"], false]);
+    seq = c.cursor;
+  }
+  await workflow({ rec: "{}" });
+  c = await since(seq);
+  assert.deepEqual([c.refs, c.full], [[], false]);
+  await workflow({ state: "stopped" });
+  c = await since(seq);
+  assert.equal(c.full, true);
   seq = c.cursor;
 
   // Global: a planner input setting forces a full pass; the planner's own bookkeeping setting does not.
@@ -136,19 +151,13 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.deepEqual([c.refs, c.full], [["app#11"], false]);
   seq = c.cursor;
 
-  // The planner's own Plan cache is an input only of items with an open decision, so its writes do not reload every item it plans.
-  const plan = (number: number, actions: string) => db.run(db.k.insertInto("main.item_plans").values({ repo: "app", number, kind: "pr", state: "s", actions, reasons: "[]", view: "{}", planned_at: T })
-    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ actions })));
-  await db.run(db.k.insertInto("decisions").values({ id: "dq", kind: "merge", repo: "app", number: 31, asked_at: T, asked_by: "x", question: "q", options: "[]" }));
+  // The planner's own Plan cache is no input, so a pass does not reload the items it plans, also those with a live workflow.
+  await db.run(db.k.insertInto("item_workflows").values({ repo: "app", number: 31, kind: "pr", entry: "review", state: "recommending", started_by: "op", started_at: T, started_via: "dashboard", updated_at: T }));
   seq = (await since(seq)).cursor;
-  await plan(30, "[]");
-  await plan(31, "[]");
-  c = await since(seq);
-  assert.deepEqual(c.refs, ["app#31"]);
-  seq = c.cursor;
-  await db.run(db.k.updateTable("decisions").set({ answer: "merge" }).where("id", "=", "dq"));
-  seq = (await since(seq)).cursor;
-  await plan(31, '[{"kind":"review","head":"h"}]');
+  for (const [number, actions] of [[30, "[]"], [31, "[]"], [31, '[{"kind":"review","head":"h"}]']] as const) {
+    await db.run(db.k.insertInto("main.item_plans").values({ repo: "app", number, kind: "pr", state: "s", actions, reasons: "[]", view: "{}", planned_at: T })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ actions })));
+  }
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [[], false]);
   await db.close();
@@ -242,8 +251,6 @@ test("a step outside the planner decides the items its stored Plans hold and the
   };
   const candidates = async () => (await loadDueRefs(w.db, "verify", "pr"))!.sort();
   const due = async () => (await planned(w.db, "verify")).map((p) => p.facts.number);
-  // A pass that writes the Plan of an item with an open decision logs the item (item_plans is its input); the next pass covers that.
-  await pass();
   await pass();
   assert.deepEqual(await candidates(), ["app#1"], "only the reviewed PR's stored Plan holds verify");
   await w.db.run(w.db.k.insertInto("comments").values({ id: "c2", repo: "app", number: 2, author: "someone", body: "ping", created_at: T }));
@@ -251,8 +258,7 @@ test("a step outside the planner decides the items its stored Plans hold and the
   assert.deepEqual(await candidates(), ["app#1", "app#2", "app#3"], "a change after the stored Plans and a PR without one are decided again");
   assert.deepEqual(await due(), [1]);
   await pass();
-  await pass();
-  assert.deepEqual(await candidates(), ["app#1"], "the passes that planned the changes took them out of the log");
+  assert.deepEqual(await candidates(), ["app#1"], "the pass that planned the changes took them out of the log");
   assert.deepEqual(await due(), [1]);
 });
 
@@ -267,12 +273,13 @@ test("a held PR is logged when its blocker closes; a bulk write logs nothing and
   assert.ok(c.full || c.refs.includes("app#1"), "the PR held for app#2 is decided again");
   seq = c.cursor;
 
-  // A decision whose items are not a list of objects is still written and logs its own item.
-  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "merge", repo: "app", number: 3, items: '["app#1", 5]', asked_at: T, asked_by: "x", question: "q", options: "[]" }));
-  await db.run(db.k.updateTable("decisions").set({ items: '{"repo": "app"}' }).where("id", "=", "d1"));
-  c = await since(seq);
-  assert.ok(c.full || c.refs.includes("app#3"));
-  seq = c.cursor;
+  // A PR whose issue links are not lists is still written and logs its own item.
+  for (const set of [{ closing_issues: '["app#1", 5]' }, { closing_issues: '{"repo": "app"}', text_refs: '{"a": 1}' }, { closing_issues: "[5", text_refs: "[[]" }]) {
+    await db.run(db.k.updateTable("items").set(set).where("number", "=", 3));
+    c = await since(seq);
+    assert.ok(c.full || c.refs.includes("app#3"), JSON.stringify(set));
+    seq = c.cursor;
+  }
 
   await bulkWrites(db, "test", async () => { for (const n of [1, 3]) await db.run(db.k.updateTable("items").set({ embed_hash: `e${n}` }).where("number", "=", n)); });
   c = await since(seq);

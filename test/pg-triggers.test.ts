@@ -14,6 +14,9 @@ import { liveTriggers } from "../src/db/live.ts";
 import { needsPg, testDatabase, type TestDatabase } from "./test-db.ts";
 
 const T = "2026-01-01T00:00:00Z";
+/** The start of a workflow: a write that moves the full-pass generation and logs its item. */
+const startWorkflow = (number: number): string => `INSERT INTO item_workflows (repo, number, kind, entry, state, started_by, started_at, started_via, updated_at)
+  VALUES ('app', ${number}, 'pr', 'review', 'running', 'op', '${T}', 'dashboard', '${T}')`;
 
 /** Writes over most kinds of trigger: item, cross-item and global inputs, bookkeeping-only updates, malformed JSON, a transaction, a bulk write. */
 const STEPS: [string, (db: Db) => Promise<unknown>][] = [
@@ -34,12 +37,14 @@ const STEPS: [string, (db: Db) => Promise<unknown>][] = [
   ["batch merged", (db) => db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = 1").run()],
   ["hold review", (db) => db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, blocked_by) VALUES ('app', 1, 'h1', ?, 'full', 'hold', '["app#2", 7, "app#2"]')`).run(T)],
   ["blocker closes", (db) => db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2))],
-  ["decision with a list", (db) => db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "merge", repo: "app", number: 3, items: '[{"repo": "app", "number": 5}, "app#6"]', asked_at: T, asked_by: "x", question: "q", options: "[]" }))],
-  ["decision list malformed", (db) => db.run(db.k.updateTable("decisions").set({ items: '{"repo": "app"' }).where("id", "=", "d1"))],
-  ["pair decision", (db) => db.run(db.k.insertInto("decisions").values({ id: "dup:app#3@12x", kind: "duplicate", repo: "app", number: 3, asked_at: T, asked_by: "x", question: "q", options: "[]" }))],
+  ["issue links", (db) => db.run(db.k.updateTable("items").set({ text_refs: "[[12],[12,13]]", closing_issues: "[14]" }).where("number", "=", 1))],
+  ["issue links malformed", (db) => db.run(db.k.updateTable("items").set({ text_refs: '{"a": [', closing_issues: '{"repo": "app"}' }).where("number", "=", 1))],
   ["assign", (db) => db.prepare("INSERT INTO audit (at, login, action, target) VALUES (?, 'op', 'assign', 'app#9')").run(T)],
   ["assign odd target", (db) => db.prepare("INSERT INTO audit (at, login, action, target) VALUES (?, 'op', 'assign', 'app#x9')").run(T)],
-  ["fast track", (db) => db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 9, 'op', ?)").run(T)],
+  ["workflow starts", (db) => db.run(db.k.insertInto("item_workflows").values({ repo: "app", number: 9, kind: "pr", entry: "review", state: "running", started_by: "op", started_at: T, started_via: "dashboard", updated_at: T }))],
+  ["workflow weight", (db) => db.run(db.k.updateTable("item_workflows").set({ weight: 8 }).where("number", "=", 9))],
+  ["workflow recommendation", (db) => db.run(db.k.updateTable("item_workflows").set({ rec: "{}", updated_at: "2026-01-02T00:00:00Z" }).where("number", "=", 9))],
+  ["workflow ends", (db) => db.run(db.k.updateTable("item_workflows").set({ state: "done" }).where("number", "=", 9))],
   ["surge breaker", (db) => db.prepare("INSERT INTO stage_trips (stage, reason, evidence, tripped_at) VALUES ('outside-surge', 'r', 'e', ?)").run(T)],
   ["env", (db) => db.prepare("INSERT INTO build_envs (id, label, kind, slots, key_hash, created_at) VALUES ('e1', 'E', 'remote', 1, 'k', ?)").run(T)],
   ["env poll", (db) => db.prepare("UPDATE build_envs SET last_seen_at = ? WHERE id = 'e1'").run(T)],
@@ -86,6 +91,9 @@ test("the same writes touch the same topics and log the same items on SQLite and
     // The steps reach the paths they are for.
     assert.ok(want.some((s) => s.startsWith("bulk:") && s.endsWith("full")));
     assert.ok(want.some((s) => s.startsWith("blocker closes:") && / app#1\b/.test(s)));
+    assert.ok(want.some((s) => s.startsWith("workflow starts:") && s.endsWith("full")));
+    assert.ok(want.some((s) => s.startsWith("workflow weight:") && s.endsWith("items app#9")));
+    assert.ok(want.some((s) => s.startsWith("issue links:") && / app#12 app#13 app#14\b/.test(s)));
     assert.deepEqual(await observe(pg.db), want);
   } finally {
     await lite.t.close();
@@ -118,7 +126,7 @@ test("a log row that commits after a later seq is read once, by the next pass, a
     let cursor = await db.read(() => changeCursor(db));
     await a.q("BEGIN");
     await a.q(`INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 1, 1, '{}', '${T}')`);
-    await a.q(`INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 1, 'op', '${T}')`);
+    await a.q(startWorkflow(1));
     await b.q("BEGIN");
     await b.q(`INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 2, 1, '{}', '${T}')`);
     await b.q("COMMIT");
@@ -163,14 +171,15 @@ test("counters move once per transaction, at commit, and not for a rolled-back s
       const s = await db.seqs();
       const gen = (await db.get(db.k.selectFrom("plan_full").select("seq")))!.seq;
       const n = (await db.get(db.k.selectFrom("plan_full_causes").select("n").where("source", "=", source)))?.n ?? 0;
-      return { items: s.items!, fasttrack: s.fasttrack!, gen, n };
+      return { items: s.items!, workflows: s.workflows!, gen, n };
     };
     const before = await seqs();
+    assert.equal(typeof before.workflows, "number");
     await a.q("BEGIN");
     await a.q(`INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', 1, 'pr', 'OPEN', 'a', '${T}'), ('app', 2, 'pr', 'OPEN', 'b', '${T}')`);
     await a.q("UPDATE items SET title = 'c' WHERE number = 1");
     await a.q("SAVEPOINT s");
-    await a.q(`INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 1, 'op', '${T}')`);
+    await a.q(startWorkflow(1));
     await a.q("ROLLBACK TO SAVEPOINT s");
     assert.deepEqual(await seqs(), before);
     await a.q("COMMIT");
@@ -178,7 +187,7 @@ test("counters move once per transaction, at commit, and not for a rolled-back s
     assert.equal(after.items, before.items + 1);
     assert.equal(after.gen, before.gen + 1);
     assert.equal(after.n, before.n + 1);
-    assert.equal(after.fasttrack, before.fasttrack);
+    assert.equal(after.workflows, before.workflows);
   } finally {
     await a.end();
     await t.close();
