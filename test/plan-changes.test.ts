@@ -67,6 +67,23 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   // Global: a planner input setting forces a full pass; the planner's own bookkeeping setting does not.
   await db.prepare("INSERT INTO settings (key, value) VALUES ('runner_heartbeat', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(T);
   assert.equal((await since(seq)).full, false);
+  // The leader's status row, rewritten every few seconds, is bookkeeping too.
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('leader:runner', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(T);
+  assert.equal((await since(seq)).full, false);
+  // A write permission: a new row forces a full pass, a refresh of a fresh row does not, a refresh of an expired one does.
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  await db.run(db.k.insertInto("repo_permissions").values({ login: "maint", repo: "app", permission: "write", checked_at: ago(8) }));
+  c = await since(seq);
+  assert.equal(c.full, true);
+  seq = c.cursor;
+  await db.run(db.k.updateTable("repo_permissions").set({ checked_at: ago(0) }).where("login", "=", "maint"));
+  assert.equal((await since(seq)).full, false);
+  await db.run(db.k.updateTable("repo_permissions").set({ checked_at: ago(30) }).where("login", "=", "maint"));
+  seq = (await since(seq)).cursor;
+  await db.run(db.k.updateTable("repo_permissions").set({ checked_at: ago(0) }).where("login", "=", "maint"));
+  c = await since(seq);
+  assert.equal(c.full, true);
+  seq = c.cursor;
   await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_enabled', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
   c = await since(seq);
   assert.equal(c.full, true);
