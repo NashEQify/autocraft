@@ -50,7 +50,6 @@ export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
 export type LegMoved = LegMove & { repo: string; number: number };
 export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };
-export type MergeApproval = { workflowId: number; by: string; at: string; via: Surface; leg: { id: number; state: LegState; head: string | null } | null };
 export type FixupRequest = Omit<Selectable<DB["operator_fixups"]>, "state"> & { state: "queued" | "started" | "ended" };
 export type NewFixupRequest = { repo: string; number: number; fromHead: string; instructions: string; by: string; merge?: boolean; workflowId?: number; at?: string };
 

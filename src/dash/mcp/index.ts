@@ -25,10 +25,9 @@ import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runCommand } from "../../workflow/apply.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
-import { eventsOf, liveWorkflow, repoWorkflow } from "../../workflow/store.ts";
+import { eventsOf, liveWorkflow } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
-import { slugOf } from "../../owners.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadLegPass } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -298,13 +297,11 @@ const itemArg = (s: unknown): { repo: string; number: number } => {
 };
 const refText = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
 
-/** Repos not switched to AutoCraft commands read with the same line the command core gives. */
 async function workflowItem(env: McpEnv, raw: unknown): Promise<{ repo: string; number: number }> {
   const a = args(raw, { item: "item" }, ["item"]);
   const r = itemArg(a.item);
   const user = await env.user(false);
   await needVisible(env.db, reqOf(user), r.repo);
-  if (await repoWorkflow(env.db, r.repo) !== "new") throw new HttpError(409, t("AutoCraft commands are not switched on for {repo}.", { repo: slugOf(r.repo) }));
   return r;
 }
 

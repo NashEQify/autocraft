@@ -10,7 +10,7 @@ import type { Req } from "../types.ts";
 import { approveLogin, denyLogin, normalizeCode, pendingLogin } from "../../remote/device-login.ts";
 import { loadHelpers } from "../../data/runners/index.ts";
 import { loadRunnerTokenOf } from "../../data/access/index.ts";
-import type { HelperInfo, Machine, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
+import type { HelperInfo, PendingRunnerLogin, RunnersReply } from "../../remote/protocol.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Lookups of a user code that found no waiting login, per login: guessing codes is slow. */

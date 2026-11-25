@@ -10,7 +10,6 @@ import { loadPg } from "../src/db/open.ts";
 import { PG_SCHEMA_GENERATION } from "../src/db/pg-generation.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { switchOver } from "../src/db/switch-over.ts";
-import { loadMergeApprovals } from "../src/data/workflow/index.ts";
 import { DEFAULT_PER_DAY } from "../src/runner/autopilot.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
 
@@ -127,7 +126,6 @@ test("a database of an earlier release comes to the current schema and switches 
       { number: 6, kind: "pr", entry: "review", weight: 5, state: "recommending", started_by: "erin", approved_by: "erin" },
     ]);
     assert.deepEqual(await rows("SELECT id, state FROM main.preapprovals ORDER BY id"), [{ id: 1, state: "cancelled" }, { id: 2, state: "queued" }, { id: 3, state: "cancelled" }], "the newest active leg goes on");
-    assert.equal((await loadMergeApprovals(db)).get("demo#2")?.by, "erin");
 
     // A second start: nothing to migrate, nothing to switch.
     const after = await snapshot(db);

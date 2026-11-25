@@ -25,8 +25,8 @@ const PULSE_MS = 2000;
 /** How long a stopping job waits for its GitHub writes in flight: inside the runner's 10 s before SIGKILL, with time left to record usage. */
 const WRITE_SETTLE_MS = 7000;
 
-/** Settings a running step re-reads to stop or to size its parallelism: the pipeline switch and the account limits. */
-const LIVE_SETTINGS = [KEY_ENABLED, "jev_parallel", "usage_pause"];
+/** Settings a running step re-reads to stop or to size its parallelism: the pipeline switch and the parallelism. */
+const LIVE_SETTINGS = [KEY_ENABLED, "jev_parallel"];
 
 const oneLine = (s: string, max = 500): string => scrub(s.replace(/\s+/g, " ").trim()).slice(0, max);
 

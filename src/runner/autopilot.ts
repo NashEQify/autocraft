@@ -1411,7 +1411,7 @@ export async function actBlockedReason(db: Db, repo: string): Promise<string | n
   return null;
 }
 
-export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "account" | "backoff"; why: string | null };
+export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "backoff"; why: string | null };
 
 /** Whether a job of the lane can start now, from the same checks the planner's gate() makes. */
 export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<LaneGate> {
@@ -1424,7 +1424,7 @@ export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<
     if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
     const why = await pauseReason(db, s, ms);
     if (!why) return { canRun: true, kind: "ok", why: null };
-    const kind = /^tripped/.test(why) ? "breaker" : /daily limit/.test(why) ? "limit" : /^failed/.test(why) ? "backoff" : "account";
+    const kind = /^tripped/.test(why) ? "breaker" : /^failed/.test(why) ? "backoff" : "limit";
     blocked ??= { canRun: false, kind, why: plain(why) };
   }
   return blocked ?? { canRun: true, kind: "ok", why: null };

@@ -1,5 +1,5 @@
 // autocraft-server classify | classify current | classify-sample | classify-referee | classify-compare
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { band, compareReport, itemUrl, loadReference, loadRows, pairUp, ref, type Pair } from "./report.ts";
 import { markSpotCheck, pickDisagreements, runReferee } from "./referee.ts";

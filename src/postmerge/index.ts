@@ -30,7 +30,6 @@ export const commands = {
     summary: `${USAGE}: post-merge review of pipeline merges`,
     async run(args: string[]): Promise<void> {
       const [sub, ...rest] = args;
-      const { connect } = await import("../db.ts");
       if (sub === "review") {
         const again = rest.includes("--again");
         const refs = rest.filter((a) => a !== "--again");

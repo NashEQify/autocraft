@@ -27,7 +27,6 @@ const INACTIVE: ItemStatus["phase"][] = ["Pipeline off", "Held", "Out of scope",
 /** A failure outside the stage the item is in still heads the bar for this long (phases without a stage: always). */
 const RECENT_MS = 2 * 3600_000;
 const POSTMERGE_MS = 24 * 3600_000;
-const FAILED_JOBS_DAYS = 30;
 
 /** Steps whose completion for an item completes their stage. Merge is done only from merged_at; fix-ups, CI fixes and verification come from their own rows. */
 const COMPLETES = new Set(["dupes", "dupes-compare", "classify-new", "classify-all", "referee", "prioritize", "rank", "opus-review", "review-post", "fixissue-collect", "act", "postmerge", "postmerge-file"]);

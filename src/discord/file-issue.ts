@@ -17,7 +17,7 @@ import { openAppKeys } from "../github/app-keys.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
 import { isPublicRepo } from "../public/status.ts";
 import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-ask.ts";
-import { failReporter, forgetReporterRow, newReporterState, readReporter, reporterToken } from "./reporter.ts";
+import { failReporter, forgetReporterRow, newReporterState, reporterToken } from "./reporter.ts";
 import type { Db } from "../db/index.ts";
 import { countAudit } from "../data/control/index.ts";
 import { filingRefusal, loadFilingCounts, releaseFiling, reserveFiling, setFiledNumber } from "../data/discord/index.ts";

@@ -3,7 +3,6 @@
 // the query text of a search, and an item that has no vector yet, are embedded
 // here with the same model.
 import type { SimilarHit } from "../../../web/src/api/types.ts";
-import type { Embedder } from "../../embed/model.ts";
 import { itemText } from "../../embed/text.ts";
 import { VectorIndex, type Hit } from "../../embed/vectors.ts";
 import { Semaphore } from "../server/limits.ts";

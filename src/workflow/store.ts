@@ -1,6 +1,5 @@
 // One-item reads of the maintainer workflow's rows (item_workflows, workflow_events) over the workflow module. Code that works on
 // many items calls the module's set loaders (src/data/workflow) directly; callers change a row only through the command core.
-import { loadTrackedRepos } from "../data/control/index.ts";
 import { listWorkflows, loadEvents, loadWorkflowHistory, recordEvents, saveWorkflows, startWorkflows, workflowOf, type StoredEvent, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { WEIGHT_NORMAL, type ItemWorkflow, type WorkflowState } from "./types.ts";
@@ -12,18 +11,6 @@ export type { WorkflowPatch };
 /** States of a live row; the unique index item_workflows_live allows one per item. */
 export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"] as const satisfies readonly WorkflowState[];
 export const isLive = (s: WorkflowState): boolean => (LIVE_STATES as readonly string[]).includes(s);
-
-/** Every tracked repo runs the maintainer workflow. */
-export type RepoWorkflow = "new";
-
-export async function repoWorkflow(_db: Db, _repo: string): Promise<RepoWorkflow> {
-  return "new";
-}
-
-/** Every tracked repo, by name. */
-export async function repoWorkflows(db: Db): Promise<{ repo: string; workflow: RepoWorkflow }[]> {
-  return [...(await loadTrackedRepos(db)).keys()].sort().map((repo) => ({ repo, workflow: "new" as const }));
-}
 
 /** The item's live workflow, if it has one. */
 export async function liveWorkflow(db: Db, repo: string, number: number): Promise<ItemWorkflow | null> {

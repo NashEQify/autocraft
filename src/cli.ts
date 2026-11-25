@@ -27,7 +27,6 @@ async function main(): Promise<void> {
   const { cliRequest, runCliJob } = await import("./runner/cli-job.ts");
   const req = cliRequest(name!, args, await loadSteps());
   if (req) {
-    const { connect } = await import("./db.ts");
     const { scopeToTracked } = await import("./repos.ts");
     const db = await openDb();
     await scopeToTracked(db);

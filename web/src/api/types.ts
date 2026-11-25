@@ -1282,15 +1282,6 @@ export interface SimilarHit extends SearchHit {
   labelBy: string | null;
 }
 
-// ---- stage registry (src/stages/registry.ts) ---------------------------------------------------
-
-/** What items in a state wait on: a model step, CI, a person, the runner (a step that needs no model), a build environment (a build task), or nothing. */
-export type FlowWait = "model" | "ci" | "person" | "runner" | "sandbox" | "nothing";
-
-export interface FlowBranch {
-  tone: "ok" | "warn" | "bad" | "neutral" | "merged" | "accent";
-}
-
 // ---- Jev, agent runs and rates -------------------------------------------------------------
 
 /** Whether Jev is in use; `unavailable` says why not (Haiku then does its work) and since when. */
@@ -1923,7 +1914,7 @@ export interface NextStep {
   stage: string;
   steps: string[];
   canRun: boolean;
-  kind: "ok" | "running" | "off" | "breaker" | "limit" | "account" | "backoff" | "approval";
+  kind: "ok" | "running" | "off" | "breaker" | "limit" | "backoff" | "approval";
   /** Why the step cannot run now, or null. */
   why: string | null;
   /** The planner's last reading of the step, when it holds back. */

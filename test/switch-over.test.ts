@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
-import { loadEvents, loadLastEventKinds, loadMergeApprovals } from "../src/data/workflow/index.ts";
+import { loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
 
 const COPIED = "2026-11-20T00:00:00.000Z", BEFORE = "2026-11-19T00:00:00.000Z", AFTER = "2026-11-20T01:00:00.000Z", NOW = "2026-11-20T02:00:00.000Z";
 
@@ -126,7 +126,6 @@ test("the switch keeps the answers as history, starts fast-tracked items and car
     { number: 9, item: 1, approved_by: "erin", approved_at: BEFORE },
     { number: 10, item: 10, approved_by: "erin", approved_at: BEFORE },
   ]);
-  assert.deepEqual((await loadMergeApprovals(db)).get("demo#10")?.by, "erin", "the merge queue merges it as the person who approved it");
   assert.deepEqual(r.legs.map((l) => l.item).sort(), ["demo#10", "demo#9"]);
   assert.deepEqual(r.legsSkipped.map((l) => l.item), ["demo#11", "demo#12"]);
   assert.deepEqual(await rows(db, "SELECT DISTINCT workflow FROM main.tracked_repos").then((x) => x.map((y) => y.workflow)), ["new"]);

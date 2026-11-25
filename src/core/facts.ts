@@ -45,8 +45,6 @@ export type LoadOptions = {
   keys?: KeySource;
   /** Decision time in ms (default: the clock). */
   now?: number;
-  /** Not read: own logins come from access. */
-  appSlug?: string | null;
   /** The classification run for labels (default: latestRun). */
   run?: string | null;
 };
@@ -89,7 +87,7 @@ export function assignmentIn(pipelineLogin: string | null, assigned: { assignee:
   };
 }
 
-/** The work score of a live workflow (higher first), as `workflow.fragments.weightScoreExpr` orders: weight, then the older workflow. */
+/** The work score of a live workflow (higher first): weight, then the older workflow. */
 export const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
 
 /** Our own integration PR of a batch. */
