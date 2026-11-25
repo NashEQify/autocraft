@@ -10,6 +10,9 @@ import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
+import { legWait } from "../src/workflow/waits.ts";
+import { setInferenceMode } from "../src/remote/mode.ts";
+import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Blocker } from "../src/workflow/types.ts";
 import { world, type World } from "./world-db.ts";
 import { setFeature } from "../src/build/features.ts";
@@ -129,6 +132,31 @@ test("an approved review entry with minor findings is fixed, reviewed again and 
   await db.run(db.k.updateTable("main.items").set({ state: "MERGED" }).where("number", "=", 1));
   await advanceWorkflows(db);
   assert.equal(await liveWorkflow(db, "app", 1), null);
+});
+
+test("an approved merge goes on past an unsure pre-merge review with no defect; a defect stops it as a major finding", async () => {
+  for (const kind of ["clean", "defect"] as const) {
+    const w = await approvedReview();
+    const db = w.db;
+    await review(w, { head: "sha1", verdict: "take", at: new Date().toISOString() });
+    if (kind === "clean") {
+      // Waiting in ci for a pre-merge check no Task Runner can take: the state line says so; the approver's runner, even never connected, takes it.
+      await setInferenceMode(db, "user-local", "test");
+      for (let i = 0; i < 2; i++) await advancePreapprovals(db);
+      assert.equal(await legState(w), "ci");
+      assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), "Waiting for the pre-merge check: no Task Runner can take it");
+      await createToken(db, MAINT, "runner", { kind: "runner" });
+      assert.equal(await legWait(db, (await liveWorkflow(db, "app", 1))!), null);
+    }
+    await w.premerge(1, kind, false);
+    await db.run(db.k.updateTable("main.premerge_reviews").set({ unsure: 1 }).where("number", "=", 1));
+    for (let i = 0; i < 3; i++) { await advanceWorkflows(db); await advancePreapprovals(db); }
+    await advanceWorkflows(db);
+    const wf = (await liveWorkflow(db, "app", 1))!;
+    if (kind === "clean") assert.deepEqual([await legState(w), wf.state], ["queued", "running"], "unsure with no finding: the merge queue has it");
+    else assert.deepEqual([await legState(w), wf.state, wf.blocker], ["asked", "blocked", "major-finding"]);
+    w.close();
+  }
 });
 
 test("a started PR that is not approved comes back with the review's recommendation and its numbered plan", async () => {

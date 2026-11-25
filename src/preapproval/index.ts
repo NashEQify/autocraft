@@ -294,9 +294,10 @@ type Hand = { done: true } | { gone: true } | { wait: true } | { stop: string };
  * Moves the row from ci to queued and answers the PR's Merge? decision at `head` with Merge for the operator, as the dashboard would,
  * in one transaction: a cancel that ran first leaves the row cancelled and nothing answered. Idempotent.
  */
-async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>): Promise<Hand> {
+async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>, unsure = false): Promise<Hand> {
   const id = mergeDecisionId(p.repo, p.number, head);
   const at = iso();
+  const premergeWord = unsure ? "found no defect but could not verify every claim of the description" : "is clean";
   // Nothing is written before an early return, so committing leaves the database as a rollback would.
   const stopped = await db.write(async (): Promise<Hand | null> => {
     if (!await isOperator(db, p.by, p.repo, held)) return { stop: `${p.by} no longer settles decisions on ${p.repo}` };
@@ -312,8 +313,8 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
       await ask(db, [{
         id, kind: "merge", repo: p.repo, number: p.number, question: "Merge this PR?",
         context: p.fix_id !== null
-          ? `${p.by} approved this merge ahead of a fix-up; the fix-up was pushed, its review says take, CI is green and its pre-merge review is clean.`
-          : `${p.by} approved this merge ahead of its review and CI; the review says take, CI is green and the pre-merge review is clean.`,
+          ? `${p.by} approved this merge ahead of a fix-up; the fix-up was pushed, its review says take, CI is green and its pre-merge review ${premergeWord}.`
+          : `${p.by} approved this merge ahead of its review and CI; the review says take, CI is green and the pre-merge review ${premergeWord}.`,
         facts: [
           ...(p.fix_id !== null ? [`fix-up pushed by the pipeline from ${short(p.from_head)} to ${short(head)}`] : head !== p.from_head ? [`base merge pushed by the pipeline from ${short(p.from_head)} to ${short(head)}`] : []),
           `${HEAD_FACT}${head}`,
@@ -331,7 +332,9 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
     return null;
   });
   if (stopped) return stopped;
-  await say(db, p.repo, p.number, "CI is green and the pre-merge review is clean: the PR is in the merge queue, which checks it as for any Merge answer.");
+  await say(db, p.repo, p.number, unsure
+    ? "CI is green and the pre-merge review found no defect, though it could not verify every claim of the description: the merge was approved, so the PR is in the merge queue, which checks it as for any Merge answer."
+    : "CI is green and the pre-merge review is clean: the PR is in the merge queue, which checks it as for any Merge answer.");
   return { done: true };
 }
 
@@ -539,8 +542,10 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
     if (pm.findings === null) return await stop("asked", `the pre-merge review of ${headName(p)} failed`, head);
     const defects = findingsOf(pm).filter((x) => x.severity === "defect").length;
     if (defects) return await stop("asked", `the pre-merge review found ${defects} defect${defects === 1 ? "" : "s"}`, head);
-    if (pm.unsure === 1) return await stop("asked", "the pre-merge review is unsure", head);
-    const h = await handOver(db, p, head, held);
+    // A workflow's merge approval says the change is wanted: an unsure pre-merge review (a claim of the description it could not
+    // verify) with no defect goes on to the merge queue; only a defect, or another blocker, brings the item back.
+    if (pm.unsure === 1 && !leg) return await stop("asked", "the pre-merge review is unsure", head);
+    const h = await handOver(db, p, head, held, pm.unsure === 1);
     if ("stop" in h) {
       if (await move(db, p, "asked", { reason: h.stop, line: `The pre-approved merge stopped: ${h.stop}.` }) && !leg && !h.stop.includes("was answered")) await askMerge(db, p, head, h.stop, [h.stop]);
     }

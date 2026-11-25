@@ -35,6 +35,7 @@ import { parse } from "../../workflow/parse.ts";
 import { runCommand } from "../../workflow/apply.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
 import { eventsOf, liveWorkflow, repoWorkflow } from "../../workflow/store.ts";
+import { legWait } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
 import { slugOf } from "../../owners.ts";
 import { ciEq, inList, jsonText, jsonValid, rowid } from "../../db/kx.ts";
@@ -610,16 +611,17 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const it = await env.db.get(env.db.k.selectFrom("main.items").select(["kind", "title", "state"]).where("repo", "=", r.repo).where("number", "=", r.number));
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
   const wf = await liveWorkflow(env.db, r.repo, r.number);
+  const wait = wf ? await legWait(env.db, wf) : null;
   const events = (await eventsOf(env.db, r.repo, r.number)).slice(-10);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
-      state: stateLine(wf), recommendation: recommendationLine(wf.rec), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
+      state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead.` : `${ref}: ${wf ? stateLine(wf) : t("No workflow running.")}`;
+  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead.` : `${ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
   return show(header, "item", data);
 }
 

@@ -105,8 +105,9 @@ export function listText(ns: readonly (number | string)[]): string {
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Where the item stands, in one line. */
-export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock): string {
+/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on (waits.ts legWait). */
+export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null): string {
+  if (wait && (wf.state === "running" || wf.state === "waiting")) return wait;
   switch (wf.state) {
     case "running": return current ? t("Running: {step}", { step: stepLabel(current) }) : t("Running");
     case "waiting": return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");

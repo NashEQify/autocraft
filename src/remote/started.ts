@@ -5,7 +5,8 @@
 // their runners is fresh, ready and not cooling off, offers the call's tier and may take it (role rules, write permission, a
 // token whose model did not decline it), other users' runners pass the call over, for at most STARTED_HOLD_MS from its
 // queueing (calls.ts claimOrder, takers.ts sweepTakers). Then, or when no owner can take it, any runner takes it under all
-// its own limits. Registered as a wait in src/stages/registry.ts.
+// its own limits. For the taker rule (takers.ts) an owner's runner counts connected or not, ready or not: the work waits for
+// it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts.
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
@@ -33,7 +34,7 @@ const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {
   review: new Set(["review", "fixup", "verify", "merge"]),
   fixup: new Set(["fixup", "review", "verify", "merge"]),
   implement: new Set(["fix", "review", "fixup", "verify", "merge"]),
-  merge: new Set(["merge"]),
+  merge: new Set(["fixup", "merge"]),
 };
 /** Workflow states in which AutoCraft runs steps; in the others the workflow waits for a person. */
 const WORKING = new Set(["running", "waiting"]);
@@ -53,13 +54,19 @@ export type StartedCalls = {
    * on (running or waiting) whose steps include `step`'s task. No step: none.
    */
   ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }) => ReadonlySet<string>;
+  /**
+   * The lowercase logins whose started work a call or job is (as ownersFor) and who have a runner token, connected or not, ready
+   * or not, cooling off or not, that may take it once it claims: the role rules, write permission, and its tier among the models
+   * the runner last reported (any tier before its first report). The taker rule counts them, so the work waits for their runner.
+   */
+  waitersFor: (c: { prompt_id: string; repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
 };
 
 const NONE: ReadonlySet<never> = new Set();
 
 /** Reads the live workflows' starters and approvers and the runners that may take their calls. */
 export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCalls> {
-  const [live, prs, runners, accepted] = await Promise.all([
+  const [live, prs, runners, tokens, accepted] = await Promise.all([
     db.all(db.k.selectFrom("main.item_workflows as w").innerJoin("main.tracked_repos as r", "r.name", "w.repo")
       .select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("r.workflow", "=", "new").where("w.state", "in", LIVE_STATES)),
     db.all(db.k.selectFrom("main.implementations as i").innerJoin("main.item_workflows as w", (j) => j.onRef("w.repo", "=", "i.repo").onRef("w.number", "=", "i.number"))
@@ -69,6 +76,8 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
     db.all(db.k.selectFrom("main.remote_helpers as h").innerJoin("main.mcp_tokens as t", "t.id", "h.token_id").leftJoin("main.access as a", "a.login", "t.login").select(["t.id", "h.login", "h.models", "a.role"])
       .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS).where("h.readiness", "=", "ready")
       .where((eb) => eb.not(eb.exists(eb.selectFrom("main.remote_cooloffs as co").select(eb.lit(1).as("one")).whereRef("co.login", "=", "t.login").where("co.until", ">", nowMs))))),
+    db.all(db.k.selectFrom("main.mcp_tokens as t").leftJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login").select(["t.login", "h.models", "a.role"])
+      .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString())),
     acceptedModels(db),
   ]);
   const byItem = new Map<string, Set<string>>();
@@ -80,19 +89,31 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
   };
   for (const w of live) add(w.repo, w.number, [w.started_by, w.approved_by]);
   for (const p of prs) add(p.repo, p.pr_number!, [p.started_by, p.approved_by]);
+  const tiersIn = (json: string): Set<Tier> => {
+    let models: Record<string, unknown> = {};
+    try { models = JSON.parse(json) as Record<string, unknown>; } catch { /* no models */ }
+    return new Set(Object.entries(models).flatMap(([t, m]) => (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null ? [t] : [])));
+  };
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
   for (const r of runners) {
-    let models: Record<string, unknown> = {};
-    try { models = JSON.parse(r.models) as Record<string, unknown>; } catch { /* no models */ }
     const login = r.login.toLowerCase();
     const u = runnersOf.get(login) ?? { role: r.role ?? "", tokens: new Map<number, Set<Tier>>() };
-    u.tokens.set(Number(r.id), new Set(Object.entries(models).flatMap(([t, m]) => (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null ? [t] : []))));
+    u.tokens.set(Number(r.id), tiersIn(r.models));
     runnersOf.set(login, u);
   }
   const runnerLogins = [...runnersOf.keys()];
+  // Every runner token, by login: its tiers as last reported, null before its first report.
+  const tokensOf = new Map<string, { role: string; tiers: (Set<Tier> | null)[] }>();
+  for (const r of tokens) {
+    const login = r.login.toLowerCase();
+    const u = tokensOf.get(login) ?? { role: r.role ?? "", tiers: [] };
+    u.tiers.push(r.models === null ? null : tiersIn(r.models));
+    tokensOf.set(login, u);
+  }
+  const tokenLogins = [...tokensOf.keys()];
   // The room's write rule (room.ts roomCanWrite): only a non-write permission confirmed within PERM_READ_TTL leaves a login out.
   const denied = new Set<string>();
-  if (runnerLogins.length) for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", runnerLogins, "citext"))))
+  if (tokenLogins.length) for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", tokenLogins, "citext"))))
     if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
   const owners = (refs: readonly ItemRef[]): ReadonlySet<string> => {
     if (!refs.length || !byItem.size) return NONE;
@@ -100,21 +121,28 @@ export async function readStartedCalls(db: Db, nowMs: number): Promise<StartedCa
     if (!first || rest.some((s) => !s)) return NONE;
     return new Set([...first].filter((l) => rest.every((s) => s!.has(l))));
   };
+  /** owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task. */
+  const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }): ReadonlySet<string> => {
+    if (c.refs) return owners(c.refs);
+    if (c.step === undefined || !c.repos.length) return NONE;
+    const task = taskOfStep(c.step);
+    const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
+    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && [w.started_by, w.approved_by].some((b) => b?.toLowerCase() === l)))));
+  };
+  const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => denied.has(`${login.toLowerCase()}\n${x}`));
   return {
     owners, runnerLogins,
     tiersOf: (login) => new Set([...runnersOf.get(login.toLowerCase())?.tokens.values() ?? []].flatMap((t) => [...t])),
     canTake: (login, c) => {
       const u = runnersOf.get(login.toLowerCase());
-      if (!u || !roleFits(u.role, c) || c.repos.some((x) => denied.has(`${login.toLowerCase()}\n${x}`))) return false;
+      if (!u || !roleFits(u.role, c) || deniedOn(login, c.repos)) return false;
       return [...u.tokens].some(([id, tiers]) => id !== c.refusedToken && (c.tier === undefined ? tiers.size > 0 : tiers.has(c.tier)));
     },
-    ownersFor: (c) => {
-      if (c.refs) return owners(c.refs);
-      if (c.step === undefined || !c.repos.length) return NONE;
-      const task = taskOfStep(c.step);
-      const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
-      return new Set(runnerLogins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && [w.started_by, w.approved_by].some((b) => b?.toLowerCase() === l)))));
-    },
+    ownersFor: (c) => startedBy(runnerLogins, c),
+    waitersFor: (c) => new Set([...startedBy(tokenLogins, c)].filter((l) => {
+      const u = tokensOf.get(l);
+      return !!u && roleFits(u.role, c) && !deniedOn(l, c.repos) && u.tiers.some((t) => t === null || (c.tier === undefined ? t.size > 0 : t.has(c.tier)));
+    })),
   };
 }
 

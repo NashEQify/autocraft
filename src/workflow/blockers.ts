@@ -30,8 +30,8 @@ export type Found = { blocker: Blocker; params: Record<string, unknown> };
 /** A step failing this many times stops the item (blocker 3). */
 export const FAILED_TWICE = 2;
 
-/** A stopped merge leg's reason that is the pre-merge review's finding (defects, or unsure). */
-export const PREMERGE_STOP = /pre-merge review (is unsure|found)/;
+/** A stopped merge leg's reason that is the pre-merge review's finding: its defects. An unsure review stops no workflow's merge leg. */
+export const PREMERGE_STOP = /pre-merge review found/;
 
 /**
  * The blocker a stopped merge leg's reason (src/preapproval) stands for. One failed try is `other`, shown with its reason: a step

@@ -32,6 +32,7 @@ import { isQuiet } from "../security/quiet.ts";
 import { repoWorkflow, workflowOf } from "../workflow/store.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
+import { legWait } from "../workflow/waits.ts";
 
 export const ACTOR = "pr-status";
 /** Ends every status comment, so the comment is found again on GitHub when the stored row is missing. */
@@ -50,7 +51,7 @@ const WORDS: Record<PublicStep, string> = {
 const NO_FIRST_POST = new Set<PublicStep>(["New", "Triaged", "Merged", "Closed"]);
 
 /** An item a person started in a repo on the maintainer workflow: its latest workflow, the latest answer, and whether it is a quiet PR. */
-export type WorkflowFacts = { wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean };
+export type WorkflowFacts = { wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean; /** waits.ts legWait. */ wait?: string | null };
 export type StatusFacts = {
   status: PublicStatus;
   /** The PR number of the PR's open merge batch, or of the batch it merged with. */ batch?: { pr: number };
@@ -86,13 +87,13 @@ function progressOf(f: StatusFacts, wf: ItemWorkflow): Progress {
  * no blocker reason: an item waiting for an answer there only says it waits for a maintainer.
  */
 export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): string[] {
-  const { wf, answered, quiet } = f.workflow, s = f.status;
+  const { wf, answered, quiet, wait } = f.workflow, s = f.status;
   const steps = workflowSteps(wf, progressOf(f, wf));
   const ended = s.step === "Merged" || s.step === "Closed";
   const waits = wf.state === "recommending" || wf.state === "blocked";
   const head = s.step === "Merged" ? (f.batch ? t("Merged with merge batch #{pr}", { pr: f.batch.pr }) : t("Merged"))
     : s.step === "Closed" ? t("Closed")
-      : quiet && waits ? t("Waiting for a maintainer decision") : stateLine(wf, currentStep(steps));
+      : quiet && waits ? t("Waiting for a maintainer decision") : stateLine(wf, currentStep(steps), undefined, wait ?? null);
   const out = [`**${head}**`, attributionLines(wf, answered).join("\n"), stepLines(steps).join("\n")];
   if (s.step === "In the merge queue") {
     if (f.batch) out.push(t("Checked in merge batch #{pr}", { pr: f.batch.pr }));
@@ -125,7 +126,7 @@ async function latestWorkflows(db: Db, repo: string): Promise<Map<number, { wf: 
 async function workflowFacts(db: Db, repo: string, number: number, wf: ItemWorkflow): Promise<WorkflowFacts> {
   const a = await db.get(db.k.selectFrom("main.workflow_events").select(["login", "at"])
     .where("workflow_id", "=", wf.id).where("kind", "=", "answered").orderBy("id", "desc").limit(1));
-  return { wf, answered: a ? { by: a.login, at: a.at } : null, quiet: await isQuiet(db, repo, number) };
+  return { wf, answered: a ? { by: a.login, at: a.at } : null, quiet: await isQuiet(db, repo, number), wait: await legWait(db, wf) };
 }
 
 export type HistoryStep = { step: string; at: string };

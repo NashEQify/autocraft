@@ -2,7 +2,8 @@
 // can. A taker is a fresh, ready Task Runner (helpers.ts) of a user who is not cooled off (cooloff.ts) and who may take the
 // call (runnerTakes: role rules, write permission by the room's rule roomCanWrite, My repos narrowed by the runner's own
 // list), busy or not. A Manual only user's runner (manual-only.ts) is a taker, since the user may pick the call, though it is
-// no room. For work its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
+// no room. For work its user started or approved (started.ts) a runner is a taker whatever its My repos, tasks and items, and
+// whether or not it is connected and ready. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
@@ -110,15 +111,15 @@ async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => bool
 }
 
 /**
- * The taker rule for work a person started or approved (started.ts): one of their fresh Task Runners takes such a call (or a
- * job of a step their live workflow runs, on its repo; StartedCalls.ownersFor) under the role rules and write permission alone,
- * whatever their Manual only, My repos, My tasks and items. It counts as a runner that takes only some items (`filtered`), as
- * the call waits for it.
+ * The taker rule for work a person started or approved (started.ts): one of their Task Runners takes such a call (or a job of a
+ * step their live workflow runs, on its repo; StartedCalls.waitersFor) under the role rules and write permission alone, whatever
+ * their Manual only, My repos, My tasks and items. Their runner counts while it is offline, not ready or cooling off, so the
+ * work waits for it instead of being skipped for want of a taker. It counts as a runner that takes only some items (`filtered`),
+ * as the call waits for it.
  */
 async function ownerTakes(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
   const s = await readStartedCalls(db, nowMs);
-  if (!s.runnerLogins.length) return () => false;
-  return (c) => [...s.ownersFor(c)].some((o) => s.canTake(o, c));
+  return (c) => s.waitersFor(c).size > 0;
 }
 
 /**

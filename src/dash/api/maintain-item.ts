@@ -12,6 +12,7 @@ import { isQuiet } from "../../security/quiet.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { eventsOf, isLive, repoWorkflow, workflowHistory, type StoredEvent } from "../../workflow/store.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
+import { legWait } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -57,7 +58,7 @@ export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
 }
 
 /** The status block of the item's latest workflow. */
-function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean): MaintainItemStatus {
+function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean, wait: string | null): MaintainItemStatus {
   const mine = events.filter((e) => e.workflowId === wf.id || (e.workflowId === null && e.at >= wf.startedAt));
   const last = mine[mine.length - 1];
   const answered = [...mine].reverse().find((e) => e.kind === "answered");
@@ -66,7 +67,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
   const reason = wf.blocker === "other" && typeof wf.blockerParams?.reason === "string" && !veiled ? wf.blockerParams.reason : null;
   const open = wf.state === "recommending" && wf.rec !== null;
   return {
-    headline: stateLine(wf, steps ? currentStep(steps) : undefined),
+    headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait),
     live: isLive(wf.state),
     entry: wf.entry,
     lines: attributionLines(wf, answered ? { by: answered.login, at: answered.at } : null),
@@ -142,7 +143,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const shown: MaintainEvent[] = events.map((e) => ({ id: e.id, at: e.at, login: e.login, via: e.via, kind: e.kind, line: e.line }));
   return {
     repo, number: n, kind, workflowRepo: workflow === "new", canAct: may,
-    status: wf ? statusOf(wf, events, leg, quiet) : null,
+    status: wf ? statusOf(wf, events, leg, quiet, await legWait(db, wf)) : null,
     events: shown, duplicates, withdrawn, security,
     outside: held && !released ? { reason: held.reason === "surge" ? "surge" : "limit", author: held.author, canRelease: may } : null,
     breakers,

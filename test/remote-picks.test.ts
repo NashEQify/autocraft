@@ -439,6 +439,25 @@ describe("picks and Manual only", async () => {
     await clear();
   });
 
+  test("the pre-merge check of a merge a maintainer approved waits for their runner, outside their My repos and while it is not ready", async () => {
+    await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "in", ["bob", "olga"]));
+    await setUserRepos(db, "alice", ["deckcraft"]);
+    const premerge = { prompt_id: "", repos: ["photocraft"], step: "premerge" };
+    assert.equal(await takerTest(db, Date.now())(premerge), false, "no started work: no taker");
+    const at = new Date().toISOString();
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 9, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: at, startedVia: "github", approvedBy: "alice", approvedAt: at, approvedVia: "github", step: "merge" });
+    assert.ok(await takerTest(db, Date.now())(premerge), "her approved merge: her runner takes the pre-merge check");
+    assert.ok(await takerTest(db, Date.now())({ ...premerge, refs: [{ repo: "photocraft", number: 9 }] }), "and the call on its PR");
+    await db.run(db.k.updateTable("remote_helpers").set({ readiness: "quota-held" }).where("login", "=", "alice"));
+    assert.ok(await takerTest(db, Date.now())(premerge), "her runner is held for its quota: the check waits for it");
+    assert.equal(await takerTest(db, Date.now())({ ...premerge, refs: [{ repo: "photocraft", number: 10 }] }), false, "a PR nobody started has no taker");
+    await setUserRepos(db, "alice", []);
+    await updateWorkflow(db, wf, { state: "done" });
+    for (const login of ["alice", "bob", "olga"]) await ready(login);
+    await clear();
+  });
+
   test("why a call waits", () => {
     const r = (o: Partial<ReadyRunner> = {}): ReadyRunner => ({ login: "bob", role: "maintainer", manual: false, tiers: new Set<Tier>(["top"]), free: 1, repos: null, skip: new Set<string>(), ...o });
     const c = { tier: "top" as Tier, promptId: "review.opus", step: "opus-review", repos: ["photocraft"], followUp: false, picked: null };
