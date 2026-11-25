@@ -429,7 +429,7 @@ async function listRepos(env: McpEnv): Promise<ToolResult> {
   spend(env);
   const user = await env.user(false);
   const repos = await visibleTo(env.db, user);
-  const held = await heldFixups(env.db, repos, null, 10_000);
+  const held = await loadHeldFixups(env.db, { repos, repo: null, limit: 10_000, light: true });
   const counts = new Map<string, number>();
   for (const h of held) counts.set(h.repo, (counts.get(h.repo) ?? 0) + 1);
   const rows = [];

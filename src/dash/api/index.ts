@@ -277,7 +277,7 @@ async function reviewsOf(db: Db, rec: ReviewRecord | undefined, head: string | n
   if (!rec || !o) return null;
   return {
     head: o.head, current: o.head === head, conflicts: await conflictsNamed(db, rec, o.head, internals, hidden),
-    opus: { verdict: o.verdict as ReviewSide["verdict"], reason: internals ? o.reason : "", fixes: internals ? o.fixes as unknown[] : [], risks: internals ? o.risks : [], at: o.at, sure: o.sure, mode: o.mode as "full" | "delta", baseHead: o.base_head },
+    opus: { verdict: o.verdict as ReviewSide["verdict"], reason: internals ? o.reason : "", fixes: internals ? o.fixes as unknown as ReviewSide["fixes"] : [], risks: internals ? o.risks : [], at: o.at, sure: o.sure, mode: o.mode as "full" | "delta", baseHead: o.base_head },
     final: { verdict: o.verdict as ReviewSide["verdict"], reason: internals ? o.reason : "", decided: true },
   };
 }

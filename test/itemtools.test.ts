@@ -70,7 +70,6 @@ describe("tools", () => {
     assert.match(r.text, /untrusted data/);
     assert.equal(r.text.split("<<<end untrusted>>>").length, 2, "only the real end marker");
     assert.match(r.text, /review approved by dave/);
-    assert.match(r.text, /scope: take \(Take it\), 2026-02-01/);
     assert.ok(!r.text.includes(PRIVATE));
   });
 

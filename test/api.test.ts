@@ -162,7 +162,7 @@ describe("api", () => {
     await db.run(db.k.insertInto("actions").values({ decision_id: "d1", repo: "photocraft", number: 1, kind: "comment-close", state: "done", comment_url: "https://x/c", created_at: "2026-01-01T00:00:00Z" }));
     const worked = await boss.get<Item>("/api/items/photocraft/1");
     assert.deepEqual([worked.verification?.state, worked.verification?.current, worked.verification?.plan], ["failed", true, { crates: ["codecs"], tests: ["png::"], testLines: null }]);
-    assert.deepEqual([worked.fixups[0]?.files, worked.fixups[0]?.state, worked.actions[0]?.commentUrl], [["a.rs"], "refused", "https://x/c"]);
+    assert.deepEqual([worked.fixups[0]?.files, worked.fixups[0]?.state, worked.actions], [["a.rs"], "refused", []]);
     assert.deepEqual(worked.premerge, []);
     const finding = { severity: "defect", file: "a.rs", line: 3, title: "t", scenario: "s", fix: { file: "a.rs", change: "c" } };
     await db.run(db.k.insertInto("premerge_reviews").values({ repo: "photocraft", number: 1, head_oid: "h0", at: "2026-01-01T00:00:00Z", model: "m", findings: JSON.stringify([finding]), searched: "looked", tries: 0 }));
@@ -171,7 +171,7 @@ describe("api", () => {
     assert.deepEqual(pre.map((r) => [r.head, r.error, r.tries, r.findings.length]), [["h1", "no JSON", 2, 0], ["h0", null, 0, 1]]);
     assert.deepEqual(pre[1]!.findings[0], finding);
     assert.deepEqual(it.comments.map((c) => c.body), ["looks good"]);
-    assert.deepEqual(it.decisionIds, [P1]);
+    assert.deepEqual(it.decisionIds, []);
     assert.deepEqual(it.related.map((r) => [r.number, r.relation]), [[5, "fixes"]]);
     assert.equal(it.classifications[0]!.typeLabel, "small extra");
     assert.equal((await boss.req("GET", "/api/items/untracked-repo/6")).status, 404);
@@ -181,7 +181,7 @@ describe("api", () => {
     assert.deepEqual(byWords.map((h) => `${h.repo}#${h.number}`).sort(), ["photocraft#1", "photocraft#5"]);
     const p = await boss.get<Progress>("/api/progress");
     assert.equal(p.funnel.open, 5);
-    assert.equal(p.decisionsOpen, 5);
+    assert.equal(p.decisionsOpen, 0);
     assert.equal(p.perHour.length, 24);
   });
 

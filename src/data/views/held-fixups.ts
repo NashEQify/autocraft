@@ -9,9 +9,10 @@ import type { HeldFixupFacts } from "./types.ts";
 
 /**
  * Open PRs of `repos` (narrowed to `repo` when given) whose current plan holds the fix-up at the PR's head and that have no fix-up in a
- * live state at that head, oldest first, at most `limit`; each with the review's reason and fixes at the head and the newest fix-up row there.
+ * live state at that head, oldest first, at most `limit`; each with the review's reason and fixes at the head and the newest fix-up row there
+ * (`light`: the PRs alone).
  */
-export async function loadHeldFixups(db: Db, o: { repos: string[]; repo: string | null; limit: number }): Promise<HeldFixupFacts[]> {
+export async function loadHeldFixups(db: Db, o: { repos: string[]; repo: string | null; limit: number; light?: boolean }): Promise<HeldFixupFacts[]> {
   const want = o.repo ? o.repos.filter((r) => r === o.repo) : o.repos;
   if (!want.length) return [];
   const q = queryDb(db);
@@ -24,6 +25,7 @@ export async function loadHeldFixups(db: Db, o: { repos: string[]; repo: string 
     .where((eb) => eb.not(hasFixupAt(eb, "p", "p.head", ["pushing", "linting", "pushed"])))
     .orderBy("i.created_at", (b) => b.asc().nullsFirst()).orderBy("p.repo").orderBy("p.number").limit(o.limit));
   if (!held.length) return [];
+  if (o.light) return held.map((h) => ({ repo: h.repo, number: h.number, title: h.title, author: h.author, note: h.note, head: h.head, reason: null, fixes: [], latestFixup: null }));
   const [reviews, latest] = await db.together(() => Promise.all([
     loadReviewsAt(db, held.map((h) => ({ repo: h.repo, number: h.number, head: h.head }))),
     loadLatestFixupAt(db, held.map((h) => ({ ref: `${h.repo}#${h.number}`, head: h.head }))),
