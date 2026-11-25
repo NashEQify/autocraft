@@ -419,12 +419,27 @@ export async function archiveActions(db: Db, r: Pick<SwitchReport, "archived">):
 
 // ---- pre-approvals --------------------------------------------------------------------------------------------------
 
+/** Characters of a review's or a fix-up's reason that the decision system kept in a leg's reason, after ": ". */
+const QUOTE_CHARS = [160, 120];
+
+/** A leg's reason whose quote was cut at its kept length ends at a word, with "…". */
+function markCut(reason: string): string {
+  const from = reason.indexOf(": ") + 2;
+  const quote = reason.slice(from);
+  return from < 2 || !QUOTE_CHARS.includes(quote.length) || /[.!?…]$/.test(quote) ? reason : `${reason.slice(0, from)}${quote.replace(/[\s,;:(–-]+\S*$/, "")}…`;
+}
+
 /**
  * Ends the pre-approvals that stopped for a Merge? question. The advance pass, which runs before the runner plans or merges anything,
  * reads an ended leg of a running workflow as it read the stopped one: with no answer since, the workflow comes back with a recommendation.
  */
 async function endAskedLegs(db: Db, r: SwitchReport): Promise<void> {
-  // updated_at stays: it says when the leg stopped, and a stop older than the workflow's last answer is no new one. So does the reason, which the recommendation names.
+  // updated_at stays: it says when the leg stopped, and a stop older than the workflow's last answer is no new one. So does the reason, which the recommendation
+  // names; a quote in it that was cut with no mark gets one.
+  for (const leg of await all(db, q(db).selectFrom("main.preapprovals").select(["id", "reason"]).where("state", "=", "asked").where("reason", "is not", null))) {
+    const reason = markCut(leg.reason as string);
+    if (reason !== leg.reason) await run(db, q(db).updateTable("main.preapprovals").set({ reason }).where("id", "=", leg.id as number));
+  }
   r.legsEnded = (await run(db, q(db).updateTable("main.preapprovals").set({ state: "cancelled" }).where("state", "=", "asked"))).changes;
 }
 

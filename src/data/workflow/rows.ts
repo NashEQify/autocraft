@@ -14,7 +14,7 @@ import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import type { Parsed } from "../../workflow/types.ts";
+import { ASKING_STATES, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 const GO_ON_EVENTS = ["started", "answered"];
@@ -183,7 +183,7 @@ export async function countWaiting(db: Db, repos: string[]): Promise<Map<string,
   if (repos.length === 0) return new Map();
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.item_workflows as w").select((eb) => ["w.repo", eb.fn.countAll<number>().as("n")])
-    .where("w.state", "=", "recommending").where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
+    .where("w.state", "in", ASKING_STATES).where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
   return new Map(rows.map((r) => [r.repo, Number(r.n)]));
 }
 

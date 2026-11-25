@@ -59,6 +59,13 @@ export type QuestionAnswer = { question: QuestionRef; option: string; label?: st
 export const sameQuestion = (a: QuestionRef | null | undefined, b: QuestionRef | null | undefined): boolean =>
   typeof a === "object" && a !== null && typeof b === "object" && b !== null && a.implementation === b.implementation && a.round === b.round;
 
+/** States in which an item has come back to a person: its recommendation is open, whether its steps are done or a blocker stopped it. */
+export const ASKING_STATES = ["recommending", "blocked"] as const satisfies readonly WorkflowState[];
+
+/** The recommendation that waits for an answer, which every surface shows; null when none is open. */
+export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | null): Recommendation | null =>
+  (wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) ? wf.rec : null);
+
 export type ItemWorkflow = {
   id: number;
   repo: string;

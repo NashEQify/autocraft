@@ -1,11 +1,11 @@
 // GET /api/maintain/home: Home's read. Items come from the live workflow rows
 // (src/workflow/store.ts) of the repos the reader may see, narrowed to the picked project. An item needs an answer when its
-// recommendation is open or its last answer was unclear; it counts for the reader only where they may act on the repo
+// recommendation is open (its steps are done, or a blocker stopped it) or its last answer was unclear; it counts for the reader only where they may act on the repo
 // (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
 import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRepo, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { recommendationText, stateLine, weightLabel } from "../../workflow/status.ts";
-import type { ItemWorkflow, WorkflowEventKind } from "../../workflow/types.ts";
+import { openRecommendation, type ItemWorkflow, type WorkflowEventKind } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Req } from "../types.ts";
 import { problems, stoppedRows } from "./home.ts";
@@ -19,6 +19,7 @@ import { mainCiRepos } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
+import { loadQuiet } from "../../data/security/index.ts";
 import { countWaiting } from "../../data/workflow/index.ts";
 import { loadMaintainStats } from "../../data/views/stats.ts";
 import { loadItemRowFacts, loadItemsBase } from "../../data/views/maintain-items.ts";
@@ -33,13 +34,17 @@ import type { Db } from "../../db/index.ts";
 
 type HomeRow = ItemWorkflow & { title: string | null; author: string | null; lastEvent: WorkflowEventKind | null };
 
-function rowsOf(wfs: HomeRow[]): MaintainRow[] {
+/** A quiet pull request (the landing fix of a security finding) shows viewers no recommendation text, as on the item page. */
+const quietFor = async (db: Db, staff: boolean, asking: (ItemWorkflow | null)[]): Promise<Set<string>> =>
+  (staff ? new Set() : await loadQuiet(db, asking.flatMap((w) => (openRecommendation(w) ? [`${w!.repo}#${w!.number}` as const] : []))));
+
+function rowsOf(wfs: HomeRow[], quiet: ReadonlySet<string>): MaintainRow[] {
   return wfs.map((w) => {
     const isUnclear = w.lastEvent === "ambiguous";
-    const open = w.state === "recommending" && w.rec !== null;
+    const open = openRecommendation(w) !== null;
     return {
       repo: w.repo, number: w.number, kind: w.kind, title: w.title ?? `${w.repo}#${w.number}`, author: w.author ?? null, entry: w.entry,
-      line: isUnclear ? t("Waiting for a clear answer") : open ? recommendationText(w.rec!) : stateLine(w),
+      line: wfLine(w, isUnclear, quiet.has(`${w.repo}#${w.number}`))!,
       waits: open || isUnclear, blocked: w.state === "blocked", weight: weightLabel(w.weight),
       startedBy: w.startedBy, approvedBy: w.approvedBy, stoppedBy: w.stoppedBy, updatedAt: w.updatedAt,
     };
@@ -63,7 +68,7 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
     problems(db, { hidden, staff, nowMs, ci, stops, facts: facts.attention, acting }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
   ]);
-  const rows = rowsOf(facts.rows);
+  const rows = rowsOf(facts.rows, await quietFor(db, staff, facts.rows));
   // Most recently moved first.
   rows.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
   if (req.user.role === "viewer") return { needs: [], mine: [], waiting: rows.filter((r) => r.waits), running: rows.filter((r) => !r.waits), runner: null, attention };
@@ -136,9 +141,9 @@ export function groupOf(x: { open: boolean; live: boolean; waits: boolean; backl
   return WORKING_PHASES.has(x.phase) ? "automatic" : "rest";
 }
 
-/** Whether an item waits for an answer: its live workflow has an open recommendation, or the last thing said to it was unclear. */
+/** Whether an item waits for an answer: its live workflow has an open recommendation (at a blocker too), or the last thing said to it was unclear. */
 export const waitsForAnswer = (wf: Pick<ItemWorkflow, "state" | "rec"> | null, lastEvent: WorkflowEventKind | undefined): boolean =>
-  lastEvent === "ambiguous" || (wf !== null && wf.state === "recommending" && wf.rec !== null);
+  lastEvent === "ambiguous" || openRecommendation(wf) !== null;
 
 const listParam = (q: URLSearchParams, key: string): string[] => q.getAll(key).flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean);
 
@@ -213,6 +218,7 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
     req.user.role === "viewer" ? repos.map(() => false) : Promise.all(repos.map((r) => mayRunRepo(req.user, r))),
   ]);
   const key = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
+  const quiet = await quietFor(db, staff, [...facts.workflows.values()]);
   const mayRepo = new Map(repos.map((r, i) => [r, may[i]!]));
   return page.map((p): MaintainItemRow => {
     const wf = facts.workflows.get(key(p)) ?? null;
@@ -224,7 +230,7 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
     const area = facts.areas.get(key(p)) as { area: string | null } | undefined;
     return {
       repo: p.repo, number: p.number, kind: p.kind, state: itemState(p.state), title: p.title || `${p.repo}#${p.number}`, author: p.author,
-      group: p.group, line: wfLine(wf, p.unclear), status, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
+      group: p.group, line: wfLine(wf, p.unclear, quiet.has(key(p))), status, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
       startedBy: wf?.startedBy ?? null, approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null,
       duplicate: facts.duplicateGroups.get(key(p))?.role === "close", outside: (facts.holds.get(key(p))?.reason ?? null) !== null, stuck: facts.stuck.has(key(p)), area: area?.area ?? null,
       may: mayRepo.get(p.repo) ?? false, updatedAt: p.updatedAt, ...(p.merged && { merged: p.merged }),
@@ -232,11 +238,12 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
   });
 }
 
-/** As on Home: an unclear last answer, else a started item's open recommendation or where it stands; null for an unstarted item. */
-function wfLine(wf: ItemWorkflow | null, unclear: boolean): string | null {
+/** A row's line: an unclear last answer, else a started item's open recommendation or where it stands; null for an unstarted item. */
+function wfLine(wf: ItemWorkflow | null, unclear: boolean, veiled: boolean): string | null {
   if (unclear) return t("Waiting for a clear answer");
   if (!wf) return null;
-  return wf.state === "recommending" && wf.rec !== null ? recommendationText(wf.rec) : stateLine(wf);
+  const rec = veiled ? null : openRecommendation(wf);
+  return rec ? recommendationText(rec) : stateLine(wf);
 }
 
 /** GET /api/maintain/waiting: per visible repo, the started items that wait for an answer, for the project picker; repos with none are left out. */
