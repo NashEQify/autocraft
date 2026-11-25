@@ -8,6 +8,7 @@ import { AUTOPILOT_USER, isDraining, isEnabled } from "./autopilot.ts";
 import { leaseSkipKeys, leaseSkips } from "./leases.ts";
 import { DEADLINE_ERROR, jobRow, scrub, type JobRow } from "./jobs.ts";
 import { loadSteps, validateParams, type StepContext } from "./steps.ts";
+import { JOB_DEADLINE_ENV, SLICE_SHARE } from "./deadlines.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { stopWrites } from "../github/write.ts";
@@ -94,6 +95,9 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; s
   }
 
   let lastProgress = 0;
+  // The runner passes the deadline it enforces; the slice is counted from the claim (started_at), like the runner's clock.
+  const deadlineMin = Number(process.env[JOB_DEADLINE_ENV]);
+  const sliceMs = deadlineMin > 0 ? deadlineMin * 60_000 * SLICE_SHARE : null;
   const ctx: StepContext = {
     db,
     job: { id, requestedBy: row.requested_by, startedAt, resumes: Number(row.resumes ?? 0) },
@@ -115,6 +119,7 @@ async function runJob(db: Db, id: number, row: JobRow, o: { runs: Set<string>; s
       return !!r.cancel_requested_at || DEADLINE_ERROR.test(r.error ?? "");
     },
     stopping: async () => await ctx.cancelled() || (row.requested_by === AUTOPILOT_USER && !await isEnabled(db)),
+    timeUp: () => sliceMs !== null && Date.now() - Date.parse(startedAt) >= sliceMs,
   };
   setCallContext({ jobId: id, step: step.name, stage: step.stage, class: step.priority ?? 0, ...(typeof params.repo === "string" && { repo: params.repo }), cancelled: ctx.cancelled,
     // Model calls (local and remote) are withdrawn when the pipeline is switched off, not during a drain: running jobs finish with their calls.

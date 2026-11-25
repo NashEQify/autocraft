@@ -34,7 +34,7 @@ import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
 import { noTakerFor } from "../remote/takers.ts";
-import { stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
+import { JOB_DEADLINE_ENV, stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { jobRemoteQueue, REMOTE_WAIT_CAP_MS, withdrawJobCalls } from "../remote/calls.ts";
@@ -564,7 +564,7 @@ export class Runner {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...dbEnv(this.o.dbTarget), AUTOCRAFT_JOB_GROUPS: groups },
+        env: { ...dbEnv(this.o.dbTarget), AUTOCRAFT_JOB_GROUPS: groups, [JOB_DEADLINE_ENV]: String(deadlineMin) },
       });
     } finally {
       closeSync(fd);

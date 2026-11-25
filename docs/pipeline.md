@@ -82,6 +82,7 @@ Every open item gets one type label (bugfix, performance, missing feature, small
 - Each flag follows the same rule on its own, whatever the type's state. Security: Jev at 0.9 or more sets it, under 0.3 clears it, in between Haiku's flag counts. Needs decision: the same with 0.8. Until Haiku has answered an unsure flag, the flag is not set (no label, no priority bump). A settled bugfix keeps needs decision only when Jev is at 0.7 or more.
 - Other disagreements (for example bugfix against missing feature) go to the Sonnet referee, which applies the classification rules and says whether it is sure. A sure label settles the type, and a scope label then follows the normal scope path. When Sonnet is unsure, Opus referees the same item with the same prompt. Opus's label settles the item either way; an unsure Opus also sets the needs-decision flag, so Decide asks an operator the scope question for that label. The referee has its own step and daily limit.
 - Started by the operator for a full pass; the pipeline classifies new and changed items on its own. Daily limit 2000.
+- A classify job works in slices: Jev asks 40 items at a time, and after half its deadline the job starts no new chunk (the first chunk always runs). It ends done, saying how many items are left, and the items still due make the next job due at once. The area questions run only while the job is inside its slice.
 
 ### Areas
 

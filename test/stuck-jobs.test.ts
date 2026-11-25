@@ -25,7 +25,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "stuck-jobs-"));
 const dbFile = join(dir, "runner.db");
 const db = await connectDb(dbFile);
-const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
+const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : s === "test-slices" ? 0.05 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
 after(async () => {
   await runner.stop();
   await db.close();
@@ -58,6 +58,18 @@ test("a job past its step's deadline is stopped and failed, and warns until ackn
   for (const end = Date.now() + 20_000; (await getJob(db, quiet.id)).state !== "failed" && Date.now() < end; await new Promise((r) => setTimeout(r, 50))) await runner.tick();
   assert.equal((await getJob(db, quiet.id)).error, noProgressError(0.02));
   assert.deepEqual((await deadlineStops(db)).map((d) => d.step), ["test-other"]);
+});
+
+test("a job that works in slices ends as a success before its deadline, and the next one is due at once", async () => {
+  const job = await enqueue(db, "test-slices", { units: 10_000 }, "boss");
+  for (const end = Date.now() + 20_000; !["done", "failed"].includes((await getJob(db, job.id)).state) && Date.now() < end; await new Promise((r) => setTimeout(r, 50))) await runner.tick();
+  const j = await getJob(db, job.id);
+  assert.equal(j.state, "done");
+  assert.equal(j.error, null);
+  const [, done, left] = /^(\d+) of \d+ units, (\d+) left$/.exec(j.summary ?? "")!.map(Number);
+  assert.ok(done! > 0 && left! > 0, j.summary ?? "");
+  await db.run(db.k.updateTable("jobs").set({ requested_by: "pipeline" }).where("id", "=", job.id));
+  assert.equal(await failureBackoff(db, "test-slices", Date.now()), null);
 });
 
 test("draining keeps a running job's writes and starts nothing; off blocks the writes", async () => {

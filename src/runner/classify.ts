@@ -53,7 +53,8 @@ const sentCounter = (ctx: StepContext) => {
 export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, sent: (n: number) => void): Promise<Set<string>> {
   const { db } = ctx;
   const done = new Set<string>();
-  for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db); i += JEV_CHUNK) {
+  // Past its time slice the job starts no new chunk; the first always runs, so every job moves the backlog.
+  for (let i = 0; i < todo.length && (i === 0 || !ctx.timeUp()) && !await ctx.cancelled() && await jevAvailable(db); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
     await keepUsage(db, run, chunk.map((x) => `jev-${refOf(x)}`));
     sent(chunk.length);
@@ -95,7 +96,7 @@ async function haikuPass(ctx: StepContext, run: string, todo: Item[], sent: (n: 
   const { db } = ctx;
   const t0 = new Date().toISOString();
   // A chunk holds one batch for every call the accounts can take at once (at least 4), so the calls fill the free slots.
-  for (let i = 0, size = 0; i < todo.length && !await ctx.cancelled(); i += size) {
+  for (let i = 0, size = 0; i < todo.length && (i === 0 || !ctx.timeUp()) && !await ctx.cancelled(); i += size) {
     size = HAIKU_PER_CALL * Math.max(4, await freeSlots(db));
     const chunk = todo.slice(i, i + size);
     await keepUsage(db, run, Array.from({ length: (await haikuBatches(db, chunk, HAIKU_PER_CALL)).length }, (_, n) => `haiku-${String(n).padStart(2, "0")}`));
@@ -166,7 +167,8 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   const haiku = await haikuPass(ctx, run, unsure, sent);
   const jev = jevDone.size;
   // Items of repos with an area list that were not asked against its current version; Jev's answers share the job's limit with the type pass.
-  const areas = await ctx.cancelled() ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: Math.min(limit, AREAS_PER_CLASSIFY_JOB), usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
+  // Past the slice the areas wait for a job with time left; the planner queues classify-new while Jev has items due.
+  const areas = await ctx.cancelled() || ctx.timeUp() ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: Math.min(limit, AREAS_PER_CLASSIFY_JOB), usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
   return { areas, jev, due: due.length, haiku, haikuDue: unsure.length, haikuAlone, aloneDue: alone.length, left: due.length - jev - haikuAlone };
 }
 
@@ -179,7 +181,7 @@ export async function classifyNew(ctx: StepContext): Promise<string> {
   if (!run) throw new Error("There is no classification run yet; start a classification pass first.");
   const r = await pass(ctx, run, "new");
   if (!r.due && !r.haikuDue && !r.areas.due) return `Nothing to classify in run ${run}.`;
-  return `Run ${run}: ${aloneNote(r)}Jev classified ${r.jev} of ${r.due} new or changed items${r.left ? ` (${r.left} left)` : ""}; Haiku gave a second opinion on ${r.haiku} of ${r.haikuDue}.${areaNote(r)}`;
+  return `Run ${run}: ${aloneNote(r)}Jev classified ${r.jev} of ${r.due} new or changed items${r.left ? ` (${r.left} left for the next job)` : ""}; Haiku gave a second opinion on ${r.haiku} of ${r.haikuDue}.${areaNote(r)}`;
 }
 
 export async function classifyAll(ctx: StepContext): Promise<string> {
