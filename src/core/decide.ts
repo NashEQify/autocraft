@@ -48,7 +48,7 @@ export const mergeEntry = (f: PrFacts): boolean => workflowOf(f)?.entry === "mer
 /** A started PR not approved for merge stops when its steps are done, for a person's answer to the recommendation. */
 export const NOT_APPROVED_REASON = "not approved for merge";
 /** The review's own fix-up runs on the auto path, for the fix-up and implement entries and once merge is approved; a review-entry PR that is not approved waits for its recommendation instead. */
-const fixAllowed = (f: PrFacts): boolean => {
+export const fixAllowed = (f: PrFacts): boolean => {
   const w = workflowOf(f);
   return w ? w.entry === "fixup" || w.entry === "implement" || w.approved : onAutoPath(f);
 };
@@ -348,9 +348,28 @@ const unsentUntil = (u: UnsentAsk | undefined): number | undefined => (u && u !=
 export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
   !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && (!f.repoFacts.mainRed || f.mainFix) ? "ci" : null;
 
-/** The PR conflicts with its base branch, and once its merge is approved the pipeline merges the base into it and then makes its review's fixes. */
-export const fixedAfterMerge = (f: PrFacts | null): boolean => f?.mergeable === "CONFLICTING"
-  && (mergeEntry(f) || (!!f.review && (f.review.verdict === "take" || f.review.verdict === "take-fix") && f.review.head === f.head && !f.review.stale));
+/**
+ * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in (`tomorrow`: today's
+ * merges are used up), and the fixes follow; or the contributor or another person has to resolve it, and nothing is fixed or merged before.
+ */
+export type ConflictPath = "merge" | "tomorrow" | "contributor" | "person";
+/** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
+export function conflictPath(f: PrFacts | null): ConflictPath | null {
+  if (f?.mergeable !== "CONFLICTING") return null;
+  const r = f.review, c = f.conflict;
+  if (!mergeEntry(f) && !(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale)) return null;
+  if (!c?.baseOk) return "person";
+  switch (c.bucket) {
+    // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
+    case "merge": case "unapproved": case "done": return "merge";
+    case "linting": return f.pushable ? "merge" : "person";
+    case "capped": return "tomorrow";
+    case "ask": case "ask-retry": case "asked": return "contributor";
+    default: return "person";
+  }
+}
+/** Nobody but the contributor or another person can settle the conflict. */
+export const byHand = (p: ConflictPath | null): p is "contributor" | "person" => p === "contributor" || p === "person";
 
 /** What a PR waits on when its conflict or CI fix is left to the contributor. */
 const stuckWait = (f: PrFacts): Wait | null => {

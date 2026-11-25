@@ -21,6 +21,7 @@ import { statusDue } from "../src/prstatus/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
+import { recommendationText } from "../src/workflow/status.ts";
 import { eventsOf, insertWorkflow, liveWorkflow, updateWorkflow, workflowHistory } from "../src/workflow/store.ts";
 import { loadPrWorkflows } from "../src/data/workflow/index.ts";
 import { selectFixups } from "../src/fixup/select.ts";
@@ -560,6 +561,124 @@ test("a recommendation on a conflicting PR offers nothing that is refused", asyn
     await run(w, "yes");
     w.close();
   }
+});
+
+/** A PR whose review conflicts with its base branch, back with its recommendation. */
+async function conflicting(o: { verdict: "take" | "take-fix"; fixes?: { file: string; change: string; title?: string; major?: boolean }[]; canModify?: boolean; before?: (w: World) => Promise<unknown> }): Promise<World> {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main" }).where("number", "=", 1));
+  await run(w, "review");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING", maintainer_can_modify: o.canModify === false ? 0 : 1 }));
+  await o.before?.(w);
+  await reviewed(w, 1, { verdict: o.verdict, ...(o.fixes ? { fixes: o.fixes } : {}) });
+  await settle(w);
+  return w;
+}
+const conflictRow = (w: World, from_head: string, state: string, o: { to_head?: string; own_diff?: string; at?: string } = {}) =>
+  w.db.run(w.db.k.insertInto("main.conflict_merges").values({ repo: "app", number: 1, from_head, to_head: o.to_head ?? null, base_sha: "base", state, attempt: 1, created_at: o.at ?? new Date().toISOString(), ...(o.own_diff ? { own_diff: o.own_diff } : {}) }));
+/** The base was merged into sha1, and the mirror shows sha1b. */
+const baseMerged = async (w: World) => {
+  await conflictRow(w, "sha1", "merged", { to_head: "sha1b", own_diff: "same" });
+  await pushRecorded(w);
+  await settle(w);
+  await w.synced(1, "sha1b");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ fetched_at: new Date().toISOString() }));
+  await w.db.run(w.db.k.updateTable("main.items").set({ updated_at: new Date(Date.now() + 1000).toISOString(), mergeable: "MERGEABLE", maintainer_can_modify: 1 }).where("number", "=", 1));
+};
+
+test("a yes on a conflict only the contributor can resolve approves the merge and waits for them: it claims no merge, asks nothing again and goes on once the conflict is gone", async () => {
+  for (const verdict of ["take", "take-fix"] as const) for (const asked of [false, true]) {
+    const w = await conflicting({ verdict, canModify: false, before: async (w) => { if (asked) await conflictRow(w, "sha1", "asked"); } });
+    const rec = (await liveWorkflow(w.db, "app", 1))!;
+    assert.equal(rec.state, "recommending");
+    assert.match(recommendationText(rec.rec!), /contributor has to resolve.*approve the merge and wait/);
+    const yes = await send(w, "yes");
+    assert.equal(yes.outcome, "run", yes.line);
+    assert.match(yes.line, /until the contributor resolves the conflict/);
+    assert.doesNotMatch(yes.line, /merging when|fixing/i);
+    await settle(w);
+    const wf = (await liveWorkflow(w.db, "app", 1))!;
+    assert.deepEqual([wf.state, wf.approvedBy, wf.rec], ["running", MAINT, null], verdict);
+    const legs = await w.rows("SELECT state FROM preapprovals");
+    assert.deepEqual(legs.map((l) => l.state), [verdict === "take" ? "ci" : "review"], verdict);
+    if (asked) assert.equal((await w.prPlan(1)).waitKind, "contributor");
+    else assert.ok((await acts(w, 1)).includes("conflict:ask"));
+
+    // The base branch no longer conflicts: the approval stands and the leg goes on.
+    if (verdict === "take") {
+      await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "MERGEABLE" }));
+      await settle(w);
+      await mergesAsPerson(w);
+    }
+    w.close();
+  }
+});
+
+test("on a conflicting PR whose base merges of today are used up, a yes goes on tomorrow: the leg waits as the plan does", async () => {
+  const now = new Date().toISOString();
+  const w = await conflicting({ verdict: "take-fix", before: async (w) => { for (const from of ["old1", "old2"]) await conflictRow(w, from, "merged", { to_head: `${from}b`, at: now }); } });
+  assert.match((await liveWorkflow(w.db, "app", 1))!.rec!.text, /goes on tomorrow\. Fix 1, then merge/);
+  assert.match((await send(w, "yes")).line, /that merge comes first, tomorrow/);
+  await settle(w);
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.deepEqual((await w.rows("SELECT state FROM preapprovals")).map((l) => l.state), ["review"]);
+  assert.deepEqual([(await w.prPlan(1)).waitKind, await acts(w, 1)], ["system", []]);
+  await w.db.run(w.db.k.updateTable("main.conflict_merges").set({ created_at: T0 }));
+  assert.ok((await acts(w, 1)).includes("conflict:merge"));
+});
+
+test("a yes to the pre-merge review's findings on a conflicting PR keeps them: the base is merged in, then the fix-up is made at the new head", async () => {
+  const w = await conflicting({ verdict: "take" });
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "MERGEABLE" }));
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await w.premerge(1, "defect");
+  await run(w, "merge");
+  await settle(w);
+  const blocked = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([blocked.state, blocked.rec!.parts.fix.length], ["blocked", 1], blocked.rec?.text ?? "");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }));
+  await settle(w);
+  assert.match((await send(w, "yes")).line, /Fixing 1, then merging.*that merge comes first/);
+  await settle(w);
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.deepEqual(await acts(w, 1), ["conflict:merge"]);
+
+  await baseMerged(w);
+  await settle(w);
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.deepEqual((await w.rows("SELECT from_head, state FROM operator_fixups")).map((r) => [r.from_head, r.state]), [["sha1b", "queued"]]);
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.head === "sha1b" && a.params?.source === "operator"), JSON.stringify(await w.prPlan(1)));
+  assert.match(String((await w.rows("SELECT instructions FROM operator_fixups"))[0]!.instructions), /off by one/);
+});
+
+test("a yes to fix a major finding on a conflicting PR is not asked again when the review of the merged head names it too", async () => {
+  const fixes = [{ file: "src/lib.rs", change: "check the bound", title: "check the bound", major: true }];
+  const w = await conflicting({ verdict: "take-fix", fixes });
+  await run(w, "yes");
+  await settle(w);
+  assert.deepEqual(await acts(w, 1), ["conflict:merge"]);
+  await baseMerged(w);
+  await w.review(1, { verdict: "take-fix", fixes, head: "sha1b" });
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 2000).toISOString() }).where("head_oid", "=", "sha1b"));
+  await settle(w);
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  assert.equal(wf.state, "running", wf.rec?.text ?? "");
+  assert.deepEqual((await w.rows("SELECT from_head, state FROM operator_fixups")).map((r) => [r.from_head, r.state]), [["sha1b", "queued"]]);
+  assert.deepEqual(await acts(w, 1), ["fixup:fix"]);
+});
+
+test("an approved PR that is a draft and has no leg waits to be marked ready, and its leg starts then", async () => {
+  const w = await unstarted(false);
+  await run(w, "merge");
+  await settle(w);
+  await w.db.run(w.db.k.deleteFrom("main.preapprovals"));
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ is_draft: 1 }));
+  await settle(w);
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([wf.state, wf.blocker, (await w.prPlan(1)).waitKind], ["running", null, "contributor"], wf.rec?.text ?? "");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ is_draft: 0 }));
+  await settle(w);
+  await mergesAsPerson(w);
 });
 
 test("implementing again leaves the PR of stopped work stopped, reopened or not", async () => {

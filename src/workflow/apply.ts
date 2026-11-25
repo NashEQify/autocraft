@@ -248,7 +248,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
     const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts });
     const more = too.flatMap((x) => (x.workflow ? [x] : []));
-    const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
+    const line = confirmLine(r.run, login, at, input.clock ?? utcClock, done.waits) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
       + (more.length ? ` ${t("The work on {refs} stopped too.", { refs: listText(more.map((x) => refText(x.item.repo, x.item.number))) })}` : "")
       + (close !== on ? ` ${t("{ref} closes; {on} stays open and its work ends.", { ref, on: refText(on.repo, on.number) })}` : "");
@@ -304,7 +304,7 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
 }
 
 /** `commit` writes the workflow row (started, changed or ended) with the run's own rows and returns its id; it runs in the write that records the event. */
-type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
+type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string; waits?: "contributor" | "person" };
 
 /** Whether our own pushes alone moved the PR from `from` to `to`. */
 const ownSince = async (db: Db, pr: fx.Target, from: string, to: string): Promise<boolean> =>
@@ -406,7 +406,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   return {
-    failed: [], ...(work?.note ? { note: work.note } : {}),
+    failed: [], ...(work?.note ? { note: work.note } : {}), ...(work?.waits ? { waits: work.waits } : {}),
     commit: async () => {
       const now = (await listWorkflows(db, { ids: [live.id], live: true }))[0];
       if (!now) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
