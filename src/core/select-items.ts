@@ -51,7 +51,7 @@ async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Pr
 /**
  * The sort keys of a PlanSet's items, read on first use for every item with an action (one query for every kind). Kept per
  * facts object: the planner's incremental pass keeps the facts of items no logged change touched, and any write to an item's
- * row logs it (src/core/plan-inputs.ts), so a kept facts object's keys are current and only reloaded items are read again.
+ * row logs it (src/db/plan-inputs.ts), so a kept facts object's keys are current and only reloaded items are read again.
  */
 const factKeys = new WeakMap<object, Keys>();
 const planKeys = new WeakMap<ItemPlans, Map<string, Keys>>();

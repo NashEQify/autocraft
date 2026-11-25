@@ -1,7 +1,9 @@
 // Key-source constructors of the planner; feature code holds and passes the descriptors.
-import type { PassKeys, Ref } from "../keys.ts";
+import { namedKeys, type NamedKeys, type PassKeys, type Ref } from "../keys.ts";
 
 /** Every item the planner decides. */
 export function fullPass(): PassKeys { return { mode: "full" }; }
 /** The logged changes plus refs whose kept facts are due; `seen` is the number of log rows the cursor already read. */
 export function changedPass(due: Ref[], seen: number): PassKeys { return { mode: "changed", due, seen }; }
+/** The pass universe of one repo: what a full pass decides there. */
+export function repoPass(repo: string): NamedKeys<{ repo: string }> { return namedKeys("planner.repoPass", { repo }); }

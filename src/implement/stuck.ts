@@ -52,7 +52,6 @@ export const STUCK_OPTIONS = {
 } as const satisfies Record<string, QuestionOption>;
 
 /** The `question` round of a stuck attempt: the blocker's options, and why it stopped. */
-// NEEDS implement.loadImplementFacts: IssueAttempt.question also while the state is `stuck`, so the workflow pass reads the blocker's options from the facts.
 export type StuckQuestion = QuestionRound & { stuck: true; cause: StuckCause; facts: string[] };
 export const isStuckQuestion = (r: ImplementationRound | null | undefined): boolean => r?.kind === "question" && (r.result as Partial<StuckQuestion> | null)?.stuck === true;
 

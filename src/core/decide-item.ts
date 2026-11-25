@@ -22,8 +22,8 @@ export { implementOffWait };
 export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again";
 
 /**
- * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no fast_track
- * row by someone who settles on the repo) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
+ * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no live implement
+ * workflow) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
  * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
  * Implement feature and room among the repo's live implementations. A question is planned again when its answer may have
  * come: the issue text changed, a person commented after it, or its decision is answered.

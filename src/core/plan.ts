@@ -358,7 +358,7 @@ export type ItemState = (typeof ITEM_STATES)[number];
 export type ItemFacts = {
   repo: string; number: number;
   kind: "pr" | "issue";
-  /** Open on GitHub as mirrored. A closed item is in the facts only while an answered close of it is not applied (the Act step records it as already closed); nothing else is planned for it. */
+  /** Open on GitHub as mirrored; the loader reads open items only. */
   open: boolean;
   /** Time of the decision, ms. */
   now: number;
@@ -469,9 +469,9 @@ export type ItemFacts = {
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
   implement: {
-    /** Who queued the issue for implementation: the `added_by` of its fast_track row (in a repo on the maintainer workflow, who started its live implement workflow); null when it has none. */
+    /** Who queued the issue for implementation: who started its live implement workflow; null when it has none. */
     queuedBy: string | null;
-    /** queuedBy settles decisions on the repo now (an operator, or a maintainer with write access under src/settlers.ts). */
+    /** queuedBy still counts on the repo: an operator, or a maintainer the act rule lets act with a fresh cached write permission (data/access decideAct). */
     settles: boolean;
     /** The repo's `implement` build feature is on (src/build/features.ts). */
     featureOn: boolean;
@@ -484,9 +484,9 @@ export type ItemFacts = {
       textChanged: boolean;
       /** An `asked` attempt: a comment by a person (no bot, not ours) came after its newest question. */
       newCommentAfterQuestion: boolean;
-      /** An `asked` attempt's decision was answered after its newest question, or a `stuck` attempt's after it got stuck. */
+      /** An answer round follows the newest question of an `asked` attempt, or the blocker question of a `stuck` one. */
       decisionAnswered: boolean;
-      /** An ended attempt, and the issue was queued again after it ended (its fast_track row is newer). */
+      /** An ended attempt, and the issue was queued again after it ended (its live implement workflow is newer). */
       requeuedAfterEnd: boolean;
       /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (a decision); null in other states. */
       asked: "author" | "maintainer" | null;

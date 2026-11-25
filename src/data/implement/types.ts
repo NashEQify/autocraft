@@ -131,7 +131,7 @@ export type IssueAttempt = {
   attempt: AttemptLite;
   /** Only with `withPlans`. */
   planned?: { plan: PlanReply | null; planMd: string | null; report: SessionReport | null };
-  /** The newest question round, only while the state is `asked`. */
+  /** The newest question round, only while the state is `asked` or `stuck` (a stuck attempt's round holds the blocker's options). */
   question: { round: number; at: string; audience: QuestionAudience | null; limit: boolean; options: NonNullable<QuestionRound["options"]>; recommended: string | null } | null;
   /** The newest answer round after that question round. */
   answer: AnswerRound | null;
