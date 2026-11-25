@@ -430,10 +430,10 @@ export const STEPS: StepDef[] = [
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 5000, default: 2000, help: "pairs to check in this job" }],
     run: async (ctx) => {
       const { runDupes } = await import("../dupes/index.ts");
-      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, progress: ctx.progress, cancelled: ctx.cancelled, timeUp: ctx.timeUp, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
       ctx.acted(r.scanned + r.pairsAdded);
-      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}`;
+      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}${r.left ? `, ${r.left} left for a later job` : ""}`;
     },
   },
   {

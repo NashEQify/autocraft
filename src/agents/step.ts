@@ -289,6 +289,12 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
   return out;
 }
 
+/** The hash a kept Jev answer (jev_unsure) is valid for: the request's body, with the prompt's version and the parser that made the value. */
+export function jevRequestHash<I, V, C>(step: JevStep<I, V, C>, input: I, ctx: C): string {
+  const { item, body } = step.request(input, ctx);
+  return createHash("sha256").update(`${promptVersion(step.id)}\n${String(step.parse)}\n${body ?? renderJev(step.id, item as Item | DupePair)}`).digest("hex");
+}
+
 type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV | null }>; hashOf: (x: It) => string };
 
 /** The unsure Jev answers kept for `items` (jev_unsure), and the hash of each item's Jev request they are valid for. */
@@ -296,11 +302,7 @@ async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
   const hashes = new Map<It, string>();
   const hashOf = (x: It): string => {
     let h = hashes.get(x);
-    if (h === undefined) {
-      const { item, body } = tier.jev.request(x, ctx);
-      // The parser's text and the prompt version join the request body: a kept answer is the parsed value, valid only for the parser that made it.
-      hashes.set(x, h = createHash("sha256").update(`${promptVersion(tier.jev.id)}\n${String(tier.jev.parse)}\n${body ?? renderJev(tier.jev.id, item as Item | DupePair)}`).digest("hex"));
-    }
+    if (h === undefined) hashes.set(x, h = jevRequestHash(tier.jev, x, ctx));
     return h;
   };
   const rows = new Map<string, { hash: string; answer: JV | null }>();
@@ -332,11 +334,18 @@ async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV,
   await saveUnsure(db, { promptId: tier.jev.id, keep, drop });
 }
 
-/** Drops kept unsure Jev answers older than the keep time and those of items that are closed, gone or in untracked repos. */
+/** The items a kept answer's ref names: `repo#n`, or both items of a pair `repo#a~b` (src/dupes/pair.ts). */
+const refItems = (ref: string): { repo: string; number: number }[] => {
+  const i = ref.lastIndexOf("#");
+  return ref.slice(i + 1).split("~").map((n) => ({ repo: ref.slice(0, i), number: Number(n) }));
+};
+
+/** Drops kept unsure Jev answers older than the keep time and those with no item that is open in a tracked repo. */
 export async function pruneJevUnsure(db: Db, nowMs: number = Date.now()): Promise<number> {
   return await pruneUnsure(db, nowMs, async (refs) => {
-    const keys = refs.map((r) => { const i = r.lastIndexOf("#"); return { repo: r.slice(0, i), number: Number(r.slice(i + 1)) }; });
+    const keys = refs.flatMap(refItems);
     const [items, tracked] = await db.together(() => Promise.all([loadItems(db, keys, "card"), loadTrackedRepos(db, [...new Set(keys.map((k) => k.repo))])]));
-    return new Set([...items].filter(([, i]) => i.state === "OPEN" && tracked.has(i.repo)).map(([k]) => k));
+    const open = new Set([...items].filter(([, i]) => i.state === "OPEN" && tracked.has(i.repo)).map(([k]) => k));
+    return new Set(refs.filter((ref) => refItems(ref).some((k) => open.has(`${k.repo}#${k.number}`))));
   });
 }
