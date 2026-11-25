@@ -250,7 +250,7 @@ const proposalLine = (command: string, mention?: string): string =>
   t("I read this as `{command}`. Reply `{reply}` to run it.", { command, reply: mention ? `@${mention} ${command}` : command });
 
 /** Words that reverse or postpone a command: a reply holding one is never read back as that command. */
-const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|stop|pause|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
+export const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|stop|pause|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
 
 /** The one start-or-approve command a leftover text names, or null when it names none, several, or is hedged. */
 function singleCommand(rest: string): string | null {

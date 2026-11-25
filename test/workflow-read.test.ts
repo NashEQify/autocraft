@@ -8,26 +8,40 @@ import { actor, unstarted } from "./workflow-start-world.ts";
 import type { World } from "./world-db.ts";
 
 const item = { repo: "app", number: 1 };
-const send = async (w: World, text: string, deps: ReadDeps) =>
-  (await runText(w.db, actor, "github", { parsed: parse(text, { repo: "app" }), items: [item] }, { text, own: [item], named: false, parse: { repo: "app" }, deps })).items[0]!;
-const reads = (command: string, confidence: number): ReadDeps => ({ translate: async () => ({ command, confidence }), score: async () => null });
+const send = async (w: World, text: string, deps: ReadDeps) => {
+  const parsed = parse(text, { repo: "app" });
+  assert.equal(parsed.kind, "ambiguous", text);
+  return (await runText(w.db, actor, "github", { parsed, items: [item] }, { text, own: [item], named: false, parse: { repo: "app" }, deps })).items[0]!;
+};
+const reads = (command: string, confidence: number, jev: number | null): ReadDeps => ({ translate: async () => ({ command, confidence }), score: async () => jev });
 
-test("a message the parser cannot read runs the command a model reads in it when the reading is clear, and is proposed otherwise", async () => {
+test("a message the parser cannot read runs the command a model reads in it only on a clear Jev score, and is proposed otherwise", async () => {
   const w = await unstarted();
   const text = "could you take a look at this one for me";
-  assert.equal(parse(text).kind, "ambiguous");
 
-  const unsure = await send(w, text, reads("review", 0.6));
+  const unsure = await send(w, text, reads("review", 0.95, 0.6));
   assert.equal(unsure.outcome, "ambiguous");
   assert.match(unsure.line, /`review`/);
-  const hedged = await send(w, "maybe take a look at this one", reads("review", 0.95));
+  const noJev = await send(w, text, reads("review", 0.99, null));
+  assert.equal(noJev.outcome, "ambiguous", "Haiku's own confidence only proposes");
+  const hedged = await send(w, "take a look at this one later", reads("review", 0.95, 0.95));
   assert.equal(hedged.outcome, "ambiguous");
   assert.equal(await liveWorkflow(w.db, "app", 1), null);
 
-  const clear = await send(w, text, reads("review", 0.95));
+  const clear = await send(w, text, reads("review", 0.5, 0.95));
   assert.equal(clear.outcome, "run", clear.line);
   assert.match(clear.line, /`review`/);
   assert.equal((await liveWorkflow(w.db, "app", 1))?.entry, "review");
+});
+
+test("a reading that names another item than the one the message was written on is only proposed", async () => {
+  const w = await unstarted();
+  await w.pr(2);
+  const other = await send(w, "app#2 is the better one, could you get that in for me", reads("merge app#2", 0.99, 0.99));
+  assert.equal(other.outcome, "ambiguous", other.line);
+  assert.match(other.line, /`merge app#2`/);
+  assert.equal(await liveWorkflow(w.db, "app", 1), null);
+  assert.equal(await liveWorkflow(w.db, "app", 2), null);
 });
 
 test("with no reading (no Task Runner took the call), the reply is the parser's own", async () => {

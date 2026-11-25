@@ -32,9 +32,9 @@ import { ghComment, WritePacedError, type Writer } from "./write.ts";
 import { envVar } from "../env.ts";
 import { t } from "../i18n/index.ts";
 import { runCommand, type Actor } from "../workflow/apply.ts";
-import { runText, type ReadDeps } from "../workflow/read.ts";
+import { READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
 import { commentLines } from "./comment-lines.ts";
-import { parseComment } from "../workflow/parse.ts";
+import { commentCondition, parseComment } from "../workflow/parse.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -325,7 +325,8 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     return "settled";
   }
   if (again.kind === "ambiguous" && allowed && deps.read !== null) {
-    readInBackground(db, d, r, deps, { actor, again, text: addressedText(c.kind === "ok" ? c.body : "", names), mention: mentionName, reply, allowed });
+    const body = c.kind === "ok" ? c.body : "";
+    readInBackground(db, d, r, deps, { actor, again, names, text: addressedText(body, names), condition: commentCondition(body, names) !== null, mention: mentionName, reply, allowed });
     return "reading";
   }
   try {
@@ -339,6 +340,9 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   }
   return "settled";
 }
+
+/** The comment was deleted, or no longer holds the command, by the time a reading's command would run. */
+class CommentChanged extends Error {}
 
 /** Comments a model is reading or has read in this process, with when it started: the drain leaves them to readInBackground. */
 const reading = new Map<number, number>();
@@ -355,16 +359,21 @@ function addressedText(body: string, names: readonly string[]): string {
 
 /**
  * Reads an answer the parser could not read with a model (src/workflow/read.ts runText), off the drain, which would otherwise wait for the
- * call; then settles the command and posts its answer. A command the reading runs is pinned to the PR's head at the comment, as a typed one
- * is. The row stays queued meanwhile, and the drain passes over it (`reading`); after a restart the drain reads it again.
+ * call; then settles the command and posts its answer. Just before a command the reading runs, the comment is read again, as a typed one
+ * is: deleted or changed meanwhile, the command ends unanswered. It is pinned to the PR's head at the comment, as a typed one is. The row
+ * stays queued meanwhile, and the drain passes over it (`reading`); after a restart the drain reads it again.
  */
-function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; text: string; mention: string | undefined; reply: boolean; allowed: boolean }): void {
+function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; names: readonly string[]; text: string; condition: boolean; mention: string | undefined; reply: boolean; allowed: boolean }): void {
   const id = Number(r.comment_id);
   const clock = deps.now ?? (() => new Date());
   const nowMs = Date.now();
   for (const [k, at] of reading) if (nowMs - at >= EXPIRE_MS) reading.delete(k);
   reading.set(id, nowMs);
   const pin = async (p: Parsed): Promise<{ head?: string } | string> => {
+    const c = await (deps.comment ?? restComment)(r.repo, r.comment_id).catch(() => null);
+    if (!c) return t("Nothing ran: the comment could not be read again. Send it again.");
+    const now = c.kind === "ok" && c.authorId === Number(r.github_id) ? parseComment(c.body, o.names, { repo: r.repo }) : null;
+    if (!now || commandKey(now) !== commandKey(o.again)) throw new CommentChanged(c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command");
     if (!pinsHead({ pr: r.pr, parsed: JSON.stringify(p) })) return {};
     const p2 = await (deps.pr ?? prSince)(deps.querier, r.repo, r.number, r.created_at).catch(() => undefined);
     return p2 && !p2.changed ? { head: p2.head } : t("{ref} changed after the command was written. Send it again.", { ref: `${slugOf(r.repo)}#${r.number}` });
@@ -373,11 +382,15 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
     let state: CommandState = "refused", line = NOT_RUN;
     try {
       const res = await runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
-        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) });
+        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) });
       const out = res.items[0];
       state = out?.outcome === "run" ? "done" : "refused";
       line = out?.line ?? (res.lines.join(" ") || NOT_RUN);
     } catch (e) {
+      if (e instanceof CommentChanged) {
+        await settle(db, d, r, "ignored", e.message, clock());
+        return;
+      }
       deps.log?.(`github command ${refOf(r)}: ${oneLine(String((e as Error)?.message ?? e))}`);
     }
     await settle(db, d, r, state, line, clock(), { reply: o.reply, allowed: o.allowed });

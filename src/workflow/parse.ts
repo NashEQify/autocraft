@@ -120,7 +120,7 @@ const CODE_RE = /\u0002(\d+)\u0002/g;
  * Words that turn or soften what they stand beside. A message holding one is never read as a command, whatever else it says; the
  * hold phrases that hold one ("not yet", "don't merge yet") are read before this.
  */
-const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|cant|wont|shouldnt)(?![\w-])|n't(?![\w-])|\?/i;
+export const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|cant|wont|shouldnt)(?![\w-])|n't(?![\w-])|\?/i;
 
 /**
  * The command in a GitHub comment, or null when no line of it is addressed to the app. A command starts on a line of its own with
@@ -130,6 +130,20 @@ const GUARD = /(?<![\w-])(?:not|never|maybe|perhaps|unless|dont|do not|cannot|ca
  * ambiguous too; a hold stands, whatever the comment says about it.
  */
 export function parseComment(body: unknown, slug: string | readonly string[], opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
+  const a = addressed(body, slug);
+  if (!a) return null;
+  const { texts, condition } = a;
+  const p = parse(texts.join("\n"), opts);
+  if (condition === null || (p.kind === "commands" && p.parts.every((x) => x.word === "hold"))) return p;
+  if (p.kind === "ambiguous") return { ...p, rest: [p.rest, condition].filter(Boolean).join(", ") };
+  return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest: condition };
+}
+
+/** The condition a GitHub comment sets after its addressed lines ("but wait for CI"), as parseComment reads it, or null. */
+export const commentCondition = (body: unknown, slug: string | readonly string[]): string | null => addressed(body, slug)?.condition ?? null;
+
+/** The addressed texts of a comment and the first condition after them; null when no line is addressed to the app. */
+function addressed(body: unknown, slug: string | readonly string[]): { texts: string[]; condition: string | null } | null {
   const names = [slug].flat().filter(Boolean);
   if (typeof body !== "string" || !names.length) return null;
   const lines = commentLines(body.slice(0, BODY_MAX));
@@ -146,15 +160,11 @@ export function parseComment(body: unknown, slug: string | readonly string[], op
     texts.push(text);
     condition ??= conditionIn(lines.slice(i + 1), mention);
   }
-  if (!texts.length) return null;
-  const p = parse(texts.join("\n"), opts);
-  if (condition === null || (p.kind === "commands" && p.parts.every((x) => x.word === "hold"))) return p;
-  if (p.kind === "ambiguous") return { ...p, rest: [p.rest, condition].filter(Boolean).join(", ") };
-  return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest: condition };
+  return texts.length ? { texts, condition } : null;
 }
 
 /** Words that open a condition on what was said before. */
-const CONDITION = /^(?:if|unless|but|wait|after|when|until|not)$/;
+export const CONDITION = /^(?:if|unless|but|wait|after|when|until|not)$/;
 /** Words a condition may start with before its own ("please only merge it when ..."). */
 const LEAD_IN = new Set(["and", "so", "then", "only", "just", "please", "pls", "also", "though", "maybe", "perhaps", "thanks", "ok", "okay", "yes", "no", "let", "us", "lets", "let's", "i", "i'd", "we", "we'd", "would", "should", "do", "go", "land", "merge", "it", "this", "that", "the"]);
 

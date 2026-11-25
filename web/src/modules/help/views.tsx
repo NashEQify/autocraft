@@ -255,9 +255,7 @@ function After() {
           <li>{t("AutoCraft reads a message it can't read as a command with a model, on your own Task Runner or another free one.")}</li>
           <li>{t("A clear reading runs. The confirmation line ends with the command it read from your words.")}</li>
           <li>{t("Otherwise AutoCraft replies with the command it thinks you meant. Send that command to run it.")}</li>
-          <li>
-            {t("A message with")} <Code>not</Code>, <Code>don't</Code>, <Code>never</Code>, <Code>maybe</Code>, <Code>unless</Code>, <Code>perhaps</Code> {t("or a question mark never runs this way, except a hold.")}
-          </li>
+          <li>{t("A message that says not to, hedges, asks a question or sets a condition never runs this way, except a hold.")}</li>
           <li>{t("With no Task Runner free, AutoCraft says what it understood and waits.")}</li>
         </ul>
       </Part>
