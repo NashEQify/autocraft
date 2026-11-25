@@ -1,11 +1,11 @@
 // A model reading of text the command parser could not read, on every surface. When parse() gives `ambiguous` and the sender may
 // send commands on the items, Haiku translates the text into one command in the parser's words: on the sender's own Task Runner
-// first (a bound call, outside its slots), else on any Task Runner's Interactive slots, never on pipeline slots. The command must
-// parse in full and name no item the message does not; Jev then scores whether the message asks for exactly it (Haiku's own
-// confidence when Jev gives no answer). At READ_RUN_SCORE or more it runs through runCommand as if the sender had typed it, unless
-// the text hedges (a hold runs anyway); below, the reply proposes it. With no reading (no Task Runner took the call, it failed or
-// timed out, or the model found it unclear) the reply is the parser's own. The text goes only into the calls, whose recorded
-// texts are deleted when they end; each reading is logged as a `read` event with the text's hash.
+// first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet item), never on pipeline
+// slots. The command must parse in full and name no item the text does not; Jev then scores whether the text asks for exactly it.
+// It runs through runCommand as if the sender had typed it only with Jev's score at READ_RUN_SCORE or more, with the message's own
+// items, and with no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it. With no reading (no Task
+// Runner took the call, it failed or timed out, or the model found it unclear) the reply is the parser's own. The text goes only
+// into the calls, whose recorded texts are deleted when they end; each reading is logged as a `read` event with the text's hash.
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
@@ -19,29 +19,43 @@ import { t } from "../i18n/index.ts";
 import { ownerOf } from "../owners.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
-import { parse, type ParseOptions } from "./parse.ts";
+import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
 import { jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
 import { isLive } from "./resolve.ts";
-import { recommendationText } from "./status.ts";
+import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, type ItemRef, type Parsed, type Surface } from "./types.ts";
 
 /** The score from which a command read from a message runs without asking. */
 export const READ_RUN_SCORE = 0.9;
-/** The longest a reading may take, from the first call to the score; past it the parser's own reply goes out. */
-export const READ_WAIT_MS = 90_000;
+/** The longest a reading may take, from the first call to the score, while the sender waits for the reply (dashboard, agent, Discord); past it the parser's own reply goes out. */
+export const READ_WAIT_MS = 45_000;
+/** The same for a reading off the request (a GitHub comment, read off the comment drain). */
+export const READ_BACKGROUND_WAIT_MS = 90_000;
+/** Items one message may be about. */
+export const READ_OWN_MAX = 100;
 /** How long each translate call waits in the queue for a Task Runner to take it. */
 export const READ_TAKE_WAIT_MS = 8_000;
 /** The step the calls are recorded under; their texts are deleted when they end. */
 const READ_STEP = "command-read";
-/** Words and marks that negate, hedge or ask: such a text never runs a reading directly, unless it is a hold. */
-const HEDGE = /(?<![\w-])(?:not|don't|dont|never|maybe|unless|perhaps)(?![\w-])|n't(?![\w-])|\?/i;
+/** Words that put a command off to a later time, beside the parser's own condition words (CONDITION). */
+const LATER = /(?<![\w-])(?:if|after|when|until|once|before|later|tomorrow)(?![\w-])/i;
+/**
+ * A text that negates, hedges, asks or sets a condition: the parser's guard (GUARD), the words an unclear reply never reads back as a
+ * command (MEANING_WORDS), its condition words (CONDITION) and LATER. Such a text never runs a reading, unless it is a hold.
+ */
+export function hedged(text: string): boolean {
+  const s = text.replace(/[\u2018\u2019]/g, "'");
+  return GUARD.test(s) || MEANING_WORDS.test(s) || LATER.test(s) || s.toLowerCase().split(/[^\p{L}']+/u).some((w) => CONDITION.test(w));
+}
 
 export type Translation = { command: string | null; confidence: number };
-export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku" };
+/** `fit`: how its items fit the message (itemsFit). */
+export type Reading = { command: string; parsed: Parsed; score: number; source: "jev" | "haiku"; fit: "own" | "text" };
 
 /** What tests replace: the translate call (null: no answer) and Jev's score (null: no answer). */
 export type ReadDeps = {
-  translate?: (db: Db, ask: ReadAsk, login: string) => Promise<Translation | null>;
+  /** `ownOnly`: only the sender's own Task Runner may read it (a quiet item). */
+  translate?: (db: Db, ask: ReadAsk, login: string, o: { ownOnly: boolean }) => Promise<Translation | null>;
   score?: (db: Db, ask: ScoreAsk) => Promise<number | null>;
 };
 
@@ -50,11 +64,18 @@ export type ReadText = {
   text: string;
   /** The items the message was written on, or names. */
   own: readonly ItemRef[];
-  /** The command must name its items (a surface with no item of its own): each one among `own`. Otherwise it names none or only those. */
+  /**
+   * The command must name its items, exactly the items of `own` (a surface with no item of its own: Discord, a dashboard list typed
+   * as text). Otherwise `own` is the item the text was written on, or the items selected: the command names none, or only those.
+   */
   named: boolean;
+  /** The parser found a condition beside the text's command (parseComment): a reading is only proposed. */
+  condition?: boolean;
+  /** The longest the reading may take (default READ_WAIT_MS). */
+  waitMs?: number;
   /** How the command read is parsed (the item's repo for a bare #n). */
   parse?: ParseOptions;
-  /** Settles what the command needs before it runs (GitHub: the PR head at the comment), or a line saying why it cannot run. */
+  /** Settles what the command needs before it runs (GitHub: the comment unchanged, the PR head at it), or a line saying why it cannot run; may throw to end the command. */
   pin?: (p: Parsed) => Promise<Partial<CommandInput> | string>;
   deps?: ReadDeps;
 };
@@ -74,16 +95,22 @@ export function refsIn(text: string, repo?: string): ItemRef[] {
   return out;
 }
 
-/** The command's items and every item its words name (a duplicate's original, an autorepin target) are the message's own. */
-function namesOwn(p: Parsed, command: string, read: ReadText): boolean {
-  if (p.kind === "ambiguous") return false;
+/**
+ * How the command's items fit the message: `own` when they are the message's own (none or only `own` written on an item, exactly
+ * `own` for a named list), `text` when every item the command names stands in the text but they are not that (it may only be
+ * proposed), `none` when it names an item the text does not. A duplicate's original and an autorepin target count as named.
+ */
+function itemsFit(p: Parsed, command: string, read: ReadText): "own" | "text" | "none" {
+  if (p.kind === "ambiguous") return "none";
   const items = p.items ?? [];
-  if (read.named && !items.length) return false;
-  const allowed = [...read.own, ...refsIn(read.text, read.parse?.repo)];
+  const inText = [...read.own, ...refsIn(read.text, read.parse?.repo)];
   const home = read.parse?.repo ?? read.own[0]?.repo ?? "";
   const originals = p.kind === "commands" ? p.parts.flatMap((x) => (x.word === "close" && x.reason?.as === "duplicate" ? [{ repo: x.reason.of.repo ?? home, number: x.reason.of.number }] : [])) : [];
   // A bare #n in the command's words is a plan part or an item the parse already resolved; named items are checked by name.
-  return [...items, ...originals, ...refsIn(command)].every((i) => allowed.some((o) => sameRef(i, o)));
+  if (![...items, ...originals, ...refsIn(command)].every((i) => inText.some((o) => sameRef(i, o)))) return "none";
+  const ofOwn = items.every((i) => read.own.some((o) => sameRef(i, o)));
+  const fits = read.named ? items.length > 0 && ofOwn && read.own.every((o) => items.some((i) => sameRef(i, o))) : ofOwn;
+  return fits ? "own" : "text";
 }
 
 /** The sender may send commands on every item: a tracked repo, and the act rule (actRefusal) lets them. */
@@ -99,7 +126,7 @@ async function mayRead(db: Db, actor: Actor, own: readonly ItemRef[]): Promise<b
 }
 
 /** The call's input: the text, and each item's kind, AutoCraft's work on it and an open question with its plan parts (left out on a quiet item). */
-async function askOf(db: Db, read: ReadText): Promise<ReadAsk> {
+async function askOf(db: Db, read: ReadText): Promise<{ ask: ReadAsk; quiet: boolean }> {
   const refs = read.own.slice(0, READ_ITEMS_MAX).map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number }));
   const keys = refs.map((r) => `${r.repo}#${r.number}`);
   const [items, history, quiet] = await Promise.all([loadItems(db, refs, "pr"), loadWorkflowHistory(db, refs), loadQuiet(db, keys)]);
@@ -116,7 +143,7 @@ async function askOf(db: Db, read: ReadText): Promise<ReadAsk> {
       ...(rec && !veiled ? { question: recommendationText(rec), parts: wf!.plan.filter((p) => p.state !== "dropped").map((p) => ({ n: p.n, title: p.title })) } : {}),
     });
   }
-  return { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out };
+  return { ask: { ...(keys[0] ? { ref: keys[0] } : {}), message: read.text.slice(0, READ_TEXT_CHARS), items: out }, quiet: quiet.size > 0 };
 }
 
 const TRANSLATE = (id: "command.read" | "interactive.command-read"): ClaudeStep<ReadAsk, Translation> => ({
@@ -146,10 +173,10 @@ async function translateOn(db: Db, id: "command.read" | "interactive.command-rea
   }
 }
 
-/** The sender's own Task Runner first; when it gives no answer, any Task Runner with a free Interactive slot. */
-async function translate(db: Db, a: ReadAsk, login: string): Promise<Translation | null> {
+/** The sender's own Task Runner first; when it gives no answer, any Task Runner with a free Interactive slot, except for a quiet item (`ownOnly`). */
+async function translate(db: Db, a: ReadAsk, login: string, o: { ownOnly: boolean }): Promise<Translation | null> {
   try {
-    return await translateOn(db, "command.read", a, login) ?? await translateOn(db, "interactive.command-read", a);
+    return await translateOn(db, "command.read", a, login) ?? (o.ownOnly ? null : await translateOn(db, "interactive.command-read", a));
   } finally {
     await removeRunTexts(db, { steps: [READ_STEP], finishedOnly: true }).catch(() => 0);
   }
@@ -168,13 +195,14 @@ async function score(db: Db, a: ScoreAsk): Promise<number | null> {
 
 /** The command a model reads in the text, checked by the parser and scored; null when there is none. */
 export async function readCommand(db: Db, login: string, read: ReadText): Promise<Reading | null> {
-  const ask = await askOf(db, read);
-  const tr = await (read.deps?.translate ?? translate)(db, ask, login);
+  const { ask, quiet } = await askOf(db, read);
+  const tr = await (read.deps?.translate ?? translate)(db, ask, login, { ownOnly: quiet });
   if (!tr?.command) return null;
   const parsed = parse(tr.command, read.parse);
-  if (!namesOwn(parsed, tr.command, read)) return null;
+  const fit = itemsFit(parsed, tr.command, read);
+  if (fit === "none") return null;
   const p = await (read.deps?.score ?? score)(db, { message: ask.message, command: tr.command });
-  return p === null ? { command: tr.command, parsed, score: tr.confidence, source: "haiku" } : { command: tr.command, parsed, score: p, source: "jev" };
+  return p === null ? { command: tr.command, parsed, score: tr.confidence, source: "haiku", fit } : { command: tr.command, parsed, score: p, source: "jev", fit };
 }
 
 /** Resolves after `ms` with null, or with the promise's value; a rejection is null. */
@@ -185,8 +213,12 @@ const within = <T>(ms: number, p: Promise<T>): Promise<T | null> => {
 
 const isHold = (p: Parsed): boolean => p.kind === "commands" && p.parts.length > 0 && p.parts.every((x) => x.word === "hold");
 
-/** Whether a reading runs without asking: a score at READ_RUN_SCORE or more, and no hedge in the text unless it is a hold. */
-export const readingRuns = (r: Reading, text: string): boolean => r.score >= READ_RUN_SCORE && (isHold(r.parsed) || !HEDGE.test(text));
+/**
+ * Whether a reading runs without asking: Jev's score at READ_RUN_SCORE or more (Haiku's own confidence only proposes), items that are
+ * the message's own, and no condition the parser found and no hedge in the text, unless it is a hold.
+ */
+export const readingRuns = (r: Reading, read: Pick<ReadText, "text" | "condition">): boolean =>
+  r.source === "jev" && r.score >= READ_RUN_SCORE && r.fit === "own" && (isHold(r.parsed) || (!read.condition && !hedged(read.text)));
 
 /** Adds the note to every item's line and to the reply. */
 function noted(res: CommandResult, note: string): CommandResult {
@@ -200,9 +232,9 @@ function noted(res: CommandResult, note: string): CommandResult {
  */
 export async function runText(db: Db, actor: Actor, via: Surface, input: CommandInput, read: ReadText | null): Promise<CommandResult> {
   if (input.parsed.kind !== "ambiguous" || !read || !actor.login || !await mayRead(db, actor, read.own)) return await runCommand(db, actor, via, input);
-  const reading = await within(READ_WAIT_MS, readCommand(db, actor.login, read));
+  const reading = await within(read.waitMs ?? READ_WAIT_MS, readCommand(db, actor.login, read));
   if (!reading) return await runCommand(db, actor, via, input);
-  const runs = readingRuns(reading, read.text);
+  const runs = readingRuns(reading, read);
   const hash = createHash("sha256").update(read.text).digest("hex").slice(0, 16);
   const line = t("Read “{command}” from a message ({hash}): {source} {score}, {outcome}.", { command: reading.command, hash, source: reading.source === "jev" ? "Jev" : "Haiku", score: reading.score.toFixed(2), outcome: runs ? t("run") : t("proposed") });
   const at = input.at ?? new Date().toISOString();

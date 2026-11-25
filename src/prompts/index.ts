@@ -1438,8 +1438,8 @@ const COMMAND_READ: ClaudePrompt = {
   placeholders: { ask: `A JSON object indented by one space: message (the text, first ${READ_TEXT_CHARS} characters) and items (at most ${READ_ITEMS_MAX}: ref, kind, work, and with an open question its recommendation and up to ${READ_PARTS_MAX} plan parts by number and title).` },
   template: COMMAND_READ_TEMPLATE,
   output: `One JSON object: {"command": string or null, "confidence": 0 to 1}.`,
-  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON; it is kept only when confidence is a number from 0 to 1 and command is null or a text of at most ${READ_COMMAND_CHARS} characters. The command is read by the parser again: one it cannot read in full, or one that names items the message does not, is dropped. Jev (command.read.jev) then scores it; without Jev the confidence is the score. At 0.9 or more it runs as if the sender had typed it, unless the message holds not, don't, never, maybe, unless, perhaps or a question mark (a hold runs anyway); below, the reply proposes it. With no answer the reply is the parser's own. The recorded prompt and reply are deleted when the call ends.`,
-  limits: { perCall: 1, attempts: 1, timeoutSeconds: 60 },
+  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON; it is kept only when confidence is a number from 0 to 1 and command is null or a text of at most ${READ_COMMAND_CHARS} characters. The command is read by the parser again: one it cannot read in full, or one that names items the message does not, is dropped. Jev (command.read.jev) then scores it. With Jev's score at 0.9 or more, the message's own items, and no condition, negation, hedge or question in the message, it runs as if the sender had typed it (a hold runs anyway); otherwise, and always without a Jev score, the reply proposes it. With no answer the reply is the parser's own. The recorded prompt and reply are deleted when the call ends.`,
+  limits: { perCall: 1, attempts: 1, timeoutSeconds: 30 },
   extra: [{ label: "Run", value: "Outside the pipeline, once per message the parser could not read, from a sender who may send commands on its items; no tools" }],
 };
 const COMMAND_READ_INTERACTIVE: ClaudePrompt = {
@@ -1463,7 +1463,7 @@ const COMMAND_READ_JEV: JevPrompt = {
     },
   },
   output: `{"answers": {"exact": {"noul": p}}, "usage": {"input_tokens", "output_tokens"}}`,
-  validation: "The answer is kept only when exact.noul is a number from 0 to 1; it is the command's score. Without an answer (Jev not configured, an error, a timeout) the model's own confidence is the score.",
+  validation: "The answer is kept only when exact.noul is a number from 0 to 1; it is the command's score. Without an answer (Jev not configured, an error, a timeout) the command is only proposed.",
   limits: { perCall: 1, attempts: 1, timeoutSeconds: 30 },
   extra: [{ label: "Run", value: "Outside the pipeline, once per command read from a message" }],
 };
