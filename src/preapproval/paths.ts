@@ -30,6 +30,16 @@ export function redCiPath(f: PrFacts | null): FixPath {
   }
 }
 
+/**
+ * Nobody makes the fixes that the take-fix review at the head asks for: they name files no fix-up may touch, or the fix-up cannot run and
+ * nobody is asked for them. A push that only waits for its approval, and what our implementation's session is asked, are somebody's.
+ */
+export function nobodyFixes(f: PrFacts): boolean {
+  const r = f.review, fx = fixupOf(f);
+  if (fx) return fx.bucket !== "unapproved" && fixPath(f) === null;
+  return f.fixup?.fixes === 0 && r?.verdict === "take-fix" && r.head === f.head && !r.stale && f.mergeable !== "CONFLICTING" && !f.changesRequested && !ownImplementation(f);
+}
+
 /** Who makes the fixes of the take-fix review at the leg's head, as `redCiPath`. */
 export function fixPath(f: PrFacts): FixPath {
   const fx = fixupOf(f);

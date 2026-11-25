@@ -5,13 +5,14 @@ import { unapprovedStop, unknownStuck, worksOn } from "../core/decide.ts";
 import { implementStep } from "../core/decide-item.ts";
 import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/plan.ts";
 import { t } from "../i18n/index.ts";
-import { afterSteps, droppedOf, onConflict, planned, textFor, type Conflict, type ReviewView } from "./recommend.ts";
+import { nobodyFixes } from "../preapproval/paths.ts";
+import { afterSteps, droppedOf, onConflict, planned, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
 /** `blocker` and `params` are what an approved item stops at (`params.code`: the wait); one not approved comes back with `rec` alone. */
 export type Question = { blocker: Blocker; params: Record<string, unknown>; rec: Recommendation; /** When what it is about happened, where that may be after the pass began. */ showed?: string };
 
-type Asked = { approved: boolean; review: ReviewView | null; parts: readonly PlanPart[]; conflict: Conflict | null };
+export type Asked = { approved: boolean; review: ReviewView | null; parts: readonly PlanPart[]; conflict: Conflict | null };
 
 /** An action that moves the item on by itself, or once something other than a person does. One refused for the question that is being looked at again counts. */
 const moves = (a: Action): boolean => !a.permission || a.permission.ok || a.permission.why.who !== "person" || a.permission.why.code === "blocked";
@@ -65,11 +66,19 @@ const regression = (f: PrFacts, rest: string): string =>
 /** The sentence of a wait that has none of its own. */
 const waitText = (wait: string): string => t("It waits for {what}.", { what: wait.replace(/\.$/, "") });
 
+/** An approved PR whose review asks for fixes nobody makes comes back to go on without them; null for any other. */
+export function withoutFixes(f: PrFacts, o: Asked): Recommendation | null {
+  const parts = planned(o.parts);
+  return o.approved && o.review?.verdict === "take-fix" && parts.length && nobodyFixes(f) ? without(parts, f.fixup!.fixes === 0) : null;
+}
+
 function recFor(code: WaitCode, f: PrFacts, p: Plan, o: Asked): Recommendation {
   const parts = { fix: [] as number[], drop: droppedOf(o.parts) }, merges = o.approved;
   if (onGithub(code)) return { text: ON_GITHUB[code](), parts, merges, goes: "look", cause: { code } };
   const past = MERGE_PAST[code];
   if (past) return { text: past(f), parts, merges: true };
+  const skip = code === "answer" || code === "ask-failed" ? withoutFixes(f, o) : null;
+  if (skip) return skip;
   const why = (REVIEW_AGAIN[code] ?? (() => waitText(p.wait ?? "")))();
   // The session does not make the review's fixes: a fix-up of ours does.
   const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];

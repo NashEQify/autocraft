@@ -610,9 +610,12 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
       const f = await factOf();
       if (f && f.head !== head) return;
       const round = f && premergeFix(f);
-      const failed = verifyStop(p, head, pf, leg);
-      if (failed) return await stop(failed);
-      if (round === "fix" || round === "running") return await noteOnce(db, p, head, "premerge-fixup", `${found[0]!.toUpperCase()}${found.slice(1)}; the merge was approved, so the fix-up runs once.`);
+      if (round === "fix" || round === "running") {
+        // Where a person has to have the defects fixed, the failed verification is no question of its own: the fix is a head verified anew.
+        const failed = verifyStop(p, head, pf, leg);
+        if (failed) return await stop(failed);
+        return await noteOnce(db, p, head, "premerge-fixup", `${found[0]!.toUpperCase()}${found.slice(1)}; the merge was approved, so the fix-up runs once.`);
+      }
       return await stop(stopOf("premerge-defect", found, { defects }));
     }
     // The merge approval says the change is wanted: an unsure pre-merge review (a claim of the description it could not verify) with

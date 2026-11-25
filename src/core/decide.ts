@@ -24,6 +24,8 @@ const verifyState = (f: PrFacts): QueueState | null => {
   return s === "failed" ? "verify-failed" : s === "error" ? "verify-error" : "waiting-verify";
 };
 
+const verifyFailed = (f: PrFacts): boolean => f.verification?.state === "failed" || f.verification?.state === "error";
+
 // ---- the maintainer workflow (src/workflow)
 
 /** The PR's live maintainer workflow, or null. */
@@ -94,7 +96,7 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (f.verification?.state === VERIFY_UNAVAILABLE) reasons.push(`not verified: ${f.verification.summary ?? "Verify cannot build this repo"}`);
   const never = unmergeable(f);
   reasons.push(...never);
-  if (open && (f.verification?.state === "failed" || f.verification?.state === "error")) reasons.push(`verification ${f.verification.state === "failed" ? "failed" : "errored"}: ${excerpt(f.verification.summary ?? f.verification.note ?? "no detail")}`);
+  if (open && verifyFailed(f)) reasons.push(`verification ${f.verification!.state === "failed" ? "failed" : "errored"}: ${excerpt(f.verification!.summary ?? f.verification!.note ?? "no detail")}`);
   // A merge refused for a reason other than the state of CI or mergeable waits for nothing that changes by itself: a person is asked.
   if (open && refusalStuck(f)) reasons.push(`the merge was refused: ${excerpt(f.lastMerge!.reason!)}`);
   const stuckUnknown = open ? unknownStuck(f) : null;
@@ -144,9 +146,9 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: boolean): QueueSta
   const mx = mergeEntry(f);
   if (!mx && f.review!.verdict === "take-fix") return "needs-fix-up";
   // A started PR merges on its approval, as its approver once the merge is handed over: the rule merges only what nobody started.
-  // A merge entry's blocking pre-merge review stops it.
+  // A merge entry's blocking pre-merge review or failed verification stops it; its leg carries it to a person's answer.
   if (unmergeable(f).length || f.screenshots) e.path = null;
-  else if (mx) e.path = e.handed ? "operator" : e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" ? null : "maintainer";
+  else if (mx) e.path = e.handed ? "operator" : e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" || verifyFailed(f) ? null : "maintainer";
   else if (!e.reasons.length) e.path = workflowOf(f) && !e.handed ? "maintainer" : "rule";
   else if (e.handed) e.path = "operator";
   if (f.mergeable === "CONFLICTING") return "conflict";
@@ -231,9 +233,6 @@ const WAITS: Partial<Record<QueueState, Wait>> = {
   "verify-failed": person("verification-failed", "a person: verification failed"), "verify-error": person("verification-failed", "a person: verification errored"),
   "changes-requested": person("changes-requested", "the maintainer's review"), refused: system("refusal-retry", "a change in CI or mergeable state"),
 };
-
-/** What the leg of an approved merge carries past a person's answer, which its hand-over makes good: until then it is no question. */
-const HANDED_ON: ReadonlySet<QueueState> = new Set(["batch-failed", "verify-failed", "verify-error"]);
 
 /** The workflow's merge is approved and its leg works on it, or the next workflow pass starts the leg (or asks), and the PR is not handed over yet. */
 const legWorks = (f: PrFacts): boolean => f.may.workflow?.state === "running" && f.may.workflow.approvedBy !== null && !f.handOver;
@@ -757,10 +756,11 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // A merge entry's pre-merge review is part of its own path, before the hand-over.
   if (f.operator?.hold) for (let i = actions.length - 1; i >= 0; i--) if (["merge", ...(mx ? [] : ["premerge"])].includes(actions[i]!.kind)) actions.splice(i, 1);
   // Its pre-merge review is the one thing it still needs from the queue: the merge is handed over only after a clean one at the head.
-  if (f.operator?.premerge && e && r && inQueue && mergeAllowed(f) && !f.draft && !f.baseOffDefault && ciAllows(f.ci) && f.mergeable === "MERGEABLE" && premergeRetryDue(f)) actions.push(act("premerge", r.head));
+  const premergePlanned = (): boolean => actions.some((a) => a.kind === "premerge");
+  if (f.operator?.premerge && e && inQueue && !premergePlanned() && mergeAllowed(f) && !f.draft && !f.baseOffDefault && ciAllows(f.ci) && f.mergeable === "MERGEABLE" && premergeRetryDue(f)) actions.push(act("premerge", qHead));
 
   // A diff that waits for what the merge rule reads beside it is read again by the pre-merge step, with no model call; after a read that left it waiting, an hour later.
-  if (f.diffPending && r && f.ghState === "OPEN" && rereadDue(f, pass) && !actions.some((a) => a.kind === "premerge")) actions.push(act("premerge", r.head));
+  if (f.diffPending && r && f.ghState === "OPEN" && rereadDue(f, pass) && !premergePlanned()) actions.push(act("premerge", r.head));
 
   actions.push(...unassignOf(f, state, actions));
 
@@ -781,7 +781,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
       if (e?.noCi) return person("no-ci", "a person: the repo has no CI, and AutoCraft merges only on green CI");
       if (f.screenshots) return person("screenshots", `a person: the screenshots show a regression${f.screenshots.summary ? ` (${excerpt(f.screenshots.summary)})` : ""}`);
     }
-    if ((HANDED_ON.has(st) || (st === "refused" && refusalStuck(f))) && legWorks(f)) return LEG;
+    // The leg of an approved merge carries these past a person's answer, which its hand-over makes good: until then they are no question.
+    if ((st === "batch-failed" || (st === "refused" && refusalStuck(f))) && legWorks(f)) return LEG;
     // The leg carries a merge its person approved past what keeps the PR off the rule; a merge state that stays unknown stops the leg too.
     if (st === "needs-decision" && legWorks(f)) return stuckState() ?? LEG;
     if (st === "waiting-premerge" && !workflowOf(f) && !mergeAllowed(f)) return person("repo-approval", "merge approval for the repo");

@@ -19,9 +19,10 @@ import { yesClause } from "../src/workflow/status.ts";
 import { eventsOf, liveWorkflow } from "../src/workflow/store.ts";
 import type { ItemWorkflow } from "../src/workflow/types.ts";
 import { legWait } from "../src/workflow/waits.ts";
+import { setCommentApproval } from "../src/act/approval.ts";
 import { setFeature } from "../src/build/features.ts";
 import { factsOf, prng, randomPrRows, rnd } from "./random-pr.ts";
-import { T0, T1, untilQuiet, world, type World } from "./world-db.ts";
+import { OPERATOR, T0, T1, untilQuiet, world, type World } from "./world-db.ts";
 
 const MAINT = "mira", ANN = "ann";
 let current: World | undefined;
@@ -256,6 +257,60 @@ test("a yes does not bring the question of a pre-merge stop back: where no fix i
   await settle(w);
   assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "fixup"]);
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"));
+});
+
+test("a merge entry whose verification failed is asked once, after its pre-merge review: a yes merges it, or has the defects fixed first", async () => {
+  for (const [found, fixable] of [["clean", true], ["defect", true], ["defect", false]] as const) {
+    const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
+    await w.pr(1, { label: "feature" });
+    await say(w, "merge");
+    await pause();
+    await w.verified(1, "error");
+    await w.db.run(w.db.k.updateTable("main.verifications").set({ finished_at: new Date().toISOString() }));
+    await settle(w);
+    assert.deepEqual([await actions(w), (await wf(w)).state], [["premerge"], "running"]);
+    await w.premerge(1, found, fixable);
+    await settle(w);
+    const x = await wf(w);
+    assert.deepEqual([x.state, x.blocker, x.rec?.merges], ["blocked", "major-finding", true]);
+    // Defects nobody's round fixes come first: the fix is a new head, which is verified again.
+    assert.equal(x.rec!.parts.fix.length, found === "defect" && !fixable ? 1 : 0, x.rec!.text);
+    await say(w, "yes", ANN);
+    await settle(w);
+    assert.equal((await wf(w)).state, "running");
+    const due = (await w.prPlan(1)).actions;
+    if (found === "clean") assert.ok(due.some((a) => a.kind === "merge") && await leg(w) === "queued");
+    else assert.ok(due.some((a) => a.kind === "fixup" && a.params?.source === (fixable ? "premerge" : "operator")));
+    w.close();
+  }
+});
+
+test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges", async () => {
+  const cases: Record<string, (w: World) => Promise<unknown>> = {
+    protected: (w) => w.review(1, { verdict: "take-fix", fixes: [{ file: ".git/config", change: "drop the hook path" }, { file: "../deny.toml", change: "allow the licence" }] }),
+    "cannot run": async (w) => {
+      await w.db.run(w.db.k.updateTable("main.pr_checks").set({ maintainer_can_modify: 0 }));
+      await setCommentApproval(w.db, OPERATOR, "app", false);
+      await w.review(1, { verdict: "take-fix", fixes: [{ file: "src/a.rs", change: "rename a" }, { file: "src/b.rs", change: "rename b" }] });
+    },
+  };
+  for (const [name, set] of Object.entries(cases)) for (const answer of ["yes", "merge"]) {
+    const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
+    await w.pr(1, { label: "feature" });
+    await (await w.verified(1)).premerge(1, "clean");
+    await say(w, "review and merge");
+    await set(w);
+    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
+    await settle(w);
+    const x = await wf(w), at = `${name}, ${answer}: ${x.rec?.text}`;
+    assert.deepEqual([x.state, x.rec?.parts, x.rec?.merges, x.rec?.again], ["blocked", { fix: [], drop: [1, 2] }, true, undefined], at);
+    assert.match(x.rec!.text, /1 and 2/);
+    assert.match(await say(w, answer, ANN), /dropping 1 and 2, then merging/i);
+    await settle(w);
+    assert.deepEqual([(await wf(w)).state, await leg(w)], ["running", "queued"], at);
+    assert.ok((await actions(w)).includes("merge"), at);
+    w.close();
+  }
 });
 
 test("a merge refused for good is asked about, and a yes tries it again", async () => {

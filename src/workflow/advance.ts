@@ -29,9 +29,9 @@ import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
-import { causeWent, itemQuestion, questionFor, type Question } from "./ask.ts";
+import { causeWent, itemQuestion, questionFor, withoutFixes, type Question } from "./ask.ts";
 import { blockWorkflow } from "./block.ts";
-import { detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
@@ -134,7 +134,10 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
 }
 
 /** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */
-const HOLD_ENDS = ["person", "workflow-ended"];
+const HOLD_ENDS: readonly StopCode[] = ["person", "workflow-ended"];
+
+/** How a merge leg ends at the fixes of the review. */
+const FIX_STOPS: readonly StopCode[] = ["fix-cannot-run", "fix-failed", "fix-too-large"];
 
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
@@ -143,7 +146,7 @@ const OWN_CANCEL = `cancelled by ${ACTOR}`;
 function endedLeg(pass: Pass, w: ItemWorkflow, since: string): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
-  if (HOLD_ENDS.includes(r.reason_code ?? "") && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
+  if (HOLD_ENDS.includes(codeOf({ reason: r.reason ?? "", code: r.reason_code as StopCode | null })) && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
   return { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
 }
 
@@ -495,8 +498,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // A question that went leaves the workflow running, as the facts do not say yet.
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
-  const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts, w.entry === "merge"), conflict);
   const ended = approved ? endedLeg(pass, w, since) : null;
+  // A leg that stopped at the review's fixes would stop there again.
+  const skips = (x: Found): Recommendation | null =>
+    (ended && x.params.reason === ended.reason && FIX_STOPS.includes(codeOf(ended)) && f?.head === head ? withoutFixes(f, { approved, review: view, parts: plan, conflict }) : null);
+  const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(skips(x) ?? atBlocker(x, view, parts, w.entry === "merge"), conflict);
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.

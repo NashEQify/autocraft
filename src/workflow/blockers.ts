@@ -28,6 +28,9 @@ export type BlockerFacts = {
 
 export type EndedLeg = { reason: string; code?: StopCode | null };
 
+/** Why the leg ended, its text's where the row has no code. */
+export const codeOf = (leg: EndedLeg): StopCode => leg.code ?? stopCodeOf(leg.reason);
+
 export type Found = { blocker: Blocker; params: Record<string, unknown> };
 
 /** A step failing this many times stops the item (blocker 3). */
@@ -76,6 +79,6 @@ export function detectBlocker(f: BlockerFacts): Found | null {
   if (r && (r.verdict === "hold" || r.verdict === "close" || r.majors.length)) {
     return { blocker: "major-finding", params: { verdict: r.verdict, sure: r.sure, parts: r.majors } };
   }
-  if (f.leg) return { blocker: legBlocker(f.leg.code ?? stopCodeOf(f.leg.reason)), params: { reason: f.leg.reason } };
+  if (f.leg) return { blocker: legBlocker(codeOf(f.leg)), params: { reason: f.leg.reason } };
   return null;
 }

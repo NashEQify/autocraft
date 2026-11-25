@@ -43,6 +43,16 @@ export function textFor(r: { fix: readonly number[]; merges: boolean; close?: bo
   return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
 }
 
+/** The planned parts of the review's fixes that nobody makes, dropped: the merge goes on without them. */
+export function without(parts: readonly number[], protectedFiles: boolean): Recommendation {
+  const vars = { parts: listText(parts) };
+  return {
+    text: protectedFiles ? t("The review asks for changes to files AutoCraft may not touch. Drop {parts}, then merge.", vars)
+      : t("The review asks for fixes that AutoCraft's fix-up cannot make and nobody else is asked for. Drop {parts}, then merge.", vars),
+    parts: { fix: [], drop: [...parts] }, merges: true,
+  };
+}
+
 const STOPS = {
   conflict: (text: string) => t("It conflicts with its base branch. {text}", { text }),
   ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),

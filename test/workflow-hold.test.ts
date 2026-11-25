@@ -44,21 +44,26 @@ const push = async (w: World, head: string) => {
 const mayMerge = async (w: World) => (await mergeMay((await loadPrFact(w.db, "app", 1))!)).ok;
 
 test("an approved PR on hold merges nothing; another maintainer's resume goes on with its merge, as them", async () => {
-  const w = await fresh();
-  await run(w, "merge");
-  await settle(w);
-  assert.ok(await mayMerge(w));
-  assert.match(await run(w, "stop"), /On hold \(held by mira/);
-  await settle(w);
-  assert.deepEqual([(await workflowHistory(w.db, "app", 1)).at(-1)!.state, (await legs(w)).map((l) => l.state)], ["stopped", ["cancelled"]]);
-  assert.ok(!await mayMerge(w));
-  await tick();
-  await run(w, "yes", OTHER);
-  await settle(w);
-  const wf = (await liveWorkflow(w.db, "app", 1))!;
-  assert.deepEqual([wf.state, wf.approvedBy, wf.stoppedBy, wf.blocker], ["running", OTHER, null, null]);
-  assert.deepEqual((await legs(w)).map((l) => [l.state, l.by]), [["cancelled", MAINT], ["queued", OTHER]]);
-  assert.deepEqual(mergeMay((await loadPrFact(w.db, "app", 1))!), { ok: true, as: "person", by: OTHER });
+  for (const coded of [true, false]) {
+    const w = await fresh();
+    await run(w, "merge");
+    await settle(w);
+    assert.ok(await mayMerge(w));
+    assert.match(await run(w, "stop"), /On hold \(held by mira/);
+    await settle(w);
+    assert.deepEqual([(await workflowHistory(w.db, "app", 1)).at(-1)!.state, (await legs(w)).map((l) => l.state)], ["stopped", ["cancelled"]]);
+    assert.ok(!await mayMerge(w));
+    // A leg's end that is stored as its sentence alone counts the same.
+    if (!coded) await w.db.run(w.db.k.updateTable("main.preapprovals").set({ reason_code: null }));
+    await tick();
+    await run(w, "yes", OTHER);
+    await settle(w);
+    const wf = (await liveWorkflow(w.db, "app", 1))!;
+    assert.deepEqual([wf.state, wf.approvedBy, wf.stoppedBy, wf.blocker], ["running", OTHER, null, null]);
+    assert.deepEqual((await legs(w)).map((l) => [l.state, l.by]), [["cancelled", MAINT], ["queued", OTHER]]);
+    assert.deepEqual(mergeMay((await loadPrFact(w.db, "app", 1))!), { ok: true, as: "person", by: OTHER });
+    w.close();
+  }
 });
 
 test("the author's commits while it is held are asked about after a resume", async () => {
