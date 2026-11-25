@@ -1,6 +1,7 @@
 // The stored link between an implement workflow and its PR (item_workflows.pr_number): its writer at every event, its readers with and without
 // it, and both against the rules it stands for (test/legacy-link.ts) (SQLite; Postgres when AUTOCRAFT_TEST_PG_URL is set).
 import assert from "node:assert/strict";
+import { sql } from "kysely";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import * as kx from "../../src/db/kx.ts";
@@ -264,6 +265,8 @@ async function write(db: Db, repo: string, shift: number, step: number, all: Sna
     const prs = now.flatMap((s) => s.prs).filter((p) => p.mirrored).map((p) => ({ repo, number: p.number, kind: "pr", state: p.state, closed_at: p.closed === null ? null : at(p.closed) }));
     for (const b of kx.batches(prs)) await q.run(k.insertInto("main.items").values(b).onConflict((oc: any) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["state", "closed_at"]))));
   });
+  // No autovacuum runs on the throwaway Postgres, and without statistics the trigger of an attempt reads the repo's items once per live workflow.
+  if (db.dialect === "postgres") for (const t of ["item_workflows", "implementations", "items"]) await sql.raw(`ANALYZE ${t}`).execute(q.k);
 }
 
 type Reading = { live: Map<number, number>; all: Map<number, Map<number, number>> };
