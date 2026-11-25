@@ -406,7 +406,7 @@ type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_logi
   /** The lowercase login of the call's pick ("Run on my Task Runner", picks.ts), when it has one, live or not (pickCounts). */
   pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   /** Ends the call's pick; set while it has one. */
-  unpick?: () => void;
+  unpick?: () => Promise<void>;
 };
 
 /** The role rules: maintainers and operators; discord.* calls and calls that name no repo go to operators only. */
@@ -467,7 +467,7 @@ function idleOthers(db: Db, login: string, nowMs: number): (c: Cand) => Promise<
 async function eligible(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => Promise<boolean>): Promise<boolean> {
   const ok = await mayTake(caller, c, canWrite, othersIdle);
   // The caller's own pick of a call it may no longer take ends: it would hold the call from every other user.
-  if (!ok && c.pickedBy === caller.login.toLowerCase()) c.unpick?.();
+  if (!ok && c.pickedBy === caller.login.toLowerCase()) await c.unpick?.();
   return ok;
 }
 
