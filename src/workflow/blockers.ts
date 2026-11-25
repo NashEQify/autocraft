@@ -14,7 +14,7 @@ export type BlockerFacts = {
   review: { verdict: string; sure: boolean; majors: number[]; outsideLines: number } | null;
   /** Steps whose tries failed since `since`, with how many failed. */
   failures: readonly { step: string; count: number }[];
-  /** Our latest fix push since `since` (a fix-up), with its changed lines and files. */
+  /** Our pushes since `since`: the changed lines of all of them together, and the files of the latest fix-up. */
   fix: { lines: number; files: readonly string[] } | null;
   /** The files the planned parts name; empty when none names one. */
   plannedFiles: readonly string[];

@@ -761,8 +761,11 @@ export const STEPS: StepDef[] = [
       const refused = await checkCommentApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runPostmergeFile(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.filed.length + r.failed.length + r.unknown.length);
-      return `${r.repo}: ${r.filed.length} issues filed, ${r.limited} over the limit, ${r.failed.length} failed${r.unknown.length ? `, ${r.unknown.length} with an unknown outcome (check GitHub)` : ""}`;
+      ctx.acted(r.filed.length + r.failed.length + r.unknown.length + r.settled);
+      const line = `${r.repo}: ${r.filed.length} issues filed, ${r.limited} over the limit, ${r.failed.length} failed${r.unknown.length ? `, ${r.unknown.length} with an unknown outcome (check GitHub)` : ""}${r.settled ? `, ${r.settled} stopped filings settled` : ""}`;
+      // As in Act: the failure backoff spaces the next try, and skips the write pacing's message.
+      if (r.later) throw new Error(`${r.later}; ${line}`);
+      return line;
     },
   },
   {
@@ -946,8 +949,12 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runCifix } = await import("../cifix/index.ts");
       const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length);
-      return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length} failed or refused, ${r.held.length} held`;
+      const acted = r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length;
+      ctx.acted(acted + r.unasked.length);
+      const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held`;
+      // Asks that failed are all this job had: the failure backoff spaces their next try (and skips the write pacing's message).
+      if (r.unasked.length && !acted) throw new Error(`${r.unasked[0]!.reason}; ${r.unasked[0]!.ref} not asked; ${line}`);
+      return line;
     },
   },
   {

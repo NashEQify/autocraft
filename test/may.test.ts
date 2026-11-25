@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mayMerge, mayPush, mergeApproved, type OwnPush, type WorkflowGate } from "../src/core/may.ts";
+import { mayMerge, mayPush, mergeApproved, type WorkflowGate } from "../src/core/may.ts";
+import type { OwnPush } from "../src/core/evidence.ts";
 
 const wf = (o: Partial<WorkflowGate> = {}): WorkflowGate => ({ live: true, entry: "review", state: "running", startedBy: "starter", approvedBy: null, approvedAt: null, blocker: null, baseHead: "h1", fixupAsked: false, leg: { state: "queued", head: "h1" }, ...o });
 const repo = { by: "op", at: "2026-01-01T00:00:00Z" };

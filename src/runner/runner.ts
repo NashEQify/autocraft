@@ -4,7 +4,8 @@
 // stops jobs whose cancel was requested, runs the autopilot (queues jobs while the
 // pipeline switch is on) and puts jobs that a stop or an earlier runner left
 // unfinished back in the queue to resume (src/runner/resuming.ts).
-import { advanceWorkflows } from "../workflow/advance.ts";
+import { recheckDelayMs } from "../core/backoff.ts";
+import { advanceWorkflows, type FailedCheck } from "../workflow/advance.ts";
 import { endGoneCloses } from "../act/gone.ts";
 import { copyLogs, JobLogCopy, pruneJobLogs } from "./job-log.ts";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -154,6 +155,10 @@ export class Runner {
   private jobsWaited = false;
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
   private preapprovalMark: { sig: string; wakeAt: number } | null = null;
+  /** The workflows whose check failed when it last ran, kept between the passes of advanceWorkflows. */
+  private readonly failedWorkflows = new Map<number, FailedCheck>();
+  /** Planner passes that failed in a row (their detection, or queueing what it found), and when the planner runs again for it. */
+  private planRetry: { times: number; at: number } | null = null;
   private readonly planThread: OffThread;
   private readonly o: Required<Omit<RunnerOptions, "db" | "lockFile" | "detect" | "maxMin" | "graceMs" | "noProgressMin">> & { lockFile: string | null };
   private readonly detect: (nowMs: number) => Promise<Detected>;
@@ -394,8 +399,9 @@ export class Runner {
           const fixes = await autoFixConfirmed(this.db);
           if (fixes) this.o.log(`autopilot: started the private fix of ${fixes} confirmed security findings`);
         }
+        this.planRetry = null;
         this.passed("autopilot");
-      } catch (e) { this.fault("autopilot", e); }
+      } catch (e) { this.planFault("autopilot", e); }
     }
     // What a part reads while nothing wrote since the wave.
     const wave = (): TickReads["wave"] => (read.stale ? null : read.wave);
@@ -422,20 +428,27 @@ export class Runner {
     try {
       const due = await planDue(this.db, read.at, wave()?.plan ?? undefined);
       this.passed("planner reads");
-      if (!due) return;
+      if (!due && (!this.planRetry || read.at < this.planRetry.at)) return;
     } catch (e) {
       this.fault("planner reads", e);
       return;
     }
     this.planning = this.detect(Date.now())
-      .then((d) => { this.detected = d; this.passed("planner"); }, (e) => this.fault("planner", e))
+      .then((d) => { this.detected = d; this.passed("planner"); }, (e) => this.planFault("planner", e))
       .finally(() => (this.planning = null));
+  }
+
+  /** A failed planner pass runs again by itself: planDue moved its marks before it ran. */
+  private planFault(part: "planner" | "autopilot", e: unknown): void {
+    this.fault(part, e);
+    const times = (this.planRetry?.times ?? 0) + 1;
+    this.planRetry = { times, at: Date.now() + recheckDelayMs(times) };
   }
 
   /**
    * The pre-approval pass, when what it reads changed since the last one (read before it runs, so its own moves make the next tick run it
    * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that failed in any
-   * part runs again on the next tick.
+   * part runs again on the next tick; a workflow whose check keeps failing is checked again after a backoff.
    */
   private async preapprovals(read: TickReads): Promise<void> {
     const t = Date.now();
@@ -454,12 +467,14 @@ export class Runner {
       wake(t);
     }
     // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on,
-    // so legs wait while the blockers could not be checked.
+    // so legs wait while their blockers could not be checked.
     let checked = false;
     try {
-      await advanceWorkflows(this.db, this.o.log, wake);
+      await advanceWorkflows(this.db, this.o.log, wake, this.failedWorkflows);
       checked = true;
-      this.passed("workflows");
+      const [bad, ...more] = this.failedWorkflows.values();
+      if (bad) this.noteFailure("workflows", new Error(`${bad.ref}${more.length ? ` and ${more.length} more` : ""}: ${(bad.error as Error)?.message ?? String(bad.error)}`), "warn");
+      else this.passed("workflows");
     } catch (e) {
       this.fault("workflows", e);
       wake(t);
@@ -472,7 +487,7 @@ export class Runner {
       wake(t);
     }
     if (checked) {
-      await advancePreapprovals(this.db, this.o.log, {}, wake);
+      await advancePreapprovals(this.db, this.o.log, {}, wake, this.failedWorkflows);
       this.passed("preapprovals");
     }
     this.preapprovalMark = next;

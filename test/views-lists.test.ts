@@ -113,6 +113,23 @@ test("the work list counts every next step, cuts each in work order and finds th
   }
 });
 
+test("the Duplicates filter shows a stored group's item only while a confirmed pair of it holds", async () => {
+  const db = await connectDb(":memory:");
+  try {
+    await db.run(db.k.insertInto("main.items").values([1, 2].map((number) => ({ repo: "app", number, kind: "issue", state: "OPEN", title: `t${number}`, updated_at: NOW, embed_hash: `h${number}` }))));
+    await db.run(db.k.insertInto("main.dupe_groups").values({ id: "g", decision_id: "g", repo: "app", source: "model" }));
+    await db.run(db.k.insertInto("main.dupe_group_items").values([1, 2].map((number) => ({ group_id: "g", decision_id: "g", repo: "app", number, kind: "issue", role: number === 1 ? "keep" : "close", base_role: "close" }))));
+    await db.run(db.k.insertInto("main.duplicate_pairs").values({ repo: "app", a: 1, b: 2, a_hash: "h1", b_hash: "h2", similarity: 0.9, verdict: "duplicate", by_operator: 0, created_at: NOW }));
+    const f = { show: "open" as const, filters: ["duplicates" as const], areas: [], text: null, refs: [], sort: "priority" as const, normalWeight: 5, limit: 50 };
+    const shown = async () => (await loadItemsBase(db, { repos: ["app"], hidden: [] }, f)).rows.map((r) => r.number);
+    assert.deepEqual(await shown(), [2]);
+    await db.run(db.k.updateTable("main.items").set({ embed_hash: "edited" }).where("number", "=", 1));
+    assert.deepEqual(await shown(), []);
+  } finally {
+    await db.close();
+  }
+});
+
 test("the Items base cuts each kind of place in the asked order and counts all of it", async () => {
   const db = await connectDb(":memory:");
   try {

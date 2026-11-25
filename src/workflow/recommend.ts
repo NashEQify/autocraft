@@ -5,6 +5,7 @@
 // always agree. A blocker the review cannot speak for (author commits, a failing step, a large fix, files beyond the plan, a merge
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
+import { byHand, type ConflictPath } from "../core/decide.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
@@ -46,17 +47,31 @@ const STOPS = {
   ci: (text: string) => t("CI fails at its latest commit. {text}", { text }),
 };
 
-/** A conflict with the base branch: whether the pipeline makes the review's fixes after it merged the base (src/core/decide.ts fixedAfterMerge). */
-export type Conflict = { fixedAfter: boolean };
+/** A conflict with the base branch, and who settles it once the merge is approved (src/core/decide.ts conflictPath). */
+export type Conflict = { path: ConflictPath | null };
+
+const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => string> = {
+  tomorrow: (text) => t("It conflicts with its base branch, and today's merges of that branch into it are used up, so this goes on tomorrow. {text}", { text }),
+  contributor: (text) => t("It conflicts with its base branch, which the contributor has to resolve first. {text}", { text }),
+  person: (text) => t("It conflicts with its base branch, which AutoCraft cannot resolve: someone has to do that on its branch first. {text}", { text }),
+};
 
 /**
- * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge: one that fixes and merges where the
- * pipeline does both once the merge is approved, else a new review.
+ * The recommendation on a PR that conflicts with its base branch, where no fix-up can be made before that merge. Where the pipeline merges the
+ * base in, a yes approves the merge and the fixes follow that merge. Where a person has to resolve the conflict, a yes approves the
+ * merge and waits for them: it runs nothing that could ask the same again. A PR with no review to go on from is reviewed again.
  */
 export function onConflict(rec: Recommendation, conflict: Conflict | null): Recommendation {
-  if (!conflict || (!rec.parts.fix.length && rec.again !== "fixup")) return rec;
-  if (conflict.fixedAfter) return rec.merges ? rec : { ...rec, merges: true, text: textFor({ fix: rec.parts.fix, merges: true }) };
-  return { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" };
+  if (!conflict || rec.close || rec.answer) return rec;
+  const { path } = conflict, fixes = rec.parts.fix.length > 0 || rec.again === "fixup";
+  if (path === null) return fixes ? { text: textFor({ fix: [], merges: rec.merges, again: "review" }), parts: { fix: [], drop: rec.parts.drop }, merges: rec.merges, again: "review" } : rec;
+  if (!fixes && !rec.merges) return rec;
+  if (byHand(path)) {
+    if (!fixes) return { ...rec, text: ON_CONFLICT[path](rec.text), waits: path };
+    return { text: ON_CONFLICT[path](t("Wait for that with the merge approved.")), parts: { fix: [], drop: rec.parts.drop }, merges: true, waits: path };
+  }
+  const out = rec.merges ? rec : { ...rec, merges: true, text: textFor({ fix: rec.parts.fix, merges: true }) };
+  return path === "merge" ? out : { ...out, text: ON_CONFLICT[path](out.text) };
 }
 
 /**
@@ -67,7 +82,9 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
  */
 export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
   const rec = onConflict(recommended(review, plan), conflict);
-  return stop && !rec.close ? { ...rec, text: STOPS[stop](rec.text) } : rec;
+  // Where the sentence is already about the conflict and who settles it, it is not said twice.
+  const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
+  return stop && !rec.close && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
 }
 
 function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
@@ -89,6 +106,9 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
   }
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
 }
+
+/** A question that takes the place of one the author pushed past. */
+export const afterPush = (rec: Recommendation): Recommendation => ({ ...rec, text: t("The author pushed commits after the last question. {text}", { text: rec.text }) });
 
 /**
  * What an item stopped at a blocker comes back with. A yes resumes the plan with the merge still approved:

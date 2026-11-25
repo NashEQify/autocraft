@@ -10,7 +10,7 @@ import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
 import { LIVE_STATES } from "./fragments.ts";
-import type { Entry, FixupRequest, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
+import type { Entry, FixupRequest, FixupRequestMove, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 /** A leg in one of these states no longer works its request. */
@@ -130,7 +130,7 @@ export async function addLegs(db: Db, rows: NewLeg[]): Promise<Map<string, numbe
     const made: { id: number; row: NewLeg }[] = [];
     for (const batch of kx.batches(rows)) {
       const got = await q.all(k.insertInto("main.preapprovals").values(batch.map((r) => ({
-        repo: r.repo, number: r.number, by: r.by, at: now, instructions: r.instructions ?? "", state: r.state, from_head: r.head, head: r.state === "review" ? r.head : null,
+        repo: r.repo, number: r.number, by: r.by, at: now, instructions: r.instructions ?? "", state: r.state, from_head: r.fromHead ?? r.head, head: r.state === "review" ? r.head : null,
         updated_at: now, fix_id: r.fixId ?? null, workflow_id: r.workflowId,
       }))).onConflict((oc: any) => oc.doNothing()).returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[];
       // One active leg per PR: a repeat of a ref in the batch is refused too, so the rows that went in are matched by ref in order.
@@ -232,6 +232,33 @@ export async function addFixupRequests(db: Db, rows: NewFixupRequest[]): Promise
   });
 }
 
+/**
+ * Moves queued requests to the PR's new head (a push of ours moved it), with the `fixup` leg that waits for each. A request or leg that is
+ * not at `from` any more stays. Audits each as `operator-fixup`. Returns the ids moved.
+ */
+export async function moveFixupRequests(db: Db, rows: FixupRequestMove[]): Promise<number[]> {
+  if (rows.length === 0) return [];
+  const q = queryDb(db);
+  const k = q.k as any;
+  const now = new Date().toISOString();
+  const to = new Map(rows.map((r) => [r.id, r]));
+  return await db.write(async () => {
+    const got: { id: number; repo: string; number: number }[] = [];
+    for (const chunk of kx.chunks(rows)) {
+      const v = () => kx.valuesTable(db, chunk.map((r) => ({ mid: r.id, was: r.from, next: r.to })), { mid: "bigint", was: "text", next: "text" }, "v");
+      got.push(...await q.all(k.updateTable("main.operator_fixups as o").from(v()).set((eb: any) => ({ from_head: eb.ref("v.next") }))
+        .where((eb: any) => eb.and([eb("o.id", "=", eb.ref("v.mid")), eb("o.from_head", "=", eb.ref("v.was")), eb("o.state", "=", "queued")]))
+        .returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[]);
+      await q.run(k.updateTable("main.preapprovals as p").from(v()).set((eb: any) => ({ from_head: eb.ref("v.next"), updated_at: now }))
+        .where((eb: any) => eb.and([eb("p.fix_id", "=", eb.ref("v.mid")), eb("p.from_head", "=", eb.ref("v.was")), eb("p.state", "=", "fixup")])));
+    }
+    if (got.length) {
+      await addAudit(db, got.map((g) => ({ login: ACTOR, action: "operator-fixup", target: refKey(g.repo, num(g.number)), at: now, details: { id: num(g.id), from: to.get(num(g.id))!.from, head: to.get(num(g.id))!.to } })));
+    }
+    return got.map((g) => num(g.id));
+  });
+}
+
 /** Compare-and-set update where `state = 'queued'`: ends the requests and audits each as `operator-fixup` with its reason. Returns the ids ended. */
 export async function endFixupRequests(db: Db, rows: { id: number; reason: string }[]): Promise<number[]> {
   if (rows.length === 0) return [];
@@ -260,7 +287,7 @@ export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo:
   const k = q.k as any;
   const after = new Date((f.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const rows = await q.all(k.selectFrom("main.operator_fixups as o").selectAll("o").where("o.state", "=", "queued")
-    .where((eb: any) => eb.not(operatorFixEnded(eb, "o.id")))
+    .where((eb: any) => eb.not(operatorFixEnded(eb, "o")))
     .$if(!f.anyMaker, (b: any) => b.where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after)))
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "o", f.refs!.map((r) => [r.repo, r.number] as const))))
     .$if(!f.refs, (b: any) => b.where((eb: any) => trackedRepo(eb, "o.repo")))

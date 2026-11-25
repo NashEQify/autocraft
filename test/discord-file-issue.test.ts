@@ -130,4 +130,22 @@ describe("Submit for me", () => {
     assert.equal((await fileAsBot(deps, ask, bot)).status, "refused");
     assert.equal(ran.filter((r) => r.args[1] === "create").length, 3);
   });
+
+  test("an issue found by a second press after the first lost its answer takes one slot, with its number", async () => {
+    await db.run(db.k.insertInto("repos").values({ name: "wordcraft", visibility: "public" }));
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "wordcraft" }).onConflict((oc) => oc.doNothing()));
+    const made: { title: string; body: string; at: string }[] = [];
+    const url = "https://github.com/storytold/wordcraft/issues/5";
+    const bot = { judge: hooks.judge, mint: async () => "ghs_install", exec: (async (_cmd, args, opts) => {
+      if (args[0] === "api") return { code: 0, stdout: made.map((m) => JSON.stringify({ number: 5, url, ...m, by: "craft-bot[bot]", pr: false })).join("\n"), stderr: "" };
+      if (args[1] !== "create") return { code: 0, stdout: "", stderr: "" };
+      made.push({ title: args[args.indexOf("--title") + 1]!, body: opts!.input!, at: new Date().toISOString() });
+      return { code: 1, stdout: "", stderr: "HTTP 502: Bad Gateway" };
+    }) as NonNullable<FileHooks["exec"]> };
+    const ask = { ...req, repo: "wordcraft", reporter: "rep3", reporterName: "@eve_1", drafted: true };
+    assert.equal((await fileAsBot(deps, ask, bot)).status, "refused");
+    assert.deepEqual(await fileAsBot(deps, ask, bot), { status: "filed", number: 5, url });
+    assert.deepEqual((await db.all(db.k.selectFrom("discord_filed").select("number").where("reporter", "=", "rep3"))).map((r) => Number(r.number)), [5]);
+    assert.equal(made.length, 1);
+  });
 });

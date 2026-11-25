@@ -22,10 +22,10 @@ export function hasFixupAt(eb: Eb, alias: string, headRef: string, states: reado
     .whereRef("x.number", "=", `${alias}.number` as never).whereRef("x.from_head", "=", headRef as never).where("x.state", "in", [...states]));
 }
 
-/** The operator fix-up request whose id is the column `requestIdRef` has a final fixups row of its own. */
-export function operatorFixEnded(eb: Eb, requestIdRef: string): Expression<SqlBool> {
+/** The operator fix-up request of the row `alias` has a final fixups row of its own at the head it asks for. */
+export function operatorFixEnded(eb: Eb, alias: string): Expression<SqlBool> {
   const w = schemaEb(eb);
-  return w.exists(w.selectFrom("fixups as f").select(w.lit(1).as("one")).whereRef("f.operator_fix", "=", requestIdRef as never)
+  return w.exists(w.selectFrom("fixups as f").select(w.lit(1).as("one")).whereRef("f.operator_fix", "=", `${alias}.id` as never).whereRef("f.from_head", "=", `${alias}.from_head` as never)
     .where("f.source", "=", "operator").where("f.state", "in", OPERATOR_ENDED));
 }
 

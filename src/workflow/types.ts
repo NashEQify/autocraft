@@ -42,6 +42,8 @@ export type Recommendation = {
   close?: boolean;
   /** A yes runs this step again when it fixes no part: a new review, or a fix-up of the latest review's fixes. */
   again?: "review" | "fixup";
+  /** The PR conflicts with its base branch, and this one has to resolve it: a yes approves the merge, and nothing is fixed or merged before. */
+  waits?: "contributor" | "person";
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
@@ -78,6 +80,7 @@ export type ItemWorkflow = {
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;
   recAt: string | null;
+  /** The PR's head the recommendation was made at; an answer accepts it and our own pushes on it. Kept while a question the author pushed past is made again. */
   recHead: string | null;
   plan: PlanPart[];
   /** The step the workflow is at, as the advance pass last recorded it (status.ts StepName); null before its first pass. */

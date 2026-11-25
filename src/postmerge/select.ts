@@ -2,9 +2,10 @@
 import { loadQuiet } from "../data/security/index.ts";
 import { listItems } from "../data/mirror/index.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
-import { loadFollowupFixPrs, loadFollowups, loadPendingDefects, loadPostmerge, loadRecentFiled } from "../data/review/index.ts";
+import { loadFilings, loadFollowupFixPrs, loadFollowups, loadPendingDefects, loadPostmerge, loadRecentFiled } from "../data/review/index.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
+import { filingOutcome, HELD_STUCK_MS } from "../conversations/held.ts";
 import type { Finding } from "./parse.ts";
 import { RETRY_AFTER_MS } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
@@ -99,7 +100,7 @@ async function heldBy(followups: Followup[], fixes: () => Promise<boolean>, revi
   return await fixes() ? "fix" : null;
 }
 
-export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number };
+export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number; /** Its row now. */ was?: Followup | null };
 
 /**
  * Defects of the latest review of each PR that the filing step may still try, oldest review first: no row yet, a
@@ -111,6 +112,18 @@ export async function pendingDefects(db: Db, repo?: string, now = Date.now()): P
   const quiet = await loadQuiet(db, merged.map((m) => `${m.repo}#${m.number}`));
   const keys = merged.filter((m) => !quiet.has(`${m.repo}#${m.number}`)).map((m) => ({ repo: m.repo, number: m.number }));
   return await loadPendingDefects(db, keys, { now }) as unknown as PendingDefect[];
+}
+
+/** The rows a stopped process, or one that could not record its create's outcome, left in `filing` whose audit row settles them, and when the others are old enough for that. */
+export async function stuckFilings(db: Db, o: { repo?: string; now: number }): Promise<{ due: { row: Followup; outcome: NonNullable<ReturnType<typeof filingOutcome>> }[]; wakes: number[] }> {
+  const rows = await loadFilings(db, { ...(o.repo !== undefined && { repo: o.repo }) });
+  return {
+    due: rows.flatMap(({ create, ...row }) => {
+      const outcome = filingOutcome({ state: "filing", updated_at: row.at, filingAudit: create }, o.now);
+      return outcome ? [{ row: row as Followup, outcome }] : [];
+    }),
+    wakes: rows.map((r) => Date.parse(r.at) + HELD_STUCK_MS).filter((t) => t > o.now),
+  };
 }
 
 const words = (t: string): Set<string> => new Set(t.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 2));

@@ -12,6 +12,8 @@ export const FAST_FLOOR = 1e15 / 2;
 export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;
   weight: number; state: WorkflowState; own: boolean;
+  /** When a person last chose to go on with what the workflow showed them (its start, or an answer). */
+  since: string;
   /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
   dropped?: string[];
 };
@@ -57,8 +59,11 @@ export type LegContext = { workflowId: number; entry: Entry; since: string; appr
 /** `requests`: the queued requests of the active legs. */
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
+/** A queued fix-up request follows the PR's head from `from` to `to`. */
+export type FixupRequestMove = { id: number; from: string; to: string };
 export type LegMoved = LegMove & { repo: string; number: number };
-export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };
+/** `fromHead`: the head the person approved, when pushes of ours lead from it to `head`. */
+export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; fromHead?: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };
 export type FixupRequest = Omit<Selectable<DB["operator_fixups"]>, "state"> & { state: "queued" | "started" | "ended" };
 export type NewFixupRequest = { repo: string; number: number; fromHead: string; instructions: string; by: string; merge?: boolean; workflowId?: number; at?: string };
 

@@ -108,7 +108,7 @@ const drop = async (db: Db, h: HeldRow, reason: string, at: string): Promise<boo
   (await move(db, [{ h, from: "held", set: { state: "dropped", reason, updated_at: at }, say: `The issue "${h.title}" held for after the merge is dropped: ${reason}.` }])).has(h.id);
 
 export type HeldDeps = { exec?: Exec; now?: () => Date; /** Stands in for the GitHub App's read of the presser's write permission. */ permission?: RefreshDeps["permission"] };
-/** `paced`: the write pacing's message when it held a create back (the job fails with it, as other paced jobs do). */
+/** `paced`: why a create sent nothing and may simply be tried again (IssueError.later): the job fails with it, as other paced jobs do. */
 export type HeldSummary = { filed: number; dropped: number; failed: { ref: string; reason: string }[]; unknown: number; writes: number; paced?: string };
 
 /**
@@ -154,8 +154,8 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
       const reason = oneLine(e);
       // The network or GitHub is likely failing: the rest waits for the next run.
       if (!(e instanceof IssueError) || !e.clear) { s.unknown++; break; }
-      // The write pacing or a rate limit of GitHub's: nothing was made and no try is counted. The job fails; the failure backoff ignores the pacing's message, so the next pass runs it again.
-      if (e.paced) {
+      // The write pacing, a rate limit of GitHub's or a failure before the request: nothing was made and no try is counted. The job fails; the failure backoff ignores the pacing's message, so the next pass runs it again.
+      if (e.later) {
         await markHeld(db, [{ id: h.id, from: "filing", set: { state: "held", attempts: h.attempts } }]);
         s.paced = reason;
         break;

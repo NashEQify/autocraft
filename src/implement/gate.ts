@@ -14,21 +14,28 @@ import { settlerOf } from "../workflow/work.ts";
 import { currentAttempt, writeStep } from "./attempt.ts";
 import { ENDED_STATES } from "./types.ts";
 
-/** Who the issue's live implement workflow acts for, newest first, each with whether they may act on the repo now; empty without one. */
-async function actorsOf(db: Db, repo: string, number: number): Promise<{ login: string; standing: Standing }[]> {
-  const w = (await listWorkflows(db, { live: true, refs: [{ repo, number }] }))[0];
-  if (w?.entry !== "implement") return [];
-  const logins = workflowActors(w, (await loadAnswers(db, [w.id])).get(w.id));
-  const at = await standings(db, logins.map((login) => ({ login, repo })), { identity: await githubIdentity(db) });
-  return logins.map((login) => ({ login, standing: at.get(permKey(login, repo))! }));
-}
+type Ref = { repo: string; number: number };
+type Actor = { login: string; standing: Standing };
+const refOf = (r: Ref): `${string}#${number}` => `${r.repo}#${r.number}`;
 
-const settler = (actors: { login: string; standing: Standing }[]) =>
+/** Per issue (`repo#number`), who its live implement workflow acts for, newest first, each with whether they may act on the repo now; empty without one. */
+async function actorsOf(db: Db, refs: Ref[]): Promise<Map<string, Actor[]>> {
+  const [live, identity] = await db.together(() => Promise.all([listWorkflows(db, { live: true, refs }), githubIdentity(db)]));
+  const first = new Map(live.toReversed().map((w) => [refOf(w), w]));
+  const flows = [...first.values()].filter((w) => w.entry === "implement");
+  const answers = await loadAnswers(db, flows.map((w) => w.id));
+  const logins = new Map(flows.map((w) => [refOf(w), workflowActors(w, answers.get(w.id))]));
+  const at = await standings(db, flows.flatMap((w) => logins.get(refOf(w))!.map((login) => ({ login, repo: w.repo }))), { identity });
+  return new Map(refs.map((r) => [refOf(r), (logins.get(refOf(r)) ?? []).map((login) => ({ login, standing: at.get(permKey(login, r.repo))! }))]));
+}
+const actorsOfIssue = async (db: Db, repo: string, number: number): Promise<Actor[]> => (await actorsOf(db, [{ repo, number }])).get(refOf({ repo, number }))!;
+
+const settler = (actors: Actor[]) =>
   settlerOf(actors.map((a) => a.login), (login) => actors.find((a) => a.login === login)!.standing);
 
 /** The login the issue's implementation runs for (settlerOf), or null when no implement workflow on it is live. */
 export async function queuerOf(db: Db, repo: string, number: number): Promise<string | null> {
-  return settler(await actorsOf(db, repo, number))?.by ?? null;
+  return settler(await actorsOfIssue(db, repo, number))?.by ?? null;
 }
 
 /**
@@ -36,7 +43,7 @@ export async function queuerOf(db: Db, repo: string, number: number): Promise<st
  * act on the repo, else the one the implementation runs for now.
  */
 async function turnsFor(db: Db, repo: string, number: number, holder: string): Promise<string> {
-  const actors = await actorsOf(db, repo, number);
+  const actors = await actorsOfIssue(db, repo, number);
   const held = actors.find((a) => a.login.toLowerCase() === holder.toLowerCase());
   if (held && held.standing !== "no") return holder;
   const s = settler(actors);
@@ -58,16 +65,28 @@ export async function implementMay(db: Db, repo: string, number: number): Promis
 
 /** Why an implement job of the issue may not run, or null. `dry`: a dry run, which may run while the repo's Implement switch is off. */
 export async function implementRefusal(db: Db, repo: string, number: number, o: { dry?: boolean } = {}): Promise<string | null> {
-  const ref = `${repo}#${number}` as const;
-  const facts = await loadImplementFacts(db, [{ repo, number }]);
+  return (await implementRefusals(db, [{ repo, number }], o)).get(refOf({ repo, number }))!;
+}
+
+/** implementRefusal of each issue, keyed `repo#number`, with reads whose number does not grow with the issues. */
+export async function implementRefusals(db: Db, refs: Ref[], o: { dry?: boolean } = {}): Promise<Map<string, string | null>> {
+  const repos = [...new Set(refs.map((r) => r.repo))];
+  const [facts, actors, on] = await db.together(() => Promise.all([
+    loadImplementFacts(db, refs), actorsOf(db, refs), Promise.all(repos.map((r) => (o.dry ? true : featureOn(db, "implement", r)))),
+  ]));
+  const off = new Set(repos.filter((_, i) => !on[i]));
   // A live attempt whose PR merged or closed only ends (attempt and workspace): bookkeeping that always runs.
-  const attempt = facts.byIssue.get(ref)?.attempt;
-  if (!o.dry && attempt && !ENDED_STATES.has(attempt.state) && attempt.prNumber !== null) {
-    const pr = (await loadItems(db, [{ repo, number: attempt.prNumber }], "ref")).get(`${repo}#${attempt.prNumber}`);
-    if (pr && pr.state !== "OPEN") return null;
-  }
-  if (!o.dry && !await featureOn(db, "implement", repo)) return `Implement is off for ${repo}`;
-  const s = settler(await actorsOf(db, repo, number));
-  if (!s) return `${ref} is not queued`;
-  return s.standing === "yes" ? null : s.standing === "no" ? `${s.by}, whom the work on ${ref} runs for, does not settle on ${repo}` : `GitHub has not answered on ${s.by}'s access to ${repo}`;
+  const prOf = new Map(refs.flatMap((r) => {
+    const attempt = facts.byIssue.get(refOf(r))?.attempt;
+    return !o.dry && attempt && !ENDED_STATES.has(attempt.state) && attempt.prNumber !== null ? [[refOf(r), { repo: r.repo, number: attempt.prNumber }] as const] : [];
+  }));
+  const prs = prOf.size ? await loadItems(db, [...prOf.values()], "ref") : new Map<string, { state: string }>();
+  return new Map(refs.map((r) => {
+    const ref = refOf(r), pr = prOf.get(ref) && prs.get(refOf(prOf.get(ref)!));
+    if (pr && pr.state !== "OPEN") return [ref, null];
+    if (off.has(r.repo)) return [ref, `Implement is off for ${r.repo}`];
+    const s = settler(actors.get(ref)!);
+    if (!s) return [ref, `${ref} is not queued`];
+    return [ref, s.standing === "yes" ? null : s.standing === "no" ? `${s.by}, whom the work on ${ref} runs for, does not settle on ${r.repo}` : `GitHub has not answered on ${s.by}'s access to ${r.repo}`];
+  }));
 }

@@ -2085,7 +2085,8 @@ CREATE TABLE IF NOT EXISTS push_outcomes (
   before_res TEXT NOT NULL,
   after_res TEXT,
   outcome TEXT,
-  resolved_at TEXT
+  resolved_at TEXT,
+  lines INTEGER                       -- how many of the pull request's lines the push changed; NULL when unknown
 );
 CREATE INDEX IF NOT EXISTS push_outcomes_to ON push_outcomes(repo, to_oid);
 CREATE INDEX IF NOT EXISTS push_outcomes_stage ON push_outcomes(stage, id);

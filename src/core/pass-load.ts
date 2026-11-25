@@ -22,9 +22,10 @@ import { loadStageFacts, type StageFacts } from "../data/planner/index.ts";
 import { loadPremerge, loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { listQuietPrs } from "../data/security/index.ts";
 import { classifyRun, loadDupeState, loadSettled, loadRanks, loadTriageFacts, prDuplicates, type DupeState, type PrDuplicates, type RankRow, type TriageFactsResult } from "../data/triage/index.ts";
-import { listWorkflows, loadActions, loadActionsDue, loadInScope, loadWorkflowFacts, type DueAction, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
+import { listWorkflows, loadActions, loadActionsDue, loadInScope, loadRepinPushes, loadWorkflowFacts, type DueAction, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { ACTION_WAITS } from "./may.ts";
+import { ownPushes, type RecordedPush } from "./evidence.ts";
 import { mergeDecisionId, PIPELINE_LOGIN_KEY } from "./rules.ts";
 import { authorWritesIn } from "../fixup/author-permission.ts";
 import { longLivedAll } from "../fixup/pushable.ts";
@@ -54,6 +55,8 @@ export type PrPassData = {
   merge: MergeFacts;
   patches: Map<RefKey, PatchFacts>;
   pushes: Map<RefKey, PushFacts>;
+  /** Every push of ours to each PR (core/evidence.ts). */
+  ownPushes: Map<RefKey, RecordedPush[]>;
   mainFixPrs: Set<RefKey>;
   workflow: WorkflowPassFacts;
   /** Live workflow rows by id: the approval inputs `mayMerge` and `mayPush` read (base head, blocker, approval time). */
@@ -173,20 +176,22 @@ export type PrPassOptions = {
 
 /** Loads the PR facts inputs of `keys`, in step with the pass's other loads. */
 export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endWave: EndWave): Promise<PrPassData> {
-  const own = [...o.base.own];
+  const logins = [...o.base.own];
   const keyRepos = reposOf(keys);
   const dupeRepo = o.repo ?? (keyRepos?.length === 1 ? keyRepos[0] : undefined);
-  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds] =
+  const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, dupes, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, scoped, mergeActions, mainRed, quiet, longLived, authorPerms, holds, repins] =
     await Promise.all([
       loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
       loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), o.dupes?.() ?? loadDupeState(db, dupeRepo ? { repo: dupeRepo } : {}), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
       loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
-      loadReviewFacts(db, keys, { now: o.now, own }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
+      loadReviewFacts(db, keys, { now: o.now, own: logins }), loadAssignments(db, {}), loadOutsideHolds(db, keys),
       loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
-      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now),
+      redMainRepos(db), listQuietPrs(db, { repo: o.repo }), longLivedAll(db, keyRepos), loadAuthorPermissions(db), loadHoldInputs(db, keys, o.now), loadRepinPushes(db, keys),
     ]);
+  const own = new Map<RefKey, RecordedPush[]>([...new Set([...patches.keys(), ...pushes.keys(), ...repins.keys()])]
+    .map((key) => [key, ownPushes(patches.get(key)?.pushes ?? [], pushes.get(key)?.moves ?? [], repins.get(key) ?? [])]));
   const data: PrPassData = {
-    now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, mainFixPrs, workflow,
+    now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
     inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
     tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(), act: new Map(),
@@ -200,7 +205,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   for (const [key, m] of mirror) {
     const { repo, number } = asRef(key);
     const head = m.item.head_oid;
-    const moves = [...(patches.get(key)?.pushes ?? []), ...(pushes.get(key)?.moves ?? [])];
+    const moves = own.get(key) ?? [];
     if (head) for (const h of pushChainOf(moves, head)) pairs.push({ repo, sha: h });
     const latest = review.latest.get(key);
     if (latest) for (const h of pushChainOf(moves, latest.head)) pairs.push({ repo, sha: h });

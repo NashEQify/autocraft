@@ -51,10 +51,11 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
   };
 }
 
-const factOf = (w: ItemWorkflow, own: boolean): WorkflowFact => {
+const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFact => {
   const dropped = w.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
   return {
     id: w.id, entry: w.entry, approved: w.approvedBy !== null, approvedBy: w.approvedBy, startedBy: w.startedBy, startedAt: w.startedAt, weight: w.weight, state: w.state, own,
+    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt,
     ...(dropped.length ? { dropped } : {}),
   };
 };
@@ -130,6 +131,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
       eb.case().when(keyed("ko", "w.repo", "w.number")(eb)).then(1).else(0).end().as("own"),
       eb.case().when(eb.and([eb("i.pr_number", "is not", null), keyed("kp", "w.repo", "i.pr_number")(eb)])).then(1).else(0).end().as("pr_hit"),
       lastAnswer("a1", "login").as("answer_by"), lastAnswer("a2", "at").as("answer_at"),
+      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on"),
     ])
     .where("w.state", "in", LIVE_STATES)
     .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("i.pr_number", "is not", null), keyed("kp2", "w.repo", "i.pr_number")(eb)])]))
@@ -142,20 +144,20 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const requestsQ = k.selectFrom("main.operator_fixups as o").innerJoin(resolveKeys(db, keys, "kr"), (j: any) => j.onRef("kr.repo", "=", "o.repo").onRef("kr.number", "=", "o.number"))
     .selectAll("o").select((eb: any) => writeCheckedAt(db, eb, "o.by", "o.repo").as("maker_checked_at")).where("o.state", "=", "queued")
     .where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after))
-    .where((eb: any) => eb.not(operatorFixEnded(eb, "o.id")))
+    .where((eb: any) => eb.not(operatorFixEnded(eb, "o")))
     .orderBy("o.repo").orderBy("o.number").orderBy("o.from_head").orderBy("o.id");
 
   const legsQ = k.selectFrom("main.preapprovals as p").innerJoin(resolveKeys(db, keys, "kl"), (j: any) => j.onRef("kl.repo", "=", "p.repo").onRef("kl.number", "=", "p.number"))
     .selectAll("p").where("p.state", "in", ACTIVE_LEGS).orderBy("p.id");
 
   const [live, ended, holds, requests, legs] = await db.together(() => Promise.all([q.all(liveQ), q.all(endedQ), q.all(holdsQ), q.all(requestsQ), q.all(legsQ)])) as
-    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown; answer_by: string | null; answer_at: string | null })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], OperatorWork["requests"], Preapproval[]];
+    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown; answer_by: string | null; answer_at: string | null; go_on: string | null })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], OperatorWork["requests"], Preapproval[]];
 
   for (const r of live) {
     const w = workflowOf(r);
     if (w.entry === "implement") out.actors.set(w.id, workflowActors(w, r.answer_by !== null ? { login: r.answer_by, at: r.answer_at! } : null));
-    if (flag(r.own)) out.live.set(refKey(w.repo, w.number), factOf(w, true));
-    if (flag(r.pr_hit) && w.entry === "implement" && r.pr !== null) out.ofPr.set(refKey(w.repo, Number(r.pr)), factOf(w, false));
+    if (flag(r.own)) out.live.set(refKey(w.repo, w.number), factOf(w, true, r.go_on));
+    if (flag(r.pr_hit) && w.entry === "implement" && r.pr !== null) out.ofPr.set(refKey(w.repo, Number(r.pr)), factOf(w, false, r.go_on));
   }
   for (const [key, state] of endedOf(ended)) out.ended.set(key, state);
   for (const r of holds) out.holds.add(refKey(r.repo, Number(r.number)));

@@ -27,13 +27,14 @@
 //   duplicate group ids, a Task Runner's machine: filled where empty.
 // - discord_filed, plan_pass_stats and every other table: one place for both, nothing to carry.
 import { decideAct, isWrite, loadActFacts, permKey, type ActIdentity } from "../data/access/index.ts";
-import { loadImplementFacts } from "../data/implement/index.ts";
-import type { ReviewWorkflow } from "../data/review/types.ts";
+import { cancelUnopened, loadImplementFacts } from "../data/implement/index.ts";
+import { withdrawItemCalls } from "../data/runners/index.ts";
+import { attemptOf } from "../data/workflow/fragments.ts";
+import { endWorkspace } from "../build/workspaces.ts";
 import { LIMIT_IMPLEMENT, type QuestionOption } from "../implement/questions.ts";
 import { MAX_ATTEMPTS_PER_TEXT, STUCK_CAUSES, STUCK_OPTIONS } from "../implement/stuck.ts";
 import { ENDED_STATES } from "../implement/types.ts";
 import { openQuestionOf, viewOf } from "../workflow/question.ts";
-import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
 import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
 import type { Db, Statement } from "./index.ts";
 import * as kx from "./kx.ts";
@@ -57,9 +58,8 @@ export interface SwitchReport {
   archived: { answered: number; withdrawn: number; actions: number; withoutItem: number };
   /** Copied state that differed and was carried over, rows per table. */
   carried: Record<string, number>;
-  /** Stopped pre-approvals ended, and the workflows that wait with a recommendation for them. */
+  /** Stopped pre-approvals ended. */
   legsEnded: number;
-  recommending: string[];
   /** Pre-approved merges in progress that no workflow owned, the person whose approval it is and the workflow it goes on in. */
   legs: { item: string; by: string; head: string; workflow: number }[];
   /** Those the pre-approval pass ends. */
@@ -91,7 +91,7 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   // Both sides were equal at this time: at the last switch, else at the state copy (a copy without a time: now).
   const since = marker?.at ?? (copied !== null && /^\d{4}-/.test(copied) ? copied : now);
   const r: SwitchReport = {
-    at: now, archived: { answered: 0, withdrawn: 0, actions: 0, withoutItem: 0 }, carried: {}, legsEnded: 0, recommending: [], legs: [], legsSkipped: [],
+    at: now, archived: { answered: 0, withdrawn: 0, actions: 0, withoutItem: 0 }, carried: {}, legsEnded: 0, legs: [], legsSkipped: [],
     questions: [], unapplied: [], repos: 0, fastTrack: [], fastTrackSkipped: [], backlog: 0,
   };
   await carryState(db, r, { now, since, keepAfter: marker ? null : since, perDay: o.perDay });
@@ -99,7 +99,7 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   await archiveDecisions(db, r, now, true, new Set((await askingAttempts(db)).flatMap((x) => (x.a.decision === null ? [] : [x.a.decision as string]))));
   await archiveActions(db, r);
   await db.write(async () => {
-    await endAskedLegs(db, r, now);
+    await endAskedLegs(db, r);
     await carryQuestions(db, r, now);
     await carryDrafts(db, now);
     await keepRecommendations(db, now);
@@ -127,7 +127,6 @@ export function reportLines(r: SwitchReport): string[] {
     `  ${r.repos} repos moved, ${r.legsEnded} stopped pre-approvals ended, ${r.backlog} items kept in the backlog; carried over: ${carried || "nothing"}`,
     ...r.fastTrack.map((f) => `  fast track: ${f.item} starts ${f.entry} for ${f.by} at weight ${f.weight} (workflow ${f.workflow})`),
     ...r.fastTrackSkipped.map((f) => `  fast track: ${f.item} not started: ${f.why}`),
-    ...(r.recommending.length ? [`  waiting with a recommendation: ${r.recommending.join(", ")}`] : []),
     ...r.legs.map((l) => `  pre-approved merge: ${l.item} goes on at ${l.head.slice(0, 7)}, approved by ${l.by} (workflow ${l.workflow})`),
     ...r.legsSkipped.map((l) => `  pre-approved merge: ${l.item} ends: ${l.why}`),
     ...(r.questions.length ? [`  implementations that wait for a maintainer: ${r.questions.join(", ")}`] : []),
@@ -421,27 +420,11 @@ export async function archiveActions(db: Db, r: Pick<SwitchReport, "archived">):
 // ---- pre-approvals --------------------------------------------------------------------------------------------------
 
 /**
- * Ends the pre-approvals that stopped for a Merge? question. A running workflow whose newest leg stopped so, with no answer
- * since, waits with the review's recommendation; without one, with a sentence that names the stop.
+ * Ends the pre-approvals that stopped for a Merge? question. The advance pass, which runs before the runner plans or merges anything,
+ * reads an ended leg of a running workflow as it read the stopped one: with no answer since, the workflow comes back with a recommendation.
  */
-async function endAskedLegs(db: Db, r: SwitchReport, now: string): Promise<void> {
-  const stopped = await all(db, q(db).selectFrom("main.preapprovals as p").innerJoin("main.item_workflows as w", "w.id", "p.workflow_id")
-    .innerJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-    .leftJoin("main.opus_reviews as o", (j: any) => j.onRef("o.repo", "=", "p.repo").onRef("o.number", "=", "p.number").onRef("o.head_oid", "=", "i.head_oid"))
-    .select(["w.id", "w.repo", "w.number", "w.plan", "p.reason", "i.head_oid as head", "o.verdict", "o.sure", "o.workflow"])
-    .where("p.state", "=", "asked").where("w.state", "in", ["running", "waiting"]).where("i.state", "=", "OPEN")
-    .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.preapprovals as n").select(eb.lit(1).as("one")).whereRef("n.repo", "=", "p.repo").whereRef("n.number", "=", "p.number").whereRef("n.id", ">", "p.id"))))
-    .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.workflow_events as e").select(eb.lit(1).as("one")).whereRef("e.workflow_id", "=", "w.id")
-      .where("e.kind", "in", ["started", "answered"]).whereRef("e.at", ">", "p.updated_at")))));
-  for (const s of stopped) {
-    const plan = (parse(s.plan) ?? []) as PlanPart[];
-    const given = (parse(s.workflow) as ReviewWorkflow | null)?.recommendation ?? null;
-    const view: ReviewView | null = s.verdict === null ? null : { verdict: s.verdict, sure: Number(s.sure) === 1, rec: Array.isArray(given?.fix) ? given : null };
-    const rec = view?.rec ? afterSteps(view, plan) : atBlocker({ blocker: "other", params: s.reason ? { reason: s.reason } : {} }, view, plan);
-    await run(db, q(db).updateTable("main.item_workflows").set({ state: "recommending", rec: JSON.stringify(rec), rec_at: now, rec_head: s.head, updated_at: now }).where("id", "=", s.id));
-    r.recommending.push(key(s as { repo: string; number: number }));
-  }
-  // updated_at stays: it says when the leg stopped, and a stop older than the workflow's last answer is no new one.
+async function endAskedLegs(db: Db, r: SwitchReport): Promise<void> {
+  // updated_at stays: it says when the leg stopped, and a stop older than the workflow's last answer is no new one. So does the reason, which the recommendation names.
   r.legsEnded = (await run(db, q(db).updateTable("main.preapprovals").set({ state: "cancelled" }).where("state", "=", "asked"))).changes;
 }
 
@@ -541,9 +524,9 @@ async function carryQuestions(db: Db, r: SwitchReport, now: string): Promise<voi
     const answered = a.answer !== null && !PIPELINE_ANSWERS.includes(a.answer) && a.applied_at === null && (a.answered_at ?? "") > round.at
       && !x.rounds.some((y) => y.kind === "answer" && Number(y.id) > round.id) && !HELD_ANSWERS.includes(a.exec_state) && await mayAct(db, a.answered_by, a.repo, identity);
     if (answered && a.answer === BACKLOG) {
-      const moved = await backlogWorkflow(db, a, now);
-      r.backlog += moved;
-      if (moved) continue;
+      const moved = await toBacklog(db, a, now);
+      r.backlog += moved ?? 0;
+      if (moved !== null) continue;
     }
     if (carried) r.questions.push(`${key(a as never)} ${a.state}`);
     const option = options.find((o) => o.key === a.answer)?.key;
@@ -558,10 +541,21 @@ async function mayAct(db: Db, login: string | null, repo: string, identity: ActI
   return !!facts && decideAct(facts, isWrite(facts.perm?.permission) ? "cached" : "no", identity).ok;
 }
 
-/** A Backlog answer to the question of a started issue ends its workflow as the backlog command does; a later start stands. */
-async function backlogWorkflow(db: Db, a: Row, now: string): Promise<number> {
-  return (await run(db, q(db).updateTable("main.item_workflows").set({ state: BACKLOG, rec: null, rec_at: null, rec_head: null, blocker: null, blocker_params: null, updated_at: now })
-    .where("repo", "=", a.repo).where("number", "=", a.number).where("kind", "=", "issue").where("state", "in", LIVE).where("started_at", "<", a.answered_at))).changes;
+/**
+ * A Backlog answer to the question of an issue does what the backlog command does: the attempt that opened no PR ends with its question, its
+ * workspace and its queued calls, and so does the issue's workflow (its merge legs end on its state). Returns the workflows ended; null when a
+ * workflow of the issue started later: that start stands.
+ */
+async function toBacklog(db: Db, a: Row, now: string): Promise<number | null> {
+  const of = (b: any): any => b.where("repo", "=", a.repo).where("number", "=", a.number).where("kind", "=", "issue");
+  if (await get(db, of(q(db).selectFrom("main.item_workflows").select("id")).where("started_at", ">=", a.answered_at).limit(1))) return null;
+  const moved = (await run(db, of(q(db).updateTable("main.item_workflows").set({ state: BACKLOG, rec: null, rec_at: null, rec_head: null, blocker: null, blocker_params: null, updated_at: now }))
+    .where("state", "in", LIVE))).changes;
+  const item = { repo: a.repo as string, number: Number(a.number) };
+  const reason = `moved to the backlog by ${a.answered_by}`;
+  for (const w of await cancelUnopened(db, [{ ...item, reason }], a.answered_by, now)) if (w.workspaceId !== null) await endWorkspace(db, w.workspaceId);
+  await withdrawItemCalls(db, key(item), reason);
+  return moved;
 }
 
 /** An attempt the Open as draft PR answer handed to the PR step (or to the undo turn that step asked for) opens a draft when its rounds hold that answer. */
@@ -655,9 +649,12 @@ async function startWorkflows(db: Db, r: SwitchReport, now: string): Promise<voi
     .where("p.state", "in", [...ACTIVE_LEG_STATES]).where("p.workflow_id", "is", null).orderBy("p.id"));
   const issueOf = new Map<string, string>();
   for (const part of kx.batches([...fast.filter((f) => f.kind === "pr"), ...legs])) {
-    const ims = await all(db, q(db).selectFrom("main.implementations").select(["repo", "number", "pr_number", "state", "updated_at"]).where(kx.tupleIn(db, ["repo", "pr_number"], part.map((x) => [x.repo, Number(x.number)]), ["text", "bigint"])));
-    // An attempt that ended before its issue's workflow started is no work of that workflow, nor is its PR.
-    for (const im of ims) if (!ENDED_STATES.has(im.state) || live.some((w) => key(w as never) === key(im as never) && w.entry === "implement" && w.started_at <= im.updated_at)) issueOf.set(`${im.repo}#${im.pr_number}`, key(im as never));
+    // Those of the live workflow's own attempts: a PR of an earlier attempt, reopened say, is no work of that workflow.
+    const ims = await all(db, q(db).selectFrom("main.implementations as im").select(["im.repo", "im.number", "im.pr_number"])
+      .where(kx.tupleIn(db, ["im.repo", "im.pr_number"], part.map((x) => [x.repo, Number(x.number)]), ["text", "bigint"]))
+      .where((eb: any) => eb.or([eb("im.state", "not in", [...ENDED_STATES]), eb.exists(eb.selectFrom("main.item_workflows as w").select(eb.lit(1).as("one")).whereRef("w.repo", "=", "im.repo").whereRef("w.number", "=", "im.number")
+        .where("w.entry", "=", "implement").where("w.state", "in", LIVE).where((x: any) => attemptOf(x, "im", "w")))])));
+    for (const im of ims) issueOf.set(`${im.repo}#${im.pr_number}`, key(im as never));
   }
   const s: Starts = {
     backlog: await backlogAnswers(db), of, live: new Set(live.map((w) => key(w as never))), fast, issueOf,

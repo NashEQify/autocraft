@@ -10,6 +10,7 @@ import { setOptionalCheck } from "../src/optional-checks.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
+import { expectFlat } from "./helpers/query-count.ts";
 import { CHECK, OPERATOR, T0, world, type World } from "./world-db.ts";
 import { addOwnCommits } from "../src/data/control/index.ts";
 import { loadLegPass } from "../src/data/workflow/index.ts";
@@ -268,6 +269,20 @@ describe("pre-approved merge", () => {
     assert.match(p!.reason!, /cannot run: the PR conflicts/);
   });
 
+  test("a pass over the legs in the merge queue reads as much for many as for few", async () => {
+    await expectFlat(async (size) => {
+      const w = await (await (await world()).repo()).acting();
+      for (let n = 1; n <= size; n++) await (await (await (await take(w, n)).review(n)).premerge(n, "clean")).handedOver(n);
+      return {
+        db: w.db, close: async () => w.close(),
+        run: async () => {
+          await advancePreapprovals(w.db);
+          assert.deepEqual(await w.rows("SELECT DISTINCT state FROM preapprovals"), [{ state: "queued" }]);
+        },
+      };
+    }, 2, 12);
+  });
+
   test("a cancel is refused while a merge job runs, and a merge that lands after a cancel turns the row into merged", async () => {
     const w = await (await take(await fresh(), 15)).review(15, { verdict: "take-fix" });
     await inCi(w, 15);
@@ -299,13 +314,13 @@ describe("pre-approved merge", () => {
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "review");
   });
 
-  test("the pipeline's own CI fix push ends the pre-approval like a foreign push", async () => {
+  test("the pipeline's own CI fix push carries the pre-approval to its head, and a foreign push ends it", async () => {
     const w = await (await take(await (await take(await fresh(), 16)).review(16, { verdict: "take-fix" }), 17)).review(17, { verdict: "take-fix" });
     await inCi(w, 16);
     await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 16, head: "sha16b", to_head: "sha16c", kind: "format", state: "pushed", attempt: 1, created_at: T0 }));
     await w.synced(16, "sha16c");
     await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 16))?.state, "cancelled");
+    assert.deepEqual([(await preapprovalOf(w.db, "app", 16))?.state, (await preapprovalOf(w.db, "app", 16))?.head], ["review", "sha16c"]);
 
     await inCi(w, 17);
     await w.synced(17, "foreign17");
