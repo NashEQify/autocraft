@@ -39,9 +39,11 @@ let n = 0;
 
 /**
  * A new empty database with `schema` run on it (statements both dialects accept). `dialect` defaults to Postgres when
- * AUTOCRAFT_TEST_PG_URL is set, else SQLite.
+ * AUTOCRAFT_TEST_PG_URL is set, else SQLite. Without a schema a Postgres database is created with its first open: `app`
+ * makes it a copy of the migrated template, which costs a tenth of the migration. `empty` creates it at once and empty, for
+ * a test that migrates it or reads `target` before it opens it.
  */
-export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG_URL ? "postgres" : "sqlite"): Promise<TestDatabase> {
+export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG_URL ? "postgres" : "sqlite", o: { empty?: boolean } = {}): Promise<TestDatabase> {
   // Each handle's own close, taken before testDb replaces it with this database's close.
   const closers: (() => Promise<void>)[] = [];
   const track = (db: Db): Db => (closers.push(db.close.bind(db)), db);
@@ -62,24 +64,19 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
   const admin = new URL(TEST_PG_URL);
   const name = `test_${process.pid}_${n++}_${randomBytes(3).toString("hex")}`;
   const server = await connectDb(admin.toString(), { role: "cli", migrate: false });
-  await server.script(`CREATE DATABASE ${name}`);
   const url = new URL(admin);
   url.pathname = `/${name}`;
-  // Whether anything may have touched the database: until then, opening it as the app replaces it with a copy of the
-  // migrated template, which costs a tenth of the migration.
-  let touched = schema !== "";
-  let replaced: Promise<void> | undefined;
+  let created: Promise<void> | undefined;
   const open = async ({ app, ...opts }: { busyTimeoutMs?: number; app?: boolean; idleInTransactionMs?: number; rowWrites?: boolean } = {}) => {
-    if (app && !touched) replaced = server.script(`DROP DATABASE ${name}`).then(() => createFromTemplate(name));
-    touched = true;
-    await replaced;
+    await (created ??= app ? createFromTemplate(name) : server.script(`CREATE DATABASE ${name}`));
     return track(await connectDb(url.toString(), { role: "dashboard", migrate: !!app, ...opts }));
   };
+  if (o.empty) await (created = server.script(`CREATE DATABASE ${name}`));
   if (schema) await (await open()).script(schema);
   return {
     dialect,
     get target() {
-      touched = true;
+      if (!created) throw new Error("testDatabase: the database does not exist before its first open; pass { empty: true }");
       return url.toString();
     },
     open,
