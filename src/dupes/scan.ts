@@ -77,17 +77,18 @@ export async function scanChunk(db: Db, index: VectorIndex, refs: { repo: string
   for (const item of items) {
     // A quiet pull request is never paired: a duplicate close or group question would name it on GitHub.
     if (quiet.has(`${item.repo}#${item.number}`)) continue;
-    let n = 0;
+    const found: { o: ScanItem; score: number }[] = [];
     for (const h of hits.get(item)!) {
-      if (n >= cap) break;
+      if (found.length >= cap) break;
       const key = `${h.repo}#${h.number}`;
       const row = others.get(key);
       const o = row && !own.has(key) && !quiet.has(key) ? rowOf(row) : null;
-      if (!o || !comparable(item, o, now.getTime())) continue;
+      if (o && comparable(item, o, now.getTime())) found.push({ o, score: h.score });
+    }
+    for (const { o, score } of found) {
       const [x, y] = item.number < o.number ? [item, o] : [o, item];
       if (ruled.has(`${item.repo}\n${x.number}\n${y.number}`)) continue;
-      pairs.push({ repo: item.repo, a: x.number, b: y.number, a_hash: x.embed_hash, b_hash: y.embed_hash, similarity: Math.round(h.score * 10000) / 10000 });
-      n++;
+      pairs.push({ repo: item.repo, a: x.number, b: y.number, a_hash: x.embed_hash, b_hash: y.embed_hash, similarity: Math.round(score * 10000) / 10000 });
     }
   }
   const at = now.toISOString();

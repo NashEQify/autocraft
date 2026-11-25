@@ -2,12 +2,27 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { currentComparison, kindSets } from "../src/dupes/plan.ts";
 import { loadDupeState, saveComparisons, type ComparisonPut } from "../src/data/triage/index.ts";
+import { fillEmbedHashes } from "../src/itemhash.ts";
 import { T0, world } from "./world-db.ts";
+import type { Db } from "../src/db/index.ts";
+
+/**
+ * A confirmed duplicate pair of PRs 1 and 2 at their current text, so the two form a group in the stored state. An edit outside
+ * sync clears an item's hash; the pair is re-stamped at the new text, as a scan and check would, so the group stays.
+ */
+async function pair(db: Db): Promise<void> {
+  await fillEmbedHashes(db);
+  const hash = async (n: number) => (await db.get(db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
+  const row = { repo: "app", a: 1, b: 2, a_hash: await hash(1), b_hash: await hash(2) };
+  const had = await db.get(db.k.selectFrom("duplicate_pairs").select("repo").where("repo", "=", "app"));
+  if (had) await db.run(db.k.updateTable("duplicate_pairs").set({ a_hash: row.a_hash, b_hash: row.b_hash }).where("repo", "=", "app"));
+  else await db.run(db.k.insertInto("duplicate_pairs").values({ ...row, similarity: 0.9, verdict: "duplicate", by_operator: 0, created_at: T0 }));
+}
 
 test("a duplicate comparison survives head pushes and small diff changes, and is redone for a state change or a diff that moved over 20%", async () => {
   const w = await (await (await (await world()).repo()).pr(1, { lines: 100 })).pr(2, { lines: 100 });
-  const group = { repo: "app", canonical: 1, why: "", members: [1, 2], edges: [] };
-  const state = async () => await loadDupeState(w.db);
+  const group = { repo: "app", members: [1, 2], edges: [] };
+  const state = async () => { await pair(w.db); return await loadDupeState(w.db); };
   const set = async () => kindSets(await state(), group)[0]!;
   const current = async () => currentComparison(await state(), await set());
   const s0 = await set();
@@ -30,8 +45,8 @@ test("a duplicate comparison survives head pushes and small diff changes, and is
 test("the stored sizes are those of the compared snapshot, and a size unknown then makes the result stale once known", async () => {
   const w = await (await (await (await world()).repo()).pr(1, { lines: 100 })).pr(2, { lines: 100 });
   await w.db.run(w.db.k.updateTable("items").set({ additions: null }).where("repo", "=", "app").where("number", "=", 2));
-  const group = { repo: "app", canonical: 1, why: "", members: [1, 2], edges: [] };
-  const state = async () => await loadDupeState(w.db);
+  const group = { repo: "app", members: [1, 2], edges: [] };
+  const state = async () => { await pair(w.db); return await loadDupeState(w.db); };
   const set = async () => kindSets(await state(), group)[0]!;
   const current = async () => currentComparison(await state(), await set());
   const snap = await set();
