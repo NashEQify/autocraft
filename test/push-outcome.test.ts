@@ -28,6 +28,7 @@ test("push outcome: green to red is broke, red to green is fixed, optional check
 
 test("a new branch takes the CI result of its base commit, not the latest main CI", async () => {
   const db = await connectDb(join(tmpdir("push-base"), "t.db"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "o/r", added_by: "op", added_at: "2026-11-01T00:00:00Z" }));
   const ci = async (sha: string, state: string, at: string) => await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: sha, branch: "main", state, failing: "[]", checks: "[]", committed_at: at, first_seen_at: at, state_changed_at: at, updated_at: at }));
   await ci("base", "red", "2026-11-01T00:00:00Z");
   await ci("latest", "green", "2026-11-02T00:00:00Z");

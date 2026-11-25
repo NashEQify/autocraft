@@ -11,9 +11,11 @@ import { parseCompareReply, parseScreenshotReply, type CompareParsed } from "../
 import { runCollect, collectDue, type CollectDeps } from "../src/verify/results.ts";
 import { putConfig, type ScreenshotConfigBody } from "../src/verify/screenshot-config.ts";
 import { runVerify, type VerifyDeps } from "../src/verify/index.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
 import { cols, excluded, like } from "../src/db/kx.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -45,6 +47,8 @@ async function fresh(): Promise<Db> {
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await putConfig(db, "op", "app", CFG);
+  await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "review", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await reportingTaskRunner(db);
   return db;
 }
 const verifyDeps: VerifyDeps = {
