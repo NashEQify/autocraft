@@ -153,19 +153,28 @@ export function writesRows(text: string): boolean {
 /** `s` as an SQL string literal (standard_conforming_strings, the default: only quotes are doubled). */
 const quoteLiteral = (s: string): string => `'${s.replaceAll("'", "''")}'`;
 
-/** Emits a query event for every round trip on `client` while someone observes. */
+/** Counts every round trip on `client` in the current meter, and emits a query event for it while someone observes. */
 function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
   const query = client.query.bind(client) as (...a: unknown[]) => unknown;
   (client as { query: unknown }).query = (...a: unknown[]): unknown => {
     const text = a[0];
-    if (!ctx.observed() || typeof text !== "string" || typeof a.at(-1) === "function") return query(...a);
-    const site = callSite(siteError());
+    const m = ctx.meter();
+    if (m) m.roundTrips++;
+    const observed = ctx.observed();
+    if ((!m && !observed) || typeof text !== "string" || typeof a.at(-1) === "function") return query(...a);
+    const site = observed ? (ctx.site() ?? callSite(siteError())) : "";
     const t0 = performance.now();
     return (query(...a) as Promise<Pg.QueryResult | Pg.QueryResult[]>).then((r) => {
+      const ms = performance.now() - t0;
+      if (m) m.ms += ms;
+      if (!observed) return r;
       // A script with several statements answers with one result per statement.
       const rows = (Array.isArray(r) ? r : [r]).flatMap((x) => x.rows ?? []);
-      ctx.emit({ kind: "query", sql: text, rows: rows.length, bytes: rows.length ? Buffer.byteLength(JSON.stringify(rows)) : 0, ms: performance.now() - t0, site });
+      ctx.emit({ kind: "query", sql: text, rows: rows.length, bytes: rows.length ? Buffer.byteLength(JSON.stringify(rows)) : 0, ms, site });
       return r;
+    }, (e: unknown) => {
+      if (m) m.ms += performance.now() - t0;
+      throw e;
     });
   };
 }
@@ -320,6 +329,13 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       return withoutInsertId(Number(r.numAffectedRows ?? 0n));
     },
     script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text, opts.scope))))),
+    // Each read becomes `(select coalesce(json_agg(agg), '[]') from (<read>) as agg) AS qN`, as Kysely's jsonArrayFrom
+    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL. Compiling for `kysely` runs
+    // its plugins (schemaPlugin) over the reads again, which leaves them as they are.
+    fuse: (kysely, nodes) => {
+      const parts = nodes.map((n, i) => k.sql`(select coalesce(json_agg(agg), '[]') from ${{ toOperationNode: () => n }} as agg) as ${k.sql.ref(`q${i}`)}`);
+      return k.sql<Row>`select ${k.sql.join(parts)}`.compile(kysely);
+    },
     configure: (b, mode) => (mode === "read" ? b.setIsolationLevel("repeatable read").setAccessMode("read only") : b.setIsolationLevel("read committed")),
     // A pool of its own: the search path is a startup parameter of each connection, never a session SET.
     scope: async () => {
