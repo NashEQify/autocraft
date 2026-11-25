@@ -55,12 +55,12 @@ const textLength = (eb: kx.Eb, col: string) => eb.fn<number>("length", [eb.fn("t
 const newSources = (db: Db) => {
   const k = queryDb(db).k;
   const union = k.selectFrom("main.comments as c")
-    .innerJoin("main.access as a", (j) => j.onRef("a.login", "=", "c.author").on("a.role", "=", "operator"))
+    .innerJoin("main.access as a", (j) => j.on(kx.ciEq(db, "a.login", "c.author")).on("a.role", "=", "operator"))
     .select((eb) => [tag(eb, "comment").as("kind"), "c.id as sid", "c.repo", "c.number", eb.fn<string>("trim", ["c.body"]).as("text"), "c.author", "c.created_at as at"])
     .where("c.kind", "in", ["comment", "review"])
     .where((eb) => eb.and([eb(textLength(eb, "c.body"), ">=", STATEMENT_MIN_CHARS), eb.not(ownPost(db, eb))]))
     .unionAll(k.selectFrom("main.conversation_turns as t")
-      .innerJoin("main.access as a", (j) => j.onRef("a.login", "=", "t.login").on("a.role", "=", "operator"))
+      .innerJoin("main.access as a", (j) => j.on(kx.ciEq(db, "a.login", "t.login")).on("a.role", "=", "operator"))
       .select((eb) => [tag(eb, "conversation").as("kind"), eb.cast<string>("t.id", "text").as("sid"), "t.repo", "t.number", eb.fn<string>("trim", ["t.body"]).as("text"), "t.login as author", "t.at"])
       .where("t.kind", "=", "operator")
       .where((eb) => eb.and([eb(eb.fn.coalesce("t.status", eb.val("")), "<>", "failed"), eb(textLength(eb, "t.body"), ">=", STATEMENT_MIN_CHARS)])));

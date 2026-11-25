@@ -35,12 +35,12 @@ export async function addStageEventsOnce(db: Db, rows: (StageEventRow & { notePr
   return await db.write(async () => {
     let n = 0;
     for (const part of kx.chunks(fresh, 500)) {
-      const v = kx.valuesTable(db, part.map((r) => ({ ...insertRow(r), pattern: `${kx.likeEscape(r.notePrefix)}%` })),
-        { repo: "text", number: "bigint", stage: "text", at: "text", actor: "text", note: "text", pattern: "text" }, "v");
+      const v = kx.valuesTable(db, part.map((r, ord) => ({ ...insertRow(r), ord, pattern: `${kx.likeEscape(r.notePrefix)}%` })),
+        { repo: "text", number: "bigint", stage: "text", at: "text", actor: "text", note: "text", ord: "bigint", pattern: "text" }, "v");
       const fresh = q.k.selectFrom(v).select(["v.repo", "v.number", "v.stage", "v.at", "v.actor", "v.note"])
         .where((w) => w.not(w.exists(kx.schemaEb(w).selectFrom("main.stages as x").select(w.lit(1).as("one"))
           .where("x.repo", "=", w.ref("v.repo")).where("x.number", "=", w.ref("v.number")).where("x.stage", "=", w.ref("v.stage"))
-          .where(kx.like(db, "x.note", w.ref("v.pattern"), "\\")))));
+          .where(kx.like(db, "x.note", w.ref("v.pattern"), "\\"))))).orderBy("v.ord");
       n += Number((await q.run(q.k.insertInto("main.stages").columns(["repo", "number", "stage", "at", "actor", "note"]).expression(fresh))).changes);
     }
     return n;

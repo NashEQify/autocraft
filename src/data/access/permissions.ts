@@ -35,7 +35,7 @@ export async function loadPermissionsOfLogins(db: Db, logins: readonly Login[]):
   if (!logins.length) return out;
   const q = queryDb(db);
   for (const part of kx.chunks(logins)) {
-    for (const r of await q.all(q.k.selectFrom("main.repo_permissions").selectAll().where(kx.inList(db, "login", part, "citext")))) {
+    for (const r of await q.all(q.k.selectFrom("main.repo_permissions").select(kx.cols("repo_permissions")).where(kx.inList(db, "login", part, "citext")))) {
       const k = r.login.toLowerCase();
       const list = out.get(k);
       if (list) list.push(r);

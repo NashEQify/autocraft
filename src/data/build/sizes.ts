@@ -96,7 +96,7 @@ export async function loadSizings(db: Db, repos: string[] | "all"): Promise<Map<
   const { k } = q;
   let names: string[], rows: SizeRow[] | null = null;
   if (repos === "all") {
-    rows = await q.all(k.selectFrom("main.build_sizes").selectAll());
+    rows = await q.all(k.selectFrom("main.build_sizes").select(kx.cols("build_sizes")));
     names = rows.map((r) => r.repo);
   } else names = [...new Set(repos)];
   names.sort();
@@ -109,7 +109,7 @@ export async function loadSizings(db: Db, repos: string[] | "all"): Promise<Map<
   const since = new Date(now - AUTO_DAYS * 86400_000).toISOString();
   const keys = names.map(warmKeyOfRepo);
   const [sizes, hist, bytes] = await db.together(() => Promise.all([
-    rows ? Promise.resolve(rows) : q.all(k.selectFrom("main.build_sizes").selectAll().where(kx.inList(db, "repo", names))),
+    rows ? Promise.resolve(rows) : q.all(k.selectFrom("main.build_sizes").select(kx.cols("build_sizes")).where(kx.inList(db, "repo", names))),
     stale.length ? q.all(k.selectFrom(k.selectFrom("main.build_tasks as t")
       .select((eb) => ["t.repo", "t.results", "t.plan", eb.fn.agg<number>("row_number").over((o) => o.partitionBy("t.repo").orderBy("t.ended_at", "desc").orderBy("t.id", "desc")).as("rn")])
       .where(kx.inList(db, "t.repo", stale)).where("t.ended_at", ">=", since).where("t.state", "in", ["done", "failed"]).where("t.results", "!=", "[]")

@@ -71,7 +71,7 @@ export async function loadUsageSpend(db: Db, o: { fromDay: string; hidden: Hidde
 export async function loadUsageByModel(db: Db, runId: string): Promise<UsageModelRow[]> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.token_usage").select(["model", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "started_at", "ended_at"])
-    .where("run_id", "=", runId).orderBy("model"));
+    .where("run_id", "=", runId).orderBy("model", (o) => o.asc().nullsFirst()));
   const by = new Map<string, UsageModelRow>();
   for (const r of rows) {
     const key = r.model ?? "";

@@ -29,7 +29,7 @@ function configOf(r: ConfigRow): ScreenshotConfig | null {
 export async function loadScreenshotConfigs(db: Db, repos?: string[]): Promise<Map<string, ScreenshotConfig>> {
   if (repos && repos.length === 0) return new Map();
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("screenshot_config").selectAll().$if(!!repos, (s) => s.where(kx.inList(db, "repo", repos!))).orderBy("repo")) as ConfigRow[];
+  const rows = await q.all(q.k.selectFrom("screenshot_config").select(kx.cols("screenshot_config")).$if(!!repos, (s) => s.where(kx.inList(db, "repo", repos!))).orderBy("repo")) as ConfigRow[];
   const out = new Map<string, ScreenshotConfig>();
   for (const r of rows) { const c = configOf(r); if (c) out.set(r.repo, c); }
   return out;

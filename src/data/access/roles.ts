@@ -20,7 +20,7 @@ const RANK: Record<Role, number> = { viewer: 0, maintainer: 1, operator: 2 };
 /** Every access row ordered by login without case. */
 export async function listAccess(db: Db): Promise<AccessRow[]> {
   const q = queryDb(db);
-  return await q.all(q.k.selectFrom("main.access").selectAll().$narrowType<{ role: Role }>().orderBy(kx.nocase(db, "login")));
+  return await q.all(q.k.selectFrom("main.access").select(kx.cols("access")).$narrowType<{ role: Role }>().orderBy(kx.nocase(db, "login")));
 }
 
 /** Access rows by lower-cased login. */
@@ -29,7 +29,7 @@ export async function loadAccess(db: Db, logins: readonly Login[]): Promise<Map<
   if (!logins.length) return out;
   const q = queryDb(db);
   for (const part of kx.chunks(logins)) {
-    for (const r of await q.all(q.k.selectFrom("main.access").selectAll().$narrowType<{ role: Role }>().where(kx.inList(db, "login", part, "citext")))) out.set(r.login.toLowerCase(), r);
+    for (const r of await q.all(q.k.selectFrom("main.access").select(kx.cols("access")).$narrowType<{ role: Role }>().where(kx.inList(db, "login", part, "citext")))) out.set(r.login.toLowerCase(), r);
   }
   return out;
 }
@@ -89,7 +89,7 @@ async function keepAnOperator(db: Db, row: AccessRow): Promise<void> {
 
 async function rowOf(db: Db, login: string): Promise<AccessRow> {
   const q = queryDb(db);
-  const row = await q.get(q.k.selectFrom("main.access").selectAll().$narrowType<{ role: Role }>().where((eb) => kx.ciEq(db, "login", eb.val(login))));
+  const row = await q.get(q.k.selectFrom("main.access").select(kx.cols("access")).$narrowType<{ role: Role }>().where((eb) => kx.ciEq(db, "login", eb.val(login))));
   if (!row) throw new AccessRefused("missing", login);
   return row;
 }
@@ -148,7 +148,7 @@ export async function bindGithubId(db: Db, login: Login, id: number): Promise<"o
 /** The access row, only while it is bound to that GitHub id. */
 export async function actorOf(db: Db, login: Login, githubId: number): Promise<AccessRow | null> {
   const q = queryDb(db);
-  const row = await q.get(q.k.selectFrom("main.access").selectAll().$narrowType<{ role: Role }>().where((eb) => kx.ciEq(db, "login", eb.val(login))));
+  const row = await q.get(q.k.selectFrom("main.access").select(kx.cols("access")).$narrowType<{ role: Role }>().where((eb) => kx.ciEq(db, "login", eb.val(login))));
   return row && row.github_id !== null && Number(row.github_id) === githubId ? row : null;
 }
 

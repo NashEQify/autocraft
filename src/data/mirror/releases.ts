@@ -82,7 +82,7 @@ export async function foldDeltas(db: Db, now: string): Promise<void> {
   const cutoff = hourOf(Date.parse(now) - HOUR_KEEP_MS);
   const q = queryDb(db);
   await db.write(async () => {
-    const day = (eb: kx.AnyEb) => eb(eb.fn<string>("substr", [eb.ref("d.t"), eb.lit(1), eb.lit(10)]), "||", eb.val("T00:00:00Z"));
+    const day = (eb: kx.AnyEb) => eb(eb.fn<string>("substr", [eb.ref("d.t"), eb.lit(1), eb.lit(10)]), "||", kx.literal("T00:00:00Z"));
     const old = q.k.selectFrom("main.download_deltas as d").select((eb) => ["d.asset_id", day(eb).as("t"), eb.val("d").as("span"), eb.fn.sum<number>("d.delta").as("delta")])
       .where("d.span", "=", "h").where("d.t", "<", cutoff).groupBy((eb) => ["d.asset_id", day(eb)]);
     await q.run(q.k.insertInto("main.download_deltas").columns(["asset_id", "t", "span", "delta"]).expression(old as any)
