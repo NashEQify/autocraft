@@ -6,7 +6,7 @@ import { BUILD_FEATURES, featureOn, featureRepos, featureStates, setFeature, sho
 import { createEnv, hello } from "../src/build/envs.ts";
 import { FEATURES_REPO_ONLY_DONE, featuresRepoOnlySqlite } from "../src/db/feature-repo-only.ts";
 import { connect } from "../src/db.ts";
-import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
+import { INPUT_TOPICS, planDue } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb, dbFor } from "./helpers/raw-db.ts";
 import { rowid } from "../src/db/kx.ts";
@@ -51,7 +51,7 @@ test("Screenshots and Nightly checks show only while an enabled environment can 
   assert.deepEqual(await shownFeatures(db), ["screenshots", "push-tests", "batch-build", "nightly", "implement"]);
 });
 
-test("a switch change is not planner input", async () => {
+test("a switch change is planned at once but is no new input to a lane whose job handled nothing", async () => {
   const db = await fresh();
   assert.ok(!INPUT_TOPICS.includes("build-features" as never));
   const before = await db.seqs();
@@ -59,6 +59,10 @@ test("a switch change is not planner input", async () => {
   const after = await db.seqs();
   assert.equal(after["build-features"], (before["build-features"] ?? 0) + 1);
   assert.equal(after.settings, before.settings);
+  await planDue(db);
+  assert.equal(await planDue(db), false);
+  await setFeature(db, "pr-builds", true, "op", "app");
+  assert.equal(await planDue(db), true);
 });
 
 test("the Implement switch is planner input", async () => {
