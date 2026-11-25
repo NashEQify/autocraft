@@ -1,4 +1,4 @@
-// Instance thresholds of the maintainer workflow's blockers 5 and 6, and each user's switch for the new dashboard.
+// Instance thresholds of the maintainer workflow's blockers 5 and 6.
 import { config, freshConfig, saveSettings, type Config } from "../data/control/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -8,9 +8,6 @@ export const LARGE_FIX_DEFAULT = 400;
 /** A change outside the PR's purpose blocks (blocker 6) when the review counts at least this many changed lines outside it. */
 export const OUTSIDE_PURPOSE_KEY = "blocker_outside_purpose_min";
 export const OUTSIDE_PURPOSE_DEFAULT = 20;
-/** `user_settings` key of the switch for the new dashboard, which every user has now. */
-export const UI_V2_KEY = "ui_v2";
-
 /** The unit of work's settings snapshot, else the two threshold rows read now. */
 async function thresholdConfig(db: Db): Promise<Config> {
   try {
@@ -26,11 +23,6 @@ export async function largeFixLines(db: Db): Promise<number> {
 
 export async function outsidePurposeMin(db: Db): Promise<number> {
   return (await thresholdConfig(db)).blockerOutsidePurposeMin;
-}
-
-/** The new dashboard is the only one. */
-export async function uiV2(_db: Db, _login: string): Promise<boolean> {
-  return true;
 }
 
 export type BlockerThresholds = { largeFixLines: number; outsidePurposeMin: number };

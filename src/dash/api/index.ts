@@ -27,7 +27,6 @@ import { hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } f
 import { contributors } from "../../whitelist.ts";
 import { doneByRepo, funnelByRepo, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
 import { HttpError } from "../server/util.ts";
-import { githubIdentity } from "../../github/identity.ts";
 import type { Req, Res, Route } from "../types.ts";
 import * as adm from "./admin.ts";
 import { githubUserId } from "../../github/users.ts";
@@ -40,7 +39,6 @@ import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
 import * as maintain from "./maintain.ts";
 import * as maintainItem from "./maintain-item.ts";
-import { uiV2 } from "../../workflow/settings.ts";
 import * as runners from "./runners.ts";
 import * as modelQueue from "./model-queue.ts";
 import * as areas from "./areas.ts";
@@ -50,9 +48,7 @@ import * as insight from "./insight.ts";
 import * as pipeline from "./pipeline.ts";
 import * as outside from "./outside.ts";
 import { prompts } from "./prompts.ts";
-import { queue, queueBatches } from "./queue.ts";
 import { next } from "./next.ts";
-import { work } from "./work.ts";
 import { health } from "./health.ts";
 import { queueSlots } from "../../rank/position.ts";
 import * as items from "./items.ts";
@@ -76,7 +72,7 @@ import * as inference from "./inference.ts";
 import { localEmbedder, type Embedder } from "../../embed/model.ts";
 import type { Exec } from "../../fixup/git.ts";
 import { batchOne } from "./batch-page.ts";
-import { batchRemovePr, batchStop, queueAdd, heldMergeRefs, mergeHoldPr, pipelineRepoNames, queuePage } from "./queue-page.ts";
+import { batchRemovePr, batchStop, mergeHoldPr, queuePage } from "./queue-page.ts";
 import { VectorIndex } from "../../embed/vectors.ts";
 import { mainCiRepos, summarize } from "../../mainci/index.ts";
 import * as commands from "./commands.ts";
@@ -120,10 +116,6 @@ async function me(db: Db, req: Req): Promise<User> {
     role: req.user.role,
     writeRepos: await writeRepos(db, req),
     runRepos: await runRepos(db, req),
-    maintainerWrites: false,
-    maintainerSettles: await githubIdentity(db) === "app",
-    inference: "user-local",
-    uiV2: await uiV2(db, req.user.login),
   };
 }
 
@@ -198,8 +190,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     comments: (commentRows.get(ref) ?? []).filter((x) => !(x.kind === "review" && (x.body ?? "").trim() === "")).map((x) => ({
       id: x.id, author: x.author ?? "", at: x.created_at, body: x.body ?? "", kind: x.kind as ItemComment["kind"] | null, reviewState: x.review_state,
     })),
-    // The decision system is retired: its ids, actions and the settled-question list stay empty.
-    decisionIds: [], settled: unflagged(settled, quiet, !veil) as Item["settled"], priority,
+    settled: unflagged(settled, quiet, !veil) as Item["settled"], priority,
     ...work,
     // The reviewer's reasons quote the patch, so viewers get the verdict only.
     patchChecks: checks.map(({ kind, subject, patchHash, round, verdict, reasons, problems, model, createdAt }) =>
@@ -207,7 +198,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     reviews,
     premerge,
     postmerge,
-    actions: [], releases,
+    releases,
     queue: slots.get(`${repo}#${n}`) ?? null,
     // The operator's instructions are shown to those who see the internals only.
     ...(pr ? { preapproval: preapproval && !internals ? { ...preapproval, instructions: "" } : preapproval } : {}),
@@ -311,7 +302,7 @@ const sum = <T extends object>(xs: T[], zero: T): T => {
   return out as T;
 };
 
-type Heavy = Omit<Progress, "decisionsOpen" | "decisionsAnsweredToday" | "mainCi">;
+type Heavy = Omit<Progress, "mainCi">;
 // One entry per set of hidden repos (nearly always the operator's empty set and one other).
 const progressCache = new WeakMap<Db, Map<string, { key: string; at: number; value: Heavy }>>();
 const PROGRESS_MAX_AGE = 60_000;
@@ -350,7 +341,7 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
   const { series } = await trend(db, start, new Map(names.map((n) => [n, funnels.get(n)?.open ?? 0])));
   const repos: RepoProgress[] = names.map((repo) => ({
     repo, funnel: toFunnel(funnels.get(repo)), done: toDone(done.get(repo)),
-    decisionsOpen: 0, openTrend: series.get(repo)!,
+    openTrend: series.get(repo)!,
   }));
   const value: Heavy = {
     trackingSince: start, now: new Date(now).toISOString(),
@@ -367,8 +358,6 @@ async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
   const heavy = await progressItems(db, hidden);
   return {
     ...heavy,
-    repos: heavy.repos.map((r) => ({ ...r, decisionsOpen: 0 })),
-    decisionsOpen: 0, decisionsAnsweredToday: 0,
     mainCi: summarize(await mainCiRepos(db, hidden)),
   };
 }
@@ -394,13 +383,11 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/mcp/tokens", mcp.tokens),
     post("/api/mcp/tokens", mcp.create),
     post("/api/mcp/tokens/revoke", mcp.revoke),
-    // The new dashboard (ui_v2).
     scoped(get("/api/maintain/home", maintain.home)),
     get("/api/maintain/queue", maintain.queueMeta),
     scoped(get("/api/maintain/stats", maintain.stats)),
-    // The new Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
+    // The Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
     scoped(get("/api/maintain/items", maintain.items)),
-    // The new item page.
     get("/api/maintain/items/:repo/:n", maintainItem.item),
     get("/api/maintain/repos", maintain.repos),
     get("/api/me/settings", userSettings.settings),
@@ -516,18 +503,13 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/pipeline/limits/:step/reset", operator: true, handler: ok(pipeline.resetLimit) },
     { method: "POST", pattern: "/api/pipeline/steps/:step/deadline-ack", operator: true, handler: ok(pipeline.ackStepDeadline) },
     { method: "POST", pattern: "/api/pipeline/trips/:stage/resume", handler: ok(pipeline.resumeTrip) },
-    { method: "PUT", pattern: "/api/pipeline/pilot", operator: true, handler: ok(adm.putPilot) },
     { method: "PUT", pattern: "/api/pipeline/outside-limits", operator: true, handler: ok(outside.putLimits) },
     { method: "GET", pattern: "/api/pipeline/blocker-thresholds", handler: ok((db) => outside.getBlockerThresholds(db)) },
     { method: "PUT", pattern: "/api/pipeline/blocker-thresholds", operator: true, handler: ok(outside.putBlockerThresholds) },
+    { method: "GET", pattern: "/api/pipeline/outside/held", operator: true, handler: ok(outside.held) },
     { method: "POST", pattern: "/api/pipeline/outside/release", operator: true, handler: ok(outside.releaseAll) },
     { method: "POST", pattern: "/api/items/:repo/:n/release-outside", handler: ok(outside.release) },
-    scoped(get("/api/needs/outside/:author", outside.held)),
     get("/api/prompts", prompts),
-    get("/api/accounts/pause", agents.getPause),
-    { method: "PUT", pattern: "/api/accounts/pause", operator: true, handler: ok(agents.putPause) },
-    get("/api/accounts/jev", agents.getJev),
-    { method: "PUT", pattern: "/api/accounts/jev", operator: true, handler: ok(agents.putJev) },
     get("/api/agents", agents.list),
     get("/api/agents/:id", agents.detail),
     get("/api/rates", agents.rates),
@@ -556,14 +538,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "PUT", pattern: "/api/build/screenshots/:repo", handler: ok(build.putScreenshots) },
     { method: "DELETE", pattern: "/api/build/screenshots/:repo", handler: ok(build.deleteScreenshots) },
     scoped(get("/api/next", next)),
-    scoped(heavy(get("/api/queue", queue))),
-    scoped(heavy(get("/api/queue/batches", queueBatches))),
     get("/api/batches/:id", batchOne),
-    scoped(get("/api/work", work)),
     scoped(get("/api/queue/page", queuePage)),
-    get("/api/repos/pipeline", pipelineRepoNames),
-    get("/api/merge/held", heldMergeRefs),
-    post("/api/queue/add", queueAdd),
     { method: "POST", pattern: "/api/merge/hold", handler: ok(async (db, req) => mergeHoldPr(db, req, true)) },
     { method: "POST", pattern: "/api/merge/release", handler: ok(async (db, req) => mergeHoldPr(db, req, false)) },
     { method: "POST", pattern: "/api/merge/batch-remove", handler: ok(async (db, req) => batchRemovePr(db, req, opts.exec)) },

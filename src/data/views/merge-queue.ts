@@ -4,7 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { PlanView, QueueView } from "../../core/plan-cache.ts";
-import { QUEUE_STATES, type QueueState } from "../../core/plan.ts";
+import type { QueueState } from "../../core/plan.ts";
 import { hiddenRepos } from "../control/fragments.ts";
 import type { HiddenRepos } from "../control/types.ts";
 import { planGh, queuedPlan } from "../planner/fragments.ts";
@@ -47,22 +47,6 @@ export async function loadMergeQueue(db: Db, o: MergeQueueOptions = {}): Promise
     const v = JSON.parse(r.view) as PlanView;
     return { ...v.queue!, repo: r.repo, number: Number(r.number), title: r.title ?? "", state: r.state as QueueState, outsideRule: JSON.parse(r.reasons) as string[], note: r.note, gh: v.gh! };
   });
-}
-
-export function countStates(entries: { state: QueueState }[]): Record<QueueState, number> {
-  const c = Object.fromEntries(QUEUE_STATES.map((s) => [s, 0])) as Record<QueueState, number>;
-  for (const e of entries) c[e.state]++;
-  return c;
-}
-
-/** How many merged PRs (GitHub says merged) have a plan in a queue state, in the repo or in all repos, without the hidden ones. 1 statement. */
-export async function countMergedQueue(db: Db, repo?: string, hidden?: HiddenRepos): Promise<number> {
-  const q = queryDb(db);
-  const r = await q.get(q.k.selectFrom("main.item_plans as p").select((eb) => eb.fn.countAll<number>().as("n"))
-    .where((eb) => queuedPlan(db, eb, "p")).where(planGh(db, "p"), "=", "MERGED")
-    .$if(!!repo, (b) => b.where("p.repo", "=", repo!))
-    .$if(filtered(hidden), (b) => b.where(hiddenRepos(db, "p.repo", hidden!))));
-  return Number(r?.n ?? 0);
 }
 
 /** The cached view of every open item with a plan, by `repo#number`. 1 statement. */

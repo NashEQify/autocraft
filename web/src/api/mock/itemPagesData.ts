@@ -1,5 +1,5 @@
 // Mock content for the redesign: the curated items, their status lines, reviews, results, history and GitHub sides, and findings.
-import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemImplementation, ItemKind, ItemPageData, ItemPageHeader, ItemPhase, ItemStatus, ItemStatusRow, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
+import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemImplementation, ItemKind, ItemPageData, ItemPageHeader, ItemPeek, ItemPhase, ItemStatus, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
 import { withTimeline, type MockPage, type ResultCard } from "./storyMock";
 import { NOW } from "./fixtures";
 
@@ -93,8 +93,11 @@ export const findingStatus = (state: string, attempts: number, note: string | nu
   return status("Closed", 3 * D, null, null);
 };
 
-/** Quieter rows from many repos, so the list runs past one page. */
-function fillerRows(): ItemStatusRow[] {
+/** What the hover card of a mock item shows. */
+export type PeekRow = Omit<ItemPeek, "createdAt" | "labels">;
+
+/** Quieter items from many repos. */
+function fillerRows(): PeekRow[] {
   const repos = ["designcraft", "photocraft", "wordcraft", "pdfcraft", "gridcraft", "vectorcraft", "lightcraft", "filmcraft"];
   const titles = ["Tooltip clips at the window edge", "Add a keyboard shortcut for zoom to selection", "Crash when the recent list is empty", "Panel resize handle flickers", "Update the French strings", "Undo skips the last brush stroke", "Rulers show the wrong unit after import", "Typo in the export dialog"];
   const phases: [ItemPhase, string | null, string | null][] = [["Triage", "classification", null], ["Review", "an Opus review", "post the review"], ["Fixing", "fix-up round 1", "verify"], ["Merged", null, null], ["Closed", null, null], ["Out of scope", null, null], ["In queue", "CI", "merge by rule"], ["Verifying", "a build worker", "merge queue"]];
@@ -103,20 +106,16 @@ function fillerRows(): ItemStatusRow[] {
     const kind = i % 3 === 0 ? "issue" : "pr";
     const state = phase === "Merged" ? "merged" : phase === "Closed" || phase === "Out of scope" ? "closed" : "open";
     const m = 8 * H + i * 37;
-    const checks: ItemStatusRow["checks"] = kind === "pr" && (phase === "In queue" || phase === "Verifying")
-      ? { verdict: i % 5 === 0 ? "take-fix" : "take", ci: i % 4 === 0 ? "pending" : "success", mergeable: "clean", size: (["S", "M", "L"] as const)[i % 3]!,
-          verify: phase === "Verifying" ? { state: "running", kind: null, summary: "Build and tests on a worker", note: null } : { state: "passed", kind: null, summary: "Build and 412 tests passed", note: null }, prBuild: null }
-      : null;
-    return { checks, closes: kind === "pr" && i % 2 === 0 ? [3000 + i] : [], repo: repos[i % repos.length]!, number: 3100 + i * 7, kind, state: kind === "issue" && state === "merged" ? "closed" : state, title: titles[(i * 5) % titles.length]!, author: ["mosswood", "kestrel", "dmann", null][i % 4] ?? null, status: status(phase, m, waiting, next), updatedAt: at(m) } as ItemStatusRow;
+    return { closes: kind === "pr" && i % 2 === 0 ? [3000 + i] : [], repo: repos[i % repos.length]!, number: 3100 + i * 7, kind, state: kind === "issue" && state === "merged" ? "closed" : state, title: titles[(i * 5) % titles.length]!, author: ["mosswood", "kestrel", "dmann", null][i % 4] ?? null, status: status(phase, m, waiting, next), updatedAt: at(m) } as PeekRow;
   });
 }
 
-export function statusRows(): ItemStatusRow[] {
+export function peekRows(): PeekRow[] {
   return [...seedRows(), ...fillerRows()];
 }
 
-function seedRows(): ItemStatusRow[] {
-  return seeds.map((s) => ({ repo: s.repo, number: s.number, kind: s.kind, state: s.state, title: s.title, author: s.author ?? null, status: s.status, updatedAt: at(s.updated) }));
+function seedRows(): PeekRow[] {
+  return seeds.map((s) => ({ repo: s.repo, number: s.number, kind: s.kind, state: s.state, title: s.title, author: s.author ?? null, status: s.status, updatedAt: at(s.updated), closes: [] }));
 }
 
 /** A plain header for mock pages: open, nothing queued or held. */

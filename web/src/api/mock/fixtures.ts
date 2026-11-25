@@ -75,23 +75,15 @@ export const MOCK_USERS: Record<"operator" | "maintainer" | "viewer", User> = {
     role: "operator",
     writeRepos: ["photocraft", "filmcraft", "designcraft", "pdfcraft", "wordcraft", "gridcraft", "vectorcraft", "deckcraft", "craft-libs", "effectcraft"],
     runRepos: ["photocraft", "filmcraft", "designcraft", "pdfcraft", "wordcraft", "gridcraft", "vectorcraft", "deckcraft", "craft-libs", "effectcraft"],
-    maintainerWrites: false,
-    maintainerSettles: false,
-    inference: "user-local",
-    uiV2: true,
   },
   maintainer: {
     login: "kiri-n",
     role: "maintainer",
     writeRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
     runRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
-    maintainerWrites: false,
-    maintainerSettles: false,
-    inference: "user-local",
-    uiV2: true,
   },
-  // A maintainer under `maintainer_writes`: settles decisions where they have write access.
-  viewer: { login: "glasswing", role: "viewer", writeRepos: [], runRepos: [], maintainerWrites: false, maintainerSettles: false, inference: "user-local", uiV2: true },
+  // A maintainer: runs the repos they have write access to.
+  viewer: { login: "glasswing", role: "viewer", writeRepos: [], runRepos: [] },
 };
 export type MockRole = keyof typeof MOCK_USERS;
 
@@ -313,14 +305,12 @@ export function itemFor(repo: string, number: number): Item {
     classifications: (s.cls ?? []).map((c, i) => classification(c, s, i)),
     stages: stagesFor(s),
     comments: [],
-    decisionIds: [],
     // mockApi fills this in from itemsFixtures
     settled: { status: "unclassified", label: null, source: null, confidence: null, jevLabel: null, haikuLabel: null, flags: [], referee: null },
     verification: null,
     fixups: [],
     preapproval: PREAPPROVALS[`${repo}#${number}`] ?? null,
     reviews: null,
-    actions: [],
     releases: { reviewAgain: false, verifyAgain: false, batchAgain: false },
     queue: mockSlot(number),
     ...(repo === PIPELINE_OFF.repo && number === PIPELINE_OFF.number
@@ -395,7 +385,7 @@ export function progress(): Progress {
     const startOpen = open + Math.round((done.mergedByPipeline + done.closedByPipeline + done.closedByOthers) * 0.82);
     const openTrend = Array.from({ length: days }, (_, i) => Math.round(startOpen - ((startOpen - open) * (i + 1)) / days + (r() - 0.5) * open * 0.01));
     openTrend[days - 1] = open;
-    return { repo, funnel: { open, classified, secondOpinion, disagreement, reviewed, take, hold, close, waiting, batched }, done, decisionsOpen: 0, openTrend };
+    return { repo, funnel: { open, classified, secondOpinion, disagreement, reviewed, take, hold, close, waiting, batched }, done, openTrend };
   });
   const sum = <K extends string>(get: (x: RepoProgress) => Record<K, number>, keys: K[]) =>
     Object.fromEntries(keys.map((k) => [k, repos.reduce((a, x) => a + get(x)[k], 0)])) as Record<K, number>;
@@ -411,8 +401,7 @@ export function progress(): Progress {
     done: sum((x) => x.done, ["mergedByPipeline", "closedByPipeline", "closedByOthers"]),
     perHour,
     perHourPipeline: perHour.map((n) => Math.round(n * 0.55)),
-    decisionsOpen: 0,
-    decisionsAnsweredToday: 0,
+   
     repos,
     mainCi: mainCiSummary(),
   };

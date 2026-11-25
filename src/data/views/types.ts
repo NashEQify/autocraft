@@ -137,7 +137,6 @@ export type QueueFacts = {
   closing: Map<Ref, number[]>; batches: BatchView[]; scores: Map<string, Map<Ref, number>>; runnerQueue: unknown; prBuilds: Map<Ref, PrBuildView>;
 };
 export type BatchPageFacts = { batch: BatchView; parent: string | null; children: { id: number; createdAt: string }[]; checks: unknown; audit: unknown[]; tasks: Map<number, unknown> };
-export type WorkFilter = { repos: string[]; kind?: "pr" | "issue"; limit: number; offset?: number; text?: string };
 export type WorkRow = { repo: string; number: number; kind: "pr" | "issue"; title: string; next: string | null; label: string | null; score: number | null; state: string };
 export type PipelineFacts = { lastJobPerStep: Map<string, unknown>; stageStates: Map<string, unknown>; counts: Map<string, number>; syncRuns: unknown[]; pipelineSwitch: unknown; limits: unknown[] };
 

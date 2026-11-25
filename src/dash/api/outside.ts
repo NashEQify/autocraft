@@ -1,6 +1,6 @@
 // The outside-author protections over JSON (src/outside.ts): the three numbers, and the operator's releases.
-import { listHeldByAuthor } from "../../data/intake/index.ts";
-import type { NeedsOutsideList } from "../../../web/src/api/types.ts";
+import { listHeldAuthors } from "../../data/intake/index.ts";
+import type { HeldAuthor } from "../../../web/src/api/types.ts";
 import { OutsideError, releaseAuthor, releaseOutside, setOutsideLimits } from "../../outside.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -63,9 +63,8 @@ export async function releaseAll(db: Db, req: Req) {
   return { released: await wrap(async () => await releaseAuthor(db, req.user.login, author)) };
 }
 
-/** The items held for one author, oldest first. */
-export async function held(db: Db, req: Req): Promise<NeedsOutsideList> {
-  const hidden = await hiddenRepos(db, req);
-  const rows = await listHeldByAuthor(db, { author: req.params.author!, hidden, limit: 200 });
-  return { rows: rows.map((r) => ({ id: `outside:${r.repo}#${r.number}`, repo: r.repo, number: r.number, title: r.title ?? "", kind: r.kind, reason: r.reason, createdAt: r.created_at })) };
+/** Operator: the authors with held items, most items first. */
+export async function held(db: Db, req: Req): Promise<HeldAuthor[]> {
+  operator(req, "see the held authors");
+  return (await listHeldAuthors(db, { hidden: await hiddenRepos(db, req) })).map((r) => ({ author: r.author, prs: r.prs, issues: r.count - r.prs, oldest: r.oldest, surge: r.surge }));
 }

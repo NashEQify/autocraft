@@ -39,20 +39,6 @@ export function decisionItem(id: string): { repo: string; number: number } | nul
   return m ? { repo: m[1]!, number: Number(m[2]) } : null;
 }
 
-type DecisionRef = { id?: string; repo: string; number: number | null; items?: { repo: string; number: number }[] };
-
-/** The page of a decision's item (its first one for a batch), or Home for a decision without any. */
-export function decisionPath(d: DecisionRef | undefined): string {
-  const item = d?.number != null ? { repo: d.repo, number: d.number } : d?.items?.[0];
-  return item ? itemPath(item.repo, item.number) : "/";
-}
-
-/** The decision a readable link opens: the first open one, oldest first, else the most recently asked. */
-export function pickDecision<T extends { answer: string | null; askedAt: string }>(ds: T[]): T | undefined {
-  const open = ds.filter((d) => !d.answer).sort((a, b) => a.askedAt.localeCompare(b.askedAt));
-  return open[0] ?? [...ds].sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
-}
-
 /** A file at a commit on GitHub, at the given line. */
 export const githubBlobUrl = (repo: string, sha: string, path: string, line?: number): string =>
   `https://github.com/${encodeURIComponent(ownerOfRepo(repo))}/${encodeURIComponent(shortRepo(repo))}/blob/${encodeURIComponent(sha)}/${path.split("/").map(encodeURIComponent).join("/")}${line ? `#L${line}` : ""}`;

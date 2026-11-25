@@ -11,7 +11,7 @@ import { loadStepApprovals } from "./approvals.ts";
 import { loadStageLimits } from "./limits.ts";
 import { PilotError, loadTrackedRepos } from "./repos.ts";
 import { loadTrips } from "./trips.ts";
-import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType, UsagePause } from "./types.ts";
+import type { Config, ControlSnapshot, LiveConfig, RepoConfig, SettingDef, SettingKey, SettingPatch, SettingRow, SettingType } from "./types.ts";
 
 // ---- the registry ------------------------------------------------------------------------------------------------------
 
@@ -39,8 +39,6 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
 /** GitHub's login rules: letters, digits and single hyphens, not starting or ending with one, at most 39 characters. */
 const MENTION = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/;
 const REPO_LIST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-const USAGE_PAUSE_DEFAULT: UsagePause = { fiveHour: 80, weekly: 80 };
-const validPct = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 100;
 const stepParallelText = (raw: string | undefined): string => {
   if (raw === "none") return raw;
   const n = Number(raw);
@@ -61,10 +59,6 @@ export const SETTINGS = {
   /** The same as a number (Infinity for "none"). */
   stepParallel: reg("step_parallel", "int", 1, { live: true, owner: "jobs" }, (r) => { const s = stepParallelText(r); return s === "none" ? Infinity : Number(s); }),
   jevParallel: reg("jev_parallel", "int", 4, { live: true, owner: "inference" }, (r) => intIn(r, 1, 100, 4)),
-  usagePause: reg<UsagePause>("usage_pause", "json", USAGE_PAUSE_DEFAULT, { live: true, owner: "inference" }, (r) => {
-    const v = jsonOf(r) as Partial<UsagePause> | null | undefined;
-    return v && validPct(v.fiveHour) && validPct(v.weekly) ? { fiveHour: v.fiveHour, weekly: v.weekly } : { ...USAGE_PAUSE_DEFAULT };
-  }),
 
   pipelineLogin: reg<string | null>("pipeline_login", "text", null, { owner: "github" }, (r) => r ?? null),
   githubIdentity: reg<"app" | "box">("github_identity", "text", "box", { owner: "github" }, (r) => (r === "app" ? "app" : "box")),
@@ -120,7 +114,7 @@ export const REPO_SETTINGS = {
 export const REGISTRY: readonly Reg<unknown>[] = [...Object.values(SETTINGS), ...Object.values(REPO_SETTINGS)];
 
 /** Keys the code still reads or writes in `settings` that the registry does not carry. They end with the build: state keys move to their module's tables (conventions 4.3), retired keys are deleted. */
-export const RETIRED_SETTINGS = ["inference", "judgement_model", "maintainer_writes", "flow_summary_marks", "outside_admitted_backfill", "fixissue_not_rust"] as const;
+export const RETIRED_SETTINGS = ["usage_pause", "inference", "judgement_model", "maintainer_writes", "flow_summary_marks", "outside_admitted_backfill", "fixissue_not_rust"] as const;
 export const STATE_SETTINGS = [
   "limit_reset_at", "merge_approved", "push_approved", "comment_approved", "fixissue_approved", "labels_approved", "mainfix_approved", "prstatus_approved", "ci_approved",
   "warm_report", "warm_bytes", "warm_gc_at", "warm_trimmed_publish", "warm_rebuild", "worker_update_pending", "worker_update_failures", "worker_update_attempts", "org_high_water", "full_sync_cursor", "classify_run",
@@ -330,7 +324,7 @@ export function loadLiveConfig(db: Db): Promise<LiveConfig> {
   const value = q.all(q.k.selectFrom("main.settings").select(["key", "value"]).where(kx.inList(db, "key", LIVE_KEYS))).then((rows) => {
     const m = new Map(rows.map((r) => [r.key, r.value] as const));
     const c = makeConfig((k) => m.get(k) ?? undefined);
-    return { pipelineEnabled: c.pipelineEnabled, drain: c.pipelineDraining, changedBy: c.pipelineChangedBy, changedAt: c.pipelineChangedAt, jevParallel: c.jevParallel, usagePause: c.usagePause, stepParallel: c.stepParallel };
+    return { pipelineEnabled: c.pipelineEnabled, drain: c.pipelineDraining, changedBy: c.pipelineChangedBy, changedAt: c.pipelineChangedAt, jevParallel: c.jevParallel, stepParallel: c.stepParallel };
   });
   liveCache.set(db, { at: Date.now(), value });
   value.catch(() => { if (liveCache.get(db)?.value === value) liveCache.delete(db); });

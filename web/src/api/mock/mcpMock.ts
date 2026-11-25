@@ -66,7 +66,7 @@ export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | 
   let tokens: McpToken[] = [
     { id: 2, label: "claude code", kind: "connector", canAnswer: false, canRun: false, createdAt: new Date(NOW - 3 * DAY).toISOString(), lastUsedAt: new Date(NOW - 40 * MIN).toISOString(), expiresAt: new Date(NOW + 87 * DAY).toISOString() },
   ];
-  const settles = me.role === "operator" || (me.role === "maintainer" && me.maintainerWrites);
+  const settles = me.role !== "viewer";
   const list = () => ({ tokens: structuredClone(tokens), max: 5, path: "/mcp", answering: true });
 
   const staff = me.role !== "viewer";
@@ -139,7 +139,7 @@ export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | 
       pending: (code) => wait(structuredClone(pending.get(norm(code)) ?? null)),
       async approve(code, label, scopes, otherMachine) {
         if (!staff) throw new Error("viewers cannot add Task Runners");
-        if (scopes.answer && !settles) throw new Error("only operators, and maintainers where they may settle decisions, let a Task Runner answer decisions");
+        if (scopes.answer && !settles) throw new Error("only operators and maintainers let a Task Runner send commands");
         const p = pending.get(norm(code));
         if (!p) throw new Error("no pending Task Runner login has this code");
         if (p.ip !== p.yourIp && !otherMachine) throw new Error("this login was started from another address than yours");
@@ -164,7 +164,7 @@ export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | 
       async setScopes(id, scopes) {
         const cur = runners.find((r) => r.tokenId === id);
         if (!cur) throw new Error("you have no such Task Runner");
-        if (scopes.answer && !cur.answer && !settles) throw new Error("only operators, and maintainers where they may settle decisions, let a Task Runner answer decisions");
+        if (scopes.answer && !cur.answer && !settles) throw new Error("only operators and maintainers let a Task Runner send commands");
         runners = runners.map((r) => (r.tokenId === id ? { ...r, ...scopes } : r));
         changed();
         return wait({ ok: true });
@@ -194,7 +194,7 @@ export function createMcpMock(me: User, changed: () => void): Pick<Api, "mcp" | 
       tokens: () => wait(list()),
       async create(label, answer = false) {
         if (me.role === "viewer") throw new Error("viewers cannot make agent tokens");
-        if (answer && !settles) throw new Error("only operators and maintainers who settle make answering tokens");
+        if (answer && !settles) throw new Error("only operators and maintainers make tokens that send commands");
         if (tokens.length >= 5) throw new Error("you have 5 connector tokens; revoke one first");
         const id = next++;
         tokens = [{ id, label: label.trim() || null, kind: "connector", canAnswer: answer, canRun: false, createdAt: new Date(NOW).toISOString(), lastUsedAt: null, expiresAt: new Date(NOW + (answer ? 7 : 90) * DAY).toISOString() }, ...tokens];

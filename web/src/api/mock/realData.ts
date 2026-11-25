@@ -3,8 +3,9 @@
 // every rule that guesses is marked. Pure TypeScript: it runs in the browser on a JSON export.
 import { barFromStatus } from "./itemPagesData";
 import { withTimeline, type ResultCard, type ResultTone } from "./storyMock";
+import type { PeekRow } from "./itemPagesData";
 import type {
-  FindingPageData, ItemPageHeader, GithubEvent, GithubSide, HistoryCall, HistoryEntry, HistoryKind, ItemPageData, ItemPhase, ItemState, ItemStatus, ItemStatusRow,
+  FindingPageData, ItemPageHeader, GithubEvent, GithubSide, HistoryCall, HistoryEntry, HistoryKind, ItemPageData, ItemPhase, ItemState, ItemStatus,
   OpusReviewEntry, ReviewTrigger, ReviewVerdict, CiState, FindingView,
 } from "../types";
 
@@ -17,7 +18,7 @@ export interface RealItem {
   plan: Json[]; planHistory: Json[]; reviewHistory: Json[]; verifications: Json[];
 }
 export interface RealExport { exportedAt: string; items: RealItem[]; findings: { repo: string; number: number; finding: FindingView }[] }
-export interface RealPages { exportedAt: string; pages: ItemPageData[]; rows: ItemStatusRow[]; findings: Map<string, FindingPageData> }
+export interface RealPages { exportedAt: string; pages: ItemPageData[]; rows: PeekRow[]; findings: Map<string, FindingPageData> }
 
 const short = (s: string | null | undefined) => (s ?? "").slice(0, 7);
 const json = <T,>(s: unknown, fallback: T): T => { if (typeof s !== "string") return (s as T) ?? fallback; try { return JSON.parse(s) as T; } catch { return fallback; } };
@@ -264,7 +265,7 @@ export function findingPageOf(f: FindingView, now: string): FindingPageData {
 export function convertReal(x: RealExport): RealPages {
   const ok = x.items.filter((i) => i.item && !i.item.error);
   const pages = ok.map(pageOf);
-  const rows = pages.map((p, i): ItemStatusRow => ({ repo: p.repo, number: p.number, kind: p.kind, state: p.state, title: p.title, author: p.author ?? null, status: p.status, updatedAt: ok[i]!.item.updatedAt }));
+  const rows = pages.map((p, i): PeekRow => ({ repo: p.repo, number: p.number, kind: p.kind, state: p.state, title: p.title, author: p.author ?? null, status: p.status, updatedAt: ok[i]!.item.updatedAt, closes: [] }));
   const findings = new Map(x.findings.filter((f) => f.finding && !("error" in f.finding)).map((f) => [`${f.repo}#${f.number}`, findingPageOf(f.finding, x.exportedAt)]));
   return { exportedAt: x.exportedAt, pages, rows, findings };
 }
