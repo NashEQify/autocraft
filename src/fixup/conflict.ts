@@ -212,7 +212,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
     if (c.lint && (await git.git(["cat-file", "-e", `${baseSha}^{commit}`])).code !== 0) { await fail("failed", "the base commit of the stored resolution is no longer in the cache"); return; }
     if ((await git.git(["merge-base", "--is-ancestor", baseSha, head])).code === 0) { await skip(`${c.base} is already in the branch`); return; }
     const who = await x.who();
-    const merge = await git.mergeInto(head, baseSha);
+    const merge = await git.mergeTreeOf(head, baseSha);
     // A resolution may not write a build script of either parent.
     const scriptsOf = async (): Promise<ReadonlySet<string> | null> => {
       const [h, b] = [await buildScriptsAt(git, head), await buildScriptsAt(git, baseSha!)];
