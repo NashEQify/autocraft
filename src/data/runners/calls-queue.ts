@@ -2,7 +2,7 @@
 import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { batches, inList, schemaEb, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
+import { batches, greatest, inList, least, schemaEb, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
 import { resumingJobs } from "../jobs/fragments.ts";
 import { loadJobs } from "../jobs/index.ts";
 import { adoptableCall } from "./fragments.ts";
@@ -38,7 +38,7 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
       await q.run(q.k.updateTable("main.remote_calls").set((eb) => {
         const w = schemaEb(eb) as any;
         return {
-          queued_ms: w("queued_ms", "+", w.case().when(w.and([w("state", "=", "queued"), w("queued_since", "is not", null)])).then(w.fn("max", [w.lit(0), w(w.fn("min", [w.ref("seen_at"), w.val(now)]), "-", w.ref("queued_since"))])).else(w.lit(0)).end()),
+          queued_ms: w("queued_ms", "+", w.case().when(w.and([w("state", "=", "queued"), w("queued_since", "is not", null)])).then(greatest(db, [w.lit(0), w(least(db, [w.ref("seen_at"), w.val(now)]), "-", w.ref("queued_since"))])).else(w.lit(0)).end()),
           queued_since: w.case().when(w("state", "=", "queued")).then(now).else(w.ref("queued_since")).end(), seen_at: now,
         } as any;
       }).where("id", "=", id));
