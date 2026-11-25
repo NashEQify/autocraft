@@ -45,7 +45,8 @@ export function mayPush(f: {
   if (w?.live) {
     if (f.kind === "implement-revision") return w.entry === "implement" ? person(w.startedBy) : refuse("Only an implement workflow revises its own pull request.");
     if (f.kind === "fixup") {
-      return w.entry !== "review" || w.fixupAsked ? person(w.startedBy) : refuse(ENDS_WITH_RECOMMENDATION);
+      if (w.entry !== "review" || w.fixupAsked) return person(w.startedBy);
+      return w.approvedBy !== null ? person(w.approvedBy) : refuse(ENDS_WITH_RECOMMENDATION);
     }
     return w.entry !== "review" || w.approvedBy !== null ? person(w.approvedBy ?? w.startedBy) : refuse(ENDS_WITH_RECOMMENDATION);
   }

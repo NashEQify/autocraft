@@ -27,6 +27,7 @@ test("mayPush", () => {
   assert.deepEqual(push("fixup", wf(), null, true), { ok: true, as: "person", by: "asker" });
   for (const entry of ["fix-up", "implement", "merge"] as const) assert.equal(push("fixup", wf({ entry })).ok, true);
   assert.equal(push("fixup", wf({ fixupAsked: true })).ok, true);
+  assert.deepEqual(push("fixup", wf({ approvedBy: "ann" })), { ok: true, as: "person", by: "ann" });
   assert.equal(push("fixup", wf()).ok, false);
   for (const kind of ["cifix", "conflict"] as const) {
     assert.equal(push(kind, wf({ entry: "merge" })).ok, true);
