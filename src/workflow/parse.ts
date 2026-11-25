@@ -98,7 +98,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   }
   const plain = s.replace(CODE_RE, " ");
   // A condition is read only beside the command it belongs to, so a bare yes or hold with one stays unread.
-  if (!normal.conditions.length) {
+  if (!normal.conditions.length && !normal.refused) {
     const yes = readYes(plain);
     if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
@@ -107,7 +107,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   const has = (w: CommandPart["word"]) => r.parts.some((p) => p.word === w);
   const unmet = normal.conditions.filter((c) => !has("merge") || (c.needs === "entry" && !["review", "fix-up", "implement"].some((w) => has(w as CommandPart["word"])))).map((c) => c.text);
   const guard = GUARD.exec(marked.text.replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
-  const rest = [...r.unknown, ...unmet, ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
+  const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
   if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
 }
@@ -269,7 +269,7 @@ const DROP_VERB = /^(?:drop|skip|leave\s+out)\s+(.+)$/i;
 const NOT_PARTS = /(?<![\w-])(?:if|when|once|unless|until|after|before|wait|not|never|maybe|perhaps)(?![\w-])|n't|\?/i;
 
 /** Ordinary phrasing rewritten into the command words it means; anything else is left as written for readWords to judge. */
-function normalise(text: string): { text: string; conditions: Condition[] } {
+function normalise(text: string): { text: string; conditions: Condition[]; /** An exception naming a command or step: the message is not read. */ refused: string | null } {
   let s = text.replace(/(?<![\w-])(urgent|high|low)[-\s]+priority(?![\w-])/gi, "$1");
   for (const [re, to] of DUPLICATE) s = s.replace(re, to);
   const conditions: Condition[] = [];
@@ -277,19 +277,33 @@ function normalise(text: string): { text: string; conditions: Condition[] } {
   const ex = EXCEPT_RE.exec(s.trim());
   if (ex) {
     const [, lead, cmd, all, sep, list] = ex as unknown as [string, string, string | undefined, string | undefined, string, string];
-    const pieces = list.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and\s+then|then|and|&|or)\s+/i).map((x) => x.trim().replace(/[.!]+$/, "")).filter(Boolean);
-    const ok = (lead.trim() || all) && (!cmd || all) && !NOT_PARTS.test(list) && pieces.length && (sep.toLowerCase() !== "but" || all || DROP_VERB.test(pieces[0]!));
+    // Only an explicit "then" ends the list of parts; what follows it is read as written.
+    const [except, then] = splitThen(list);
+    const pieces = except.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and|&|or)\s+/i).map((x) => x.trim().replace(/[.!]+$/, "")).filter(Boolean);
+    const ok = (lead.trim() || all) && (!cmd || all) && !NOT_PARTS.test(except) && pieces.length && (sep.toLowerCase() !== "but" || all || DROP_VERB.test(pieces[0]!));
     if (ok) {
-      const out = pieces.map((x) => {
-        if (DROP_VERB.test(x)) return x;
-        const c = commandOf(norm(stripFiller(x)));
-        return (c && !c.answer) || isWeightWord(x.toLowerCase()) || /^weight\s+\d+$/i.test(x) ? x : `drop ${x}`;
-      });
+      // "yes except merge" must never merge: an exception that names a command or a step leaves the message unread.
+      const step = pieces.find((x) => namesStep(DROP_VERB.exec(x)?.[1] ?? x));
+      if (step) return { text, conditions, refused: `${sep} ${step}` };
+      const out = pieces.map((x) => (DROP_VERB.test(x) || isWeightWord(x.toLowerCase()) || /^weight\s+\d+$/i.test(x) ? x : `drop ${x}`));
       const word = cmd?.toLowerCase();
-      s = [word ? null : "yes", word === "fix" ? "fix-up" : null, ...out, word === "merge" || word === "land" ? "merge" : null].filter(Boolean).join(", ");
+      s = [word ? null : "yes", word === "fix" ? "fix-up" : null, ...out, word === "merge" || word === "land" ? "merge" : null, then].filter(Boolean).join(", ");
     }
   }
-  return { text: s, conditions };
+  return { text: s, conditions, refused: null };
+}
+
+/** The list before the first `then` / `and then`, and what follows it (null without one). */
+function splitThen(list: string): [string, string | null] {
+  const m = /(?:\s*[,;]\s*|\s+)(?:and\s+)?then\s+/i.exec(list);
+  return m ? [list.slice(0, m.index), list.slice(m.index + m[0].length)] : [list, null];
+}
+
+/** Every command word and alias, and the steps a person may name: words an exception never drops as a part. */
+const STEP_RE = new RegExp(`(?<![\\w-])(?:${any([...COMMANDS.flatMap((c) => [c.word, ...c.aliases]), "fix up", "ci", "tests", "test", "checks", "build", "builds", "review", "reviews", "merging", "closing", "approval", "merge queue"])})(?![\\w-])`, "i");
+function namesStep(piece: string): boolean {
+  const t = norm(piece.replace(CODE_RE, " "));
+  return STEP_RE.test(t) || t.split(/[^\p{L}\p{N}-]+/u).some((w) => typoOf(w) !== null);
 }
 
 const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
@@ -330,26 +344,27 @@ const ALL_PARTS = /^(?:(?:all|each)(?:\s+of\s+(?:them|it|these|those))?|everythi
 const BOTH_PARTS = /^both(?:\s+of\s+them)?$/i;
 const POSITION = /^(?:the\s+)?(?:last|final|latter|former|other|previous|next|rest)(?:\s+(?:one|two|three|part|parts))?$/i;
 
-/** Command words a one-letter typo of reads as (five letters or more); their inflections and real words a letter away do not. */
-const TYPO_WORDS: readonly string[] = [...COMMANDS.filter((c) => c.word.length >= 5 && c.word !== "autorepin").map((c) => c.word), "fixup"];
-const NOT_TYPOS = new Set(["clone", "closer", "cloned"]);
+/**
+ * Command words a typo of reads as: five letters or more, and never close, which acts on GitHub. Only a wrong letter or two letters
+ * swapped count, so inflections and other words a letter longer or shorter don't.
+ */
+const TYPO_WORDS: readonly string[] = [...COMMANDS.filter((c) => c.word.length >= 5 && c.word !== "autorepin" && c.word !== "close").map((c) => c.word), "fixup"];
+/** Real words a letter away from a command word. */
+const NOT_TYPOS = new Set(["verge", "serge", "emerge", "merged", "merger", "merges", "preview", "reviews", "closed", "clone", "close's", "closet", "cloze", "chose", "lose", "resumé"]);
 
-/** The command word `w` misspells by one letter (an insertion, deletion, substitution or swap), when exactly one fits. */
+/** The command word `w` misspells by one wrong letter or one swap of neighbours, when exactly one fits. */
 function typoOf(w: string): string | null {
-  if (w.length < 4 || NOT_TYPOS.has(w)) return null;
-  const hits = TYPO_WORDS.filter((c) => c !== w && !(w.startsWith(c) && w.length === c.length + 1 && /[dsr]$/.test(w)) && oneEdit(w, c));
+  if (w.length < 5 || NOT_TYPOS.has(w)) return null;
+  const hits = TYPO_WORDS.filter((c) => c !== w && oneSwapOrSubstitution(w, c));
   return hits.length === 1 ? hits[0]! : null;
 }
 
-function oneEdit(a: string, b: string): boolean {
-  if (Math.abs(a.length - b.length) > 1) return false;
+function oneSwapOrSubstitution(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
   let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  if (a.length === b.length) {
-    if (a.slice(i + 1) === b.slice(i + 1)) return true;
-    return a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2);
-  }
-  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+  while (i < a.length && a[i] === b[i]) i++;
+  if (a.slice(i + 1) === b.slice(i + 1)) return true;
+  return a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2);
 }
 
 /** A fix or drop with the parts it names; drop's other words (skip, leave out) too. */

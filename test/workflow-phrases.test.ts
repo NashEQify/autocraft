@@ -90,6 +90,18 @@ const PHRASES: readonly (readonly [string, string])[] = [
   ["yes but wait", AMBIGUOUS],
   ["yes except when CI fails", AMBIGUOUS],
   ["yes but not 3", AMBIGUOUS],
+  ["yes except merge", AMBIGUOUS],
+  ["approve except merge", AMBIGUOUS],
+  ["all but merge", AMBIGUOUS],
+  ["yes, all except merge", AMBIGUOUS],
+  ["yes except\nmerge", AMBIGUOUS],
+  ["yes except close", AMBIGUOUS],
+  ["yes except review", AMBIGUOUS],
+  ["yes except hold", AMBIGUOUS],
+  ["lgtm except the merge", AMBIGUOUS],
+  ["merge everything except review", AMBIGUOUS],
+  ["yes except 3 and the reveiw", AMBIGUOUS],
+  ["fix all except 2, then merge", "fix-up, drop 2, merge"],
   // Parts by number word, ordinal and range.
   ["drop the second one", "drop 2"],
   ["fix one and three", "fix 1, fix 3"],
@@ -107,11 +119,22 @@ const PHRASES: readonly (readonly [string, string])[] = [
   ["drop 1-30", AMBIGUOUS],
   // A typo of one letter in a long command word.
   ["mrege", "merge"],
-  ["please merg it", "merge"],
+  ["please merg it", AMBIGUOUS],
   ["reveiw", "review"],
   ["backlgo", "backlog"],
-  ["implment", "implement"],
-  ["clsoe", "close"],
+  ["implemnet", "implement"],
+  ["implment", AMBIGUOUS],
+  ["clsoe", AMBIGUOUS],
+  ["lose", AMBIGUOUS],
+  ["chose", AMBIGUOUS],
+  ["closet", AMBIGUOUS],
+  ["cloze", AMBIGUOUS],
+  ["verge", AMBIGUOUS],
+  ["emerge", AMBIGUOUS],
+  ["preview", AMBIGUOUS],
+  ["reviews", AMBIGUOUS],
+  ["merger", AMBIGUOUS],
+  ["close's", AMBIGUOUS],
   ["hodl", AMBIGUOUS],
   ["drpo 2", AMBIGUOUS],
   ["merged", AMBIGUOUS],
@@ -161,6 +184,9 @@ test("an exception to a yes runs what drop runs, and both or all name the planne
   const all = run("fix all of them");
   assert.ok(all.kind === "run" && all.run.fix.join() === "1,2,3");
   assert.equal(run("fix both").kind, "ambiguous");
+  // A word inside another word names no part: "port" is in "import", not a word of its title.
+  const inside = run("drop port");
+  assert.ok(inside.kind === "ambiguous" && inside.ambiguity.why === "part-matches-none");
   const two = { kind: "pr" as const, workflow: wf([part(1, "Export dialog loses focus"), part(2, "Title typo")]) };
   const both = run("fix both", two);
   assert.ok(both.kind === "run" && both.run.fix.join() === "1,2");

@@ -111,11 +111,13 @@ const isEntryWord = (w: string): w is EntryWord => Object.hasOwn(ENTRY_OF, w);
 /** Words that say nothing about which part is meant. */
 const FILLER = new Set(["the", "a", "an", "of", "in", "on", "for", "to", "and", "part", "finding", "change", "one"]);
 
-/** The planned parts whose title holds every word of `words` (case-insensitive; filler words ignored). */
+const wordsOf = (s: string): string[] => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/** The planned parts whose title holds every word of `words` as a whole word (case-insensitive; filler words ignored). */
 export function partsMatching(plan: readonly PlanPart[], words: string): PlanPart[] {
-  const ws = words.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w && !FILLER.has(w));
+  const ws = wordsOf(words).filter((w) => !FILLER.has(w));
   if (!ws.length) return [];
-  return plan.filter((p) => p.state === "planned" && ws.every((w) => p.title.toLowerCase().includes(w)));
+  return plan.filter((p) => { const title = new Set(wordsOf(p.title)); return p.state === "planned" && ws.every((w) => title.has(w)); });
 }
 
 export function resolve(parsed: Parsed, state: ItemState): Resolved {
