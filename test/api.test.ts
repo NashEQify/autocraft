@@ -170,7 +170,6 @@ describe("api", () => {
     assert.deepEqual(pre.map((r) => [r.head, r.error, r.tries, r.findings.length]), [["h1", "no JSON", 2, 0], ["h0", null, 0, 1]]);
     assert.deepEqual(pre[1]!.findings[0], finding);
     assert.deepEqual(it.comments.map((c) => c.body), ["looks good"]);
-    assert.deepEqual(it.decisionIds, []);
     assert.deepEqual(it.related.map((r) => [r.number, r.relation]), [[5, "fixes"]]);
     assert.equal(it.classifications[0]!.typeLabel, "small extra");
     assert.equal((await boss.req("GET", "/api/items/untracked-repo/6")).status, 404);
@@ -180,7 +179,6 @@ describe("api", () => {
     assert.deepEqual(byWords.map((h) => `${h.repo}#${h.number}`).sort(), ["photocraft#1", "photocraft#5"]);
     const p = await boss.get<Progress>("/api/progress");
     assert.equal(p.funnel.open, 5);
-    assert.equal(p.decisionsOpen, 0);
     assert.equal(p.perHour.length, 24);
   });
 

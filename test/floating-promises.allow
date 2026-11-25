@@ -15,6 +15,5 @@ src/worker/serve.ts :: runTask.<anonymous> :: api.heartbeat(task.id).then( (r) =
 src/worker/tarball.ts :: downloadAndExtract :: piping.catch(() => {});
 worker/autocraft-task.mjs :: <top-level> :: main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 worker/autocraft.mjs :: <top-level> :: main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
-src/dash/api/needs.ts :: feedback :: openRead.catch(() => {});
 src/dash/server/index.ts :: createApp.handle :: revocations.catch(() => {});
 src/dash/server/index.ts :: createApp.handle :: snapshot?.catch(() => {});
