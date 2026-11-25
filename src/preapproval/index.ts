@@ -52,6 +52,7 @@ import {
   type LegContext, type LegMove, type LegPass, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
+import { asSentence, clipText } from "../prose.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
 const ACTOR = "pipeline";
@@ -60,7 +61,7 @@ const ACTIVE: readonly LegState[] = ["fixup", "review", "ci", "queued"];
 /** Plan states in which the PR gets no review, so a pre-approved merge cannot go on. A label never stops one: a live pre-approval lifts the label gate (src/core/decide.ts); a draft waits to be marked ready. */
 const NOT_REVIEWABLE = ["out-of-scope", "integration", "backlog"];
 const short = (sha: string | null) => (sha ?? "").slice(0, 7);
-const oneLine = (s: string, n = 200) => s.replace(/\s+/g, " ").trim().slice(0, n);
+const oneLine = (s: string, n = 200) => clipText(s, n);
 const refOf = (repo: string, n: number) => `${repo}#${n}`;
 
 type Row = LegRow;
@@ -400,7 +401,7 @@ const needsReview = (leg: LegContext | null, pf: PassFacts, ref: string, head: s
 
 /** A push of ours moved the PR off the head the mirror shows, until a sync that began after the push has finished: no step works the old head any more, and the new one is not here yet. */
 function mirrorBehind(pushes: readonly RecordedPush[], head: string | null, syncedAt: string | null): boolean {
-  return pushes.some((x) => x.from === head && x.to !== head && (syncedAt === null || syncedAt <= x.at));
+  return pushes.some((x) => x.landed && x.from === head && x.to !== head && (syncedAt === null || syncedAt <= x.at));
 }
 
 /** Our implementation PR whose revision by its session is planned or running: the review's fixes and red CI are its to repair. */
@@ -463,7 +464,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (it?.state !== "MERGED") return cancel("its workflow ended");
   }
   const leg = ctx === "ended" ? null : ctx;
-  const stop = async (why: string) => void await move(db, p, "failed", { reason: why, line: `The pre-approved merge stopped: ${why}.` });
+  const stop = async (why: string) => void await move(db, p, "failed", { reason: why, line: asSentence(`The pre-approved merge stopped: ${why}`) });
   // A review the person had seen when they last answered: they chose to go on.
   const accepted = (r: ReviewRead): ReviewRead => (leg && r.kind === "bad" && r.at !== undefined && r.at <= leg.since ? { ...r, kind: "take" } : r);
   if (!it) return cancel("the PR is gone");
@@ -478,8 +479,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
 
   // A draft gets no work and no merge: the leg waits where it is, and the plan says for what.
   const draft = draftPr(draftOf(it, pf.checks.get(ref)));
-  // Where the plan says the mirror is behind our push, the leg waits for the new head.
-  const behind = async (): Promise<boolean> => mirrorBehind(pf.pushes.get(ref) ?? [], cur, pf.syncedAt.get(p.repo) ?? null) && !!(await factOf())?.pushedOff;
+  const behind = mirrorBehind(pf.pushes.get(ref) ?? [], cur, pf.syncedAt.get(p.repo) ?? null);
 
   if (p.state === "fixup") {
     // A try at a head the request has moved on from says nothing about the request, unless it pushed.
@@ -496,11 +496,13 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
         return;
       }
     }
+    // A try that another push overtook: the request follows that push once the mirror shows it.
+    if (fx?.state === "superseded" && behind) return;
     if (fx && FAILED_FIXUP.includes(fx.state)) return await stop(`the fix-up ${fx.state}${fx.reason ? `: ${oneLine(fx.reason, 120)}` : ""}`);
     // Whatever the fix-up row says (none yet, linting, pushing), a head that is neither its start nor its push is someone else's.
     if (cur !== null && cur !== p.from_head && cur !== fx?.toHead) return cancel(`another push moved the head to ${short(cur)}`);
     // No try yet and the planner would not work the request (not pushable, conflicting, a draft, ...): it would wait for ever.
-    if (!fx && !draft && !await behind()) {
+    if (!fx && !draft && !behind) {
       const f = await factOf();
       const why = f ? await whyNotPlanned(db, f) : null;
       if (why) await stop(`the fix-up cannot run: ${why}`);
@@ -524,7 +526,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (!lag) return cancel(cur === p.from_head ? `the head went back to ${short(cur)}` : `another push moved the head to ${short(cur)}`);
   }
 
-  if (draft || await behind()) return;
+  if (draft || behind) return;
 
   const reviewed = needsReview(leg, pf, ref, head);
   if (p.state === "review" && !reviewed) {
@@ -620,15 +622,23 @@ async function endStaleRequests(db: Db, wake: Wake): Promise<void> {
   const now = Date.now();
   // A request whose maker may no longer act on the repo (a demotion, a write permission gone) is dropped before the planner can push it. One
   // whose maker's access GitHub has not answered on waits: the planner does not work it meanwhile.
-  const [all, live] = await db.together(() => Promise.all([loadFixupRequests(db, { anyMaker: true, nowMs: now }), loadFixupRequests(db, { nowMs: now })]));
+  const [all, live, dropped] = await db.together(() => Promise.all([
+    loadFixupRequests(db, { anyMaker: true, nowMs: now }), loadFixupRequests(db, { nowMs: now }), loadFixupRequests(db, { raced: true, nowMs: now }),
+  ]));
+  // Requests whose try was dropped at their head, of the work that is under way: an older one was overtaken by what a person said since.
+  const started = dropped.length ? await loadWorkflowFacts(db, dropped) : null;
+  const raced = dropped.filter((o) => {
+    const w = started?.live.get(refOf(o.repo, o.number)) ?? started?.ofPr.get(refOf(o.repo, o.number));
+    return w !== undefined && o.at >= w.since;
+  });
   const makers = await standings(db, all.map((o) => ({ login: o.by, repo: o.repo })), { identity: await githubIdentity(db), now });
   const gone = all.filter((o) => o.preapproval_id === null && makers.get(permKey(o.by, o.repo)) === "no");
   const ended = new Set(await endFixupRequests(db, gone.map((o) => ({ id: o.id, reason: "the requester may no longer act here" }))));
   await sayAll(db, gone.filter((o) => ended.has(o.id)).map((o) => ({ repo: o.repo, number: o.number, text: `The queued fix-up of ${short(o.from_head)} was dropped: ${o.by} no longer may act on ${o.repo}.` })));
   const ends: { id: number; reason: string; repo: string; number: number; head: string }[] = [];
-  const alone = live.filter((o) => o.preapproval_id === null && !ended.has(o.id));
+  const alone = [...live.filter((o) => o.preapproval_id === null && !ended.has(o.id)), ...raced];
   const [results, pushes, repos] = await db.together(() => Promise.all([
-    loadOperatorFixResults(db, live.map((o) => o.id)), loadOwnPushes(db, alone), loadRepos(db, { names: [...new Set(alone.map((o) => o.repo))] }),
+    loadOperatorFixResults(db, alone.map((o) => o.id)), loadOwnPushes(db, alone), loadRepos(db, { names: [...new Set(alone.map((o) => o.repo))] }),
   ]));
   for (const o of alone) {
     const f = await loadPrFact(db, o.repo, o.number);
@@ -638,8 +648,10 @@ async function endStaleRequests(db: Db, wake: Wake): Promise<void> {
       await moveFixupRequests(db, [{ id: o.id, from: o.from_head, to: f.head }]);
       continue;
     }
-    if (f?.pushedOff && mirrorBehind(pushes.get(refOf(o.repo, o.number)) ?? [], f.head, repos.get(o.repo)?.synced_at ?? null)) continue;
-    const why = !f ? "the PR is no longer open" : f.head !== o.from_head ? `the head moved to ${short(f.head)}` : results.get(o.id)?.fromHead === o.from_head ? null : await whyNotPlanned(db, f);
+    if (f && mirrorBehind(pushes.get(refOf(o.repo, o.number)) ?? [], f.head, repos.get(o.repo)?.synced_at ?? null)) continue;
+    const tried = results.get(o.id);
+    const why = !f ? "the PR is no longer open" : f.head !== o.from_head ? `the head moved to ${short(f.head)}`
+      : tried?.fromHead !== o.from_head ? await whyNotPlanned(db, f) : tried.state === "superseded" ? tried.reason ?? "its try was dropped" : null;
     if (why) ends.push({ id: o.id, reason: why, repo: o.repo, number: o.number, head: o.from_head });
   }
   const done = new Set(await endFixupRequests(db, ends.map((e) => ({ id: e.id, reason: e.reason }))));

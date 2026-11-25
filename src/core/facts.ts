@@ -24,10 +24,11 @@ import { CARRIED } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import { reviewOwed } from "./evidence.ts";
+import { landedOpen } from "./decide.ts";
+import { landedWhy, reviewOwed } from "./evidence.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import { keptFixes, settlerOf, verdictKept } from "../workflow/work.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
@@ -216,6 +217,16 @@ function runsOf(w: RunApproval | undefined, ciApproved: boolean): PrFacts["runs"
   return { waiting, reread: w.reread, crossRepo: w.crossRepo, approvable: w.runs.filter((x) => x.event === "pull_request" && failed(x.id) < MAX_FAILURES).length, blocked };
 }
 
+/** The merge of the PR we made, for the review of what it landed; null without one, or in a repo that is not tracked. `postmerge_unscoped_since` is when merges outside the scope began to be reviewed. */
+function landedOf(d: PrPassData, ref: string, inScope: boolean): PrFacts["postmerge"] {
+  const m = d.merge.merged.get(ref), at = (key: string): string => d.control.settings.get(key) ?? "9999";
+  if (!m || !d.control.tracked.has(asRef(ref).repo)) return null;
+  return {
+    mergedAt: m.firstAt, head: m.lastHead, why: landedWhy({ head: m.lastHead, approval: d.landedApprovals.get(ref)?.get(m.lastHead) ?? null, pushes: d.ownPushes.get(ref) ?? [] }),
+    since: [at("postmerge_since"), ...(inScope ? [] : [at("postmerge_unscoped_since")])].sort().at(-1)!, review: d.review.postmerge.get(ref) ?? null,
+  };
+}
+
 async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx): Promise<PrFacts | null> {
   const { now, refresh } = c;
   const i = m.item, ch = m.checks;
@@ -223,8 +234,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const state = i.state as PrFacts["ghState"];
   const integration = integrationOf(d, ref);
   const itemScope = d.inScope.has(ref);
-  // The queue leaves merged PRs outside the scope and our own integration PRs out.
-  if (state !== "OPEN" && (!itemScope || integration)) return null;
+  // The queue leaves our own merged integration PRs out.
+  if (state !== "OPEN" && integration) return null;
+  // A merged PR outside the scope has facts only until what it landed is reviewed.
+  const landed = landedOf(d, ref, itemScope);
+  if (state !== "OPEN" && !itemScope && !(landed && landedOpen(landed))) return null;
   const cfg = config(db);
   const approvals = d.control.approvals.get(repo) ?? {};
   const repoRow = d.repos.get(repo);
@@ -290,6 +304,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.runs = runsOf(tipRuns, rf.ciApproved);
     return base;
   }
+  base.postmerge = landed;
   if (!inScope) {
     const v = head ? d.merge.verifications.get(`${ref}@${head}`) : undefined;
     base.outside = {
@@ -301,12 +316,15 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
 
   const duplicates = state === "OPEN" ? d.duplicates.get(ref) : undefined;
   if (duplicates) base.duplicates = duplicates;
+  if (state === "OPEN" && head && (patch.fixups.some((r) => r.state === "pushing" && r.fromHead === head) || patch.cifixes.some((r) => r.state === "pushing" && r.head === head))) base.pushing = true;
+  base.baseOffDefault = state === "OPEN" && !!i.base_ref && !!defaultBranch && i.base_ref !== defaultBranch;
   const ownDiff = state === "OPEN" && head ? diffFactsOf(d.diff.get(`${ref}@${head}`)) : null;
   if (ownDiff && !ownDiff.pending) {
     const size = sizeOf(ownDiff.lines);
     const out = [...(RULE_SIZES.includes(size) ? [] : [`size ${size}`]), ...ownDiff.reasons];
     if (out.length) base.ruledOut = out;
   }
+  if (base.baseOffDefault) base.ruledOut = [...(base.ruledOut ?? []), OFF_DEFAULT_REASON];
   const s = d.settled.get(ref) ?? settle(null, null);
   base.label = s.label ?? null;
   base.needsDecisionFlag = s.flags.includes("needs decision");
@@ -317,8 +335,6 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     return t === "not" && isOwn(i.author) && c.ownPrs.has(ref) && !!h && ownHead(h) ? "whitelisted" : t;
   };
   base.tier = tierOf(head);
-  const pm = d.merge.merged.get(ref);
-  if (pm) base.postmerge = { mergedAt: pm.firstAt, head: pm.lastHead, since: d.control.settings.get("postmerge_since") ?? "9999", review: d.review.postmerge.get(ref) ?? null };
   const mxh = state === "OPEN" && wfFact?.entry === "merge" && !owed ? head : null;
   // Checks describe the PR when they were fetched for the reviewed head (or, without a review, the current one).
   const checksAtHead = ch?.head_oid === (mxh ?? latest?.head ?? head);
@@ -439,7 +455,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     }
   }
   if (base.mergeable === "CONFLICTING" && i.base_ref) {
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved }, now);
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   }
@@ -451,7 +467,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.cifix = cifixOf(cfHead ?? qh);
   }
   base.batch = d.merge.batchStates.get(`${ref}@${qh}`) ?? null;
-  base.baseOffDefault = !!i.base_ref && !!defaultBranch && i.base_ref !== defaultBranch;
+  // A hand-over after the batch failed (a person answered): the merge is tried again.
+  if (base.batch === "batch-failed" && handed && handed.updated_at > (d.merge.batchFailedAt.get(`${ref}@${qh}`) ?? "")) base.batch = null;
   base.mainFix = !!i.head_ref?.startsWith(MAIN_FIX_BRANCH_PREFIX) && ownHere;
   const g = d.gates.get(ref);
   const gate = g ? { blocked: g.blocked === 1, by: g.by_login ? g.by_login.split(",") : [], readAt: g.read_at ?? "", failures: g.failures } : undefined;

@@ -7,7 +7,7 @@ import { patchLines } from "./pure.ts";
 import {
   CONFLICT_EDGE_STATES, FIXUP_EDGE_STATES, cifixEdge, cifixRow, conflictEdge, conflictRow, fixupEdge, fixupRow, newestFirst, noKeys, num, onKey, PATCH_CHECK_COLS, patchCheckRow, push, refKey, rowsOf, splitRef, strings,
 } from "./rows.ts";
-import type { FixupSource, LintingRow, PatchCheckRow, PatchFacts, PatchKind, PushEdge, RefKey, StoredPatch } from "./types.ts";
+import type { FixupSource, LintingRow, PatchCheckRow, PatchFacts, PatchKind, PushEdge, PushingRow, RefKey, StoredPatch } from "./types.ts";
 
 const FIXUP_FACT_COLS = ["f.repo", "f.number", "f.from_head", "f.to_head", "f.state", "f.reason", "f.attempt", "f.created_at", "f.source", "f.lint_task", "f.lint_state", "f.operator_fix"] as const;
 const CIFIX_FACT_COLS = ["c.repo", "c.number", "c.head", "c.to_head", "c.kind", "c.state", "c.reason", "c.files", "c.attempt", "c.task_id", "c.runs", "c.created_at", "c.lint_task"] as const;
@@ -122,6 +122,17 @@ export async function loadLintingRows(db: Db, keys: KeySource): Promise<LintingR
   ]));
   const row = (kind: PatchKind, r: any): LintingRow => ({ kind, id: Number(r.id), repo: r.repo, number: Number(r.number), head: r.head, lintTask: num(r.lint_task), unsentSibling: Number(r.unsent ?? 0) });
   return [...fixups.map((r) => row("fixup", r)), ...cifixes.map((r) => row("cifix", r)), ...conflicts.map((r) => row("conflict", r))];
+}
+
+/** The fix-ups and CI fixes in state `pushing`, whatever their head; `stored`: the row keeps a patch that passed through a lint task. 2 statements in one wave. */
+export async function loadPushingRows(db: Db, keys: KeySource): Promise<PushingRow[]> {
+  if (noKeys(keys)) return [];
+  const k = queryDb(db).k as any;
+  const of = (kind: PushingRow["kind"], t: "fixups" | "ci_fixes", head: string) => rowsOf<any>(db, k.selectFrom(`main.${t} as f`).innerJoin(resolveKeys(db, keys, "kk"), onKey("f"))
+    .select(["f.repo", "f.number", `f.${head} as head`, "f.to_head", "f.files", "f.lint_task", kx.rowid(`main.${t}`, "f").as("id"), (eb: any) => eb.case().when("f.patch", "is not", null).then(1).else(0).end().as("has_patch")])
+    .where("f.state", "=", "pushing").where("f.to_head", "is not", null).orderBy(kx.rowid(`main.${t}`, "f")))
+    .then((rows) => rows.map((r): PushingRow => ({ kind, id: Number(r.id), repo: r.repo, number: Number(r.number), head: r.head, toHead: r.to_head, files: JSON.parse(r.files ?? "[]") as string[], stored: Number(r.has_patch) === 1 && r.lint_task !== null })));
+  return (await db.together(() => Promise.all([of("fixup", "fixups", "from_head"), of("cifix", "ci_fixes", "head")]))).flat();
 }
 
 /** The newest operator fix-up row of each request id. 1 statement (`row_number()` over the request). */

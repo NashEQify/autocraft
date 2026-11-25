@@ -56,10 +56,10 @@ export function conflictAskRetryAtOf(rows: readonly ConflictRow[], head: string,
   const u = unsentConflictAsk(rows, head, now);
   return u !== null && u !== "final" ? u.until : undefined;
 }
-/** The conflict-merge bucket of a PR at `p.head` from its rows. */
-export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string; pushable: boolean }, approvals: { push: boolean; comment: boolean }, now: number): ConflictBucket {
+/** The conflict-merge bucket of a PR at `p.head` from its rows. `p.gone`: a merge pushed from that head is off the branch again (the PR is back at the head, or never left it), so it is due again. */
+export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string; pushable: boolean; gone?: boolean }, approvals: { push: boolean; comment: boolean }, now: number): ConflictBucket {
   const here = new Set(rows.filter((r) => r.fromHead === p.head).map((r) => r.state));
-  if (here.has("merged")) return "done";
+  if (here.has("merged") && !p.gone) return "done";
   // Nothing more a merge can do at this head: the contributor is asked once (a comment needs approval). A comment that failed is
   // final too (GitHub may have posted it); one that never reached GitHub is asked again after a backoff and is final after the last.
   const stuck = (): ConflictBucket => {

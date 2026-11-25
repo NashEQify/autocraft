@@ -1912,6 +1912,8 @@ CREATE TABLE IF NOT EXISTS postmerge_followups (
 CREATE INDEX IF NOT EXISTS postmerge_followups_issue ON postmerge_followups(repo, issue_number);
 -- Only merges from this moment on are reviewed unless `postmerge backfill` moves it back.
 INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+-- Merges outside the pipeline's scope, such as those a person approved in a repo whose Pipeline switch is off, from this moment on.
+INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_unscoped_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 -- CI on the default branch of every synced repo, one row per head commit seen. Written by the main-ci step.
 -- state: green | red | optional | running | none (src/mainci/classify.ts).
@@ -2085,11 +2087,22 @@ CREATE TABLE IF NOT EXISTS push_outcomes (
   before_res TEXT NOT NULL,
   after_res TEXT,
   outcome TEXT,
-  resolved_at TEXT,
-  lines INTEGER                       -- how many of the pull request's lines the push changed; NULL when unknown
+  resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS push_outcomes_to ON push_outcomes(repo, to_oid);
 CREATE INDEX IF NOT EXISTS push_outcomes_stage ON push_outcomes(stage, id);
+
+-- The pushes AutoCraft makes to pull requests, each written right before its push and never overwritten by another: the head it was made
+-- on, the commit, and when. A push that never landed left a commit no head is.
+CREATE TABLE IF NOT EXISTS own_pushes (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  from_oid TEXT NOT NULL, to_oid TEXT NOT NULL,
+  action TEXT NOT NULL,               -- the audit action of the push (fixup-push, cifix-push, conflict-push, implement-push, autorepin-push)
+  at TEXT NOT NULL,                   -- right before the push
+  lines INTEGER,                      -- how many of the pull request's lines it changed; NULL when unknown
+  landed_at TEXT,                     -- when git reported it done; NULL until then, and when a crash came first
+  PRIMARY KEY (repo, number, to_oid)
+) WITHOUT ROWID;
 
 -- Circuit breaker: a stage that stopped itself. One row per push stage and repo (stage `<stage>:<repo>`, stage one of fixup,
 -- cifix, fixissue, merge), one per push stage for its trip on every repo (`<stage>`), and `outside-surge` for the outside-author
@@ -2293,6 +2306,7 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   legacy_preapproval_id INTEGER,
   updated_at TEXT NOT NULL,
   step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  pr_number INTEGER,                  -- an implement workflow: the PR it works on, the newest an attempt of its issue opened for it; null before that (src/data/workflow/link.ts)
   version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
   accepted_head TEXT                  -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
 );

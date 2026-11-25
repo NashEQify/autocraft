@@ -1,8 +1,9 @@
 // Which merged PRs still need a post-merge review and which defects still need an issue, from the local tables only.
 import { loadQuiet } from "../data/security/index.ts";
+import { config, withConfig } from "../data/control/index.ts";
 import { listItems } from "../data/mirror/index.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
-import { loadFilings, loadFollowupFixPrs, loadFollowups, loadPendingDefects, loadPostmerge, loadRecentFiled } from "../data/review/index.ts";
+import { listPostmergeReviewed, loadFilings, loadFollowupFixPrs, loadFollowups, loadPendingDefects, loadPostmerge, loadRecentFiled } from "../data/review/index.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { filingOutcome, HELD_STUCK_MS } from "../conversations/held.ts";
@@ -20,7 +21,7 @@ export type MergedPr = { repo: string; number: number; head_oid: string; merged_
 /** Re-reviews of a PR whose review ended in a `retry:` error stop after this many tries. */
 export const MAX_RETRIES = 3;
 
-/** PRs whose Plan holds a `postmerge` action: a pipeline merge landed since the `postmerge_since` setting and no usable review is stored (a `retry:` error counts as missing an hour after it failed; the third is stored as held). Oldest merge first. */
+/** PRs whose Plan holds a `postmerge` action: a pipeline merge that needs a review (src/core/evidence.ts landedWhy) landed since the `postmerge_since` setting and no usable review is stored (a `retry:` error counts as missing an hour after it failed; the third is stored as held). Oldest merge first. */
 export async function selectPostmerge(db: Db, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet): Promise<MergedPr[]> {
   const rows = await planned(db, "postmerge", { repo, now, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) });
   return [...(await mergedPrs(db, repo, rows.map((p) => p.facts.number))).values()]
@@ -100,6 +101,18 @@ async function heldBy(followups: Followup[], fixes: () => Promise<boolean>, revi
   return await fixes() ? "fix" : null;
 }
 
+/** The merged PRs whose reviewed defects are filed: those in the pipeline's scope, and those outside it that were reviewed since merges outside it are (`postmerge_unscoped_since`). */
+export async function filedFor(db: Db, o: { repo?: string; number?: number } = {}): Promise<{ repo: string; number: number }[]> {
+  return await withConfig(db, async () => {
+    const [scoped, reviewed] = await db.together(() => Promise.all([
+      listItems(db, { kind: "pr", states: ["MERGED"], inScope: true, ...(o.repo !== undefined && { repos: [o.repo] }), ...(o.number !== undefined && { numbers: [o.number] }) }, "ref"),
+      listPostmergeReviewed(db, { since: config(db).postmergeUnscopedSince, ...(o.repo !== undefined && { repo: o.repo }) }),
+    ]));
+    const out = new Map([...scoped, ...reviewed].map((m) => [`${m.repo}#${m.number}`, { repo: m.repo, number: m.number }]));
+    return [...out.values()].filter((m) => o.number === undefined || m.number === o.number);
+  });
+}
+
 export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number; /** Its row now. */ was?: Followup | null };
 
 /**
@@ -108,7 +121,7 @@ export type PendingDefect = { repo: string; number: number; review_at: string; f
  */
 export async function pendingDefects(db: Db, repo?: string, now = Date.now()): Promise<PendingDefect[]> {
   // A security fix gets no public text until its advisory is published: its findings stay on the dashboard.
-  const merged = await listItems(db, { kind: "pr", states: ["MERGED"], inScope: true, ...(repo !== undefined ? { repos: [repo] } : {}) }, "ref");
+  const merged = await filedFor(db, { ...(repo !== undefined && { repo }) });
   const quiet = await loadQuiet(db, merged.map((m) => `${m.repo}#${m.number}`));
   const keys = merged.filter((m) => !quiet.has(`${m.repo}#${m.number}`)).map((m) => ({ repo: m.repo, number: m.number }));
   return await loadPendingDefects(db, keys, { now }) as unknown as PendingDefect[];

@@ -141,7 +141,7 @@ test("started work under the box identity says that it waits for the GitHub App"
   await w.db.run(w.db.k.updateTable("main.settings").set({ value: "box" }).where("key", "=", "github_identity"));
   assert.match((await legWait(w.db, wf))!, /GitHub App/);
   const step = implementStep((await loadItemFact(w.db, "app", 7))!);
-  assert.ok(step && "wait" in step && /GitHub App/.test(step.wait), JSON.stringify(step));
+  assert.ok(step && "wait" in step && /GitHub App/.test(step.wait.text), JSON.stringify(step));
 });
 
 // ---- duplicates of a PR nobody started

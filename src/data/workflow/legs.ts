@@ -1,13 +1,15 @@
 // The merge leg: `preapprovals` and `operator_fixups` (M10 workflow-a).
-// reads: mirror.items (through mirror.openItem), control.tracked_repos (through control.trackedRepo), access (canActExpr), changes (operatorFixEnded)
+// reads: mirror.items (loadLandedApprovals; through mirror.openItem), merge.merges (through merge.mergedByUs), control.tracked_repos (through control.trackedRepo), access (canActExpr), changes (operatorFixEnded)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { canActExpr } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
-import { operatorFixEnded } from "../changes/fragments.ts";
+import { FINAL_BUT_DROPPED, operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
+import { mergedByUs } from "../merge/fragments.ts";
+import type { LandedApproval } from "../../core/evidence.ts";
 import { addAudit } from "../control/audit.ts";
 import { LIVE_STATES } from "./fragments.ts";
 import type { Entry, FixupRequest, FixupRequestMove, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
@@ -46,6 +48,31 @@ export async function loadLegs(db: Db, keys: KeySource, o: { activeOnly?: boolea
     const p = legOf(r);
     const key = refKey(p.repo, p.number);
     (out.get(key) ?? out.set(key, []).get(key)!).push(p);
+  }
+  return out;
+}
+
+/**
+ * The person's approval of each merge the pipeline made of the PRs of `keys`, by merged head: the newest leg at that head, with its workflow's
+ * times. A leg is `queued` until the pass that ends it sees the merge, so its state is not asked. One statement.
+ */
+export async function loadLandedApprovals(db: Db, keys: KeySource): Promise<Map<RefKey, Map<string, LandedApproval>>> {
+  const out = new Map<RefKey, Map<string, LandedApproval>>();
+  if (isEmpty(keys)) return out;
+  const q = queryDb(db);
+  const k = q.k as any;
+  const rows = await q.all(k.selectFrom("main.preapprovals as p").innerJoin(resolveKeys(db, keys, "kl"), (j: any) => j.onRef("kl.repo", "=", "p.repo").onRef("kl.number", "=", "p.number"))
+    .leftJoin("main.item_workflows as w", "w.id", "p.workflow_id")
+    .leftJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number").on("w.kind", "=", "issue"))
+    .select((eb: any) => ["p.repo", "p.number", "p.head", "p.at", "w.approved_at", "w.started_at", "i.created_at as pr_opened_at",
+      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on")])
+    .where("p.head", "is not", null).where((eb: any) => mergedByUs(eb, "p.repo", "p.number"))
+    .orderBy("p.id")) as { repo: string; number: number; head: string; at: string; approved_at: string | null; started_at: string | null; pr_opened_at: string | null; go_on: string | null }[];
+  for (const r of rows) {
+    const key = refKey(r.repo, num(r.number));
+    const approvedAt = r.approved_at ?? r.started_at ?? r.at;
+    const since = [approvedAt, r.started_at, r.go_on].filter((t) => t !== null).sort().at(-1)!;
+    (out.get(key) ?? out.set(key, new Map()).get(key)!).set(r.head, { approvedAt, since, prOpenedAt: r.pr_opened_at });
   }
   return out;
 }
@@ -279,15 +306,16 @@ export async function endFixupRequests(db: Db, rows: { id: number; reason: strin
 /**
  * Queued requests with no final fix-up row of their own, ordered by repo, number, head and id. `refs` narrows to those PRs; without it the
  * requests of tracked repos. A request counts only while its maker may still act on the repo; `anyMaker` returns the ones whose maker may not
- * (the caller ends them).
+ * (the caller ends them). `raced`: instead, the ones without a leg whose try at their head was dropped (another push came first).
  */
-export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo: string; number: number }[]; nowMs?: number; anyMaker?: true }): Promise<FixupRequest[]> {
+export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo: string; number: number }[]; nowMs?: number; anyMaker?: true; raced?: true }): Promise<FixupRequest[]> {
   if (f.refs?.length === 0) return [];
   const q = queryDb(db);
   const k = q.k as any;
   const after = new Date((f.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const rows = await q.all(k.selectFrom("main.operator_fixups as o").selectAll("o").where("o.state", "=", "queued")
-    .where((eb: any) => eb.not(operatorFixEnded(eb, "o")))
+    .$if(!f.raced, (b: any) => b.where((eb: any) => eb.not(operatorFixEnded(eb, "o"))))
+    .$if(!!f.raced, (b: any) => b.where("o.preapproval_id", "is", null).where((eb: any) => operatorFixEnded(eb, "o", ["superseded"])).where((eb: any) => eb.not(operatorFixEnded(eb, "o", FINAL_BUT_DROPPED))))
     .$if(!f.anyMaker, (b: any) => b.where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after)))
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "o", f.refs!.map((r) => [r.repo, r.number] as const))))
     .$if(!f.refs, (b: any) => b.where((eb: any) => trackedRepo(eb, "o.repo")))

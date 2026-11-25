@@ -1,4 +1,5 @@
 // Autorepin: `@<app> autorepin <pull request>` on a PR, and the commit that repins its Cargo dependencies once that pull request is merged.
+import { loadOwnPushes } from "../src/data/views/own-pushes.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -295,6 +296,11 @@ describe("autorepin", () => {
     await advancePreapprovals(s.w.db);
     const p = (await preapprovalOf(s.w.db, "app", 1))!;
     assert.deepEqual([p.state, p.head], ["review", to]);
+    // Asked for again for the same dependency, which clears its row: the push made stays known.
+    await set(s);
+    assert.equal((await row(s)).to_head, null);
+    const known = (await loadOwnPushes(s.w.db, [{ repo: "app", number: 1 }])).get("app#1") ?? [];
+    assert.deepEqual(known.map((x) => [x.from, x.to, x.what, x.landed, x.small]), [[s.head, to, "autorepin", true, true]]);
   });
 
   test("without a lockfile the manifest is pushed at once", async () => {

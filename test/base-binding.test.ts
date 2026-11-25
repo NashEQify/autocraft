@@ -62,5 +62,5 @@ test("a private-org member's PR is pushable once the author's permission is read
 
 test("a PR aimed at a non-default branch does not merge", () => {
   const plan = decidePr(prFacts({ workflow: null, baseOffDefault: true }));
-  assert.deepEqual([plan.state, plan.actions.filter((a) => a.kind === "merge"), plan.waitKind], ["needs-decision", [], "person"]);
+  assert.deepEqual([plan.state, plan.actions.filter((a) => a.kind === "merge"), plan.waitCode], ["needs-decision", [], "base-off-default"]);
 });

@@ -14,6 +14,7 @@ import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForCommit, checkoutForPr } from "../sandbox/index.ts";
 import { MAX_MERGED_DIFF_CHARS, type FiledBefore, type Finding, type PostmergeCommit, type PostmergePr } from "./parse.ts";
 import { relatedOpen, reviewHistory } from "./related.ts";
+import { planned } from "../core/select.ts";
 import { mergedPr, selectPostmerge, type MergedPr } from "./select.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { flatMapSeq } from "../async-seq.ts";
@@ -22,7 +23,7 @@ import { addAudit, tripMergeBreakers, writeSetting } from "../data/control/index
 import { loadPushEdges } from "../data/changes/index.ts";
 import { loadMergedInfo } from "../data/merge/index.ts";
 import { loadItems, loadShown } from "../data/mirror/index.ts";
-import { countUnreviewedMerges, loadFollowups, savePostmerge } from "../data/review/index.ts";
+import { loadFollowups, savePostmerge } from "../data/review/index.ts";
 
 const PROMPT = CLAUDE_PROMPTS["postmerge.opus"];
 const now = () => new Date().toISOString();
@@ -156,12 +157,12 @@ export const BACKFILL_FREE_DAYS = 14;
 export async function queueBackfill(db: Db, by: string, since: string, o: { yes?: boolean; now?: number } = {}): Promise<number> {
   const iso = new Date(since).toISOString();
   const days = ((o.now ?? Date.now()) - Date.parse(iso)) / 86400_000;
-  if (days > BACKFILL_FREE_DAYS && !o.yes) throw new Error(`--since is ${Math.floor(days)} days back; every merged PR since then gets a model review and its defects are filed publicly. Add --yes to confirm`);
+  if (days > BACKFILL_FREE_DAYS && !o.yes) throw new Error(`--since is ${Math.floor(days)} days back; every PR merged since then that needs a post-merge review gets a model review and its defects are filed publicly. Add --yes to confirm`);
   await db.write(async () => {
     await writeSetting(db, "postmerge_since", iso);
     await addAudit(db, [{ login: by, action: "postmerge-backfill", target: null, details: { since: iso, confirmed: o.yes === true } }]);
   });
-  return await countUnreviewedMerges(db, iso);
+  return (await planned(db, "postmerge", { now: o.now ?? Date.now() })).length;
 }
 
 export { RELATED_CLOSED_DAYS, relatedOpen } from "./related.ts";

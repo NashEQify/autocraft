@@ -53,7 +53,7 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
   ]));
 
   const facts: MergeFacts = {
-    attempts: new Map(), merged, verifications: new Map(), runs: new Map(), unknown: new Map(), batchStates: new Map(),
+    attempts: new Map(), merged, verifications: new Map(), runs: new Map(), unknown: new Map(), batchStates: new Map(), batchFailedAt: new Map(),
     activeBatched: new Set(), integration: new Map(), batchPrs: new Set(batchPrs.map((r) => refOf(r.repo, r.pr_number))),
   };
   for (const r of attempts) {
@@ -81,6 +81,7 @@ export async function loadMergeFacts(db: Db, keys: KeySource): Promise<MergeFact
       // Lists are filtered here; a descriptor was resolved inside the statement, so every member of a matched batch is kept.
       if (Array.isArray(keys) && !wanted.has(ref)) continue;
       facts.batchStates.set(headOf(b.repo, m.number, m.head_oid), b.state === "checking" ? "batch-checking" : b.state === "open" ? "in-batch" : "batch-failed");
+      if (b.state === "failed") facts.batchFailedAt.set(headOf(b.repo, m.number, m.head_oid), b.updated_at);
       if (active) facts.activeBatched.add(ref);
     }
     if (active && b.pr_number !== null) {

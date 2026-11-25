@@ -123,6 +123,9 @@ both("scores, queue positions, started refs and the acting pairs follow the live
   const work = await loadStartedWork(db);
   assert.equal(work.live.length, 5);
   assert.deepEqual(work.prs.map((p) => p.pr), [4]);
+  // An attempt that ended while its workflow goes on: the PR is the started work of the same people.
+  await q.run(k.updateTable("main.implementations").set({ state: "closed", updated_at: "2026-01-01T01:00:00.000Z" }).where("number", "=", 3));
+  assert.deepEqual((await loadStartedWork(db)).prs.map((p) => p.pr), [4]);
   const pairs = await loadActingPairs(db);
   assert.ok(pairs.some((p) => p.login === "cat" && p.repo === "o/b") && pairs.some((p) => p.login === "bob" && p.repo === "o/a"));
   assert.equal(new Set(pairs.map((p) => `${p.login}@${p.repo}`)).size, pairs.length, "pairs are distinct");

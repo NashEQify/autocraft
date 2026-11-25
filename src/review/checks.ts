@@ -6,6 +6,7 @@ import type { Db } from "../db/index.ts";
 import { resolvePushes } from "../data/control/index.ts";
 import { recordRuns } from "../data/merge/index.ts";
 import { noteMergeable } from "../merge/mergeable.ts";
+import { settlePushing } from "../prepush/settle.ts";
 import { listItems, loadChecks, saveChecks as saveCheckRows, SAVE_CHECKS_ROWS } from "../data/mirror/index.ts";
 
 /** PRs per query: 100 check contexts each keeps a query well under GitHub's node limit. */
@@ -117,6 +118,7 @@ export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISO
     mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify ? 1 : 0, fetched_at: at,
   })), at);
   await recordRuns(db, rows, at);
+  await settlePushing(db, rows, at);
   await resolvePushes(db, rows.map((r) => ({ repo: r.repo, number: r.number, head_oid: r.head_oid, checks: JSON.stringify(r.checks) })), at);
   await noteMergeable(db, rows, at);
 }
