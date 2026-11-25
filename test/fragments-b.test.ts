@@ -158,7 +158,7 @@ function cases(db: Db): Case[] {
     built: (d) => d.k.selectFrom("main.items as i").select("i.number as k").where("i.repo", "=", "app").where((eb) => quietPrExpr(eb, "i.repo", "i.number")).orderBy("i.number") });
   for (const n of [2, 6]) {
     out.push({ name: `quietPrExpr on values (${n})`, expect: [n === 2 ? "1" : "0"],
-      built: (d) => d.k.selectNoFrom((eb) => quietPrExpr(eb, eb.val("app"), eb.val(n)).as("k")) });
+      built: (d) => d.k.selectNoFrom((eb) => eb.case().when(quietPrExpr(eb, eb.val("app"), eb.val(n))).then(1).else(0).end().as("k")) });
   }
   for (const repo of [undefined, "app"]) {
     out.push({ name: `latestCte (${repo ?? "every repo"})`,
@@ -174,7 +174,7 @@ function cases(db: Db): Case[] {
   for (const not of [false, true]) {
     out.push({ name: `PRIVATE_STEPS_SQL${not ? " (NOT IN)" : ""}`, text: [`SELECT step AS k FROM build_tasks WHERE step ${not ? "NOT " : ""}IN (${PRIVATE_STEPS_SQL}) ORDER BY step`],
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),
-      built: (d) => d.k.selectFrom("build_tasks").select("step as k").where((eb) => (not ? eb.not(privateStepExpr(eb)) : privateStepExpr(eb))).orderBy("step") });
+      built: (d) => d.k.selectFrom("build_tasks").select("step as k").where((eb) => (not ? eb.not(privateStepExpr(eb, "step")) : privateStepExpr(eb, "step"))).orderBy("step") });
   }
   out.push({ name: "manualOnlyExpr", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE EXISTS (SELECT 1 FROM main.user_settings mo WHERE mo.login = t.login AND mo.key = '${MANUAL_ONLY_KEY}' AND mo.value = '1') ORDER BY t.login`], expect: ["alice"],
     built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualOnlyExpr(eb as never, "t.login")).orderBy("t.login") });
