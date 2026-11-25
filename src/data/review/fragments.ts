@@ -15,6 +15,6 @@ export const finalTakeAtLatestHead = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, 
   const s = kx.schemaEb(eb);
   return eb.exists(s.selectFrom("main.final_reviews as fl").select(eb.lit(1).as("one"))
     .where("fl.repo", "=", kx.exprOf(eb, repo)).where("fl.number", "=", kx.exprOf(eb, number)).where("fl.head_oid", "=", kx.exprOf(eb, head)).where("fl.verdict", "in", ["take", "take-fix"])
-    .where((x) => x("fl.head_oid", "=", kx.schemaEb(x).selectFrom("main.opus_reviews as fr").select("fr.head_oid").whereRef("fr.repo", "=", "fl.repo").whereRef("fr.number", "=", "fl.number")
+    .where((x) => x("fl.head_oid", "=", kx.schemaEb(x).selectFrom("main.opus_reviews as fr").select("fr.head_oid").where("fr.repo", "=", kx.ref<string>("fl.repo")).where("fr.number", "=", kx.ref<number>("fl.number"))
       .where("fr.verdict", "is not", null).orderBy("fr.at", "desc").orderBy(kx.rowid("main.opus_reviews", "fr"), "desc").limit(1))));
 };

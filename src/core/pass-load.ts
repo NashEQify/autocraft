@@ -18,8 +18,9 @@ import {
 } from "../data/mirror/index.ts";
 import { loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { loadRanks, type RankRow } from "../data/triage/index.ts";
-import { listWorkflows, loadInScope, loadWorkflowFacts, type WorkflowPassFacts } from "../data/workflow/index.ts";
+import { listWorkflows, loadActions, loadInScope, loadWorkflowFacts, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
+import { ACTION_WAITS } from "./may.ts";
 import { mergeDecisionId } from "./rules.ts";
 import { whitelistVerdict } from "../whitelist.ts";
 
@@ -50,6 +51,8 @@ export type PrPassData = {
   ownLogins: Set<string>;
   /** In-scope PRs (the workflow scope fragment). */
   inScope: Set<RefKey>;
+  /** Merges that wait for their person's sign-in or access. */
+  mergeActions: Map<RefKey, WorkflowAction[]>;
   tasks: TaskStates;
   /** Our own commits on the loaded PRs' push chains, keyed "repo@sha". */
   ownCommits: Set<string>;
@@ -88,18 +91,18 @@ function statementIds(review: ReviewFacts, more: Iterable<ReviewFacts["premerge"
  */
 export async function loadPrPass(db: Db, keys: KeySource, o: { now: number; mergeEntryHead: (d: PrPassData, key: RefKey) => string | null }): Promise<PrPassData> {
   return await db.read(async () => {
-    const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, ownLogins, scoped] =
+    const [control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow, live, implement, review, assignments, outsideHolds, ownLogins, scoped, mergeActions] =
       await db.together(() => Promise.all([
         loadControl(db), loadPrMirror(db, keys), loadRepos(db, { all: true }), loadRepoCiSignals(db), loadDiffFacts(db, keys),
         loadFormalReviews(db, keys), loadGates(db, keys), loadRanks(db, keys), loadMergeFacts(db, keys), loadPatchFacts(db, keys), loadPushFacts(db, keys),
         loadMainFixPrs(db), loadWorkflowFacts(db, keys, { nowMs: o.now }), listWorkflows(db, { live: true }), loadImplementFacts(db, keys),
         loadReviewFacts(db, keys, { now: o.now }), loadAssignments(db, {}), loadOutsideHolds(db, keys), loadOwnLogins(db),
-        loadInScope(db, keys),
+        loadInScope(db, keys), loadActions(db, { kinds: ["merge"], states: ACTION_WAITS }),
       ]));
     const data: PrPassData = {
       now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, merge, patches, pushes, mainFixPrs, workflow,
       workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins,
-      inScope: scoped, tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
+      inScope: scoped, mergeActions, tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(),
     };
 
     const pairs: { repo: string; sha: string }[] = [];

@@ -20,7 +20,7 @@ import { queueActions, retryActions, saveActions, type ActionState, type NewActi
 import type { Db } from "../db/index.ts";
 
 export type ExecState = ActionState;
-export const WAITING: readonly ActionState[] = ["waiting-token", "waiting-permission"];
+export { ACTION_WAITS as WAITING } from "../core/may.ts";
 
 export const SIGN_IN_REASON = "Sign in to let AutoCraft finish this as you";
 export const noWriteReason = (repo: string): string => `You have no write access to ${slugOf(repo)}`;
@@ -172,7 +172,7 @@ export async function laneForOperator(db: Db, deps: LaneDeps | undefined, login:
 }
 
 /** An action that waits for its person's token or access: the stages leave it out of their work until it is retried. */
-export const isWaiting = (a: Pick<WorkflowAction, "state"> | null | undefined): boolean => !!a && WAITING.includes(a.state);
+export const isWaiting = (a: Pick<WorkflowAction, "state"> | null | undefined): boolean => !!a && ACTION_WAITS.includes(a.state);
 
 /**
  * How a failed write as a user is classified, from the HTTP status (a GitHub error's, or gh's own "(HTTP 403)" line in

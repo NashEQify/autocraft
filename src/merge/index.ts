@@ -7,6 +7,7 @@
 import { mergeHeld } from "./holds.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
 import { mergeScope, mergeVerdicts } from "./approval.ts";
+import { ACTION_WAITS, mergeWaits } from "../core/may.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { CLI_BY, type By } from "../core/gates.ts";
@@ -178,6 +179,10 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   // Heaviest workflow first, then in the order the workflows started; then by number.
   let picks = open.filter((e) => mergeDue.has(e.number) && (!params.only || params.only(e)) && (!params.singleOnly || mergeDue.get(e.number)!.singleOnly))
     .sort((a, b) => score(b) - score(a) || a.number - b.number);
+  const refs = picks.map((e) => ({ repo, number: e.number }));
+  const [live, waits] = await db.together(() => Promise.all([listWorkflows(db, { refs, live: true }), loadActions(db, { refs, kinds: ["merge"], states: ACTION_WAITS })]));
+  // A merge that waits for its approver's sign-in or access stays put.
+  picks = picks.filter((e) => !mergeWaits(waits.get(refOf(e)), live.find((w) => w.number === e.number), e.head));
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
   const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [], asked: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
@@ -316,12 +321,12 @@ async function noteMergeAction(db: Db, repo: string, e: QueueEntry, by: string, 
   const row = actions.get(`${repo}#${e.number}`)?.find((a) => a.kind === "merge" && a.workflow_id === wf.id);
   if (state === "waiting-token" || state === "waiting-permission") {
     await db.write(async () => {
-      // A row of an earlier head is stopped first, so the upsert takes it over with this head and approver.
-      if (row && row.head !== e.head) await saveActions(db, [{ id: row.id, state: "stopped", at }]);
+      // A row of an earlier head or approver is stopped first, so the upsert takes it over.
+      if (row && (row.head !== e.head || row.by !== by)) await saveActions(db, [{ id: row.id, state: "stopped", at }]);
       const id = (await queueActions(db, [{ workflowId: wf.id, repo, number: e.number, kind: "merge", by, head: e.head, state, at }])).get(`${repo}#${e.number}:merge`);
       if (id !== undefined) await saveActions(db, [{ id, state, reason, at }]);
     });
-  } else if (row && row.head === e.head && row.state !== state && row.state !== "done") {
+  } else if (row && row.state !== state && row.state !== "done") {
     await saveActions(db, [{ id: row.id, state, reason, at }]);
   }
 }

@@ -30,7 +30,7 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import type { WorkflowGate } from "./may.ts";
+import { mergeWaits, type WorkflowGate } from "./may.ts";
 import { loadPrPass, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
@@ -309,6 +309,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const mx = mxh !== null;
   const qh = mxh ?? latest!.head;
   const qAt = mx ? wfFact!.startedAt : latest!.at;
+  // The merge queue's operator path: the approved workflow's leg handed the PR over at this head (moveLegs sets `updated_at`).
+  const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
+  if (handed) base.decision = { ...NO_DECISION, asked: true, answer: "merge", mergeAnswerAfterReview: handed.updated_at > qAt };
+  if (mergeWaits(d.mergeActions.get(ref), wfRow, qh)) base.decision = { ...base.decision, execWaiting: true };
   const verdict = latest?.verdict;
 
   const take = mx || verdict === "take" || verdict === "take-fix";
