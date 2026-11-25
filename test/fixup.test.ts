@@ -183,6 +183,13 @@ describe("fixup step", () => {
 
 
 
+  test("a push that another one overtook is no try of the fix-up", async () => {
+    const w = world({ pushError: "! [rejected] fix -> fix (stale info)" });
+    const db = await fresh(w.head);
+    await runFixup(db, { repo: "app", dryRun: false }, () => {}, w.deps);
+    assert.deepEqual((await fixupRows(db)).map((r) => r.state), ["superseded"]);
+  });
+
   test("a file over the size limit is held without a checkout and listed by path alone with one", async () => {
     const lib = Array.from({ length: 6000 }, (_, i) => `fn f${i}() {}`).join("\n") + "\n";
     const held = world({ lib, diff: spreadDiff("src/lib.rs") });

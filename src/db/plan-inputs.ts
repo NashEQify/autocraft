@@ -132,6 +132,10 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       noTopic: "Written with the workflow row the event is about (workflows).",
     },
     {
+      table: "own_pushes", class: "item", why: "Our pushes to one PR, recorded before each push (our own push chain).",
+      noTopic: "Written before its push; the push moves the PR's head (items), which the decision needs.",
+    },
+    {
       table: "autorepins", class: "item", why: "An autorepin's commit on one PR (our own pushes).", columns: ["head", "to_head"],
       noTopic: "The commit is stored before its push; the push moves the PR's head (items), which the decision needs.",
     },

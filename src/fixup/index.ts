@@ -190,7 +190,7 @@ class Recorder {
   }
 
   /** A fixups row and a stages row: `hold` for the two states that need a person, else the PR's `take` stage with a note. */
-  async fixup(c: FixCandidate, state: "pushed" | "failed" | "refused" | "rejected" | "cannot-push" | "too-large" | "asked" | "comment-failed" | "comment-unsent" | "push-denied", reason: string | null, files: string[], toHead: string | null = null): Promise<void> {
+  async fixup(c: FixCandidate, state: "pushed" | "failed" | "refused" | "rejected" | "superseded" | "cannot-push" | "too-large" | "asked" | "comment-failed" | "comment-unsent" | "push-denied", reason: string | null, files: string[], toHead: string | null = null): Promise<void> {
     const at = this.at();
     const hold = state === "cannot-push" || state === "too-large" || state === "push-denied";
     const note = state === "pushed" ? `fix-up pushed at ${short(c.head)}: ${files.join(", ")}${reason ? `; ${reason}` : ""}`
@@ -355,7 +355,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
     let files = [...new Set(c.fixes.map((f) => f.file))];
     // The push is recorded: what fails after it (the comment) changes nothing about it.
     let pushed = false;
-    const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
+    const fail = async (state: "failed" | "refused" | "rejected" | "superseded", raw: string) => {
       const reason = scrubReason(raw, d.root);
       await rec.fixup(c, state, reason, files);
       summary.failed.push({ ref, reason });
@@ -514,7 +514,9 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       const push = await pushBranch(gw, git, "fixup-push", g, { remote: pr.headRepository.nameWithOwner, branch: pr.headRefName, sha: commit }, { run: runId, from: head, to: commit, files: v.files, changed: v.changed });
       if (push.code !== 0) {
         const err = oneLine(push.stderr);
-        if (/stale info|rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the review");
+        // Another push came first: the try says nothing about the fix-up, and the new head gets its own.
+        if (/stale info/i.test(err)) await fail("superseded", "the branch moved before the push");
+        else if (/rejected|fetch first/i.test(err)) await fail("refused", "the branch moved since the review");
         else if (/denied|403|permission|not allowed|protected branch|declined|GH013/i.test(err)) await hold("push-denied", HOLD_CANNOT_PUSH);
         else await fail("failed", `push failed: ${err}`);
         return;
