@@ -10,7 +10,7 @@ import { mergeScope, mergeVerdicts } from "./approval.ts";
 import { ACTION_WAITS, mergeWaits } from "../core/may.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CLI_BY, type By } from "../core/gates.ts";
+import { CLI_BY, mayMergeNow, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
 import { planned } from "../core/select.ts";
 import { claimForWork } from "../github/claim.ts";
@@ -170,7 +170,8 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   const queue = await buildQueue(db, { repo });
   const open = queue.filter((e) => e.state !== "merged");
   const states = countStates(queue);
-  const due = await planned(db, "merge", { repo });
+  const planDue = await planned(db, "merge", { repo });
+  const due = planDue.filter((p) => mayMergeNow(p.facts));
   const mergeDue = new Map(due.map((p) => [p.facts.number, { singleOnly: p.action.params?.singleOnly === true, verifyOverride: p.facts.verifyOverride }]));
   const scores = await loadWorkScores(db, open.map((e) => ({ repo, number: e.number })));
   const score = (e: QueueEntry) => scores.get(refOf(e)) ?? NO_WORKFLOW_SCORE;
@@ -184,6 +185,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
   const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
+  if (due.length < planDue.length) log(`merge ${repo}: ${planDue.length - due.length} that could merge left out: nobody approved them and the repo does not merge on its own`);
 
   if (dryRun) {
     summary.attempted = picks.map(refOf);
@@ -262,7 +264,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     }
     // A hold may have been set during the calls above.
     if (await mergeHeld(db, repo, e.number)) { log(`  ${refOf(e)}: merge held meanwhile; skipped`); summary.attempted.pop(); continue; }
-    const ag = await guardRepo(db, repo, "merge", params.by ?? CLI_BY);
+    const ag = await guardRepo(db, repo, "merge", params.by ?? CLI_BY, undefined, { members: [may] });
     if ("refused" in ag) log(`  ${refOf(e)}: not assigned: ${ag.refused}`);
     else await claimForWork(w, ag, d.querier, repo, e.number, "pr", () => pipelineMe(log), { run: runId }, log);
     const method = methodOf(info);

@@ -8,7 +8,7 @@ import { verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
 import { loadRepoGuards } from "../data/control/index.ts";
 import { decideItem } from "./decide-item.ts";
-import { gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
+import { approvalOf, gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
 import { loadItemFact } from "./issue-facts.ts";
 import type { ActionKind, PrFacts } from "./plan.ts";
 import type { MayResult } from "./may.ts";
@@ -156,6 +156,13 @@ export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, lo
   const why = gateRepo(await repoApprovals(db, repo), approved ? null : need, by, repo);
   // `login`: the person pressing the button right now (a conversation card), who acts as themselves.
   return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : "app" } as unknown as GuardedRepo);
+}
+
+/** Lets a stage that starts work on a PR take it (the pipeline's account is assigned): the PR must pass the gates of the action the work ends in. */
+export async function guardClaim(db: Db, ref: Ref, action: Want, by: By): Promise<GuardedRepo | Refused> {
+  const f = await loadPrFact(db, ref.repo, ref.number);
+  const why = f ? gates(f, action, by) : "not an open PR the pipeline tracks";
+  return why ? { refused: `${ref.repo}#${ref.number}: ${why}` } : ({ scope: "repo", need: approvalOf(f!, action), repo: ref.repo, as: "app" } as unknown as GuardedRepo);
 }
 
 /**

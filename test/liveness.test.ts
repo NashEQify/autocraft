@@ -7,7 +7,7 @@ import { loadLivenessInputs } from "../src/data/planner/index.ts";
 import { testDatabase } from "./test-db.ts";
 
 const row = (o: Partial<PlanRowLike>): PlanRowLike => ({ kind: "pr", state: "opus-hold", itemState: "classified", phase: "Held", wait: null, waitKind: null, actions: 0, since: "2026-11-01T00:00:00Z", ...o });
-const none: ItemFlags = { question: false };
+const none: ItemFlags = { question: false, started: true };
 const cause = (o: Partial<PlanRowLike>, f: Partial<ItemFlags> = {}) => { const v = classify(row(o), { ...none, ...f }); return `${v.live ? "live" : "stuck"}:${v.cause}`; };
 
 test("an item is live when work is due, a person is asked or the wait has an external clearing event", () => {
@@ -26,6 +26,37 @@ test("an item nobody will move or answer is stuck", () => {
   assert.equal(cause({ state: "needs-decision", wait: "a maintainer's answer", waitKind: "person" }), "stuck:person-wait-without-question");
   assert.equal(cause({ state: "not-reviewed", wait: "the label referee", waitKind: "system" }), "stuck:internal-wait");
   assert.equal(cause({ state: "needs-decision", wait: "a maintainer's answer", waitKind: "person" }, { question: true }), "live:question");
+});
+
+test("a PR nobody started waits for someone to pick it up; a started one that asks nobody is stuck", async () => {
+  const t = await testDatabase();
+  const db = await t.open({ app: true });
+  try {
+    const T = "2026-01-01T00:00:00Z";
+    const answer = { wait: "a maintainer's answer", waitKind: "person" };
+    const rows: [number, "pr" | "issue", string, { wait: string | null; waitKind: string | null }][] = [
+      // Nobody started these three.
+      [1, "pr", "opus-hold", answer], [2, "pr", "needs-decision", answer], [3, "pr", "opus-close", { wait: null, waitKind: null }],
+      // Nobody started it, but nothing says what it waits on.
+      [4, "pr", "ready", { wait: null, waitKind: null }],
+      // Started, with nobody asked.
+      [5, "pr", "opus-hold", answer],
+      // The implementation PRs of issue #8, whose workflow recommends, and of #9, which runs.
+      [6, "pr", "opus-hold", answer], [7, "pr", "opus-hold", answer],
+    ];
+    for (const [number, kind, state, w] of rows) {
+      await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title: `t${number}`, created_at: T }));
+      await db.run(db.k.insertInto("item_plans").values({ repo: "app", number, kind, state, actions: "[]", wait: w.wait, reasons: "[]", planned_at: T, view: JSON.stringify({ status: { phase: "Held", since: T }, waitKind: w.waitKind }) }));
+    }
+    const wf = { repo: "app", started_by: "x", started_at: T, started_via: "github", updated_at: T };
+    await db.run(db.k.insertInto("item_workflows").values([
+      { ...wf, number: 5, kind: "pr", entry: "review", state: "running" },
+      { ...wf, number: 8, kind: "issue", entry: "implement", state: "recommending" }, { ...wf, number: 9, kind: "issue", entry: "implement", state: "running" },
+    ]));
+    for (const [number, pr_number] of [[8, 6], [9, 7]] as const) await db.run(db.k.insertInto("implementations").values({ repo: "app", number, pr_number, state: "pr-opened", text_hash: "h", attempt: 1, created_at: T, updated_at: T, queued_by: "x" }));
+    const res = await withConfig(db, () => computeLiveness(db, Date.parse(T) + 60_000));
+    assert.deepEqual(res.items.map((i) => `${i.number} ${i.verdict} ${i.cause}`).sort(), ["4 stuck no-plan", "5 stuck person-wait-without-question", "7 stuck person-wait-without-question"]);
+  } finally { await t.close(); }
 });
 
 test("a review wait names its blockers, whose questions keep the item live", async () => {

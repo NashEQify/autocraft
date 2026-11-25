@@ -340,7 +340,9 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped") return system("conflict merge cap for today reached; next merge tomorrow");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") return unsentWait("the comment asking the contributor to resolve the conflict", f.conflict.until);
   if (f.mergeable === "CONFLICTING" && f.conflict && ["ask", "asked", "held"].includes(f.conflict.bucket)) return f.conflict.bucket === "held" ? (f.repoFacts.commentApproved ? person("a person to resolve the conflict") : approval) : contributor("the contributor to resolve the conflict");
+  if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "unapproved" && fixAllowed(f)) return person("push approval for the repo");
   const cf = cifixBucket(f);
+  if (cf === "unapproved") return person("push approval for the repo");
   if (cf === "comment-wait") return unsentWait("the CI fix comment", unsentUntil(f.cifix?.unsent));
   if (cf === "done" && f.cifix?.states.includes("asked")) return contributor("the contributor to fix CI");
   if (cf === "done" && (f.cifix?.states.includes("comment-failed") || f.cifix?.unsent === "final")) return person("a person: the CI fix comment failed");

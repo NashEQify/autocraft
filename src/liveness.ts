@@ -16,8 +16,8 @@ export type LiveCause = "planned" | "question" | "contributor" | "external" | "p
 export type StuckCause = "person-wait-without-question" | "no-plan" | "internal-wait";
 
 export type PlanRowLike = Pick<LivenessPlanRow, "kind" | "state" | "itemState" | "phase" | "wait" | "waitKind" | "actions" | "since">;
-/** `question`: a person has been asked, which is a workflow in `recommending` or `blocked`. */
-export type ItemFlags = { question: boolean };
+/** `question`: a person has been asked, which is a workflow in `recommending` or `blocked`; `started`: a live workflow works on the item. */
+export type ItemFlags = { question: boolean; started: boolean };
 
 /** Plan states a person parks on purpose, or that wait for one to pick the item: nothing is due and nobody is asked. */
 const PARKED_STATES: ReadonlySet<string> = new Set(["backlog", "held-backlog", "draft", "out-of-scope", "not-started"]);
@@ -35,9 +35,15 @@ export function classify(p: PlanRowLike, f: ItemFlags): Verdict {
   if (f.question) return { live: true, cause: "question" };
   if (p.wait !== null && PARKED_WAITS.has(p.wait)) return { live: true, cause: "parked" };
   if (PARKED_STATES.has(p.state) || p.itemState === "held-backlog") return { live: true, cause: "parked" };
+  // The automatic path stopped for a person on a PR nobody started: nobody is asked, it waits for someone to pick it up.
+  const unpicked = p.kind === "pr" && !f.started;
+  if (unpicked && p.state === "opus-close") return { live: true, cause: "parked" };
   if (p.wait === null) return { live: false, cause: "no-plan" };
   if (p.waitKind === "contributor") return { live: true, cause: "contributor" };
-  if (p.waitKind === "person") return GITHUB_PERSON_WAITS.has(p.wait) ? { live: true, cause: "external" } : { live: false, cause: "person-wait-without-question" };
+  if (p.waitKind === "person") {
+    if (GITHUB_PERSON_WAITS.has(p.wait)) return { live: true, cause: "external" };
+    return unpicked ? { live: true, cause: "parked" } : { live: false, cause: "person-wait-without-question" };
+  }
   if (INTERNAL_WAITS.has(p.wait)) return { live: false, cause: "internal-wait" };
   return { live: true, cause: "external" };
 }
@@ -58,7 +64,7 @@ export function evaluateLiveness(input: LivenessInput, nowMs: number = Date.now(
     const key = `${r.repo}#${r.number}`;
     // A review held by other items waits on the questions about those items.
     const asked = input.asked.has(key) || blockersOfWait(r.wait).some((b) => input.asked.has(b));
-    const verdict = classify(r, { question: asked });
+    const verdict = classify(r, { question: asked, started: input.started.has(key) });
     const base = { repo: r.repo, number: r.number, kind: r.kind, state: r.state, wait: r.wait, phase, since };
     if (!verdict.live) {
       items.push({ ...base, verdict: "stuck", cause: verdict.cause });

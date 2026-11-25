@@ -8,6 +8,7 @@ import { REFUSED_PREFIX } from "../remote/calls.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
 import { workflowOf } from "../core/decide.ts";
+import { mergeAllowed } from "../core/gates.ts";
 import { notDue, planned, planNow } from "../core/select.ts";
 import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
@@ -64,7 +65,7 @@ export async function premergeCandidates(db: Db, opts: { repo?: string; at?: num
     ...rest, ...(at !== undefined ? { now: at } : {}),
     onPlan: wake ? (f, plan) => {
       const pm = f.premerge;
-      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && f.repoFacts.mergeApproved && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
+      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergeAllowed(f) && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
       if (f.diffPending) {
         const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, pace);
         if (t > f.now) wake.push(t);

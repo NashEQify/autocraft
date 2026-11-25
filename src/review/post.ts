@@ -12,7 +12,7 @@ import { auditIdentity, githubIdentity } from "../github/identity.ts";
 import { ownerOf } from "../owners.ts";
 import { planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
-import { CLI_BY, type By } from "../core/gates.ts";
+import { CLI_BY, mergeAllowed, pushAllowed, type By } from "../core/gates.ts";
 import { Client, GithubError, type Querier } from "../mirror.ts";
 import { prInfo } from "../merge/index.ts";
 import { postSourcesOf } from "./post-source.ts";
@@ -66,7 +66,7 @@ export async function postCandidates(db: Db, repo: string): Promise<PostCandidat
       repo, number: f.number, head_oid: head, editId, opusAt: o.at, model: o.model,
       body: reviewBody({
         verdict: o.sourceVerdict, sure: o.sure, summary: pub.summary, points: pub.points, claims: o.claims, head: o.reviewedAt, owner: ownerOf(repo), fixedIn: o.fixedIn,
-        recommendation: recommendation({ verdict: o.verdict, queue: o.verdict === "take" && isQueueState(plan.state) ? { path: plan.path, state: plan.state } : null, mergeApproved: f.repoFacts.mergeApproved, canPush: f.repoFacts.pushApproved && f.pushable }),
+        recommendation: recommendation({ verdict: o.verdict, queue: o.verdict === "take" && isQueueState(plan.state) ? { path: plan.path, state: plan.state } : null, mergeApproved: mergeAllowed(f), canPush: f.pushable && pushAllowed(f, "fixup") }),
       }),
     });
   }

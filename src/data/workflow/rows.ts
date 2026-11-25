@@ -1,10 +1,10 @@
 // `item_workflows` and `workflow_events` (M10 workflow-a).
-// reads: implement.implementations, mirror.items (through mirror.openItem), access (canActExpr), changes (operatorFixEnded)
+// reads: implement.implementations, mirror.items (through mirror.openItem), access (canActExpr, writeCheckedAt), changes (operatorFixEnded)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import { canActExpr } from "../access/fragments.ts";
+import { canActExpr, writeCheckedAt } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
@@ -111,7 +111,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const holdsQ = k.selectFrom("main.merge_holds as h").innerJoin(resolveKeys(db, keys, "kh"), (j: any) => j.onRef("kh.repo", "=", "h.repo").onRef("kh.number", "=", "h.number")).select(["h.repo", "h.number"]);
 
   const requestsQ = k.selectFrom("main.operator_fixups as o").innerJoin(resolveKeys(db, keys, "kr"), (j: any) => j.onRef("kr.repo", "=", "o.repo").onRef("kr.number", "=", "o.number"))
-    .selectAll("o").where("o.state", "=", "queued")
+    .selectAll("o").select((eb: any) => writeCheckedAt(db, eb, "o.by", "o.repo").as("maker_checked_at")).where("o.state", "=", "queued")
     .where((eb: any) => canActExpr(db, eb, "o.by", "o.repo", after))
     .where((eb: any) => eb.not(operatorFixEnded(eb, "o.id")))
     .orderBy("o.repo").orderBy("o.number").orderBy("o.from_head").orderBy("o.id");
@@ -120,7 +120,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
     .selectAll("p").where("p.state", "in", ACTIVE_LEGS).orderBy("p.id");
 
   const [live, ended, holds, requests, legs] = await db.together(() => Promise.all([q.all(liveQ), q.all(endedQ), q.all(holdsQ), q.all(requestsQ), q.all(legsQ)])) as
-    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], FixupRequest[], Preapproval[]];
+    [(WorkflowRow & { pr: number | null; own: unknown; pr_hit: unknown })[], { repo: string; number: number; state: string }[], { repo: string; number: number }[], OperatorWork["requests"], Preapproval[]];
 
   for (const r of live) {
     const w = workflowOf(r);
@@ -400,16 +400,17 @@ export async function loadQueuePositions(db: Db, f: { repos?: string[] } = {}): 
   return out;
 }
 
-/** Items a person started or approved (case-insensitive login), with the implementation PR of a live implement workflow; narrowed by refs, repos and open state. */
+/** Items a person started or approved (case-insensitive login), with the implementation PR of a live implement workflow; narrowed by workflow state, refs, repos and open state. */
 export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Set<RefKey>> {
   const out = new Set<RefKey>();
-  if (f.refs?.length === 0 || f.repos?.length === 0) return out;
+  if (f.refs?.length === 0 || f.repos?.length === 0 || f.states?.length === 0) return out;
   const q = queryDb(db);
   const k = q.k as any;
   const who = (b: any) => f.login === undefined ? b : b.where((eb: any) => eb.or([loginIn(db, eb, "w.started_by", [f.login!], "ls"), loginIn(db, eb, "w.approved_by", [f.login!], "la")]));
-  const own = who(k.selectFrom("main.item_workflows as w").select(["w.repo as repo", "w.number as number"]).where("w.state", "in", LIVE_STATES));
+  const states = f.states ?? LIVE_STATES;
+  const own = who(k.selectFrom("main.item_workflows as w").select(["w.repo as repo", "w.number as number"]).where("w.state", "in", states));
   const viaPr = who(k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .select(["i.repo as repo", "i.pr_number as number"]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null));
+    .select(["i.repo as repo", "i.pr_number as number"]).where("w.state", "in", states).where("w.entry", "=", "implement").where("i.pr_number", "is not", null));
   const rows = await q.all(k.selectFrom(own.union(viaPr).as("s")).select(["s.repo", "s.number"])
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "s", pairs(f.refs!))))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "s.repo", f.repos!)))

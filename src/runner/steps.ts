@@ -102,12 +102,6 @@ export function modelsOf(step: StepDef | undefined, params: Params): string[] {
 /** Models that run on a Task Runner (everything but Jev). */
 export const usesClaude = (models: string[]): boolean => models.some((m) => m !== "jev");
 
-/** Merging is opt-in per repo: tracked repos include ones we do not maintain. */
-async function checkMergeApproved(db: Db, p: Params): Promise<string | null> {
-  const { mergeApprovalOf } = await import("../merge/approval.ts");
-  return await mergeApprovalOf(db, String(p.repo)) ? null : `merging in ${p.repo} is not approved`;
-}
-
 /** Approving workflow runs of outside contributors' PRs is opt-in per repo. */
 async function checkCiApproved(db: Db, p: Params): Promise<string | null> {
   const { ciApprovalOf } = await import("../merge/ci-approval.ts");
@@ -129,13 +123,6 @@ async function checkMainFixApproved(db: Db, p: Params): Promise<string | null> {
 async function checkCommentApproved(db: Db, p: Params): Promise<string | null> {
   const { commentApprovalOf } = await import("../act/approval.ts");
   return await commentApprovalOf(db, String(p.repo)) ? null : `commenting in ${p.repo} is not approved`;
-}
-
-/** Pushing to contributors' branches and commenting the fixes are each opt-in per repo; the fix-up step needs either. */
-async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
-  const { pushApprovalOf } = await import("../fixup/approval.ts");
-  const { commentApprovalOf } = await import("../act/approval.ts");
-  return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
 }
 
 /** The `implement` buckets this build carries out. */
@@ -309,13 +296,11 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to start or merge in this job" },
     ],
-    check: checkMergeApproved,
+    // No repo check: whether a PR may merge is its own (src/core/may.ts), applied by the step to each PR.
     run: async (ctx) => {
       const { runMerge } = await import("../merge/index.ts");
       const { runBatches } = await import("../merge/batch.ts");
       const { runSingles } = await import("../merge/single.ts");
-      const refused = await checkMergeApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo), limit = Number(ctx.params.limit);
       const singly = await runSingles(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       if (singly) {
@@ -369,11 +354,9 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to fix up in this job" },
     ],
-    check: checkPushApproved,
+    // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runFixup } = await import("../fixup/index.ts");
-      const refused = await checkPushApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runFixup(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.pushed.length + r.asked.length + r.failed.length + r.held.length);
       return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} asked, ${r.failed.length} failed or refused, ${r.held.length} held`;
@@ -960,11 +943,9 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to work on in this job" },
     ],
-    check: checkPushApproved,
+    // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runCifix } = await import("../cifix/index.ts");
-      const refused = await checkPushApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
       const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length);
       return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length} failed or refused, ${r.held.length} held`;

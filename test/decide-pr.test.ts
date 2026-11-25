@@ -206,7 +206,7 @@ const rows: Row[] = [
 
   // ---- CI fixes
   { name: "cifix: failing CI is worked on", facts: { ...CI_FAIL, cifix: cifix() }, expect: { state: "ci-failed", actions: ["cifix:work"] } },
-  { name: "cifix: no push approval", facts: { ...CI_FAIL, cifix: cifix(), repoFacts: { pushApproved: false } }, expect: { actions: [] } },
+  { name: "cifix: no push approval", facts: { ...CI_FAIL, cifix: cifix(), repoFacts: { pushApproved: false } }, expect: { actions: [], wait: "push approval for the repo" } },
   { name: "cifix: not pushable, comments approved: work (comment route)", facts: { ...CI_FAIL, cifix: cifix(), pushable: false }, expect: { actions: ["cifix:work"] } },
   { name: "cifix: not pushable, no comment approval", facts: { ...CI_FAIL, cifix: cifix(), pushable: false, repoFacts: { commentApproved: false } }, expect: { actions: [] } },
   { name: "cifix: formatter task running", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 7, formatterEnded: false, tries: 1 }) }, expect: { actions: [] } },

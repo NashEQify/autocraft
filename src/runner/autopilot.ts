@@ -17,7 +17,7 @@ import { TOPICS } from "../db/live.ts";
 import { pendingConversations } from "../conversations/store.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { loadPlanSet, type PlanSet } from "../core/plan-set.ts";
-import { gates, type Want } from "../core/gates.ts";
+import { gates, mergeAllowed, type Want } from "../core/gates.ts";
 import type { Action, ActionKind } from "../core/plan.ts";
 import { planCacheDiff, writePlanDiff } from "../core/plan-cache.ts";
 import { refreshLiveness } from "../liveness.ts";
@@ -239,11 +239,13 @@ async function servable(db: Db, ctx: PlanCtx, kind: ActionKind, step: string, fr
 const cursorOf = async (db: Db, ctx: PlanCtx, name: "review" | "verify"): Promise<string | null> =>
   (ctx.marks ??= new Map([...(await loadLaneState(db, ["cursor"])).values()].map((r) => [r.step, r.value]))).get(name) ?? null;
 
-/** Whether the guard would let the pipeline make the write an action stands for: the global switch and the repo's approval. */
-const wantOf = (a: Action): Want => ({ kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}) });
-const allowed = <T extends { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }>(ps: T[]): T[] =>
-  ps.filter((p) => gates(p.facts, wantOf(p.action), "pipeline") === null);
-/** The same test for a write that needs no per-item fact, judged on the repo's own facts. */
+const wantOf = (a: Action): Want => ({
+  kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}), ...(typeof a.params?.source === "string" ? { source: a.params.source } : {}),
+});
+/** Whether the guard would let the pipeline make the write an action stands for: the global switch, the breaker and the item's own approval rule. */
+const passes = (p: { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }): boolean => gates(p.facts, wantOf(p.action), "pipeline") === null;
+const allowed = <T extends { facts: Planned["facts"] | PlannedItem["facts"]; action: Action }>(ps: T[]): T[] => ps.filter(passes);
+/** The same test for a write whose approval is the repo's alone (no per-item rule): every item of the repo carries the same answer. */
 function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
   const f = plans.prs.find((p) => p.facts.repo === repo)?.facts ?? plans.items.find((p) => p.facts.repo === repo)?.facts;
   return !f || gates(f, want, "pipeline") === null;
@@ -512,8 +514,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
-      // The merge queue: PRs with a queue state (merged ones too), in repos approved for merging.
-      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && p.facts.repoFacts.mergeApproved)
+      // The merge queue: PRs with a queue state (merged ones too) whose merge is approved, by a person or by the repo.
+      const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && mergeAllowed(p.facts))
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
       const due = new Set(allowed(await planned(db, "merge", { plans })).map((p) => p.facts.repo));
       const batches = new Set(await batchesDue(db));
@@ -583,12 +585,20 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
-      const sels = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, await selectFixups(db, repo, ctx.run, plans)]));
-      const repos = ctx.tracked.filter((repo) => {
-        const sel = sels.get(repo)!;
-        const push = repoAllows(plans, repo, { kind: "fixup", bucket: "fix" }), ask = repoAllows(plans, repo, { kind: "fixup", bucket: "ask" });
-        return (push && (sel.fix.length > 0 || sel.lint.length > 0 || sel.conflictMerge.length > 0)) || (ask && (sel.ask.length > 0 || sel.conflictAsk.length > 0));
-      });
+      // Each planned action is judged on its own PR: a person's fix-up runs whatever the repo approves.
+      const repos: string[] = [], failed: unknown[] = [];
+      for (const repo of ctx.tracked) {
+        try {
+          const sel = await selectFixups(db, repo, ctx.run, plans, passes);
+          if ([sel.fix, sel.lint, sel.conflictMerge, sel.ask, sel.conflictAsk].some((l) => l.length > 0)) repos.push(repo);
+        } catch (e) {
+          // A repo whose selection fails leaves the lane to the others; a failure of every repo is the lane's own.
+          failed.push(e);
+          if (failed.length === ctx.tracked.length) throw e;
+          console.error(`autopilot: fixup: ${repo}: ${(e as Error).message}`);
+          (ctx.notes ??= {}).fixup ??= `the fix-ups of ${repo} could not be selected: ${(e as Error).message}`;
+        }
+      }
       return flightFirst(plans, repos.sort()).map((repo) => ({ step: "fixup", params: { repo } }));
     },
   },

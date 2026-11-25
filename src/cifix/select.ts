@@ -1,4 +1,5 @@
 // The PRs the CI fix step works on: those whose Plan holds a `cifix` action.
+import { pushRefusal } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { CifixCandidate, CifixSelection } from "./candidates.ts";
@@ -11,7 +12,7 @@ export async function selectCifix(db: Db, repo: string, run?: string | null, pla
     const x = f.cifix!, r = f.review;
     const c: CifixCandidate = {
       repo, number: f.number, head: action.head!, verdict: r?.verdict === "take-fix" ? "take-fix" : "take", reason: r?.reason ?? "", attempt: x.tries + 1,
-      route: f.pushable ? "branch" : "comment", rerun: x.rerunAt !== null, rerunAt: x.rerunAt,
+      route: f.pushable ? "branch" : "comment", pushRefused: pushRefusal(f, "cifix"), rerun: x.rerunAt !== null, rerunAt: x.rerunAt,
     };
     const bucket = action.params?.bucket;
     if (bucket === "work") out.work.push(c);
@@ -23,12 +24,12 @@ export async function selectCifix(db: Db, repo: string, run?: string | null, pla
   const lints = await planned(db, "lint", { repo, bucket: "cifix", ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) });
   const stored = await loadStoredPatches(db, lints.map((l) => ({ repo, number: l.facts.number })), ["cifix"]);
   for (const { facts: f, action } of lints) {
-    const head = action.head!, r = f.review!;
+    const head = action.head!, r = f.review;
     if (out.lint.some((x) => x.number === f.number)) continue;
     // The newest stored row at the head.
     const w = stored.filter((x) => x.kind === "cifix" && x.number === f.number && x.head === head).at(-1);
     if (!w || w.kind !== "cifix") continue;
-    out.lint.push({ repo, number: f.number, head, verdict: r.verdict as "take" | "take-fix", reason: r.reason, attempt: w.attempt, route: f.pushable ? "branch" : "comment", rerun: false, rerunAt: null,
+    out.lint.push({ repo, number: f.number, head, verdict: r?.verdict === "take-fix" ? "take-fix" : "take", reason: r?.reason ?? "", attempt: w.attempt, route: f.pushable ? "branch" : "comment", pushRefused: pushRefusal(f, "cifix"), rerun: false, rerunAt: null,
       lint: { rowid: w.id, round: w.lintRound, task: w.lintTask, state: w.lintState, patch: w.patch, files: w.files, session: w.session } });
   }
   return out;

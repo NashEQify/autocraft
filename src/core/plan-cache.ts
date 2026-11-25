@@ -3,6 +3,7 @@
 // that changed and deletes the rows of items that left the Plans, in one transaction.
 import { holdWait } from "../outside.ts";
 import { cifixBucket, fixupOf, mergeEntry, queueEntry } from "./decide.ts";
+import { pushAllowed } from "./gates.ts";
 import { nextStep } from "./decide-item.ts";
 import { isWork } from "./assignment.ts";
 import type { ItemFacts, MergePath, Plan, PrFacts, WaitKind } from "./plan.ts";
@@ -54,7 +55,7 @@ const CIFIX_BUCKETS: Record<string, CifixBucket> = { work: "cifix-queued", forma
 function fixupBucketOf(f: PrFacts, plan: Plan): FixupBucket | undefined {
   const x = fixupOf(f);
   if (x) return x.bucket === "fix" || x.bucket === "unapproved" || x.bucket === "asked" ? x.bucket : "hold";
-  if (f.premerge && plan.actions.some((a) => a.kind === "fixup" && a.params?.source === "premerge")) return f.pushable && f.repoFacts.pushApproved ? "fix" : f.pushable ? "unapproved" : "hold";
+  if (f.premerge && plan.actions.some((a) => a.kind === "fixup" && a.params?.source === "premerge")) return f.pushable && pushAllowed(f, "fixup") ? "fix" : f.pushable ? "unapproved" : "hold";
   return undefined;
 }
 

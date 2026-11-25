@@ -16,7 +16,7 @@ import { isHalt, poolRoom, takersCut } from "../agents/call.ts";
 import { pushesAreUnsettled } from "../fixup/unsettled.ts";
 import { audit } from "../dash/audit.ts";
 import { optionalChecks } from "../optional-checks.ts";
-import { loadStepApprovals } from "../data/control/index.ts";
+import { commentApprovalOf } from "../act/approval.ts";
 import { finishInfraRerun, finishPatch, loadPatchFacts, recordPushing, startInfraRerun, storePatch } from "../data/changes/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadArtifactFiles } from "../data/build/index.ts";
@@ -35,7 +35,7 @@ import { ensureAuthorWrites } from "../fixup/author-permission.ts";
 import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { HOLD_CANNOT_PUSH } from "../fixup/template.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
-import { guard, guardRepo, liveOf } from "../core/guard.ts";
+import { guard, guardClaim, liveOf } from "../core/guard.ts";
 import { claimForWork } from "../github/claim.ts";
 import { pipelineMe } from "../github/pipeline-account.ts";
 import { ghAskComment, ghComment, ghRerunFailed, pushBranch, type Note, type Writer } from "../github/write.ts";
@@ -378,8 +378,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   await rec.dropUnlisted(repo, sel.lint);
   const gw: Writer = { db, login: ACTOR };
   const git = new Git(d.exec, d.root, repo);
-  const approvals = (await loadStepApprovals(db, [repo], ["push", "comment"])).get(repo) ?? {};
-  const approved = !!approvals.push, commenting = !!approvals.comment;
+  const commenting = await commentApprovalOf(db, repo);
   const titles = new Map([...await loadItems(db, [...sel.work, ...sel.collect.map((x) => x.c), ...sel.lint].map((c) => ({ repo: c.repo, number: c.number })), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
   const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   let whoP: ReturnType<typeof whoAmI> | undefined;
@@ -408,8 +407,8 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     const writes = pr.headRepository ? await ensureAuthorWrites(db, repo, c.number, pr.headRepository.nameWithOwner) : "no";
     if (writes === "unknown") { log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
     const canPush = !!pr.headRepository && pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes");
-    if (canPush ? !approved : !commenting) {
-      const reason = canPush ? "pushing is not approved for this repo" : HOLD_CANNOT_PUSH;
+    if (canPush ? c.pushRefused !== null : !commenting) {
+      const reason = canPush ? `the push is not approved: ${c.pushRefused}` : HOLD_CANNOT_PUSH;
       await rec.set(c, kind, "cannot-push", reason, { files: v.files });
       summary.held.push({ ref, reason });
       log(`  ${ref}: held: ${reason}`);
@@ -549,9 +548,8 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   /** Sonnet patches the code from the log, Opus checks the patch. */
   /** The CI fix starts work on the PR (a model patch or a formatter run): the pipeline's account is assigned when nobody is. */
   const claim = async (c: CifixCandidate): Promise<void> => {
-    const by = params.by ?? CLI_BY;
-    const g = [await guardRepo(db, repo, "push", by), await guardRepo(db, repo, "comment", by)].find((x) => !("refused" in x));
-    if (g && !("refused" in g)) await claimForWork({ db, login: ACTOR }, g, d.querier, repo, c.number, "pr", () => pipelineMe(log, d.exec), { run: runId }, log);
+    const g = await guardClaim(db, { repo, number: c.number }, { kind: "cifix", bucket: "work" }, params.by ?? CLI_BY);
+    if (!("refused" in g)) await claimForWork({ db, login: ACTOR }, g, d.querier, repo, c.number, "pr", () => pipelineMe(log, d.exec), { run: runId }, log);
   };
   const fixCode = async (c: CifixCandidate, pr: PrNode, failure: CiFailure, previous?: LintPrevious, ses: SessionAsk = {}): Promise<void> => {
     const ref = refOf(c);

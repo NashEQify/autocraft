@@ -82,6 +82,9 @@ export function mergeMay(f: PrFacts): MayResult | null {
   return m && mayMerge(m);
 }
 
+/** `mergeMay` as a yes or no; the repo's merge approval on facts without its inputs. */
+export const mayMergeNow = (f: PrFacts): boolean => mergeMay(f)?.ok ?? f.repoFacts.mergeApproved;
+
 /** Whether the merge of the PR at its head is approved, handed over or not (`mergeApproved`, src/core/may.ts); the repo's merge approval on facts without its inputs. */
 export function mergeAllowed(f: PrFacts): boolean {
   const m = mergeInputs(f);

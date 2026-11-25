@@ -1,7 +1,7 @@
 // Facts: everything the review-to-merge rules read about open PRs, built for a whole pass or a slice of it from the module loads of
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
-import { loadOwnLogins } from "../data/access/index.ts";
+import { HOLD_MAX, loadOwnLogins } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
@@ -295,6 +295,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     sameRepo(i.head_repo, repo) && d.authorWrites(repo, { author: i.author, author_type: i.author_type, author_id: i.author_id ?? null }, (t) => refresh.soon(ref, t)) !== "no");
   if (operator && state === "OPEN") {
     const legs = operator.legs;
+    // A request counts only while GitHub confirmed its maker's write permission within HOLD_MAX, which ends with the clock alone.
+    for (const r of operator.requests) if (r.maker_checked_at) refresh.soon(ref, Date.parse(r.maker_checked_at) + HOLD_MAX);
     base.operator = {
       fix: !!head && operator.requests.some((r) => r.from_head === head) ? { attempts: operatorTriesIn(patch.fixups) } : null,
       hold: legs.some((l) => l.state !== "queued"), premerge: !!head && legs.some((l) => l.state === "ci" && l.head === head),
