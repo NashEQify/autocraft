@@ -17,7 +17,7 @@ import type { LowerLogin, RunnerSnapshot, StartedWork, SweepState, TakerSweepPla
 /** Calls whose prompt starts with one of these run in a login's Interactive slots; keep in step with the claim's rule. */
 const INTERACTIVE_LIKE = "discord.%";
 
-/** The reads of other modules the snapshot embeds; tests pass fakes for modules not built yet. */
+/** The reads of other modules the snapshot embeds; tests may pass fixed answers in their place. */
 export type SnapshotDeps = {
   started: (db: Db) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
   /** Non-write permission checks of every login with a live runner credential, by "login\nrepo", with when each was checked. */
