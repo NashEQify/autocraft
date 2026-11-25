@@ -24,7 +24,7 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { actionRefusal, cardRepos, dependsOnCode, isRegistry, itemLabels, otherTypeLabel, readParams, type CardParams, type FollowUp, type OtherAction, type RegistryCommand } from "./cards.ts";
 import { ConversationError, insertTurn, prChanged, seenHead, systemBlock, type StoreDeps } from "./store.ts";
 import { COMMENT_MAX, NOTE_MAX } from "./types.ts";
-import { ownerOf, slugOf } from "../owners.ts";
+import { ownerOf } from "../owners.ts";
 import { parse } from "../workflow/parse.ts";
 import { runCommand } from "../workflow/apply.ts";
 import type { Surface } from "../workflow/types.ts";
