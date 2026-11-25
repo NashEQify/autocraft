@@ -100,7 +100,7 @@ const lastSignature = new WeakMap<Db, string>();
  * The runners the taker rule reads, in a form that changes only when they or what decides their repos change: each one's login, role,
  * My repos, own repo list and skipped tasks. The planner adds it to its input, so work left for want of a taker is planned again when one
  * connects or comes back, without every status report waking the planner. Then, per user with an item choice, the repos of the items they
- * take (started work, or the work they started or approved), and the oldest cached non-write permission check of live runner logins, so
+ * take (started work, or the work they started or approved), and the oldest cached non-write permission check of the takers' logins, so
  * the signature changes when that one expires. One wave: the grouped string, the takers with their item choice, the started work and the
  * permission checks. A signature that differs from the handle's last one drops the cached snapshot: work planned on it must not be
  * judged on an older reading, which would leave it waiting for a signature that does not change again.
@@ -145,8 +145,9 @@ async function readTakerSignature(db: Db, now: number, deps: SnapshotDeps): Prom
     }
     return `${me}=${[...repos].sort().join(",")}`;
   });
-  // The oldest cached denial: the signature changes when it expires.
-  const oldest = [...denials.values()].map((d) => d.checkedAt).sort()[0];
+  // The takers' oldest cached denial: the signature changes when it expires, and not for a login that takes nothing now.
+  const taking = new Set(takers.map((t) => t.login.toLowerCase()));
+  const oldest = [...denials].filter(([key]) => taking.has(key.slice(0, key.indexOf("\n")))).map(([, d]) => d.checkedAt).sort()[0];
   const s = filtered.length ? `${sig.s}|items:${filtered.join(";")}` : sig.s;
   return oldest ? `${s}|${oldest}` : s;
 }

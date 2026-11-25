@@ -35,21 +35,16 @@ export async function loadCallUsage(db: Db, ids: number[], o: { reply?: boolean 
   return new Map(rows.map((r) => [Number(r.id), { usage: r.usage, reply: r.reply }]));
 }
 
-/** The call row, liveness stamp, lost-lease and gone-caller reads in one wave. */
-export async function loadCallPoll(db: Db, id: number, now: number): Promise<CallPoll> {
-  return (await loadCallPolls(db, [id], now)).get(id)!;
-}
-
 /**
- * Set form of `loadCallPoll`: one poller per process reads every call it waits on in one wave of 5 statements, whatever their number. A done reply
- * is cleared in the same call (one more statement, only when a reply arrived), so it is handed out once; its `consumedAt` is the time it was taken.
+ * The call row, liveness stamp, lost-lease and gone-caller reads: one poller per process reads every call it waits on in one wave of 5
+ * statements, whatever their number. Reads only: the poller takes a done call's reply (`takeReplies`) before it hands it out.
  */
 export async function loadCallPolls(db: Db, ids: number[], nowMs: number): Promise<Map<number, CallPoll>> {
   if (!ids.length) return new Map();
   const q = queryDb(db);
   const [rows, stamp, lost, gone, parentLive] = await db.together(async () => await Promise.all([
     // The reply only of a done call: it is up to 4 MB and every poll would carry it.
-    q.all(q.k.selectFrom("main.remote_calls").select((eb) => ["id", "state", eb.case().when("state", "=", "done").then(eb.ref("reply")).end().as("reply"), "error", "run_id", "leased_at", "attempt", "consumed_at", "usage", "turns", "session_id",
+    q.all(q.k.selectFrom("main.remote_calls").select((eb) => ["id", "state", eb.case().when("state", "=", "done").then(eb.ref("reply")).end().as("reply"), "error", "progress", "run_id", "leased_at", "attempt", "consumed_at", "usage", "turns", "session_id",
       "parent_id", "queued_ms", "queued_since", "since", "prompt_id", "tier", "items", "repo"])
       .where(inList(db, "id", ids, "bigint"))),
     q.get(q.k.selectFrom("main.remote_liveness").select(["alive_at", "since"]).where("id", "=", 1)),
@@ -62,15 +57,11 @@ export async function loadCallPolls(db: Db, ids: number[], nowMs: number): Promi
   ]));
   const liveness = aliveOf(stamp, nowMs);
   const lostIds = new Set(lost.map((r) => Number(r.id))), goneIds = new Set(gone.map((r) => Number(r.id))), parentIds = new Set(parentLive.map((r) => Number(r.id)));
-  const fresh = rows.filter((r) => r.state === "done" && r.consumed_at === null).map((r) => Number(r.id));
-  if (fresh.length) {
-    await q.run(q.k.updateTable("main.remote_calls").set({ reply: null, consumed_at: nowMs }).where(inList(db, "id", fresh, "bigint")).where("state", "=", "done").where("consumed_at", "is", null));
-  }
   const out = new Map<number, CallPoll>();
   for (const id of ids) out.set(id, { call: null, liveness, lost: false, gone: false, parentLive: false, queued: null });
   for (const r of rows) {
     const id = Number(r.id);
-    const call: PollRow = { id, state: r.state as CallState, reply: r.reply, error: r.error, runId: r.run_id, leasedAt: r.leased_at, attempt: Number(r.attempt), consumedAt: fresh.includes(id) ? nowMs : r.consumed_at, usage: r.usage, turns: r.turns, sessionId: r.session_id };
+    const call: PollRow = { id, state: r.state as CallState, reply: r.reply, error: r.error, progress: r.progress, runId: r.run_id, leasedAt: r.leased_at, attempt: Number(r.attempt), consumedAt: r.consumed_at, usage: r.usage, turns: r.turns, sessionId: r.session_id };
     const queued: QueuedWait | null = r.state !== "queued" ? null : {
       parentId: r.parent_id === null ? null : Number(r.parent_id), queuedMs: Number(r.queued_ms), queuedSince: r.queued_since === null ? null : Number(r.queued_since), since: Number(r.since),
       promptId: r.prompt_id, tier: r.tier as Tier, repos: [...new Set([...items(r.items).map((i) => i.repo), ...(r.repo ? [r.repo] : [])])],
@@ -78,6 +69,13 @@ export async function loadCallPolls(db: Db, ids: number[], nowMs: number): Promi
     out.set(id, { call, liveness, lost: lostIds.has(id), gone: goneIds.has(id), parentLive: parentIds.has(id), queued });
   }
   return out;
+}
+
+/** Clears the replies of done calls that were read, so each is handed out once and can no longer be adopted. 1 statement. */
+export async function takeReplies(db: Db, ids: number[], nowMs: number): Promise<void> {
+  if (!ids.length) return;
+  const q = queryDb(db);
+  await q.run(q.k.updateTable("main.remote_calls").set({ reply: null, consumed_at: nowMs }).where(inList(db, "id", ids, "bigint")).where("state", "=", "done").where("consumed_at", "is", null));
 }
 
 /** `GROUP BY job_id`: whether each job has queued calls (for a caller that polls) and when the last lease was taken. */
@@ -120,7 +118,7 @@ export async function loadLeaseTurnover(db: Db, logins: string[]): Promise<Map<L
 
 /**
  * Every queued call: the follow-ups first, then the others, each oldest first (the pure `sortQueue` of feature code gives the claim order). Cached per `Db` for 2 s and keyed
- * by the (count, newest id) signature; every writer that changes the queue drops the cache. A miss is one wave of 3 statements after the signature, a hit one.
+ * by the (count, newest id) signature; every writer that changes the queue drops the cache. A miss is one wave of 2 statements after the signature, a hit one.
  */
 export async function loadQueue(db: Db, now: number): Promise<QueueSnapshot> {
   return await loadQueueFor(db, now);

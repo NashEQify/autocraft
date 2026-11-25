@@ -217,10 +217,14 @@ export class WorkspaceServer {
 
   async serve(): Promise<void> {
     const { db } = this;
-    const rows = (await claimQueuedCalls(db, this.workspaceId, this.callId)).filter((r) => !this.#running.has(r.id));
-    // The session gets the whole arguments; the row keeps them cut to its record size.
-    const parsed = rows.map((r) => ({ ...r, parsed: parseArgs(r.args) }));
-    if (parsed.length) await markCalls(db, parsed.map((r) => ({ id: r.id, set: { args: JSON.stringify(capJson(r.parsed ?? {})) } })));
+    // One transaction: a call claimed by a pass that then fails would stay running with nothing that runs it.
+    const parsed = await db.write(async () => {
+      const rows = (await claimQueuedCalls(db, this.workspaceId, this.callId)).filter((r) => !this.#running.has(r.id));
+      // The session gets the whole arguments; the row keeps them cut to its record size.
+      const parsed = rows.map((r) => ({ ...r, parsed: parseArgs(r.args) }));
+      if (parsed.length) await markCalls(db, parsed.map((r) => ({ id: r.id, set: { args: JSON.stringify(capJson(r.parsed ?? {})) } })));
+      return parsed;
+    });
     for (const r of parsed) this.#run(r.id, r.tool, r.parsed);
   }
 

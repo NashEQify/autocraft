@@ -3,7 +3,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { finishRuns, saveTools, setReportedModel } from "../inference/index.ts";
 import { noteFailure, noteSuccess } from "./cooloffs.ts";
-import { REFUSED_PREFIX, dropQueueCache, forgetParsed, sha256hex } from "./calls-shared.ts";
+import { REFUSED_PREFIX, dropQueueCache, sha256hex } from "./calls-shared.ts";
 import { bury, requeue, unlease } from "./calls-unlease.ts";
 import type { LiveLease, ParsedSubmit, RefusalRetry, SubmitResult } from "./types.ts";
 
@@ -82,7 +82,6 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     return true;
   });
   if (ok) {
-    forgetParsed(db, [lease.id]);
     dropQueueCache(db);
   }
   return ok;

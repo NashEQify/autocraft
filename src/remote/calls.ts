@@ -13,6 +13,7 @@ import { rootAgents } from "../sandbox/agents.ts";
 import { joinParts } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
+import { loadFreshWrites, permKey } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
 import * as runners from "../data/runners/index.ts";
 import { LEASE_IDLE_MS } from "../data/runners/index.ts";
@@ -37,7 +38,7 @@ import { heldForOwner, startedOf, type StartedCalls } from "./started.ts";
 import { orderedOf, type Cand } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
 import { fastLaneFits, judges, roleFits, runnerTakes, sameLogin } from "./rules.ts";
-import { canWriteOf, itemFilterIn, settingsOf, type RemoteView } from "./view.ts";
+import { itemFilterIn, settingsOf, type RemoteView } from "./view.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -152,14 +153,21 @@ export type Caller = { tokenId: number; login: string; role: Role };
 
 /**
  * Whether a login other than the caller could take a call now: its helper's last claim found nothing within IDLE_FRESH_MS,
- * the login is not Manual only, that claim covered the call's tier and repos, the login fits the role rules, it may write to
- * every repo by the room's rule and it authored no item of the call. Pure over the runner snapshot.
+ * the login is not Manual only, that claim covered the call's tier and repos, the login fits the role rules, a write
+ * permission of it on every repo is cached and fresh (an author gives way only to someone known to be able to take the call),
+ * and it authored no item of the call. Over the runner snapshot; the permissions are read the first time they matter.
  */
-function idleOthers(v: RemoteView, login: string): (c: Cand) => boolean {
-  const s = v.snapshot, self = login.toLowerCase(), canWrite = canWriteOf(s);
+function idleOthers(db: Db, v: RemoteView, login: string): (c: Cand) => Promise<boolean> {
+  const s = v.snapshot, self = login.toLowerCase();
   const idle = s.runners.filter((r) => r.role !== null && r.idleClaimAt !== null && r.idleClaimAt >= v.now - IDLE_FRESH_MS && r.login.toLowerCase() !== self && !settingsOf(s, r.login).manualOnly)
     .map((r) => ({ login: r.login.toLowerCase(), role: r.role!, tiers: new Set<string>(r.idleTiers ?? []), only: r.idleRepos ? new Set(r.idleRepos) : null, skip: skipsIn(settingsOf(s, r.login).skipTasks), items: itemFilterIn(s, r.login) }));
-  return (c) => idle.some((o) => o.tiers.has(c.tier) && !c.authors.has(o.login) && runnerTakes({ login: o.login, role: o.role, repos: o.only, skip: o.skip }, c, canWrite) && itemsFit(o.items, c));
+  let writes: Promise<ReadonlySet<string>> | null = null;
+  return async (c) => {
+    const others = idle.filter((o) => o.tiers.has(c.tier) && !c.authors.has(o.login) && itemsFit(o.items, c));
+    if (!others.length) return false;
+    const writable = await (writes ??= loadFreshWrites(db, [...new Set(idle.map((o) => o.login))], v.now));
+    return others.some((o) => runnerTakes({ login: o.login, role: o.role, repos: o.only, skip: o.skip }, c, (who, repo) => writable.has(permKey(who, repo))));
+  };
 }
 
 /**
@@ -168,12 +176,12 @@ function idleOthers(v: RemoteView, login: string): (c: Cand) => boolean {
  * prompt judges is passed over only while another helper that could take the call is asking for work (idleOthers). A call
  * bound to a user (NewCall.forLogin) goes to that user alone, author or not.
  */
-async function mayTake(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => boolean): Promise<boolean> {
+async function mayTake(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => Promise<boolean>): Promise<boolean> {
   if (c.forLogin !== null && !sameLogin(c.forLogin, caller.login)) return false;
   if (!roleFits(caller.role, c)) return false;
   for (const repo of c.repos) if (!(await canWrite(repo))) return false;
   // A call bound to the caller is theirs whatever they authored: nobody else may take it.
-  return c.forLogin !== null || !(judges(c.prompt_id) && c.authors.has(caller.login.toLowerCase()) && othersIdle(c));
+  return c.forLogin !== null || !(judges(c.prompt_id) && c.authors.has(caller.login.toLowerCase()) && await othersIdle(c));
 }
 
 const HARNESSES: HarnessId[] = ["claude", "codex"];
@@ -346,7 +354,7 @@ export async function claimableCalls(db: Db, caller: Caller, opts: { tiers?: rea
   // A tier counts when the model the helper would use for it is of an accepted family; without a model, when the tier accepts any.
   const tiers = new Set((opts.tiers ?? TIERS).filter((t) => x.accepted[t].length > 0 && (opts.models?.[t] === undefined || familyOf(opts.models[t]!, x.accepted[t]) !== null)));
   const w = claimView(x, nowMs);
-  const can = memoWrite(canWrite), others = idleOthers(w.view, caller.login);
+  const can = memoWrite(canWrite), others = idleOthers(db, w.view, caller.login);
   let n = 0;
   for (const r of claimOrder(w.q, orderReadsOf(w.view, caller.login), caller, tiers, claimReposOf(set.repos, undefined), [], nowMs)) if (await mayTake(caller, r, can, others)) n++;
   return n;
@@ -483,7 +491,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     tiers = claimTiers(claim, x.accepted, x.floors);
     if (!tiers.size && cooled) return coolReply(cooled);
     if (!tiers.size) throw new HttpError(400, `no tier of the claim has an accepted model at the minimum effort; accepted: ${(Object.keys(x.accepted) as Tier[]).map((t) => `${t} ${x.accepted[t].join("/")}${x.floors[t] ? ` at effort ${x.floors[t]} or higher` : ""}`).join(", ")}`);
-    const can = memoWrite(canWrite), others = idleOthers(w.view, caller.login);
+    const can = memoWrite(canWrite), others = idleOthers(db, w.view, caller.login);
     repos = claimReposOf(set.repos, claim.repos);
     const max = set.maxCalls;
     // An interactive-lane claim is bounded by the user's Interactive slots alone; Max calls at once and the pipeline slots do not apply to it.
@@ -730,7 +738,8 @@ type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
  * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
  * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
  * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
- * queued call's poll carries the waits' fields.
+ * queued call's poll carries the waits' fields. A failed read of the wave fails every call waiting on it (no reply is taken by
+ * then); a write that fails after it fails only the calls it was for.
  */
 class CallPoller {
   readonly #db: Db;
@@ -786,19 +795,34 @@ class CallPoller {
       const [polls, checks, tools] = await db.together(() => Promise.all([
         runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
       ]));
+      const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
+      const resolve = (id: number, p: runners.CallPoll): void => { for (const w of batch.get(id)!) w.resolve({ ...p, checks: checks.has(id), tools: asked.has(id) }); };
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);
+      await this.#hand(batch, ids.filter((id) => !ended.includes(id)), polls, now, resolve);
       if (ended.length) {
         await runners.expireLeases(db, { now, ids: ended });
-        for (const [id, p] of await runners.loadCallPolls(db, ended, now)) polls.set(id, p);
+        await this.#hand(batch, ended, await runners.loadCallPolls(db, ended, now), now, resolve);
       }
-      const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
-      for (const [id, list] of batch) for (const w of list) w.resolve({ ...polls.get(id)!, checks: checks.has(id), tools: asked.has(id) });
     } catch (e) {
+      // Waiters that have their answer keep it.
       for (const list of batch.values()) for (const w of list) w.reject(e);
     } finally {
       this.#running = false;
       this.#schedule();
     }
+  }
+
+  /** Answers the waiters of `ids`; the reply of a done call is taken (runners.takeReplies) before it is handed out. */
+  async #hand(batch: ReadonlyMap<number, { reject: (e: unknown) => void }[]>, ids: number[], polls: ReadonlyMap<number, runners.CallPoll>, now: number, resolve: (id: number, p: runners.CallPoll) => void): Promise<void> {
+    const taken = ids.filter((id) => { const c = polls.get(id)!.call; return c?.state === "done" && c.consumedAt === null; });
+    for (const id of ids) if (!taken.includes(id)) resolve(id, polls.get(id)!);
+    try {
+      await runners.takeReplies(this.#db, taken, now);
+    } catch (e) {
+      for (const id of taken) for (const w of batch.get(id)!) w.reject(e);
+      return;
+    }
+    for (const id of taken) resolve(id, polls.get(id)!);
   }
 }
 const pollers = new WeakMap<Db, CallPoller>();
@@ -816,7 +840,7 @@ const pollerOf = (db: Db): CallPoller => {
  * (takers.ts) throws a NoTakerError and counts as a skipped item (skipItem), so the planner runs the step again. While the
  * call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts)
  * and the tool calls of the workspace bound to the call (src/build/workspace-relay.ts), which also run as soon as their wake
- * arrives. `workspace` gives the session they run on (default: the process's session on the workspace, jobSession).
+ * arrives. The helper's progress lines go to `onProgress`, each once. `workspace` gives the session they run on (default: the process's session on the workspace, jobSession).
  */
 export async function awaitCall(db: Db, id: number, opts: AwaitOptions = {}): Promise<Outcome> {
   const ws = await WorkspaceServer.open(db, id, opts.workspace);
@@ -844,7 +868,7 @@ const parseJson = (v: string | null): unknown => {
 
 async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceServer | null, poller: CallPoller): Promise<Outcome> {
   const log = opts.log ?? console.log;
-  let lastLog = 0;
+  let lastLog = 0, lastProgress: string | null = null;
   // The repos the call names, from its queue entry: a call withdrawn for want of a taker skips them.
   let repos: string[] | null = null;
   for (;;) {
@@ -892,6 +916,10 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
     }
     if (r.state === "leased" && opts.check && poll.checks) await serveChecks(db, id, opts.check);
     if (r.state === "leased" && ws && poll.tools) await ws.serve();
+    if (r.progress !== null && r.progress !== lastProgress) {
+      lastProgress = r.progress;
+      try { opts.onProgress?.(r.progress); } catch { /* progress is best effort */ }
+    }
   }
 }
 

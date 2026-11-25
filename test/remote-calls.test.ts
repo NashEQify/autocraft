@@ -13,7 +13,7 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import type { User } from "../src/dash/types.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
-import { bundleOf, claimableCalls, claimCall, CLAIM_RETRY_S, enqueueCall, expireLeases, heartbeat, leaseState, withdrawCall, submitCall, type Caller } from "../src/remote/calls.ts";
+import { awaitCall, bundleOf, claimableCalls, claimCall, CLAIM_RETRY_S, enqueueCall, expireLeases, heartbeat, leaseState, withdrawCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { stampAlive } from "../src/remote/liveness.ts";
 import { clearCooloff } from "../src/remote/cooloff.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
@@ -113,6 +113,59 @@ describe("user-local remote calls", async () => {
     assert.ok(lease, "the author's helper takes it");
     await done(lease.secret, "by the author");
     assert.equal((await ask)?.text, "by the author");
+  });
+
+  test("the author does not give way to a helper whose write permission is not known", async () => {
+    const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
+    await idle("bob");
+    await db.run(db.k.deleteFrom("repo_permissions").where("login", "=", "bob"));
+    const lease = (await leaseFor("alice"))!;
+    assert.ok(lease, "nobody else is known to be able to take it");
+    await done(lease.secret, "by the author");
+    assert.equal((await ask)?.text, "by the author");
+    await noneIdle();
+  });
+
+  const queue = async () => await enqueueCall(db, {
+    promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number: 1287 }], level: 0, maxAttempts: 2,
+    bundle: { stdin: "x", timeoutSeconds: 600, mcpServers: [], hints: {}, mounts: [], keepSession: false, system: null } as never,
+  });
+
+  test("a waiting caller gets the helper's progress lines, each once", async () => {
+    const id = await queue();
+    const lines: string[] = [];
+    const out = awaitCall(db, id, { onProgress: (l) => void lines.push(l) });
+    const lease = (await leaseFor("bob"))!;
+    for (const progress of ["reading a.rs", "reading a.rs", "reading b.rs"]) {
+      await heartbeat(db, lease.secret, { progress });
+      await sleep(60);
+    }
+    await done(lease.secret, "ok");
+    assert.equal((await out).state, "done");
+    assert.deepEqual(lines, ["reading a.rs", "reading b.rs"]);
+  });
+
+  test("a lost lease that cannot be expired fails its own caller; another call's reply of the same poll is delivered", async (t) => {
+    const ids = [await queue(), await queue()];
+    const leases = [(await leaseFor("bob"))!, (await leaseFor("bob"))!];
+    assert.deepEqual(leases.map((l) => l.id).sort((a, b) => a - b), ids);
+    const [finished, lost] = ids.map((id) => awaitCall(db, id).then((o) => (o.state === "done" ? o.text : o.state), (e: Error) => e.message)) as [Promise<string>, Promise<string>];
+    const write = db.write.bind(db);
+    let failed = false;
+    t.mock.method(db, "write", (async (fn: () => Promise<unknown>, ...rest: []) => {
+      if (!failed && new Error().stack!.includes("expireLeases")) {
+        failed = true;
+        throw new Error("the expiry failed");
+      }
+      return await write(fn, ...rest);
+    }) as typeof db.write);
+    await write(async () => {
+      await db.run(db.k.updateTable("remote_calls").set({ state: "done", reply: "the reply", ended_at: Date.now(), lease_secret_hash: null }).where("id", "=", ids[0]!));
+      await db.run(db.k.updateTable("remote_calls").set((eb) => ({ heartbeat_at: eb("heartbeat_at", "-", 3 * 60000) })).where("id", "=", ids[1]!));
+    });
+    assert.equal(await finished, "the reply");
+    assert.equal(await lost, "the expiry failed");
+    await withdrawCall(db, ids[1]!, "test over");
   });
 
   test("a lease without heartbeats goes back to the queue and the next claim gets it; the old secret is dead", async () => {
