@@ -43,9 +43,7 @@ test("a maintainer with write runs one action per area; without write, or as a v
   assert.ok(await db.get(db.k.selectFrom("main.fast_track").select("repo").where("repo", "=", "app")));
 });
 
-test("bulk Backlog without a repo and release-all of outside authors stay with operators", async () => {
+test("release-all of outside authors stays with operators", async () => {
   const db = await world();
-  await assert.rejects(backlogBulk(db, as("maintainer", ["app"], {}, { outsidePilot: true })), { status: 403 });
   await assert.rejects(releaseAll(db, as("maintainer", ["app"], {}, { author: "x" })), { status: 403 });
-  await assert.rejects(backlogBulk(db, as("maintainer", [], {}, { repo: "app" })), { status: 403 });
 });

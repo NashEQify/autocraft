@@ -33,7 +33,6 @@ import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 import type { Db } from "../src/db/index.ts";
 import { excluded, like } from "../src/db/kx.ts";
-import { insertWorkflow } from "../src/workflow/store.ts";
 
 /** A started item: the workflow row a maintainer's start command writes. */
 const startedItem = (db: Db, by: string, repo: string, number: number): Promise<unknown> =>
