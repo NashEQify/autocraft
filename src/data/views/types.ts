@@ -143,5 +143,12 @@ export type PublicStatsFacts = {
   open: { repo: string; kind: "pr" | "issue"; n: number }[]; merged: { repo: string; number: number; ours: boolean; mergedAt: string; openedAt: string }[];
   reviews: { repo: string; n: number }[]; queues: { repo: string; n: number }[];
 };
-export type StatusInputs = { workflows: ItemWorkflow[]; stages: Map<Ref, unknown>; batches: BatchView[]; items: unknown[] };
 export type HeldFixupFacts = { repo: string; number: number; title: string; head: string; reason: string | null; fixes: unknown; latestFixup: { state: string; reason: string | null } | null };
+
+/** src/data/views/prStatus.ts */
+export type StatusInputs = {
+  stored: import("../workflow/types.ts").StatusRow[];
+  inScope: Set<number>;
+  started: Map<number, { wf: ItemWorkflow; open: boolean }>;
+};
+export type StatusExtras = { batches: Map<string, { pr: number | null }>; answered: Map<number, { login: string; at: string }>; quiet: Set<number> };

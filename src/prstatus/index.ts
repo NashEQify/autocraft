@@ -6,8 +6,7 @@
 // budget), under the repo's PR status switch (src/prstatus/approval.ts) and the step's daily limit. No timer: the planner
 // queues the step when a PR's line differs from the one posted; a PR whose writes keep failing waits out a backoff.
 //
-// In a repo on the maintainer workflow (tracked_repos.workflow = 'new'), every item a person started, issue or PR, gets the
-// comment as soon as it starts, built from the workflow's lines (src/workflow/status.ts): where it stands, who started,
+// Every item a person started, issue or PR, gets the comment as soon as it starts, built from the workflow's lines (src/workflow/status.ts): where it stands, who started,
 // approved, answered or stopped it, its steps, its place in the merge queue, its numbered parts and the open recommendation.
 // A quiet PR's comment carries no parts, recommendation or blocker reason. Items nobody started keep the line above.
 import { commentStatuses, type PublicStatus, type PublicStep } from "../public/status.ts";
@@ -16,20 +15,18 @@ import type { By } from "../core/gates.ts";
 import { ghComment, ghEditComment, WritePacedError, type Writer } from "../github/write.ts";
 import { mentionName, shownMention } from "../github/slugs.ts";
 import { appSlug, githubIdentity, ownLoginTest, plainLogin } from "../github/identity.ts";
-import { setting } from "../settings-read.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { exec as realExec, type Exec } from "../fixup/git.ts";
 import { Client, type Querier } from "../mirror.ts";
-import { ACTIVE_BATCH } from "../merge/batch-store.ts";
-import { pilotExpr } from "../pilot.ts";
 import { ownerOf } from "../owners.ts";
 import { envVar } from "../env.ts";
 import { itemPath, shortRepo } from "../../web/src/lib/links.ts";
 import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
-import { isQuiet } from "../security/quiet.ts";
-import { repoWorkflow, workflowOf } from "../workflow/store.ts";
+import { freshConfig } from "../data/control/index.ts";
+import { countStatusRetriesDue, loadStatusRetryAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
+import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { legWait } from "../workflow/waits.ts";
@@ -116,19 +113,6 @@ export function workflowBody(repo: string, number: number, paragraphs: string[],
   return `${parts.join("\n\n")}\n\n${MARKER}`;
 }
 
-/** Each started item's latest workflow in a repo on the maintainer workflow, with whether the item is open. */
-async function latestWorkflows(db: Db, repo: string): Promise<Map<number, { wf: ItemWorkflow; open: boolean }>> {
-  const rows = await db.all(db.k.selectFrom("main.item_workflows as w").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .selectAll("w").select("i.state as item_state").where("w.repo", "=", repo).orderBy("w.id"));
-  return new Map(rows.map((r) => [r.number, { wf: workflowOf(r), open: r.item_state === "OPEN" }]));
-}
-
-async function workflowFacts(db: Db, repo: string, number: number, wf: ItemWorkflow): Promise<WorkflowFacts> {
-  const a = await db.get(db.k.selectFrom("main.workflow_events").select(["login", "at"])
-    .where("workflow_id", "=", wf.id).where("kind", "=", "answered").orderBy("id", "desc").limit(1));
-  return { wf, answered: a ? { by: a.login, at: a.at } : null, quiet: await isQuiet(db, repo, number), wait: await legWait(db, wf) };
-}
-
 export type HistoryStep = { step: string; at: string };
 
 /** The history with `step` added when it differs from the last one, keeping the newest HISTORY_MAX. */
@@ -152,7 +136,7 @@ export function commentBody(repo: string, number: number, line: string, history:
 }
 
 
-type Stored = { number: number; comment_id: string | null; author: string | null; line: string | null; steps: string; failures: number };
+type Stored = StatusRow;
 export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null };
 
 const parseSteps = (s: string): HistoryStep[] => {
@@ -173,31 +157,19 @@ const retryAt = (failures: number, now: number): string =>
 
 /**
  * The PRs of a repo whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
- * whose posted line differs from its line now. Out of scope (the repo's Pipeline off, a pilot) a posted comment still
- * gets its Merged or Closed edit. Batch PRs get none; a PR waiting out a failure backoff is left out; a member of a batch
- * whose PR has not opened yet keeps its line.
+ * whose posted line differs from its line now. Out of scope (the repo's Pipeline off, a person ended the item) a posted
+ * comment still gets its Merged or Closed edit. Batch PRs get none; a PR waiting out a failure backoff is left out; a member
+ * of a batch whose PR has not opened yet keeps its line.
  */
 export async function statusDue(db: Db, repo: string, now: number = Date.now()): Promise<Due[]> {
-  const stored = await db.all(db.k.selectFrom("main.pr_status_comments").select(["number", "comment_id", "author", "line", "steps", "failures", "retry_at"])
-    .where("repo", "=", repo).where("final", "=", 0)
-    // A Closed line is final until the item is open again: its state then leaves CLOSED and the row is read again.
-    .where((eb) => eb.not(eb.and([eb("line", "=", WORDS.Closed), eb.exists(eb.selectFrom("main.items as c").select(eb.lit(1).as("one"))
-      .whereRef("c.repo", "=", "main.pr_status_comments.repo").whereRef("c.number", "=", "main.pr_status_comments.number").where("c.state", "=", "CLOSED"))]))));
+  const { stored, inScope, started } = await loadStatusInputs(db, repo);
   const byNumber = new Map(stored.map((r) => [r.number, r]));
-  const inScope = new Set((await db.all(db.k.selectFrom("main.items as i").select("i.number")
-    .where("i.repo", "=", repo).where("i.kind", "=", "pr").where("i.state", "=", "OPEN")
-    .where((eb) => eb.or([
-      eb.exists(eb.selectFrom("main.item_stage as s").select(eb.lit(1).as("one")).whereRef("s.repo", "=", "i.repo").whereRef("s.number", "=", "i.number")),
-      eb.exists(eb.selectFrom("main.decisions as d").select(eb.lit(1).as("one")).whereRef("d.repo", "=", "i.repo").whereRef("d.number", "=", "i.number").where("d.answer", "is", null)),
-    ]))
-    .where((eb) => eb.not(eb.exists(eb.selectFrom("main.merge_batches as b").select(eb.lit(1).as("one")).whereRef("b.repo", "=", "i.repo").whereRef("b.pr_number", "=", "i.number"))))
-    .where((eb) => pilotExpr(db, eb, "i")))).map((r) => r.number));
-  const started = await repoWorkflow(db, repo) === "new" ? await latestWorkflows(db, repo) : new Map<number, { wf: ItemWorkflow; open: boolean }>();
   const numbers = [...new Set([...inScope, ...[...started].filter(([, w]) => w.open).map(([n]) => n), ...stored.map((r) => r.number)])]
     .filter((n) => { const at = byNumber.get(n)?.retry_at; return !at || Date.parse(at) <= now; });
   if (!numbers.length) return [];
   const statuses = await commentStatuses(db, repo, numbers);
-  const batches = await batchesOf(db, repo, numbers);
+  const wfIds = numbers.flatMap((n) => { const w = started.get(n); return w ? [w.wf.id] : []; });
+  const { batches, answered, quiet } = await loadStatusExtras(db, repo, numbers, wfIds);
   const out: Due[] = [];
   for (const n of numbers.sort((a, b) => a - b)) {
     const status = statuses.get(n), prev = byNumber.get(n) ?? null;
@@ -209,7 +181,9 @@ export async function statusDue(db: Db, repo: string, now: number = Date.now()):
     if (open && open.pr === null) continue;
     const merged = status.step === "Merged" ? batches.get(`merged:${n}`) : undefined;
     const pr = (open ?? merged)?.pr;
-    const facts: StatusFacts = { status, ...(pr ? { batch: { pr } } : {}), ...(w ? { workflow: await workflowFacts(db, repo, n, w.wf) } : {}) };
+    const a = w ? answered.get(w.wf.id) : undefined;
+    const workflow: WorkflowFacts | undefined = w ? { wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(n), wait: await legWait(db, w.wf) } : undefined;
+    const facts: StatusFacts = { status, ...(pr ? { batch: { pr } } : {}), ...(workflow ? { workflow } : {}) };
     // A started item's line is its whole comment text, so any change edits it; once it ended, the final line is the same as any PR's.
     const line = facts.workflow && !ended ? workflowLines({ ...facts, workflow: facts.workflow }).join("\n\n") : statusLine(facts);
     const first = facts.workflow ? !ended : !NO_FIRST_POST.has(status.step);
@@ -220,30 +194,12 @@ export async function statusDue(db: Db, repo: string, now: number = Date.now()):
 
 /** The earliest end of a failure backoff of the repo's comments after `now`, or null. */
 export async function statusRetryAt(db: Db, repo: string, now: number = Date.now()): Promise<number | null> {
-  const r = await db.get(db.k.selectFrom("main.pr_status_comments").select((eb) => eb.fn.min("retry_at").as("at"))
-    .where("repo", "=", repo).where("final", "=", 0).where("retry_at", ">", new Date(now).toISOString()));
-  return r?.at ? Date.parse(r.at) : null;
+  return await loadStatusRetryAt(db, repo, now);
 }
 
 /** Backoffs that have ended, for the lane's fingerprint: the planner tries those PRs again once the time has passed. */
 export async function statusRetriesDue(db: Db, now: number = Date.now()): Promise<string> {
-  const r = await db.get(db.k.selectFrom("main.pr_status_comments").select((eb) => eb.fn.countAll<number>().as("n"))
-    .where("final", "=", 0).where("retry_at", "<=", new Date(now).toISOString()));
-  return String(r?.n ?? 0);
-}
-
-/** Each PR's open merge batch at its current head (`open:N`) and the batch it merged with (`merged:N`): the batch's PR number, null before it opens. */
-async function batchesOf(db: Db, repo: string, numbers: number[]): Promise<Map<string, { pr: number | null }>> {
-  const rows = await db.all(db.k.selectFrom("main.merge_batch_prs as bp").innerJoin("main.merge_batches as b", "b.id", "bp.batch_id")
-    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "b.repo").onRef("i.number", "=", "bp.number"))
-    .select(["bp.number", "b.state", "b.pr_number", "bp.head_oid", "i.head_oid as head"])
-    .where("b.repo", "=", repo).where("bp.number", "in", numbers).where("b.state", "in", [...ACTIVE_BATCH, "merged"]).orderBy("b.id"));
-  const out = new Map<string, { pr: number | null }>();
-  for (const r of rows) {
-    if (r.state === "merged") out.set(`merged:${r.number}`, { pr: r.pr_number });
-    else if (r.head_oid === r.head) out.set(`open:${r.number}`, { pr: r.pr_number });
-  }
-  return out;
+  return String(await countStatusRetriesDue(db, now));
 }
 
 const FIND_QUERY = `query($owner: String!, $name: String!, $n: Int!, $before: String) {
@@ -277,7 +233,7 @@ async function searchComments(q: Querier, repo: string, number: number, pick: (c
 
 /** The login our comments are written as now (plainLogin), or null when it is not known. */
 async function writerLogin(db: Db): Promise<string | null> {
-  const login = await githubIdentity(db) === "box" ? await setting(db, "pipeline_login") : appSlug();
+  const login = await githubIdentity(db) === "box" ? (await freshConfig(db, ["pipeline_login"])).pipelineLogin : appSlug();
   return login ? plainLogin(login) : null;
 }
 
@@ -354,7 +310,7 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
   return out;
 }
 
-type RowValues = { comment_id: string | null; author: string | null; line: string | null; steps: string; final: number; failures: number; retry_at: string | null; updated_at: string };
+type RowValues = Omit<StatusRow, "repo" | "number">;
 async function store(db: Db, repo: string, number: number, row: RowValues): Promise<void> {
-  await db.run(db.k.insertInto("main.pr_status_comments").values({ repo, number, ...row }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(row)));
+  await saveStatusComments(db, [{ repo, number, ...row }]);
 }

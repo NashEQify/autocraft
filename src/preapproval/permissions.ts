@@ -1,14 +1,15 @@
-// The pipeline's own reading of a maintainer's write permission. A maintainer's pre-approved merge, the Merge answer it rests on and a
+// The pipeline's own reading of a maintainer's write permission. A maintainer's pre-approved merge, the approval it rests on and a
 // queued fix-up request count only while the maintainer's cached write permission is fresh (src/settlers.ts), and a dashboard session
 // refreshes that row only while the person uses the dashboard. The pipeline reads it again through the GitHub App installation
 // (src/remote/permission.ts, which writes repo_permissions) shortly before it expires, so these long-lived rows do not end with the session.
-import { mergeDecisionId } from "../core/rules.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { appPermission, type AppPermission } from "../remote/permission.ts";
-import { maintainersSettle, maintainersSettleOn, settleKey, settlesNow } from "../settlers.ts";
+import { settleKey, settlesNow } from "../settlers.ts";
+import { loadAccess, loadPermissions, loginsWithRole, permKey, type PermEntry } from "../data/access/index.ts";
+import { loadTrackedRepos } from "../data/control/index.ts";
+import { loadActingPairs } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { rowid } from "../db/kx.ts";
 
 /** A write permission older than this is read again, so it stays younger than PERM_READ_TTL while GitHub answers. About one read per login and repo per TTL. */
 export const REFRESH_AFTER = PERM_READ_TTL - 2 * 60_000;
@@ -22,34 +23,15 @@ export type RefreshDeps = {
   permission?: (db: Db, login: string, repo: string) => Promise<AppPermission>;
 };
 
-const answeredMerge = async (db: Db, repo: string, number: number, head: string): Promise<string | null> =>
-  (await db.get(db.k.selectFrom("main.decisions").select("answered_by").where("id", "=", mergeDecisionId(repo, number, head)).where("answer", "=", "merge")))?.answered_by ?? null;
-
-/** The maintainer logins the pipeline acts for, with the repo: makers of active pre-approvals and queued fix-up requests, and who answered the Merge a queued pre-approval rests on or that has yet to carry across a base merge. */
-async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: string }[]> {
-  const maintainers = new Set((await db.all(db.k.selectFrom("main.access").select("login").where("role", "=", "maintainer"))).map((r) => r.login));
-  if (!maintainers.size) return [];
-  const pairs = new Map<string, { login: string; repo: string }>();
-  const add = (login: string | null, repo: string) => {
-    if (login && maintainers.has(login)) pairs.set(settleKey(login, repo), { login, repo });
-  };
-  const active = await db.all(db.k.selectFrom("preapprovals").select(["repo", "number", "state", "head", "by"]).where("state", "in", ["fixup", "review", "ci", "queued"])
-    .where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).orderBy("repo").orderBy("number").orderBy("id"));
-  for (const p of active) {
-    add(p.by, p.repo);
-    if (p.state === "queued" && p.head) add(await answeredMerge(db, p.repo, p.number, p.head), p.repo);
-  }
-  for (const o of await db.all(db.k.selectFrom("operator_fixups").select(["by", "repo"]).where("state", "=", "queued").orderBy("id"))) add(o.by, o.repo);
-  // A Merge answer that carries across the pipeline's own base merge (carryAnswers) and has not carried yet.
-  const carries = await db.all(db.k.selectFrom("conflict_merges as m")
-    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "m.repo").onRef("i.number", "=", "m.number"))
-    .select(["m.repo", "m.number", "m.from_head"])
-    .where("m.state", "=", "merged").where("m.own_diff", "=", "same").where("i.state", "=", "OPEN").whereRef("i.head_oid", "=", "m.to_head")
-    .where("m.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
-    .where((eb) => eb.not(eb.exists(eb.selectFrom("preapprovals as p").select(eb.lit(1).as("one")).whereRef("p.repo", "=", "m.repo").whereRef("p.number", "=", "m.number").whereRef("p.head", "=", "m.to_head"))))
-    .orderBy("m.repo").orderBy("m.number").orderBy("m.created_at").orderBy(rowid("conflict_merges", "m")));
-  for (const x of carries) add(await answeredMerge(db, x.repo, x.number, x.from_head), x.repo);
-  return [...pairs.values()];
+/** The maintainer logins the pipeline acts for, with the repo (of tracked repos), and each one's cached permission row. */
+async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: string; row: PermEntry | undefined }[]> {
+  const [pairs, maintainers, tracked] = await db.together(() => Promise.all([loadActingPairs(db), loginsWithRole(db, ["maintainer"]), loadTrackedRepos(db)]));
+  const isMaintainer = new Set(maintainers.map((l) => l.toLowerCase()));
+  const seen = new Map<string, { login: string; repo: string }>();
+  for (const p of pairs) if (isMaintainer.has(p.login.toLowerCase()) && tracked.has(p.repo)) seen.set(settleKey(p.login, p.repo), p);
+  const list = [...seen.values()];
+  const rows = await loadPermissions(db, list);
+  return list.map((p) => ({ ...p, row: rows.get(permKey(p.login, p.repo)) }));
 }
 
 /**
@@ -62,17 +44,10 @@ async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: strin
  */
 export async function refreshSettlers(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}, wake: (at: number) => void = () => {}): Promise<Set<string>> {
   const held = new Set<string>();
-  const all = await maintainersSettle(db);
   const read = deps.permission ?? ((d, login, repo) => appPermission(d, login, repo));
   const now = Date.now();
-  const settlesOn = new Map<string, boolean>();
-  for (const { login, repo } of await pipelineMaintainers(db)) {
-    if (!all) {
-      // A repo on the maintainer workflow lets its maintainers settle without `maintainer_writes`.
-      if (!settlesOn.has(repo)) settlesOn.set(repo, await maintainersSettleOn(db, repo));
-      if (!settlesOn.get(repo)) continue;
-    }
-    const row = await db.get(db.k.selectFrom("main.repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
+  for (const { login, repo, row: entry } of await pipelineMaintainers(db)) {
+    const row = entry ? { permission: entry.permission, checked_at: entry.checkedAt } : undefined;
     const age = row ? now - Date.parse(row.checked_at) : NaN;
     if (row && WRITE_PERMISSIONS.has(row.permission) && age < REFRESH_AFTER) wake(Date.parse(row.checked_at) + REFRESH_AFTER);
     // Past HOLD_MAX (or an unreadable time) the row is not held and the pre-approval ends: a read started now would come too late for this pass.
@@ -100,11 +75,11 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
  * younger than HOLD_MAX: the caller waits. Past that, or on a fresh non-write answer, "no".
  */
 export async function settlesLive(db: Db, login: string, repo: string, read: RefreshDeps["permission"] = (d, l, r) => appPermission(d, l, r)): Promise<"yes" | "no" | "unknown"> {
-  const role = (await db.get(db.k.selectFrom("main.access").select("role").where("login", "=", login)))?.role;
-  if (role !== "maintainer" || !await maintainersSettleOn(db, repo)) return await settlesNow(db, login, [repo]) ? "yes" : "no";
+  const role = (await loadAccess(db, [login])).get(login.toLowerCase())?.role;
+  if (role !== "maintainer") return await settlesNow(db, login, [repo]) ? "yes" : "no";
   const age = async (): Promise<number> => {
-    const row = await db.get(db.k.selectFrom("main.repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
-    return row && WRITE_PERMISSIONS.has(row.permission) ? Date.now() - Date.parse(row.checked_at) : NaN;
+    const row = (await loadPermissions(db, [{ login, repo }])).get(permKey(login, repo));
+    return row && WRITE_PERMISSIONS.has(row.permission) ? Date.now() - Date.parse(row.checkedAt) : NaN;
   };
   const before = await age();
   if (!(before < PERM_READ_TTL)) {

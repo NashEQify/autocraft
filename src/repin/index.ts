@@ -23,7 +23,6 @@ import { join } from "node:path";
 import { absolute } from "../build/artifacts.ts";
 import { cancelTask, createTask, getTask, TERMINAL } from "../build/tasks.ts";
 import { guardRepo } from "../core/guard.ts";
-import { audit } from "../dash/audit.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { HttpError } from "../dash/server/util.ts";
 import { ensureAuthorWrites, type PermissionReader } from "../fixup/author-permission.ts";
@@ -36,17 +35,16 @@ import { ghComment, pushRepin, WritePacedError } from "../github/write.ts";
 import type { Querier } from "../mirror.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission } from "../remote/permission.ts";
-import { isFastTracked } from "../fasttrack.ts";
-import { baseScopeRepos } from "../pilot.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { settleRefusal } from "../settlers.ts";
 import { fetchScript } from "../worker/rust.ts";
 import { BRANCH_MAX_MS, BRANCH_POLL_MS, LOCK_MAX_MS, RETRY_MS, repinsDue, type RepinRow } from "./due.ts";
 import { lockRefusal, repinManifest, safePath, type PrRef } from "./manifest.ts";
-import type { ExpressionBuilder } from "kysely";
-import * as kx from "../db/kx.ts";
+import { addAudit, loadTrackedRepos } from "../data/control/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { loadArtifactFiles } from "../data/build/index.ts";
+import { loadRepinOffs, loadRepins, loadStartedRefs, requestRepin as writeRepin, saveRepins, type RepinKey, type RepinPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import type { DB } from "../db/types.ts";
 
 /** Attempts that may end unfinished (GitHub unreadable, the head moved, the lockfile task failed) before the repin is given up. */
 export const MAX_TRIES = 5;
@@ -90,17 +88,19 @@ const short = (sha: string): string => sha.slice(0, 12);
 const refOf = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
 const depRefOf = (r: { ref_repo: string; ref_number: number }): string => `${slugOf(r.ref_repo)}#${r.ref_number}`;
 type Item = { kind: string; state: string };
-const itemOf = async (db: Db, repo: string, number: number): Promise<Item | undefined> =>
-  await db.get(db.k.selectFrom("main.items").select(["kind", "state"]).where("repo", "=", repo).where("number", "=", number));
+/** The mirror's kind and state of each pull request asked for, keyed `repo#number`. */
+const itemsOf = async (db: Db, refs: { repo: string; number: number }[]): Promise<Map<string, Item>> =>
+  await loadItems(db, refs, "ref");
 
 // ---- the command ---------------------------------------------------------------
 
 /**
- * Why no build worker would take the pull request's lockfile task, or null: workers take pipeline tasks only for repos in
- * scope or for fast-tracked items (claim in src/build/tasks.ts).
+ * Why no build worker would take the pull request's lockfile task, or null: workers take pipeline tasks only for repos whose
+ * pipeline is on or for started items (claim in src/build/tasks.ts).
  */
 async function outOfBuildScope(db: Db, repo: string, number: number): Promise<string | null> {
-  return (await baseScopeRepos(db)).has(repo) || await isFastTracked(db, repo, number) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
+  const [tracked, started] = await db.together(() => Promise.all([loadTrackedRepos(db, [repo]), loadStartedRefs(db, { refs: [{ repo, number }] })]));
+  return tracked.get(repo)?.pipeline || started.has(`${repo}#${number}`) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
 }
 
 /** Cancels a lockfile task that is no longer wanted; one that already ended is left as it is. */
@@ -123,26 +123,30 @@ export async function requestRepin(db: Db, o: { login: string; githubId: number;
   const refusal = o.authorized ? null : await settleRefusal(db, { login: o.login, role: o.role, canWrite: async (r) => r === o.repo && o.canWrite }, [o.repo], `sets autorepin on ${o.repo}`);
   if (refusal) throw refused(refusal);
   const at = (o.at ?? new Date()).toISOString();
-  const me = await itemOf(db, o.repo, o.number);
+  const ref = o.ref;
+  const [items, tracked, offs] = await db.together(() => Promise.all([
+    itemsOf(db, [{ repo: o.repo, number: o.number }]), loadTrackedRepos(db), ref ? loadRepinOffs(db, [{ repo: o.repo, number: o.number }]) : Promise.resolve(new Map<string, string>()),
+  ]));
+  const me = items.get(refOf(o));
   if (me?.kind !== "pr" || me.state !== "OPEN") throw refused("this pull request is not open");
-  if (!o.ref) {
-    // Kept even when nothing waits, so an older `autorepin` command still to be carried out (a retry) does not set it again.
-    await db.run(db.k.insertInto("main.autorepin_offs").values({ repo: o.repo, number: o.number, off_at: at })
-      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["off_at"])).whereRef("excluded.off_at", ">", "main.autorepin_offs.off_at")));
-    const tasks = await db.all(db.k.selectFrom("main.autorepins").select("task_id").where("repo", "=", o.repo).where("number", "=", o.number).where("state", "=", "locking").where("requested_at", "<=", at));
-    const n = (await db.run(db.k.updateTable("main.autorepins").set({ state: "cancelled", result: null, done_at: at, requested_at: at, notice: "none" })
-      .where("repo", "=", o.repo).where("number", "=", o.number).where("state", "in", ["waiting", "locking"]).where("requested_at", "<=", at))).changes;
-    for (const t of tasks) await stopTask(db, t.task_id);
-    await audit(db, o.login, "autorepin-off", refOf(o), { cancelled: Number(n) });
-    return n ? "Autorepin is off for this pull request" : "No autorepin was waiting on this pull request; it stays off";
+  if (!ref) {
+    // The off marker is kept even when nothing waits, so an older `autorepin` command still to be carried out (a retry) does not set it again.
+    const r = await db.write(async () => {
+      const r = await writeRepin(db, { repo: o.repo, number: o.number, refRepo: "", refNumber: 0, refBranch: null, login: o.login, githubId: o.githubId, off: true, at });
+      await addAudit(db, [{ login: o.login, action: "autorepin-off", target: refOf(o), details: { cancelled: r.cancelled } }]);
+      return r;
+    });
+    for (const t of r.cancelledTasks) await stopTask(db, t);
+    return r.cancelled ? "Autorepin is off for this pull request" : "No autorepin was waiting on this pull request; it stays off";
   }
-  const off = (await db.get(db.k.selectFrom("main.autorepin_offs").select("off_at").where("repo", "=", o.repo).where("number", "=", o.number)))?.off_at;
+  const off = offs.get(refOf(o));
   if (off !== undefined && off > at) throw refused("a later autorepin off on this pull request stands");
-  const dep = (await db.get(db.k.selectFrom("main.tracked_repos").select("name").where((eb) => kx.ciEq(db, "name", eb.val(o.ref!.name)))))?.name;
-  if (!dep || (o.ref.owner !== null && o.ref.owner.toLowerCase() !== ownerOf(dep).toLowerCase())) throw refused(`${o.ref.owner ? `${o.ref.owner}/` : ""}${o.ref.name} is not a repository AutoCraft tracks`);
-  const depRef = `${slugOf(dep)}#${o.ref.number}`;
+  const want = ref.name.toLowerCase();
+  const dep = [...tracked.keys()].find((n) => n.toLowerCase() === want);
+  if (!dep || (ref.owner !== null && ref.owner.toLowerCase() !== ownerOf(dep).toLowerCase())) throw refused(`${ref.owner ? `${ref.owner}/` : ""}${ref.name} is not a repository AutoCraft tracks`);
+  const depRef = `${slugOf(dep)}#${ref.number}`;
   if (dep === o.repo) throw refused("the pull request to wait for must be in another repository");
-  const other = await itemOf(db, dep, o.ref.number);
+  const other = (await itemsOf(db, [{ repo: dep, number: ref.number }])).get(`${dep}#${ref.number}`);
   if (other?.kind !== "pr") throw refused(`${depRef} is not a pull request AutoCraft has read`);
   if (other.state === "CLOSED") throw refused(`${depRef} was closed without merging`);
   const g = await guardRepo(db, o.repo, "push", { operator: o.login }, undefined, o.login);
@@ -155,15 +159,17 @@ export async function requestRepin(db: Db, o: { login: string; githubId: number;
   }
   // Only over a row of an earlier command: a later `off`, or a later command for the same repository, stands.
   const branch = o.branch ?? null;
-  const set = (await db.run(db.k.insertInto("main.autorepins")
-    .values({ repo: o.repo, number: o.number, ref_repo: dep, ref_number: o.ref.number, ref_branch: branch, login: o.login, github_id: o.githubId, requested_at: at, state: "waiting" })
-    .onConflict((oc) => oc.columns(["repo", "number", "ref_repo"]).doUpdateSet((eb) => ({
-      ref_number: eb.ref("excluded.ref_number"), ref_branch: eb.ref("excluded.ref_branch"), login: eb.ref("excluded.login"), github_id: eb.ref("excluded.github_id"),
-      requested_at: eb.ref("excluded.requested_at"), state: "waiting",
-      sha: null, head: null, task_id: null, tries: 0, tried_at: null, to_head: null, result: null, done_at: null, notice: null,
-    })).whereRef("excluded.requested_at", ">=", "main.autorepins.requested_at")))).changes;
-  if (!set) throw refused(`a later autorepin command for ${slugOf(dep)} on this pull request stands`);
-  await audit(db, o.login, "autorepin-set", refOf(o), { on: depRef, ...(branch ? { via: branch } : {}) });
+  try {
+    await db.write(async () => {
+      await writeRepin(db, { repo: o.repo, number: o.number, refRepo: dep, refNumber: ref.number, refBranch: branch, login: o.login, githubId: o.githubId, at });
+      await addAudit(db, [{ login: o.login, action: "autorepin-set", target: refOf(o), details: { on: depRef, ...(branch ? { via: branch } : {}) } }]);
+    });
+  } catch (e) {
+    const m = (e as Error).message;
+    if (m.includes("later autorepin off")) throw refused("a later autorepin off on this pull request stands");
+    if (m.includes("later autorepin command")) throw refused(`a later autorepin command for ${slugOf(dep)} on this pull request stands`);
+    throw e;
+  }
   if (branch) {
     const to = `the first \`${branch}\` commit that contains it`;
     return other.state === "MERGED"
@@ -215,16 +221,25 @@ class Wait extends Error {}
 class Superseded extends Error {}
 
 /** True while the row still holds the request `r` was read with: an `off` and a new command both move requested_at, and an end moves the state. */
-const still = async (db: Db, r: RepinRow): Promise<boolean> =>
-  !!await db.get(db.k.selectFrom("main.autorepins").select((eb) => eb.lit(1).as("one")).where(isRow(r)).where("state", "=", r.state).where("requested_at", "=", r.requested_at));
+const still = async (db: Db, r: RepinRow): Promise<boolean> => !!await reread(db, r, { state: r.state, requestedAt: r.requested_at });
 
-const isRow = (r: RepinRow) => (eb: ExpressionBuilder<DB, "main.autorepins">) =>
-  eb.and([eb("repo", "=", r.repo), eb("number", "=", r.number), eb("ref_repo", "=", r.ref_repo)]);
+/** The stored row of `r`'s pull request and dependency (optionally only while it holds `state` and `requestedAt`), or null. */
+async function reread(db: Db, r: RepinRow, o: { state?: string; requestedAt?: string } = {}): Promise<RepinRow | null> {
+  const row = (await loadRepins(db, [{ repo: r.repo, number: r.number }])).get(refOf(r))?.find((x) => x.ref_repo === r.ref_repo);
+  if (!row || (o.state !== undefined && row.state !== o.state) || (o.requestedAt !== undefined && row.requested_at !== o.requestedAt)) return null;
+  return row as RepinRow;
+}
+
+/** The row's key; its pair, dependency and asker as read. */
+const keyOf = (r: RepinRow): RepinKey => ({ repo: r.repo, number: r.number, refRepo: r.ref_repo, refNumber: r.ref_number, login: r.login });
+const patchRow = async (db: Db, r: RepinRow, patch: RepinPatch): Promise<void> => void await saveRepins(db, [{ key: keyOf(r), patch }]);
 
 async function finish(db: Db, r: RepinRow, e: Ended, at: Date): Promise<void> {
   await stopTask(db, r.task_id);
-  await db.run(db.k.updateTable("main.autorepins").set({ state: e.state, result: e.message || null, done_at: at.toISOString(), to_head: e.toHead, notice: e.notice }).where(isRow(r)));
-  await audit(db, AUDIT_LOGIN, "autorepin", refOf(r), { on: depRefOf(r), by: r.login, state: e.state, ...(e.message ? { result: e.message } : {}), ...(e.toHead ? { commit: e.toHead } : {}) });
+  await db.write(async () => {
+    await patchRow(db, r, { state: e.state, result: e.message || null, done_at: at.toISOString(), to_head: e.toHead, notice: e.notice });
+    await addAudit(db, [{ login: AUDIT_LOGIN, action: "autorepin", target: refOf(r), details: { on: depRefOf(r), by: r.login, state: e.state, ...(e.message ? { result: e.message } : {}), ...(e.toHead ? { commit: e.toHead } : {}) } }]);
+  });
 }
 
 /** One step of an autorepin: from `waiting` it queues the lockfile task (or pushes, without a lockfile); from `locking` it takes the task's lockfile and pushes. Throws `Ended` when it is over, anything else to try again. */
@@ -239,9 +254,10 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
       throw failed("the lockfile task did not end within 3 hours");
     }
   }
-  const me = await itemOf(db, r.repo, r.number);
+  const items = await itemsOf(db, [{ repo: r.repo, number: r.number }, { repo: r.ref_repo, number: r.ref_number }]);
+  const me = items.get(refOf(r));
   if (me?.kind !== "pr" || me.state !== "OPEN") throw new Ended("cancelled", null, { notice: "none" });
-  const other = await itemOf(db, r.ref_repo, r.ref_number);
+  const other = items.get(`${r.ref_repo}#${r.ref_number}`);
   if (!other) throw failed(`AutoCraft no longer has ${depRef}`);
   if (other.state === "CLOSED") throw new Ended("cancelled", `${depRef} was closed without merging, so nothing was repinned`);
 
@@ -381,14 +397,14 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
           step: "autorepin", repo: r.repo, number: r.number, headSha: head, requires: { os: "linux", toolchains: ["rust-stable"] }, patch,
           plan: [{ name: "lock", cmd: ["sh", "-c", LOCK_SCRIPT], network: "fetch", timeoutSec: 900, artifacts: [LOCK] }],
         });
-        await db.run(db.k.updateTable("main.autorepins").set({ state: "locking", sha: target, head, to_head: null, task_id: id }).where(isRow(r)));
+        await patchRow(db, r, { state: "locking", sha: target, head, to_head: null, task_id: id });
         d.log?.(`autorepin ${refOf(r)}: lockfile task ${id} queued for ${dep} at ${short(target)}`);
         return;
       }
-      const t = await db.get(db.k.selectFrom("main.build_tasks").select("state").where("id", "=", r.task_id));
-      if (t?.state !== "done") throw new Retry(`the lockfile task ${t ? t.state : "is gone"}`);
-      const art = await db.get(db.k.selectFrom("main.build_artifacts").select("file").where("task_id", "=", r.task_id).where("name", "=", LOCK));
-      const file = art ? absolute(art.file) : null;
+      const t = r.task_id === null ? null : await getTask(db, r.task_id);
+      if (!t || t.state !== "done") throw new Retry(`the lockfile task ${t ? t.state : "is gone"}`);
+      const art = (await loadArtifactFiles(db, [{ taskId: t.id, name: LOCK }])).get(`${t.id}/${LOCK}`);
+      const file = art ? absolute(art) : null;
       if (!file) throw new Retry("the lockfile task returned no Cargo.lock");
       const after = readFileSync(file, "utf8");
       const no = lockRefusal(lock.content, after, dep, target);
@@ -405,7 +421,7 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
     if (changes.some((x) => x[2] !== "M" || x[0] !== x[1]) || changes.map((x) => x[3]!).sort().join("\n") !== [...changed].sort().join("\n")) throw failed("the commit would change more than the revs and the lockfile");
     if (!await still(db, r)) throw new Superseded("the request changed before the push");
     // Written before the push, so a head that reaches the mirror before the outcome is recorded is already known as this commit (ownPush in src/preapproval).
-    await db.run(db.k.updateTable("main.autorepins").set({ head, to_head: commit }).where(isRow(r)));
+    await patchRow(db, r, { head, to_head: commit });
     const push = await pushRepin({ db, login: AUDIT_LOGIN }, g, git, { repo: r.repo, number: r.number, remote: headRepo, branch: pr.headRefName, head, sha: commit }, { on: depRef, rev: target, files: changed, by: r.login });
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
@@ -456,7 +472,7 @@ export function noticeText(r: Pick<RepinRow, "login" | "state" | "result" | "ref
 async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "failed" | "paced" | "none"> {
   // A quiet pull request (a security fix not yet published) gets no comment.
   if (await isQuiet(db, r.repo, r.number)) {
-    await db.run(db.k.updateTable("main.autorepins").set({ notice: "none" }).where(isRow(r)));
+    await patchRow(db, r, { notice: "none" });
     return "none";
   }
   const g = await guardRepo(db, r.repo, null, { operator: r.login }, undefined, r.login);
@@ -472,7 +488,7 @@ async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "fa
       d.log?.(`autorepin ${refOf(r)}: the comment failed: ${oneLine(String((e as Error)?.message ?? e))}`);
     }
   }
-  await db.run(db.k.updateTable("main.autorepins").set({ notice }).where(isRow(r)));
+  await patchRow(db, r, { notice });
   return notice;
 }
 
@@ -500,7 +516,7 @@ export async function drainRepins(db: Db, deps: RepinDeps): Promise<number> {
         else if (e instanceof Wait) {
           // Not a try, and it clears the count, so MAX_TRIES counts consecutive failures only: tried_at is set ahead, so the row is due again (repinsDue: a minute after tried_at) in BRANCH_POLL_MS.
           await stopTask(db, r.task_id);
-          await db.run(db.k.updateTable("main.autorepins").set({ state: "waiting", task_id: null, tries: 0, tried_at: new Date(clock().getTime() + BRANCH_POLL_MS - RETRY_MS).toISOString() }).where(isRow(r)));
+          await patchRow(db, r, { state: "waiting", task_id: null, tries: 0, tried_at: new Date(clock().getTime() + BRANCH_POLL_MS - RETRY_MS).toISOString() });
           deps.log?.(`autorepin ${refOf(r)}: ${e.message}`);
           continue;
         } else {
@@ -511,13 +527,13 @@ export async function drainRepins(db: Db, deps: RepinDeps): Promise<number> {
           if (r.tries + 1 >= MAX_TRIES) await finish(db, r, failed(e instanceof Retry ? raw : UNEXPECTED), clock());
           else {
             await stopTask(db, r.task_id);
-            await db.run(db.k.updateTable("main.autorepins").set((eb) => ({ state: "waiting", task_id: null, tries: eb("tries", "+", 1), tried_at: clock().toISOString() })).where(isRow(r)));
+            await patchRow(db, r, { state: "waiting", task_id: null, tries: r.tries + 1, tried_at: clock().toISOString() });
             continue;
           }
         }
       }
       ended++;
-      r = (await db.get(db.k.selectFrom("main.autorepins").select(kx.cols("autorepins")).where(isRow(r)).$narrowType<{ state: RepinRow["state"] }>()))!;
+      r = (await reread(db, r))!;
       deps.log?.(`autorepin ${refOf(r)}: ${r.state}${r.result ? `: ${r.result}` : ""}`);
     }
     if (r.notice === null && (await notify(db, r, deps)) === "paced") break;
