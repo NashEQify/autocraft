@@ -193,7 +193,7 @@ const GITHUB_1484: GithubSide = {
   url: "https://github.com/storytold/designcraft/pull/1484",
   events: [
     gh("g1", "opened", 4 * D + 5 * H, "rhea-m", "Adds Hungarian spellchecking and the nonstandard hyphenation cases."),
-    gh("g2", "review", 4 * D + 2 * H - 4, "autocraft", "**Review of 5d19f03: Hold.** Large data addition with no tests. Asks for tests and a check against the language pack in craft-i18n.\n\nOpus, not sure.", { as: AC_APP, historyId: "h3" }),
+    gh("g2", "review", 4 * D + 2 * H - 4, "autocraft", "**Review of 5d19f03: Not ready.** Large data addition with no tests. Asks for tests and a check against the language pack in craft-i18n.\n\nOpus, not sure.", { as: AC_APP, historyId: "h3" }),
     gh("g3", "push", 3 * D + 6 * H, "rhea-m", "Pushed 2 commits: hyphenation tests, rename hu_spell to hungarian"),
     gh("g4", "review", 3 * D + 4 * H - 3, "autocraft", "(edited) **Review of b72c4d8: Take with fixes.** The tests cover the nonstandard cases. Use load_pack for the dictionary.", { as: AC_APP, historyId: "h5" }),
     gh("g5", "comment", 150, "kiri-n", "The pack is the better source; I checked that the patterns match."),
