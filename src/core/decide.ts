@@ -8,7 +8,7 @@ import { UNCHECKED_REASON } from "./sensitive.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
-import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind, WorkflowFact } from "./plan.ts";
+import type { Action, EndedWorkflow, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind, WorkflowFact } from "./plan.ts";
 
 /** The start of a statement for a reason line: one line, at most 80 characters. */
 const excerpt = (t: string): string => { const s = t.replace(/\s+/g, " ").trim(); return s.length > 80 ? `${s.slice(0, 79).trimEnd()}…` : s; };
@@ -26,11 +26,13 @@ const verifyState = (f: PrFacts): QueueState | null => {
 
 /** The PR's live maintainer workflow, or null. */
 export const workflowOf = (f: Pick<PrFacts, "workflow">): WorkflowFact | null => f.workflow ?? null;
+/** Ends that mean hands off: only a start takes the item up again. */
+const HANDS_OFF: readonly (EndedWorkflow | null | undefined)[] = ["stopped", "backlog", "done"];
 /**
  * An unstarted PR that the workflow takes up by itself: a small or medium bug fix on the merge rule's criteria.
- * Not once someone stopped it or sent it to the backlog: that means hands off until someone starts it.
+ * Not once someone stopped it, sent it to the backlog or ended its workflow with an answer that runs nothing: that means hands off until someone starts it.
  */
-export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && f.endedWorkflow !== "stopped" && f.endedWorkflow !== "backlog" && autoEligible(f);
+export const onAutoPath = (f: PrFacts): boolean => !workflowOf(f) && !HANDS_OFF.includes(f.endedWorkflow) && autoEligible(f);
 /** The head has no review that stands, so one is due once nothing holds it: a person who started the PR chose it, and the auto path chose by label and flags; a merge entry is never reviewed. */
 const reviewDue = (f: PrFacts): boolean => !f.draft && !!f.head && !mergeEntry(f) && !f.carriable && !(f.review && f.review.head === f.head && !f.review.staleActionable);
 /** An auto-path PR whose diff keeps it outside the merge rule before a review read it: the review could merge nothing, so it is not made. Our own push that broke CI is repaired first. */
@@ -73,8 +75,8 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (open && refusalStuck(f)) reasons.push(`the merge was refused: ${excerpt(f.lastMerge!.reason!)}`);
   const stuckUnknown = open ? unknownStuck(f) : null;
   if (stuckUnknown) reasons.push(stuckUnknown);
-  // The approver's leg handed the PR to the merge queue at this head; at an unsure head only a hand-over after the review counts.
-  const handed = f.handOver !== null && (!r?.unsure || f.handOver.afterReview);
+  // The leg of a PR approved for merge handed it to the merge queue at this head (handOver names the approval). The approval says the change is wanted, so an unsure review does not undo it, not even one made after the hand-over.
+  const handed = f.handOver;
 
   // The pre-merge review gates what the rule would merge, and every merge-entry PR; its blocking reasons count before the path is decided.
   let premerge: PremergeState | null = null;

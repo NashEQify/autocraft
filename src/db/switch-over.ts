@@ -29,6 +29,7 @@
 import type { ReviewWorkflow } from "../data/review/types.ts";
 import { LIMIT_IMPLEMENT, type QuestionOption } from "../implement/questions.ts";
 import { MAX_ATTEMPTS_PER_TEXT, STUCK_CAUSES, STUCK_OPTIONS } from "../implement/stuck.ts";
+import { ENDED_STATES } from "../implement/types.ts";
 import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
 import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
 import type { Db, Statement } from "./index.ts";
@@ -546,8 +547,9 @@ async function startWorkflows(db: Db, r: SwitchReport, now: string): Promise<voi
     .where("p.state", "in", [...ACTIVE_LEG_STATES]).where("p.workflow_id", "is", null).orderBy("p.id"));
   const issueOf = new Map<string, string>();
   for (const part of kx.batches([...fast.filter((f) => f.kind === "pr"), ...legs])) {
-    const ims = await all(db, q(db).selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where(kx.tupleIn(db, ["repo", "pr_number"], part.map((x) => [x.repo, Number(x.number)]), ["text", "bigint"])));
-    for (const im of ims) issueOf.set(`${im.repo}#${im.pr_number}`, key(im as never));
+    const ims = await all(db, q(db).selectFrom("main.implementations").select(["repo", "number", "pr_number", "state", "updated_at"]).where(kx.tupleIn(db, ["repo", "pr_number"], part.map((x) => [x.repo, Number(x.number)]), ["text", "bigint"])));
+    // An attempt that ended before its issue's workflow started is no work of that workflow, nor is its PR.
+    for (const im of ims) if (!ENDED_STATES.has(im.state) || live.some((w) => key(w as never) === key(im as never) && w.entry === "implement" && w.started_at <= im.updated_at)) issueOf.set(`${im.repo}#${im.pr_number}`, key(im as never));
   }
   const s: Starts = {
     backlog: await backlogAnswers(db), of, live: new Set(live.map((w) => key(w as never))), fast, issueOf,

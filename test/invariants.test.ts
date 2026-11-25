@@ -53,7 +53,7 @@ function randomPr(x: Rnd): PrFacts {
       mode: x.pick(["full", "full", "skipped"]), stale: x.bool(0.1), staleActionable: x.bool(0.1), fixes: x.int(3),
     },
     verification: x.bool(0.1) ? null : { state: x.pick(["passed", "passed", "ci-enough", "failed", "error", "running", "planned", "stale", "unavailable"]) },
-    handOver: x.pick([null, null, { afterReview: true }, { afterReview: false }]), mergeWaiting: x.bool(0.05),
+    handOver: x.bool(0.5), mergeWaiting: x.bool(0.05),
     premerge: x.bool(0.15) ? null : {
       tries: x.int(4), hasFindings: x.bool(0.85), unsure: false, defects: x.pick([0, 0, 0, 1, 2]), defectsAllFixable: x.bool(0.7), fixesSafe: x.bool(0.7), minor: x.int(2), error: null,
     },
@@ -105,7 +105,7 @@ function checkPr(f: PrFacts): void {
 
   const mergeEntry = f.workflow?.entry === "merge";
   // 1. An unsure head merges only on a hand-over after the latest review.
-  if (f.review?.unsure && !mergeEntry && merges.length) assert.ok(f.handOver?.afterReview, "merge on an unsure head without a later hand-over");
+  if (f.review?.unsure && !mergeEntry && merges.length) assert.ok(f.handOver, "merge on an unsure head without a hand-over");
   // 2. Nothing merges that nobody handed over, off the merge rule; an unapproved workflow merges nothing by itself.
   if (f.workflow && !f.workflow.approved && merges.length) assert.ok(f.handOver, "merge of an unapproved item");
   if (merges.length) {

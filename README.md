@@ -54,9 +54,9 @@ flowchart TD
 - Untrusted code runs only in a separate build environment (a worker as another OS user, with rootless Podman), never where GitHub or Claude credentials are.
 - Model calls that use tools run inside a bubblewrap sandbox. They get `Read`, `Grep` and `Glob` on read-only checkouts of the public tracked repos, a Haiku explorer subagent, and read-only item tools (search, item, similar items, PR diff) over a snapshot of the public items. Other calls run without tools.
 - Only `src/github/write.ts` writes to GitHub. Every write is recorded in an audit table, and a test fails if another file writes.
-- Every GitHub write needs an operator's approval for that repo. Approvals are given on the dashboard and cannot be set from the CLI.
-- The dashboard needs GitHub sign-in. Roles are `operator` (answers, approvals, switches, accounts), `maintainer` (read and comment) and `viewer` (read only).
-- Contributors' own agents reach AutoCraft through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act with their user's role, and send the same commands the user can send on GitHub or the dashboard.
+- A person's command is its own approval of the merge, pushes or close it asks for, for that item alone. Every other GitHub write needs the repo's approval of its kind (merges and pushes of work nobody started, comments, labels and others). An operator, or a maintainer with write access to the repo, gives it on the dashboard; it cannot be set from the CLI.
+- The dashboard needs GitHub sign-in. A `maintainer` starts, answers, approves and stops any item, and sets the approvals and the pipeline switch, of the repos they have GitHub write access to. An `operator` does so everywhere and keeps the instance's settings: access, the global switch and limits, prompts, build environments and the GitHub identity. A `viewer` reads.
+- Contributors' own agents reach AutoCraft through an MCP server on the dashboard (`POST /mcp`) with a personal token. They act as their user, with that user's role and repo access, and send the same commands the user can send on GitHub or the dashboard.
 - A pipeline switch (on/off) turns the whole pipeline off, a per-repo pipeline switch limits it to chosen repos, and each step has a daily limit.
 
 See [Trust boundary](docs/pipeline.md#trust-boundary).

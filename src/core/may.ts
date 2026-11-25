@@ -60,6 +60,7 @@ const ENDED_WHY: Partial<Record<EndedWorkflow, string>> = {
   stopped: "Someone stopped the work on this; it merges once someone starts it again.",
   backlog: "Someone sent this to the backlog; it merges once someone starts it again.",
   closed: "The work on this ended with a close; it merges once someone starts it again.",
+  done: "The work on this ended with an answer that did not merge it; it merges once someone starts it again.",
 };
 
 export type MergeInputs = {

@@ -17,7 +17,7 @@ const base = (): PrFacts => ({
   checksHere: true, checksOpen: true, ci: "success", mergeable: "MERGEABLE", unknown: null, runs: null,
   lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false,
   verification: { state: "passed", kind: "build", summary: null, note: null }, verifyUnavailable: null,
-  handOver: null, mergeWaiting: false,
+  handOver: false, mergeWaiting: false,
   workflow: { entry: "review", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true },
   premerge: { at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, fixesSafe: true, minor: 0, error: null },
   premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,

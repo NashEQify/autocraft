@@ -250,7 +250,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     review: null, post: { postable: false, posted: null },
     checksHere: false, checksOpen: false, ci: "unknown", mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
-    handOver: null, mergeWaiting: false,
+    handOver: false, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
     fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legs: operator?.legs ?? [] }), ended: d.workflow.ended.get(ref) ?? null, pushes: moves, ownHead: !!head && ownHead(head),
@@ -326,9 +326,12 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const qAt = mx ? wfFact!.startedAt : latest!.at;
   // The merge queue's operator path: the approved workflow's leg handed the PR over at this head (moveLegs sets `updated_at`).
   const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
-  if (handed) base.handOver = { afterReview: handed.updated_at > qAt };
+  base.handOver = handed !== undefined;
   base.mergeWaiting = mergeWaits(d.mergeActions.get(ref), wfRow, qh);
-  const verdict = latest?.verdict;
+  // A hold or close review that the leg went on past is one the person answered after (src/preapproval accepted): it counts as a take.
+  const wentOn = !mx && (latest!.verdict === "hold" || latest!.verdict === "close") && !!wfRow
+    && !!operator?.legs.some((l) => (l.state === "ci" || l.state === "queued") && l.head === qh && l.workflow_id === wfRow.id && l.updated_at > latest!.at);
+  const verdict = wentOn ? "take" : latest?.verdict;
 
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(patch.pushes, qh) : [qh];
@@ -382,8 +385,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const ownHere = isOwn(i.author) && c.ownPrs.has(ref) && !!head && ownHead(head);
 
   const last = d.merge.attempts.get(`${ref}@${qh}`);
-  // An operator's Retry after a refusal asks for another try now, without waiting for CI or the mergeable state to change.
-  const retried = last?.outcome === "refused" && (d.retries.get(mergeDecisionId(repo, number, qh)) ?? "") > last.at;
+  // An operator's Retry after a refusal, or a hand-over after it (a person answered), asks for another try now, without waiting for CI or the mergeable state to change.
+  const retried = last?.outcome === "refused" && ((d.retries.get(mergeDecisionId(repo, number, qh)) ?? "") > last.at || (!!handed && handed.updated_at > last.at));
   if (last && !retried) {
     base.lastMerge = { outcome: last.outcome, reason: last.reason, ci: last.ci, mergeable: last.mergeable, refusals: last.refusals };
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;

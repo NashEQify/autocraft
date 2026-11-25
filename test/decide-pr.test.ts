@@ -18,7 +18,7 @@ const SIZE_L = { size: "L", lines: 900 } as const;
 /** Nobody started it. */
 const UNSTARTED = { workflow: null } as const;
 const MERGE_ENTRY = { entry: "merge", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } as const;
-const HANDED = { handOver: { afterReview: true } } as const;
+const HANDED = { handOver: true } as const;
 const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, minor: 0, error: null, ...o });
 const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });
@@ -54,8 +54,7 @@ const rows: Row[] = [
   { name: "unsure head does not merge by rule", facts: { review: { unsure: true } }, expect: { state: "needs-decision", path: null, actions: [], reasons: [UNSURE_REASON] } },
   { name: "a handed-over merge waiting for its person's sign-in proposes no merge", facts: { ...SIZE_L, ...HANDED, mergeWaiting: true }, expect: { state: "decision-answered-merge", path: "operator", actions: [] } },
   { name: "the same merge runs once the sign-in arrived", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"] } },
-  { name: "unsure head, handed over before the review, does not merge", facts: { review: { unsure: true }, handOver: { afterReview: false } }, expect: { state: "needs-decision", path: null, actions: [] } },
-  { name: "unsure head, handed over after the review, merges as its approver", facts: { review: { unsure: true }, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
+  { name: "unsure head, handed over, merges as its approver", facts: { review: { unsure: true }, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], reasons: [UNSURE_REASON] } },
   { name: "a handed-over large PR merges as its approver", facts: { ...SIZE_L, ...HANDED }, expect: { state: "decision-answered-merge", path: "operator", actions: ["merge"], eligible: true } },
   { name: "a hand-over accepts a repo without CI", facts: { ...SIZE_L, ci: "none", repoFacts: { noCi: true }, ...HANDED }, expect: { state: "decision-answered-merge", actions: ["merge"], eligible: true } },
   { name: "a handed-over PR of an unverifiable repo merges", facts: { verification: { state: "unavailable", summary: "x" }, ...HANDED }, expect: { state: "decision-answered-merge", actions: ["merge"] } },
@@ -292,8 +291,8 @@ test("a rule PR without a clean pre-merge review never gets merge", () => {
   assert.equal(merges(prFacts({ ...UNSTARTED, premerge: premerge({}) })), true);
 });
 
-test("an unsure head merges only on a hand-over after its latest review", () => {
-  for (const over of [{}, { handOver: { afterReview: false } }]) assert.equal(merges(prFacts({ review: { unsure: true }, ...over })), false, JSON.stringify(over));
+test("an unsure head merges only on a hand-over", () => {
+  assert.equal(merges(prFacts({ review: { unsure: true } })), false);
   assert.equal(merges(prFacts({ review: { unsure: true }, ...HANDED })), true);
 });
 

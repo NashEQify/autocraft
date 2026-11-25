@@ -92,7 +92,7 @@ export type WorkflowFact = {
   own: boolean;
 };
 
-/** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Stopped and backlog mean hands off: not even the auto path takes the item up again until someone starts it. */
+/** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Stopped, backlog and done (an open PR whose workflow ended with an answer that runs nothing) mean hands off: not even the auto path takes the item up again until someone starts it. */
 export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
 
 export const isQueueState = (s: PlanState): s is QueueState => (QUEUE_STATES as readonly string[]).includes(s);
@@ -107,7 +107,7 @@ export type ReviewFacts = {
   head: string;
   at: string;
   verdict: string;
-  /** Unsure at this head or anywhere in the chain of heads AutoCraft pushed it from: only a hand-over after this review lets it merge. */
+  /** Unsure at this head or anywhere in the chain of heads AutoCraft pushed it from: only a hand-over of a PR approved for merge lets it merge. */
   unsure: boolean;
   mode: string | null;
   reason: string;
@@ -229,8 +229,8 @@ export type PrFacts = {
   /** Why Verify cannot build the repo (private, not Rust without CI), or null. */
   verifyUnavailable: string | null;
 
-  /** The approver's merge leg is in the merge queue at the reviewed head (a hand-over); `afterReview`: it got there after that review. */
-  handOver: { afterReview: boolean } | null;
+  /** The merge leg of a workflow approved for merge (an approver, or a merge entry) is in the merge queue at the reviewed head: a hand-over. */
+  handOver: boolean;
   /** The merge, made as the person who approved it, waits for their sign-in or access: the merge step leaves it out, so none is proposed. */
   mergeWaiting: boolean;
 

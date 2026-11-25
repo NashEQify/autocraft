@@ -68,6 +68,21 @@ describe("batch-build", () => {
     assert.deepEqual((await batches(t.w)).map((b) => [b.state, b.build_state, b.pr_number]), [["open", "passed", 900]]);
   });
 
+  test("a member that lost its merge approval while the batch is checking is left out, and the others go on", async () => {
+    const t = await setup([1, 2], true);
+    await (await t.w.acting()).workflow(2);
+    const wf = (await t.w.rows("SELECT id FROM item_workflows WHERE number = 2"))[0]!.id as number;
+    await t.w.db.run(t.w.db.k.insertInto("preapprovals").values({ repo: "app", number: 2, by: "op", at: "2026-01-01T00:00:00Z", instructions: "", state: "queued", from_head: "sha2", head: "sha2", updated_at: "2026-01-02T00:00:00Z", workflow_id: wf }));
+    await run(t);
+    assert.deepEqual((await t.w.rows("SELECT number FROM merge_batch_prs ORDER BY number")).map((x) => x.number), [1, 2]);
+    await t.w.db.run(t.w.db.k.updateTable("preapprovals").set({ state: "cancelled" }));
+    await finish(t.w, 1, "pass");
+    await run(t);
+    const [first, second] = await batches(t.w);
+    assert.deepEqual([first!.state, second!.parent_id], ["superseded", first!.id]);
+    assert.deepEqual((await t.w.rows("SELECT number FROM merge_batch_prs WHERE batch_id = ?", second!.id as number)).map((x) => x.number), [1]);
+  });
+
   test("a binary diff, or the switch turned off mid-flight, opens the PR without the build", async () => {
     const bin = await setup([1], true);
     bin.setPatch("diff --git a/x.png b/x.png\nBinary files a/x.png and b/x.png differ\n");

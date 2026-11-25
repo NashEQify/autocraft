@@ -8,13 +8,14 @@
 //   ci      -> that review says take (sure or unsure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it.
 //              A take-fix review keeps the row in review while the pipeline's fix-up of its fixes runs; that push is reviewed again.
 //   queued  -> CI is green and the pre-merge review is clean: the merge queue merges it as the person who approved the workflow
-//              (src/core/may.ts mayMerge), with every check it always makes (safe-merge included)
+//              (src/core/may.ts mayMerge), with every check it always makes (safe-merge included). It stops when the queue can go on only
+//              with a person's answer (queueStop), and goes back to review when a new review asks for fixes.
 //   merged / cancelled / failed end it. A stop ends the leg failed; the workflow then stops at a blocker with its recommendation.
 // Every transition is a pure reaction to rows other steps write (fixups, opus_reviews, pr_checks, items, merges), evaluated by
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf, notStarted, ownImplementation, reviseOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, notStarted, ownImplementation, refusalStuck, reviseOf } from "../core/decide.ts";
 import { pushRefusal } from "../core/gates.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
@@ -22,6 +23,7 @@ import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
 import { ensureAuthorWrites } from "../fixup/author-permission.ts";
 import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
+import { effectiveCi } from "../optional-checks.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { releaseMerge, removeFromBatch } from "../merge/controls.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -304,6 +306,8 @@ async function loadPassFacts(db: Db, rows: Row[]): Promise<PassFacts> {
   };
 }
 
+const verifyFailed = (p: Row): string => `verification failed at ${headName(p)}`;
+
 type Hand = { done: true } | { gone: true } | { wait: true } | { stop: string };
 
 /** Moves the row from ci to queued: the merge queue merges it as the workflow's approver from here. Idempotent. */
@@ -311,7 +315,7 @@ async function handOver(db: Db, p: Row, head: string, pf: PassFacts, leg: LegCon
   // A hand-over waits for a running verification, and goes on over a failed one only when the person answered after it.
   const v = pf.merge.verifications.get(`${refOf(p.repo, p.number)}@${head}`);
   if (v && (v.state === "planned" || v.state === "running")) return { wait: true };
-  if (v && (v.state === "failed" || v.state === "error") && !(leg && v.finishedAt && v.finishedAt <= leg.since)) return { stop: `verification failed at ${headName(p)}` };
+  if (v && (v.state === "failed" || v.state === "error") && !(leg && v.finishedAt && v.finishedAt <= leg.since)) return { stop: verifyFailed(p) };
   if (!await moveRaw(db, p, "queued", { head })) return { gone: true };
   await say(db, p.repo, p.number, unsure
     ? "CI is green and the pre-merge review found no defect, though it could not verify every claim of the description: the merge was approved, so the PR is in the merge queue, which checks it as for any approved merge."
@@ -389,6 +393,18 @@ function stepRuns(f: PrFacts, step: "cifix" | "conflict"): boolean {
   if (step === "conflict") return f.conflict?.bucket === "linting" || acts.some((a) => a.kind === "conflict" && a.params?.bucket === "merge");
   const b = cifixBucket(f);
   return (b !== null && ["formatting", "linting", "rerun-wait"].includes(b)) || acts.some((a) => a.kind === "cifix" && !["capped", "ask"].includes(String(a.params?.bucket)));
+}
+
+/**
+ * Why the merge queue cannot merge a PR handed over to it until a person answers: verification failed, or a merge refusal that nothing
+ * clears by itself. Null for every other wait. A merge hold is released, not answered.
+ */
+function queueStop(p: Row, f: PrFacts): string | null {
+  if (f.mergeHeld) return null;
+  const plan = decidePr(f);
+  if (plan.waitKind !== "person") return null;
+  if (plan.state === "verify-failed" || plan.state === "verify-error") return verifyFailed(p);
+  return plan.state === "refused" && refusalStuck(f) ? `the merge was refused: ${oneLine(f.lastMerge?.reason ?? "", 160)}` : null;
 }
 
 const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large", "push-denied", "asked", "comment-failed", "superseded"];
@@ -503,8 +519,11 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (r.kind === "takefix") return void await move(db, p, "review", { line: `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.` });
     if (r.kind === "bad") return await stop(r.why);
     const c = pf.checks.get(ref);
-    if (!c || c.head_oid !== head || c.overall === "pending") return;
-    if (c.overall === "failure") {
+    if (!c || c.head_oid !== head) return;
+    // CI as the planner and the merge step judge it: without the repo's optional checks, and pending while approved runs have not finished.
+    const ci = pf.merge.runs.get(`${ref}@${head}`)?.approved.length ? "pending" : await effectiveCi(db, p.repo, c.overall ?? "none", c.checks);
+    if (ci === "pending") return;
+    if (ci === "failure") {
       // The CI fix step works the red head as it would for any PR; its push is a head nobody saw, so the leg ends. A person decides when the step has given up.
       const f = await factOf();
       if (f && revisesNow(f)) return;
@@ -512,7 +531,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
       if (bucket !== null && ["work", "formatting", "linting", "collect", "rerun", "rerun-wait"].includes(bucket) && stepRuns(f!, "cifix")) return;
       return await stop(`CI failed at ${headName(p)} and the CI fix did not repair it`);
     }
-    if (c.overall === "none" && !await repoHasNoCi(db, p.repo)) return;
+    if (ci === "none" && !await repoHasNoCi(db, p.repo)) return;
     if (c.mergeable === "CONFLICTING") {
       // The conflict step merges the base into the PR when it can; its push is a new head that continues this pre-approval.
       const f = await factOf();
@@ -531,7 +550,16 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if ("stop" in h) await stop(h.stop);
     return;
   }
-  // queued: the merge queue owns it now.
+  // queued: the merge queue owns it. A batch that holds the PR, or a merge of the repo under way, goes first.
+  const leave = async (to: "review" | "failed", reason: string | null, line: string): Promise<void> => {
+    const moved = await db.write(async () => !await inActiveBatch(db, p.repo, p.number) && !await mergeRunning(db, p.repo) && await moveRaw(db, p, to, { reason }));
+    if (moved) await say(db, p.repo, p.number, line);
+  };
+  // A new review that asks for fixes, sure or not, of a PR approved for merge: the pipeline's fix-up runs under that approval, and its push is the leg's own again.
+  if (leg?.entry !== "merge" && (await reviewAt(db, p, head, pf, wake)).kind === "takefix") return await leave("review", null, `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.`);
+  const f = cur === head ? await factOf() : null;
+  const why = f?.head === head ? queueStop(p, f) : null;
+  if (why !== null) await leave("failed", why, `The pre-approved merge stopped: ${why}.`);
 }
 
 /** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
