@@ -1,6 +1,6 @@
 // The planner pass's inputs: every module's set loader for the pass keys, loaded inside one read snapshot. The first wave
 // carries every loader keyed by the pass keys; the second only what needs the first one's rows (task states of stored patches,
-// our own commits on the push chains, stacked heads, operators' retries of refused merges, the pre-merge rows of merge-entry heads,
+// our own commits on the push chains, operators' retries of refused merges, the pre-merge rows of merge-entry heads,
 // labels, author tiers and blockers); the third the owner statements the reviews name, and only when one does. The PR load and the
 // item load of a pass run in step, so their waves share round trips.
 import type { Db } from "../db/index.ts";
@@ -14,7 +14,7 @@ import { loadImplementFacts, type ImplementFacts } from "../data/implement/index
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
 import { loadMergeFacts, loadOwnIntegration, type MergeFacts } from "../data/merge/index.ts";
 import {
-  loadAuthorPermissions, loadComments, loadDiffFacts, loadFormalReviews, loadGates, loadItems, loadItemsWithHashes, loadOpenPrLinks, loadPrMirror, loadRepoCiSignals, loadRepos, loadStackedHeads,
+  loadAuthorPermissions, loadComments, loadDiffFacts, loadFormalReviews, loadGates, loadItems, loadItemsWithHashes, loadOpenPrLinks, loadPrMirror, loadRepoCiSignals, loadRepos,
   type DiffFactsRow, type Gate, type PrMirror, type RepoCiSignals, type RepoRow, type ReviewFact,
 } from "../data/mirror/index.ts";
 import type { CommentOut, ItemHashes, ItemOf, OpenPrRow } from "../data/mirror/types.ts";
@@ -73,7 +73,6 @@ export type PrPassData = {
   tasks: TaskStates;
   /** Our own commits on the loaded PRs' push chains, keyed "repo@sha". */
   ownCommits: Set<string>;
-  stacked: Map<string, number[]>;
   statements: Map<number, Statement>;
   /** An operator's latest Retry of a refused merge, by the retry target of the queue head (`mergeDecisionId`). */
   retries: Map<string, string>;
@@ -194,7 +193,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
     now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
     inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
-    tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(), act: new Map(),
+    tasks: new Map(), ownCommits: new Set(), statements: new Map(), retries: new Map(), act: new Map(),
     settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() }, carried: new Map(),
   };
   await endWave();
@@ -221,15 +220,15 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   for (const [key, r] of review.latest) if (mirror.get(key)?.item.state === "OPEN") for (const b of r.blocked_by) blockers.add(b);
   const authors = rows.scoped.flatMap((key) => { const i = mirror.get(key)!.item; return i.author ? [{ login: i.author, id: i.author_id ?? null }] : []; });
   const actors = [...workflow.ofPr].flatMap(([key, w]) => (workflow.actors.get(w.id) ?? []).map((login) => ({ login, repo: asRef(key).repo })));
-  const [tasks, ownCommits, stacked, retries, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
-    loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs), loadStackedHeads(db, [...new Set([...mirror.values()].map((m) => m.item.repo))]),
+  const [tasks, ownCommits, retries, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
+    loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs),
     retryTargets.length ? loadAuditMax(db, "retry", retryTargets) : Promise.resolve(new Map<string, string>()),
     loadPremerge(db, entryHeads), loadInScope(db, members), loadSettled(db, rows.scoped.map(asRef), o.base.run), tiersOf(db, authors),
     postSourcesOf(db, rows.all.filter((key) => review.latest.get(key)?.mode === CARRIED)), loadBlockerReads(db, blockers),
     actors.length ? loadActFacts(db, actors) : Promise.resolve(new Map<PermKey, ActFacts>()),
   ]);
   for (const k of membersInScope) data.inScope.add(k);
-  Object.assign(data, { tasks, ownCommits, stacked, retries, settled, tiers, postSource, blockers: reads, act });
+  Object.assign(data, { tasks, ownCommits, retries, settled, tiers, postSource, blockers: reads, act });
   for (const [k, v] of premerge) data.review.premerge.set(k, v);
   await endWave();
 

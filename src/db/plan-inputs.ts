@@ -34,7 +34,7 @@ const inDupeSet = (a: string): string =>
 const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ");
 
 /**
- * Item columns that change other PRs' facts: stacked PRs (head_ref, head_repo), long-lived branches (base_ref, author_association),
+ * Item columns that change other PRs' facts: long-lived branches (head_ref, head_repo, base_ref, author_association),
  * authors' tiers (state). A PR's text and closing links move issues' open PR, which the PR_REFS input logs by issue.
  */
 const PR_CROSS_COLUMNS = ["state", "head_ref", "head_repo", "base_ref", "author_association"];
