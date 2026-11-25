@@ -332,7 +332,7 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): CommentI
 }
 
 /** One item read: its repo, kind and detail level, and the node GitHub returned. */
-type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node };
+type NodeWrite = { repo: string; kind: Kind; detail: Detail; n: Node; /** When this node's own read started, if not the call's. */ readAt?: string };
 
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**
@@ -354,7 +354,7 @@ async function writeNodes(db: Db, nodes: readonly NodeWrite[], opts: { force?: b
   const own = await mentionNames(db, live);
   // Rows are built before the write lock. An item read twice keeps its last read (the writer also keeps one entry per item).
   const entries: ItemEntry[] = nodes.map((w) => ({
-    repo: w.repo, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [],
+    repo: w.repo, kind: w.kind, detail: w.detail, row: toRow(w.repo, w.kind, w.n, w.detail), comments: w.detail === "full" ? commentRows(w.repo, w.kind, w.n, own) : [], ...(w.readAt !== undefined && { readAt: w.readAt }),
   }));
   if (!entries.length && !opts.inside) return;
   await db.write(async () => {
@@ -869,14 +869,19 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
   const stale = (await listItems(db, { repos: [name], states: ["OPEN"] }, "ref")).filter((r) => !listed.has(`${r.kind}\t${r.number}`)).sort((a, b) => a.number - b.number);
   let updated = 0;
   const goneRefs: string[] = [];
+  // Every item is stored with the time its own request was sent; a page's worth shares one write.
+  const read: (NodeWrite & { readAt: string })[] = [];
+  const store = async (): Promise<void> => { if (read.length) await writeNodes(db, read.splice(0)); };
   for (const r of stale) {
     const sentAt = iso(new Date());
     const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
     if (n && n.repository?.name === name && ownedBy(n, name)) {
-      await writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
+      read.push({ repo: name, kind: n.__typename === "PullRequest" ? "pr" : "issue", detail: n.state === "OPEN" ? "full" : "light", n, readAt: sentAt });
       updated++;
+      if (read.length >= FULL_PAGE) await store();
     } else goneRefs.push(`${name}#${r.number}`);
   }
+  await store();
   // Deleted or transferred items are marked CLOSED (no consumer reads a state other than OPEN, CLOSED and MERGED) and audited.
   const gone = await closeGoneItems(db, goneRefs, iso(now));
   await markReposReconciled(db, [{ name, at: iso(now) }]);

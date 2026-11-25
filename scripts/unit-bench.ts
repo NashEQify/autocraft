@@ -24,7 +24,8 @@ import { queueView } from "../src/remote/queue-view.ts";
 import { runSync, type Querier } from "../src/mirror.ts";
 import { JobLogCopy } from "../src/runner/job-log.ts";
 import { Runner } from "../src/runner/runner.ts";
-import { runJev } from "../src/classify/run.ts";
+import { runJev, setRunner } from "../src/classify/run.ts";
+import { withConfig } from "../src/data/control/index.ts";
 import { startLatencyProxy } from "./latency-proxy.ts";
 
 const args = process.argv.slice(2);
@@ -213,12 +214,11 @@ try {
   }
 
   // ---- classify ----
-  if (!only || "classify".includes(only)) {
-    const q = queryDb(seedDb);
-    const rows = await q.all(q.k.selectFrom("items").select(["repo", "number", "kind", "title", "body", "author", "state", "labels", "created_at", "updated_at"]).where("kind", "=", "issue").orderBy("number").limit(40));
-    dumps["classify"] = rows.length;
-    void runJev;
-  }
+  const answers = { type: { choice: "performance", confidence: 0.95, probabilities: { performance: 0.95, bugfix: 0.05 } }, security: { noul: 0.1 }, needs_decision: { noul: 0.1 } };
+  const restore = setRunner(async () => { await new Promise((r) => setTimeout(r, 300)); return { code: 0, stderr: "", stdout: JSON.stringify({ answers, usage: { input_tokens: 1000, output_tokens: 50 } }) }; });
+  const chunk = Array.from({ length: 40 }, (_, i) => ({ repo: repoOf(i), number: 5000 + i, kind: "issue" as const, title: "t", body: "b", lines_changed: null, files_changed: null, author_association: null }));
+  await unit("classify: a chunk of 40, calls 300 ms", () => quiet(() => withConfig(db, () => runJev(db, "bench", chunk as never, 20))), { runs: 3 });
+  restore();
   if (dumpFile) writeFileSync(dumpFile, JSON.stringify(dumps, null, 1));
   await db.close();
   await remote.close();

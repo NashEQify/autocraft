@@ -4,6 +4,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Kysely } from "kysely";
 import { join } from "node:path";
+import { allocation } from "../src/agents/call.ts";
+import { runJev, setRunner } from "../src/classify/run.ts";
+import { withConfig } from "../src/data/control/index.ts";
 import { effect } from "../src/db/effects.ts";
 import { COLUMNS } from "../src/db/types.ts";
 import { activity } from "../src/dash/api/activity.ts";
@@ -25,6 +28,7 @@ import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { tmpdir, world, type World } from "./world-db.ts";
 
 const iso = (minAgo: number): string => new Date(Date.now() - minAgo * 60_000).toISOString();
+const until = async (done: () => boolean): Promise<void> => { for (let i = 0; i < 500 && !done(); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(done()); };
 const numbers = (n: number, from = 1): number[] => Array.from({ length: n }, (_, i) => from + i);
 
 const req = (query: Record<string, string> = {}, params: Record<string, string> = {}): Req => ({
@@ -148,6 +152,50 @@ test("calls that wait for their result share one poll", async () => {
     // Each await is one model call, which opens and closes its own relays; a call whose relays open late joins the next poll.
     return () => Promise.all(ids.map((id) => { effect("model-call"); return awaitCall(w.db, id, { log: () => {} }); }));
   }), 1, 8, { perEffect: 3 });
+});
+
+test("calls a Task Runner runs cost their caller no write while nothing asks for a check", async () => {
+  const w = await world();
+  await w.repo();
+  await seedPrs(w, 3);
+  const ids: number[] = [];
+  for (const i of numbers(3)) ids.push(await queueCall(w, i));
+  const now = Date.now();
+  await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "leased", leased_at: now, heartbeat_at: now, started_at: now }));
+  let polls = 0, writes = 0;
+  const stop = w.db.observe((e) => {
+    if (e.kind !== "query") return;
+    if (/^\s*update\b.*remote_checks/is.test(e.sql)) writes++;
+    if (/remote_calls/.test(e.sql) && /^\s*select/i.test(e.sql)) polls++;
+  });
+  const was = allocation.pollMs;
+  allocation.pollMs = 10;
+  const check = { run: async () => { throw new Error("no check was asked for"); } };
+  try {
+    const waits = ids.map((id) => awaitCall(w.db, id, { log: () => {}, check: check as never }));
+    await until(() => polls >= 3);
+    await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "failed", error: "ended" }));
+    await Promise.all(waits);
+  } finally {
+    allocation.pollMs = was;
+    stop();
+  }
+  assert.equal(writes, 0);
+  w.close();
+  await w.db.close();
+});
+
+test("the runs and answers of a classify chunk are written in sets", async () => {
+  const restore = setRunner(async () => ({ code: 0, stderr: "", stdout: JSON.stringify({
+    answers: { type: { choice: "performance", confidence: 0.95, probabilities: { performance: 0.95, bugfix: 0.05 } }, security: { noul: 0.1 }, needs_decision: { noul: 0.1 } }, usage: { input_tokens: 10, output_tokens: 5 },
+  }) }));
+  try {
+    await expectFlat(unit(async (w, n) => {
+      await seedPrs(w, n);
+      const chunk = numbers(n).map((number) => ({ repo: "app", number, kind: "pr" as const, title: "t", body: "b", lines_changed: 1, files_changed: 1, author_association: null }));
+      return async () => assert.equal((await withConfig(w.db, () => runJev(w.db, "run", chunk, n))).saved.size, n);
+    }), 2, 20, { perEffect: 1 });
+  } finally { restore(); }
 });
 
 test("a runner tick reads its running and queued jobs in sets", async () => {
