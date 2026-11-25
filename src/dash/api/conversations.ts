@@ -1,23 +1,18 @@
 // Opus conversations on items. Everyone who may see the repo reads them. Operators write to Opus, and so do maintainers with
 // write access to the repo, whose messages run on their own Task Runners; cards are run, edited and dismissed by those who settle.
-import type { CardEdit, Conversation, ConversationCard, ConversationTurn, DecisionChoices } from "../../../web/src/api/types.ts";
-import { buttonLabel, cardEffect, cardLines, decisionStamp, dependsOnCode, headline, isSettling, openDecision, stepLine, validateCard, type CardParams } from "../../conversations/cards.ts";
-import { applyDrafts, choicesById, compose, coresFor, currentChoices, seenJson, type ComposeExtra, type Core } from "../../decide/choices.ts";
-import { parseCoreKey, type ChoicesRow, type CoreKey } from "../../decide/choices-types.ts";
-import { getDecision } from "../../decisions.ts";
-import { queuePlace, queueReason } from "../../conversations/queue.ts";
-import * as kx from "../../db/kx.ts";
-import { NOTE_MAX } from "../../conversations/types.ts";
-import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
-import { ConversationError, addMessage, withdrawTurn, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
+import type { CardEdit, Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
+import { buttonLabel, cardEffect, cardLines, cardRepos, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
+import { queueReason } from "../../conversations/queue.ts";
+import { cardDigest, cardOf, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
+import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
+import { ConversationError, loadQueue, loadThreads, type Queue, type Thread } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
-import { canSettleCached, requireSettle } from "../../settlers.ts";
+import { canSettleCached, requireSettle, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { mayRunRepo } from "../repo-access.ts";
-import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import { inferenceMode, tierOfModel } from "../../remote/mode.ts";
 import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
@@ -52,111 +47,80 @@ async function guard<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-async function guardAsync<T>(f: () => Promise<T>): Promise<T> {
-  try {
-    return await f();
-  } catch (e) {
-    if (e instanceof ConversationError) throw new HttpError(e.status, e.message);
-    throw e;
-  }
-}
+type Viewer = { login: string; role: string };
+/** What the views of several cards share. */
+type CardsView = { queue: Queue; stale: Map<number, Stale>; memo: SettleMemo };
 
-async function queuedView(db: Db, c: CardRow, staff: boolean): Promise<NonNullable<ConversationCard["queued"]>> {
-  const place = await queuePlace(db, c.id);
-  return { place, reason: queueReason(place), dispute: null };
-}
+const cardsView = async (db: Db, cards: CardRow[]): Promise<CardsView> => {
+  const [queue, stale] = await Promise.all([loadQueue(db), loadStale(db, cards.filter((c) => c.state === "proposed"))]);
+  return { queue, stale, memo: settleMemo() };
+};
+
+/** One card's view. A card of the retired decision system shows its stored lines only. */
+export const cardView = async (db: Db, c: CardRow, who?: Viewer): Promise<ConversationCard> => await viewOf(db, c, await cardsView(db, [c]), who);
 
 /** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer under the rule of src/settlers.ts, from cached permissions). */
-export async function cardView(db: Db, c: CardRow, who?: { login: string; role: string }): Promise<ConversationCard> {
-  const params = JSON.parse(c.params) as CardParams;
-  const effect = c.kind === "answer" || c.kind === "close" || c.kind === "resolution" ? await cardEffect(db, params) : null;
-  const lines = await cardLines(db, params, c.description);
-  const commentStep = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "comment") : params.kind === "comment" || (params.kind === "close" && c.text !== null) ? 0 : -1;
-  const issueAt = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "open_issue") : -1;
-  const fixupAt = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "fixup") : -1;
-  const issueStep = params.kind === "resolution" ? params.steps[issueAt] : undefined;
-  const fixupStep = params.kind === "resolution" ? params.steps[fixupAt] : undefined;
-  const stale = c.state === "proposed" ? await staleOf(db, c.repo, c.number, c.seen) : undefined;
+async function viewOf(db: Db, c: CardRow, v: CardsView, who?: Viewer): Promise<ConversationCard> {
+  const params = readParams(c.kind, c.params);
+  const effect = params ? cardEffect(params) : null;
+  const issue = params ? issueOf(params) : undefined;
+  const stale = c.state === "proposed" ? v.stale.get(c.id) : undefined;
   const one = (t: string) => t.replace(/\s+/g, " ").trim();
-  const settleReason = params.kind === "resolution" && params.settle?.kind === "answer" ? params.settle.reason : undefined;
-  const previews: [string, string | undefined | null][] = [
-    ["Comment", c.text],
-    ["Reason", settleReason],
-    ["Issue", issueStep?.kind === "open_issue" ? issueStep.title : undefined],
-    ["Instructions", fixupStep?.kind === "fixup" ? fixupStep.instructions : undefined],
-  ];
-  const first = previews.find(([, t]) => t && one(t));
-  const preview = first ? `${first[0]}: ${one(first[1]!)}` : undefined;
+  const preview = c.text && one(c.text) ? `Comment: ${one(c.text)}` : issue ? `Issue: ${one(issue.title)}` : undefined;
+  const place = c.state === "queued" ? v.queue.rows.find((r) => r.id === c.id)?.place ?? null : null;
   return {
-    steps: lines.steps,
-    ...(commentStep >= 0 && { commentStep }),
-    ...(issueStep?.kind === "open_issue" && { issue: { step: issueAt, repo: issueStep.repo, title: issueStep.title, body: issueStep.body } }),
-    ...(fixupStep?.kind === "fixup" && { fixup: { step: fixupAt, instructions: fixupStep.instructions, merge: fixupStep.merge } }),
-    ...(params.kind === "resolution" && params.settle?.kind === "answer" && { option: params.settle.option }),
+    steps: params ? cardLines(params) : [],
+    ...(params?.kind === "comment" && { commentStep: 0 }),
+    ...(issue && { issue }),
     ...(stale && { stale }),
-    ...(lines.settles && { settles: lines.settles }),
-    label: await buttonLabel(db, params),
-    headline: await headline(db, params),
+    label: params ? buttonLabel(params) : c.description,
+    headline: params ? headline(params) : c.description,
     ...(preview && { preview }),
-    canSettle: !!who && await canSettleCached(db, who.login, who.role, cardRepos(c, params)),
+    canSettle: !!who && params !== null && await canSettleCached(db, who.login, who.role, cardRepos(c.repo, params), v.memo),
     id: c.id, kind: c.kind as ConversationCard["kind"], title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
     ...(c.text !== null && { text: c.text }),
     ...(effect && { writes: effect }),
     ...(c.state === "done" && { done: { at: c.acted_at ?? "", link: c.result_url ?? "", label: c.result ?? "Done" } }),
     ...(c.state === "failed" && c.error && { error: c.error }),
-    ...(c.state === "queued" && { queued: await queuedView(db, c, !!who && (who.role === "operator" || who.role === "maintainer")) }),
+    ...(c.state === "queued" && { queued: { place, reason: queueReason(place), dispute: null } }),
     ...(c.acted_by && { by: c.acted_by }),
     ...(c.acted_at && { at: c.acted_at }),
     ...(c.edited_by && { edited: true, editedBy: c.edited_by }),
-    ...(c.choice_id && { fromChoice: true }),
   };
 }
 
-/**
- * The choices of the item's open decision (the one a conversation card would settle): the offered cores with Opus's drafts over them.
- * Null when the item has no such decision or cores, or when the decision has no current choices row written for its present state
- * (the web then offers the plain answer path and Re-prepare).
- */
-export async function choicesView(db: Db, repo: string, n: number): Promise<DecisionChoices | null> {
-  const d = await openDecision(db, repo, n);
-  if (!d) return null;
-  const base = await coresFor(db, d);
-  if (base.length === 0) return null;
-  const row = await currentChoices(db, d.id);
-  if (!row || row.stamp !== await decisionStamp(db, d)) return null;
-  const cores = await applyDrafts(db, d, base, row);
-  const strip = ({ parsed: _p, decision: _d, allowed: _a, closing: _c, ...view }: Core) => view;
-  const run = await db.get(db.k.selectFrom("conversation_cards").select(["id", "state", "error"]).where("choice_id", "=", row.id).orderBy("id", "desc").limit(1));
-  const pick = row.pick.core && cores.some((c) => c.key === row.pick.core) ? { core: row.pick.core, reason: row.pick.reason ?? "" } : null;
-  return {
-    id: row.id, decisionId: d.id, pick, cores: cores.map(strip),
-    ...(run && { run: { cardId: run.id, state: run.state as NonNullable<DecisionChoices["run"]>["state"], ...(run.error && { error: run.error }) } }),
-    source: row.source, at: row.createdAt, ...(row.askedBy && { after: row.askedBy }),
-  };
+/** The issue draft a card carries (the first a merge holds, or the one it would open), with its place among the card's lines. */
+function issueOf(p: CardParams): ConversationCard["issue"] {
+  const held = followupsOf(p)[0];
+  if (held) return { step: 1, ...held };
+  return p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue" ? { step: 0, repo: p.command.repo, title: p.command.title, body: p.command.body } : undefined;
 }
 
-/** The conversation plus the maintainer posts shared with Opus. */
-export type ConversationView = Conversation & { includes: IncludeRow[] };
+/** `includes` and `choices` are retired: always empty. */
+export type ConversationView = Conversation;
 
-export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<Omit<ConversationView, "canTalk" | "canWithdraw">> {
+async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promise<{ thread: Thread | undefined; view: Omit<ConversationView, "canTalk" | "canWithdraw"> }> {
   // A card left Running by a crash must not show as running until the next restart.
   await sweepRunningCards(db);
-  const c = await conversationOf(db, repo, n);
-  const includes = await includesOf(db, repo, n);
-  const choices = await choicesView(db, repo, n);
-  if (!c) return { repo, number: n, exists: false, pending: false, startedBy: null, turns: [], includes, choices };
-  const cards = await db.all(db.k.selectFrom("conversation_cards").select(kx.cols("conversation_cards")).where("repo", "=", repo).where("number", "=", n).orderBy("id"));
-  const turns: ConversationTurn[] = await mapSeq((await turnsOf(db, repo, n)), async (t) => ({
+  const key = `${repo}#${n}`;
+  const thread = (await loadThreads(db, [key])).get(key);
+  if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [], includes: [], choices: null } };
+  const shared = await cardsView(db, thread.cards);
+  const actions = new Map<number, ConversationCard[]>();
+  for (const c of thread.cards) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(await viewOf(db, c, shared, who));
+  const turns: ConversationTurn[] = thread.turns.map((t) => ({
     id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,
-    actions: await mapSeq(cards.filter((x) => x.turn_id === t.id), async (x) => await cardView(db, x, who)),
+    actions: actions.get(t.id) ?? [],
     notes: t.notes ? (JSON.parse(t.notes) as string[]) : [],
     ...(t.status && { status: t.status as ConversationTurn["status"] }),
     ...(t.error && { error: t.error }),
   }));
-  const wait = await pendingTurn(db, repo, n);
+  const wait = thread.waiting;
   const progress = wait?.status === "answering" && wait.progress ? (JSON.parse(wait.progress) as string[]) : [];
-  return { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: c.created_by, turns, includes, choices };
+  return { thread, view: { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: thread.conversation.created_by, turns, includes: [], choices: null } };
 }
+
+export const conversationView = async (db: Db, repo: string, n: number, who?: Viewer): Promise<Omit<ConversationView, "canTalk" | "canWithdraw">> => (await threadView(db, repo, n, who)).view;
 
 function itemOf(req: Req): { repo: string; n: number } {
   const n = Number(req.params.n);
@@ -193,15 +157,12 @@ function ask(req: Req): boolean {
   return a !== false;
 }
 
-function needOperator(req: Req): void {
-  if (!isOperator(req)) throw new HttpError(403, "only operators share posts with Opus");
-}
-
 /** The conversation as the requester sees it, with whether they may write to Opus and withdraw the maintainer's message that waits. */
 async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<ConversationView> {
-  const wait = await pendingTurn(db, repo, n);
+  const { thread, view } = await threadView(db, repo, n, req.user);
+  const wait = thread?.waiting;
   const canWithdraw = wait?.kind === "maintainer" && (isOperator(req) || wait.login.toLowerCase() === req.user.login.toLowerCase());
-  return { ...await conversationView(db, repo, n, req.user), canTalk: await canTalk(db, req.user, repo), canWithdraw };
+  return { ...view, canTalk: await canTalk(db, req.user, repo), canWithdraw };
 }
 
 export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
@@ -211,7 +172,7 @@ export async function getConversation(db: Db, req: Req): Promise<ConversationVie
   return !canSeeInternals(req) && (await loadQuiet(db, [`${repo}#${n}`])).size > 0 ? veilConversation(view) : view;
 }
 
-/** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, cards, choices and their reasons go. */
+/** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, and cards go. */
 function veilConversation(v: ConversationView): ConversationView {
   const { progress: _p, ...rest } = v;
   return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })), includes: [], choices: null };
@@ -233,7 +194,7 @@ export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<C
   const kind = isOperator(req) ? "operator" : "maintainer", asking = ask(req), body = text(req);
   const refused = kind === "maintainer" && asking ? await ownAskRefusal(db, req.user.login, repo) : null;
   if (refused) throw new HttpError(409, refused);
-  await guardAsync(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
+  await guard(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
   return await viewFor(db, req, repo, n);
 }
 
@@ -245,32 +206,19 @@ export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> 
   return await viewFor(db, req, repo, n);
 }
 
-/** Shares a maintainer post with Opus (`on`) or stops sharing it; the next asked message carries it. */
-export async function postInclude(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
-  const { repo, n } = itemOf(req);
-  await needVisible(db, req, repo);
-  if (!(await mayRunRepo(req.user, repo))) throw new HttpError(403, "no write access to this repo");
-  const b = req.json as { source?: unknown; on?: unknown } | null;
-  if (!b || typeof b !== "object" || typeof b.source !== "string" || typeof b.on !== "boolean") throw new HttpError(400, "the body must be an object with a source and on (true or false)");
-  await guard(async () => await setInclude(db, repo, n, b.source as string, b.on as boolean, req.user.login, deps));
-  return await viewFor(db, req, repo, n);
-}
-
 /** The card, for someone who settles it on every repo it writes to (src/settlers.ts: an operator with write access, or a maintainer under its rule). */
 async function needCard(db: Db, req: Req): Promise<CardRow> {
   const id = Number(req.params.id);
   const c = Number.isInteger(id) ? await cardOf(db, id) : undefined;
   if (!c) throw new HttpError(404, `no card ${req.params.id}`);
   await needVisible(db, req, c.repo);
-  await requireSettle(db, req.user, cardRepos(c, JSON.parse(c.params) as CardParams), "runs cards");
+  await requireSettle(db, req.user, cardRepos(c.repo, readParams(c.kind, c.params)), "runs cards");
   return c;
 }
 
 export async function editCardText(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   const edit = cardEdit(req);
-  // The fix-up instructions go to the fix-up model: only someone who runs the repo writes them.
-  if (edit.instructions !== undefined && !(await mayRunRepo(req.user, c.repo))) throw new HttpError(403, "no write access to edit a fix-up's instructions");
   return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, edit)), req.user);
 }
 
@@ -285,10 +233,6 @@ export async function dismiss(db: Db, req: Req): Promise<ConversationCard> {
   return await cardView(db, await guard(async () => await dismissCard(db, c.id, req.user.login, { role: req.user.role })), req.user);
 }
 
-/** Disputes of queued presses are retired; the routes stay until the web code drops them. */
-export const disputePress = async (_db: Db, _req: Req): Promise<ConversationCard> => { throw new HttpError(410, "queued presses are no longer disputed: dismiss the press instead"); };
-export const keepPress = disputePress;
-
 /**
  * Runs the card once; a second press returns the card as it is. The press carries the digest of the card it was made on,
  * so an edit by someone else in between is refused instead of running under this press.
@@ -299,138 +243,6 @@ export async function doIt(db: Db, req: Req, deps?: ActDeps): Promise<Conversati
   if (typeof b?.digest !== "string") throw new HttpError(400, "digest must be the digest of the card as shown");
   if (c.state === "proposed" && b.digest !== cardDigest(c)) throw new HttpError(409, c.edited_by ? `the card changed since it was shown (edited by ${c.edited_by}); look at it again` : "the card changed since it was shown; look at it again");
   if (b?.note !== undefined && typeof b.note !== "string") throw new HttpError(400, "note must be a string");
-  if (b?.skip !== undefined && (!Array.isArray(b.skip) || b.skip.some((k) => !Number.isInteger(k)))) throw new HttpError(400, "skip must be a list of step positions");
-  const skip = (b?.skip as number[] | undefined) ?? [];
-  return await cardView(db, (await guardAsync(() => doCard(db, c.id, req.user.login, { ...deps, skip, note: b?.note as string | undefined, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }))).card, req.user);
-}
-
-/** The request body of a choice run, checked for shape only. */
-function choiceBody(req: Req): { core: CoreKey; params: { reason?: string; instructions?: string }; extras: { id: string; text?: string; title?: string; body?: string }[]; note?: string } {
-  const b = req.json as Record<string, unknown> | null;
-  if (!b || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "the body must be an object");
-  if (typeof b.core !== "string" || !parseCoreKey(b.core)) throw new HttpError(400, "core must be a choice key");
-  const str = (o: Record<string, unknown>, k: string, what: string): string | undefined => {
-    if (o[k] === undefined) return undefined;
-    if (typeof o[k] !== "string") throw new HttpError(400, `${what} must be a string`);
-    return o[k] as string;
-  };
-  const p = (b.params ?? {}) as Record<string, unknown>;
-  if (typeof p !== "object" || Array.isArray(p)) throw new HttpError(400, "params must be an object");
-  if (!Array.isArray(b.extras ?? [])) throw new HttpError(400, "extras must be a list");
-  const extras = ((b.extras ?? []) as unknown[]).map((x) => {
-    const e = x as Record<string, unknown> | null;
-    if (!e || typeof e !== "object" || typeof e.id !== "string") throw new HttpError(400, "each extra needs an id");
-    return { id: e.id, text: str(e, "text", "text"), title: str(e, "title", "title"), body: str(e, "body", "body") };
-  });
-  return { core: b.core, params: { reason: str(p, "reason", "reason"), instructions: str(p, "instructions", "instructions") }, extras, note: str(b, "note", "note") };
-}
-
-/**
- * Runs a decision's chosen core with its ticked extras: composes one resolution card from them, stores it as an ordinary card
- * (`choice_id` set) and runs it like Do it. The user's own edited texts go through the card edit, so they are not cleaned and
- * show as edited; a maintainer may not edit fix-up instructions.
- */
-export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<ConversationCard> {
-  const key = req.params.id!;
-  const before = pressing.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const mine = new Promise<void>((r) => { release = r; });
-  pressing.set(key, mine);
-  try {
-    await before;
-    return await pressChoices(db, req, release, deps);
-  } finally {
-    release();
-    if (pressing.get(key) === mine) pressing.delete(key);
-  }
-}
-
-// A press inserts its card and claims it only in doCard, after other awaits; a second press of the same choices let in between
-// would replace the first one's card. So in this process a press waits until the one before it has claimed its card or ended.
-const pressing = new Map<string, Promise<void>>();
-
-async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDeps): Promise<ConversationCard> {
-  const row = await choicesById(db, req.params.id!);
-  if (!row) throw new HttpError(404, `no choices ${req.params.id}`);
-  await needVisible(db, req, row.repo);
-  const body = choiceBody(req);
-  if (row.state !== "current") throw new HttpError(409, "replaced by newer choices");
-  const d = await getDecision(db, row.decisionId);
-  if (!d || d.answer !== null) throw new HttpError(409, "the decision is already settled");
-  if (await decisionStamp(db, d) !== row.stamp || (await openDecision(db, row.repo, row.number))?.id !== d.id) throw new HttpError(409, "the decision changed since these choices were written");
-  const priorOf = async (): Promise<CardRow | undefined> => await db.get(db.k.selectFrom("conversation_cards").select(kx.cols("conversation_cards")).where("choice_id", "=", row.id).orderBy("id", "desc").limit(1));
-  // A card for these choices that is already running or done is returned as it is (a second press).
-  const first = await priorOf();
-  if (first && (first.state === "running" || first.state === "done" || first.state === "queued")) return await cardView(db, first, req.user);
-
-  const core = (await applyDrafts(db, d, await coresFor(db, d), row)).find((c) => c.key === body.core);
-  if (!core) throw new HttpError(400, `"${body.core}" is not one of the choices`);
-  const user = (id: string) => body.extras.find((x) => x.id === id);
-  const extras: ComposeExtra[] = body.extras.map((x) => {
-    const offered = core.extras.find((e) => e.id === x.id);
-    if (!offered) throw new HttpError(400, `the extra "${x.id}" is not offered with "${core.label}"`);
-    const { id, kind, label, login, logins, repo } = offered;
-    // The user's text is what runs; the card edit below keeps it as written.
-    return { id, kind, label, login, logins, repo, text: x.text ?? offered.text, title: x.title ?? offered.title, body: x.body ?? offered.body };
-  });
-  const drafted = core.params?.instructions ?? "";
-  const params = { reason: body.params.reason ?? core.params?.reason, instructions: body.params.instructions ?? core.params?.instructions };
-  if (body.params.instructions !== undefined && body.params.instructions.trim() !== drafted.trim() && !(await mayRunRepo(req.user, row.repo))) throw new HttpError(403, "no write access to edit a fix-up's instructions");
-  const composed = compose(core, extras, params);
-  if ("note" in composed) throw new HttpError(400, composed.note);
-  const v = await validateCard(db, row.repo, row.number, composed.card);
-  if (!("card" in v)) throw new HttpError(400, v.note);
-  // After a push only cards that do not rest on the code (backlog, hold, label, close, plain answers) run; a drafted text or a fix-up waits for the updated choices.
-  if (await staleOf(db, row.repo, row.number, seenJson(row.seen)) === "pr-changed" && dependsOnCode(v.card.params, v.card.text)) throw new HttpError(409, "the PR changed since these choices were written; Opus is updating the choices");
-
-  const probe = { repo: row.repo } as CardRow;
-  await requireSettle(db, req.user, cardRepos(probe, v.card.params), "runs choices");
-
-  // The press is claimed here, in one transaction with the check: a press from another process that got this far sees this one's card.
-  let id = 0;
-  let failedBefore: CardRow | undefined;
-  const pressed = await db.write(async () => {
-    if ((await choicesById(db, row.id))?.state !== "current") throw new HttpError(409, "replaced by newer choices");
-    const prior = await priorOf();
-    if (prior && (prior.state === "running" || prior.state === "done" || prior.state === "queued")) return prior;
-    // A run whose outcome is unknown may have repeated writes: the operator prepares again or says what else to do.
-    if (prior?.state === "failed" && /^outcome unknown/.test(prior.error ?? "")) throw new HttpError(409, "the last run of these choices stopped after some of its steps; Re-prepare, or tell Opus what to do next");
-    failedBefore = prior?.state === "failed" ? prior : undefined;
-    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("choice_id", "=", row.id).where("state", "=", "proposed"));
-    id = (await db.get(db.k.insertInto("main.conversation_cards")
-      .values({ turn_id: row.turnId ?? 0, repo: row.repo, number: row.number, kind: "resolution", params: JSON.stringify(v.card.params), text: v.card.text, description: v.card.description, seen: seenJson(row.seen), choice_id: row.id })
-      .returning("id")))!.id;
-    return undefined;
-  });
-  if (pressed) return await cardView(db, pressed, req.user);
-  try {
-    // Edits the user made to the drafted texts: the comment, the issue, the fix-up instructions.
-    const edit: CardEdit = {};
-    const steps = v.card.params.kind === "resolution" ? v.card.params.steps : [];
-    const typedComment = extras.find((e) => e.kind === "comment" && user(e.id)?.text !== undefined);
-    if (typedComment && typedComment.text!.trim() && typedComment.text!.trim() !== v.card.text) edit.text = typedComment.text!;
-    const issue = steps.find((x) => x.kind === "open_issue");
-    const typedIssue = extras.find((e) => e.kind === "open_issue" && (user(e.id)?.title !== undefined || user(e.id)?.body !== undefined));
-    if (issue?.kind === "open_issue" && typedIssue && (typedIssue.title!.trim() !== issue.title || typedIssue.body!.trim() !== issue.body)) edit.issue = { title: typedIssue.title!, body: typedIssue.body! };
-    const fix = steps.find((x) => x.kind === "fixup");
-    if (fix?.kind === "fixup" && body.params.instructions !== undefined && body.params.instructions.trim() !== fix.instructions) edit.instructions = body.params.instructions;
-    if (Object.keys(edit).length) await guard(async () => await editCard(db, id, req.user.login, edit));
-  } catch (e) {
-    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("id", "=", id).where("state", "=", "proposed"));
-    throw e;
-  }
-  // Steps a failed earlier press of these choices completed (its error names them) are not run again.
-  const allSteps = v.card.params.kind === "resolution" ? v.card.params.steps : [];
-  const priorDone = failedBefore?.error?.startsWith("Already done:") ? failedBefore.error : "";
-  const doneAt = allSteps.flatMap((x, k) => (priorDone.includes(stepLine(x)) && !isSettling(x) ? [k] : []));
-  const alreadyDone = doneAt.length < allSteps.length || (v.card.params.kind === "resolution" && v.card.params.settle) ? doneAt : [];
-  let ran;
-  try {
-    ran = await guardAsync(() => doCard(db, id, req.user.login, { ...deps, claimed, skip: alreadyDone, note: body.note, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }));
-  } catch (e) {
-    // Refused before the claim (lane, approval): the card never ran and must not stay proposed.
-    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("id", "=", id).where("state", "=", "proposed"));
-    throw e;
-  }
-  return await cardView(db, ran.card, req.user);
+  if (b?.skip !== undefined && !(Array.isArray(b.skip) && b.skip.length === 0)) throw new HttpError(400, "a card does one thing: it has no steps to skip");
+  return await cardView(db, (await guard(() => doCard(db, c.id, req.user.login, { ...deps, via: "dashboard", note: b?.note as string | undefined, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }))).card, req.user);
 }

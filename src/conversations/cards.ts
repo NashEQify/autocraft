@@ -10,20 +10,31 @@ import { loadPermissions, permKey } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import type { NewCard as StoredCard } from "../data/conversations/index.ts";
+import { listWorkflows } from "../data/workflow/index.ts";
+import { duplicateComment } from "../act/templates.ts";
+import { describe as describeParts, parse } from "../workflow/parse.ts";
+import { resolve } from "../workflow/resolve.ts";
+import type { ItemWorkflow } from "../workflow/types.ts";
 import { COMMENT_MAX, ISSUE_TITLE_MAX } from "./types.ts";
 import type { Db } from "../db/index.ts";
 
 /** An issue a merging command opens once the PR merged (src/conversations/held.ts). */
 export type FollowUp = { repo: string; title: string; body: string };
 
-/** A command of the registry: a press runs its text (commandText) through the workflow's runCommand as the presser. */
-export type RegistryCommand =
-  | { word: "review" }
-  | { word: "fix-up"; merge: boolean; followups?: FollowUp[] }
-  | { word: "merge"; followups?: FollowUp[] }
-  | { word: "backlog" }
-  /** `duplicateOf`: the item it duplicates, shown on the card. */
-  | { word: "close"; pr: boolean; duplicateOf?: number };
+/** A command of the registry: a press runs `text` through the workflow's runCommand as the presser. */
+export type RegistryCommand = {
+  /** Registry words as src/workflow/parse.ts reads them, in canonical form ("fix-up, merge"). */
+  text: string;
+  /** The text approves a merge. */
+  merges?: boolean;
+  /** The text names plan parts: when the recommendation it names them from was written. Another recommendation refuses the press. */
+  parts?: { recAt: string | null };
+  /** The item is a pull request (the wording of a close). */
+  pr?: boolean;
+  /** The item a close names as the original, shown on the card. */
+  duplicateOf?: number;
+  followups?: FollowUp[];
+};
 
 /** Actions with no registered command: the card shows them and a press refuses (actionRefusal). */
 export type OtherAction =
@@ -40,13 +51,7 @@ export type CardParams = { kind: "command"; command: Command } | { kind: "commen
 
 export type NewCard = { params: CardParams; text: string | null; description: string };
 
-const REGISTRY = new Set(["review", "fix-up", "merge", "backlog", "close"]);
-export const isRegistry = (c: Command): c is RegistryCommand => REGISTRY.has(c.word);
-
-/** The text a press runs: registry words, read by src/workflow/parse.ts. */
-export function commandText(c: RegistryCommand): string {
-  return c.word === "fix-up" && c.merge ? "fix-up and merge" : c.word;
-}
+export const isRegistry = (c: Command): c is RegistryCommand => "text" in c;
 
 /** Why a press of an action without a registered command runs nothing. */
 export const actionRefusal = (c: OtherAction): string =>
@@ -54,6 +59,16 @@ export const actionRefusal = (c: OtherAction): string =>
 const actionVerb: Record<OtherAction["word"], string> = {
   reopen: "reopen an item", open_issue: "open an issue", transfer: "move an issue", assign: "assign someone", request_reviewers: "request reviewers",
 };
+
+/** The card as a reply writes it, for the turn Opus reads back. */
+export function replyForm(c: NewCard): unknown {
+  const p = c.params;
+  if (p.kind === "comment") return { kind: "resolution", steps: [{ kind: "comment" }], text: c.text ?? "" };
+  if (p.kind === "label") return { kind: "resolution", steps: [{ kind: p.remove ? "unlabel" : "label", label: p.label }] };
+  if (isRegistry(p.command)) return { kind: "resolution", steps: [...followupsOf(p).map((f) => ({ kind: "open_issue", ...f })), { kind: "command", text: p.command.text }] };
+  const { word, ...rest } = p.command;
+  return { kind: "resolution", steps: [{ kind: word, ...rest }] };
+}
 
 /** The stored form of a card. */
 export const storedCard = (c: NewCard): StoredCard => ({ kind: c.params.kind, params: JSON.stringify(c.params), text: c.text, description: c.description });
@@ -67,20 +82,30 @@ export function readParams(kind: string, params: string): CardParams | null {
   } catch { return null; }
 }
 
-const followupsOf = (p: CardParams): FollowUp[] =>
-  p.kind === "command" && (p.command.word === "merge" || p.command.word === "fix-up") ? p.command.followups ?? [] : [];
+export const followupsOf = (p: CardParams): FollowUp[] => (p.kind === "command" && isRegistry(p.command) ? p.command.followups ?? [] : []);
 
 /** Whether the press holds issues until the merge: a merging command with follow-ups. */
 export const holdsIssues = (p: CardParams): boolean => followupsOf(p).length > 0;
 
+/** The line and the button of the commands proposed most; any other shows its own text. */
+const WORDS: Record<string, [line: string, button: string]> = {
+  review: ["Review the PR", "Review"],
+  "fix-up": ["Fix up the PR", "Fix up"],
+  "fix-up, merge": ["Fix up the PR, then merge it if the review and CI pass", "Fix up and merge"],
+  merge: ["Approve the merge", "Merge"],
+  implement: ["Implement the issue", "Implement"],
+  "implement, merge": ["Implement the issue, then merge its PR if the review and CI pass", "Implement and merge"],
+  backlog: ["Move the item to the Backlog", "Move to Backlog"],
+  stop: ["Stop all work on the item", "Stop"],
+};
+
 /** One plain line for a command. */
 export function commandLine(c: Command): string {
+  if (isRegistry(c)) {
+    if (c.text === "close") return c.duplicateOf !== undefined ? `Close as a duplicate of #${c.duplicateOf}` : c.pr ? "Close the PR" : "Close the issue";
+    return WORDS[c.text]?.[0] ?? `Run "${c.text}"`;
+  }
   switch (c.word) {
-    case "review": return "Review the PR again";
-    case "fix-up": return c.merge ? "Fix up the PR, then merge it if the review and CI pass" : "Fix up the PR";
-    case "merge": return "Approve the merge";
-    case "backlog": return "Move the item to the Backlog";
-    case "close": return c.duplicateOf !== undefined ? `Close as a duplicate of #${c.duplicateOf}` : c.pr ? "Close the PR" : "Close the issue";
     case "reopen": return "Reopen it";
     case "open_issue": return `Open an issue in ${c.repo}: "${c.title}"`;
     case "transfer": return `Move the issue to ${c.to}`;
@@ -101,12 +126,11 @@ export function buttonLabel(p: CardParams): string {
   if (p.kind === "comment") return "Post comment";
   if (p.kind === "label") return p.remove ? "Remove label" : "Add label";
   const c = p.command;
+  if (isRegistry(c)) {
+    if (c.text === "close") return c.duplicateOf !== undefined ? "Close as duplicate" : c.pr ? "Close PR" : "Close issue";
+    return WORDS[c.text]?.[1] ?? c.text;
+  }
   switch (c.word) {
-    case "review": return "Review again";
-    case "fix-up": return c.merge ? "Fix up and merge" : "Fix up";
-    case "merge": return "Merge";
-    case "backlog": return "Move to Backlog";
-    case "close": return c.duplicateOf !== undefined ? "Close as duplicate" : c.pr ? "Close PR" : "Close issue";
     case "reopen": return "Reopen";
     case "open_issue": return "Open issue";
     case "transfer": return "Move issue";
@@ -119,7 +143,7 @@ export function buttonLabel(p: CardParams): string {
 export function headline(p: CardParams): string {
   if (p.kind !== "command") return buttonLabel(p);
   const c = p.command;
-  if (c.word === "close" && c.duplicateOf !== undefined) return `Close as duplicate of #${c.duplicateOf}`;
+  if (isRegistry(c)) return c.text === "close" && c.duplicateOf !== undefined ? `Close as duplicate of #${c.duplicateOf}` : buttonLabel(p);
   if (c.word === "transfer") return `Move issue to ${c.to}`;
   if (c.word === "open_issue") return `Open issue in ${c.repo}`;
   return buttonLabel(p);
@@ -127,28 +151,25 @@ export function headline(p: CardParams): string {
 
 /** The GitHub write the command leads to after the press, or null. */
 export function cardEffect(p: CardParams): string | null {
-  if (p.kind !== "command") return null;
-  const c = p.command;
-  if (c.word === "close") return c.pr ? "closes the PR on GitHub" : "closes the issue on GitHub";
-  if (c.word === "merge" || (c.word === "fix-up" && c.merge)) return "merges the PR on GitHub once the review and CI pass";
-  if (c.word === "transfer") return `moves the issue to ${c.to} on GitHub`;
-  return null;
+  if (p.kind !== "command" || !isRegistry(p.command)) return null;
+  if (p.command.text === "close") return p.command.pr ? "closes the PR on GitHub" : "closes the issue on GitHub";
+  return p.command.merges ? "merges the PR on GitHub once the review and CI pass" : null;
 }
 
 /** The one-line description stored with a card. */
 export const describe = (repo: string, n: number, p: CardParams): string => `On ${repo}#${n}: ${cardLines(p).join("; ")}`;
 
-/** Whether the card posts text drafted from the item as it was: refused after a push until Opus writes it again. */
-export const dependsOnCode = (p: CardParams): boolean =>
-  p.kind === "comment" || holdsIssues(p) || (p.kind === "command" && p.command.word === "open_issue");
+/** Whether the card rests on the code as it was: a drafted public text, a merge, or parts of the plan. Refused after a push until Opus writes it again. */
+export const dependsOnCode = (p: CardParams): boolean => p.kind === "comment" || holdsIssues(p)
+  || (p.kind === "command" && (isRegistry(p.command) ? !!p.command.merges || !!p.command.parts : p.command.word === "open_issue"));
 
 /** Whether the card puts model-written text on GitHub: refused on a quiet pull request until its fix is published. */
 export const postsText = (p: CardParams): boolean =>
-  p.kind === "comment" || holdsIssues(p) || (p.kind === "command" && (p.command.word === "open_issue" || p.command.word === "transfer"));
+  p.kind === "comment" || holdsIssues(p) || (p.kind === "command" && !isRegistry(p.command) && (p.command.word === "open_issue" || p.command.word === "transfer"));
 
 /** The repos a card writes to: its item's, and where it moves the item or opens an issue. */
 export function cardRepos(repo: string, p: CardParams | null): string[] {
-  const more = !p || p.kind !== "command" ? [] : p.command.word === "transfer" ? [p.command.to] : p.command.word === "open_issue" ? [p.command.repo] : followupsOf(p).map((f) => f.repo);
+  const more = !p || p.kind !== "command" ? [] : isRegistry(p.command) ? followupsOf(p).map((f) => f.repo) : p.command.word === "transfer" ? [p.command.to] : p.command.word === "open_issue" ? [p.command.repo] : [];
   return [...new Set([repo, ...more])];
 }
 
@@ -201,14 +222,16 @@ export type CardFacts = {
   item: { kind: string; state: string; author: string | null; labels: string[] } | null;
   quiet: boolean;
   tracked: ReadonlySet<string>;
-  /** Numbers of the repo's items the mirror has, among those asked for. */
-  known: ReadonlySet<number>;
+  /** The item's live workflow. */
+  workflow: ItemWorkflow | null;
+  /** State of the repo's items the mirror has, among those asked for. */
+  known: ReadonlyMap<number, string>;
   /** Logins (lower case), among those asked for, known to write to the repo: a cached write permission, or an owner, member or collaborator association there. */
   writers: ReadonlySet<string>;
 };
 
-const labelsOf = (raw: string | null): string[] => {
-  try { const l = JSON.parse(raw ?? "[]") as unknown; return Array.isArray(l) ? l.map(String) : []; } catch { return []; }
+export const itemLabels = (i: { labels: string | null }): string[] => {
+  try { const l = JSON.parse(i.labels ?? "[]") as unknown; return Array.isArray(l) ? l.filter((x): x is string => typeof x === "string") : []; } catch { return []; }
 };
 
 const WRITE = new Set(["write", "maintain", "admin"]);
@@ -218,18 +241,20 @@ export async function loadCardFacts(db: Db, repo: string, n: number, want: { num
   const ref = `${repo}#${n}`;
   const numbers = [...new Set((want.numbers ?? []).filter((x) => Number.isInteger(x) && x > 0 && x !== n))];
   const logins = [...new Set((want.logins ?? []).filter((l) => LOGIN.test(l)).map((l) => l.toLowerCase()))];
-  const [items, quiet, tracked, perms, authored] = await db.together(() => Promise.all([
+  const [items, quiet, tracked, perms, authored, live] = await db.together(() => Promise.all([
     loadItems(db, [{ repo, number: n }, ...numbers.map((number) => ({ repo, number }))], "card"),
     loadQuiet(db, [ref]),
     loadTrackedRepos(db),
     loadPermissions(db, logins.map((login) => ({ login, repo }))),
     loadAuthoredIn(db, repo, logins, ["OWNER", "MEMBER", "COLLABORATOR"]),
+    listWorkflows(db, { live: true, refs: [{ repo, number: n }] }),
   ]));
   const it = items.get(ref);
   return {
     repo, n, quiet: quiet.size > 0, tracked: new Set(tracked.keys()),
-    item: it ? { kind: it.kind, state: it.state, author: it.author, labels: labelsOf(it.labels) } : null,
-    known: new Set(numbers.filter((x) => items.has(`${repo}#${x}`))),
+    item: it ? { kind: it.kind, state: it.state, author: it.author, labels: itemLabels(it) } : null,
+    workflow: live.at(-1) ?? null,
+    known: new Map(numbers.flatMap((x) => { const i = items.get(`${repo}#${x}`); return i ? [[x, i.state] as const] : []; })),
     writers: new Set(logins.filter((l) => WRITE.has(perms.get(permKey(l, repo))?.permission ?? "") || authored.has(l))),
   };
 }
@@ -262,6 +287,20 @@ const bareRepo = (v: unknown): unknown => {
 };
 
 const isPr = (f: CardFacts): boolean => f.item?.kind === "pr";
+/** A command text longer than this is no command. */
+const COMMAND_MAX = 200;
+
+/** The command a text names, checked against the item and its workflow as a press would resolve it now. */
+export function registryCommand(f: CardFacts, raw: unknown): Checked<RegistryCommand> {
+  const p = typeof raw === "string" && raw.length <= COMMAND_MAX ? parse(raw, { repo: f.repo }) : null;
+  if (!p || p.kind !== "commands" || p.items.length) return { note: `dropped a resolution: "${String(raw).slice(0, 60)}" is not a command` };
+  const text = describeParts(p.parts);
+  if (!isOpen(f)) return { note: `dropped a resolution: ${f.repo}#${f.n} is not open` };
+  if (resolve(p, { kind: isPr(f) ? "pr" : "issue", workflow: f.workflow }).kind !== "run") return { note: `dropped a resolution: the command "${text}" does not apply to the item now` };
+  const merges = p.parts.some((x) => x.word === "merge"), parts = p.parts.some((x) => "part" in x);
+  return { value: { text, ...(merges && { merges }), ...(parts && { parts: { recAt: f.workflow?.recAt ?? null } }), ...(isPr(f) && { pr: true }) } };
+}
+
 const isOpen = (f: CardFacts): boolean => f.item?.state === "OPEN";
 const sameLogin = (a: string | null | undefined, b: string): boolean => !!a && a.toLowerCase() === b.toLowerCase();
 
@@ -277,20 +316,24 @@ export function otherTypeLabel(have: readonly string[], label: string, removing:
   return have.find((l) => isTypeLabel(l) && !sameLabel(l, label) && !removing.some((r) => sameLabel(r, l))) ?? null;
 }
 
-/** The step kinds that can pass the checks for the item as it is now (the item block's `steps`); "fixup with merge" is listed apart. */
-export function applicableSteps(f: CardFacts): string[] {
-  if (!f.item || !isOpen(f)) return [];
+/** The step kinds that can pass the checks for the item as it is now (the item block's `steps`). */
+export function applicableSteps(f: Pick<CardFacts, "item" | "quiet">): string[] {
+  if (f.item?.state !== "OPEN") return [];
   const out = ["comment", "label"];
   if (f.item.labels.some((l) => ALL_LABELS.some((x) => sameLabel(x.name, l)))) out.push("unlabel");
-  out.push("close", "duplicate");
-  if (isPr(f)) out.push("review", "fixup", "fixup with merge", "open_issue");
+  out.push("command", "duplicate");
+  if (f.item.kind === "pr") out.push("open_issue");
   return f.quiet ? out.filter((k) => k !== "comment" && k !== "open_issue") : out;
 }
 
 const MAX_STEPS = 8;
 
-/** One step as the model wrote it, checked; `merging`: an open_issue step becomes a follow-up of the merge. */
-function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly string[], drop: ReadonlySet<string>): Checked<Command | { kind: "comment" } | { kind: "label"; label: string; remove: boolean } | FollowUp> {
+type LabelStep = { kind: "label"; label: string; remove: boolean };
+/** A step that names a command, before its text is checked. */
+type CommandStep = { command: string; duplicateOf?: number };
+
+/** One step as the model wrote it, checked; an open_issue step is a FollowUp until the resolution shows whether it merges. */
+function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly string[], drop: ReadonlySet<string>): Checked<OtherAction | CommandStep | { kind: "comment" } | LabelStep | FollowUp> {
   const open = isOpen(f), ref = `${f.repo}#${f.n}`;
   switch (st.kind) {
     case "comment": return { value: { kind: "comment" } };
@@ -305,21 +348,20 @@ function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly
       if (other) return { note: `dropped a resolution: the item already has the type label "${other}" and an item has one type label` };
       return { value: { kind: "label", label: l.value, remove } };
     }
-    case "close":
-      if (!open) return { note: `dropped a resolution: ${ref} is not open` };
-      return { value: { word: "close", pr: isPr(f) } };
+    case "close": return { value: { command: "close" } };
     case "duplicate": {
       const of = st.of;
       if (!Number.isInteger(of) || of === f.n) return { note: "dropped a resolution whose duplicate step names no other item number" };
       if (!f.known.has(of as number)) return { note: `dropped a resolution: ${f.repo}#${of as number} is not in the mirror` };
-      if (!open) return { note: `dropped a resolution: ${ref} is not open` };
-      return { value: { word: "close", pr: isPr(f), duplicateOf: of as number } };
+      return { value: { command: "close", duplicateOf: of as number } };
     }
-    case "review": case "fixup":
-      if (!isPr(f) || !open) return { note: `dropped a resolution: a ${String(st.kind)} step needs an open PR` };
-      if (st.kind === "review") return { value: { word: "review" } };
+    case "command":
+      if (typeof st.text !== "string") return { note: "dropped a resolution whose command step has no text" };
+      return { value: { command: st.text } };
+    case "review": return { value: { command: "review" } };
+    case "fixup":
       if (st.merge !== undefined && typeof st.merge !== "boolean") return { note: "dropped a resolution whose fixup merge is not true or false" };
-      return { value: { word: "fix-up", merge: st.merge === true } };
+      return { value: { command: st.merge === true ? "fix-up, merge" : "fix-up" } };
     case "reopen":
       if (f.item?.state !== "CLOSED") return { note: `dropped a resolution: ${ref} is not closed` };
       return { value: { word: "reopen" } };
@@ -362,35 +404,34 @@ function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly
 }
 
 const isFollowUp = (v: object): v is FollowUp => "title" in v && "body" in v && !("word" in v);
-const isCommand = (v: object): v is Command => "word" in v;
 
 /**
  * One resolution as the model wrote it, checked against the item, as the cards that carry out its steps (comments and labels first,
- * then the commands), or why it is dropped. Rules: at most one step of each kind except label and unlabel; close, duplicate and transfer
- * end the item (at most one, last); reopen comes first and not with an ending step; no review or fixup with an ending step. An open_issue
- * step of a resolution that merges (a fixup that merges, or a merge settlement) is held until the merge. A settlement of `merge` or `backlog`
- * becomes that command; any other settlement is dropped with a note.
+ * then the command or action), or why it is dropped. Rules: at most one step of each kind except label and unlabel; one command (review,
+ * fixup, close and duplicate steps name one); close, duplicate and transfer end the item and come last; reopen comes first and not with an
+ * ending step. A duplicate names the original in the comment. An open_issue step of a resolution whose command merges is held until the
+ * merge. A settlement of `merge` or `backlog` becomes that command; any other is dropped with a note.
  */
 export function validateResolution(f: CardFacts, c: Record<string, unknown>, drop: ReadonlySet<string>, notes: string[]): Checked<NewCard[]> {
   if (!Array.isArray(c.steps) || c.steps.length > MAX_STEPS) return { note: "dropped a resolution without a list of steps" };
   const raws = c.steps.map((x) => (x && typeof x === "object" && !Array.isArray(x) ? x as Record<string, unknown> : {}));
   const removing = raws.flatMap((x) => (x.kind === "unlabel" && typeof x.label === "string" ? [x.label] : []));
   const kinds = raws.map((x) => String(x.kind));
-  const checked: (Command | FollowUp | { kind: "comment" } | { kind: "label"; label: string; remove: boolean })[] = [];
+  const checked: (OtherAction | CommandStep | FollowUp | { kind: "comment" } | LabelStep)[] = [];
   for (const st of raws) {
     const r = checkStep(f, st, removing, drop);
     if ("note" in r) return r;
     checked.push(r.value);
   }
   const count = (k: string) => kinds.filter((x) => x === k).length;
-  for (const k of ["comment", "reopen", "open_issue", "assign", "request_reviewers", "review", "fixup"]) if (count(k) > 1) return { note: `dropped a resolution with more than one ${k} step` };
-  if (count("review") + count("fixup") > 1) return { note: "dropped a resolution with both a review and a fixup step" };
+  for (const k of ["comment", "reopen", "open_issue", "assign", "request_reviewers"]) if (count(k) > 1) return { note: `dropped a resolution with more than one ${k} step` };
   const ending = kinds.filter((k) => k === "close" || k === "duplicate" || k === "transfer").length;
   if (ending > 1) return { note: "dropped a resolution that ends the item twice (close, duplicate or transfer)" };
   if (ending === 1 && !["close", "duplicate", "transfer"].includes(kinds[kinds.length - 1]!)) return { note: "dropped a resolution whose close, duplicate or transfer step is not last" };
-  if (ending === 1 && (count("review") || count("fixup"))) return { note: "dropped a resolution that closes the PR and also reviews or fixes it up" };
+  if (ending === 1 && (count("review") || count("fixup") || count("command"))) return { note: "dropped a resolution that ends the item and also runs another command" };
+  if (count("review") + count("fixup") + count("command") > 1) return { note: "dropped a resolution with more than one command" };
   if (count("reopen") === 1 && (kinds[0] !== "reopen" || ending === 1)) return { note: "dropped a resolution whose reopen step is not first or that also ends the item" };
-  const labels = checked.flatMap((x) => ("kind" in x && x.kind === "label" ? [x] : []));
+  const labels = checked.filter((x): x is LabelStep => "kind" in x && x.kind === "label");
   const added = labels.filter((x) => !x.remove).map((x) => x.label), removed = labels.filter((x) => x.remove).map((x) => x.label);
   if (new Set(added).size !== added.length || new Set(removed).size !== removed.length) return { note: "dropped a resolution that adds or removes the same label twice" };
   if (added.filter(isTypeLabel).length > 1) return { note: "dropped a resolution that adds more than one type label" };
@@ -403,19 +444,25 @@ export function validateResolution(f: CardFacts, c: Record<string, unknown>, dro
     text = t.value;
   } else if (c.text !== undefined && c.text !== null && c.text !== "") return { note: "dropped a resolution with a comment text but no comment step" };
 
-  const commands = checked.filter((x): x is Command => isCommand(x));
   const issues = checked.filter((x): x is FollowUp => isFollowUp(x));
+  const step = checked.find((x): x is CommandStep => "command" in x);
   const s = c.settle && typeof c.settle === "object" && !Array.isArray(c.settle) ? c.settle as Record<string, unknown> : null;
-  const fix = commands.find((x): x is Extract<RegistryCommand, { word: "fix-up" }> => x.word === "fix-up");
-  if (s?.kind === "answer" && s.option === "merge" && !fix) {
-    if (!isPr(f) || !isOpen(f) || ending) return { note: "dropped a resolution: a merge needs an open PR" };
-    commands.push({ word: "merge" });
-  } else if (s?.kind === "answer" && s.option === "merge" && fix) fix.merge = true;
-  else if (s?.kind === "backlog") commands.push({ word: "backlog" });
+  let words = step?.command ?? null;
+  if (s?.kind === "answer" && s.option === "merge") words = words === null ? "merge" : /\bmerge\b/.test(words) ? words : `${words}, merge`;
+  else if (s?.kind === "backlog" && words === null) words = "backlog";
   else if (s) notes.push("dropped a settlement: questions are answered with commands now");
-  const merging = commands.find((x): x is Extract<RegistryCommand, { word: "merge" | "fix-up" }> => x.word === "merge" || (x.word === "fix-up" && x.merge));
-  if (issues.length && merging) merging.followups = issues;
-  else commands.push(...issues.map((i): Command => ({ word: "open_issue", ...i })));
+  if (raws.some((x) => x.kind === "fixup" && typeof x.instructions === "string" && x.instructions.trim())) notes.push("dropped a fix-up's instructions: a fix-up makes the fixes of the review");
+  const commands: Command[] = checked.filter((x): x is OtherAction => "word" in x);
+  if (words !== null) {
+    const r = registryCommand(f, words);
+    if ("note" in r) return r;
+    commands.push({ ...r.value, ...(step?.duplicateOf !== undefined && { duplicateOf: step.duplicateOf }), ...(r.value.merges && issues.length && { followups: issues }) });
+  }
+  if (!commands.some((x) => isRegistry(x) && x.merges)) commands.push(...issues.map((i): Command => ({ word: "open_issue", ...i })));
+  if (step?.duplicateOf !== undefined && !f.quiet) {
+    const line = duplicateComment({ repo: f.repo, original: `${f.repo}#${step.duplicateOf}`, closed: f.known.get(step.duplicateOf) !== "OPEN" });
+    text = text === null ? line : `${text}\n\n${line}`;
+  }
   const params: CardParams[] = [
     ...(text !== null ? [{ kind: "comment" } as const] : []),
     ...labels.map((l): CardParams => ({ kind: "label", label: l.label, remove: l.remove })),
@@ -489,7 +536,7 @@ export function parseReplyWith(f: CardFacts, reply: string, drop: ReadonlySet<st
       const v = validateResolution(f, c, drop, notes);
       if ("note" in v) { notes.push(v.note); continue; }
       for (const card of v.value) {
-        const key = card.params.kind === "command" ? `command:${card.params.command.word}` : card.params.kind === "label" ? `label:${card.params.label.toLowerCase()}` : `comment:${card.text}`;
+        const key = card.params.kind === "command" ? `command:${isRegistry(card.params.command) ? card.params.command.text : card.params.command.word}` : card.params.kind === "label" ? `label:${card.params.label.toLowerCase()}` : `comment:${card.text}`;
         if (seen.has(key)) { notes.push(`dropped a second card that does the same: ${card.description}`); continue; }
         if (cards.length >= MAX_CARDS) { notes.push(`dropped the cards beyond the ${MAX_CARDS}th`); break; }
         seen.add(key);

@@ -13,10 +13,10 @@ import { SUMMARY_MIN, summaryInput } from "../classify/parse.ts";
 import { pool } from "../classify/run.ts";
 import { itemsOf, optionsOf, factsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import { openDecision, type NewCard } from "./choices-parse.ts";
-import { choicesTexts, parseChoices, type ParsedChoices } from "./choices-parse.ts";
+import { choicesTexts, parseChoices, storeParsedChoices, type ParsedChoices } from "./choices-parse.ts";
 import { coreSummaries } from "./choices.ts";
 import { parseCoreKey, type CoreKey } from "./choices-types.ts";
-import { ensureConversation, insertTurn, opusBlock, refreshItem, turnsOf, type DiffSource } from "../conversations/store.ts";
+import { conversationOf, ensureConversation, insertTurn, opusBlock, refreshItem, turnsOf, type DiffSource } from "../conversations/store.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { codeDiff } from "../review/diff.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
@@ -302,8 +302,10 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const at = now();
     try {
       if (single) {
-        const cards = got.ask ? [got.ask] : [];
-        await insertTurn(db, repo, n, { kind: "opus", login: "opus", body: got.text, block: opusBlock(got.text, cards, got.choices), notes: got.notes, cards, ...(got.choices && { choices: { decision: d, parsed: got.choices, source: "prepare" as const, by } }) }, { diff: p.diff });
+        await db.write(async () => {
+          const turnId = await insertTurn(db, repo, n, { kind: "opus", login: "opus", body: got.text, block: opusBlock(got.text, []), notes: got.notes });
+          if (got.choices) await storeParsedChoices(db, d, got.choices, { turnId, seen: (await conversationOf(db, repo, n))?.item_sig ?? null, source: "prepare", by });
+        });
       }
       await store({ pick: got.pick, reason: got.pick ? got.reason || null : null, by, summary: got.summary, at, head, readKey, id: d.id, question: d.question, options: d.options });
       res.stored++;
