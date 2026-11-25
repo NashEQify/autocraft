@@ -87,7 +87,7 @@ async function sayAll(db: Db, lines: { repo: string; number: number; text: strin
   if (!lines.length) return;
   await addTurns(db, lines.map((l) => ({ ref: refOf(l.repo, l.number), kind: "system", login: "system", body: l.text, block: systemBlock(l.text), onlyIfThread: true })));
 }
-const say = async (db: Db, repo: string, n: number, text: string): Promise<void> => await sayAll(db, [{ repo, number: n, text }]);
+export const say = async (db: Db, repo: string, n: number, text: string): Promise<void> => await sayAll(db, [{ repo, number: n, text }]);
 
 /** Moves the row to `to` when it is still in its state; the module audits the transition (the trace shows it). Joins a caller's transaction. */
 async function moveRaw(db: Db, p: Row, to: LegState, o: { head?: string | null; reason?: string | null; by?: string; via?: string }): Promise<boolean> {
@@ -120,18 +120,23 @@ function mergeGate(wf: WorkflowFact | null, head: string, by: string): { ok: tru
   return r.ok ? { ok: true } : { ok: false, why: r.why };
 }
 
+/** Why a cancel of the leg can no longer stop its merge, past the guard of the merge queue: a batch holds the PR, or it is merged. Null while it can. */
+export async function pastCancel(db: Db, p: Pick<Row, "repo" | "number" | "state" | "head">): Promise<string | null> {
+  if (p.state !== "queued") return null;
+  const [batched, merging, merges] = await db.together(() => Promise.all([inActiveBatch(db, p.repo, p.number), mergeRunning(db, p.repo), loadMergeFacts(db, [{ repo: p.repo, number: p.number }])]));
+  if (batched) return "the PR is still in an integration batch";
+  if (merging) return "a merge of the repo is running: it may be merging this PR";
+  return mergedAt(merges, p.repo, p.number, p.head) ? "the PR is already merged" : null;
+}
+
 /** Cancels the row in one transaction, whatever state the caller read. False when the row had ended meanwhile. */
 async function cancelRow(db: Db, leg: { id: number; repo: string; number: number }, by: string, reason: string, line: string, guard = false, via?: string): Promise<boolean> {
   // Nothing is written before an early return, so committing leaves the database as a rollback would.
   const p = await db.write(async () => {
     const p = (await loadLegs(db, [{ repo: leg.repo, number: leg.number }], { activeOnly: true })).get(refOf(leg.repo, leg.number))?.find((r) => r.id === leg.id);
     if (!p || !ACTIVE.includes(p.state)) return null;
-    // Past the guard of the merge queue, a cancel cannot stop the merge: a batch holds the PR, or it is merged.
-    if (guard && p.state === "queued") {
-      if (await inActiveBatch(db, p.repo, p.number)) throw new Error("the PR is still in an integration batch");
-      if (await mergeRunning(db, p.repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
-      if (mergedAt(await loadMergeFacts(db, [{ repo: p.repo, number: p.number }]), p.repo, p.number, p.head)) throw new Error("the PR is already merged");
-    }
+    const late = guard ? await pastCancel(db, p) : null;
+    if (late !== null) throw new Error(late);
     return await moveRaw(db, p, "cancelled", { by, reason, via }) ? p : null;
   });
   if (!p) return false;

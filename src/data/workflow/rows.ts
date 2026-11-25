@@ -9,6 +9,7 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { attemptOf, LIVE_STATES, notArchived, workScore } from "./fragments.ts";
+import { patchRows } from "./update.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
@@ -321,7 +322,8 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
 
 /**
  * Inserts workflows in the `running` state, one statement per 500 rows, `ON CONFLICT DO NOTHING` against the unique index of live workflows: a
- * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. Joins the caller's `db.write`.
+ * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`; a PR's base head is the head its
+ * starter accepted. Joins the caller's `db.write`.
  */
 export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<RefKey, number>> {
   const out = new Map<RefKey, number>();
@@ -334,7 +336,7 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
         const at = w.at ?? now;
         return {
           repo: w.repo, number: w.number, kind: w.kind, entry: w.entry, weight: w.weight, state: "running", started_by: w.startedBy, started_at: at, started_via: w.startedVia,
-          base_head: w.baseHead ?? null, approved_by: w.approvedBy ?? null, approved_at: w.approvedBy ? at : null, approved_via: w.approvedBy ? w.approvedVia ?? null : null,
+          base_head: w.baseHead ?? null, accepted_head: w.kind === "pr" ? w.baseHead ?? null : null, approved_by: w.approvedBy ?? null, approved_at: w.approvedBy ? at : null, approved_via: w.approvedBy ? w.approvedVia ?? null : null,
           plan: JSON.stringify(w.plan ?? []), step: w.step ?? null, updated_at: at,
         };
       })).onConflict((oc: any) => oc.doNothing()).returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[];
@@ -375,27 +377,36 @@ function patchGroups(rows: { id: number; patch: WorkflowPatch; at?: string }[]):
   return [...groups.values()];
 }
 
-/** Batched update, one statement per distinct patch column set. Returns the rows changed. */
+/** The columns of a patch that are not text. */
+const BIGINT: readonly string[] = ["id", "weight", "legacy_preapproval_id"];
+
+/** Batched update, one statement per distinct patch column set; each row's `version` goes up by one. Returns the rows changed. */
 export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
   if (rows.length === 0) return 0;
   return await db.write(async () => {
     let changed = 0;
-    for (const group of patchGroups(rows)) changed += await kx.updateFrom(db, "main.item_workflows", ["id"], group);
+    for (const group of patchGroups(rows)) {
+      const set = Object.fromEntries(Object.keys(group[0]!).filter((c) => c !== "id").map((c) => [c, BIGINT.includes(c) ? "bigint" as const : "text" as const]));
+      changed += await patchRows(db, "main.item_workflows", { id: "bigint" }, set, group, { also: (eb) => ({ version: eb("main.item_workflows.version", "+", 1) }) });
+    }
     return changed;
   });
 }
 
+/** The row is as it was read. A release before `version` writes the row without raising it, so the state and the time of its last write count too. */
+export const sameWorkflow = (now: WorkflowRead, was: WorkflowRead): boolean => now.version === was.version && now.state === was.state && now.updatedAt === was.updatedAt;
+
 /**
- * `saveWorkflows` for rows read before this write: one that changed since (`was`: the state and `updated_at` it was read with) is left as it
- * is. One patch per id. Returns the ids written. Joins the caller's `db.write`.
+ * `saveWorkflows` for rows read before this write: one that changed since (`was`: how it was read) is left as it is. One patch per id. Returns
+ * the ids written. Joins the caller's `db.write`.
  */
 export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at: string; was: WorkflowRead }[]): Promise<Set<number>> {
   if (rows.length === 0) return new Set();
   const q = queryDb(db);
   return await db.write(async () => {
-    const now = new Map((await q.all((q.k as any).selectFrom("main.item_workflows as w").select(["w.id", "w.state", "w.updated_at"]).where(kx.inList(db, "w.id", rows.map((r) => r.id), "bigint"))) as
-      { id: number | string; state: string; updated_at: string }[]).map((r) => [Number(r.id), r]));
-    const same = rows.filter((r) => { const n = now.get(r.id); return n?.state === r.was.state && n.updated_at === r.was.updatedAt; });
+    const now = new Map((await q.all((q.k as any).selectFrom("main.item_workflows as w").select(["w.id", "w.state", "w.updated_at", "w.version"]).where(kx.inList(db, "w.id", rows.map((r) => r.id), "bigint"))) as
+      { id: number | string; state: WorkflowState; updated_at: string; version: number | string }[]).map((r) => [Number(r.id), { state: r.state, updatedAt: r.updated_at, version: Number(r.version) }]));
+    const same = rows.filter((r) => { const n = now.get(r.id); return n !== undefined && sameWorkflow(n, r.was); });
     await saveWorkflows(db, same);
     return new Set(same.map((r) => r.id));
   });

@@ -549,7 +549,7 @@ async function mayAct(db: Db, login: string | null, repo: string, identity: ActI
 async function toBacklog(db: Db, a: Row, now: string): Promise<number | null> {
   const of = (b: any): any => b.where("repo", "=", a.repo).where("number", "=", a.number).where("kind", "=", "issue");
   if (await get(db, of(q(db).selectFrom("main.item_workflows").select("id")).where("started_at", ">=", a.answered_at).limit(1))) return null;
-  const moved = (await run(db, of(q(db).updateTable("main.item_workflows").set({ state: BACKLOG, rec: null, rec_at: null, rec_head: null, blocker: null, blocker_params: null, updated_at: now }))
+  const moved = (await run(db, of(q(db).updateTable("main.item_workflows").set((eb: any) => ({ state: BACKLOG, rec: null, rec_at: null, rec_head: null, blocker: null, blocker_params: null, version: eb("version", "+", 1), updated_at: now })))
     .where("state", "in", LIVE))).changes;
   const item = { repo: a.repo as string, number: Number(a.number) };
   const reason = `moved to the backlog by ${a.answered_by}`;
@@ -585,7 +585,7 @@ async function keepRecommendations(db: Db, now: string): Promise<void> {
     const same = attempt && question && (await get(db, q(db).selectFrom("main.implementations").select("decision_id").where("id", "=", attempt.attempt.id)))?.decision_id === (parse(w.rec) as Row).question;
     if (!same) continue;
     const { plan, rec } = viewOf(attempt, question, (parse(w.plan) ?? []) as PlanPart[], w.approved_by !== null);
-    await run(db, q(db).updateTable("main.item_workflows").set({ plan: JSON.stringify(plan), rec: JSON.stringify(rec), ...(w.state === "blocked" && { blocker_params: JSON.stringify({ step: "implement" }) }), updated_at: now }).where("id", "=", w.id));
+    await run(db, q(db).updateTable("main.item_workflows").set((eb: any) => ({ plan: JSON.stringify(plan), rec: JSON.stringify(rec), ...(w.state === "blocked" && { blocker_params: JSON.stringify({ step: "implement" }) }), version: eb("version", "+", 1), updated_at: now })).where("id", "=", w.id));
   }
 }
 
@@ -740,7 +740,7 @@ async function startLegs(db: Db, r: SwitchReport, s: Starts, legs: Row[], now: s
     const issue = s.implementing.get(s.issueOf.get(item) ?? "");
     let id = issue?.id ?? null;
     if (issue && !issue.approved) {
-      await run(db, q(db).updateTable("main.item_workflows").set((eb: any) => ({ approved_by: p.by, approved_at: p.at, approved_via: "cli", base_head: eb.fn.coalesce("base_head", eb.val(head)), updated_at: now })).where("id", "=", issue.id));
+      await run(db, q(db).updateTable("main.item_workflows").set((eb: any) => ({ approved_by: p.by, approved_at: p.at, approved_via: "cli", base_head: eb.fn.coalesce("base_head", eb.val(head)), version: eb("version", "+", 1), updated_at: now })).where("id", "=", issue.id));
       issue.approved = true;
       await addEvent(db, { id: issue.id, repo: p.repo, number: issue.number, by: p.by, kind: "approved", word: "merge", line }, now);
     } else if (!issue) {

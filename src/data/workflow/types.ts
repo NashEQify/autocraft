@@ -59,7 +59,7 @@ export type LegContext = { workflowId: number; entry: Entry; since: string; appr
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; /** What `reason` is, as a code, with its parts. */ code?: StopCode; params?: Params; by?: string; via?: string };
 /** What a row was read with, for a write that takes place only while it is still the same. */
-export type WorkflowRead = { state: WorkflowState; updatedAt: string; version?: number };
+export type WorkflowRead = { state: WorkflowState; updatedAt: string; version: number };
 /** A queued fix-up request follows the PR's head from `from` to `to`. */
 export type FixupRequestMove = { id: number; from: string; to: string };
 export type LegMoved = LegMove & { repo: string; number: number };

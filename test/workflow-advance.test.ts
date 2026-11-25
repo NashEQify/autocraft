@@ -664,9 +664,11 @@ test("a person's stop, approval or drop during the pass wins over what the pass 
 test("one workflow's change that cannot be stored loses no other's, and the pass is told to run again", async () => {
   const w = await approvedReview();
   const db = w.db;
-  await w.pr(2, { label: "feature" });
-  await runCommand(db, actor, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 2 }] });
-  for (const number of [1, 2]) await w.synced(number, `sha9${number}`);
+  for (const number of [2, 3]) {
+    await w.pr(number, { label: "feature" });
+    await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number }] });
+    await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number, head_oid: `sha${number}`, run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r" }));
+  }
   const write = db.write;
   // The joint write fails, then the first workflow's own.
   let failures = 2;
@@ -679,11 +681,11 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
     }) as typeof write;
     woken = 0;
     try { await advanceWorkflows(db, () => {}, () => { woken++; }); } finally { db.write = write; }
-    return (await Promise.all([1, 2].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
+    return (await Promise.all([2, 3].map((n) => liveWorkflow(db, "app", n)))).map((x) => x!.state).sort();
   };
-  assert.deepEqual(await pass(), ["blocked", "running"]);
+  assert.deepEqual(await pass(), ["recommending", "running"]);
   assert.ok(woken > 0);
-  assert.deepEqual(await pass(), ["blocked", "blocked"]);
+  assert.deepEqual(await pass(), ["recommending", "recommending"]);
   assert.equal(woken, 0);
 });
 

@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -398,10 +398,15 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
-  // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
-  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null, ...(item.head ? { baseHead: item.head } : {}) });
-  // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
-  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
+  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null });
+  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null });
+  // The person approved or answered at this head: commits they could see are no longer new (blocker 2 counts from here). An option of an
+  // implementation's question is about its work, not about a head.
+  if (r.approve || r.answers) {
+    if (item.head) Object.assign(patch, { baseHead: item.head, acceptedHead: item.head });
+    const pr = live.kind === "issue" && !r.pick ? await issuePr(live) : null;
+    if (pr?.head) patch.acceptedHead = pr.head;
+  }
   if (runs) patch.state = r.again !== null || r.merges || r.pick ? "running" : r.answers ? "done" : live.state;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
@@ -410,7 +415,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     commit: async () => {
       const now = (await listWorkflows(db, { ids: [live.id], live: true }))[0];
       if (!now) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
-      if (now.state !== live.state || now.updatedAt !== live.updatedAt) throw new Moved();
+      if (!sameWorkflow(now, live)) throw new Moved();
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
