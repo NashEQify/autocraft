@@ -2,6 +2,9 @@
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { queryDb } from "../../db/query-db.ts";
+import { registerKeySource } from "../keys.ts";
+import { openItem } from "../mirror/fragments.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 
@@ -64,3 +67,6 @@ export const rankLevel = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<
 /** An `item_embeddings` row of `model` exists for the item. */
 export const embeddedAt = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, model: string): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.item_embeddings as ie").select(one(eb)).where("ie.repo", "=", kx.exprOf(eb, repo)).where("ie.number", "=", kx.exprOf(eb, number)).where("ie.model", "=", model));
+
+/** Open items with a priority row: the keys `rescoreReach` loads the mirror's reach signals for in the same wave. */
+registerKeySource<undefined>("triage.ratedOpen", (db) => queryDb(db).k.selectFrom("main.item_priority as rp").select(["rp.repo", "rp.number"]).where((eb) => openItem(eb, "rp.repo", "rp.number")));
