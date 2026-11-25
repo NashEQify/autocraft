@@ -7,6 +7,8 @@ import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
 import { loadActivityRound } from "../src/data/views/activity.ts";
 import { loadImplementFacts } from "../src/data/implement/index.ts";
+import { attemptNow } from "../src/implement/attempt.ts";
+import { opensAsDraft } from "../src/implement/stuck.ts";
 import { openQuestionOf, viewOf } from "../src/workflow/question.ts";
 import { countEventsSince, loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
 
@@ -30,6 +32,11 @@ async function legacy(): Promise<Db> {
   await insert(db, "tracked_repos", { name: "pilot", workflow: "new" });
   await setting(db, STATE_COPY_DONE, COPIED);
   await setting(db, "runner_heartbeat", AFTER);
+  await setting(db, "github_identity", "app");
+  for (const [login, role, permission] of [["alice", "maintainer", "write"], ["frank", "maintainer", "read"], ["gone", "viewer", "write"]] as const) {
+    await insert(db, "access", { login, role, added_by: "op", added_at: BEFORE });
+    await insert(db, "repo_permissions", { login, repo: "demo", permission, checked_at: BEFORE });
+  }
   for (const [n, kind, state] of [[1, "issue"], [2, "pr"], [3, "issue", "CLOSED"], [4, "pr"], [5, "pr"], [6, "issue"], [7, "pr"], [8, "issue"], [9, "pr"], [10, "pr"], [11, "pr", "MERGED"], [12, "pr"]] as [number, string, string?][]) await item(db, n, kind, state);
 
   await decision(db, "answered", { number: 2, answer: "take", answered_by: "alice", answered_at: AFTER });
@@ -180,26 +187,28 @@ test("a second run, and a run after one that was cut short, change nothing; an o
   await db.close();
 });
 
+const attempt = async (db: Db, id: number, state: string, x: Record<string, string | number | null> = {}) => {
+  await item(db, id, "issue");
+  await insert(db, "implementations", { id, repo: "demo", number: id, queued_by: "dave", state, attempt: 1, text_hash: `x${id}`, created_at: BEFORE, updated_at: BEFORE, ...x });
+};
+const question = (db: Db, id: number, result: object) => insert(db, "implementation_rounds", { implementation_id: id, kind: "question", result: JSON.stringify(result), at: BEFORE });
+const options = (...keys: string[]) => JSON.stringify(keys.map((k) => ({ key: k, label: `Label ${k}`, hint: "h" })));
+const answerBy = (login: string, answer: string, at = AFTER) => ({ answer, answered_by: login, answered_at: at });
+
 test("an implementation that waited for a maintainer when the switch ran still asks, and an answer nothing acted on is kept", async () => {
   const db = await legacy();
-  const attempt = async (id: number, number: number, state: string, x: Record<string, string | number | null> = {}) => {
-    await item(db, number, "issue");
-    await insert(db, "implementations", { id, repo: "demo", number, queued_by: "dave", state, attempt: 1, text_hash: `x${number}`, created_at: BEFORE, updated_at: BEFORE, ...x });
-  };
-  const question = (id: number, result: object) => insert(db, "implementation_rounds", { implementation_id: id, kind: "question", result: JSON.stringify(result), at: BEFORE });
-  const options = (...keys: string[]) => JSON.stringify(keys.map((k) => ({ key: k, label: `Label ${k}`, hint: "h" })));
   // Stuck with its decision, after a plan question that was answered; stuck without one; stuck on its PR, answered.
   await decision(db, "demo#21:implement", { number: 21, options: options("try-again", "draft-pr", "close-issue", "backlog") });
-  await attempt(21, 21, "stuck", { decision_id: "demo#21:implement", reason: "The session finished without changing anything" });
-  await question(21, { audience: "maintainer", text: "Globally?", decisionId: "demo#21:implement-q1-1" });
-  await attempt(22, 22, "stuck", { reason: "The plan call failed: no reply" });
+  await attempt(db, 21, "stuck", { decision_id: "demo#21:implement", reason: "The session finished without changing anything" });
+  await question(db, 21, { audience: "maintainer", text: "Globally?", decisionId: "demo#21:implement-q1-1" });
+  await attempt(db, 22, "stuck", { reason: "The plan call failed: no reply" });
   await decision(db, "demo#23:implement", { number: 23, options: options("try-again", "close-pr", "backlog"), answer: "try-again", answer_note: "use the cache", answered_by: "alice", answered_at: AFTER });
-  await attempt(23, 23, "stuck", { decision_id: "demo#23:implement", pr_number: 30, reason: "The pull request went back to the session too many times" });
+  await attempt(db, 23, "stuck", { decision_id: "demo#23:implement", pr_number: 30, reason: "The pull request went back to the session too many times" });
   // Asked two questions at once: the decision's options belong to the first.
   await decision(db, "demo#24:implement-q1-1", { number: 24, question: "Globally or per file?", options: options("o1", "o2", "backlog"), recommended: "o2" });
-  await attempt(24, 24, "asked", { decision_id: "demo#24:implement-q1-1" });
-  await question(24, { audience: "maintainer", text: "Globally or per file?", decisionId: "demo#24:implement-q1-1" });
-  await question(24, { audience: "maintainer", text: "Which icon?", decisionId: "demo#24:implement-q1-1" });
+  await attempt(db, 24, "asked", { decision_id: "demo#24:implement-q1-1" });
+  await question(db, 24, { audience: "maintainer", text: "Globally or per file?", decisionId: "demo#24:implement-q1-1" });
+  await question(db, 24, { audience: "maintainer", text: "Which icon?", decisionId: "demo#24:implement-q1-1" });
 
   const ask = async () => {
     const facts = (await loadImplementFacts(db, [21, 22, 23, 24].map((number) => ({ repo: "demo", number })), { withPlans: true })).byIssue;
@@ -217,8 +226,63 @@ test("an implementation that waited for a maintainer when the switch ran still a
     { asks: "The implementation is stuck: The pull request went back to the session too many times.", answer: ["alice", "try-again", "use the cache", true], yes: null, parts: null },
     { asks: "Globally or per file?", answer: null, yes: "o2", parts: ["o1", "o2"] },
   ]);
+  assert.deepEqual(r.unapplied.filter((id) => id.includes(":implement")), [], "a carried answer is acted on");
+  const lines = [...(await loadEvents(db, [{ repo: "demo", number: 21 }], { archived: true })).values()].flat().map((e) => e.line);
+  assert.deepEqual(lines, ["Question demo#21:implement? The implementation still asks it."]);
   await setting(db, "runner_heartbeat", "2026-11-22T00:00:00.000Z");
   assert.deepEqual((await switchOver(db, { now: "2026-11-23T00:00:00.000Z" }))!.questions, [], "a second run carries nothing again");
   assert.deepEqual(await ask(), first);
+  // An older release ran again and two people answered there.
+  for (const [id, answer] of [["demo#21:implement", "draft-pr"], ["demo#24:implement-q1-1", "o1"]]) {
+    await db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'alice', answered_at = '2026-11-23T10:00:00.000Z' WHERE id = ?").run(answer, id);
+  }
+  for (const n of [1, 2]) {
+    await setting(db, "runner_heartbeat", `2026-11-23T0${n}:00:00.000Z`);
+    await switchOver(db, { now: `2026-11-24T0${n}:00:00.000Z` });
+    assert.deepEqual((await ask()).map((a) => a.answer?.[1] ?? null), ["draft-pr", null, "try-again", "o1"]);
+  }
+  await db.close();
+});
+
+test("an answer nobody may act on leaves the question open, Backlog ends the workflow and a draft stays a draft", async () => {
+  const db = await legacy();
+  const stuck = async (id: number, x: Record<string, string | number | null>, state = "stuck") => {
+    await decision(db, `demo#${id}:implement`, { number: id, options: options("try-again", "draft-pr", "backlog"), ...x });
+    await attempt(db, id, state, { decision_id: `demo#${id}:implement`, reason: "The plan call failed: no reply" });
+  };
+  await stuck(31, { ...answerBy("alice", "try-again"), exec_state: "disputed", dispute_by: "erin" });
+  await stuck(32, { ...answerBy("alice", "try-again"), exec_state: "waiting-token" });
+  await stuck(33, answerBy("frank", "try-again"));
+  await stuck(34, answerBy("gone", "try-again"));
+  await stuck(35, answerBy("alice", "try-again"));
+  await stuck(36, answerBy("alice", "backlog"));
+  await stuck(37, answerBy("alice", "backlog", BEFORE));
+  await stuck(38, { ...answerBy("alice", "draft-pr"), applied_at: AFTER }, "opening");
+  await stuck(39, {});
+  const rec = (id: number) => JSON.stringify({ text: "Start it again.", parts: { fix: [], drop: [] }, merges: true, answer: { decision: `demo#${id}:implement`, option: "try-again" }, question: `demo#${id}:implement` });
+  for (const [id, at] of [[36, BEFORE], [37, AFTER], [39, BEFORE]] as const) {
+    await insert(db, "item_workflows", { id: 2000 + id, repo: "demo", number: id, kind: "issue", entry: "implement", state: "blocked", started_by: "erin", started_at: at, started_via: "github", approved_by: "erin", approved_at: at, blocker: "failed-twice", rec: rec(id), rec_at: AFTER, updated_at: AFTER });
+  }
+  const state = async () => {
+    const numbers = [31, 32, 33, 34, 35, 38, 39];
+    const facts = (await loadImplementFacts(db, numbers.map((number) => ({ repo: "demo", number })), { withPlans: true })).byIssue;
+    return {
+      answers: numbers.map((n) => [n, facts.get(`demo#${n}`)!.answer?.option ?? null]),
+      workflows: (await rows(db, "SELECT number, state, rec, rec_at FROM main.item_workflows WHERE number IN (36, 37, 39) ORDER BY number")).map((w) => ({ ...w })),
+      asks39: openQuestionOf(facts.get("demo#39")!),
+      rounds: (await rows(db, "SELECT * FROM main.implementation_rounds ORDER BY id")).map((x) => JSON.stringify(x)),
+    };
+  };
+  await switchOver(db, { now: NOW });
+  const first = await state();
+  assert.deepEqual(first.answers, [[31, null], [32, null], [33, null], [34, null], [35, "try-again"], [38, "draft-pr"], [39, null]], "disputed, waiting, no write access, no role");
+  assert.deepEqual(first.workflows.map((w) => [w.number, w.state]), [[36, "backlog"], [37, "blocked"], [39, "blocked"]], "a start after the Backlog answer stands");
+  const back = first.workflows[2]!;
+  assert.equal(back.rec_at, AFTER, "the same question does not come back as a new one");
+  assert.deepEqual([JSON.parse(back.rec as string).question, JSON.parse(back.rec as string).answer.question], [first.asks39, first.asks39]);
+  assert.ok(opensAsDraft((await attemptNow(db, { id: 38, repo: "demo", number: 38 }))!.rounds));
+  await db.prepare("DELETE FROM main.settings WHERE key = ?").run(SWITCH_KEY);
+  await switchOver(db, { now: "2026-11-21T00:00:00.000Z" });
+  assert.deepEqual(await state(), first);
   await db.close();
 });
