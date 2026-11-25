@@ -1,7 +1,9 @@
 // Cached repo permissions and the act rule (M03 access-a).
 import type { Db } from "../../db/index.ts";
-import type { ActFacts, ActIdentity, ActRefusal, ActVerdict, Login, PermEntry, PermKey, PermRow } from "./types.ts";
-import type { KeySource } from "../keys.ts";
+import { queryDb } from "../../db/query-db.ts";
+import * as kx from "../../db/kx.ts";
+import { resolveKeys, type KeySource } from "../keys.ts";
+import type { ActFacts, ActIdentity, ActRefusal, ActVerdict, Login, PermEntry, PermKey, PermRow, Role } from "./types.ts";
 
 export const WRITE_PERMISSIONS: readonly string[] = ["write", "maintain", "admin"];
 export const PERM_READ_TTL = 10 * 60_000;
@@ -11,62 +13,162 @@ export const REFRESH_AFTER = PERM_READ_TTL - 2 * 60_000;
 /** How long after GitHub last confirmed it a write permission still counts while a re-read is under way or failed. */
 export const HOLD_MAX = 60 * 60_000;
 
+/** The key of a (login, repo) pair in the maps of this file: the login lower-cased. */
+export const permKey = (login: string, repo: string): PermKey => `${login.toLowerCase()}\n${repo}`;
+
 /** Cached permission per login and repo; one JSON-bound tuple lookup. */
 export async function loadPermissions(db: Db, pairs: readonly { login: Login; repo: string }[]): Promise<Map<PermKey, PermEntry>> {
-  throw new Error("not built: access.loadPermissions");
+  const out = new Map<PermKey, PermEntry>();
+  if (!pairs.length) return out;
+  const q = queryDb(db);
+  for (const part of kx.chunks(pairs)) {
+    const rows = await q.all(q.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"])
+      .where(kx.tupleIn(db, ["login", "repo"], part.map((p) => [p.login, p.repo]), ["citext", "text"])));
+    for (const r of rows) out.set(permKey(r.login, r.repo), { permission: r.permission, checkedAt: r.checked_at });
+  }
+  return out;
 }
 
 /** All cached rows of those logins. */
 export async function loadPermissionsOfLogins(db: Db, logins: readonly Login[]): Promise<Map<string, PermRow[]>> {
-  throw new Error("not built: access.loadPermissionsOfLogins");
+  const out = new Map<string, PermRow[]>();
+  if (!logins.length) return out;
+  const q = queryDb(db);
+  for (const part of kx.chunks(logins)) {
+    for (const r of await q.all(q.k.selectFrom("main.repo_permissions").selectAll().where(kx.inList(db, "login", part, "citext")))) {
+      const k = r.login.toLowerCase();
+      const list = out.get(k);
+      if (list) list.push(r);
+      else out.set(k, [r]);
+    }
+  }
+  return out;
 }
 
 /** One person, many repos (a session's visible repos). */
 export async function loadPermissionsForRepos(db: Db, login: Login, repos: string[]): Promise<Map<string, PermEntry>> {
-  throw new Error("not built: access.loadPermissionsForRepos");
+  const out = new Map<string, PermEntry>();
+  if (!repos.length) return out;
+  const q = queryDb(db);
+  for (const part of kx.chunks(repos)) {
+    const rows = await q.all(q.k.selectFrom("main.repo_permissions").select(["repo", "permission", "checked_at"])
+      .where((eb) => kx.ciEq(db, "login", eb.val(login))).where(kx.inList(db, "repo", part)));
+    for (const r of rows) out.set(r.repo, { permission: r.permission, checkedAt: r.checked_at });
+  }
+  return out;
 }
 
-/** Batched upsert, one statement. */
+/** Batched upsert, one statement per 500 rows. A pair listed twice (in any letter case of the login) keeps its last row. */
 export async function savePermissions(db: Db, rows: { login: Login; repo: string; permission: string; checkedAt: string }[]): Promise<void> {
-  throw new Error("not built: access.savePermissions");
+  const last = new Map<PermKey, (typeof rows)[number]>();
+  for (const r of rows) last.set(permKey(r.login, r.repo), r);
+  if (!last.size) return;
+  const q = queryDb(db);
+  for (const part of kx.batches([...last.values()])) {
+    await q.run(q.k.insertInto("main.repo_permissions").values(part.map((r) => ({ login: r.login, repo: r.repo, permission: r.permission, checked_at: r.checkedAt })))
+      .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(kx.excluded(["permission", "checked_at"]))));
+  }
 }
 
 /** Batched delete. */
 export async function endPermissions(db: Db, logins: Login[]): Promise<number> {
-  throw new Error("not built: access.endPermissions");
+  if (!logins.length) return 0;
+  const q = queryDb(db);
+  let n = 0;
+  for (const part of kx.chunks(logins)) n += Number((await q.run(q.k.deleteFrom("main.repo_permissions").where(kx.inList(db, "login", part, "citext")))).changes);
+  return n;
 }
 
-/** Cached rows below write permission, checked within `PERM_READ_TTL` (Task Runner claim snapshot). */
+/**
+ * Cached rows below write permission, checked within `PERM_READ_TTL` (Task Runner claim snapshot). Given logins, their rows;
+ * given item keys, the rows of every login on the repos of those items. The map holds the permission.
+ */
 export async function loadPermissionDenials(db: Db, logins: Login[] | KeySource, nowMs: number): Promise<Map<PermKey, string>> {
-  throw new Error("not built: access.loadPermissionDenials");
+  const out = new Map<PermKey, string>();
+  const since = new Date(nowMs - PERM_READ_TTL).toISOString();
+  const q = queryDb(db);
+  const base = () => q.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission"]).where("checked_at", ">", since)
+    .where("permission", "not in", [...WRITE_PERMISSIONS]);
+  if (Array.isArray(logins) && logins.every((l) => typeof l === "string")) {
+    for (const part of kx.chunks(logins as Login[])) for (const r of await q.all(base().where(kx.inList(db, "login", part, "citext")))) out.set(permKey(r.login, r.repo), r.permission);
+    return out;
+  }
+  const keys = logins as KeySource;
+  if (Array.isArray(keys) && !keys.length) return out;
+  const rows = await q.all(base().where((eb) => eb("repo", "in", eb.selectFrom(resolveKeys(db, keys, "kr")).select("kr.repo"))));
+  for (const r of rows) out.set(permKey(r.login, r.repo), r.permission);
+  return out;
 }
 
 /** One LEFT JOIN of the pairs to `access` and `repo_permissions`; the only database read of the act rule. */
 export async function loadActFacts(db: Db, pairs: { login: string | null; repo: string }[]): Promise<Map<PermKey, ActFacts>> {
-  throw new Error("not built: access.loadActFacts");
+  const out = new Map<PermKey, ActFacts>();
+  const named = new Map<PermKey, { login: string; repo: string }>();
+  for (const p of pairs) {
+    if (p.login === null) out.set(permKey("", p.repo), { login: null, role: null, githubId: null, perm: null });
+    else named.set(permKey(p.login, p.repo), { login: p.login, repo: p.repo });
+  }
+  const q = queryDb(db);
+  for (const part of kx.chunks([...named.values()])) {
+    const rows = await q.all(q.k.selectFrom(kx.valuesTable(db, part, { login: "citext", repo: "text" }, "p"))
+      .leftJoin("main.access as a", (j) => j.on(kx.ciEq(db, "a.login", "p.login")))
+      .leftJoin("main.repo_permissions as rp", (j) => j.on(kx.ciEq(db, "rp.login", "p.login")).onRef("rp.repo", "=", "p.repo"))
+      .select(["p.login as login", "p.repo as repo", "a.role as role", "a.github_id as github_id", "rp.permission as permission", "rp.checked_at as checked_at"]));
+    for (const r of rows) {
+      if (r.login === null || r.repo === null) continue;
+      out.set(permKey(r.login, r.repo), {
+        login: r.login, role: (r.role as Role | null) ?? null, githubId: r.github_id === null || r.github_id === undefined ? null : Number(r.github_id),
+        perm: r.permission !== null && r.checked_at !== null ? { permission: r.permission, checkedAt: r.checked_at } : null,
+      });
+    }
+  }
+  return out;
 }
 
 /** The set form for the planner and bulk commands; never calls GitHub. `why: "stale"` tells the caller to re-read the permission. */
 export async function canActMany(db: Db, pairs: { login: string | null; repo: string }[], o: { identity: ActIdentity; mode: "cached"; maxAgeMs: number; now?: number; held?: ReadonlySet<PermKey> }): Promise<Map<PermKey, ActVerdict>> {
-  throw new Error("not built: access.canActMany");
+  const facts = await loadActFacts(db, pairs);
+  const now = o.now ?? Date.now();
+  const out = new Map<PermKey, ActVerdict>();
+  for (const p of pairs) {
+    const key = permKey(p.login ?? "", p.repo);
+    const f = facts.get(key) ?? { login: p.login, role: null, githubId: null, perm: null };
+    const fresh = freshWrite(f.perm, o.maxAgeMs, now);
+    const write = freshWrite(f.perm, o.maxAgeMs, now, o.held?.has(key)) ? "cached"
+      : f.perm && !isWrite(f.perm.permission) && now - Date.parse(f.perm.checkedAt) < o.maxAgeMs ? "no" : "unknown";
+    const v = decideAct(f, write, o.identity);
+    out.set(key, v.ok && !fresh ? { ...v, basis: "held" } : v);
+  }
+  return out;
 }
 
 /** The request form, in the order of today's `actRefusal`: login, role, the live write check, then the identity. */
 export async function canAct(db: Db, actor: { login: string | null; canWrite(repo: string): Promise<boolean> }, repo: string, o: { identity: ActIdentity }): Promise<ActRefusal | null> {
-  throw new Error("not built: access.canAct");
+  const facts: ActFacts = actor.login === null ? { login: null, role: null, githubId: null, perm: null } : (await loadActFacts(db, [{ login: actor.login, repo }])).get(permKey(actor.login, repo))!;
+  // The identity check comes last: with "app" here only the login and the role can refuse.
+  const early = decideAct(facts, "yes", "app");
+  if (!early.ok) return early.why as ActRefusal;
+  const write = await actor.canWrite(repo).catch(() => false);
+  const v = decideAct(facts, write ? "yes" : "no", o.identity);
+  return v.ok ? null : v.why as ActRefusal;
 }
 
 /** Whether the permission is write or better. */
 export function isWrite(permission: string | null | undefined): boolean {
-  throw new Error("not built: access.isWrite");
+  return !!permission && WRITE_PERMISSIONS.includes(permission);
 }
 
 /** Whether a cached write permission is young enough. */
 export function freshWrite(row: PermEntry | null | undefined, maxAgeMs: number, now: number, held?: boolean): boolean {
-  throw new Error("not built: access.freshWrite");
+  return !!row && isWrite(row.permission) && (now - Date.parse(row.checkedAt) < maxAgeMs || !!held);
 }
 
-/** The act rule over loaded facts. */
+/** The act rule over loaded facts: login, role, write access, then the identity, in that order. */
 export function decideAct(facts: ActFacts, write: "yes" | "no" | "unknown" | "cached", identity: ActIdentity): ActVerdict {
-  throw new Error("not built: access.decideAct");
+  if (!facts.login || facts.role === null) return { ok: false, why: "no-login" };
+  if (facts.role !== "operator" && facts.role !== "maintainer") return { ok: false, why: "no-role" };
+  if (write === "no") return { ok: false, why: "no-write" };
+  if (write === "unknown") return { ok: false, why: "stale" };
+  if (identity !== "app") return { ok: false, why: "box-identity" };
+  return { ok: true, role: facts.role, basis: write === "yes" ? "live" : "cached" };
 }
