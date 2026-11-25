@@ -190,7 +190,7 @@ function answerWithin(client: Pg.PoolClient, ms: number): void {
       }, ms);
     });
     // The statement's own failure once the connection is closed is not the one the caller sees.
-    r.catch(() => undefined);
+    void r.catch(() => undefined);
     return Promise.race([r, late]).finally(() => clearTimeout(t));
   };
 }
