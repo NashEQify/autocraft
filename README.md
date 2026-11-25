@@ -28,6 +28,27 @@ Stages run in this order. Details, limits and rules for each are in [docs/pipeli
 | Post-merge review | Opus reviews each PR the pipeline merged a second time, reading what landed with the pipeline's own commits and reviews of the PR, and lists defects and minor findings. Each defect that no open item covers becomes one follow-up issue in repos approved for commenting, except on a security fix whose advisory is not published yet (its findings are only shown); minor findings are only shown. | Opus | yes: per-repo approval |
 <!-- stages:end stage-table -->
 
+```mermaid
+flowchart TD
+  new[New issue or PR] --> cheap["Sync, duplicates, classify, priority"]
+  cheap --> rule{"Small or medium fix<br/>inside the merge rules?"}
+  rule -- yes --> review[Review]
+  rule -- no --> wait["Waits for a maintainer's command"]
+  wait -- "review, fix-up" --> review
+  wait -- implement --> impl["Implement in a workspace, open a PR"]
+  wait -- merge --> queue
+  impl --> review
+  review --> fix["Fix-up and review again"]
+  fix --> ok{"Approved for merge,<br/>or inside the rules?"}
+  review --> ok
+  ok -- no --> rec["One recommendation; a maintainer answers in words"]
+  rec --> fix
+  rec --> queue
+  ok -- yes --> queue["Merge queue: pre-merge check, CI, batch"]
+  queue -- "blocker" --> rec
+  queue --> merged[Merged] --> post[Post-merge review]
+```
+
 ### Trust boundaries
 
 - Untrusted code runs only in a separate build environment (a worker as another OS user, with rootless Podman), never where GitHub or Claude credentials are.

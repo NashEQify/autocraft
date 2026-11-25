@@ -148,7 +148,7 @@ The frontend in `web/` talks to `/api/`; the wire types are `web/src/api/types.t
 | Method and path | Who |
 |---|---|
 | `GET /api/me`, `/api/repos`, `/api/progress`, `/api/search?q=`, `/api/items/<repo>/<n>` | anyone signed in |
-| `GET /api/items?q=&mode=text&repo=&kind=&state=&label=&status=&flag=&author=&since=&flow=&sort=&desc=&limit=&offset=&run=` (Items browser: full-text search over titles, bodies and comments, settled type labels, counts per settled status; `flow=<node>.<branch>` lists exactly the items a flowchart branch counts) | anyone signed in |
+| `GET /api/items?q=&mode=text&repo=&kind=&state=&label=&status=&flag=&author=&since=&sort=&desc=&limit=&offset=&run=` (Items browser: full-text search over titles, bodies and comments, settled type labels, counts per settled status) | anyone signed in |
 | `GET /api/classifiers?run=&a=&b=` (agreement, confusion, confidence bands and flags for a run and classifier pair; defaults to the latest run), `/api/classifiers/disagreements?run=&a=&b=&label=&band=&limit=&offset=` | anyone signed in |
 | `GET /api/cost?run=` (token use, USD where recorded, and wall time per stage and model and per repo, plus spend over time; all runs when `run` is empty) | anyone signed in |
 | `GET /api/queue/page?tab=all\|review\|fix\|verify\|merge&repos=pipeline\|all\|<repo>` (the queue tabs; Merge: the PRs in merge order, the next merges, PRs approved for merge before their review, the batches in flight) | anyone signed in |
@@ -549,7 +549,7 @@ Codex's own sandbox does not keep its shell tool away from its login on Linux, s
 
 ## Pipeline runner
 
-`autocraft-server runner serve` is the only process that runs pipeline steps (how the parts fit together: [docs/pipeline.md](docs/pipeline.md#architecture)). It polls the `jobs` table every 2 seconds, runs each job in a child process (`autocraft-server runner exec <id>`) with its output in a log file, stops jobs whose cancel was requested, and, while the pipeline is On, queues the jobs the stages need (see [docs/pipeline.md](docs/pipeline.md#on-and-off)). Every 20 seconds it also refreshes the flowchart counts (`flow_summary`) of repos whose data changed. On start it puts jobs that an earlier runner left running back in the queue to resume (see [Restarts and resumed jobs](#restarts-and-resumed-jobs)). A lock file keeps a second runner on the same host from starting; on Postgres, a second copy elsewhere waits as a standby (see [Two replicas](#two-replicas)).
+`autocraft-server runner serve` is the only process that runs pipeline steps (how the parts fit together: [docs/pipeline.md](docs/pipeline.md#architecture)). It polls the `jobs` table every 2 seconds, runs each job in a child process (`autocraft-server runner exec <id>`) with its output in a log file, stops jobs whose cancel was requested, and, while the pipeline is On, queues the jobs the stages need (see [docs/pipeline.md](docs/pipeline.md#on-and-off)). On start it puts jobs that an earlier runner left running back in the queue to resume (see [Restarts and resumed jobs](#restarts-and-resumed-jobs)). A lock file keeps a second runner on the same host from starting; on Postgres, a second copy elsewhere waits as a standby (see [Two replicas](#two-replicas)).
 
 It reads the same variables as the CLI (`AUTOCRAFT_DB` and the rest), plus:
 
