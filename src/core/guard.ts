@@ -1,6 +1,6 @@
 // The guard: the only way to get a `Guarded` value, which every PR write in github/write.ts requires.
 // Right before a write it reloads the facts (with a live read of head, state and mergeable for merges and pushes),
-// runs decide() again, applies the gates, and passes only when the Plan still holds the same action at the same head.
+// runs decide() again, and passes only when the Plan still holds the same action at the same head and its permission lets it run.
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { decidePr } from "./decide.ts";
@@ -8,10 +8,11 @@ import { verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
 import { loadRepoGuards } from "../data/control/index.ts";
 import { decideItem } from "./decide-item.ts";
-import { approvalOf, gateRepo, gates, mergeMay, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
+import { mayRun, repoPermission } from "./authority.ts";
+import { approvalOf, type By, type RepoApprovals, type RepoNeed, type Want } from "./gates.ts";
+import { ownImplementation } from "./implementation.ts";
 import { loadItemFact } from "./issue-facts.ts";
-import type { ActionKind, PrFacts } from "./plan.ts";
-import type { MayResult } from "./may.ts";
+import type { Action, ActionKind, Permission, Plan, PrFacts } from "./plan.ts";
 import type { Identity } from "../github/identity.ts";
 import { botRepo } from "../discord/filing-repos.ts";
 import type { Db } from "../db/index.ts";
@@ -56,7 +57,38 @@ const needsLive = (a: Want): boolean =>
 
 const make = <K extends ActionKind>(ref: Ref, a: Want<K>, head: string, as: Identity = "app"): Guarded<K> => ({ scope: "pr", action: a, head, repo: ref.repo, number: ref.number, as }) as unknown as Guarded<K>;
 
-async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f: PrFacts } | Refused> {
+/** Why a PR cannot be in an integration batch at its head, whoever approved it; a merge on its own waits for the same. */
+export function memberRefusal(f: PrFacts): string | null {
+  if (f.draft) return "it is a draft";
+  if (f.mergeWaiting) return "its merge waits for the sign-in or access of the person who approved it";
+  return ownImplementation(f)?.state === "revising" ? "its implementation session is revising it" : null;
+}
+
+/** The action as one of a Plan, for its permission when the Plan does not hold it. */
+const asAction = (a: Want & { source?: string }, head: string | null): Action =>
+  ({ kind: a.kind, head, params: { ...(a.bucket !== undefined ? { bucket: a.bucket } : {}), ...(a.source !== undefined ? { source: a.source } : {}) } });
+
+const other = (text: string): Permission => ({ ok: false, why: { code: "other", who: "system", text } });
+const actionsOf = (p: Pick<Plan, "wait"> & { actions: readonly Action[] }): string =>
+  `actions: ${p.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none"}`;
+
+/** Whether the write may be made on these facts: the Plan decided on them holds the action at the head asked for, and it may run. Pure. */
+export function allows(f: PrFacts, a: Ask, by: By): Permission {
+  const plan = decidePr(f, loadPass());
+  const due = plan.head !== a.head ? undefined : plan.actions.find((x) => x.kind === a.kind && x.head === a.head
+    && (a.bucket === undefined || x.params?.bucket === a.bucket) && (a.source === undefined || x.params?.source === a.source));
+  // Why the action may not run says more than the state of a Plan without it, so it is asked first.
+  const may = mayRun({ facts: f, action: due ?? asAction(a, a.head) }, by);
+  if (!may.ok) return may;
+  const out = a.batch ? memberRefusal(f) : null;
+  if (out) return other(out);
+  // A batch member is in its batch state, not ready; it must still pass what a single merge needs apart from CI and mergeable.
+  const inBatch = a.batch === true && a.kind === "merge" && plan.head === a.head && BATCH_STATES.includes(plan.state) && plan.path !== null && verifyAllows(plan.path, f.verification?.state, f.verifyOverride);
+  return due || inBatch ? may
+    : other(`the plan no longer has ${a.kind}${a.bucket ? `:${a.bucket}` : ""} at ${short(a.head)} (state ${plan.state}, head ${short(plan.head)}, ${actionsOf(plan)}${plan.wait ? `, waiting for ${plan.wait}` : ""})`);
+}
+
+async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ as: Identity } | Refused> {
   const name = `${ref.repo}#${ref.number}`;
   let read: LiveRead | null = null;
   if (needsLive(a)) {
@@ -73,28 +105,14 @@ async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f
   let f = await loadPrFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open PR the pipeline tracks` };
   if (read) f = { ...f, ghState: read.state, head: read.head, draft: read.draft, mergeable: read.mergeable };
-  const why = gates(f, a, by);
-  if (why) return { refused: `${name}: ${why}` };
-  if (a.batch && f.mergeHeld) return { refused: `${name}: merge held by an operator` };
-  if (a.batch && f.draft) return { refused: `${name}: it is a draft` };
-  const plan = decidePr(f, loadPass());
-  const holds = plan.head === a.head && (plan.actions.some((x) => x.kind === a.kind && x.head === a.head && (a.bucket === undefined || x.params?.bucket === a.bucket) && (a.source === undefined || x.params?.source === a.source))
-    // A batch member is in its batch state, not ready; it must still pass what a single merge needs apart from CI and mergeable.
-    || (a.batch === true && a.kind === "merge" && BATCH_STATES.includes(plan.state) && plan.path !== null && verifyAllows(plan.path, f.verification?.state, f.verifyOverride)));
-  if (!holds) {
-    const now = plan.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none";
-    return { refused: `${name}: the plan no longer has ${a.kind}${a.bucket ? `:${a.bucket}` : ""} at ${short(a.head)} (state ${plan.state}, head ${short(plan.head)}, actions: ${now}${plan.wait ? `, waiting for ${plan.wait}` : ""})` };
-  }
-  return { f };
+  const may = allows(f, a, by);
+  return may.ok ? { as: may.as } : { refused: `${name}: ${may.why.text}` };
 }
 
 /** Lets one PR write through, or says why not. Call it right before the write. */
 export async function guard<K extends ActionKind>(db: Db, ref: Ref, action: Ask<K>, by: By, live?: Live): Promise<Guarded<K> | Refused> {
   const r = await check(db, ref, action, by, live);
-  if ("refused" in r) return r;
-  // A merge a person approved is made as them (src/core/may.ts); a merge on the repo's approval as the app.
-  const m = action.kind === "merge" ? mergeMay(r.f) : null;
-  return make(ref, action, action.head, m?.ok && m.as === "person" ? `user:${m.by}` : "app");
+  return "refused" in r ? r : make(ref, action, action.head, r.as);
 }
 
 /**
@@ -123,17 +141,14 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, logi
   const name = `${ref.repo}#${ref.number}`;
   const f = await loadItemFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
-  const why = gates(f, action, by);
-  if (why) return { refused: `${name}: ${why}` };
   const plan = decideItem(f);
-  const holds = plan.actions.some((x) => x.kind === action.kind
+  const due = plan.actions.find((x) => x.kind === action.kind
     && (action.bucket === undefined || x.params?.bucket === action.bucket)
     && (action.id === undefined || x.params?.id === action.id)
     && (action.source === undefined || x.params?.source === action.source));
-  if (!holds) {
-    const now = plan.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none";
-    return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, actions: ${now})` };
-  }
+  const may = mayRun({ facts: f, action: due ?? asAction(action, null) }, by);
+  if (!may.ok) return { refused: `${name}: ${may.why.text}` };
+  if (!due) return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, ${actionsOf(plan)})` };
   return { scope: "item", action, repo: ref.repo, number: ref.number, as: login ? `user:${login}` : "app" } as unknown as GuardedItem;
 }
 
@@ -149,22 +164,22 @@ export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals
 
 /**
  * Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch.
- * `members`: the verdicts of the items the write serves: the merge rule's (src/core/may.ts) of the PRs a batch carries, or the
+ * `members`: the verdicts of the items the write serves: the merge's (src/merge/approval.ts) of the PRs a batch carries, or the
  * implementation's. A "merge" or "fix-issue" write passes without the repo's approval when every one of them passes, so a batch of PRs
  * people approved one by one, or an issue a person queued, needs no repo switch.
  */
-export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, login?: string, o: { members?: readonly MayResult[] } = {}): Promise<GuardedRepo | Refused> {
-  const approved = (need === "merge" || need === "fix-issue") && !!o.members?.length && o.members.every((m) => m.ok);
-  const why = gateRepo(await repoApprovals(db, repo), approved ? null : need, by, repo);
+export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, login?: string, o: { members?: readonly { ok: boolean }[] } = {}): Promise<GuardedRepo | Refused> {
+  const why = repoPermission(await repoApprovals(db, repo), need, by, repo, o.members);
   // `login`: the person pressing the button right now (a conversation card), who acts as themselves.
-  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : "app" } as unknown as GuardedRepo);
+  return why ? { refused: `${repo}: ${why.text}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : "app" } as unknown as GuardedRepo);
 }
 
-/** Lets a stage that starts work on a PR take it (the pipeline's account is assigned): the PR must pass the gates of the action the work ends in. */
+/** Lets a stage that starts work on a PR take it (the pipeline's account is assigned): the action the work ends in may run. */
 export async function guardClaim(db: Db, ref: Ref, action: Want, by: By): Promise<GuardedRepo | Refused> {
   const f = await loadPrFact(db, ref.repo, ref.number);
-  const why = f ? gates(f, action, by) : "not an open PR the pipeline tracks";
-  return why ? { refused: `${ref.repo}#${ref.number}: ${why}` } : ({ scope: "repo", need: approvalOf(f!, action), repo: ref.repo, as: "app" } as unknown as GuardedRepo);
+  if (!f) return { refused: `${ref.repo}#${ref.number}: not an open PR the pipeline tracks` };
+  const may = mayRun({ facts: f, action: asAction(action, f.head) }, by);
+  return may.ok ? ({ scope: "repo", need: approvalOf(f, action), repo: ref.repo, as: "app" } as unknown as GuardedRepo) : { refused: `${ref.repo}#${ref.number}: ${may.why.text}` };
 }
 
 /**

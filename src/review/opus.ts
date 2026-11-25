@@ -33,6 +33,7 @@ import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
+import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
 import { droppedTitles, keptFixes } from "../workflow/work.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
@@ -142,13 +143,10 @@ export type PreparedOpus =
   | { kind: "no-threads"; error: string }
   | { kind: "ready"; input: OpusPr; snap: Snapshot; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** A maintainer's entry was left out of the discussion for length. */ maintDropped?: boolean };
 
-/**
- * The person's decision that the change belongs in the app: they approved its merge, or started it at an entry that works towards
- * one. A review entry that is not approved asks the review for that as well.
- */
+/** The person's decision that the change belongs in the app (core settledBy), as the prompt input carries it. */
 export function scopeSettled(w: ItemWorkflow | undefined): { scope_settled?: NonNullable<OpusPr["scope_settled"]> } {
-  if (!w || (w.approvedBy === null && w.entry === "review")) return {};
-  return { scope_settled: w.approvedBy !== null ? { answer: "merge approved", by: w.approvedBy, note: null } : { answer: `started at ${w.entry === "fixup" ? "fix-up" : w.entry}`, by: w.startedBy, note: null } };
+  const by = settledBy(w);
+  return by ? { scope_settled: { ...by, note: null } } : {};
 }
 
 /**

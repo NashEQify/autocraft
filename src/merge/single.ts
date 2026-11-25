@@ -42,8 +42,7 @@ export function pathsOfDiff(text: string): string[] | null {
  */
 export async function planSingles(db: Db, repo: string, fetchDiff: DiffFetcher = ghDiff, by: By = CLI_BY): Promise<Set<number> | null> {
   const max = await singleMergeMax(db);
-  // A PR aimed at a non-default branch merges singly on its own path and takes no part in this count or the file overlap.
-  const ready = (await planned(db, "merge", { repo, by })).filter((p) => !p.facts.baseOffDefault);
+  const ready = await planned(db, "merge", { repo, by });
   if (max === 0 || !ready.length || ready.length > max) return null;
   const seen = new Set<string>();
   for (const { facts, action } of ready) {
@@ -68,7 +67,7 @@ export async function runSingles(
   db: Db, params: { repo: string; limit?: number; onMerged?: (n: number) => void; by?: By },
   log: (line: string) => void = console.log, deps?: MergeDeps, fetchDiff?: DiffFetcher,
 ): Promise<MergeSummary | null> {
-  // Whether each PR may merge is the plan's (mayMerge), checked again before each merge.
+  // Whether each PR may merge is the plan's, checked again before each merge.
   if ((await loadBatchRun(db, params.repo)).active.length) return null;
   const plan = await planSingles(db, params.repo, fetchDiff, params.by);
   if (!plan) return null;

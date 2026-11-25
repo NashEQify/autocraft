@@ -28,7 +28,6 @@ const DECIDES: Record<Kind, readonly string[]> = {
     "src/labels/approval.ts",
     "src/mainfix/approval.ts",
     "src/mainfix/index.ts",
-    "src/merge/approval.ts",
     "src/merge/ci-approval.ts",
     "src/postmerge/file.ts",
     "src/prstatus/approval.ts",
@@ -38,7 +37,6 @@ const DECIDES: Record<Kind, readonly string[]> = {
   workflow: [
     "src/implement/pr.ts",
     "src/preapproval/index.ts",
-    "src/review/opus.ts",
     "src/workflow/advance.ts",
     "src/workflow/apply.ts",
     "src/workflow/resolve.ts",

@@ -4,34 +4,34 @@
 //   autocraft-server merge --repo R [--limit N] [--apply]
 //
 // Without --apply it is a dry run: it reads the local tables only, calls nothing and writes nothing.
-import { mergeHeld } from "./holds.ts";
 import { baseRefusal, recordLiveBase } from "./base.ts";
 import { mergeScope, mergeVerdicts } from "./approval.ts";
 import { DRAFT_REFUSAL } from "./safe-merge.ts";
-import { ACTION_WAITS, mergeWaits } from "../core/may.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mayRun } from "../core/authority.ts";
+import { ciAt, type CiState } from "../core/evidence.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
-import { planned, runnable } from "../core/select.ts";
+import { planned } from "../core/select.ts";
 import { claimForWork } from "../github/claim.ts";
 import { pipelineMe } from "../github/pipeline-account.ts";
 import { mergeViaCommand, MERGE_RECORDED_ENV, type Writer } from "../github/write.ts";
 import { Client, type Querier } from "../mirror.ts";
-import { refreshChecks } from "../review/checks.ts";
+import { refreshChecks, type PrChecks } from "../review/checks.ts";
 import { readGate } from "./changes-requested.ts";
 import { liveGateChecked } from "../review/discussion.ts";
-import { buildQueue, ciAllows, countStates, QUEUE_STATES, verifyAllows, type QueueEntry } from "./queue.ts";
+import { buildQueue, countStates, QUEUE_STATES, ciAllows, verifyAllows, type QueueEntry } from "./queue.ts";
 
 export { buildQueue, countStates, QUEUE_STATES, type QueueEntry, type QueueState } from "./queue.ts";
 import { envVar } from "../env.ts";
-import { effectiveCi, optionalChecks } from "../optional-checks.ts";
+import { optionalChecks } from "../optional-checks.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { authFailure, laneForOperator, noWriteReason, SIGN_IN_REASON, type Lane, type LaneDeps } from "../github/user-lane.ts";
 import { ownerOf } from "../owners.ts";
 import { readEnvFor } from "../github/read.ts";
 import { addAudit } from "../data/control/index.ts";
-import { recordAttempts, verificationOf } from "../data/merge/index.ts";
+import { loadRunApprovals, recordAttempts, verificationOf } from "../data/merge/index.ts";
 import type { AttemptInput } from "../data/merge/types.ts";
 import { addStageEventsOnce } from "../data/planner/index.ts";
 import { loadActions, loadPrWorkflows, loadWorkScores, queueActions, saveActions, type ActionState } from "../data/workflow/index.ts";
@@ -149,6 +149,12 @@ export async function prInfo(q: Querier, repo: string, n: number): Promise<PrInf
 export const methodOf = (info: PrInfo): "squash" | "merge" => (info.authors > 1 || info.commits > 100 ? "merge" : "squash");
 
 
+/** CI of a PR whose checks were just read, by the planner's rule (ciAt): without the repo's optional checks, and pending while runs we approved are unfinished. */
+export async function ciNow(db: Db, repo: string, ch: PrChecks): Promise<CiState> {
+  const [optional, runs] = await db.together(() => Promise.all([optionalChecks(db, repo), loadRunApprovals(db, [{ repo, number: ch.number }])]));
+  return ciAt(ch, ch.head_oid, { optional, approvedRuns: runs.get(`${repo}#${ch.number}@${ch.head_oid}`)?.approved.length ?? 0 });
+}
+
 // ---- the step ----------------------------------------------------------------
 
 /** An item with no live workflow ranks after every weight-5 workflow and before weight 4 (loadWorkScores: 1e15 + weight * 1e12 - id). */
@@ -171,21 +177,19 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   const queue = await buildQueue(db, { repo });
   const open = queue.filter((e) => e.state !== "merged");
   const states = countStates(queue);
-  const { may: due, held } = runnable(await planned(db, "merge", { repo, refused: true }), params.by ?? CLI_BY);
+  const by = params.by ?? CLI_BY;
+  const mays = (await planned(db, "merge", { repo, refused: true })).map((p) => ({ p, may: mayRun(p, by) }));
+  const due = mays.flatMap(({ p, may }) => (may.ok ? [p] : []));
   const mergeDue = new Map(due.map((p) => [p.facts.number, { singleOnly: p.action.params?.singleOnly === true, verifyOverride: p.facts.verifyOverride }]));
   const scores = await loadWorkScores(db, open.map((e) => ({ repo, number: e.number })));
   const score = (e: QueueEntry) => scores.get(refOf(e)) ?? NO_WORKFLOW_SCORE;
   // Heaviest workflow first, then in the order the workflows started; then by number.
   let picks = open.filter((e) => mergeDue.has(e.number) && (!params.only || params.only(e)) && (!params.singleOnly || mergeDue.get(e.number)!.singleOnly))
     .sort((a, b) => score(b) - score(a) || a.number - b.number);
-  const refs = picks.map((e) => ({ repo, number: e.number }));
-  const [live, waits] = await db.together(() => Promise.all([loadPrWorkflows(db, refs), loadActions(db, { refs, kinds: ["merge"], states: ACTION_WAITS })]));
-  // A merge that waits for its approver's sign-in or access stays put.
-  picks = picks.filter((e) => !mergeWaits(waits.get(refOf(e)), live.get(refOf(e)), e.head));
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
   const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
-  if (held) log(`merge ${repo}: ${held}`);
+  for (const { p, may } of mays) if (!may.ok) log(`  ${refOf(p.facts)}: left out: ${may.why.text}`);
 
   if (dryRun) {
     summary.attempted = picks.map(refOf);
@@ -215,35 +219,35 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   // One PR at a time; any error that isn't a refusal stops the run.
   for (const e of picks) {
     if (params.stopOnRefusal && summary.refused.length) break;
-    if (await mergeHeld(db, repo, e.number)) { log(`  ${refOf(e)}: merge held since the queue was read; skipped`); continue; }
-    // Approval read now: a repo switch turned off or a workflow that stopped since the plan was made leaves the PR alone.
+    // Asked again now: a repo switch turned off or a workflow that stopped since the plan was made leaves the PR alone.
     const may = (await mergeVerdicts(db, repo, [{ number: e.number, head: e.head }])).get(e.number)!;
-    if (!may.ok) { log(`  ${refOf(e)}: not merged: ${may.why}`); continue; }
+    if (!may.ok) { log(`  ${refOf(e)}: not merged: ${may.why.text}`); continue; }
     // A merge a person approved is made as that person, with their token, in a repo on the app's identity.
     let lane: Lane | null = null;
-    if (may.as === "person") {
-      const lr = await laneForOperator(db, d.lane, may.by, [repo]);
+    if (may.as !== "app") {
+      const approver = may.as.slice("user:".length);
+      const lr = await laneForOperator(db, d.lane, approver, [repo]);
       if (lr && !("lane" in lr)) {
-        if (!("transient" in lr)) await noteMergeAction(db, repo, e, may.by, lr.state, lr.reason);
+        if (!("transient" in lr)) await noteMergeAction(db, repo, e, approver, lr.state, lr.reason);
         log(`  ${refOf(e)}: ${"transient" in lr ? `not merged yet: ${lr.transient}` : `waiting: ${lr.reason}`}`);
         continue;
       }
-      if (lr) { lane = lr.lane; await noteMergeAction(db, repo, e, may.by, "pending", null); }
+      if (lr) { lane = lr.lane; await noteMergeAction(db, repo, e, approver, "pending", null); }
     }
     summary.attempted.push(refOf(e));
     seen = null;
     const [ch] = await refreshChecks(db, d.querier, repo, [e.number]);
     // GitHub often has no mergeable state yet right after a merge: end the round without a refusal on record.
     if (params.stopOnRefusal && summary.merged.length && ch?.state === "OPEN" && ch.mergeable === "UNKNOWN") { log(`  ${refOf(e)}: GitHub has not computed its mergeable state yet; left for the next round`); summary.attempted.pop(); break; }
-    if (ch) seen = { ci: await effectiveCi(db, repo, ch.overall ?? "none", ch.checks), mergeable: ch.mergeable ?? "UNKNOWN" };
     if (!ch) { await refuse(e, null, "GitHub returned no such PR"); continue; }
+    const ci = await ciNow(db, repo, ch);
+    seen = { ci, mergeable: ch.mergeable ?? "UNKNOWN" };
     if (ch.state !== "OPEN") { await refuse(e, null, `no longer open on GitHub (${ch.state.toLowerCase()})`); continue; }
     if (ch.head_oid !== e.head) { await refuse(e, null, `head moved from ${short(e.head)} to ${short(ch.head_oid)} since the review`); continue; }
     // Not a refusal: the PR goes on once it is marked ready for review.
     if (ch.is_draft) { log(`  ${refOf(e)}: a draft; not merged until it is marked ready for review`); continue; }
     const ver = await verificationOf(db, repo, e.number, ch.head_oid);
     if (!verifyAllows(e.path, ver?.state, mergeDue.get(e.number)!.verifyOverride)) { await refuse(e, null, `verification at ${short(ch.head_oid)} is ${ver?.state ?? "missing"}, not passed`); continue; }
-    const ci = await effectiveCi(db, repo, ch.overall, ch.checks);
     if (!ciAllows(ci) || ch.mergeable !== "MERGEABLE") {
       await refuse(e, null, `not ready at merge time: CI ${ci}, mergeable ${(ch.mergeable ?? "unknown").toLowerCase()}`);
       continue;
@@ -252,8 +256,9 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     if (!info) { await refuse(e, null, "GitHub returned no such PR"); continue; }
     if (info.head !== e.head) { await refuse(e, null, `head moved from ${short(e.head)} to ${short(info.head)} since the review`); continue; }
     const baseWhy = await baseRefusal(db, repo, e.head, e.number, info.baseRef);
-    // A retargeted PR is not a refusal either: the mirror takes the new base, which makes the review stale, so it is reviewed again against it.
-    if (baseWhy) { await recordLiveBase(db, repo, e.number, e.head, info.baseRef); log(`  ${refOf(e)}: ${baseWhy}; reviewed again first`); continue; }
+    // A retargeted PR is not a refusal either: the mirror takes the live base. A review that read another one is stale then and made again;
+    // off the default branch the PR waits for a person.
+    if (baseWhy) { await recordLiveBase(db, repo, e.number, e.head, info.baseRef); log(`  ${refOf(e)}: ${baseWhy}; not merged`); continue; }
     // Not a refusal: no merges row, so the queue keeps the PR and takes it up again once it is reviewed again.
     // The same read checks for a maintainer's changes-requested review, whatever merge command runs next.
     const gate = await liveGateChecked(db, d.querier, repo, e.number, e.head, log);
@@ -264,13 +269,11 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
       log(`  ${refOf(e)}: new comments or reviews since the final review; not merged, it is reviewed again first`);
       continue;
     }
-    // A hold may have been set during the calls above.
-    if (await mergeHeld(db, repo, e.number)) { log(`  ${refOf(e)}: merge held meanwhile; skipped`); summary.attempted.pop(); continue; }
-    const ag = await guardRepo(db, repo, "merge", params.by ?? CLI_BY, undefined, { members: [may] });
+    const ag = await guardRepo(db, repo, "merge", by, undefined, { members: [may] });
     if ("refused" in ag) log(`  ${refOf(e)}: not assigned: ${ag.refused}`);
     else await claimForWork(w, ag, d.querier, repo, e.number, "pr", () => pipelineMe(log), { run: runId }, log);
     const method = methodOf(info);
-    const g = await guard(db, { repo, number: e.number }, { kind: "merge", head: e.head }, params.by ?? CLI_BY, liveOf(db, d.querier));
+    const g = await guard(db, { repo, number: e.number }, { kind: "merge", head: e.head }, by, liveOf(db, d.querier));
     if ("refused" in g) {
       // Not recorded as a merge attempt: the PR is tried again once the reason is gone.
       summary.refused.push({ ref: refOf(e), reason: g.refused });
