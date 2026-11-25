@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { planHistory, prunePlanHistory, refreshPlanCache } from "../src/core/plan-cache.ts";
+import { prunePlanHistory, refreshPlanCache } from "../src/core/plan-cache.ts";
+import { loadPlanHistory } from "../src/data/planner/index.ts";
+import type { Db } from "../src/db/index.ts";
 import { detectAutopilot, planDue, setEnabled } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
@@ -14,6 +16,9 @@ import { sqliteOnly } from "./test-db.ts";
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-cache-"));
 const T0 = "2026-01-01T00:00:00Z";
+
+/** An item's plan history, oldest first. */
+const planHistory = async (db: Db, repo: string, number: number) => (await loadPlanHistory(db, [`${repo}#${number}`])).get(`${repo}#${number}`)?.reverse() ?? [];
 
 describe("Plan cache", async () => {
   const db = await connectDb(join(dir, "t.db"));
