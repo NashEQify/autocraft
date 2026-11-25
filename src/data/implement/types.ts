@@ -140,10 +140,10 @@ export type IssueAttempt = {
   /** Heads of this attempt's `revise` rounds with a review or CI fix. */
   reviseHeads: string[];
   lastRevise: ReviseRound | null;
-  /** Attempts of the issue per text_hash. */
+  /** Attempts of the issue per text_hash; empty while its only attempt is neither failed nor stuck. */
   textCounts: Record<string, number>;
-  /** Attempts with a PR, newest id first. */
-  prAttempts: { id: number; prNumber: number; state: ImplementationState; createdAt: string; diffStat: string | null }[];
+  /** Attempts with a PR, newest id first; the plan each was built from only with `withPlans`. */
+  prAttempts: { id: number; prNumber: number; state: ImplementationState; createdAt: string; diffStat: string | null; plan?: PlanReply | null }[];
 };
 export type PrAttempt = { issue: number; attemptId: number; state: ImplementationState; revisedHeads: string[]; planned?: IssueAttempt["planned"] };
 export type ImplementFacts = {

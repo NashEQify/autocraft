@@ -25,11 +25,11 @@ import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runCommand } from "../../workflow/apply.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
-import { eventsOf, liveWorkflow } from "../../workflow/store.ts";
+import { eventsOf } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
 import { loadItems } from "../../data/mirror/index.ts";
-import { loadLegPass } from "../../data/workflow/index.ts";
+import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { loadUserRuns } from "../../data/inference/index.ts";
 import { loadHeldFixups } from "../../data/views/held-fixups.ts";
@@ -307,7 +307,10 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const r = itemArg(args(raw, { item: "item" }, ["item"]).item);
   const ref = refText(r);
   const { role } = await needWorkflowItem(env, r);
-  const [found, quiet, wf, stored] = await env.db.together(() => Promise.all([loadItems(env.db, [r], "card"), loadQuiet(env.db, [ref]), liveWorkflow(env.db, r.repo, r.number), eventsOf(env.db, r.repo, r.number)]));
+  const [found, quiet, works, said] = await env.db.together(() => Promise.all([loadItems(env.db, [r], "card"), loadQuiet(env.db, [ref]), loadPrWorkflows(env.db, [r]), eventsOf(env.db, r.repo, r.number)]));
+  // A PR that its issue's live workflow works on shows that one: commands on the PR act on it.
+  const wf = works.get(ref) ?? null;
+  const on = wf && wf.number !== r.number ? refText(wf) : null;
   const it = found.get(ref);
   if (!it) throw new HttpError(404, t("{ref} is not an item AutoCraft has read.", { ref }));
   // A quiet pull request (the landing fix of a security finding) shows viewers no workflow text, as on the item page.
@@ -315,17 +318,18 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
     return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
   }
   const wait = wf ? await legWait(env.db, wf) : null;
-  const events = stored.slice(-10);
+  const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
+      ...(on ? { item: on } : {}),
       state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead.` : `${ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
-  return show(header, "item", data);
+  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
+  return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
 
 async function myItems(env: McpEnv, raw: unknown): Promise<ToolResult> {

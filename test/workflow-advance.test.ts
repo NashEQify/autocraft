@@ -4,12 +4,12 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
-import { setStepApproval } from "../src/data/control/index.ts";
+import { addOwnCommits, setStepApproval } from "../src/data/control/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { liveWorkflow } from "../src/workflow/store.ts";
+import { liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { SNAPSHOT_CACHE_MS } from "../src/data/runners/snapshot-cache.ts";
@@ -22,7 +22,7 @@ import { implementStep } from "../src/core/decide-item.ts";
 import { loadItemFact } from "../src/core/issue-facts.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
-import { startAttempt } from "../src/data/implement/index.ts";
+import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { recordPlan } from "../src/implement/plan.ts";
 import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import type { PlanReply } from "../src/implement/types.ts";
@@ -341,4 +341,109 @@ test("an answer on an implement issue queues a fix-up of the named part on its i
   assert.equal(fx.length, 1);
   assert.equal(fx[0]!.number, 8);
   assert.match(fx[0]!.instructions ?? "", /folder per document/);
+});
+
+/** A ready plan whose one part changes src/a.rs. */
+const PLANNED: PlanReply = { ...ASKS, ready: true, questions: [], workflow: { parts: [{ title: "Keep the folder", files: ["src/a.rs"] }], recommendation: null } };
+/** The issue's attempt opened PR 8 at sha8 (our own commit), having changed `files`. */
+async function implementationOpened(files: string[], approved: boolean): Promise<World> {
+  const w = await implementIssue();
+  if (approved) await say(w, "merge");
+  await w.pr(8, { author: "craft-bot" });
+  await addOwnCommits(w.db, [{ repo: "app", sha: "sha8", action: "implement-push" }]);
+  await writeStep(w.db, (await currentAttempt(w.db, "app", 7))!.impl, {
+    to: "pr-opened", patch: { plan: PLANNED, diffStat: files.map((f) => ` ${f} | +300 -1`).join("\n"), branch: "fix-8", prNumber: 8, prUrl: "https://example.invalid/8" },
+  });
+  return w;
+}
+const review8 = async (w: World, verdict: string, workflow?: object) => await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
+  repo: "app", number: 8, head_oid: "sha8", run_id: "rv", at: later(), model: "m", mode: "full", verdict, sure: 1, reason: "r", workflow: workflow ? JSON.stringify(workflow) : null,
+}));
+const leg8 = async (w: World) => (await w.rows("SELECT state FROM preapprovals WHERE number = 8 ORDER BY id DESC"))[0]?.state;
+
+test("an approved implementation that changed files its plan does not name comes back before it merges, once", async () => {
+  const w = await implementationOpened(["src/a.rs", "src/zzz.rs", "Cargo.lock"], true);
+  await advanceWorkflows(w.db);
+  const wf = (await liveWorkflow(w.db, "app", 7))!;
+  assert.deepEqual([wf.state, wf.blocker, wf.approvedBy, wf.blockerParams?.files], ["blocked", "beyond-agreed", MAINT, ["src/zzz.rs"]]);
+  assert.match(wf.rec!.text, /src\/zzz\.rs/);
+  assert.equal(await leg8(w), undefined, "no merge leg starts");
+  const r = await say(w, "yes");
+  assert.equal(r.outcome, "run", r.line);
+  await advanceWorkflows(w.db);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 7))!.state, await leg8(w)], ["running", "review"]);
+});
+
+test("an implementation inside its plan merges without asking; one beyond it names the files in the end recommendation", async () => {
+  const inside = await implementationOpened(["src/a.rs"], true);
+  await advanceWorkflows(inside.db);
+  assert.deepEqual([(await liveWorkflow(inside.db, "app", 7))!.state, await leg8(inside)], ["running", "review"]);
+  inside.close();
+  const w = await implementationOpened(["src/a.rs", "src/zzz.rs"], false);
+  await review8(w, "take");
+  await w.verified(8);
+  await advanceWorkflows(w.db);
+  const wf = (await liveWorkflow(w.db, "app", 7))!;
+  assert.equal(wf.state, "recommending");
+  assert.match(wf.rec!.text, /src\/zzz\.rs/);
+});
+
+test("the other blockers stop an approved implementation too", async () => {
+  const cases: [Blocker, (w: World) => Promise<unknown>][] = [
+    ["author-commits", (w) => w.synced(8, "theirs")],
+    ["major-finding", (w) => review8(w, "hold")],
+    ["outside-purpose", (w) => review8(w, "take", { outside_purpose: { lines: 60, note: "n" }, recommendation: null })],
+    ["failed-twice", async (w) => { for (const state of ["failed", "rejected"]) await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 8, head: "sha8", kind: "patch", state, attempt: state === "failed" ? 1 : 2, created_at: later() })); }],
+    ["large-fix", (w) => w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 8, from_head: "sha8", to_head: "sha8b", state: "pushed", files: "[]", attempt: 1, created_at: later(), source: "operator", patch: Array.from({ length: 450 }, (_, i) => `+${i}`).join("\n") }))],
+  ];
+  for (const [blocker, evidence] of cases) {
+    const w = await implementationOpened(["src/a.rs"], true);
+    await advanceWorkflows(w.db);
+    assert.equal(await leg8(w), "review");
+    await evidence(w);
+    await advanceWorkflows(w.db);
+    const wf = (await liveWorkflow(w.db, "app", 7))!;
+    assert.deepEqual([wf.state, wf.blocker, wf.approvedBy], ["blocked", blocker, MAINT], blocker);
+    assert.equal(await leg8(w), "cancelled", blocker);
+    w.close();
+  }
+});
+
+test("a person's stop, approval or drop during the pass wins over what the pass writes", async () => {
+  for (const text of ["stop", "merge", "drop 1", "stop, then review"]) {
+    const w = await approvedReview();
+    const db = w.db;
+    await w.pr(2, { label: "feature" });
+    const say2 = async (t: string) => { const o = (await runCommand(db, actor, "dashboard", { parsed: parse(t), items: [{ repo: "app", number: 2 }] })).items[0]!; assert.equal(o.outcome, "run", o.line); };
+    await say2("review");
+    await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "take-fix", sure: 1, reason: "r", fixes: JSON.stringify([{ file: "a", change: "x", title: "one" }]) }));
+    await db.run(db.k.updateTable("main.item_workflows").set({ plan: JSON.stringify([{ n: 1, title: "one", source: "review", state: "planned" }]) }).where("number", "=", 2));
+    // Another process handles the command between the pass's reads and its write.
+    const write = db.write;
+    db.write = (async (f: () => Promise<unknown>, o?: never) => {
+      db.write = write;
+      for (const t of text.split(", then ")) await say2(t);
+      return await write.call(db, f, o);
+    }) as typeof write;
+    await advanceWorkflows(db);
+    const wf = (await workflowHistory(db, "app", 2)).map((x) => [x.state, x.approvedBy, x.rec]);
+    const want = { stop: [["stopped", null, null]], merge: [["running", MAINT, null]], "drop 1": [["running", null, null]], "stop, then review": [["stopped", null, null], ["running", null, null]] }[text];
+    assert.deepEqual(wf, want, text);
+    if (text === "drop 1") assert.equal((await liveWorkflow(db, "app", 2))!.plan[0]!.state, "dropped");
+    w.close();
+  }
+});
+
+test("the third attempt on an issue text offers no Try again, whatever became of the first two", async () => {
+  const w = await implementIssue();
+  const db = w.db;
+  for (const end of ["cancelled", "closed"] as const) {
+    const im = (await currentAttempt(db, "app", 7))!.impl;
+    await recordSteps(db, [{ id: im.id, to: end }]);
+    await startAttempt(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: im.textHash });
+  }
+  await markStuck(db, (await currentAttempt(db, "app", 7))!.impl, "session-failed", null);
+  await advanceWorkflows(db);
+  const wf = (await liveWorkflow(db, "app", 7))!;
+  assert.deepEqual([wf.state, wf.rec?.answer], ["recommending", undefined]);
 });

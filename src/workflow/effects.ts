@@ -194,10 +194,14 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   return failed;
 }
 
-/** Takes back the item's closes that are still to be made: queued, or waiting for their person's sign-in or access. */
+/** Takes back the closes of the item, and those its workflow made of other items, that are still to be made: queued, or waiting for their person's sign-in or access. */
 export async function stopCloses(c: Ctx): Promise<void> {
   const open = ["pending", "waiting-token", "waiting-permission"] as const;
-  const rows = [...(await loadActions(c.db, { refs: [{ repo: c.item.repo, number: c.item.number }], kinds: ["close", "comment-close"], states: open })).values()].flat();
+  const of = { kinds: ["close", "comment-close"], states: open } as const;
+  const maps = await c.db.together(() => Promise.all([
+    loadActions(c.db, { refs: [{ repo: c.item.repo, number: c.item.number }], ...of }), ...(c.workflowId === undefined ? [] : [loadActions(c.db, { workflowIds: [c.workflowId], ...of })]),
+  ]));
+  const rows = maps.flatMap((m) => [...m.values()].flat());
   await saveActions(c.db, rows.map((a) => ({ id: a.id, state: "stopped", reason: `stopped by ${c.by}`, at: c.at })), { from: open });
 }
 
@@ -206,8 +210,8 @@ export async function stopCloses(c: Ctx): Promise<void> {
  * through the user lane). A PR's action names its current head, so a push after the command stops the close. Everything that runs is
  * stopped first (`stopAll`), so no fix-up pushes to an item about to close.
  */
-export async function queueClose(c: Ctx, workflowId: number, closeAs: CloseAs | null = null): Promise<void> {
-  const { db, by, item, at } = c;
+export async function queueClose(c: Ctx, workflowId: number, item: Target, closeAs: CloseAs | null = null): Promise<void> {
+  const { db, by, at } = c;
   await queueLaneActions(db, [{ workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at, closeAs }]);
 }
 

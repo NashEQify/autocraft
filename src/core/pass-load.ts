@@ -257,7 +257,7 @@ export type ItemPassData = {
   /** Second wave: the text of the items `needs` named. */
   texts: Map<RefKey, ItemOf<"text">>;
   /** Second wave: mirror state of the PRs `needs` named. */
-  prs: Map<RefKey, ItemOf<"ref">>;
+  prs: Map<RefKey, ItemOf<"pr">>;
   /** Second wave: comments created after the earliest `asked` time, of the items asked. */
   comments: Map<RefKey, CommentOut[]>;
   /** Second wave: role and cached permission of each login on a repo `needs` named. */
@@ -293,7 +293,7 @@ export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; ba
   const after = n.asked.reduce<string | null>((m, a) => (m === null || a.since < m ? a.since : m), null);
   const [texts, prs, comments, act] = await Promise.all([
     n.texts.length ? loadItems(db, n.texts, "text") : Promise.resolve(new Map<RefKey, ItemOf<"text">>()),
-    n.prs.length ? loadItems(db, n.prs, "ref") : Promise.resolve(new Map<RefKey, ItemOf<"ref">>()),
+    n.prs.length ? loadItems(db, n.prs, "pr") : Promise.resolve(new Map<RefKey, ItemOf<"pr">>()),
     after !== null ? loadComments(db, n.asked.map((a) => a.ref), { after, order: "rowid" }) : Promise.resolve(new Map<RefKey, CommentOut[]>()),
     n.logins.length ? loadActFacts(db, n.logins) : Promise.resolve(new Map<PermKey, ActFacts>()),
   ]);

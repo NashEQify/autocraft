@@ -8,7 +8,7 @@ import { canActExpr } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { LIVE_STATES, notArchived, workScore } from "./fragments.ts";
+import { attemptOf, LIVE_STATES, notArchived, workScore } from "./fragments.ts";
 import type {
   Blocker, EndedWorkflow, Entry, FixupRequest, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowState,
@@ -93,9 +93,8 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const after = new Date((o.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const keyed = (alias: string, a: string, b: string) => (eb: any) => eb.exists(k.selectFrom(resolveKeys(db, keys, alias)).select(one(eb)).whereRef(`${alias}.repo`, "=", a).whereRef(`${alias}.number`, "=", b));
 
-  const impl = k.selectFrom("main.implementations").select(["repo", "number", "pr_number"]).where("pr_number", "is not", null).distinct().as("i");
   const liveQ = k.selectFrom("main.item_workflows as w")
-    .leftJoin(impl, (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number").on("w.entry", "=", "implement"))
+    .leftJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number").on("w.entry", "=", "implement").on("i.pr_number", "is not", null).on((eb: any) => attemptOf(eb, "i", "w")))
     .selectAll("w")
     .select((eb: any) => [
       "i.pr_number as pr",
@@ -168,9 +167,9 @@ export async function countWaiting(db: Db, repos: string[]): Promise<Map<string,
 
 /**
  * The live workflow that works on each PR: its own, else the one its active merge leg belongs to, else the implement workflow of the
- * issue an attempt opened it for. One statement.
+ * issue an attempt opened it for (attemptOf). `others`: without the PR's own. One statement.
  */
-export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[]): Promise<PrWorkflows> {
+export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[], o: { others?: boolean } = {}): Promise<PrWorkflows> {
   const out: PrWorkflows = new Map();
   if (refs.length === 0) return out;
   const q = queryDb(db);
@@ -182,9 +181,11 @@ export async function loadPrWorkflows(db: Db, refs: { repo: string; number: numb
     .select((eb: any) => ["p.repo as repo", "p.number as number", "p.workflow_id as wid", eb.lit(1).as("rank")]).where("p.state", "in", ACTIVE_LEGS).where("p.workflow_id", "is not", null);
   const attempt = k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, refs, "kk"), onKey("i", "pr_number"))
     .innerJoin("main.item_workflows as iw", (j: any) => j.onRef("iw.repo", "=", "i.repo").onRef("iw.number", "=", "i.number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", "iw.id as wid", eb.lit(2).as("rank")]).where("iw.entry", "=", "implement").where("iw.state", "in", LIVE_STATES);
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", "iw.id as wid", eb.lit(2).as("rank")]).where("iw.entry", "=", "implement").where("iw.state", "in", LIVE_STATES)
+    .where((eb: any) => attemptOf(eb, "i", "iw"));
   const rows = await q.all(k.selectFrom(own.unionAll(leg).unionAll(attempt).as("h")).innerJoin("main.item_workflows as w", "w.id", "h.wid")
-    .selectAll("w").select(["h.number as pr", "h.rank as rank"]).where("w.state", "in", LIVE_STATES).orderBy("h.rank", "desc").orderBy("w.id")) as (WorkflowRow & { pr: number | string; rank: number })[];
+    .selectAll("w").select(["h.number as pr", "h.rank as rank"]).where("w.state", "in", LIVE_STATES)
+    .$if(!!o.others, (b: any) => b.whereRef("w.number", "<>", "h.number")).orderBy("h.rank", "desc").orderBy("w.id")) as (WorkflowRow & { pr: number | string; rank: number })[];
   // The best match of a PR comes last and is the one kept.
   for (const { pr, rank: _rank, ...row } of rows) out.set(refKey(row.repo, Number(pr)), workflowOf(row as WorkflowRow));
   return out;
@@ -320,12 +321,8 @@ const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell
   recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
 };
 
-/**
- * Batched update, one `updateFrom` per distinct patch column set; always sets `updated_at` (the live topic `workflows`). Patches of the same id
- * merge in order. Returns the rows changed.
- */
-export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
-  if (rows.length === 0) return 0;
+/** The rows to write per distinct column set; patches of the same id merge in order. Every row sets `updated_at` (the live topic `workflows`). */
+function patchGroups(rows: { id: number; patch: WorkflowPatch; at?: string }[]): Record<string, Cell>[][] {
   const now = new Date().toISOString();
   const byId = new Map<number, Record<string, Cell>>();
   for (const r of rows) {
@@ -343,10 +340,32 @@ export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowP
     const shape = Object.keys(set).sort().join(",");
     (groups.get(shape) ?? groups.set(shape, []).get(shape)!).push(set);
   }
+  return [...groups.values()];
+}
+
+/** Batched update, one statement per distinct patch column set. Returns the rows changed. */
+export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
+  if (rows.length === 0) return 0;
   return await db.write(async () => {
     let changed = 0;
-    for (const group of groups.values()) changed += await kx.updateFrom(db, "main.item_workflows", ["id"], group);
+    for (const group of patchGroups(rows)) changed += await kx.updateFrom(db, "main.item_workflows", ["id"], group);
     return changed;
+  });
+}
+
+/**
+ * `saveWorkflows` for rows read before this write: one that changed since (`was`: the state and `updated_at` it was read with) is left as it
+ * is. One patch per id. Returns the ids written. Joins the caller's `db.write`.
+ */
+export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at: string; was: { state: WorkflowState; updatedAt: string } }[]): Promise<Set<number>> {
+  if (rows.length === 0) return new Set();
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const now = new Map((await q.all((q.k as any).selectFrom("main.item_workflows as w").select(["w.id", "w.state", "w.updated_at"]).where(kx.inList(db, "w.id", rows.map((r) => r.id), "bigint"))) as
+      { id: number | string; state: string; updated_at: string }[]).map((r) => [Number(r.id), r]));
+    const same = rows.filter((r) => { const n = now.get(r.id); return n?.state === r.was.state && n.updated_at === r.was.updatedAt; });
+    await saveWorkflows(db, same);
+    return new Set(same.map((r) => r.id));
   });
 }
 
@@ -378,7 +397,7 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
     .select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
   const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
     .innerJoin(resolveKeys(db, keys, "kt"), (j: any) => j.onRef("kt.repo", "=", "i.repo").onRef("kt.number", "=", "i.pr_number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w"));
   for (const r of await q.all(own.unionAll(viaPr)) as { repo: string; number: number; s: number | string }[]) {
     const key = refKey(r.repo, Number(r.number)), s = Number(r.s), old = out.get(key);
     if (old === undefined || s > old) out.set(key, s);
@@ -416,7 +435,7 @@ export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Se
   const who = (b: any) => f.login === undefined ? b : b.where((eb: any) => eb.or([loginIn(db, eb, "w.started_by", [f.login!], "ls"), loginIn(db, eb, "w.approved_by", [f.login!], "la")]));
   const own = who(k.selectFrom("main.item_workflows as w").select(["w.repo as repo", "w.number as number"]).where("w.state", "in", LIVE_STATES));
   const viaPr = who(k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .select(["i.repo as repo", "i.pr_number as number"]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null));
+    .select(["i.repo as repo", "i.pr_number as number"]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w")));
   const rows = await q.all(k.selectFrom(own.union(viaPr).as("s")).select(["s.repo", "s.number"])
     .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "s", pairs(f.refs!))))
     .$if(!!f.repos, (b: any) => b.where(kx.inList(db, "s.repo", f.repos!)))

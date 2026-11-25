@@ -8,7 +8,7 @@ import { after, before, describe, test } from "node:test";
 import type { McpTokenCreated, McpTokens } from "../web/src/api/types.ts";
 import { addLogin, removeLogin, setRole } from "../src/access.ts";
 import { scopeToTracked } from "../src/repos.ts";
-import { insertWorkflow } from "../src/workflow/store.ts";
+import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
@@ -346,6 +346,16 @@ describe("answering", () => {
     assert.equal(refused.isError, true);
     assert.match((await call(plain, "help")).text, /fix-up/);
     assert.match((await call(plain, "get_item", { item: "photocraft#10" })).text, /No workflow running/);
+    // A PR that its issue's implementation works on shows the issue's workflow, which commands on it act on.
+    for (const [number, kind] of [[9011, "issue"], [9012, "pr"]] as const) await db.run(db.k.insertInto("main.items").values({ repo: "photocraft", number, kind, state: "OPEN", title: `t${number}` }));
+    const at = new Date().toISOString();
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 9011, kind: "issue", entry: "implement", state: "running", startedBy: "boss", startedAt: at, startedVia: "agent" });
+    await db.run(db.k.insertInto("main.implementations").values({ repo: "photocraft", number: 9011, queued_by: "boss", state: "pr-opened", attempt: 1, text_hash: "h", pr_number: 9012, created_at: at, updated_at: at }));
+    const covered = (await call(plain, "get_item", { item: "photocraft#9012" })).text;
+    assert.match(covered, /photocraft#9012 is part of the work on photocraft#9011/);
+    assert.match(covered, /started by boss/);
+    await updateWorkflow(db, wf, { state: "stopped" });
+    assert.match((await call(plain, "get_item", { item: "photocraft#9012" })).text, /No workflow running/);
     const made = await b.json<McpTokenCreated>("POST", "/api/mcp/tokens", { label: "cmd", answer: true });
     const answering_ = made.token;
     assert.ok((await toolNames(answering_)).includes("command"));

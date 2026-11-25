@@ -17,6 +17,16 @@ export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
  */
 export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => eb(kind, "<>", kx.literal("archived"));
 
+/** Attempt states that no longer work a PR (src/implement/types.ts ENDED_STATES). */
+const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
+
+/**
+ * The attempt `i` is one the implement workflow `w` of its issue works on: the current one, or one that ended in it. An attempt that ended
+ * before the workflow started belongs to an earlier one, and its PR (reopened, say) is no work of this one.
+ */
+export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> =>
+  eb.or([eb(`${i}.state`, "not in", ENDED_ATTEMPTS), eb(`${i}.updated_at`, ">=", eb.ref(`${w}.started_at`))]);
+
 /** The item has a live workflow, or is the PR of a live implement workflow. */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
@@ -24,7 +34,7 @@ export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Alia
   return eb.or([
     eb.exists(t.selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.number", "=", n).where("pw.state", "in", LIVE_STATES)),
     eb.exists(t.selectFrom("main.implementations as pwi").innerJoin("main.item_workflows as pw", (j) => j.onRef("pw.repo", "=", "pwi.repo").onRef("pw.number", "=", "pwi.number")).select(one(eb))
-      .where("pwi.repo", "=", r).where("pwi.pr_number", "=", n).where("pw.entry", "=", "implement").where("pw.state", "in", LIVE_STATES)),
+      .where("pwi.repo", "=", r).where("pwi.pr_number", "=", n).where("pw.entry", "=", "implement").where("pw.state", "in", LIVE_STATES).where((w) => attemptOf(w, "pwi", "pw"))),
   ]);
 }
 
@@ -36,7 +46,7 @@ export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string;
   const k = queryDb(db).k as any;
   const own = k.selectFrom("main.item_workflows as w").select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
   const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null);
+    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w"));
   return k.selectFrom(own.unionAll(viaPr).as("ws")).select((eb: any) => ["ws.repo", "ws.number", eb.fn.max("ws.s").as("s")]).groupBy(["ws.repo", "ws.number"]);
 }
 
@@ -68,7 +78,7 @@ export function boundToExpr(db: Db, eb: kx.AnyEb, refs: readonly { repo: string;
       .where((w) => w.or([kx.ciEq(db, "bw.started_by", login), kx.ciEq(db, "bw.approved_by", login)]))
       .where((w) => w.or([
         w("bw.number", "=", ref.number),
-        w.and([w("bw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as bi").select(one(eb)).where("bi.repo", "=", kx.ref<string>("bw.repo")).where("bi.number", "=", kx.ref<number>("bw.number")).where("bi.pr_number", "=", ref.number))]),
+        w.and([w("bw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as bi").select(one(eb)).where("bi.repo", "=", kx.ref<string>("bw.repo")).where("bi.number", "=", kx.ref<number>("bw.number")).where("bi.pr_number", "=", ref.number).where((x) => attemptOf(x, "bi", "bw")))]),
       ])));
   })) as AliasableExpression<SqlBool>;
 }

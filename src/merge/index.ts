@@ -319,8 +319,8 @@ async function noteMergeAction(db: Db, repo: string, e: QueueEntry, by: string, 
   const row = actions.get(`${repo}#${e.number}`)?.find((a) => a.kind === "merge" && a.workflow_id === wf.id);
   if (state === "waiting-token" || state === "waiting-permission") {
     await db.write(async () => {
-      // A row of an earlier head or approver is stopped first, so the upsert takes it over.
-      if (row && (row.head !== e.head || row.by !== by)) await saveActions(db, [{ id: row.id, state: "stopped", at }]);
+      // A row of an earlier head, approver or approval is stopped first, so the upsert takes it over.
+      if (row && (row.head !== e.head || row.by !== by || row.updated_at < (wf.approvedAt ?? ""))) await saveActions(db, [{ id: row.id, state: "stopped", at }]);
       const id = (await queueActions(db, [{ workflowId: wf.id, repo, number: e.number, kind: "merge", by, head: e.head, state, at }])).get(`${repo}#${e.number}:merge`);
       if (id !== undefined) await saveActions(db, [{ id, state, reason, at }]);
     });

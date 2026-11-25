@@ -24,7 +24,7 @@ export function joinKeys<Q extends AnyQ>(db: Db, q: Q, keys: KeySource, alias: s
 export const keyChunks = (keys: KeySource): KeySource[] => (Array.isArray(keys) ? kx.chunks(keys) : [keys]);
 
 const CARD = ["repo", "number", "kind", "state", "title", "url", "author", "author_type", "labels", "assignees", "comments_count", "is_draft", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason"];
-const PR = ["repo", "number", "kind", "state", "author", "author_id", "author_type", "assignees", "is_draft", "updated_at", "additions", "deletions", "head_oid", "head_ref", "head_repo", "base_ref", "mergeable", "maintainer_can_modify", "review_decision", "ci_state", "closing_issues", "merged_at"];
+const PR = ["repo", "number", "kind", "state", "author", "author_id", "author_type", "assignees", "is_draft", "updated_at", "additions", "deletions", "head_oid", "head_ref", "head_repo", "base_ref", "mergeable", "maintainer_can_modify", "review_decision", "ci_state", "closing_issues", "closed_at", "merged_at"];
 const TEXT = [...CARD, "body", "author_id", "author_association", "additions", "deletions", "changed_files", "closing_issues", "text_refs", "head_oid", "embed_hash", "class_hash", "class_scheme"];
 
 /** The columns of a preset (a plain list, no repeats). `full` is every column of `items` but the full-text one and `jev_failed_hash`. */

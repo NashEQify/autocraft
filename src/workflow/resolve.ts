@@ -8,8 +8,11 @@
 import { describe } from "./parse.ts";
 import { sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
-/** `closing`: a close of the item is queued or waits for its person, which a stop takes back. */
-export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; closing?: boolean };
+/**
+ * `closing`: a close of the item is queued or waits for its person, which a stop takes back. `mergeWaits`: the merge the sender approved
+ * waits for their own sign-in or access.
+ */
+export type ItemState = { kind: ItemKind; workflow: ItemWorkflow | null; closing?: boolean; mergeWaits?: boolean };
 
 /** How the confirmation line attributes the run: "approved by", "started by", ...; null: "by". */
 export type How = "started" | "approved" | "answered" | "stopped" | "set" | null;
@@ -25,6 +28,8 @@ export type Run = {
   drop: number[];
   /** Records merge approval now. */
   approve: boolean;
+  /** Approves again a merge that waits for the sender's sign-in or access: it is tried again. */
+  retryMerge: boolean;
   /** The steps end in a merge (approved now or before); false: they end in a recommendation. */
   merges: boolean;
   weight: number | null;
@@ -78,7 +83,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, merges: false, weight: null, end: null, autorepin: null, answers: false, pick: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, retryMerge: false, merges: false, weight: null, end: null, autorepin: null, answers: false, pick: null, ...r },
 });
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
@@ -203,6 +208,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
       if (rec.parts.fix.length) return ambiguous({ why: "merge-skips-fixes", parts: rec.parts.fix });
       return accept(wf, [], rec.parts.drop, weight, true);
     }
+    if (approved && state.mergeWaits) return run({ retryMerge: true, merges: true, weight, how: "approved" });
     if (approved) return refused({ why: "already-approved", by: wf.approvedBy!, at: wf.approvedAt ?? "" });
     return run({ approve: true, merges: true, weight, how: "approved" });
   }

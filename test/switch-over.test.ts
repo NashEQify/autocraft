@@ -6,6 +6,8 @@ import { connectDb, type Db } from "./helpers/raw-db.ts";
 import { STATE_COPY_DONE } from "../src/db/state-copy.ts";
 import { SWITCH_KEY, switchOver } from "../src/db/switch-over.ts";
 import { loadActivityRound } from "../src/data/views/activity.ts";
+import { loadImplementFacts } from "../src/data/implement/index.ts";
+import { openQuestionOf, viewOf } from "../src/workflow/question.ts";
 import { countEventsSince, loadEvents, loadLastEventKinds } from "../src/data/workflow/index.ts";
 
 const COPIED = "2026-11-20T00:00:00.000Z", BEFORE = "2026-11-19T00:00:00.000Z", AFTER = "2026-11-20T01:00:00.000Z", NOW = "2026-11-20T02:00:00.000Z";
@@ -175,5 +177,48 @@ test("a second run, and a run after one that was cut short, change nothing; an o
   await db.prepare("UPDATE main.decisions SET answer = 'take', answered_by = 'alice', answered_at = '2026-11-22T00:00:00.000Z' WHERE id = 'open'").run();
   const again = (await switchOver(db, { now: "2026-11-23T00:00:00.000Z" }))!;
   assert.deepEqual([again.archived.answered, again.archived.withdrawn, again.archived.actions, again.fastTrack.length], [1, 0, 0, 0]);
+  await db.close();
+});
+
+test("an implementation that waited for a maintainer when the switch ran still asks, and an answer nothing acted on is kept", async () => {
+  const db = await legacy();
+  const attempt = async (id: number, number: number, state: string, x: Record<string, string | number | null> = {}) => {
+    await item(db, number, "issue");
+    await insert(db, "implementations", { id, repo: "demo", number, queued_by: "dave", state, attempt: 1, text_hash: `x${number}`, created_at: BEFORE, updated_at: BEFORE, ...x });
+  };
+  const question = (id: number, result: object) => insert(db, "implementation_rounds", { implementation_id: id, kind: "question", result: JSON.stringify(result), at: BEFORE });
+  const options = (...keys: string[]) => JSON.stringify(keys.map((k) => ({ key: k, label: `Label ${k}`, hint: "h" })));
+  // Stuck with its decision, after a plan question that was answered; stuck without one; stuck on its PR, answered.
+  await decision(db, "demo#21:implement", { number: 21, options: options("try-again", "draft-pr", "close-issue", "backlog") });
+  await attempt(21, 21, "stuck", { decision_id: "demo#21:implement", reason: "The session finished without changing anything" });
+  await question(21, { audience: "maintainer", text: "Globally?", decisionId: "demo#21:implement-q1-1" });
+  await attempt(22, 22, "stuck", { reason: "The plan call failed: no reply" });
+  await decision(db, "demo#23:implement", { number: 23, options: options("try-again", "close-pr", "backlog"), answer: "try-again", answer_note: "use the cache", answered_by: "alice", answered_at: AFTER });
+  await attempt(23, 23, "stuck", { decision_id: "demo#23:implement", pr_number: 30, reason: "The pull request went back to the session too many times" });
+  // Asked two questions at once: the decision's options belong to the first.
+  await decision(db, "demo#24:implement-q1-1", { number: 24, question: "Globally or per file?", options: options("o1", "o2", "backlog"), recommended: "o2" });
+  await attempt(24, 24, "asked", { decision_id: "demo#24:implement-q1-1" });
+  await question(24, { audience: "maintainer", text: "Globally or per file?", decisionId: "demo#24:implement-q1-1" });
+  await question(24, { audience: "maintainer", text: "Which icon?", decisionId: "demo#24:implement-q1-1" });
+
+  const ask = async () => {
+    const facts = (await loadImplementFacts(db, [21, 22, 23, 24].map((number) => ({ repo: "demo", number })), { withPlans: true })).byIssue;
+    return [21, 22, 23, 24].map((n) => {
+      const a = facts.get(`demo#${n}`)!, q = openQuestionOf(a);
+      return { asks: a.question?.text, answer: a.answer && [a.answer.by, a.answer.option, a.answer.text, a.answer.question === a.question?.round], yes: q && viewOf(a, q, [], false).rec.answer?.option, parts: q && viewOf(a, q, [], false).plan.map((p) => p.option) };
+    });
+  };
+  const r = (await switchOver(db, { now: NOW }))!;
+  assert.deepEqual(r.questions, ["demo#21 stuck", "demo#22 stuck", "demo#23 stuck", "demo#24 asked"]);
+  const first = await ask();
+  assert.deepEqual(first, [
+    { asks: "The implementation is stuck: The session finished without changing anything.", answer: null, yes: "try-again", parts: ["try-again", "draft-pr"] },
+    { asks: "The implementation is stuck: The plan call failed: no reply.", answer: null, yes: "try-again", parts: ["try-again"] },
+    { asks: "The implementation is stuck: The pull request went back to the session too many times.", answer: ["alice", "try-again", "use the cache", true], yes: null, parts: null },
+    { asks: "Globally or per file?", answer: null, yes: "o2", parts: ["o1", "o2"] },
+  ]);
+  await setting(db, "runner_heartbeat", "2026-11-22T00:00:00.000Z");
+  assert.deepEqual((await switchOver(db, { now: "2026-11-23T00:00:00.000Z" }))!.questions, [], "a second run carries nothing again");
+  assert.deepEqual(await ask(), first);
   await db.close();
 });
