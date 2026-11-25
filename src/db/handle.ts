@@ -94,6 +94,11 @@ const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 /** The most statements one shareReads scope keeps. */
 const SHARED_READS_MAX = 2000;
 
+/** Statements that write the settings table, which a settings snapshot must notice whoever issues them. */
+const SETTINGS_WRITE = /^\s*(?:insert\s+into|update|delete\s+from)\s+"?(?:main"?\."?)?settings"?(?![\w.])/i;
+let settingsWriteHook: ((db: object) => void) | null = null;
+export const onSettingsWrite = (fn: (db: object) => void): void => { settingsWriteHook = fn; };
+
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
@@ -193,7 +198,9 @@ export class Handle implements Db {
   }
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
-    const r = await this.#forgetting(() => this.k.executeQuery(q.compile()));
+    const compiled = q.compile();
+    if (settingsWriteHook && SETTINGS_WRITE.test(compiled.sql)) settingsWriteHook(this);
+    const r = await this.#forgetting(() => this.k.executeQuery(compiled));
     const changes = Number(r.numAffectedRows ?? 0n);
     return this.dialect === "postgres" ? withoutInsertId(changes) : { changes, lastInsertRowid: Number(r.insertId ?? 0n) };
   }
@@ -201,6 +208,7 @@ export class Handle implements Db {
   prepare(text: string): Statement {
     const exec = async (op: Op, args: Args) => {
       const go = () => this.#engine.exec(op, text, args, this.#current());
+      if (op === "run" && settingsWriteHook && SETTINGS_WRITE.test(text)) settingsWriteHook(this);
       return op === "run" ? await this.#forgetting(go) : await go();
     };
     async function* iterate(args: Args): AsyncGenerator<Row> {
