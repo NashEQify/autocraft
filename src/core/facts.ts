@@ -2,7 +2,7 @@
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
 import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey } from "../data/access/index.ts";
-import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
+import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
 import { prPass } from "../data/planner/index.ts";
@@ -275,7 +275,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
     handOver: false, mergeWaiting: false,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
-    fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
+    fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, changesRequested: null, gateFailureNote: null,
     may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legs: operator?.legs ?? [] }), ended: d.workflow.ended.get(ref) ?? null, pushes: moves, ownHead: !!head && ownHead(head),
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
@@ -433,7 +433,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const all = findingsOf(pmRow);
     const defects = all.filter((f) => f.severity === "defect");
     base.premerge = { at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, defectsAllFixable: defects.every((f) => f.fix), fixesSafe: parseFixes(JSON.stringify(defects.map((f) => f.fix))).length === defects.length, minor: all.length - defects.length, error: pmRow.error ?? null };
-    if (defects.length) base.premergeFixUsed = premergeFixUsedIn(patch.fixups);
+    if (defects.length) {
+      base.premergeFixUsed = premergeFixUsedIn(patch.fixups);
+      if (premergeFixRunningIn(patch.fixups, qh, pushedOff)) base.premergeFixRunning = true;
+    }
   }
   if (base.mergeable === "CONFLICTING" && i.base_ref) {
     const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved }, now);
@@ -448,7 +451,6 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.cifix = cifixOf(cfHead ?? qh);
   }
   base.batch = d.merge.batchStates.get(`${ref}@${qh}`) ?? null;
-  if (i.base_ref) base.stackedOn = (d.stacked.get(`${repo} ${i.base_ref} ${`${slugOf(repo)}`.toLowerCase()}`) ?? []).find((n) => n !== number) ?? null;
   base.baseOffDefault = !!i.base_ref && !!defaultBranch && i.base_ref !== defaultBranch;
   base.mainFix = !!i.head_ref?.startsWith(MAIN_FIX_BRANCH_PREFIX) && ownHere;
   const g = d.gates.get(ref);

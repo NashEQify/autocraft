@@ -35,6 +35,10 @@ export function operatorTriesIn(rows: readonly FixupRow[]): number {
 export function premergeFixUsedIn(rows: readonly FixupRow[]): boolean {
   return rows.some((r) => r.source === "premerge" && r.state !== "linting" && r.state !== "superseded");
 }
+/** The pre-merge fix round made on `head` is being pushed, or was pushed off it (`pushedOff`: the mirror does not show our push yet). */
+export function premergeFixRunningIn(rows: readonly FixupRow[], head: string, pushedOff: boolean): boolean {
+  return rows.some((r) => r.source === "premerge" && r.fromHead === head && (r.state === "pushing" || (r.state === "pushed" && pushedOff)));
+}
 
 /** Conflict merge tries at a head. */
 export function triesIn(rows: readonly ConflictRow[], head: string): number {

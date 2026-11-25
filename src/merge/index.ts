@@ -245,7 +245,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     const ver = await verificationOf(db, repo, e.number, ch.head_oid);
     if (!verifyAllows(e.path, ver?.state, mergeDue.get(e.number)!.verifyOverride)) { await refuse(e, null, `verification at ${short(ch.head_oid)} is ${ver?.state ?? "missing"}, not passed`); continue; }
     const ci = await effectiveCi(db, repo, ch.overall, ch.checks);
-    if (!ciAllows(e.path, ci, e.noCi) || ch.mergeable !== "MERGEABLE") {
+    if (!ciAllows(ci) || ch.mergeable !== "MERGEABLE") {
       await refuse(e, null, `not ready at merge time: CI ${ci}, mergeable ${(ch.mergeable ?? "unknown").toLowerCase()}`);
       continue;
     }

@@ -20,7 +20,7 @@ const base = (): Omit<PrFacts, "may"> => ({
   handOver: false, mergeWaiting: false,
   workflow: { entry: "review", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true },
   premerge: { at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, fixesSafe: true, minor: 0, error: null },
-  premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
+  premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, changesRequested: null, gateFailureNote: null,
 });
 
 const REPO_APPROVAL = { by: "op", at: "2026-11-01T00:00:00.000Z" };

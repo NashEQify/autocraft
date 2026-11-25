@@ -431,10 +431,9 @@ function cifixRuns(f: PrFacts): boolean {
 
 /**
  * Why the merge queue cannot merge a PR handed over to it until a person answers: verification failed, or a merge refusal that nothing
- * clears by itself. Null for every other wait. A merge hold is released, not answered.
+ * clears by itself. Null for every other wait.
  */
 function queueStop(p: Row, f: PrFacts): string | null {
-  if (f.mergeHeld) return null;
   const plan = decidePr(f);
   if (plan.waitKind !== "person") return null;
   if (plan.state === "verify-failed" || plan.state === "verify-error") return verifyFailed(p);
@@ -587,7 +586,11 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
       if (bucket !== null && ["work", "formatting", "linting", "collect", "rerun", "rerun-wait"].includes(bucket) && cifixRuns(f!)) return;
       return await stop(`CI failed at ${headName(p)} and the CI fix did not repair it`);
     }
-    if (ci === "none" && !await repoHasNoCi(db, p.repo)) return;
+    if (ci === "none") {
+      // Nothing merges without green CI, and in a repo that has no CI it never comes.
+      if (await repoHasNoCi(db, p.repo)) await stop(`${p.repo} has no CI checks, and nothing merges without green CI`);
+      return;
+    }
     // The pre-merge review of this head must be clean; the planner runs it (src/core/decide.ts) and retries a failed one.
     const pm = await premergeAt(db, p.repo, p.number, head);
     if (!pm || (pm.findings === null && pm.tries < PREMERGE_MAX_TRIES)) return;

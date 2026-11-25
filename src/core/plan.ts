@@ -260,6 +260,8 @@ export type PrFacts = {
   /** The pre-merge review row at the reviewed head. */
   premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   premergeFixUsed: boolean;
+  /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
+  premergeFixRunning?: boolean;
   /** Owner statements (owner_statements) that the Opus review or the pre-merge review at the reviewed head says the PR goes against; any keeps the PR off the merge rule. */
   /** Reasons from the PR's diff that keep it off the merge rule (README, brand files, third-party links); read from the diff cache at the reviewed head, null when the diff is not cached. */
   sensitive: string[] | null;
@@ -321,10 +323,8 @@ export type PrFacts = {
     /** GitHub writes go out as the box account, under which nobody's standing is known. */
     boxIdentity?: boolean;
   } | null;
-  /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
+  /** The PR's base is not its repository's default branch: nothing merges it. */
   baseOffDefault: boolean;
-  /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */
-  stackedOn: number | null;
   /** A maintainer's formal block: why, and whether from a live read. */
   changesRequested: { why: string; live: boolean } | null;
   /** The note when live review reads failed several times in a row. */

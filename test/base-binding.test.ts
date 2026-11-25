@@ -60,16 +60,7 @@ test("a private-org member's PR is pushable once the author's permission is read
   for (const want of ["unknown", "unknown", "no"]) assert.equal(await ensureAuthorWrites(db, "app", 10, "storytold/app", async () => null), want);
 });
 
-test("a PR aimed at a non-default branch is planned as a single merge only", () => {
+test("a PR aimed at a non-default branch does not merge", () => {
   const plan = decidePr(prFacts({ workflow: null, baseOffDefault: true }));
-  const merge = plan.actions.find((a) => a.kind === "merge");
-  assert.ok(merge);
-  assert.equal(merge.params?.singleOnly, true);
-  assert.equal(merge.params?.batchable, false);
-});
-
-test("a PR stacked on another open PR's branch needs a decision", () => {
-  const plan = decidePr(prFacts({ stackedOn: 4, baseOffDefault: true }));
-  assert.equal(plan.state, "needs-decision");
-  assert.ok(plan.reasons.some((r) => /targets the branch of open #4/.test(r)));
+  assert.deepEqual([plan.state, plan.actions.filter((a) => a.kind === "merge"), plan.waitKind], ["needs-decision", [], "person"]);
 });
