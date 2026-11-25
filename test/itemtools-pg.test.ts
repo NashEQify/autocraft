@@ -83,11 +83,10 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     // An embed run moves no change counter: only the vectors are compared and rewritten.
     await pdb.prepare("UPDATE item_embeddings SET vec = ?, at = 't1' WHERE repo = 'photocraft' AND number = 8").run(vec(0.5, 0.5));
     assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 0, embeddings: 1 });
-    // A decision answered alone rewrites the outcomes.
+    // A decision answered alone changes nothing in the snapshot.
     await pdb.prepare(`INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, answer, answered_by, answered_at)
       VALUES ('d2', 'scope', 'photocraft', 8, 'Take it?', '[{"key":"backlog","label":"Backlog"}]', 't', 'backlog', 'op', '2026-02-02T00:00:00Z')`).run();
-    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 1, comments: 0, embeddings: 0 });
-    assert.ok(dump(file).outcomes.some((o) => (o as { number: number }).number === 8));
+    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 0, embeddings: 0 });
 
     // A changed and a deleted item, comment and vector are applied in place, and the file then equals a fresh build.
     await pdb.prepare("UPDATE items SET title = 'Fix kerning now' WHERE repo = 'photocraft' AND number = 7").run();

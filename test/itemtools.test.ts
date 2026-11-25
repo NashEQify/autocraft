@@ -1,5 +1,4 @@
-// The item snapshot and the item tools: the snapshot holds GitHub data and
-// decision outcomes only, search finds a word in a comment, results frame
+// The item snapshot and the item tools: the snapshot holds GitHub data only, search finds a word in a comment, results frame
 // GitHub text as untrusted, arguments are validated, and the MCP server
 // answers over stdio.
 import assert from "node:assert/strict";
