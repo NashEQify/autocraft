@@ -107,7 +107,7 @@ test("GET /healthz/checks answers 503 with a stale worker and shows no repo name
   const db = await scratchDb();
   const now = Date.parse("2026-11-05T12:00:00Z");
   const at = (msAgo: number) => new Date(now - msAgo).toISOString();
-  await db.run(db.k.insertInto("settings").values({ key: "runner_heartbeat", value: at(5_000) }));
+  await db.run(db.k.insertInto("lane_state").values({ kind: "mark", step: "heartbeat", repo: "", value: at(5_000), at: at(5_000) }));
   await db.run(db.k.insertInto("sync_runs").values({ started_at: at(70_000), ended_at: at(60_000), mode: "search", items: 0 }));
   await db.run(db.k.insertInto("build_envs").values({ id: "sandbox", label: "Sandbox", kind: "local-sandbox", enabled: 1, slots: 2, key_hash: "h", last_seen_at: at(6 * 60_000), created_at: at(86_400_000) }));
   await db.run(db.k.insertInto("sync_repo_errors").values({ repo: "a", kind: "not-found", message: "x", since: at(1000), at: at(1000) }));

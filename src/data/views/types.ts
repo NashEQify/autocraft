@@ -18,11 +18,13 @@ import type { HeldAuthorRow, HoldStatus } from "../intake/types.ts";
 import type { Preapproval, StoredEvent } from "../workflow/types.ts";
 import type { JobItemRow, JobRow } from "../jobs/types.ts";
 import type { DupeSignal } from "../triage/types.ts";
+import type { HealthFacts } from "./health.ts";
+
+export type { HealthFacts };
 
 export type { TrackedRepo, TripRow, WriteLogRow, RepoRow, CommentRow, HeldAuthorRow, HoldStatus, Preapproval, StoredEvent, JobItemRow, JobRow };
 // S1 has no types for these three; they stay open until the view files define them.
 export type LegWaitInputs = Record<string, unknown>;
-export type HealthFacts = Record<string, unknown>;
 export type LaneFacts = Record<string, unknown>;
 /** S1 names the duplicate signal of an item `DupeSignal`. */
 export type DuplicateRow = DupeSignal;
@@ -53,12 +55,16 @@ export type Scope = {
 
 export type VisibilityInputs = { tracked: Map<string, TrackedRepo>; everTracked: Set<string>; repos: Map<string, RepoRow> };
 
+/** `updatedAt` is empty when the limit was never written. */
 export type StoppedFacts = { trips: TripRow[]; zeroLimits: { step: string; updatedAt: string }[]; heldAuthors: HeldAuthorRow[] };
 export type GaveUpFinding = FindingAttention["gaveUp"][number];
-export type AttentionFacts = { stops: StoppedFacts; health: HealthFacts; gaveUp: GaveUpFinding[]; ciFixFailed: { repo: string; number: number; title: string }[] };
+export type AttentionFacts = {
+  stops: StoppedFacts; health: HealthFacts; gaveUp: GaveUpFinding[]; ciFixFailed: { repo: string; number: number; title: string }[];
+  /** Jobs that failed in the last hour, per step and repo (null repo: not about a repo). */
+  failedJobs: { step: string; repo: string | null; n: number }[];
+};
 export type HomeFacts = {
   rows: (ItemWorkflow & { title: string | null; author: string | null; lastEvent: WorkflowEventKind | null })[];
-  permissions: Map<string, Permission>;
   attention: AttentionFacts;
   runner: { mine: HelperInfo[]; ready: ReadyRunner[] } | null;
 };
@@ -70,21 +76,19 @@ export type QueueMeta = { approvedBy: Map<Ref, string> };
 export type StatsFacts = {
   closed: { day: string; state: string; stage: string | null; kind: string; n: number }[]; created: number; backlog: number; reviewed: number; spendUsd: number;
 };
-export type FunnelFacts = {
-  stages: { repo: string; stage: string; n: number }[]; done: { repo: string; n: number }[]; trend: { day: string; opened: number; closed: number }[];
-  trackingStart: string | null; hourlyClosed: { hour: string; n: number }[];
-};
+import type { FunnelFacts } from "./funnel.ts";
+export type { FunnelFacts };
 
 export type ItemsFilter = {
   show: "open" | "backlog" | "closed"; filters: ("security" | "outside" | "stuck" | "duplicates")[]; areas: string[]; text: string | null; refs: Ref[]; limit: number;
 };
 export type ItemBase = {
-  repo: string; number: number; kind: "pr" | "issue"; title: string; author: string | null; state: string; updatedAt: string; planState: string | null; itemState: string | null;
+  repo: string; number: number; kind: "pr" | "issue"; title: string; author: string | null; state: string; updatedAt: string; mergedAt: string | null; closedAt: string | null; planState: string | null; itemState: string | null;
   phase: string | null; score: number | null; weight: number | null; workflowState: string | null; hasRecommendation: boolean; startedBy: string | null;
   approvedBy: string | null; stoppedBy: string | null; lastEvent: WorkflowEventKind | null;
 };
 export type ItemRowFacts = {
-  plans: Map<Ref, StoredPlan>; holds: Map<Ref, HoldStatus>; stuck: Set<Ref>; duplicateGroups: Map<Ref, unknown>; areas: Map<Ref, string[]>; permissions: Map<string, Permission>;
+  plans: Map<Ref, StoredPlan>; holds: Map<Ref, HoldStatus>; stuck: Set<Ref>; duplicateGroups: Map<Ref, DupeSignal>; areas: Map<Ref, unknown>; workflows: Map<Ref, ItemWorkflow>; permissions: Map<string, Permission>;
 };
 export type SearchHit = { repo: string; number: number; kind: "pr" | "issue"; title: string; snippet: string | null; commentId: string | null };
 export type ItemPeekFacts = { shown: ItemShown; body: string | null; comments: CommentRow[] };
