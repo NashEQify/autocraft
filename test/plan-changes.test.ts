@@ -88,6 +88,15 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   c = await since(seq);
   assert.equal(c.full, true);
   seq = c.cursor;
+  // Default-branch CI: a running head's check list alone moves no fact, its state does.
+  await db.run(db.k.insertInto("main_ci").values({ repo: "app", head_sha: "m1", branch: "main", state: "running", failing: "[]", checks: "[]", first_seen_at: T, state_changed_at: T, updated_at: T }));
+  seq = (await since(seq)).cursor;
+  await db.run(db.k.updateTable("main_ci").set({ checks: '[{"name":"build","state":"success","url":null}]' }).where("head_sha", "=", "m1"));
+  assert.equal((await since(seq)).full, false);
+  await db.run(db.k.updateTable("main_ci").set({ state: "green" }).where("head_sha", "=", "m1"));
+  c = await since(seq);
+  assert.equal(c.full, true);
+  seq = c.cursor;
 
   // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
