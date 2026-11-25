@@ -66,8 +66,6 @@ export function phaseOf(i: StatusInput): ItemPhase {
   if (i.itemState && TRIAGE_OVERRIDES.includes(i.itemState)) return ITEM_PHASE[i.itemState];
   if (i.waitKind === "person") return "Waiting for a person";
   if (i.waitKind === "contributor") return "Held";
-  // Waits the planner did not type (older cached rows) fall back to the wording.
-  if (i.waitKind === undefined && i.wait && /answer/i.test(i.wait)) return "Waiting for a person";
   if (i.state) {
     const phase: ItemPhase = PR_PHASE[i.state];
     if (i.reviewBlocked && (phase === "Review" || i.state === "opus-hold")) return "Held";

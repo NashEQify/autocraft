@@ -16,7 +16,7 @@ export type WaitCode = RefusalCode
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
   | "ci-contributor" | "ci-running" | "ci-fix-failed" | "ci-own-breakage" | "ci-nothing-to-fix" | "ask-unsent" | "ask-failed" | "lint"
   | "revision" | "revision-failed" | "implement-question" | "implement-stuck" | "implement-off" | "implement-ended" | "implement-room"
-  | "open-pr" | "draft" | "mirror" | "triage" | "outside-hold";
+  | "open-pr" | "draft" | "mirror" | "triage" | "open-request" | "outside-hold";
 
 /** Why a merge leg ended without a merge. */
 export type StopCode =
@@ -33,7 +33,7 @@ export type Stop = Why<StopCode>;
 export const refusalWho = (code: RefusalCode): Who => (code === "not-handed-over" || code === "actor-unknown" || code === "scope" ? "system" : "person");
 
 /** Person waits that ask nothing: a person set them on purpose, or their person acts on GitHub, on a switch or at the sign-in. */
-const NO_QUESTION: ReadonlySet<WaitCode> = new Set(["hold", "repo-approval", "changes-requested", "sign-in", "open-pr"]);
+const NO_QUESTION: ReadonlySet<WaitCode> = new Set(["hold", "repo-approval", "breaker", "box-identity", "changes-requested", "sign-in", "open-pr"]);
 
 /** Whether a started item with this wait has to have a question open. */
 export const needsQuestion = (code: WaitCode, who: Who): boolean => who === "person" && !NO_QUESTION.has(code);
@@ -51,6 +51,16 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "push approval for the repo": "repo-approval",
   "CI approval for the repo": "repo-approval",
   "merge approval for the repo": "repo-approval",
+  "label approval for the repo": "repo-approval",
+  "a maintainer's answer to the question it stopped with": "blocked",
+  "a maintainer to accept the author's new commits": "unaccepted-head",
+  "a maintainer's approval of the work": "not-approved",
+  "the workflow's steps before the merge": "not-handed-over",
+  "a maintainer to start it again": "ended",
+  "a maintainer to start it or the item it duplicates": "duplicate",
+  "a maintainer to ask for the fix-up again": "request-unnamed",
+  "a maintainer to resume it": "hold",
+  "the pipeline to be on": "pipeline-off",
   "merge held by an operator": "hold",
   "CI or GitHub's mergeable state": "ci",
   "CI on the latest commit to finish": "ci",
@@ -98,8 +108,8 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "a Backlog hold": "ended",
   "the label referee": "triage",
   "Haiku's second opinion": "triage",
-  "stays open as a plugin candidate": "triage",
-  "an open request for a person to pick up": "triage",
+  "stays open as a plugin candidate": "open-request",
+  "an open request for a person to pick up": "open-request",
   "the outside-surge breaker, until an operator resumes it": "outside-hold",
 };
 
@@ -109,6 +119,7 @@ const WAIT_FORM: readonly (readonly [RegExp, WaitCode])[] = [
   [/; waits for a maintainer$/, "not-started"],
   [/^a maintainer of \S+ to answer, approve or start it again: /, "actor-gone"],
   [/^GitHub's answer on .* access to \S+$/s, "actor-unknown"],
+  [/^the circuit breaker of \S+ to be resumed$/, "breaker"],
   [/^Implement is off for /, "implement-off"],
   [/, which blocks its review$/, "review-hold"],
   [/^next review after \d\d:\d\d$/, "review-hold"],

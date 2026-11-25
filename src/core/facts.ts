@@ -323,7 +323,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const v = head ? d.merge.verifications.get(`${ref}@${head}`) : undefined;
     base.outside = {
       review: latest && latest.head === head && !c.stale.has(`${ref}@${latest.head}`) ? latest.verdict : null,
-      verify: v?.state ?? null, ci: head && ch?.head_oid === head ? ch.overall ?? null : null,
+      verify: v?.state ?? null, ci: head ? ciOf(head) : null,
     };
     return base;
   }

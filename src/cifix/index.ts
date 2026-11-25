@@ -397,6 +397,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     return pr;
   };
 
+  const isQuiet = async (number: number): Promise<boolean> => (await loadQuiet(db, [`${repo}#${number}`])).size > 0;
   /** Applies a validated patch to the PR head: pushed to the branch, or posted as a comment where the branch is closed to us. */
   const deliver = async (c: CifixCandidate, kind: "format" | "code", pr: PrNode, v: Fix, checkName: string, check?: (patch: string) => Promise<string | null>, shown: CifixPr["files"] = [], folded: string | null = null, ses: SessionAsk = {}): Promise<void> => {
     const ref = refOf(c);
@@ -410,7 +411,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     if (writes === "unknown") { log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
     // A patch planned as a comment is not pushed without an approval of the push, also when the branch is open to us by now.
     const canPush = c.mayPush && !!pr.headRepository && pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes");
-    if (!canPush && !c.mayComment) {
+    if (!canPush && (!c.mayComment || await isQuiet(c.number))) {
       await rec.set(c, kind, "cannot-push", HOLD_CANNOT_PUSH, { files: v.files });
       summary.held.push({ ref, reason: HOLD_CANNOT_PUSH });
       log(`  ${ref}: held: ${HOLD_CANNOT_PUSH}`);
@@ -748,6 +749,13 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       // A maintainer's changes request is the person's to resolve first; an unreadable answer counts as blocked.
       const blocked = await readGate(db, d.querier, ownerOf(repo), repo, c.number, log);
       if (blocked !== null) { const why = blocked ?? "the PR's reviews could not be read"; await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); continue; }
+      if (await isQuiet(c.number)) {
+        const reason = "a quiet pull request is not asked for changes";
+        await rec.set(c, "code", "cannot-push", reason);
+        summary.held.push({ ref, reason });
+        log(`  ${ref}: held: ${reason}`);
+        continue;
+      }
       const g = await guard(db, { repo, number: c.number }, { kind: "cifix", bucket: "ask", head: c.head }, params.by ?? CLI_BY, liveOf(db, d.querier));
       if ("refused" in g) { summary.skipped.push(ref); log(`  ${ref}: skipped: ${g.refused}`); continue; }
       const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.failure.checks.map((x) => x.name)), { run: runId, head: c.head });

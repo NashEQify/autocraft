@@ -2,7 +2,7 @@
 // An item that is neither is STUCK; a live item whose plan state and wait have not changed for a long time is LONG (a monitor
 // threshold, not a pipeline wait). The runner refreshes the stored result after planner passes (refreshLiveness); the health check,
 // the Stuck items page and `autocraft-server liveness` read it.
-import { isOpenPrWait, TRIAGE_WAIT } from "./core/decide-item.ts";
+import { needsQuestion, type WaitCode } from "./core/codes.ts";
 import { blockersOfWait } from "./review/blockers.ts";
 import { readConfig } from "./data/control/index.ts";
 import { loadLiveness, loadLivenessInputs, loadLivenessState, saveLiveness } from "./data/planner/index.ts";
@@ -15,25 +15,23 @@ export type { Liveness, LivenessItem, LivenessVerdict };
 export type LiveCause = "planned" | "question" | "contributor" | "external" | "parked";
 export type StuckCause = "person-wait-without-question" | "no-plan" | "internal-wait";
 
-export type PlanRowLike = Pick<LivenessPlanRow, "kind" | "state" | "itemState" | "phase" | "wait" | "waitKind" | "actions" | "since">;
+export type PlanRowLike = Pick<LivenessPlanRow, "kind" | "state" | "itemState" | "phase" | "wait" | "waitKind" | "waitCode" | "actions" | "since">;
 /** `question`: a person has been asked, which is a workflow in `recommending` or `blocked`; `started`: a live workflow works on the item. */
 export type ItemFlags = { question: boolean; started: boolean };
 
 /** Plan states a person parks on purpose, or that wait for one to pick the item: nothing is due and nobody is asked. */
 const PARKED_STATES: ReadonlySet<string> = new Set(["backlog", "held-backlog", "draft", "out-of-scope", "not-started"]);
-const PARKED_WAITS: ReadonlySet<string> = new Set(["merge held by an operator", "stays open as a plugin candidate", "a Backlog hold", TRIAGE_WAIT]);
+const PARKED_WAITS: ReadonlySet<WaitCode> = new Set(["hold", "repo-approval", "ended", "open-request"]);
 /** Waits on a pipeline step that has no action due: nothing is working on them. */
-const INTERNAL_WAITS: ReadonlySet<string> = new Set(["the label referee", "Haiku's second opinion"]);
-/** Person waits whose person acts on GitHub, not in a question. */
-const GITHUB_PERSON_WAITS: ReadonlySet<string> = new Set(["the maintainer's review"]);
+const INTERNAL_WAITS: ReadonlySet<WaitCode> = new Set(["triage"]);
 
 export type Verdict = { live: true; cause: LiveCause } | { live: false; cause: StuckCause };
 
-/** Live or stuck, from the item's stored plan and the questions that name it. Pure. */
+/** Live or stuck, from the item's stored plan and the questions that name it: an action that may run moves it, a refused one does not. Pure. */
 export function classify(p: PlanRowLike, f: ItemFlags): Verdict {
   if (p.actions > 0) return { live: true, cause: "planned" };
   if (f.question) return { live: true, cause: "question" };
-  if (p.wait !== null && PARKED_WAITS.has(p.wait)) return { live: true, cause: "parked" };
+  if (p.waitCode !== null && PARKED_WAITS.has(p.waitCode)) return { live: true, cause: "parked" };
   if (PARKED_STATES.has(p.state) || p.itemState === "held-backlog") return { live: true, cause: "parked" };
   // The automatic path stopped for a person on a PR nobody started: nobody is asked, it waits for someone to pick it up.
   const unpicked = p.kind === "pr" && !f.started;
@@ -41,10 +39,11 @@ export function classify(p: PlanRowLike, f: ItemFlags): Verdict {
   if (p.wait === null) return { live: false, cause: "no-plan" };
   if (p.waitKind === "contributor") return { live: true, cause: "contributor" };
   if (p.waitKind === "person") {
-    if (GITHUB_PERSON_WAITS.has(p.wait)) return { live: true, cause: "external" };
+    // Its person acts on GitHub, on a switch or at the sign-in, and is asked nothing.
+    if (p.waitCode !== null && !needsQuestion(p.waitCode, "person")) return { live: true, cause: "external" };
     return unpicked ? { live: true, cause: "parked" } : { live: false, cause: "person-wait-without-question" };
   }
-  if (INTERNAL_WAITS.has(p.wait)) return { live: false, cause: "internal-wait" };
+  if (p.waitCode !== null && INTERNAL_WAITS.has(p.waitCode)) return { live: false, cause: "internal-wait" };
   return { live: true, cause: "external" };
 }
 
@@ -71,7 +70,7 @@ export function evaluateLiveness(input: LivenessInput, nowMs: number = Date.now(
       causes[verdict.cause] = (causes[verdict.cause] ?? 0) + 1;
     } else if (verdict.cause !== "parked" && verdict.cause !== "question"
       // An issue waiting on an open PR does not age on its own: the PR carries the age and is counted itself.
-      && !(r.kind === "issue" && isOpenPrWait(r.wait)) && !asked && nowMs - Date.parse(since) > longMs) {
+      && !(r.kind === "issue" && r.waitCode === "open-pr") && !asked && nowMs - Date.parse(since) > longMs) {
       items.push({ ...base, verdict: "long", cause: verdict.cause });
     }
   }

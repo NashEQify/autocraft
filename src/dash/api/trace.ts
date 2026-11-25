@@ -410,7 +410,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
   const { box, hidden } = c;
   const { plan, hold } = r.header;
   const view = obj(plan?.view);
-  const acts = (plan?.actions ?? []).filter((a) => a && typeof a.kind === "string") as { kind: string; head?: unknown }[];
+  const acts = (plan?.actions ?? []).filter((a) => a && typeof a.kind === "string" && !a.refused) as { kind: string; head?: unknown }[];
   const assignees = arr(r.detail.item?.assignees).filter((x): x is string => typeof x === "string");
   // The planner's texts as this reader may see them: no item of a hidden repo, and for viewers no note and plain reasons.
   const wait = waitFor(c, plan?.wait ?? null);

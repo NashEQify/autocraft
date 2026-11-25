@@ -5,7 +5,7 @@ import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, ty
 import { isWork, unassignActions } from "./assignment.ts";
 import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
-import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, standingWait, waitFields, type Wait } from "./decide.ts";
+import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts } from "./plan.ts";
 
@@ -60,9 +60,8 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
  */
 const labelDisagreement = ({ classification: c }: ItemFacts): boolean => c.status === "disagree" && !(isScope(c.jevLabel) && isScope(c.haikuLabel));
 
-/** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
+/** An issue's wait on the open PR that closes it or mentions it. */
 export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
-export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+( mentions it)?$/.test(wait);
 
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
 export const TRIAGE_WAIT = "an open request for a person to pick up";
@@ -137,16 +136,17 @@ export function decideItem(f: ItemFacts): ItemPlan {
 
   // A closed item is here for its close only.
   if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act"));
-  const idle = !actions.some(isWork);
-  let wait: Wait | null = !idle ? null : !f.inScope ? system("scope", "not in scope") : state === "classified" && pluginPr(f) ? system("triage", PLUGIN_WAIT) : WAITS[state] ?? null;
+  const due = permitted(f, actions);
+  const idle = !due.some((a) => isWork(a) && (a.permission?.ok || !TELLS.has(a.kind)));
+  let wait: Wait | null = !idle ? null : !f.inScope ? system("scope", "not in scope") : state === "classified" && pluginPr(f) ? system("open-request", PLUGIN_WAIT) : WAITS[state] ?? null;
   // A queued issue waits on what holds its implementation.
   if (step && "wait" in step && f.open && idle) wait = step.wait;
   // An issue with nothing else due waits on the PR that closes it.
   if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && idle) {
     if (f.openPr !== null) wait = system("open-pr", openPrWait(f.openPr.number, f.openPr.closes));
-    else if (state === "classified") wait = system("triage", TRIAGE_WAIT);
+    else if (state === "classified") wait = system("open-request", TRIAGE_WAIT);
   }
-  return { repo: f.repo, number: f.number, kind: f.kind, state, actions: permitted(f, actions), ...waitFields(wait) };
+  return { repo: f.repo, number: f.number, kind: f.kind, state, actions: due, ...waitFields(wait ?? refusedWait(due)) };
 }
 
 /** The Work page's next-step text (rank/next.ts nextStepOf), from the item's state and, for a PR, the facts of its review-to-merge path. */

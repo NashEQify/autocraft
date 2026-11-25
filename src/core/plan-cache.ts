@@ -3,7 +3,9 @@
 // that changed and deletes the rows of items that left the Plans, in one transaction.
 import { holdWait } from "../outside.ts";
 import { cifixBucket, fixupOf, mergeEntry, queueEntry } from "./decide.ts";
-import { pushAllowed } from "./gates.ts";
+import { mayRun } from "./authority.ts";
+import type { RefusalCode, WaitCode } from "./codes.ts";
+import { CLI_BY } from "./gates.ts";
 import { nextStep } from "./decide-item.ts";
 import { isWork } from "./assignment.ts";
 import type { Action, ItemFacts, MergePath, Plan, PrFacts, WaitKind } from "./plan.ts";
@@ -40,6 +42,8 @@ export type PlanView = {
   queue?: QueueView;
   /** Who the wait is on, as the planner typed it; absent when nothing is awaited (read by the liveness check). */
   waitKind?: WaitKind;
+  /** What the wait is, as a code; absent when nothing is awaited. */
+  waitCode?: WaitCode;
   /** Phase, wait and next step; `since` is when phase or wait last changed. */
   status: ItemStatus;
 };
@@ -55,8 +59,8 @@ const CIFIX_BUCKETS: Record<string, CifixBucket> = { work: "cifix-queued", forma
 function fixupBucketOf(f: PrFacts, plan: Plan): FixupBucket | undefined {
   const x = fixupOf(f);
   if (x) return x.bucket === "fix" || x.bucket === "unapproved" || x.bucket === "asked" ? x.bucket : "hold";
-  if (f.premerge && plan.actions.some((a) => a.kind === "fixup" && a.params?.source === "premerge")) return f.pushable && pushAllowed(f, "fixup") ? "fix" : f.pushable ? "unapproved" : "hold";
-  return undefined;
+  const fix = f.premerge ? plan.actions.find((a) => a.kind === "fixup" && a.params?.source === "premerge") : undefined;
+  return !fix ? undefined : !f.pushable ? "hold" : refusalOf(f, fix) ? "unapproved" : "fix";
 }
 
 function queueViewOf(f: PrFacts, plan: Plan): QueueView {
@@ -74,7 +78,8 @@ function queueViewOf(f: PrFacts, plan: Plan): QueueView {
   };
 }
 
-function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFacts; plan: Parameters<typeof nextStep>[0] } | null, wait: string | null, waitKind: WaitKind | null, plannedAt: string): PlanView {
+function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFacts; plan: Parameters<typeof nextStep>[0] } | null, w: RowWait, plannedAt: string): PlanView {
+  const { wait, waitKind, waitCode } = w;
   const v = { status: { phase: "Triage", waiting: null, next: null, since: plannedAt } } as PlanView;
   if (item) {
     v.next = nextStep(item.plan, item.facts, pr?.facts ?? null);
@@ -90,6 +95,7 @@ function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFa
     if (isQueueState(pr.plan.state) && pr.facts.review) v.queue = queueViewOf(pr.facts, pr.plan);
   }
   if (wait !== null && waitKind) v.waitKind = waitKind;
+  if (wait !== null && waitCode) v.waitCode = waitCode;
   v.status = {
     ...statusOf({ gh: pr?.facts.ghState ?? null, state: pr?.plan.state ?? null, itemState: item?.plan.state ?? null, wait, waitKind, next: v.next ?? null, reviewBlocked: pr?.facts.reviewHold?.kind === "blocked", inPipeline: item?.facts.inScope ?? pr?.facts.inScope, ...((item?.facts.outsideHold ?? pr?.facts.outsideHold) ? { outside: (item?.facts.outsideHold ?? pr?.facts.outsideHold)! } : {}) }),
     since: plannedAt,
@@ -97,8 +103,22 @@ function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFa
   return v;
 }
 
-/** The actions as a row stores them: what is due, without who permits it. */
-const storedActions = (actions: readonly Action[]): string => JSON.stringify(actions.map(({ permission: _, ...a }) => a));
+/** An action as a row stores it: what is due, with the code of the refusal that holds it. */
+export type StoredAction = Omit<Action, "permission"> & { refused?: RefusalCode };
+
+/** What an action's permission says, the global switch aside: a flip of it changes no row. */
+const refusalOf = (facts: PrFacts | ItemFacts, action: Action): RefusalCode | null => {
+  const p = mayRun({ facts, action }, CLI_BY);
+  return p.ok ? null : p.why.code;
+};
+const stored = (facts: PrFacts | ItemFacts, actions: readonly Action[]): StoredAction[] => actions.map((x) => {
+  const { permission: _, ...a } = x, refused = refusalOf(facts, x);
+  return refused ? { ...a, refused } : a;
+});
+
+type RowWait = { wait: string | null; waitKind: WaitKind | null; waitCode: WaitCode | null };
+const waitOfPlan = (p: Pick<Plan, "wait" | "waitKind" | "waitCode">): RowWait => ({ wait: p.wait, waitKind: p.waitKind, waitCode: p.waitCode ?? null });
+const NO_WAIT: RowWait = { wait: null, waitKind: null, waitCode: null };
 
 /** One row per PR or item of the set. A PR with item facts gets both its plans in one row. */
 export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOString()): PlanRow[] {
@@ -108,20 +128,20 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
     const ref = `${f.repo}#${f.number}`;
     const pr = prs.get(ref) ?? null;
     prs.delete(ref);
-    const actions = [...item.actions, ...(pr?.plan.actions ?? [])];
-    const work = actions.some(isWork);
+    const actions = [...stored(f, item.actions), ...(pr ? stored(pr.facts, pr.plan.actions) : [])];
+    // Work that may run is what comes next, whatever else the plans wait on.
+    const work = actions.some((a) => isWork(a) && !a.refused);
     const hold = f.outsideHold ?? pr?.facts.outsideHold;
-    const wait = hold ? holdWait(hold) : work ? null : pr?.plan.wait ?? item.wait;
-    const waitKind = hold ? "system" as const : work ? null : pr?.plan.wait != null ? pr.plan.waitKind : item.waitKind;
+    const wait: RowWait = hold ? { wait: holdWait(hold), waitKind: "system", waitCode: "outside-hold" } : work ? NO_WAIT : waitOfPlan(pr?.plan.wait != null ? pr.plan : item);
     rows.push({
       repo: f.repo, number: f.number, kind: f.kind, head: pr?.facts.head ?? null, state: pr ? pr.plan.state : item.state, item_state: item.state,
-      actions: storedActions(actions), wait, reasons: JSON.stringify(pr?.plan.reasons ?? []), note: pr?.plan.note ?? null,
-      view: JSON.stringify(viewOf(pr, { facts: f, plan: item }, wait, waitKind, plannedAt)),
+      actions: JSON.stringify(actions), wait: wait.wait, reasons: JSON.stringify(pr?.plan.reasons ?? []), note: pr?.plan.note ?? null,
+      view: JSON.stringify(viewOf(pr, { facts: f, plan: item }, wait, plannedAt)),
     });
   }
   // PRs outside the item facts: merged ones with a take review, and PRs of repos that are not tracked.
   for (const { facts: f, plan } of prs.values()) {
-    rows.push({ repo: f.repo, number: f.number, kind: "pr", head: f.head, state: plan.state, item_state: null, actions: storedActions(plan.actions), wait: plan.wait, reasons: JSON.stringify(plan.reasons), note: plan.note, view: JSON.stringify(viewOf({ facts: f, plan }, null, plan.wait, plan.waitKind, plannedAt)) });
+    rows.push({ repo: f.repo, number: f.number, kind: "pr", head: f.head, state: plan.state, item_state: null, actions: JSON.stringify(stored(f, plan.actions)), wait: plan.wait, reasons: JSON.stringify(plan.reasons), note: plan.note, view: JSON.stringify(viewOf({ facts: f, plan }, null, waitOfPlan(plan), plannedAt)) });
   }
   return rows;
 }

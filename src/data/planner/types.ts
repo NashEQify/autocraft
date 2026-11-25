@@ -1,9 +1,10 @@
 import type { RefKey } from "../mirror/types.ts";
+import type { WaitCode } from "../../core/codes.ts";
 import type { Action, ActionKind, WaitKind } from "../../core/plan.ts";
-import type { CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView } from "../../core/plan-cache.ts";
+import type { CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView, StoredAction } from "../../core/plan-cache.ts";
 import type { KeySource } from "../keys.ts";
 
-export type { Action, ActionKind, CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView, WaitKind };
+export type { Action, ActionKind, CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView, StoredAction, WaitCode, WaitKind };
 
 export type { RefKey };
 export type ItemKeys = KeySource;
@@ -18,7 +19,7 @@ export type Changes = { refs: RefKey[]; full: boolean; cause?: "marker" | "cap";
 
 export type StoredPlan = {
   repo: string; number: number; kind: "pr" | "issue"; head: string | null; state: string; itemState: string | null;
-  actions: Action[]; wait: string | null; reasons: string[]; note: string | null; view: PlanView; plannedAt: string;
+  actions: StoredAction[]; wait: string | null; reasons: string[]; note: string | null; view: PlanView; plannedAt: string;
 };
 /** Opaque to callers: the revision and the per-connection memo of stored signatures. */
 export type StoredPlans = { rev: number | null; rows: Map<RefKey, unknown> | null };
@@ -55,7 +56,8 @@ export type StageFacts = { stage: Stage; at: string; reviewed: boolean; labeledN
 export type StageEvent = { rowid: number; stage: Stage; at: string; actor: string | null; note: string | null };
 
 export type LivenessVerdict = "stuck" | "long";
-export type LivenessPlanRow = { kind: "pr" | "issue"; state: string; itemState: string | null; phase: string; wait: string | null; waitKind: WaitKind | null; actions: number; since: string; repo: string; number: number };
+/** `actions`: how many of the planned actions may run. */
+export type LivenessPlanRow = { kind: "pr" | "issue"; state: string; itemState: string | null; phase: string; wait: string | null; waitKind: WaitKind | null; waitCode: WaitCode | null; actions: number; since: string; repo: string; number: number };
 /** `asked`: items a person has been asked about; `started`: items with a live workflow. Both include the implementation PR of an issue's implement workflow. */
 export type LivenessInput = { plans: LivenessPlanRow[]; asked: Set<RefKey>; started: Set<RefKey>; longDays: number };
 export type LivenessItem = { repo: string; number: number; kind: "pr" | "issue"; verdict: LivenessVerdict; cause: string; state: string; wait: string | null; phase: string; since: string };

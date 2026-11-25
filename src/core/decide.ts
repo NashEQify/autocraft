@@ -5,9 +5,9 @@ import {
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
-import { inFlightNow, unassignActions } from "./assignment.ts";
+import { inFlightNow, isWork, unassignActions } from "./assignment.ts";
 import { permitted } from "./authority.ts";
-import type { WaitCode, Why } from "./codes.ts";
+import type { Refusal, WaitCode, Why } from "./codes.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
 import { liveAttempt, ownImplementation } from "./implementation.ts";
 import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WorkflowFact } from "./plan.ts";
@@ -214,6 +214,7 @@ const LEG = system("leg", "its pre-approved merge");
 const BATCH = system("batch", "its batch");
 const MAIN_RED = system("main-red", "a green main");
 const COMMENT_OFF = person("repo-approval", "comment approval for the repo");
+const RED_CI = person("ci-fix-failed", "a person to look at the red CI");
 const PUSH_OFF = person("repo-approval", "push approval for the repo");
 const RESOLVE = person("conflict-person", "a person to resolve the conflict");
 const CI_AUTHOR = contributor("ci-contributor", "the contributor to fix CI");
@@ -251,11 +252,46 @@ function reviewHoldWait(h: NonNullable<PrFacts["reviewHold"]>): Wait {
 /** The wait of started work while GitHub writes go out as the box account: nobody's started work counts then (data/access standing). */
 export const BOX_IDENTITY_WAIT = "an operator to switch AutoCraft to its GitHub App: started work runs as the person who started it only through the app";
 
+const goneWait = (login: unknown, repo: unknown): Wait => person("actor-gone", `a maintainer of ${repo} to answer, approve or start it again: ${login}, whom it runs for, does not settle there`);
+const unknownWait = (login: unknown, repo: unknown): Wait => system("actor-unknown", `GitHub's answer on ${login}'s access to ${repo}`);
+
 /** What an implementation waits on while the person it runs for does not count on the repo; null when they do. */
 export function standingWait(im: Pick<NonNullable<PrFacts["implementation"]>, "queuedBy" | "standing" | "boxIdentity">, repo: string): Wait | null {
   if (im.standing === "yes") return null;
-  if (im.standing === "no") return person("actor-gone", `a maintainer of ${repo} to answer, approve or start it again: ${im.queuedBy}, whom it runs for, does not settle there`);
-  return im.boxIdentity ? person("box-identity", BOX_IDENTITY_WAIT) : system("actor-unknown", `GitHub's answer on ${im.queuedBy}'s access to ${repo}`);
+  if (im.standing === "no") return goneWait(im.queuedBy, repo);
+  return im.boxIdentity ? person("box-identity", BOX_IDENTITY_WAIT) : unknownWait(im.queuedBy, repo);
+}
+
+/** A refusal as a wait: what ends it. */
+function waitOf(why: Refusal): Wait {
+  const { need, stage, login, repo } = why.params ?? {};
+  switch (why.code) {
+    case "repo-approval": return person(why.code, `${need === "ci" ? "CI" : need === "labels" ? "label" : need} approval for the repo`);
+    case "breaker": return person(why.code, `the circuit breaker of ${stage} to be resumed`);
+    case "actor-gone": return goneWait(login, repo);
+    case "actor-unknown": return unknownWait(login, repo);
+    case "box-identity": return person(why.code, BOX_IDENTITY_WAIT);
+    case "blocked": return person(why.code, "a maintainer's answer to the question it stopped with");
+    case "unaccepted-head": return person(why.code, "a maintainer to accept the author's new commits");
+    case "not-approved": return person(why.code, "a maintainer's approval of the work");
+    case "not-handed-over": return system(why.code, "the workflow's steps before the merge");
+    case "ended": return person(why.code, "a maintainer to start it again");
+    case "duplicate": return person(why.code, "a maintainer to start it or the item it duplicates");
+    case "request-unnamed": return person(why.code, "a maintainer to ask for the fix-up again");
+    case "hold": return person(why.code, "a maintainer to resume it");
+    case "scope": return system(why.code, "not in scope");
+    case "pipeline-off": return person(why.code, "the pipeline to be on");
+    case "other": return why;
+  }
+}
+
+/** The actions that only tell GitHub what was decided: nothing waits on them. */
+export const TELLS: ReadonlySet<Action["kind"]> = new Set(["label", "post-review"]);
+/** What a plan waits on when every action that is due is refused: what ends the first refusal. Null when one may run, or none is due. */
+export function refusedWait(actions: readonly Action[]): Wait | null {
+  const work = actions.filter((a) => isWork(a) && !TELLS.has(a.kind));
+  const first = work[0]?.permission;
+  return first && !first.ok && !actions.some((a) => isWork(a) && a.permission?.ok) ? waitOf(first.why) : null;
 }
 
 /** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. A switch a maintainer flips: a system wait, live. */
@@ -379,7 +415,7 @@ export function cifixBucket(f: PrFacts): CifixBucket | null {
   if (c.tries >= CIFIX_MAX_TRIES) return "failed";
   if (c.infraRuns && c.rerunAt === null) return "rerun";
   if (c.rerunAt !== null && !(c.checksAt && c.checksAt > c.rerunAt)) return "rerun-wait";
-  if (!f.pushable && !f.repoFacts.commentApproved) return "cannot-push";
+  if (!f.pushable && (!f.repoFacts.commentApproved || f.quiet)) return "cannot-push";
   if (f.pushable && !pushAllowed(f, "cifix")) return "unapproved";
   return "work";
 }
@@ -390,8 +426,8 @@ function cifixOf(f: PrFacts): "work" | "collect" | "rerun" | "capped" | "ask" | 
   if (b === null) return null;
   if (b === "unreviewed") return "ask";
   // A fix given up or capped at this head: the contributor is asked once.
-  // Not for our own breakage, and not when the fix-up already asked at this head: one comment per head.
-  if ((b === "failed" || b === "capped") && f.repoFacts.commentApproved && !f.brokeByUs && fixupOf(f)?.bucket !== "asked") return "ask";
+  // Not on a quiet pull request, not for our own breakage, and not when the fix-up already asked at this head: one comment per head.
+  if ((b === "failed" || b === "capped") && f.repoFacts.commentApproved && !f.quiet && !f.brokeByUs && fixupOf(f)?.bucket !== "asked") return "ask";
   // No rerun at a head the contributor pushed that no review has read.
   if (b === "rerun") return f.repoFacts.ciApproved && !f.gateRed ? "rerun" : "other";
   return b === "work" || b === "collect" || b === "capped" ? b : "other";
@@ -449,7 +485,7 @@ const stuckWait = (f: PrFacts): Wait | null => {
   const cf = cifixBucket(f);
   if (cf === "unapproved") return PUSH_OFF;
   // A finished formatter run or lint task whose patch may not be delivered.
-  const undelivered = f.pushable ? (pushAllowed(f, "cifix") ? null : PUSH_OFF) : f.repoFacts.commentApproved ? null : COMMENT_OFF;
+  const undelivered = f.pushable ? (pushAllowed(f, "cifix") ? null : PUSH_OFF) : f.quiet ? RED_CI : f.repoFacts.commentApproved ? null : COMMENT_OFF;
   const linted = cf === "linting" && f.lint.some((l) => l.step === "cifix" && l.ended);
   if (undelivered && (cf === "collect" || linted)) return undelivered;
   if (cf === "formatting" || (cf === "linting" && !linted)) return system("ci-running", "the formatter or lint run of the CI fix");
@@ -460,8 +496,8 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (cf === "done" && (f.cifix?.states.includes("comment-failed") || f.cifix?.unsent === "final")) return person("ask-failed", "a person: the CI fix comment failed");
   if (cf === "done" && f.cifix?.states.includes("pushing")) return system("ci-running", "the push of the CI fix");
   if (cf === "done" && f.cifix?.states.some((s) => s === "push-denied" || s === "cannot-push")) return person("ci-fix-failed", "a person to fix CI: the CI fix could not push");
-  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", "a person to fix CI our push broke") : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
-  return cf === "cannot-push" ? COMMENT_OFF : null;
+  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", "a person to fix CI our push broke") : f.quiet ? RED_CI : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
+  return cf === "cannot-push" ? (f.quiet ? RED_CI : COMMENT_OFF) : null;
 };
 
 /** What a PR waits on when the review waits for red CI and the CI fix could not start: the contributor was asked, or a person decides. Null when the ask is still due. */
@@ -473,7 +509,7 @@ const unreviewedWait = (f: PrFacts): Wait | null => {
   if (s.includes("comment-failed") || f.cifix.unsent === "final") return person("ask-failed", "a person: the comment to the contributor failed");
   if (f.cifix.unsent) return unsentWait("the comment asking the contributor to fix CI", f.cifix.unsent.until);
   if (s.includes("skipped")) return person("ci-nothing-to-fix", `a person: CI is red and the CI fix has nothing to fix${f.cifix.skipReason ? ` (${excerpt(f.cifix.skipReason)})` : ""}`);
-  return CIFIX_FINAL_STATES.some((x) => s.includes(x)) ? person("ci-fix-failed", "a person to look at the red CI") : null;
+  return CIFIX_FINAL_STATES.some((x) => s.includes(x)) ? RED_CI : null;
 };
 
 /** Actions that work the PR towards merge (a push, a base merge, a review of a new head, a pre-merge review, the merge), as against comment-only asks. */
@@ -547,10 +583,13 @@ function notStartedWait(f: PrFacts): Wait {
 export const NO_PASS: PassFacts = { rereadPaceAt: 0 };
 
 export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
-  const plan = (state: PlanState, p: Partial<Omit<Plan, "wait" | "waitKind" | "waitCode">> & { wait?: Wait | null } = {}): Plan => ({
-    repo: f.repo, number: f.number, head: f.head, state, path: null, reasons: [], note: null, eligible: false, conflictNote: null, ...p,
-    ...waitFields(p.wait ?? null), actions: permitted(f, p.actions ?? []),
-  });
+  const plan = (state: PlanState, p: Partial<Omit<Plan, "wait" | "waitKind" | "waitCode">> & { wait?: Wait | null } = {}): Plan => {
+    const actions = permitted(f, p.actions ?? []);
+    return {
+      repo: f.repo, number: f.number, head: f.head, state, path: null, reasons: [], note: null, eligible: false, conflictNote: null, ...p,
+      ...waitFields(p.wait ?? refusedWait(actions)), actions,
+    };
+  };
   const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
   const r = f.review;
   const open = f.ghState === "OPEN";
@@ -691,7 +730,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     // A CI fix of our own breakage is reviewed against the head before the push.
     const reviewed = l.source === "operator" || (mx && notHeld(f)) || (l.step === "cifix" && (!!f.brokeByUs || !!f.gateRed) && !!r && takeReview && notHeld(f)) || (!!r && takeReview && r.head === f.head && !r.stale && notHeld(f));
     // A patch of the review's or the pre-merge review's own fixes, stored before a maintainer took the PR up for review only, is not pushed.
-    const approved = f.pushable ? pushAllowed(f, l.step, l.source === "operator") && (l.source === "operator" || fixAllowed(f)) : l.step === "cifix" && f.repoFacts.commentApproved;
+    const approved = f.pushable ? pushAllowed(f, l.step, l.source === "operator") && (l.source === "operator" || fixAllowed(f)) : l.step === "cifix" && f.repoFacts.commentApproved && !f.quiet;
     // A CI fix patch whose comment did not reach GitHub is posted again once the backoff ends, and not after the last one.
     const unsentHeld = l.step === "cifix" && !!f.cifix?.unsent;
     if (basic && reviewed && approved && !unsentHeld) actions.push(act("lint", f.head, { bucket: l.step, source: l.source }));

@@ -59,7 +59,7 @@ export type Permission =
   | { ok: true; as: "app" | `user:${string}`; by: { kind: "person" | "repo"; login: string } | null }
   | { ok: false; why: Refusal };
 
-/** `permission` is set by decidePr and decideItem, and no stored row carries it: without one it is judged again (mayRun), never taken as a yes. */
+/** `permission` is set by decidePr and decideItem, and no stored row carries it (a refused action keeps the refusal's code): without one it is judged again (mayRun), never taken as a yes. */
 export type Action = { kind: ActionKind; head: string | null; params?: Record<string, unknown>; permission?: Permission };
 
 /** Who started work acts for, and whether they count on the repo (data/access standing). `boxIdentity`: GitHub writes go out as the box account, under which nobody's standing is known. */
@@ -84,11 +84,11 @@ export type Plan = {
   actions: Action[];
   /** The conflict-handling note ("conflict: merging main"); apart from `note`, which is the queue's own. */
   conflictNote: string | null;
-  /** What it waits on when no main-path action is due. */
+  /** What it waits on when no main-path action is due, or what ends the first refusal when none that is due may run. */
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
-  /** What `wait` is, as a code; null exactly when `wait` is. Absent in stored rows. */
+  /** What `wait` is, as a code; null exactly when `wait` is. A stored row has it in its view. */
   waitCode?: WaitCode | null;
   /** The merge rule or an operator's answer lets it merge now (a refused PR still counts while its retry waits for a change). */
   eligible: boolean;
@@ -479,11 +479,11 @@ export type ItemPlan = {
   repo: string; number: number; kind: "pr" | "issue";
   state: ItemState;
   actions: Action[];
-  /** What it waits on when no action is due. */
+  /** What it waits on when no action is due, or what ends the first refusal when none may run. */
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
-  /** What `wait` is, as a code; null exactly when `wait` is. Absent in stored rows. */
+  /** What `wait` is, as a code; null exactly when `wait` is. A stored row has it in its view. */
   waitCode?: WaitCode | null;
 };
 
