@@ -390,7 +390,7 @@ test("an implementation whose review failed for good goes to the merge queue as 
   await w.db.run(w.db.k.insertInto("main.implementations").values({ repo: "app", number: 7, queued_by: MAINT, state: "pr-opened", attempt: 1, text_hash: "x7", pr_number: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }));
   await w.db.run(w.db.k.updateTable("main.item_workflows").set({ accepted_head: "sha1" }));
   await settle(w);
-  await w.db.run(w.db.k.insertInto("main.review_state").values({ repo: "app", number: 1, fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }).onConflict((oc) => oc.doUpdateSet({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() })));
+  await w.db.run(w.db.k.insertInto("main.review_state").values({ repo: "app", number: 1, fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ fail_head: "sha1", fail_count: 9, fail_at: new Date().toISOString() })));
   await settle(w);
   const asked = await wf(w, 7);
   assert.deepEqual([asked.state, asked.rec?.again], ["blocked", "review"]);
