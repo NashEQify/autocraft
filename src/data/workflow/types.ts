@@ -5,7 +5,7 @@ import type { Params, StopCode } from "../../core/codes.ts";
 import type { RefKey } from "../mirror/types.ts";
 
 export type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState, RefKey };
-export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
+export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog" | "superseded";
 
 
 export type WorkflowFact = {

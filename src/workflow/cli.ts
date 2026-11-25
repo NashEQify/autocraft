@@ -1,6 +1,6 @@
 // `workflow status [repo]`: the live workflows, per tracked repo. `workflow auto-stops [repo]`: the workflows the next workflow pass
 // starts for PRs the automatic merge rule stopped for a person (auto-stop.ts), by wait code; it writes nothing.
-import { loadTrackedRepos } from "../data/control/index.ts";
+import { loadTrackedRepos, readConfig, SETTINGS } from "../data/control/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import { openDb } from "../db/open.ts";
 import { findAutoStops } from "./auto-stop.ts";
@@ -29,6 +29,7 @@ async function status(repo: string | undefined): Promise<void> {
 async function autoStops(repo: string | undefined): Promise<void> {
   const db = await openDb();
   const stops = await findAutoStops(db, repo ? { repos: [repo] } : {});
+  if (!(await readConfig(db, [SETTINGS.pipelineEnabled.name])).pipelineEnabled) console.log("the pipeline is off: no pass starts these until it is on");
   const byCode = new Map<string, string[]>();
   for (const s of stops) byCode.set(s.code, [...byCode.get(s.code) ?? [], `${s.repo}#${s.number}`]);
   console.log(`${stops.length} workflow${stops.length === 1 ? "" : "s"} the next pass would start`);

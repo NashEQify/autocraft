@@ -29,6 +29,8 @@ export type PlanFilter = {
   queued?: boolean;
   gh?: ("OPEN" | "MERGED")[];
   scope?: boolean;
+  /** The view says the automatic merge rule takes the PR up by itself. */
+  auto?: boolean;
   fixup?: FixupBucket;
   hasWait?: boolean;
   action?: { kind: ActionKind; bucket?: string };

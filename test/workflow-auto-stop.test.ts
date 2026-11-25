@@ -2,6 +2,7 @@
 // whoever answers takes it over; a wait that clears by itself makes no question.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { decidePr } from "../src/core/decide.ts";
 import { loadPrFact } from "../src/core/facts.ts";
 import { mergeMay } from "../src/core/gates.ts";
 import { writePlanCache } from "../src/core/plan-cache.ts";
@@ -21,11 +22,15 @@ afterEach(() => current?.close());
 const MAINT = "mira";
 const actor: Actor = { login: MAINT, canWrite: async () => true };
 const say = async (w: World, text: string) => (await runCommand(w.db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 1 }] })).items[0]!;
+/** Starts what the rule's stops start, after the planner stored their plans. */
+const sweep = async (w: World) => { await writePlanCache(w.db, await w.plan()); await advanceWorkflows(w.db); };
+const states = async (w: World) => (await w.rows("SELECT state FROM item_workflows WHERE number = 1 ORDER BY id")).map((r) => r.state);
 /** PR `n`, a small bug fix on the auto path, stopped at an unsure take whose recommendation is to merge it. */
-async function unsure(w: World, n: number): Promise<void> {
-  await w.pr(n);
+async function unsure(w: World, n: number, head?: string): Promise<void> {
+  if (head) await w.synced(n, head);
+  else await w.pr(n);
   await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
-    repo: "app", number: n, head_oid: `sha${n}`, run_id: "rv", at: T0, model: "m", mode: "full", verdict: "take", sure: 0, reason: "r",
+    repo: "app", number: n, head_oid: head ?? `sha${n}`, run_id: "rv", at: T0, model: "m", mode: "full", verdict: "take", sure: 0, reason: "r",
     workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Merge it.", fix: [], merge: true, close: false } }),
   }));
   await (await w.verified(n)).premerge(n, "clean");
@@ -74,4 +79,29 @@ test("starting the rule's stops sends as many statements for many PRs as for one
     await writePlanCache(w.db, await w.plan());
     return { db: w.db, run: async () => assert.equal(await startAutoStops(w.db), size), close: async () => w.close() };
   }, 1, 6);
+});
+
+test("an author push before anyone answers gives the PR back to the rule, which may ask again; with the pipeline off nothing starts", async () => {
+  const w = current = await (await (await world()).repo()).acting(MAINT);
+  await unsure(w, 1);
+  await w.pipeline(false);
+  await sweep(w);
+  assert.deepEqual(await states(w), [], "the pipeline is off");
+  await w.pipeline(true);
+  await sweep(w);
+  assert.deepEqual(await states(w), ["recommending"]);
+
+  await w.synced(1, "sha1b");
+  await advanceWorkflows(w.db);
+  assert.deepEqual(await states(w), ["superseded"]);
+  await (await (await w.review(1, { head: "sha1b" })).verified(1)).premerge(1, "clean");
+  assert.equal(decidePr((await loadPrFact(w.db, "app", 1))!).path, "rule", "a sure take at the new head merges by the rule");
+
+  await unsure(w, 1, "sha1c");
+  await sweep(w);
+  assert.deepEqual(await states(w), ["superseded", "recommending"], "a new stop asks again");
+  assert.equal((await say(w, "hold")).outcome, "run");
+  await w.synced(1, "sha1d");
+  await sweep(w);
+  assert.deepEqual(await states(w), ["superseded", "stopped"], "after a person ended it, the rule asks no more");
 });

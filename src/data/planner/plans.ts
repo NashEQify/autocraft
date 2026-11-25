@@ -7,7 +7,7 @@ import { schemaEb } from "../../db/kx.ts";
 import { hasTakeReview } from "../review/fragments.ts";
 import { hiddenRepos, trackedRepo } from "../control/fragments.ts";
 import { itemHead, openItem } from "../mirror/fragments.ts";
-import { inPlanScope, keysOf, queuedPlan, planFixup, planGh, planScope } from "./fragments.ts";
+import { inPlanScope, keysOf, onPlanAutoPath, queuedPlan, planFixup, planGh, planScope } from "./fragments.ts";
 import type { ActionKind, ItemKeys, PlanFilter, PlanHistoryEntry, PlanHistoryRow, PlanRow, PlanVersion, PlanView, RefKey, StoredPlan, StoredPlans } from "./types.ts";
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -153,6 +153,7 @@ export async function listPlans(db: Db, f: PlanFilter): Promise<StoredPlan[]> {
     .$if(!!f.queued, (b) => b.where((eb) => queuedPlan(db, eb, "p")))
     .$if(!!f.gh, (b) => b.where(kx.inList(db, gh, f.gh!)))
     .$if(f.scope !== undefined, (b) => b.where((eb) => f.scope ? inPlanScope(eb, "p") : eb.or([eb(scope, "is", null), eb(scope, "=", 0)])))
+    .$if(f.auto === true, (b) => b.where((eb) => onPlanAutoPath(eb, "p")))
     .$if(!!f.fixup, (b) => b.where(planFixup(db, "p"), "=", f.fixup!))
     .$if(f.hasWait !== undefined, (b) => b.where("p.wait", f.hasWait ? "is not" : "is", null))
     .$if(!!f.action, (b) => b.where((eb) => {

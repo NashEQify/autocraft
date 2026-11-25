@@ -126,6 +126,7 @@ export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcCl
     case "stopped": return wf.stoppedBy ? t("Held by {login}, {time}", { login: wf.stoppedBy, time: clock(wf.stoppedAt ?? "") }) : t("Held");
     case "closed": return t("Closed");
     case "backlog": return t("In the backlog");
+    case "superseded": return t("Back with the automatic merge rule");
   }
 }
 

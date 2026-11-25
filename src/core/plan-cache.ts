@@ -2,7 +2,7 @@
 // dashboard to read. The planner is its only writer. This file turns a PlanSet into rows; data/planner savePlans writes the rows
 // that changed and deletes the rows of items that left the Plans, in one transaction.
 import { holdWait } from "../outside.ts";
-import { cifixBucket, fixupOf, mergeEntry, queueEntry } from "./decide.ts";
+import { cifixBucket, fixupOf, mergeEntry, onAutoPath, queueEntry } from "./decide.ts";
 import { mayRun } from "./authority.ts";
 import type { RefusalCode, WaitCode } from "./codes.ts";
 import { CLI_BY } from "./gates.ts";
@@ -35,6 +35,8 @@ export type PlanView = {
   scope?: true;
   /** Settled label of the current classification run. */
   label?: string;
+  /** A PR the automatic merge rule takes up by itself (core/decide.ts onAutoPath). */
+  auto?: true;
   /** GitHub state of a PR. */
   gh?: "OPEN" | "MERGED" | "CLOSED";
   fixup?: FixupBucket;
@@ -88,6 +90,7 @@ function viewOf(pr: { facts: PrFacts; plan: Plan } | null, item: { facts: ItemFa
   } else if (pr && pr.facts.inScope && !pr.facts.integration) v.scope = true;
   if (pr) {
     v.gh = pr.facts.ghState;
+    if (onAutoPath(pr.facts)) v.auto = true;
     const fx = fixupBucketOf(pr.facts, pr.plan);
     if (fx) v.fixup = fx;
     const cf = cifixBucket(pr.facts);
