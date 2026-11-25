@@ -238,10 +238,14 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   return t("{what}{weight} {by}. Reply hold to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
 }
 
-/** The reply when nothing ran: what was understood, and why it waits. */
-export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string): string {
-  return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity, mention) : refusalText(r.refusal, clock);
+/** The reply when nothing ran: what was understood, and why it waits. `proposed`: a command a model read in text the parser could not read. */
+export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string, proposed?: string): string {
+  return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity, mention, proposed) : refusalText(r.refusal, clock);
 }
+
+/** The sentence that proposes a command to send. */
+const proposalLine = (command: string, mention?: string): string =>
+  t("I read this as `{command}`. Reply `{reply}` to run it.", { command, reply: mention ? `@${mention} ${command}` : command });
 
 /** Words that reverse or postpone a command: a reply holding one is never read back as that command. */
 const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|stop|pause|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
@@ -253,13 +257,17 @@ function singleCommand(rest: string): string | null {
   return found.length === 1 ? found[0]!.word : null;
 }
 
-function ambiguityText(understood: string, a: Ambiguity, mention?: string): string {
+function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {
   switch (a.why) {
     case "unreadable":
+      if (proposed) {
+        const unread = understood && a.rest ? t("I understood “{understood}” but not “{rest}”.", { understood, rest: a.rest }) : a.rest ? t("I couldn't read “{rest}” as a command.", { rest: a.rest }) : null;
+        return [unread, proposalLine(proposed, mention)].filter((x) => x !== null).join(" ");
+      }
       if (understood && a.rest) return t("I understood “{understood}” but not “{rest}”. Nothing runs until the instruction is clear.", { understood, rest: a.rest });
       if (a.rest) {
         const one = singleCommand(a.rest);
-        if (one) return t("I read this as `{command}`. Reply `{reply}` to run it.", { command: one, reply: mention ? `@${mention} ${one}` : one });
+        if (one) return proposalLine(one, mention);
         return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: COMMANDS.filter((c) => !c.answer || c.word === "drop").map((c) => c.usage).join(", ") });
       }
       if (understood) return t("I understood “{understood}” but not which items. Nothing runs until the instruction is clear.", { understood });

@@ -7,7 +7,7 @@ import { INTERACTIVE_SLOTS_MAX, loadUserSettings, saveUserSettings } from "../da
 export { INTERACTIVE_SLOTS_MAX };
 export const INTERACTIVE_SLOTS_KEY = "interactive_slots";
 /** Prompt id prefixes of calls a person waits for; each is withdrawn after a few seconds without a taker, so it takes only a free interactive slot. */
-export const INTERACTIVE_PROMPTS: readonly string[] = ["discord."];
+export const INTERACTIVE_PROMPTS: readonly string[] = ["discord.", "interactive."];
 /** The first helper version that runs the interactive lane; older ones are offered interactive calls in their ordinary claims. */
 export const INTERACTIVE_HELPER = "1.4.0";
 export const interactive = (r: { prompt_id: string }): boolean => INTERACTIVE_PROMPTS.some((p) => r.prompt_id.startsWith(p));

@@ -311,11 +311,11 @@ export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: str
   return out;
 }
 
-/** Command rate limit count: events of `login` on `via` after `since`. */
+/** Command rate limit count: events of `login` on `via` after `since`; a model reading (`read`) comes with the event of its command and is not counted. */
 export async function countEventsSince(db: Db, c: { login: string; via: Surface; since: string }): Promise<number> {
   const q = queryDb(db);
   const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", c.login).where("via", "=", c.via).where("at", ">", c.since)
-    .where((eb) => notArchived(eb, "kind")));
+    .where((eb) => notArchived(eb, "kind")).where("kind", "<>", kx.literal("read")));
   return Number(r?.n ?? 0);
 }
 
