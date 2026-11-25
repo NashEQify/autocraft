@@ -86,15 +86,28 @@ export type ParsedSubmit = {
 export type SubmitResult = { ok: boolean; state: CallState; requeued?: boolean; error?: string };
 export type RefusalRetry = { tier: Tier; model: string } | null;
 
+/**
+ * What the pick rules read. `callState` is the call's state (null: no such call); `call` is read whatever its state. `runners` are the
+ * user's live Task Runner credentials. `pickerLogins` are the lowercase logins whose picks count now. `cap`: how long a new pick counts, in ms
+ * (null: until it ends otherwise). `max`: the most live picks one user holds whatever their slots (`PICKS_MAX`).
+ */
 export type PickContext = {
-  call: QueuedCall | null; runners: RunnerRow[]; livePicks: number; cooled: { until: string; reason: string } | null; pickerLogins: string[]; cap: number; max: number;
+  call: QueuedCall | null; callState: CallState | null; runners: RunnerRow[]; livePicks: number; cooled: { until: string; reason: string } | null;
+  pickerLogins: string[]; cap: number | null; max: number;
 };
+/** `limit`: the user already holds `max` live picks; `taken`: another user's pick counts, or the call is no longer queued. */
+export type PickResult = "picked" | "limit" | "taken";
 export type ReadyRunner = { login: string; role: string; manual: boolean; tiers: ReadonlySet<Tier>; free: number; repos: ReadonlySet<string> | null; skip: ReadonlySet<string> };
 export type TakerSweepPlan = { insertRepos: string[]; deleteRepos: string[]; mark: number[]; clear: number[]; withdraw: { id: number; reason: string }[] };
 export type SweepState = { snapshot: RunnerSnapshot; queue: QueueSnapshot; pipelineRepos: string[]; noTakerRepos: Map<string, number>; marked: Map<number, number> };
+/**
+ * Queued calls with a live caller, counted past each bucket's limit (`queuedMs`, the tier's `tierWaitMs`, `interactiveWaitMs`): `n` of them and
+ * `oldestMs`, the epoch ms the oldest was queued (null when none). `ready` counts live credentials with a fresh, ready status, `manualOnly` those of
+ * them whose user is Manual only. `noTakerRepos` are the pipeline-on repos marked without a taker for `noTakerMs`, with the mark's epoch ms.
+ */
 export type RunnerHealth = {
   queued: { total: number; oldestMs: number | null; byTier: Record<string, { n: number; oldestMs: number | null }>; interactive: { n: number; oldestMs: number | null } };
-  lastLeaseAt: number | null; ready: number; manualOnly: number; noTakerRepos: string[]; operatorRunners: { login: string; interactiveSlots: number | null }[];
+  lastLeaseAt: number | null; ready: number; manualOnly: number; noTakerRepos: { repo: string; since: number }[]; operatorRunners: { login: string; interactiveSlots: number | null }[];
 };
 export type RelayedCheck = { id: number; runId: number | null; input: string };
-export type NewPassage = { callId: number; runId: number | null; text: string; at: number };
+export type NewPassage = { callId: number; runId: number | null; login: string; repo: string; passageId: number; page: string; at: number };
