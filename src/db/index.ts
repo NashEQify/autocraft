@@ -108,6 +108,12 @@ export interface Db {
   /** Runs `fn` with every read going to the database, inside shareReads too: for code that reads until a row changes. */
   fresh<T>(fn: () => Promise<T>): Promise<T>;
   /**
+   * Runs `fn` while holding the lock `name`, which excludes only other holders of the same name in every process
+   * (Postgres: a session advisory lock on a connection of its own; SQLite: an in-process queue). It holds no writer lock,
+   * so `fn` may wait on the network; its own reads and writes run as usual. Not inside a transaction.
+   */
+  exclusive<T>(name: string, fn: () => Promise<T>, waitMs?: number): Promise<T>;
+  /**
    * Runs `fn` in one read snapshot (SQLite BEGIN; Postgres REPEATABLE READ READ ONLY). Inside an open transaction it
    * joins that one.
    */

@@ -45,6 +45,11 @@ export interface Engine {
   configure(b: TransactionBuilder<DB>, mode: Tx["mode"]): TransactionBuilder<DB>;
   /** A new listener on a connection of its own; absent where the backend has no notifications (SQLite). */
   listener?(): Listener;
+  /**
+   * Takes the lock `name` across processes, waiting at most `waitMs`, and returns its release. It holds no writer lock and
+   * no pooled connection. Absent where one process owns the database (SQLite): the in-process queue of Db.exclusive is enough.
+   */
+  exclusiveLock?(name: string, waitMs: number): Promise<() => Promise<void>>;
   close(): Promise<void>;
 }
 
@@ -198,6 +203,30 @@ export class Handle implements Db {
   }
 
   #settingsTx = new WeakSet<Tx>();
+
+  #exclusive = new Map<string, Promise<void>>();
+
+  async exclusive<T>(name: string, fn: () => Promise<T>, waitMs = 30_000): Promise<T> {
+    if (this.#current()) throw new Error(`db.exclusive("${name}") inside a transaction`);
+    // One holder per name in this process, then one across processes; a session-level lock would let this process in twice.
+    const prev = this.#exclusive.get(name) ?? Promise.resolve();
+    let done!: () => void;
+    const tail = prev.then(() => new Promise<void>((r) => (done = r)));
+    this.#exclusive.set(name, tail);
+    try {
+      await prev;
+      const release = await this.#engine.exclusiveLock?.(name, waitMs);
+      try {
+        return await fn();
+      } finally {
+        await release?.();
+      }
+    } finally {
+      // `done` is set once `prev` settled, which it has by now unless the wait above threw (it never rejects).
+      done?.();
+      if (this.#exclusive.get(name) === tail) this.#exclusive.delete(name);
+    }
+  }
 
   async fresh<T>(fn: () => Promise<T>): Promise<T> {
     if (!this.#sharedReads()) return await fn();

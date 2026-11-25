@@ -2,15 +2,16 @@
 //
 // GitHub refresh tokens are single use, and a login's token set lives in several copies: its user_tokens row and each
 // of its sessions. The vault refreshes the row, a session refreshes its own copy, and either may run in any process.
-// refreshShared takes the login's named lock, reads every copy again, and only then decides:
+// refreshShared takes the login's lock (Db.exclusive: it excludes only other refreshes of the login and holds no writer
+// lock), reads every copy again, and only then decides:
 //  1. the copy is usable (another process refreshed while this one waited): use it, no endpoint call;
-//  2. otherwise call the refresh endpoint and write the new pair into every copy that held the old refresh token, in
-//     the same transaction, so no process ever sees one copy updated and the other not;
+//  2. otherwise call the refresh endpoint and, once it answered, write the new pair into every copy that held the old
+//     refresh token in one short write transaction, so no process ever sees one copy updated and the other not;
 //  3. when the endpoint refuses, or the refresh token has expired, a newer token set in another copy (a session's for
 //     the row, the row's for a session) heals this one instead of failing;
 //  4. only then is the row marked refresh-failed, with GitHub's error code and description, or the session ended.
-// The lock is held across at most two endpoint calls (the second only when healing from a copy whose access token has
-// also expired); every endpoint call has the provider's timeout.
+// The login's lock is held across at most two endpoint calls (the second only when healing from a copy whose access
+// token has also expired); every endpoint call has the provider's timeout.
 import type { TokenBox } from "./crypto.ts";
 import type { Provider, Refused, Tokens } from "./provider.ts";
 import { failUserTokens, readUserTokens, swapUserTokens } from "./user-tokens.ts";
@@ -69,9 +70,10 @@ async function readCopies(db: Db, box: TokenBox, login: string): Promise<Copy[]>
  * the app), so a copy with another, newer token set may replace a refused one.
  */
 export function refreshShared(db: Db, box: TokenBox, provider: Provider, login: string, target: RefreshTarget, opts: { rejected?: string; heal: boolean }): Promise<Refreshed> {
-  return db.write(async (): Promise<Refreshed> => {
+  // A lock wait past LOCK_WAIT_MS or a database error leaves the token set as it was: try again later.
+  return db.exclusive(lockOf(login), async (): Promise<Refreshed> => {
     const now = Date.now();
-    const copies = await readCopies(db, box, login);
+    const copies = await db.fresh(() => readCopies(db, box, login));
     const isTarget = (c: Copy): boolean => c.kind === target.kind && (c.kind === "user" || c.idHash === (target as { idHash: string }).idHash);
     const mine = copies.find(isTarget);
     if (!mine?.tokens) return { ok: false, transient: false, why: "no-token" };
@@ -80,12 +82,15 @@ export function refreshShared(db: Db, box: TokenBox, provider: Provider, login: 
     if (live && usableAccess(own, opts.rejected, now)) return { ok: true, tokens: own };
 
     // Writes `next` into the target and every other copy holding one of the `used` refresh tokens.
+    // Each write is a compare-and-swap: a sign-in may have replaced a copy since it was read.
     const store = async (next: Tokens, used: (string | null)[]): Promise<Refreshed> => {
-      for (const c of copies) {
-        if (!isTarget(c) && !(c.tokens?.refresh && used.includes(c.tokens.refresh))) continue;
-        if (c.kind === "user") await swapUserTokens(db, box, login, c.version, next);
-        else await db.run(db.k.updateTable("sessions").set({ token_enc: box.seal(JSON.stringify(next), c.idHash) }).where("id_hash", "=", c.idHash).where("token_enc", "=", c.enc));
-      }
+      await db.write(async () => {
+        for (const c of copies) {
+          if (!isTarget(c) && !(c.tokens?.refresh && used.includes(c.tokens.refresh))) continue;
+          if (c.kind === "user") await swapUserTokens(db, box, login, c.version, next);
+          else await db.run(db.k.updateTable("sessions").set({ token_enc: box.seal(JSON.stringify(next), c.idHash) }).where("id_hash", "=", c.idHash).where("token_enc", "=", c.enc));
+        }
+      });
       return { ok: true, tokens: next };
     };
     const refresh = async (token: string): Promise<Tokens | Refused | null> => {
@@ -128,5 +133,8 @@ export function refreshShared(db: Db, box: TokenBox, provider: Provider, login: 
     }
     if (live) await failUserTokens(db, login, mine.version, refusal ?? "the stored refresh token has expired");
     return { ok: false, transient: false, why: live && !refusal ? "expired" : "refresh-failed" };
-  }, { lock: lockOf(login), lockTimeoutMs: LOCK_WAIT_MS });
+  }, LOCK_WAIT_MS).catch((e: unknown): Refreshed => {
+    console.error(`GitHub token refresh for ${login}: ${(e as Error).message}`);
+    return { ok: false, transient: true };
+  });
 }

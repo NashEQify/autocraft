@@ -171,6 +171,8 @@ export class FakeProvider implements Provider {
   rejectRefresh = false;
   /** How long a refresh takes, so tests can overlap two of them. */
   refreshDelayMs = 0;
+  /** Runs while a refresh is at the endpoint, before it answers. */
+  duringRefresh: (() => Promise<void>) | null = null;
   constructor(permsFile: string | null, tokenTtlMs = 8 * 3_600_000) {
     this.#permsFile = permsFile;
     this.tokenTtlMs = tokenTtlMs;
@@ -220,6 +222,7 @@ export class FakeProvider implements Provider {
     const login = this.#refresh.get(refreshToken);
     this.#refresh.delete(refreshToken);
     if (this.refreshDelayMs) await new Promise((r) => setTimeout(r, this.refreshDelayMs));
+    await this.duringRefresh?.();
     if (!login || this.rejectRefresh) return { refused: { error: "bad_refresh_token", description: "The refresh token passed is incorrect or expired." } };
     this.refreshes++;
     return this.#issue(login);

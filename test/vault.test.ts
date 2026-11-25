@@ -56,9 +56,18 @@ test("a session and the vault refreshing one login at once make one endpoint cal
   const idHash = sha256hex(await createSession(db, box, "example-user", old, undefined));
   // Slow enough that both callers are past their first read before either refresh returns.
   provider.refreshDelayMs = 50;
+  // The endpoint call runs outside any transaction, so it holds no writer lock: an unrelated write finishes while the
+  // endpoint has not answered yet.
+  let inTransaction = false;
+  provider.duringRefresh = () => (inTransaction ||= db.inTransaction(), Promise.race([
+    db.run(db.k.insertInto("settings").values({ key: "unrelated", value: "1" })).then(() => undefined),
+    new Promise<void>((_, reject) => setTimeout(() => reject(new Error("a write waited for the refresh")), 3000)),
+  ]));
   const [fromVault, fromSession] = await Promise.all([new Vault(db, box, provider).userToken("example-user"), accessToken(db, box, provider, idHash, true)]);
   assert.equal(provider.refreshCalls, 1);
   assert.ok(fromVault.ok);
+  assert.equal(inTransaction, false);
+  assert.ok(await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "unrelated")));
   assert.notEqual(fromVault.access, old.access);
   assert.equal(fromSession, fromVault.access);
   const row = (await readUserTokens(db, box, "example-user"))!;
