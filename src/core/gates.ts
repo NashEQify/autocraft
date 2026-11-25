@@ -1,13 +1,14 @@
 // The gates on writes: the repo approvals each action needs and the global pipeline switch. Pure. The planner and the
 // guard (guard.ts) both use it; decide() does not (it shows what would run, approved or not).
 import type { ActionKind, ItemFacts, PrFacts } from "./plan.ts";
+import { mayMerge, mayPush, type MayResult } from "./may.ts";
 import { tripStageOf } from "./push-outcome.ts";
 
 /** Who asks for a write: the pipeline itself (the autopilot), or an operator (a job they requested, or a command they ran). */
 export type By = "pipeline" | { operator: string };
 
 /** An action as the gates and the guard see it: its kind, and the bucket where the kind has several (fix-up: fix | ask, ...). */
-export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string };
+export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string; /** Fix-up: the plan action's source (`operator`: a person's fix-up request). */ source?: string };
 
 /** The repo approvals a write can need. */
 export type Approval = "merge" | "push" | "comment" | "ci" | "labels" | "fix-issue" | "main-fix" | "status";
@@ -66,10 +67,40 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (tripped) return `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`;
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;
+  const may = "may" in f && f.may && (need === "merge" || need === "push") ? (need === "merge" ? mergeMay(f as PrFacts) : pushMay(f as PrFacts, a)) : null;
+  if (may) return may.ok ? null : `${WHAT[need]} in ${f.repo} are not approved: ${may.why}`;
   const r = f.repoFacts as Partial<Record<"mergeApproved" | "pushApproved" | "commentApproved" | "ciApproved" | "labelsApproved" | "fixIssueApproved", boolean>>;
   const ok = { merge: r.mergeApproved, push: r.pushApproved, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
   return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
 }
+
+/** Whether a merge of the PR at its head is approved (src/core/may.ts); null on facts built without the approval inputs. */
+export function mergeMay(f: PrFacts): MayResult | null {
+  if (!f.may) return null;
+  return mayMerge({ repoApproval: f.may.repoMerge, workflow: f.may.workflow, head: f.head ?? "", ownHeads: new Set(f.may.ownHeads) });
+}
+
+/** The merge approval as a yes or no: `mayMerge` where the facts carry its inputs, else the repo's merge approval. */
+export const mergeAllowed = (f: PrFacts): boolean => mergeMay(f)?.ok ?? f.repoFacts.mergeApproved;
+
+type PushKind = "fixup" | "cifix" | "conflict";
+
+/** The push kind `mayPush` judges for an action that pushes. */
+function pushKind(a: Want): PushKind {
+  if (a.kind === "cifix" || (a.kind === "lint" && a.bucket === "cifix")) return "cifix";
+  if (a.kind === "conflict" || (a.kind === "lint" && a.bucket === "conflict")) return "conflict";
+  return "fixup";
+}
+
+/** Whether a push of `kind` is approved (src/core/may.ts); null on facts built without the approval inputs. `operatorFix`: a person's fix-up request. */
+function pushMayOf(f: PrFacts, kind: PushKind, operatorFix: boolean): MayResult | null {
+  if (!f.may) return null;
+  return mayPush({ kind, repoApproval: f.may.repoPush, workflow: f.may.workflow, operatorFix, ...(operatorFix && f.may.fixupBy ? { by: f.may.fixupBy } : {}) });
+}
+const pushMay = (f: PrFacts, a: Want): MayResult | null => pushMayOf(f, pushKind(a), a.source === "operator");
+
+/** The push approval as a yes or no: `mayPush` where the facts carry its inputs, else the repo's push approval. */
+export const pushAllowed = (f: PrFacts, kind: PushKind, operatorFix = false): boolean => pushMayOf(f, kind, operatorFix)?.ok ?? f.repoFacts.pushApproved;
 
 /** Writes from the command line are an operator's. */
 export const CLI_BY: By = { operator: "cli" };

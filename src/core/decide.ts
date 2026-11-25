@@ -8,6 +8,7 @@ import {
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
+import { mergeAllowed, pushAllowed } from "./gates.ts";
 import type { Action, MergePath, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind, WorkflowFact } from "./plan.ts";
 
 /** The start of a statement for a reason line: one line, at most 80 characters. */
@@ -88,7 +89,7 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
     else if (!row.defects) premerge = row.unsure ? "unsure" : "clean";
     else {
       // A Merge? decision at this head (a Hold, say) is never replaced by a fix-up.
-      const fixable = !f.decision.asked && row.defectsAllFixable && !f.premergeFixUsed && f.repoFacts.pushApproved && f.pushable;
+      const fixable = !f.decision.asked && row.defectsAllFixable && !f.premergeFixUsed && pushAllowed(f, "fixup") && f.pushable;
       premerge = fixable ? "fix" : "defect";
     }
     if (premerge === "defect") reasons.push(PREMERGE_DEFECT_REASON);
@@ -241,7 +242,7 @@ export function fixupOf(f: PrFacts): { bucket: FixupBucket; done: boolean } | nu
   if (has("too-large")) return askOnce(true);
   if (!f.pushable) return ask(false);
   if (x.attempts + 1 > FIXUP_MAX_ATTEMPTS) return commenting ? askOnce(false) : { bucket: "hold", done: false };
-  return { bucket: f.repoFacts.pushApproved ? "fix" : "unapproved", done: false };
+  return { bucket: pushAllowed(f, "fixup") ? "fix" : "unapproved", done: false };
 }
 
 /** The last refusal came from GitHub or the network and was tried once only: the merge is tried again. */
@@ -314,7 +315,7 @@ export function cifixBucket(f: PrFacts): CifixBucket | null {
   if (c.infraRuns && c.rerunAt === null) return "rerun";
   if (c.rerunAt !== null && !(c.checksAt && c.checksAt > c.rerunAt)) return "rerun-wait";
   if (!f.pushable && !f.repoFacts.commentApproved) return "cannot-push";
-  if (f.pushable && !f.repoFacts.pushApproved) return "unapproved";
+  if (f.pushable && !pushAllowed(f, "cifix")) return "unapproved";
   return "work";
 }
 
@@ -460,17 +461,10 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     const reviewed = pm.review && (pm.review.error === null || !pm.review.error.startsWith("retry:") || pm.review.at > retryAfter);
     if (!reviewed) extra.push(act("postmerge", pm.head));
   }
-  if (f.ghState === "OPEN" && !f.heldBacklog && f.head && !f.draft && f.mergeable !== "CONFLICTING") {
-    for (const c of declinedBy(f) || f.lint.some((l) => l.source === "carry") ? [] : f.carry) {
-      if (f.pushable && f.repoFacts.pushApproved && c.attempts + 1 <= FIXUP_MAX_ATTEMPTS) extra.push(act("fixup", f.head, { bucket: "fix", source: "carry" }));
-      else if (f.repoFacts.commentApproved && !f.quiet && !c.unsent) extra.push(act("fixup", f.head, { bucket: "ask", source: "carry" }));
-    }
-  }
-
   // An operator's fix-up of this head (a resolution card's step, or the first part of a pre-approved merge); it needs no review verdict.
   const opFix = f.operator?.fix;
   if (opFix && f.ghState === "OPEN" && !f.heldBacklog && f.head && !f.draft && f.mergeable !== "CONFLICTING" && !f.lint.some((l) => l.source === "operator")
-    && f.pushable && f.repoFacts.pushApproved && opFix.attempts + 1 <= FIXUP_MAX_ATTEMPTS) extra.push(act("fixup", f.head, { bucket: "fix", source: "operator" }));
+    && f.pushable && pushAllowed(f, "fixup", true) && opFix.attempts + 1 <= FIXUP_MAX_ATTEMPTS) extra.push(act("fixup", f.head, { bucket: "fix", source: "operator" }));
 
   // A repo on the maintainer workflow: a PR nobody started and that is off the auto path gets no model work and no question.
   const newRepo = f.repoFacts.workflow === "new";
@@ -586,14 +580,14 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     // A carry-over needs no review at the head; every other patch needs a take review there that is not stale.
     // A CI fix of our own breakage is reviewed against the head before the push.
     const reviewed = l.source === "carry" || l.source === "operator" || (mx && notHeld(f)) || (l.step === "cifix" && (!!f.brokeByUs || !!f.gateRed) && !!r && takeReview && notHeld(f)) || (!!r && takeReview && r.head === f.head && !r.stale && notHeld(f));
-    const approved = f.pushable ? f.repoFacts.pushApproved : l.step === "cifix" && f.repoFacts.commentApproved;
+    const approved = f.pushable ? pushAllowed(f, l.step, l.source === "operator") : l.step === "cifix" && f.repoFacts.commentApproved;
     // A CI fix patch whose comment did not reach GitHub is posted again once the backoff ends, and not after the last one.
     const unsentHeld = l.step === "cifix" && !!f.cifix?.unsent;
     if (basic && reviewed && approved && !unsentHeld) actions.push(act("lint", f.head, { bucket: l.step, source: l.source }));
   }
 
   if (e) {
-    if (e.state === "waiting-premerge" && f.repoFacts.mergeApproved && premergeRetryDue(f)) actions.push(act("premerge", qHead));
+    if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
     // While the diff's reasons are the conservative ones, the Merge? question waits for the re-read that settles them.
     if (e.state === "needs-decision" && !f.decision.asked && !f.decision.inOpenGroup && !f.diffPending) actions.push(act("ask-merge", qHead));
     if (eligible(f, e) && !refusedAsBefore(f, e) && !(e.path === "operator" && f.decision.execWaiting)) {
@@ -608,7 +602,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // The maintainer workflow asks no Merge? or Hold question: a person answers its recommendation instead. Setting an old question aside still runs.
   if (newRepo) for (let i = actions.length - 1; i >= 0; i--) if (actions[i]!.kind === "ask-merge" && !actions[i]!.params?.withdraw) actions.splice(i, 1);
   // Its pre-merge review is the one thing it still needs from the queue: the merge answer is handed over only after a clean one at the head.
-  if (f.operator?.premerge && e && r && inQueue && f.repoFacts.mergeApproved && !f.draft && !f.mergeHeld && ciAllows("operator", f.ci, e.noCi) && f.mergeable === "MERGEABLE" && premergeRetryDue(f)) actions.push(act("premerge", r.head));
+  if (f.operator?.premerge && e && r && inQueue && mergeAllowed(f) && !f.draft && !f.mergeHeld && ciAllows("operator", f.ci, e.noCi) && f.mergeable === "MERGEABLE" && premergeRetryDue(f)) actions.push(act("premerge", r.head));
 
   // A diff that waits for what the merge rule reads beside it is read again by the pre-merge step, with no model call; after a read that left it waiting, an hour later.
   if (f.diffPending && r && f.ghState === "OPEN" && rereadDue(f, pass) && !actions.some((a) => a.kind === "premerge")) actions.push(act("premerge", r.head));

@@ -1,5 +1,13 @@
 // The vocabulary of a Plan: what state an item is in and which actions are due. No imports: the web build may use it.
 
+/** A repo step approval (control StepApproval). */
+export type MayApproval = { by: string; at: string };
+/** A live workflow as src/core/may.ts reads it (its WorkflowGate). */
+export type MayWorkflow = {
+  live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
+  blocker: string | null; baseHead: string | null; fixupAsked: boolean;
+};
+
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
 export type OutsideHoldInfo = { reason: "limit" | "surge"; author: string; kind: "pr" | "issue"; /** The author's daily limit for the item's kind. */ limit: number };
 
@@ -316,6 +324,12 @@ export type PrFacts = {
   changesRequested: { why: string; live: boolean } | null;
   /** The note when live review reads failed several times in a row. */
   gateFailureNote: string | null;
+  /**
+   * What the merge and push approval checks (src/core/may.ts) read: the repo's merge and push approvals, the live workflow's
+   * approval inputs, and the heads of the push chain that are our own commits. Absent on facts built by hand: the repo approvals
+   * in `repoFacts` stand alone.
+   */
+  may?: { repoMerge: MayApproval | null; repoPush: MayApproval | null; workflow: MayWorkflow | null; ownHeads: string[]; /** Who asked for the queued fix-up of the current head. */ fixupBy: string | null };
   /** For a PR outside the pipeline's scope (no other review facts are loaded): what its stored rows say, enough for the Work page to name the step it waits on. */
   outside?: { review: string | null; verify: string | null; ci: string | null };
 };
