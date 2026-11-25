@@ -21,7 +21,7 @@ import type { ItemWorkflow } from "../src/workflow/types.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { setFeature } from "../src/build/features.ts";
 import { factsOf, prng, randomPrRows, rnd } from "./random-pr.ts";
-import { T0, T1, world, type World } from "./world-db.ts";
+import { T0, T1, untilQuiet, world, type World } from "./world-db.ts";
 
 const MAINT = "mira", ANN = "ann";
 let current: World | undefined;
@@ -35,7 +35,7 @@ const say = async (w: World, text: string, by = MAINT, number = 1) => {
   assert.equal(o.outcome, "run", o.line);
   return o.line;
 };
-const settle = async (w: World) => { for (let i = 0; i < 5; i++) { await advanceWorkflows(w.db); await advancePreapprovals(w.db); } };
+const settle = (w: World) => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 5);
 const wf = async (w: World, number = 1) => (await liveWorkflow(w.db, "app", number))!;
 const leg = async (w: World) => (await w.rows("SELECT state FROM preapprovals ORDER BY id DESC"))[0]?.state;
 const shown = async (w: World, number = 1) => { const x = await wf(w, number); return [x.state, x.blockerParams?.code ?? null, x.approvedBy]; };
