@@ -12,11 +12,11 @@ import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/ch
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
-import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepinPushes, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { decidePr, fixedAfterMerge, MAINTAINER_ANSWER_WAIT, unapprovedStop } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
-import { chainsOwn, type OwnPush } from "../core/may.ts";
+import { approvedHead, chainsOwn, ownPushes, reviewOwed, type RecordedPush } from "../core/evidence.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { cancelPreapproval, inActiveBatch, PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
@@ -50,9 +50,9 @@ type Pass = {
   legs: Map<string, Preapproval[]>;
   reviews: Map<string, ReviewRow[]>;
   patches: Map<string, PatchFacts>;
-  fixes: Map<string, { fromHead: string; createdAt: string; lines: number; files: string[] }>;
-  /** Our own pushes per PR: fix-ups, CI fixes, base merges, implementation revisions, autorepins. */
-  moves: Map<string, OwnPush[]>;
+  fixes: Map<string, { fromHead: string; toHead: string | null; createdAt: string; lines: number; files: string[] }>;
+  /** Every push of ours per PR. */
+  moves: Map<string, RecordedPush[]>;
   facts: Map<string, PrFacts>;
   thresholds: BlockerFacts["thresholds"];
 };
@@ -61,7 +61,7 @@ type Writes = { workflows: { id: number; patch: WorkflowPatch; at: string; was: 
 
 const key = (repo: string, n: number): string => `${repo}#${n}`;
 
-/** Whether our own pushes lead from `from` to `to`: the merge rule's own check (src/core/may.ts). */
+/** Whether our own pushes lead from `from` to `to`. */
 const ownChain = (pass: Pass, ref: string, from: string, to: string): boolean => chainsOwn(pass.moves.get(ref) ?? [], from, to);
 
 type Review = { at: string; verdict: string; sure: boolean; fixes: ReviewRow["fixes"]; workflow: ReviewRow["workflow"] };
@@ -75,15 +75,21 @@ function failures(pass: Pass, ref: string, since: string): { step: string; count
 }
 
 /**
- * Our latest pushed fix-up of the PR's review findings (the review's own, or one a person asked for) after `since`: its changed lines,
- * its files, and the files the plan of the review it fixed names (that review is at the head it started from).
+ * What our pushes changed: the lines of all of them since the person approved the PR (`agreed`), and the files of the
+ * latest pushed fix-up of the PR's review findings (the review's own, or one a person asked for) after `since`, with the files the plan of the
+ * review it fixed names (that review is at the head it started from).
  */
-function latestFix(pass: Pass, w: ItemWorkflow, ref: string, since: string): { fix: BlockerFacts["fix"]; plannedFiles: string[] } {
+function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, since: string, agreed: string): { fix: BlockerFacts["fix"]; plannedFiles: string[] } {
   const r = pass.fixes.get(ref);
-  if (!r || r.createdAt <= since) return { fix: null, plannedFiles: [] };
-  const fixed = reviewAt(pass, ref, r.fromHead);
+  const latest = r && r.createdAt > since ? r : null;
+  const pushes = (pass.moves.get(ref) ?? []).filter((p) => p.at > agreed);
+  if (!pushes.length && !latest) return { fix: null, plannedFiles: [] };
+  // The latest fix-up without its recorded size counts its stored patch.
+  const unsized = latest && latest.createdAt > agreed && !pushes.some((p) => p.to === latest.toHead && p.lines !== null);
+  const lines = pushes.reduce((n, p) => n + (p.lines ?? 0), unsized ? latest.lines : 0);
+  const fixed = latest ? reviewAt(pass, ref, latest.fromHead) : null;
   const plannedFiles = fixed ? planOf(fixed.fixes, w.plan).filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!) : [];
-  return { fix: { lines: r.lines, files: r.files.filter((f) => !LOCKFILE.test(f)) }, plannedFiles };
+  return { fix: { lines, files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
 }
 
 /** The pre-merge review's findings at the head, as plan parts numbered after `plan`'s. */
@@ -110,14 +116,14 @@ const waitsForAnswer = (f: PrFacts): boolean => {
 };
 
 /** Starts or adopts the approved PR's merge leg; a refusal is returned as the reason it cannot go on. */
-async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, repo: string, pr: number, head: string): Promise<string | null> {
+async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, repo: string, pr: number, head: string, since: string): Promise<string | null> {
   const legs = pass.legs.get(key(repo, pr)) ?? [];
   const active = legs.filter((l) => ACTIVE_LEG.includes(l.state)).at(-1);
   if (!active) {
     // The queue merged the leg and the mirror does not show it yet: no new leg on a merged PR.
     if (legs.at(-1)?.state === "merged") return null;
     try {
-      await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, workflowId: w.id });
+      await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, fromHead: approvedHead(pass.moves.get(key(repo, pr)) ?? [], head, since), workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
       // A leg that became active meanwhile is adopted, or waited for, on the next pass.
@@ -160,16 +166,12 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const itemRefs = [...new Map([...live.map((w) => ({ repo: w.repo, number: w.number })), ...prRefs].map((r) => [key(r.repo, r.number), r])).values()];
     const [items, legs, reviews, patches, fixes, outcomes, repins] = await db.together(() => Promise.all([
       loadItems(db, itemRefs, "pr"), loadLegs(db, prRefs), loadReviewRows(db, prRefs), loadPatchFacts(db, prRefs), loadLatestFixPushes(db, prRefs),
-      loadPushOutcomeEdges(db, prRefs),
-      loadRepins(db, prRefs, { states: ["pushed"] }),
+      loadPushOutcomeEdges(db, prRefs), loadRepinPushes(db, prRefs),
     ]));
     const facts = new Map((prRefs.length ? await loadPrFacts(db, { refs: prRefs.map((r) => key(r.repo, r.number)) }) : []).map((f) => [key(f.repo, f.number), f]));
     const pass: Pass = {
       items, implement, goOn, legs, reviews, patches, fixes, facts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
-      moves: new Map(prRefs.map((r) => key(r.repo, r.number)).map((k) => [k, [
-        ...(patches.get(k)?.pushes ?? []), ...(outcomes.get(k) ?? []),
-        ...(repins.get(k) ?? []).flatMap((r) => (r.head && r.to_head ? [{ from: r.head, to: r.to_head }] : [])),
-      ]])),
+      moves: new Map(prRefs.map((r) => key(r.repo, r.number)).map((k) => [k, ownPushes(patches.get(k)?.pushes ?? [], outcomes.get(k) ?? [], repins.get(k) ?? [])])),
     };
     const writes: Writes = { workflows: [], events: [], adopt: [] };
     const moved: Moved[] = [];
@@ -313,6 +315,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const head = pr.head_oid;
   if (!head) return settle(base);
   const since = pass.goOn.get(w.id) ?? w.startedAt;
+  // The head the person approved: an approval accepts what was pushed before it.
+  const agreed = w.approvedAt !== null && w.approvedAt > since ? w.approvedAt : since;
   const patch: WorkflowPatch = { ...base };
 
   // The head the workflow accepted moves along our own pushes; any other push is the author's.
@@ -328,8 +332,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const impl = w.kind === "issue" ? implHead(pass, w, ref, head) : null;
   if (impl === "theirs") authorPush = { from: w.baseHead ?? (pass.legs.get(ref) ?? []).filter((l) => l.workflow_id === w.id).at(-1)?.head ?? "", to: head };
 
-  // The numbered plan follows the latest review at the head; a merge-queue entry has no review.
-  const review = w.entry === "merge" ? null : reviewAt(pass, ref, head);
+  // The numbered plan follows the latest review at the head; a merge-queue entry has none, unless a push of ours owes one.
+  const reviewed = w.entry !== "merge" || reviewOwed(pass.moves.get(ref) ?? [], head, since);
+  const review = reviewed ? reviewAt(pass, ref, head) : null;
   const plan: PlanPart[] = review ? planOf(review.fixes, w.plan) : w.plan;
   if (!sameJson(plan, w.plan)) patch.plan = plan;
   const view: ReviewView | null = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
@@ -358,7 +363,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   }
   const approved = w.approvedBy !== null;
   const fresh = review && review.at > since ? review : null;
-  const fixed = latestFix(pass, w, ref, since);
+  const fixed = pushedWork(pass, w, ref, since, agreed);
   const f = pass.facts.get(ref);
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { fixedAfter: fixedAfterMerge(f) } : null;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts), conflict);
@@ -409,7 +414,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       return write({ ...patch, state: "recommending", rec, recAt: at, recHead: head });
     }
   } else if (impl !== "later") {
-    const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head);
+    const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head, agreed);
     if (refused) {
       const stop: Found = { blocker: "other", params: { reason: refused } };
       return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: blockerRec(stop, plan), recAt: at, recHead: head }, "blocked");

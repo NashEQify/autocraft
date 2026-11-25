@@ -1,8 +1,8 @@
 // Merge approval. A repo's `merge` step approval lets the pipeline merge PRs nobody approved one by one (the automatic
 // path); an operator, or a maintainer of the repo, turns it on (src/dash/api/admin.ts). A live workflow carries the
 // approval of its own PR, or of the PR that implements its issue. `mergeVerdicts` applies the one rule (src/core/may.ts) to freshly loaded facts.
-import { loadPushOutcomeEdges, loadStepApprovals, loadTrackedRepos, setStepApproval } from "../data/control/index.ts";
-import { loadPushEdges } from "../data/changes/index.ts";
+import { loadStepApprovals, loadTrackedRepos, setStepApproval } from "../data/control/index.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadDupeState, prDuplicates } from "../data/triage/index.ts";
 import { loadEndedWorkflows, loadLegs, loadLiveRepos, loadPrWorkflows } from "../data/workflow/index.ts";
 import { mayMerge, workflowGate, type MayResult } from "../core/may.ts";
@@ -21,13 +21,12 @@ export async function mergeVerdicts(db: Db, repo: string, items: { number: numbe
   const out = new Map<number, MayResult>();
   if (!items.length) return out;
   const refs = items.map((i) => ({ repo, number: i.number }));
-  const [approvals, workflows, ended, legs, edges, outcomes, dupes] = await db.together(() => Promise.all([
+  const [approvals, workflows, ended, legs, pushes, dupes] = await db.together(() => Promise.all([
     loadStepApprovals(db, [repo], ["merge"]),
     loadPrWorkflows(db, refs),
     loadEndedWorkflows(db, refs),
     loadLegs(db, refs, { activeOnly: true }),
-    loadPushEdges(db, refs),
-    loadPushOutcomeEdges(db, refs),
+    loadOwnPushes(db, refs),
     loadDupeState(db, { repo }),
   ]));
   const duplicates = prDuplicates(dupes);
@@ -37,7 +36,7 @@ export async function mergeVerdicts(db: Db, repo: string, items: { number: numbe
     out.set(i.number, mayMerge({
       repoApproval, workflow: workflowGate(workflows.get(key), { legs: legs.get(key) ?? [] }), ended: ended.get(key) ?? null, head: i.head,
       duplicates: duplicates.get(key)?.of.map((n) => `${repo}#${n}`),
-      pushes: [...(edges.get(key) ?? []), ...(outcomes.get(key) ?? [])],
+      pushes: pushes.get(key) ?? [],
     }));
   }
   return out;

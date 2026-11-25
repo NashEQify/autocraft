@@ -211,5 +211,5 @@ test("operator fix results come back one per request, the newest row", async () 
     ]));
     return [...(await loadOperatorFixResults(db, [7, 8, 9])).entries()];
   });
-  assert.deepEqual(lite, [[7, { state: "pushed", toHead: "b", reason: null }], [8, { state: "failed", toHead: null, reason: null }]]);
+  assert.deepEqual(lite, [[7, { state: "pushed", fromHead: "a", toHead: "b", reason: null }], [8, { state: "failed", fromHead: "a", toHead: null, reason: null }]]);
 });

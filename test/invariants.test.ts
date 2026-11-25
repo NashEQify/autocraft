@@ -80,7 +80,7 @@ type Violation = { rule: string; detail: string };
 function safety({ w, f, p }: Case): Violation[] {
   const out: Violation[] = [];
   const need = (rule: string, ok: unknown, detail: string): void => void (ok || out.push({ rule, detail }));
-  const merges = has(p, "merge"), mergeEntry = f.workflow?.entry === "merge";
+  const merges = has(p, "merge"), mergeEntry = f.workflow?.entry === "merge" && !f.reviewOwed;
   const runs = (a: Action): boolean => gates(f, wantOf(a), "pipeline") === null;
 
   if (!f.inScope) need("out-of-scope", p.actions.every((a) => !isWork(a)), "work for an out-of-scope PR");
@@ -110,6 +110,8 @@ function safety({ w, f, p }: Case): Violation[] {
   }
   // An unsure head merges only when a PR approved for merge was handed over at it.
   if (f.review?.unsure && !mergeEntry && merges.length) need("unsure", f.handOver && w.workflow?.approvedBy, "merge on an unsure head that nobody handed over");
+  // A merge entry whose head holds a push of ours that a model has to read gets that review, unless something names what it waits for.
+  if (f.reviewOwed && f.ghState === "OPEN" && f.inScope && !f.draft && !f.pushedOff && !(f.review && f.review.head === f.head)) need("owed-review", has(p, "review").length || has(p, "carry").length || p.wait !== null, "nothing plans the review our push owes");
   if (merges.length) {
     if (w.workflow) need("unapproved", w.workflow.approvedBy && f.handOver, "merge of a started PR that nobody handed over");
     if (!mergeEntry) need("reviewed", f.review && f.review.head === f.head && (f.review.verdict === "take" || f.review.verdict === "take-fix"), "merge without a take review of the head");

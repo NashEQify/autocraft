@@ -126,13 +126,6 @@ export function pushChainOf(edges: readonly Pick<PushEdge, "from" | "to">[], hea
 const newest = (edges: readonly PushEdge[], keep: (e: PushEdge) => boolean): PushEdge | undefined =>
   edges.filter(keep).reduce<PushEdge | undefined>((best, e) => (!best || e.id > best.id ? e : best), undefined);
 
-/** Whether our push from `from` to `to` was a fix-up for the review's fixes, or a base merge that left the PR's own diff the same. */
-export function ownPushKind(edges: readonly PushEdge[], from: string, to: string): "fix-up for the review's fixes" | "base merge" | null {
-  if (edges.some((e) => e.kind === "fixup" && e.from === from && e.to === to && (e.source ?? "review") === "review" && (e.state === "pushing" || e.state === "pushed"))) return "fix-up for the review's fixes";
-  if (edges.some((e) => e.kind === "conflict" && e.from === from && e.to === to && e.state === "merged" && e.ownDiff === "same")) return "base merge";
-  return null;
-}
-
 /** The commit of ours that made `head`: the newest pushed fix-up, else CI fix, else base merge; null for a contributor's commit. */
 export function madeBy(edges: readonly PushEdge[], head: string): MadeBy | null {
   for (const [kind, state] of [["fixup", "pushed"], ["cifix", "pushed"], ["conflict", "merged"]] as const) {

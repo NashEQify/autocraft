@@ -1,9 +1,11 @@
 // Autorepin (M11 workflow-b).
 // reads: mirror.items, build.build_tasks
 import type { AliasableExpression, SqlBool } from "kysely";
+import type { RepinPush } from "../../core/evidence.ts";
 import type { Db, Param } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
+import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RepinKey, RepinPatch, RepinRequest, RepinRow, RepinState, RefKey } from "./types.ts";
 import { groupBy, patchRows } from "./update.ts";
 
@@ -87,7 +89,22 @@ export async function hasRepinDue(db: Db, now: Date): Promise<boolean> {
   return !!await q.get(q.k.selectFrom("main.autorepins as a").select((eb) => eb.lit(1).as("one")).where((eb) => due(eb, now)).limit(1));
 }
 
-/** Autorepins of the pull requests (the own-push chain reads those `pushed`), by request time, then dependency. */
+/** The commits of the pull requests' autorepins, with the head each was made on: the autorepin part of the own-push chain. They are stored before the push. */
+export async function loadRepinPushes(db: Db, keys: KeySource): Promise<Map<RefKey, RepinPush[]>> {
+  const out = new Map<RefKey, RepinPush[]>();
+  if (Array.isArray(keys) && !keys.length) return out;
+  const q = queryDb(db);
+  const rows = await q.all((q.k as any).selectFrom("main.autorepins as a").innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "a.repo").onRef("kk.number", "=", "a.number"))
+    .select(["a.repo", "a.number", "a.head", "a.to_head"]).select((eb: any) => eb.fn.coalesce("a.done_at", "a.tried_at", "a.requested_at").as("at"))
+    .where("a.head", "is not", null).where("a.to_head", "is not", null)) as { repo: string; number: number; head: string; to_head: string; at: string }[];
+  for (const r of rows) {
+    const ref = `${r.repo}#${r.number}`;
+    (out.get(ref) ?? out.set(ref, []).get(ref)!).push({ from: r.head, to: r.to_head, at: r.at });
+  }
+  return out;
+}
+
+/** Autorepins of the pull requests, by request time, then dependency. */
 export async function loadRepins(db: Db, refs: { repo: string; number: number }[], o?: { states?: RepinState[] }): Promise<Map<RefKey, RepinRow[]>> {
   const out = new Map<RefKey, RepinRow[]>();
   if (!refs.length) return out;

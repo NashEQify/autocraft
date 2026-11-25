@@ -920,7 +920,7 @@ async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, acti
   // Also for a push the job's earlier run made: that run may have stopped before recording it (a push is recorded once).
   if (r.code === 0) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
-    try { await addPushOutcomes(w.db, [{ action, ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }]); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    try { await addPushOutcomes(w.db, [{ action, ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null, lines: typeof details.changed === "number" ? details.changed : null }]); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
   }
   return r;
 }

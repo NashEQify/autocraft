@@ -125,16 +125,16 @@ export async function loadLintingRows(db: Db, keys: KeySource): Promise<LintingR
 }
 
 /** The newest operator fix-up row of each request id. 1 statement (`row_number()` over the request). */
-export async function loadOperatorFixResults(db: Db, fixIds: number[]): Promise<Map<number, { state: string; toHead: string | null; reason: string | null }>> {
-  const out = new Map<number, { state: string; toHead: string | null; reason: string | null }>();
+export async function loadOperatorFixResults(db: Db, fixIds: number[]): Promise<Map<number, { state: string; fromHead: string; toHead: string | null; reason: string | null }>> {
+  const out = new Map<number, { state: string; fromHead: string; toHead: string | null; reason: string | null }>();
   if (!fixIds.length) return out;
   const k = queryDb(db).k as any;
   for (const part of kx.chunks(fixIds)) {
     const rows = await rowsOf<any>(db, k.selectFrom((eb: any) => eb.selectFrom("main.fixups as f")
-      .select(["f.operator_fix", "f.state", "f.to_head", "f.reason",
+      .select(["f.operator_fix", "f.state", "f.from_head", "f.to_head", "f.reason",
         (e: any) => e.fn.agg("row_number").over((o: any) => o.partitionBy("f.operator_fix").orderBy(kx.rowid("main.fixups", "f"), "desc")).as("rn")])
-      .where("f.source", "=", "operator").where(kx.inList(db, "f.operator_fix", part, "bigint")).as("t")).select(["t.operator_fix", "t.state", "t.to_head", "t.reason"]).where("t.rn", "=", 1));
-    for (const r of rows) out.set(Number(r.operator_fix), { state: r.state, toHead: r.to_head, reason: r.reason });
+      .where("f.source", "=", "operator").where(kx.inList(db, "f.operator_fix", part, "bigint")).as("t")).select(["t.operator_fix", "t.state", "t.from_head", "t.to_head", "t.reason"]).where("t.rn", "=", 1));
+    for (const r of rows) out.set(Number(r.operator_fix), { state: r.state, fromHead: r.from_head, toHead: r.to_head, reason: r.reason });
   }
   return out;
 }
@@ -143,16 +143,16 @@ export async function loadOperatorFixResults(db: Db, fixIds: number[]): Promise<
  * The newest pushed fix-up row with source review or operator per PR; `lines` is computed from the patch, which is read for the
  * winning row only and not returned. 1 statement.
  */
-export async function loadLatestFixPushes(db: Db, keys: KeySource): Promise<Map<RefKey, { fromHead: string; createdAt: string; source: string | null; lines: number; files: string[] }>> {
-  const out = new Map<RefKey, { fromHead: string; createdAt: string; source: string | null; lines: number; files: string[] }>();
+export async function loadLatestFixPushes(db: Db, keys: KeySource): Promise<Map<RefKey, { fromHead: string; toHead: string | null; createdAt: string; source: string | null; lines: number; files: string[] }>> {
+  const out = new Map<RefKey, { fromHead: string; toHead: string | null; createdAt: string; source: string | null; lines: number; files: string[] }>();
   if (noKeys(keys)) return out;
   const k = queryDb(db).k as any;
   const rows = await rowsOf<any>(db, k.selectFrom((eb: any) => eb.selectFrom("main.fixups as f").innerJoin(resolveKeys(db, keys, "kk"), onKey("f"))
-    .select(["f.repo", "f.number", "f.from_head", "f.created_at", "f.source", "f.patch", "f.files",
+    .select(["f.repo", "f.number", "f.from_head", "f.to_head", "f.created_at", "f.source", "f.patch", "f.files",
       (e: any) => e.fn.agg("row_number").over((o: any) => o.partitionBy(["f.repo", "f.number"]).orderBy("f.created_at", "desc").orderBy(kx.rowid("main.fixups", "f"), "desc")).as("rn")])
     .where("f.state", "=", "pushed").where((w: any) => w(w.fn.coalesce("f.source", w.val("review")), "in", ["review", "operator"])).as("t"))
-    .select(["t.repo", "t.number", "t.from_head", "t.created_at", "t.source", "t.patch", "t.files"]).where("t.rn", "=", 1));
-  for (const r of rows) out.set(refKey(r.repo, Number(r.number)), { fromHead: r.from_head, createdAt: r.created_at, source: r.source ?? null, lines: patchLines(r.patch), files: strings(r.files) });
+    .select(["t.repo", "t.number", "t.from_head", "t.to_head", "t.created_at", "t.source", "t.patch", "t.files"]).where("t.rn", "=", 1));
+  for (const r of rows) out.set(refKey(r.repo, Number(r.number)), { fromHead: r.from_head, toHead: r.to_head ?? null, createdAt: r.created_at, source: r.source ?? null, lines: patchLines(r.patch), files: strings(r.files) });
   return out;
 }
 
