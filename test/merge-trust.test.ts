@@ -167,7 +167,7 @@ test("a push of ours the mirror does not show yet neither moves the leg nor ends
   // The push never shows: the leg judges the head it has.
   await w.db.run(w.db.k.updateTable("repos").set({ synced_at: new Date(Date.now() + 1000).toISOString() }));
   await tick(w);
-  assert.equal((await legOf(w, 1)).state, "failed");
+  assert.equal((await legOf(w, 2)).state, "failed");
 });
 
 test("every push of ours is one list: its kind, its size, and the newest time recorded for it", async () => {
