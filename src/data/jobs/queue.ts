@@ -2,7 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
-import { lastLeaseOf, remoteQueuedOf } from "./cross.ts";
+import { lastLeaseOf, remoteQueuedOf } from "../runners/fragments.ts";
 import { resumingJobs } from "./fragments.ts";
 import { hasFilter, nowIso, numberOf, octets, repoVisible } from "./sql.ts";
 import type { CliJob, HiddenRepos, JobRow, JobState, LiveJob, LogCursor, NewJob, QueuedJob, RunningState } from "./types.ts";

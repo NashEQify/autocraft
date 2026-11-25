@@ -5,7 +5,7 @@ import { indexedBy, inList, literal } from "../../db/kx.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
 import { loadRunningCounts } from "../inference/index.ts";
 import { cachedQueue, keepParsed, parsedOf, queueSignature, storeQueue, type Parsed } from "./calls-shared.ts";
-import { loadAuthors } from "./cross.ts";
+import { loadItemAuthors } from "../mirror/authors.ts";
 import { judges } from "./calls-shared.ts";
 import type { QueuedCall, QueueSnapshot, Tier } from "./types.ts";
 
@@ -34,7 +34,7 @@ export async function loadQueueFor(db: Db, now: number, signature?: string): Pro
   const text = new Map(texts.map((t) => [Number(t.id), t]));
   // Calls queued before authors were stored on the row, in one more read.
   const unauthored = queued.filter((r) => !known.has(Number(r.id)) && text.get(Number(r.id))?.authors === null && judges(r.prompt_id));
-  const legacy = unauthored.length ? await loadAuthors(db, unauthored.flatMap((r) => JSON.parse(text.get(Number(r.id))!.items) as ItemRef[])) : new Map<string, string[]>();
+  const legacy = unauthored.length ? await loadItemAuthors(db, unauthored.flatMap((r) => (JSON.parse(text.get(Number(r.id))!.items) as ItemRef[]).map((i) => ({ repo: i.repo, number: i.number })))) : new Map<string, string[]>();
   const seen = new Map<number, Parsed>();
   const calls = queued.map((r): QueuedCall => {
     const id = Number(r.id);

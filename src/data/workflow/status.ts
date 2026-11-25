@@ -1,31 +1,14 @@
 // The PR status comment (M11 workflow-b).
 // reads: mirror.items
-import type { Selectable } from "kysely";
 import type { Db } from "../../db/index.ts";
-import type { DB } from "../../db/types.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, StatusRow, Surface, WorkflowState } from "./types.ts";
+import { workflowOf } from "./rows.ts";
+import type { ItemWorkflow, StatusRow } from "./types.ts";
 
 const T = "main.pr_status_comments";
 /** The line of a comment on a closed item; it is final until the item is open again. */
 const CLOSED_LINE = "Closed";
-
-const json = <V>(s: string | null, fallback: V): V => {
-  if (!s) return fallback;
-  try { return JSON.parse(s) as V; } catch { return fallback; }
-};
-
-function toWorkflow(r: Selectable<DB["main.item_workflows"]>): ItemWorkflow {
-  return {
-    id: r.id, repo: r.repo, number: r.number, kind: r.kind as ItemKind, entry: r.entry as Entry, weight: r.weight, state: r.state as WorkflowState,
-    startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head,
-    approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null, stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
-    blocker: r.blocker as Blocker | null, blockerParams: json<Record<string, unknown> | null>(r.blocker_params, null),
-    rec: json<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head, plan: json<PlanPart[]>(r.plan, []), step: r.step,
-    legacyPreapprovalId: r.legacy_preapproval_id, updatedAt: r.updated_at,
-  };
-}
 
 /** Rows not final, by number, leaving out a Closed line on an item that is closed. */
 export async function loadStatusComments(db: Db, repo: string): Promise<StatusRow[]> {
@@ -43,7 +26,7 @@ export async function loadLatestWorkflows(db: Db, repo: string): Promise<Map<num
     .selectAll("w").select("i.state as item_state").where("w.repo", "=", repo)
     .where("w.id", "=", (eb) => kx.schemaEb(eb).selectFrom("main.item_workflows as m").select((e) => e.fn.max("m.id").as("id")).where("m.repo", "=", kx.ref<string>("w.repo")).where("m.number", "=", kx.ref<number>("w.number")))
     .orderBy("w.id"));
-  return new Map(rows.map((r) => [r.number, { wf: toWorkflow(r), open: r.item_state === "OPEN" }]));
+  return new Map(rows.map((r) => [r.number, { wf: workflowOf(r), open: r.item_state === "OPEN" }]));
 }
 
 /** Batched upsert of whole rows, one per item (the last given wins). */

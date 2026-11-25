@@ -1,4 +1,5 @@
 // The statement behind recomputeHolds: the in-scope items of outside authors with their admission and release flags.
+// reads: mirror.items (the candidate items and their follow-up parents, in one statement)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";

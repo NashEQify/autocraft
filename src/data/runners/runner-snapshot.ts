@@ -20,7 +20,8 @@ const INTERACTIVE_LIKE = "discord.%";
 /** The reads of other modules the snapshot embeds; tests pass fakes for modules not built yet. */
 export type SnapshotDeps = {
   started: (db: Db) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
-  denials: (db: Db, logins: string[], now: number) => Promise<Map<string, string>>;
+  /** Non-write permission checks of every login with a live runner credential, by "login\nrepo", with when each was checked. */
+  denials: (db: Db, logins: { runners: true }, now: number) => Promise<Map<string, { checkedAt: string }>>;
 };
 const REAL: SnapshotDeps = { started: loadStartedWork, denials: loadPermissionDenials };
 
@@ -32,9 +33,8 @@ const startedOf = (w: Awaited<ReturnType<SnapshotDeps["started"]>>): StartedWork
 
 /**
  * Every live Task Runner credential with its status, the settings of their users, live cool-offs, lease counts, permission denials and
- * started work. Two waves, whatever the number of runners, repos and calls: the first reads the runners, settings, cool-offs, leases
- * and started work; the second asks `access` for the denials of the runners' logins, which it can name only after the first. Cached
- * 2 s per `Db` (`snapshot-cache.ts`), dropped by the writers of runner state.
+ * started work, in one wave whatever the number of runners, repos and calls (`access` reads the denials of live runner logins itself).
+ * Cached 2 s per `Db` (`snapshot-cache.ts`), dropped by the writers of runner state.
  */
 export function loadRunnerSnapshot(db: Db, now: number, deps?: SnapshotDeps): Promise<RunnerSnapshot> {
   if (deps) return readSnapshot(db, now, deps);
@@ -44,7 +44,7 @@ export function loadRunnerSnapshot(db: Db, now: number, deps?: SnapshotDeps): Pr
 async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<RunnerSnapshot> {
   const q = queryDb(db);
   const iso = new Date(now).toISOString();
-  const [creds, settingRows, cooled, leases, started] = await db.together(() => Promise.all([
+  const [creds, settingRows, cooled, leases, started, denials] = await db.together(() => Promise.all([
     q.all(runnerCredentials(db, now).orderBy("t.id")),
     q.all(q.k.selectFrom("main.user_settings").select(["login", "key", "value"]).where(kx.inList(db, "key", USER_SETTING_KEYS))
       .where("login", "in", (eb) => eb.selectFrom("main.mcp_tokens").select("login").where("kind", "=", "runner").where("expires_at", ">", iso))),
@@ -54,9 +54,9 @@ async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<Ru
         eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("c.prompt_id", "like", INTERACTIVE_LIKE).then(1).else(0).end()), eb.lit(0)).as("interactive")])
       .where("c.state", "=", kx.literal("leased")).groupBy(["c.token_id", "c.user_login", "c.own_lane"])),
     deps.started(db),
+    deps.denials(db, { runners: true }, now),
   ]));
   const logins = [...new Set(creds.map((r) => r.login))];
-  const denials = logins.length ? await deps.denials(db, logins, now) : new Map<string, string>();
 
   const perToken = new Map<number, { leased: number; own: number; beat: number | null }>();
   const leasedByLogin = new Map<LowerLogin, { leased: number; interactive: number }>();
@@ -98,13 +98,13 @@ const takerExpr = (eb: kx.Eb, now: number) => eb.and([
  * The runners the taker rule reads, in a form that changes only when they or what decides their repos change: each one's login, role,
  * My repos, own repo list and skipped tasks. The planner adds it to its input, so work left for want of a taker is planned again when one
  * connects or comes back, without every status report waking the planner. Then, per user with an item choice, the repos of the items they
- * take (started work, or the work they started or approved), and the oldest cached non-write permission check of the takers' logins, so
- * the signature changes when that one expires. Statements: the grouped string, the takers with their item choice and the started work in
- * one wave; the permission read after it, which needs the takers' logins.
+ * take (started work, or the work they started or approved), and the oldest cached non-write permission check of live runner logins, so
+ * the signature changes when that one expires. One wave: the grouped string, the takers with their item choice, the started work and the
+ * permission checks.
  */
 export async function loadTakerSignature(db: Db, now: number, deps: SnapshotDeps = REAL): Promise<string> {
   const q = queryDb(db);
-  const [sig, takers, started] = await db.together(() => Promise.all([
+  const [sig, takers, started, denials] = await db.together(() => Promise.all([
     q.get(q.k.selectFrom((eb) => eb.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
       .leftJoin("main.user_settings as us", (j) => j.onRef("us.login", "=", "t.login").on("us.key", "=", "repos"))
       .leftJoin("main.user_settings as sk", (j) => j.onRef("sk.login", "=", "t.login").on("sk.key", "=", "skip_tasks"))
@@ -116,6 +116,7 @@ export async function loadTakerSignature(db: Db, now: number, deps: SnapshotDeps
       .leftJoin("main.user_settings as ti", (j) => j.onRef("ti.login", "=", "t.login").on("ti.key", "=", "task_items"))
       .select(["t.login", "ti.value as items"]).where((eb) => takerExpr(eb, now)).groupBy(["t.login", "ti.value"]).orderBy((eb) => eb.fn("lower", ["t.login"])).orderBy("t.login")),
     deps.started(db),
+    deps.denials(db, { runners: true }, now),
   ]));
   if (!sig?.s) return "";
   const work = startedOf(started);
@@ -132,8 +133,8 @@ export async function loadTakerSignature(db: Db, now: number, deps: SnapshotDeps
     }
     return `${me}=${[...repos].sort().join(",")}`;
   });
-  const logins = [...new Set(takers.map((t) => t.login))];
-  const oldest = logins.length ? [...(await deps.denials(db, logins, now)).values()].sort()[0] : undefined;
+  // The oldest cached denial: the signature changes when it expires.
+  const oldest = [...denials.values()].map((d) => d.checkedAt).sort()[0];
   const s = filtered.length ? `${sig.s}|items:${filtered.join(";")}` : sig.s;
   return oldest ? `${s}|${oldest}` : s;
 }

@@ -1,4 +1,5 @@
 // Owner statements (memory) (M12 conversations).
+// reads: mirror.comments, access.access (operators' comments that become statements, in one statement)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { sql } from "../../db/sql.ts";

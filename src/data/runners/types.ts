@@ -94,8 +94,8 @@ export type LeaseRequest = {
   /** The call is for work the caller started or approved: checked in the lease statement; else the Manual only rules apply. */
   started: boolean;
   clearIdle: boolean; source: LeaseSource;
-  /** The run's stored prompt (`packPrompt` of the harness-worded bundle). */
-  prompt: string | Uint8Array;
+  /** The run's stored prompt: `inference.packPrompt` of the harness-worded bundle, scrubbed by the caller. */
+  prompt: Uint8Array;
   /** A bundle whose text was rewritten for this lease (a workspace session's resume note) and the text it was rewritten from. */
   rewrite: { bundle: string; baseStdin: string } | null;
   /** Asked inside the lease transaction before anything is written: false when no one waits for the reply any more. */

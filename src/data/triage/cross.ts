@@ -22,7 +22,7 @@ export type ItemFactRow = {
 
 const sameAsText = (eb: kx.AnyEb, col: string) => eb.case().when(eb.ref(col), "=", eb.ref("i.embed_hash")).then(eb.val("")).else(eb.ref(col)).end();
 
-/** Rank score, priority impact and hash, embedding hash for `model`, scan hash and Jev-failed hash of each tracked item of `keys`: one statement. */
+/** Rank score, priority impact and hash, embedding hash for `model`, scan hash and Jev-failed hash (only at the item's current `class_hash`) of each tracked item of `keys`: one statement. */
 export async function loadItemFactRows(db: Db, keys: KeySource, model: string): Promise<ItemFactRow[]> {
   if (Array.isArray(keys) && keys.length === 0) return [];
   const q = queryDb(db);
@@ -33,7 +33,8 @@ export async function loadItemFactRows(db: Db, keys: KeySource, model: string): 
     .leftJoin("main.item_priority as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
     .leftJoin("main.item_embeddings as e", (j) => j.onRef("e.repo", "=", "i.repo").onRef("e.number", "=", "i.number").on("e.model", "=", model))
     .leftJoin("main.duplicate_scans as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
-    .leftJoin("main.classify_state as c", (j) => j.onRef("c.repo", "=", "i.repo").onRef("c.number", "=", "i.number").on("c.kind", "=", "jev_failed"))
+    // A failure recorded at another input is no failure: the item changed since, and is asked again.
+    .leftJoin("main.classify_state as c", (j) => j.onRef("c.repo", "=", "i.repo").onRef("c.number", "=", "i.number").on("c.kind", "=", "jev_failed").onRef("c.value", "=", "i.class_hash"))
     .select((eb) => ["i.repo", "i.number", "i.embed_hash", "r.score", "p.impact", sameAsText(eb, "p.text_hash").as("pr_hash"), sameAsText(eb, "e.hash").as("e_hash"),
       sameAsText(eb, "s.hash").as("scan_hash"), "c.value as jev_failed"])
     .orderBy("i.repo").orderBy("i.number"), { label: "triage.loadItemFactRows" }) as ItemFactRow[];
