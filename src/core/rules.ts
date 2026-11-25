@@ -114,9 +114,6 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   return until > nowMs ? { until } : null;
 }
 
-/** The audit target of a merge at one head (an operator's Retry after a refusal names it). */
-export const mergeDecisionId = (repo: string, number: number, head: string): string => `${repo}#${number}:merge@${head}`;
-
 /** Setting that holds the pipeline account's login, recorded wherever the pipeline pushes as that account. */
 export const PIPELINE_LOGIN_KEY = "pipeline_login";
 

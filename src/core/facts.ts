@@ -24,7 +24,7 @@ import { CARRIED } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { reviewOwed } from "./evidence.ts";
@@ -363,7 +363,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (!mx) {
     const unsure = take && (!latest!.sure || chain.some((h) => d.review.unsureHeads.has(`${ref}@${h}`)));
     base.review = {
-      head: qh, at: qAt, verdict: verdict!, unsure, mode: latest!.mode, reason: latest!.reason ?? "", fixes: fixes.length,
+      head: qh, at: qAt, verdict: verdict!, unsure, reason: latest!.reason ?? "", fixes: fixes.length,
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
     // A stale review does not carry: it has not read the discussion as it is now.
@@ -410,8 +410,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const ownHere = isOwn(i.author) && c.ownPrs.has(ref) && !!head && ownHead(head);
 
   const last = d.merge.attempts.get(`${ref}@${qh}`);
-  // An operator's Retry after a refusal, or a hand-over after it (a person answered), asks for another try now, without waiting for CI or the mergeable state to change.
-  const retried = last?.outcome === "refused" && ((d.retries.get(mergeDecisionId(repo, number, qh)) ?? "") > last.at || (!!handed && handed.updated_at > last.at));
+  // A hand-over after a refusal (a person answered) asks for another try now, without waiting for CI or the mergeable state to change.
+  const retried = last?.outcome === "refused" && !!handed && handed.updated_at > last.at;
   if (last && !retried) {
     base.lastMerge = { outcome: last.outcome, reason: last.reason, ci: last.ci, mergeable: last.mergeable, refusals: last.refusals };
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;

@@ -15,7 +15,7 @@ import type { Db } from "../db/index.ts";
 export { QUEUE_STATES, type QueueState };
 export {
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, VERIFY_OK, verifyOk, VERIFY_UNAVAILABLE, verifyAllows, ciAllows,
-  mergeDecisionId, PIPELINE_LOGIN_KEY,
+  PIPELINE_LOGIN_KEY,
 } from "../core/rules.ts";
 export { NO_CI_SAMPLE, repoHasNoCi } from "./no-ci.ts";
 export { headWasUnsure, ownFixPrs } from "../core/facts.ts";

@@ -77,7 +77,6 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (w && !w.approved && !mx) reasons.push(NOT_APPROVED_REASON);
   // Merging a stacked PR lands it in the other PR's branch, not in the default branch: a person decides.
   if (open && f.stackedOn !== null) reasons.push(`targets the branch of open #${f.stackedOn}`);
-  if (r?.mode === "skipped") reasons.push("the review was skipped");
   if (!RULE_SIZES.includes(f.size)) reasons.push(`size ${f.size}`);
   if (!f.label || !RULE_LABELS.includes(f.label)) reasons.push(f.label ? `label ${f.label}` : "no settled label");
   else if (f.labelUnsure) reasons.push("label settled by an unsure referee");

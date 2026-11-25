@@ -127,7 +127,6 @@ export type ReviewFacts = {
   verdict: string;
   /** Unsure at this head or anywhere in the chain of heads AutoCraft pushed it from: only a hand-over of a PR approved for merge lets it merge. */
   unsure: boolean;
-  mode: string | null;
   reason: string;
   /** Number of fixes the review lists. */
   fixes: number;

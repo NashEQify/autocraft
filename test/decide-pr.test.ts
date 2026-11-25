@@ -45,7 +45,6 @@ const rows: Row[] = [
   { name: "tier not on the whitelist", facts: { tier: "not" }, expect: { state: "needs-decision", reasons: ["author not on the whitelist"] } },
   { name: "unknown author", facts: { tier: "not", author: null }, expect: { state: "needs-decision", reasons: ["author unknown"] } },
   { name: "allow tier counts as whitelisted", facts: { ...UNSTARTED, tier: "allow" }, expect: { state: "ready", path: "rule" } },
-  { name: "review mode skipped never merges by rule", facts: { review: { mode: "skipped" } }, expect: { state: "needs-decision", reasons: ["the review was skipped"], actions: [] } },
   { name: "verification unavailable puts it outside the rule", facts: { verification: { state: "unavailable", summary: "the repo is private" } }, expect: { state: "needs-decision", reasons: ["not verified: the repo is private"], actions: [] } },
   { name: "no CI in the repo puts it outside the rule", facts: { ci: "none", repoFacts: { noCi: true } }, expect: { state: "needs-decision", reasons: ["the repo has no CI checks"] } },
   { name: "several reasons keep the queue's order", facts: { ...SIZE_L, label: "infra", tier: "not", review: { verdict: "take-fix" } }, expect: { state: "needs-fix-up", reasons: ["review asks for fixes", "size L", "author not on the whitelist"] } },
@@ -245,8 +244,8 @@ const rows: Row[] = [
   { name: "broke: without it, a pushed head waits for its review", facts: { head: "pushed1", ci: "unknown", cifix: cifix() }, expect: { actions: ["review"] } },
 
   // ---- a verdict carried over our own checked fix-up
-  { name: "carried: a review recorded as carried at the head needs no review and the merge path continues", facts: { ...UNSTARTED, review: { mode: "carried", verdict: "take" } }, expect: { state: "ready", path: "rule", actions: ["merge"] } },
-  { name: "carried: a contributor commit after our fix-up leaves the reviewed head behind: review again", facts: { head: "contributor1", review: { mode: "carried", verdict: "take" } }, expect: { actions: ["review"] } },
+  { name: "carried: a review recorded as carried at the head needs no review and the merge path continues", facts: { ...UNSTARTED, review: { verdict: "take" } }, expect: { state: "ready", path: "rule", actions: ["merge"] } },
+  { name: "carried: a contributor commit after our fix-up leaves the reviewed head behind: review again", facts: { head: "contributor1", review: { verdict: "take" } }, expect: { actions: ["review"] } },
 
   // ---- post-merge review
   { name: "postmerge: merged by the pipeline, no review stored", facts: { ghState: "MERGED", postmerge: merged() }, expect: { state: "merged", actions: ["postmerge"] } },

@@ -56,7 +56,7 @@ export type PrRows = {
   ended: EndedWorkflow | null; endedOwn: boolean;
   legs: Leg[]; request: { from: string; by: string; id: number } | null; mergeHeld: boolean; mergeWaits: boolean;
   implementation: { state: ImplementationState; revised: boolean; /** Whether the person its workflow runs for may act on the repo. */ standing?: "yes" | "no" | "unknown" } | null;
-  review: { head: string; verdict: "take" | "take-fix" | "hold" | "close"; sure: boolean; fixes: number; stale: boolean; capped: boolean; mode: "full" | "skipped"; blockedBy: "open" | "asked" | "settled" | null } | null;
+  review: { head: string; verdict: "take" | "take-fix" | "hold" | "close"; sure: boolean; fixes: number; stale: boolean; capped: boolean; blockedBy: "open" | "asked" | "settled" | null } | null;
   gate: "failed" | "failing" | "requested" | "cap" | "interval" | null; carried: boolean; posted: boolean;
   checks: { head: string; overall: "success" | "failure" | "pending" | "none"; approvedRuns: boolean };
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"; unknownStuck: boolean; pushable: boolean;
@@ -162,7 +162,7 @@ export function randomPrRows(x: Rnd): PrRows {
   } else if (workflow && x.bool(0.05)) legs.push({ state: "queued", head, fromHead: head, workflow: 7, updatedAt: at("10:20"), fixId: null });
   const review: PrRows["review"] = x.bool(0.08) || workflow?.entry === "merge" && x.bool() ? null : {
     head: some(0.88), verdict: x.pick(["take", "take", "take", "take", "take-fix", "take-fix", "hold", "close"] as const), sure: x.bool(0.8), fixes: x.int(3), stale: x.bool(0.06), capped: x.bool(0.2),
-    mode: x.bool(0.95) ? "full" : "skipped", blockedBy: x.pick([null, "open", "asked", "settled"] as const),
+    blockedBy: x.pick([null, "open", "asked", "settled"] as const),
   };
   const checks: PrRows["checks"] = { head: some(0.93), overall: x.pick(["success", "success", "success", "success", "failure", "failure", "pending", "none"] as const), approvedRuns: x.bool(0.05) };
   const mergeable = x.pick(["MERGEABLE", "MERGEABLE", "MERGEABLE", "MERGEABLE", "MERGEABLE", "CONFLICTING", "UNKNOWN"] as const);
@@ -206,7 +206,7 @@ export function greenRows(over: Partial<PrRows> = {}): PrRows {
 }
 export const startedAs = (entry: WorkflowRow["entry"], over: Partial<WorkflowRow> = {}): WorkflowRow => ({ id: 7, kind: "pr", entry, state: "running", approvedBy: "mira", baseHead: "c0", blocker: null, ...over });
 export const reviewed = (verdict: NonNullable<PrRows["review"]>["verdict"], head = "c0"): NonNullable<PrRows["review"]> =>
-  ({ head, verdict, sure: true, fixes: verdict === "take-fix" ? 2 : 0, stale: false, capped: false, mode: "full", blockedBy: null });
+  ({ head, verdict, sure: true, fixes: verdict === "take-fix" ? 2 : 0, stale: false, capped: false, blockedBy: null });
 
 const APPROVAL = { by: "op", at: "2026-11-01T00:00:00.000Z" };
 
@@ -299,7 +299,7 @@ export function factsOf(w: PrRows): PrFacts {
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(w.patches.pushes, qh) : [qh];
   if (!mx) {
-    f.review = { head: qh, at: qAt, verdict: verdict!, unsure: take && !r!.sure, mode: r!.mode, reason: "because", fixes: r!.fixes, stale: r!.stale, staleActionable: r!.stale && !r!.capped };
+    f.review = { head: qh, at: qAt, verdict: verdict!, unsure: take && !r!.sure, reason: "because", fixes: r!.fixes, stale: r!.stale, staleActionable: r!.stale && !r!.capped };
     const last = w.commits.at(-1)!;
     if (w.carried && head !== qh && take && reached(w, qh, head) && (last.by === "fixup" || last.by === "conflict") && !r!.stale) f.carriable = true;
   }

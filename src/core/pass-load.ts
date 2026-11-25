@@ -1,6 +1,6 @@
 // The planner pass's inputs: every module's set loader for the pass keys, loaded inside one read snapshot. The first wave
 // carries every loader keyed by the pass keys; the second only what needs the first one's rows (task states of stored patches,
-// our own commits on the push chains, stacked heads, operators' retries of refused merges, the pre-merge rows of merge-entry heads,
+// our own commits on the push chains, stacked heads, the pre-merge rows of merge-entry heads,
 // labels, author tiers and blockers); the third the owner statements the reviews name, and only when one does. The PR load and the
 // item load of a pass run in step, so their waves share round trips.
 import type { Db } from "../db/index.ts";
@@ -8,7 +8,7 @@ import type { KeySource, Ref } from "../data/keys.ts";
 import { loadActFacts, loadOwnLogins, type ActFacts, type PermKey } from "../data/access/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type TaskStates } from "../data/changes/index.ts";
-import { loadAssignments, loadAuditMax, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
+import { loadAssignments, loadControl, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
@@ -26,7 +26,7 @@ import { listWorkflows, loadActions, loadActionsDue, loadInScope, loadRepinPushe
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { ACTION_WAITS } from "./may.ts";
 import { ownPushes, type RecordedPush } from "./evidence.ts";
-import { mergeDecisionId, PIPELINE_LOGIN_KEY } from "./rules.ts";
+import { PIPELINE_LOGIN_KEY } from "./rules.ts";
 import { authorWritesIn } from "../fixup/author-permission.ts";
 import { longLivedAll } from "../fixup/pushable.ts";
 import type { Settled } from "../classify/settled.ts";
@@ -75,8 +75,6 @@ export type PrPassData = {
   ownCommits: Set<string>;
   stacked: Map<string, number[]>;
   statements: Map<number, Statement>;
-  /** An operator's latest Retry of a refused merge, by the retry target of the queue head (`mergeDecisionId`). */
-  retries: Map<string, string>;
   /** Role and cached permission of the people the live implementations of the PRs run for. */
   act: Map<PermKey, ActFacts>;
   /** Repos whose default branch is red. */
@@ -194,14 +192,13 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
     now: o.now, control, mirror, repos, ciSignals, diff, formal, gates, ranks, duplicates: prDuplicates(dupes), merge, patches, pushes, ownPushes: own, mainFixPrs, workflow,
     workflowRows: new Map(live.map((w) => [w.id, w])), implement, review, assignments, outsideHolds, ownLogins: o.base.own,
     inScope: scoped, mergeActions, mainRed, quiet, longLived, authorWrites: authorWritesIn(control.settings.get(PIPELINE_LOGIN_KEY), authorPerms, o.now), holds,
-    tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), retries: new Map(), act: new Map(),
+    tasks: new Map(), ownCommits: new Set(), stacked: new Map(), statements: new Map(), act: new Map(),
     settled: new Map(), tiers: new Map(), postSource: async () => null, blockers: { item: new Map(), pending: new Set(), latest: new Map() }, carried: new Map(),
   };
   await endWave();
 
   const pairs: { repo: string; sha: string }[] = [];
   const entryHeads: { repo: string; number: number; head: string }[] = [];
-  const retryTargets: string[] = [];
   for (const [key, m] of mirror) {
     const { repo, number } = asRef(key);
     const head = m.item.head_oid;
@@ -211,8 +208,6 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
     if (latest) for (const h of pushChainOf(moves, latest.head)) pairs.push({ repo, sha: h });
     const eh = o.mergeEntryHead(data, key);
     if (eh) entryHeads.push({ repo, number, head: eh });
-    const qh = eh ?? latest?.head;
-    if (qh && merge.attempts.get(`${key}@${qh}`)?.outcome === "refused") retryTargets.push(mergeDecisionId(repo, number, qh));
   }
   // Members of an integration PR's batch decide its scope; a ref list of keys may leave them out.
   const members = [...merge.integration.values()].flatMap((b) => b.members.map((m) => ({ repo: b.repo, number: m.number }))).filter((m) => !mirror.has(refKey(m.repo, m.number)));
@@ -221,15 +216,14 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   for (const [key, r] of review.latest) if (mirror.get(key)?.item.state === "OPEN") for (const b of r.blocked_by) blockers.add(b);
   const authors = rows.scoped.flatMap((key) => { const i = mirror.get(key)!.item; return i.author ? [{ login: i.author, id: i.author_id ?? null }] : []; });
   const actors = [...workflow.ofPr].flatMap(([key, w]) => (workflow.actors.get(w.id) ?? []).map((login) => ({ login, repo: asRef(key).repo })));
-  const [tasks, ownCommits, stacked, retries, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
+  const [tasks, ownCommits, stacked, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
     loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs), loadStackedHeads(db, [...new Set([...mirror.values()].map((m) => m.item.repo))]),
-    retryTargets.length ? loadAuditMax(db, "retry", retryTargets) : Promise.resolve(new Map<string, string>()),
     loadPremerge(db, entryHeads), loadInScope(db, members), loadSettled(db, rows.scoped.map(asRef), o.base.run), tiersOf(db, authors),
     postSourcesOf(db, rows.all.filter((key) => review.latest.get(key)?.mode === CARRIED)), loadBlockerReads(db, blockers),
     actors.length ? loadActFacts(db, actors) : Promise.resolve(new Map<PermKey, ActFacts>()),
   ]);
   for (const k of membersInScope) data.inScope.add(k);
-  Object.assign(data, { tasks, ownCommits, stacked, retries, settled, tiers, postSource, blockers: reads, act });
+  Object.assign(data, { tasks, ownCommits, stacked, settled, tiers, postSource, blockers: reads, act });
   for (const [k, v] of premerge) data.review.premerge.set(k, v);
   await endWave();
 
