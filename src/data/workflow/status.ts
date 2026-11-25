@@ -1,28 +1,73 @@
 // The PR status comment (M11 workflow-b).
+// reads: mirror.items
+import type { Selectable } from "kysely";
 import type { Db } from "../../db/index.ts";
-import type { ItemWorkflow, StatusRow } from "./types.ts";
+import type { DB } from "../../db/types.ts";
+import * as kx from "../../db/kx.ts";
+import { queryDb } from "../../db/query-db.ts";
+import type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, StatusRow, Surface, WorkflowState } from "./types.ts";
 
-/** Non-final rows, excluding a Closed line on a closed item. */
+const T = "main.pr_status_comments";
+/** The line of a comment on a closed item; it is final until the item is open again. */
+const CLOSED_LINE = "Closed";
+
+const json = <V>(s: string | null, fallback: V): V => {
+  if (!s) return fallback;
+  try { return JSON.parse(s) as V; } catch { return fallback; }
+};
+
+function toWorkflow(r: Selectable<DB["main.item_workflows"]>): ItemWorkflow {
+  return {
+    id: r.id, repo: r.repo, number: r.number, kind: r.kind as ItemKind, entry: r.entry as Entry, weight: r.weight, state: r.state as WorkflowState,
+    startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head,
+    approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null, stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
+    blocker: r.blocker as Blocker | null, blockerParams: json<Record<string, unknown> | null>(r.blocker_params, null),
+    rec: json<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head, plan: json<PlanPart[]>(r.plan, []), step: r.step,
+    legacyPreapprovalId: r.legacy_preapproval_id, updatedAt: r.updated_at,
+  };
+}
+
+/** Rows not final, by number, leaving out a Closed line on an item that is closed. */
 export async function loadStatusComments(db: Db, repo: string): Promise<StatusRow[]> {
-  throw new Error("not built: workflow.loadStatusComments");
+  const q = queryDb(db);
+  return await q.all(q.k.selectFrom("main.pr_status_comments as c").select(kx.cols(T, "c")).where("c.repo", "=", repo).where("c.final", "=", 0)
+    .where((eb) => eb.not(eb.and([eb("c.line", "=", CLOSED_LINE), eb.exists(kx.schemaEb(eb).selectFrom("main.items as ci").select(eb.lit(1).as("one"))
+      .where("ci.repo", "=", kx.ref<string>("c.repo")).where("ci.number", "=", kx.ref<number>("c.number")).where("ci.state", "=", "CLOSED"))])))
+    .orderBy("c.number")) as StatusRow[];
 }
 
-/** Latest workflow per item with the item's open state. */
+/** Each started item's latest workflow in the repo, with whether the item is open. */
 export async function loadLatestWorkflows(db: Db, repo: string): Promise<Map<number, { wf: ItemWorkflow; open: boolean }>> {
-  throw new Error("not built: workflow.loadLatestWorkflows");
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.item_workflows as w").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
+    .selectAll("w").select("i.state as item_state").where("w.repo", "=", repo)
+    .where("w.id", "=", (eb) => kx.schemaEb(eb).selectFrom("main.item_workflows as m").select((e) => e.fn.max("m.id").as("id")).where("m.repo", "=", kx.ref<string>("w.repo")).where("m.number", "=", kx.ref<number>("w.number")))
+    .orderBy("w.id"));
+  return new Map(rows.map((r) => [r.number, { wf: toWorkflow(r), open: r.item_state === "OPEN" }]));
 }
 
-/** Batched upsert. */
+/** Batched upsert of whole rows, one per item (the last given wins). */
 export async function saveStatusComments(db: Db, rows: StatusRow[]): Promise<void> {
-  throw new Error("not built: workflow.saveStatusComments");
+  const unique = [...new Map(rows.map((r) => [`${r.repo}#${r.number}`, r])).values()];
+  if (!unique.length) return;
+  const q = queryDb(db);
+  await db.write(async () => {
+    for (const part of kx.batches(unique)) {
+      await q.run(q.k.insertInto(T).values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"]))));
+    }
+  });
 }
 
-/** Next retry time of a repo's status comments. */
+/** The earliest end of a failure backoff of the repo's comments after `nowMs`, as epoch milliseconds, or null. */
 export async function loadStatusRetryAt(db: Db, repo: string, nowMs: number): Promise<number | null> {
-  throw new Error("not built: workflow.loadStatusRetryAt");
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom(T).select((eb) => eb.fn.min("retry_at").as("at")).where("repo", "=", repo).where("final", "=", 0).where("retry_at", ">", new Date(nowMs).toISOString()));
+  return r?.at ? Date.parse(r.at) : null;
 }
 
-/** Count for the lane fingerprint. */
+/** Backoffs that have ended, across repos, for the lane fingerprint. */
 export async function countStatusRetriesDue(db: Db, nowMs: number): Promise<number> {
-  throw new Error("not built: workflow.countStatusRetriesDue");
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom(T).select((eb) => eb.fn.countAll().as("n")).where("final", "=", 0).where("retry_at", "<=", new Date(nowMs).toISOString()));
+  return Number(r?.n ?? 0);
 }
