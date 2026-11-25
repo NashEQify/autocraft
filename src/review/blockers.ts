@@ -1,5 +1,4 @@
 // What can keep a PR's review from changing: another open item the review named as the reason for its hold.
-import type { HiddenRepos } from "../hidden-sql.ts";
 import type { Db } from "../db/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadLatestReviews } from "../data/review/index.ts";

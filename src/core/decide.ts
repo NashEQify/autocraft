@@ -456,7 +456,6 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     && f.pushable && pushAllowed(f, "fixup", true) && opFix.attempts + 1 <= FIXUP_MAX_ATTEMPTS) extra.push(act("fixup", f.head, { bucket: "fix", source: "operator" }));
 
   // A PR nobody started and that is off the auto path gets no model work and no question.
-  const wf = workflowOf(f);
   if (open && notStarted(f)) {
     return plan(held ? "backlog" : "not-started", { actions: unassignActions(f.assignment, open, true), wait: NOT_STARTED_WAIT, waitKind: "person" });
   }

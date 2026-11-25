@@ -26,7 +26,7 @@ export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Alia
  * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible (the repo's pipeline is on and an outside-author hold does not keep it back). Not ended
  * by a person (stopped, backlog, closed).
  */
-export function inScopeExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
+export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
   const endedByPerson = t.selectFrom("main.item_workflows as ew").select(one(eb)).where("ew.repo", "=", r).where("ew.number", "=", n).where("ew.state", "in", ["stopped", "backlog", "closed"])
     .where((w) => w.not(w.exists(t.selectFrom("main.item_workflows as lw").select(one(eb)).where("lw.repo", "=", kx.ref<string>("ew.repo")).where("lw.number", "=", kx.ref<number>("ew.number")).where("lw.state", "in", LIVE_STATES))))

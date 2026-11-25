@@ -1,7 +1,7 @@
 // What the planner and the fix-up step read of operator fix-ups and pre-approved merges, over the workflow and changes modules. No writes here.
 import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
 import { loadFixupRequests, loadLegPass } from "../data/workflow/index.ts";
-import { loadOperatorFixResults, loadPatchFacts, operatorTriesIn } from "../data/changes/index.ts";
+import { loadPatchFacts, operatorTriesIn } from "../data/changes/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** Tries the operator's fix-ups used on the PR; the fix-up limit of the PR applies to them as to the review's. */
