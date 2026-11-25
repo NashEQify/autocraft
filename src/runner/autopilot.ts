@@ -54,9 +54,8 @@ import { scopeRepos } from "./scope.ts";
 import { refreshOutsideHolds } from "../outside.ts";
 import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withConfig, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
-import { loadDeadlineStops, loadLaneInputs, loadLaneState, loadPipelineEndedSince, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { loadDeadlineStops, loadLaneInputs, loadLaneState, markCancelQueued, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
-import { loadEndedTaskSignature } from "../data/build/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
 import { countMainFixes } from "../data/changes/index.ts";
@@ -124,7 +123,7 @@ export type Lane = {
   anyTracked?: boolean;
   /** The change topics the lane's input lives in (default: INPUT_TOPICS). A job that handled nothing is not queued again while these and `extra` are unchanged. */
   topics?: string[];
-  /** Input that no topic reports, e.g. the state of sandbox tasks. */
+  /** Input that no topic reports, e.g. the room under a daily limit. */
   extra?: (db: Db) => Promise<string>;
   /** Least time between two of the lane's jobs: for cheap recomputes whose input moves in bursts (a sync writes in several transactions) and that no stage waits on. */
   minGapMs?: number;
@@ -246,8 +245,21 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
   return !f || gates(f, want, "pipeline") === null;
 }
 
-/** Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries the item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs", "workflow-events"].includes(t));
+/**
+ * Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries, the
+ * item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. `plan-inputs` covers what
+ * the plan facts read in tables of the other topics or of none; a table of theirs without a topic says why (noTopic in src/db/plan-inputs.ts).
+ */
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs", "workflow-events", "job-ends", "task-ends"].includes(t));
+
+/**
+ * Topics that make the planner due. Ended jobs and returned leases let held-back work start, but are no new input to a lane whose job
+ * handled nothing. A sync run's own rows make nothing due: what a sync changed moves the topics of the tables it wrote.
+ */
+export const DUE_TOPICS = [...INPUT_TOPICS.filter((t) => t !== "sync"), "job-ends", "task-ends"];
+
+/** The topics of lanes that also read the results of sandbox tasks. */
+const TASK_TOPICS = [...INPUT_TOPICS, "task-ends"];
 
 /** The Task Runners that could take calls (loadTakerSignature). Work a pool left for want of a taker waits on it. */
 const takersOf = async (db: Db): Promise<string> => {
@@ -257,9 +269,6 @@ const takersOf = async (db: Db): Promise<string> => {
   if (pass) pass.takers = sig;
   return sig;
 };
-
-/** Sandbox tasks that ended, for lanes that read their results. */
-const tasksSig = async (db: Db): Promise<string> => await loadEndedTaskSignature(db);
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
@@ -487,7 +496,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Batches in flight and PRs waiting for CI are external waits: they are read again every WAITING_CI_RECHECK_MS, on unchanged inputs too.
     name: "merge",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       // The merge queue: PRs with a queue state (merged ones too), in repos approved for merging.
@@ -560,7 +569,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "fixup",
     perRepo: true,
     // A stored patch is collected when its lint task ends.
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       const sels = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, await selectFixups(db, repo, ctx.run, plans)]));
@@ -576,7 +585,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // One repo per job, round robin; the repo's checks come before its planning.
     name: "verify",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const out: Candidate[] = [];
       const plans = await plansOf(db, ctx);
@@ -596,14 +605,14 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   },
   {
     name: "verify-collect",
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db) => (await collectDue(db) ? [{ step: "verify-collect", params: {} }] : []),
   },
   {
     // Our own build of PR heads (pr-builds feature): queues new builds and collects finished ones, no model call. Off: no repo is detected.
     name: "pr-build",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const queued = new Set(await reposWithQueuedBuilds(db));
       return (await filterSeq([...new Set([...ctx.tracked, ...queued])], async (repo) => await prBuildDue(db, repo, queued))).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
@@ -679,7 +688,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Failing gate checks of wanted PRs: the log is read, a formatter run is queued or collected, or a patch is written and pushed.
     name: "cifix",
     perRepo: true,
-    extra: tasksSig,
+    topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
       const lint = allowed(await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
@@ -1268,26 +1277,26 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
  * What the planner's marks say about the content stages read, the limits that apply to them and the operators' releases, from its
  * parts read. The releases' times are compared as values: on Postgres a release can commit after a planner mark later than its time.
  */
-const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string, released: Map<string, string>): string =>
-  [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers, ...[...released].sort().flat()].join(",");
+const inputSignature = (seqs: Record<string, number>, limits: string, takers: string, released: Map<string, string>): string =>
+  [...DUE_TOPICS.map((t) => seqs[t] ?? 0), limits, takers, ...[...released].sort().flat()].join(",");
 
 /**
- * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, an autopilot job finished, an operator released
- * work, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
+ * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, a job or sandbox task
+ * ended, a lease was given back, a limit changed, an operator released work, the Task Runners that may take calls changed, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
  * it is, so the caller must then plan.
  */
 export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
   const t = nowMs;
-  const [marks, limits, tasks, seqs, takers, finished, released] = await db.together(() => Promise.all([
-    loadLaneState(db, ["mark"]), limitsSignature(db), loadEndedTaskSignature(db), db.seqs(), loadTakerSignature(db, t), loadPipelineEndedSince(db, { mark: MARK_PLANNED_AT }), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
+  const [marks, limits, seqs, takers, released] = await db.together(() => Promise.all([
+    loadLaneState(db, ["mark"]), limitsSignature(db), db.seqs(), loadTakerSignature(db, t), loadAuditMax(db, Object.keys(RELEASE_STEPS)),
   ]));
   const mark = (name: string): string | null => marks.get(`mark|${name}|`)?.value ?? null;
   const [seen, plannedAt, wake] = [mark(MARK_SEQS_SEEN), mark(MARK_PLANNED_AT), mark(MARK_WAKE_AT)];
-  const sig = inputSignature(seqs, limits, tasks, takers, released);
+  const sig = inputSignature(seqs, limits, takers, released);
   const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
   const woken = wake !== null && Date.parse(wake) <= t;
-  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !woken) return false;
+  if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !woken) return false;
   // The pass about to run sets the next wake time when it is applied. With the switch off nothing is applied, so a
   // wake time that has passed would stay and make every tick plan again.
   await db.write(async () => {

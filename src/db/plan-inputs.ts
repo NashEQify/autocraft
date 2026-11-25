@@ -69,17 +69,26 @@ export const PLAN_IGNORED_SETTINGS = [...BOOKKEEPING_SETTINGS, "plan_shadow", "a
 const PLAN_IGNORED_SETTING_LIKE = ["%\\_points\\_last\\_run", "pipeline\\_fp:%", "leader:%", "warm\\_bytes:%"];
 
 /**
+ * An UPDATE of repo_permissions that moves facts: a new login, repo or permission, or the refresh of a row that was no longer fresh
+ * (see planInputsWith).
+ */
+export function permissionMoved(permReadTtlMs: number): { sqlite: string; pg: string } {
+  const freshS = Math.round(permReadTtlMs / 1000) - 60;
+  const moved = (fresh: string): string => `${changed(["login", "repo", "permission"])} OR NOT (old.checked_at > ${fresh})`;
+  return {
+    sqlite: moved(`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${freshS} seconds')`),
+    pg: moved(`to_char(now() AT TIME ZONE 'UTC' - interval '${freshS} seconds', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`).replace(/ IS NOT /g, " IS DISTINCT FROM "),
+  };
+}
+
+/**
  * The planner's inputs. `permReadTtlMs` is how long a cached write permission counts as fresh (access PERM_READ_TTL): a
  * repo_permissions UPDATE moves facts when it brings a new login, repo or permission, or refreshes a row that was no longer fresh.
  * The pipeline and dashboard sessions refresh a permission before it goes stale (src/preapproval/permissions.ts), so a refresh of a
  * fresh row changes no fact. The threshold is a minute stricter than the lifetime, for clock skew between the database and the planner.
  */
 export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
-  const freshS = Math.round(o.permReadTtlMs / 1000) - 60;
-  const permissionMoved = (fresh: string): string => `${changed(["login", "repo", "permission"])} OR NOT (old.checked_at > ${fresh})`;
-  const permissionFullUpdate = permissionMoved(`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${freshS} seconds')`);
-  const permissionFullUpdatePg = permissionMoved(`to_char(now() AT TIME ZONE 'UTC' - interval '${freshS} seconds', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`)
-    .replace(/ IS NOT /g, " IS DISTINCT FROM ");
+  const permission = permissionMoved(o.permReadTtlMs);
   return [
     // ---- item-keyed ----
     // A bookkeeping column (src/live.ts) that the Plan reads: it is watched here on its own.
@@ -87,7 +96,10 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       table: "classify_state", class: "item", why: "A classify request that gave no valid verdict at the item's input (a jev_failed row) ends the prioritize hold.",
       when: "r.kind = 'jev_failed'",
     },
-    { table: "agent_run_items", class: "item", why: "Links a model run to an item; the review gate counts the item's Opus review runs." },
+    {
+      table: "agent_run_items", class: "item", why: "Links a model run to an item; the review gate counts the item's Opus review runs.",
+      noTopic: "Written with every model call. A review run only holds the PR's next review back, and the job that made it ends (job-ends).",
+    },
     { table: "ci_fixes", class: "item", why: "CI fix rows of one PR (cifix facts, push chain, lint)." },
     { table: "ci_run_approvals", class: "item", why: "Workflow runs waiting at one PR head; an integration PR's tip rows are its own." },
     {
@@ -107,13 +119,19 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "merge_holds", class: "item", why: "An operator's merge hold on one PR." },
     { table: "merges", class: "item", why: "Merge attempts of one PR." },
     { table: "operator_fixups", class: "item", why: "An operator's fix-up request on one PR." },
-    { table: "opus_review_history", class: "item", why: "Overwritten reviews of one PR (unsure heads, review counts)." },
+    {
+      table: "opus_review_history", class: "item", why: "Overwritten reviews of one PR (unsure heads, review counts).",
+      noTopic: "Written in the transaction that stores the review (reviews).",
+    },
     { table: "postmerge_reviews", class: "item", why: "The post-merge review of one PR." },
     { table: "preapprovals", class: "item", why: "A pre-approved merge of one PR." },
     { table: "premerge_reviews", class: "item", why: "Pre-merge reviews of one PR." },
     { table: "push_outcomes", class: "item", why: "Our pushes to one PR (pushed heads, broken heads)." },
     { table: "review_state", class: "item", why: "One PR's review flags: stale mark, reruns of the day, failures at a head." },
-    { table: "merge_state", class: "item", why: "One PR's mergeable-unknown record.", columns: ["head", "since", "stuck"] },
+    {
+      table: "merge_state", class: "item", why: "One PR's mergeable-unknown record.", columns: ["head", "since", "stuck"],
+      noTopic: "Written by jobs (job-ends) after the checks rows it follows (checks). It names a wait and a question for a person; no lane works on it.",
+    },
     { table: "review_gates", class: "item", why: "The changes-requested gate of one PR." },
     { table: "review_posts", class: "item", why: "Our posted review on one PR." },
     { table: "stages", class: "item", why: "One item's labeled note.", when: "r.stage = 'labeled'" },
@@ -126,6 +144,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       table: "audit", class: "item", why: "Assign and unassign of an item, whose target names it.",
       when: "r.action IN ('assign', 'unassign') AND instr(r.target, '#') > 1",
       refs: "SELECT substr(r.target, 1, instr(r.target, '#') - 1) AS repo, CAST(substr(r.target, instr(r.target, '#') + 1) AS INTEGER) AS number",
+      noTopic: "The row is written before GitHub's call, so the mirrored assignees the decision needs arrive later (items). Operator releases are compared as values (src/runner/autopilot.ts).",
     },
 
     // ---- cross-item ----
@@ -174,7 +193,8 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       full: "r.verdict = 'duplicate'",
     },
     { table: "dupe_comparisons", class: "cross", why: "A compared set: every member of the set, which the row does not name.", full: "1" },
-    { table: "dupe_drops", class: "cross", why: "A dropped set: its members are not compared again for a while, and the row does not name them.", full: "1" },
+    { table: "dupe_drops", class: "cross", why: "A dropped set: its members are not compared again for a while, and the row does not name them.", full: "1",
+      noTopic: "Written by the compare job (job-ends); it only holds a set back, and the pass wakes when that ends." },
     {
       // Refs, not a full pass: the rows a change can move are this issue's, its PR's and, through the repo's live count, the repo's other queued issues.
       table: "implementations", class: "cross", why: "An implementation attempt: its issue, its PR (which it revises), and the repo's other open issues started for implementation (live implementations per repo bound new attempts).",
@@ -197,6 +217,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     {
       table: "agent_runs", class: "cross", why: "An Opus review run's start: the items it ran for (review counts of the review gate).",
       when: "r.step = 'opus-review'", columns: ["step", "started_at", "job_id"],
+      noTopic: "Written with every model call; see agent_run_items.",
       refs: "SELECT ai.repo AS repo, ai.number AS number FROM agent_run_items ai WHERE ai.run_id = r.id",
     },
     {
@@ -222,7 +243,8 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       table: "security_findings", class: "cross", why: "A finding's quiet fix PR: that PR's scope, labels and own-PR facts, and through scope its duplicate sets.",
       columns: ["repo", "number", "state", "fork", "fix_pr"], full: "1",
     },
-    { table: "security_quiet_prs", class: "cross", why: "A former quiet PR of a finding (scope, labels).", full: "1" },
+    { table: "security_quiet_prs", class: "cross", why: "A former quiet PR of a finding (scope, labels).", full: "1",
+      noTopic: "Written in the transaction that clears the finding's fix_pr (security_findings, plan-inputs)." },
 
     // ---- global ----
     { table: "settings", class: "global", why: "Approvals, pilot list, pipeline switch and login, app slugs, classification run, optional checks and the other switches every item reads.",
@@ -238,7 +260,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "access", class: "global", why: "Operator and maintainer roles: who may answer for a repo, whose comments count." },
     {
       table: "repo_permissions", class: "global", why: "Maintainers' write permission per repo: who may answer there.",
-      fullUpdate: permissionFullUpdate, pg: { fullUpdate: permissionFullUpdatePg },
+      fullUpdate: permission.sqlite, pg: { fullUpdate: permission.pg },
     },
     { table: "author_ids", class: "global", why: "Author logins bound to account ids: tiers of every PR of the author." },
     { table: "whitelist_overrides", class: "global", why: "Operator tier overrides of an author." },
@@ -249,8 +271,14 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
       columns: ["repo", "head_sha", "branch", "state", "failing", "committed_at", "headline", "first_seen_at", "state_changed_at"],
     },
     { table: "main_fixes", class: "global", why: "Fixes of a red default branch: the repo's main CI state and its own fix PR." },
-    { table: "own_commits", class: "global", why: "Commits the pipeline pushed: whether a PR's head is its own work, through any push chain." },
-    { table: "owner_statements", class: "global", why: "Owner statements that stored reviews of any PR name as conflicts." },
+    {
+      table: "own_commits", class: "global", why: "Commits the pipeline pushed: whether a PR's head is its own work, through any push chain.",
+      noTopic: "Written at the push, before the patch row that names the head (verify, fixes, queue) and before the mirror holds it (items).",
+    },
+    {
+      table: "owner_statements", class: "global", why: "Owner statements that stored reviews of any PR name as conflicts.",
+      noTopic: "Rows are inserted once and only their vectors change; a review that names one is written later (reviews).",
+    },
 
     // ---- read, but not a fact input ----
     { table: "review_blockers", class: "none", why: "Kept from opus_reviews by its own triggers; a review's write logs the items it names." },

@@ -11,6 +11,7 @@ import type { Db } from "./helpers/raw-db.ts";
 import { loadPg } from "../src/db/open.ts";
 import { PG_COLUMNS_SQL, pgColumns } from "../src/db/pg-triggers.ts";
 import { liveTriggers } from "../src/db/live.ts";
+import { planDue } from "../src/runner/autopilot.ts";
 import { needsPg, testDatabase, type TestDatabase } from "./test-db.ts";
 
 const T = "2026-01-01T00:00:00Z";
@@ -161,6 +162,27 @@ test("a log row that commits after a later seq is read once, by the next pass, a
   }
 });
 
+test("a job and a sandbox task that ended before the planner's mark and commit after it make the planner due", { skip: needsPg }, async () => {
+  const { t, db } = await appDb("postgres");
+  const a = await client(t);
+  const T = "2026-01-01T00:00:00Z";
+  try {
+    const job = (await db.get(db.k.insertInto("jobs").values({ step: "embed", params: "{}", requested_by: "pipeline", requested_at: T, state: "queued" }).returning("id")))!.id;
+    const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo: "app", number: 1, head_sha: "h", state: "running", requires: "{}", queued_at: T, plan: "[]" } as never).returning("id")))!.id;
+    for (const sql of [`UPDATE jobs SET state = 'cancelled', ended_at = '${T}' WHERE id = ${job}`, `UPDATE build_tasks SET state = 'done', ended_at = '${T}' WHERE id = ${task}`]) {
+      await a.q("BEGIN");
+      await a.q(sql);
+      await planDue(db);
+      assert.equal(await planDue(db), false);
+      await a.q("COMMIT");
+      assert.equal(await planDue(db), true, sql);
+    }
+  } finally {
+    await a.end();
+    await t.close();
+  }
+});
+
 test("counters move once per transaction, at commit, and not for a rolled-back savepoint", { skip: needsPg }, async () => {
   const { t, db } = await appDb("postgres");
   const a = await client(t);
@@ -203,7 +225,7 @@ test("every Postgres trigger condition and log query plans against the schema", 
       ...planTriggers("postgres", columns).map((p) => "full" in p
         ? `SELECT 1 FROM ${rows(p.table)} WHERE ${p.cond || "true"}`
         : `INSERT INTO item_changes (repo, number) SELECT s.repo, s.number FROM ${rows(p.table)}, LATERAL (${p.refs}) AS s WHERE ${p.cond || "true"}`),
-      ...liveTriggers(columns).map((l) => `SELECT 1 FROM ${rows(l.table)} WHERE ${l.cond ? pgExpr(l.cond) : "true"}`),
+      ...liveTriggers(columns).map((l) => `SELECT 1 FROM ${rows(l.table)} WHERE ${l.pg ?? (l.cond ? pgExpr(l.cond) : "true")}`),
     ];
     assert.ok(checks.length > 300);
     const failed: string[] = [];

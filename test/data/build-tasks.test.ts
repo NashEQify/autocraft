@@ -6,7 +6,7 @@ import { queryDb } from "../../src/db/query-db.ts";
 import { TEST_PG_URL, testDatabase } from "../test-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import {
-  addArtifact, appendTaskLogs, claimRun, claimTasks, createTasks, finishTask, hasWarmBuild, loadArtifactFiles, loadArtifacts, loadEndedTaskSignature, loadEnvPass, loadLogTails, loadOpenTasks,
+  addArtifact, appendTaskLogs, claimRun, claimTasks, createTasks, finishTask, hasWarmBuild, loadArtifactFiles, loadArtifacts, loadEnvPass, loadLogTails, loadOpenTasks,
   loadQueuedStats, loadStandaloneTasks, loadTasks, loadTaskStates, loseTasks, MAX_QUEUED, QueueFullError, reapStaleTasks, releaseClaims, savePodRuns, TaskAccessError,
 } from "../../src/data/build/index.ts";
 
@@ -185,13 +185,15 @@ both("savePodRuns applies different patches in one statement per column set", as
   return runs.length;
 });
 
-both("loadEndedTaskSignature changes when a task ends and loadOpenTasks lists only open ones", async (db) => {
+both("the task-ends counter moves when a task ends, not when one starts, and loadOpenTasks lists only open ones", async (db) => {
   await env(db, "w1", "remote");
   const ids = await createTasks(db, [newTask(1), newTask(2)]);
-  const before = await loadEndedTaskSignature(db);
+  const ends = async () => (await db.seqs())["task-ends"] ?? 0;
+  const before = await ends();
   await claimTasks(db, "w1", [{ id: ids[0]! }], T0);
+  assert.equal(await ends(), before);
   await finishTask(db, "w1", ids[0]!, { results: [{ step: "b", exitCode: 1, durationMs: 1, timedOut: false }], summary: null, sandbox: null, failed: false });
-  assert.notEqual(await loadEndedTaskSignature(db), before);
+  assert.ok(await ends() > before);
   const open = await loadOpenTasks(db, [{ repo: "app", number: 1 }, { repo: "app", number: 2 }]);
   assert.deepEqual([...open.keys()], ["app#2"]);
   return open.get("app#2")!.length;

@@ -115,7 +115,7 @@ export function pgTriggerParts(columns?: Map<string, string[]>): PgTriggerParts 
   };
   for (const t of liveTriggers(columns)) {
     const g = group(t.table, t.op);
-    g.topics.set(t.topic, [...(g.topics.get(t.topic) ?? []), t.cond ? pgExpr(t.cond) : ""]);
+    g.topics.set(t.topic, [...(g.topics.get(t.topic) ?? []), t.pg ?? (t.cond ? pgExpr(t.cond) : "")]);
   }
   for (const t of planTriggers("postgres", columns)) {
     const body = "full" in t ? `PERFORM ac_mark_full('${t.full}');`

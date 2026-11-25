@@ -10,3 +10,9 @@ registerTriggerSource("outside",
 registerTriggerSource("plans",
   { table: "outside_holds" },
 );
+
+// A hold that ends with the clock or a release frees its item for every lane. The planner writes only differences, so a pass that
+// moved holds is followed by one more that moves none.
+registerTriggerSource("plan-inputs",
+  { table: "outside_holds" },
+);

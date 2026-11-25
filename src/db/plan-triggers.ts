@@ -46,6 +46,8 @@ export type PlanInput = {
    * translate: JSON functions, GLOB, integer results used as conditions.
    */
   pg?: Partial<Record<"refs" | "when" | "updateWhen" | "full" | "fullUpdate", string>>;
+  /** Why a write to the table needs no topic that makes the planner due (src/runner/autopilot.ts DUE_TOPICS); every other input table feeds one. */
+  noTopic?: string;
 };
 
 
