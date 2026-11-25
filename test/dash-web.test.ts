@@ -40,13 +40,13 @@ async function fresh(): Promise<Db> {
 test("the Work queue's Hold and Resume: the held item is listed until it is resumed", async () => {
   const db = await fresh();
   const held = async () => (await call<{ held: { repo: string; number: number; line: string }[] }>(db, "GET", "/api/maintain/queue")).held;
-  const press = async (text: string) => call<{ ok: boolean; lines: string[] }>(db, "POST", "/api/items/app/7/command", { text });
+  const press = async (text: string) => call<{ items: { outcome: string }[]; lines: string[] }>(db, "POST", "/api/items/app/7/command", { text });
   const on = await press("hold");
-  assert.ok(on.ok, on.lines.join(" "));
+  assert.equal(on.items[0]!.outcome, "run", on.lines.join(" "));
   assert.deepEqual((await held()).map((h) => `${h.repo}#${h.number}`), ["app#7"]);
   assert.match((await held())[0]!.line, /Held by op/);
   const off = await press("resume");
-  assert.ok(off.ok, off.lines.join(" "));
+  assert.equal(off.items[0]!.outcome, "run", off.lines.join(" "));
   assert.deepEqual(await held(), []);
 });
 

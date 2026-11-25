@@ -20,12 +20,11 @@ export class ControlError extends Error {
 
 const refOf = (repo: string, number: number): string => `${repo}#${number}`;
 
-/** Marks the batch superseded and closes its integration PR, when it has one; the row goes back to its state if the close fails, so a later Stop, Remove or merge run retries. The PRs go back to the queue; the next merge run builds batches from what is eligible. `ended` runs before the PR closes. */
-async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec, ended?: () => Promise<void>): Promise<{ closed: number | null }> {
+/** Marks the batch superseded and closes its integration PR, when it has one; the row goes back to its state if the close fails, so a later Stop, Remove or merge run retries. The PRs go back to the queue; the next merge run builds batches from what is eligible. */
+async function endBatch(db: Db, by: string, id: number, why: string, comment: string, run: Exec): Promise<{ closed: number | null }> {
   const b = (await getBatch(db, id))!;
   await cancelBuild(db, b, by);
   await updateBatch(db, id, new Date().toISOString(), { state: "superseded", summary: why });
-  await ended?.();
   if (b.pr_number === null) return { closed: null };
   const g = await guardRepo(db, b.repo, null, { operator: by });
   const r = "refused" in g ? { code: 1, stdout: "", stderr: g.refused }
@@ -69,10 +68,10 @@ export async function endStoppedBatch(db: Db, by: string, b: { id: number; repo:
   return await endBatch(db, by, b.id, `stopped in AutoCraft by ${by}`, `the batch was stopped in AutoCraft by ${by}. Its pull requests are on hold`, run);
 }
 
-/** Ends the PR's batch: the others go back to the queue and the next merge run builds a batch without it. The caller has ended what makes the PR eligible, or does in `ended`, which runs before the batch PR closes. */
-export async function removeFromBatch(db: Db, by: string, repo: string, number: number, run: Exec = defaultExec, ended?: () => Promise<void>): Promise<{ batch: string; closed: number | null }> {
+/** Ends the PR's batch: the others go back to the queue and the next merge run builds a batch without it. A hold has ended the PR's workflow before, so that batch leaves it out. */
+export async function removeFromBatch(db: Db, by: string, repo: string, number: number, run: Exec = defaultExec): Promise<{ batch: string; closed: number | null }> {
   const b = await batchOf(db, repo, number);
   await addAudit(db, [{ login: by, action: "batch-remove", target: refOf(repo, number), details: { batch: b.branch } }]);
-  const { closed } = await endBatch(db, by, b.id, `${refOf(repo, number)} was removed in AutoCraft by ${by}`, `${refOf(repo, number)} was removed from the batch in AutoCraft by ${by}. The other pull requests are rebuilt in a new batch`, run, ended);
+  const { closed } = await endBatch(db, by, b.id, `${refOf(repo, number)} was removed in AutoCraft by ${by}`, `${refOf(repo, number)} was removed from the batch in AutoCraft by ${by}. The other pull requests are rebuilt in a new batch`, run);
   return { batch: b.branch, closed };
 }

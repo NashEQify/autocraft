@@ -802,10 +802,11 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
   };
   if (p.state === "queued" && await inActiveBatch(db, repo, n)) {
     if (await mergeRunning(db, repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
-    // The row is cancelled while the batch PR closes, so the queue never sees the PR out of a batch with a live approval.
-    const r = await removeFromBatch(db, by, repo, n, run, finish);
+    const r = await removeFromBatch(db, by, repo, n, run);
     const id = await loadBatchByBranch(db, repo, r.batch);
     if (id !== undefined && (await getBatch(db, id))?.state === "merged") throw new Error("the PR is already merged: its batch merged");
+    // A merge run that took the PR into a new batch meanwhile makes this throw (pastCancel): the cancel is asked for again.
+    await finish();
   } else await finish();
   return (await preapprovalOf(db, repo, n))!;
 }
