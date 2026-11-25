@@ -210,7 +210,7 @@ export type TieredStep<It, JV, HV, C = void, B = It[]> = {
   onJevFailure: "haiku" | "haiku-when-unavailable";
 };
 
-export type TieredOpts<It, C> = {
+export type TieredOpts<It, C, JV = unknown> = {
   ctx?: C;
   /** Jev call width (default: the Jev parallelism setting). */
   jevWidth?: number | (() => Promise<number>);
@@ -221,6 +221,8 @@ export type TieredOpts<It, C> = {
   /** Start the first Haiku batch alone (a failure that stops all calls then shows early). */
   first?: boolean;
   cancelled?: () => Promise<boolean>;
+  /** Jev answers already given by ref (asked in another request: src/classify/run.ts runJev); these items are not sent to Jev. */
+  given?: ReadonlyMap<string, JV>;
 };
 
 export type TieredResult<JV, HV> = {
@@ -235,10 +237,12 @@ export type TieredResult<JV, HV> = {
   skipped: Set<string>;
 };
 
-export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C> = {}): Promise<TieredResult<JV, HV>> {
+export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C, JV> = {}): Promise<TieredResult<JV, HV>> {
   const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set() };
-  if (await jevAvailable(db)) {
-    await pool(items.map((x) => async () => {
+  for (const x of items) if (opts.given?.has(tier.ref(x))) out.jev.set(tier.ref(x), opts.given.get(tier.ref(x))!);
+  const toJev = items.filter((x) => !out.jev.has(tier.ref(x)));
+  if (toJev.length && await jevAvailable(db)) {
+    await pool(toJev.map((x) => async () => {
       if (!await jevAvailable(db)) return;
       const r = await runModelStep(db, tier.jev, x, { ctx: opts.ctx, usage: opts.jevUsage?.(x), cancelled: opts.cancelled });
       out.jev.set(tier.ref(x), r.ok ? r.value : null);

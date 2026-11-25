@@ -11,14 +11,17 @@
 import { refOf, type Item } from "../classify/parse.ts";
 import { takersFirst } from "../agents/call.ts";
 import { freeSlots } from "../agents/accounts.ts";
-import { jevAvailable } from "../agents/jev.ts";
-import { haikuBatches, runHaiku, runJev } from "../classify/run.ts";
+import { jevAvailable, takeJevStatuses } from "../agents/jev.ts";
+import { haikuBatches, jevAgents, runHaiku, runJev, type JevExtraAnswers } from "../classify/run.ts";
+import { prioritizeAnswered } from "../priority/index.ts";
+import { priorityDue } from "../core/decide-item.ts";
+import type { ClassifyExtras } from "../prompts/index.ts";
 import { fillClassHashes } from "../itemhash.ts";
 import { itemPlans, itemsOf, plannedItems, type ItemPlans, type PlannedItem } from "../core/select-items.ts";
 import { startedRefs } from "../pilot.ts";
 import type { StepContext } from "./steps.ts";
 import { latestRun } from "../classify/settled.ts";
-import { assignAreas, type AssignResult } from "../areas/assign.ts";
+import { areaListsDue, assignAreas, type AskedList, type AssignResult } from "../areas/assign.ts";
 import type { Db } from "../db/index.ts";
 import { batches, excluded } from "../db/kx.ts";
 
@@ -32,8 +35,9 @@ const JEV_CHUNK = 40, HAIKU_PER_CALL = 25;
 
 
 /**
- * runJev and runHaiku write one token_usage row per agent name (`jev-<ref>`,
- * `haiku-NN`) with INSERT OR REPLACE. Rows from earlier passes with those
+ * runJev and runHaiku write one token_usage row per agent name (`jev-<ref>`, and
+ * `priority-jev-<ref>` and `areas-jev-<ref>` for the questions a classify request
+ * carries for those steps; `haiku-NN`) with INSERT OR REPLACE. Rows from earlier passes with those
  * names are renamed first so their cost stays on record.
  */
 async function keepUsage(db: Db, run: string, agents: string[]): Promise<void> {
@@ -66,18 +70,44 @@ const sliceGuard = (ctx: StepContext): (() => boolean) => {
   };
 };
 
-export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, t: Tally, more: () => boolean): Promise<Set<string>> {
+/** What the Jev pass got: the items it classified, and the valid impact and area answers their requests carried. */
+export type JevPassResult = { done: Set<string> } & JevExtraAnswers;
+
+export async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, t: Tally, more: () => boolean, extras?: ReadonlyMap<string, ClassifyExtras>): Promise<JevPassResult> {
   const { db } = ctx;
-  const done = new Set<string>();
+  const out: JevPassResult = { done: new Set(), impact: new Map(), area: new Map() };
   for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db) && more(); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
-    await keepUsage(db, run, chunk.map((x) => `jev-${refOf(x)}`));
+    await keepUsage(db, run, chunk.flatMap((x) => jevAgents(refOf(x), extras?.get(refOf(x)))));
     t.sent(chunk.length);
-    for (const ref of await runJev(db, run, chunk, undefined, hashes)) done.add(ref);
-    t.answered("jev", done.size);
+    const r = await runJev(db, run, chunk, undefined, hashes, extras);
+    for (const ref of r.saved) out.done.add(ref);
+    for (const [ref, a] of r.impact) out.impact.set(ref, a);
+    for (const [ref, a] of r.area) out.area.set(ref, a);
+    t.answered("jev", out.done.size);
+    const limited = takeJevStatuses();
     await ctx.progress(`Jev: ${Math.min(i + JEV_CHUNK, todo.length)} of ${todo.length} items`);
+    if (limited.size) ctx.log(`Jev responses that were not OK in this chunk: ${[...limited].map(([status, n]) => `${n} with status ${status}`).join(", ")}`);
   }
-  return done;
+  return out;
+}
+
+/**
+ * The questions of priority.jev and areas.jev that are due for the items of `todo`, to ask in their classify requests (one Jev
+ * request per item), with the priority text hash of each item asked for its impact. Priority is due from the item's Plan facts
+ * (the Plan holds back the prioritize step while this request is due); an area question rides along on an issue only.
+ */
+async function classifyExtras(db: Db, plans: ClassifyPlans, todo: readonly Item[]): Promise<{ extras: Map<string, ClassifyExtras>; priority: Map<string, string>; lists: Map<string, AskedList> }> {
+  const facts = new Map(plans.items.map((p) => [`${p.facts.repo}#${p.facts.number}`, p.facts]));
+  const lists = await areaListsDue(db, todo);
+  const extras = new Map<string, ClassifyExtras>(), priority = new Map<string, string>();
+  for (const x of todo) {
+    const ref = refOf(x), f = facts.get(ref), list = lists.get(ref);
+    const impact = !!f && priorityDue(f);
+    if (impact) priority.set(ref, f.embedHash);
+    if (impact || list) extras.set(ref, { ...(impact && { impact }), ...(list && { areas: list.areas }) });
+  }
+  return { extras, priority, lists };
 }
 
 /**
@@ -174,7 +204,8 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   const todo = (await takersFirst(ctx.db, due, (x) => [x.repo], (x) => [x])).slice(0, limit);
   ctx.log(`run ${run}: ${open} open items, ${due.length} due for Jev, taking ${todo.length}`);
   const t = tally(ctx), more = sliceGuard(ctx);
-  const jevDone = await jevPass(ctx, run, todo, hashes, t, more);
+  const ask = await classifyExtras(ctx.db, plans, todo);
+  const jevRes = await jevPass(ctx, run, todo, hashes, t, more, ask.extras), jevDone = jevRes.done;
   // Items Jev did not answer because it is unavailable go to Haiku, which settles them.
   const alone = await ctx.cancelled() || await jevAvailable(ctx.db) ? [] : todo.filter((x) => !jevDone.has(refOf(x)));
   const haikuAlone = alone.length ? await haikuOnlyPass(ctx, run, alone, hashes, t, more) : 0;
@@ -184,10 +215,15 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   ctx.log(`Haiku: ${unsure.length} items where Jev is unsure of the type (under ${SURE * 100} %) or of a flag`);
   const haiku = await haikuPass(ctx, run, unsure, t, "haiku", more);
   const jev = jevDone.size, left = due.length - jev - haikuAlone;
+  // Impact answers the classify requests carried are settled and stored whatever the time, as the prioritize step would.
+  const prio = await ctx.cancelled() || !jevRes.impact.size ? null : await prioritizeAnswered(ctx.db, todo.filter((x) => jevRes.impact.has(refOf(x))).map((x) => ({ ...x, hash: ask.priority.get(refOf(x))! })), jevRes.impact, { cancelled: ctx.cancelled, log: ctx.log });
+  if (prio) ctx.log(`Priority from the classify requests: ${prio.saved} of ${prio.due} items saved (${prio.haiku} by Haiku where Jev was unsure)`);
   // Items of repos with an area list that were not asked against its current version; Jev's answers share the job's limit with the type pass.
   // Past the slice the areas wait for a job with time left, since the planner queues classify-new only while Jev has items due;
-  // the job that clears the last of them asks them whatever its time.
-  const areas = await ctx.cancelled() || (ctx.timeUp() && left > 0) ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: Math.min(limit, AREAS_PER_CLASSIFY_JOB), usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
+  // the job that clears the last of them asks them whatever its time. Answers the classify requests carried are stored in any case.
+  const given = new Map([...jevRes.area].map(([ref, answer]) => [ref, { answer, version: ask.lists.get(ref)!.version }]));
+  const areaLimit = ctx.timeUp() && left > 0 ? 0 : Math.min(limit, AREAS_PER_CLASSIFY_JOB);
+  const areas = await ctx.cancelled() || (!areaLimit && !given.size) ? { due: 0, jev: 0, haiku: 0, none: 0, left: 0 } : await assignAreas(ctx.db, { limit: areaLimit, given, usageRun: run, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
   return { areas, jev, due: due.length, haiku, haikuDue: unsure.length, haikuAlone, aloneDue: alone.length, left, asked: t.asked() };
 }
 

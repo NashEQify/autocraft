@@ -6,7 +6,7 @@
 // recomputed from the mirror's reach signals on every pass, without a model.
 import { takersFirst } from "../agents/call.ts";
 import { runTiered } from "../agents/step.ts";
-import { PRIORITY } from "../agents/steps.ts";
+import { PRIORITY, type JevImpact } from "../agents/steps.ts";
 import { type Item, refOf } from "../classify/parse.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { reachOfOpenItems } from "./reach.ts";
@@ -19,7 +19,7 @@ import { batches, excluded } from "../db/kx.ts";
 const JEV_CHUNK = 40;
 const now = () => new Date().toISOString();
 
-type Due = Item & { hash: string };
+export type Due = Item & { hash: string };
 
 /** The items the Plans send to rating: no priority row, or one made at other text. */
 async function dueItems(db: Db): Promise<Due[]> {
@@ -71,6 +71,25 @@ export async function rescore(db: Db, nowMs: number = Date.now()): Promise<numbe
 export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => Promise<boolean>; log?: (line: string) => void };
 export type PrioritizeResult = { due: number; sent: number; jev: number; haiku: number; saved: number; rescored: number; haikuAlone: number };
 
+/** Rates one chunk: Jev (skipped for the items in `given`, answered in another request), Haiku where it is unsure, then saves. */
+async function rateChunk(db: Db, all: Due[], res: PrioritizeResult, log: (line: string) => void, given?: ReadonlyMap<string, JevImpact>): Promise<void> {
+  const t = await runTiered(db, PRIORITY, all, given ? { given } : {});
+  // An item whose Haiku batch no Task Runner could take is left for a later pass, unsaved.
+  const chunk = all.filter((x) => !t.skipped.has(refOf(x)));
+  res.sent += chunk.length;
+  const verdicts = new Map<string, Verdict>();
+  for (const item of chunk) {
+    const ref = refOf(item), v = t.jev.get(ref) ?? null;
+    verdicts.set(ref, { jev: v, haiku: t.haiku.get(ref) ?? null });
+    if (v) res.jev++;
+    if (t.haiku.has(ref)) res.haiku++;
+  }
+  res.haikuAlone += t.alone.size;
+  const saved = await save(db, chunk, verdicts);
+  for (const item of chunk) if (saved.has(refOf(item))) res.saved++;
+  else log(`prioritize: no valid answer for ${refOf(item)}`);
+}
+
 export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<PrioritizeResult> {
   const log = opts.log ?? (() => {});
   await fillEmbedHashes(db);
@@ -80,26 +99,25 @@ export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<Pr
   log(`prioritize: ${due} items due, taking ${todo.length}`);
   const res: PrioritizeResult = { due, sent: 0, jev: 0, haiku: 0, saved: 0, rescored: 0, haikuAlone: 0 };
   for (let i = 0; i < todo.length && !await opts.cancelled?.(); i += JEV_CHUNK) {
-    const all = todo.slice(i, i + JEV_CHUNK);
-    const t = await runTiered(db, PRIORITY, all);
-    // An item whose Haiku batch no Task Runner could take is left for a later pass, unsaved.
-    const chunk = all.filter((x) => !t.skipped.has(refOf(x)));
-    res.sent += chunk.length;
+    await rateChunk(db, todo.slice(i, i + JEV_CHUNK), res, log);
     opts.onSent?.(res.sent);
-    const verdicts = new Map<string, Verdict>();
-    for (const item of chunk) {
-      const ref = refOf(item), v = t.jev.get(ref) ?? null;
-      verdicts.set(ref, { jev: v, haiku: t.haiku.get(ref) ?? null });
-      if (v) res.jev++;
-      if (t.haiku.has(ref)) res.haiku++;
-    }
-    res.haikuAlone += t.alone.size;
-    const saved = await save(db, chunk, verdicts);
-    for (const item of chunk) if (saved.has(refOf(item))) res.saved++;
-    else log(`prioritize: no valid answer for ${refOf(item)}`);
   }
   res.rescored = await rescore(db);
   if (res.haikuAlone) log(`Jev unavailable: Haiku rated ${res.haikuAlone} items`);
+  return res;
+}
+
+/**
+ * Settles and stores the priority of items whose Jev impact answer came in another request (the classify job asks it with the
+ * type, src/runner/classify.ts), as runPrioritize does: Haiku decides where Jev is unsure. `hash`: the item's text hash when the
+ * question was asked. The saved rows make the items no longer due for the prioritize step.
+ */
+export async function prioritizeAnswered(db: Db, items: readonly Due[], given: ReadonlyMap<string, JevImpact>, opts: { cancelled?: () => Promise<boolean>; log?: (line: string) => void } = {}): Promise<PrioritizeResult> {
+  const todo = items.filter((x) => given.has(refOf(x)));
+  const res: PrioritizeResult = { due: todo.length, sent: 0, jev: 0, haiku: 0, saved: 0, rescored: 0, haikuAlone: 0 };
+  for (let i = 0; i < todo.length && !await opts.cancelled?.(); i += JEV_CHUNK) await rateChunk(db, todo.slice(i, i + JEV_CHUNK), res, opts.log ?? (() => {}), given);
+  // New rows get their reach now, as a prioritize pass gives its own.
+  if (res.saved) res.rescored = await rescore(db);
   return res;
 }
 
