@@ -90,6 +90,9 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
 }
 
+/** A question that takes the place of one the author pushed past. */
+export const afterPush = (rec: Recommendation): Recommendation => ({ ...rec, text: t("The author pushed commits after the last question. {text}", { text: rec.text }) });
+
 /**
  * What an item stopped at a blocker comes back with. A yes resumes the plan with the merge still approved:
  * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix; a stuck implementation comes back through question.ts);
