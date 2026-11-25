@@ -209,13 +209,15 @@ export function nightlyIssueBody(c: NightlyCheck, sha: string, summary: string |
 }
 const issueTitle = (c: NightlyCheck): string => `Nightly check fails: ${cleanLine(c.label, 80)}`;
 
+/** Failing nights in a row before an issue can be opened. */
+export const STREAK_TO_OPEN = 2;
 /** The nights the Open issue control looks back over. */
 const ISSUE_NIGHTS = 30;
 
 /**
  * The Open issue control: opens one issue for a check that is failing, naming the check and the failure. The failing streak is the
  * consecutive failed nights up to the newest (a skipped or errored night says nothing; a pass or warn ends it). Refused when the
- * newest night did not fail, or when an issue was already opened for the streak; its number then marks the streak's results.
+ * streak is shorter than STREAK_TO_OPEN, or when an issue was already opened for the streak; its number then marks the streak's results.
  */
 export async function openNightlyIssue(db: Db, o: { repo: string; checkId: string; by: By }, deps: NightlyDeps = defaultDeps()): Promise<{ number: number; url: string }> {
   const c = checkOf(o.checkId);
@@ -228,7 +230,7 @@ export async function openNightlyIssue(db: Db, o: { repo: string; checkId: strin
     if (m.result.state !== "fail") break;
     streak.push(m);
   }
-  if (!streak.length || streak[0] !== mine.find((m) => !["error", "skipped", "queued"].includes(m.result.state))) throw new Error(`the nightly check ${c.id} is not failing on ${o.repo}`);
+  if (streak.length < STREAK_TO_OPEN || streak[0] !== mine.find((m) => !["error", "skipped", "queued"].includes(m.result.state))) throw new Error(`the nightly check ${c.id} is not failing ${STREAK_TO_OPEN} nights in a row on ${o.repo}`);
   if (streak.some((m) => m.result.issueNumber !== null)) throw new Error(`an issue is already open for the nightly check ${c.id} on ${o.repo}`);
   const last = streak[0]!;
   const made = await deps.openIssue(db, { repo: o.repo, title: issueTitle(c), body: nightlyIssueBody(c, last.run.sha, last.result.summary), by: o.by });

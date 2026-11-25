@@ -24,7 +24,7 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
   await db.run(db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
   await db.run(db.k.insertInto("comments").values({ repo: "photocraft", number: 7, id: "c1", kind: "comment", author: "dev", created_at: "2026-01-01T01:00:00Z", body: "please look", commit_oid: null }));
   await db.run(db.k.insertInto("plan_history").values({ repo: "photocraft", number: 7, head: H1, old_state: "reviewing", new_state: "verifying", wait: "CI", reasons: "[]", at: "2026-01-01T02:00:00Z" }));
-  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 7 }], prompt: "secret prompt" });
+  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "photocraft", number: 7 }], prompt: "secret prompt" });
   await db.run(db.k.updateTable("agent_runs").set({ started_at: "2026-01-01T03:00:00Z" }));
   await saveTools(db, run, [{ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: "x" } }] } }]);
   await finishRun(db, run, { state: "done", output: "o", costUsd: 0.5 });
@@ -160,7 +160,7 @@ test("item history discloses only the reader's own-item calls and preserves unkn
     await db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, head_oid) VALUES ('photocraft', 7, 'pr', 'OPEN', 'Own item', '2026-01-01T00:00:00Z', ?)").run("a".repeat(40));
     await db.prepare("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('pdfcraft', 'private') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility").run();
     const make = async (promptId: string, items: { repo: string; number: number }[], at: string, costUsd: number | null) => {
-      const id = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId, promptVersion: "1", provider: "claude", model: "opus", accountId: null, items, prompt: "private prompt" });
+      const id = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId, promptVersion: "1", provider: "claude", model: "opus", items, prompt: "private prompt" });
       await finishRun(db, id, { state: "done", output: "private output", costUsd });
       await db.prepare("UPDATE agent_runs SET started_at = ?, ended_at = ? WHERE id = ?").run(at, at, id);
       return id;

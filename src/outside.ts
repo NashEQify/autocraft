@@ -7,7 +7,8 @@ import type { Db } from "./db/index.ts";
 import * as intake from "./data/intake/index.ts";
 import type { HiddenRepos, Hold, OutsideLimits, OutsideState, WhitelistInput } from "./data/intake/index.ts";
 
-export { OutsideError, OUTSIDE_SURGE } from "./data/intake/index.ts";
+export { OutsideError } from "./data/intake/index.ts";
+export const OUTSIDE_SURGE = "outside-surge";
 export type { Hold, OutsideLimits, OutsideState } from "./data/intake/index.ts";
 export type OutsideRefresh = { holds: Hold[]; tripped: boolean; wakeAt: number | null };
 

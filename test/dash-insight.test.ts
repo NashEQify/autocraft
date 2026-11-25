@@ -75,7 +75,7 @@ test("an item's status bar queues behind earlier jobs of the step, shows a faile
   await db.run(db.k.insertInto("jobs").values([job(1, "queued"), job(2, "queued"), job(5, "queued"), job(6, "queued")]));
   await db.run(db.k.insertInto("fixups").values({ repo: "app", number: 5, from_head: "h1", state: "failed", reason: "refused: too big", created_at: "2026-01-01T01:00:00Z", attempt: 1 }));
   await db.run(db.k.insertInto("verifications").values({ repo: "app", number: 5, head_sha: "h1", kind: "k", reason: "r", state: "passed", created_at: "2026-01-01T02:00:00Z" }));
-  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "app", number: 5 }], prompt: "x" });
+  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "app", number: 5 }], prompt: "x" });
   await finishRun(db, run, { state: "done", output: "o", costUsd: 0.25 });
   const c = { db, repo: "app", n: 5, ref: "app#5", own: new Set<string>(), box: "", staff: true, veiled: false, operator: true, hidden: [] };
   const bar = await barOf(c, { kind: "pr", state: "open", mergedAt: null, pipelineOn: true }, { phase: "Review", waiting: null, next: null, since: "2026-01-01T00:00:00Z" });

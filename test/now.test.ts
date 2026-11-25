@@ -26,9 +26,9 @@ test("Now lists running work with its items, reports a failing sync, and hides a
   };
   const pj = await job("photocraft", 1);
   await job("secretcraft", 2);
-  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
+  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
   await db.run(db.k.updateTable("agent_runs").set({ job_id: pj }).where("id", "=", run));
-  await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "secretcraft", number: 2 }], prompt: "x" });
+  await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "secretcraft", number: 2 }], prompt: "x" });
   const sync = async (started_at: string, ended_at: string, error: string | null) => await db.run(db.k.insertInto("sync_runs").values({ started_at, ended_at, mode: "full", items: 0, error }));
   await sync(at(40), at(39), null);
   for (const m of [30, 20, 10]) await sync(at(m), at(m - 1), "HTTP 502 from GitHub");
@@ -55,7 +55,7 @@ test("Now lists running work with its items, reports a failing sync, and hides a
 
   // A failed job and a failed model call: staff read the error text, viewers only that it failed.
   await db.run(db.k.insertInto("jobs").values({ step: "opus-review", params: "{}", requested_by: "pipeline", requested_at: at(4), state: "failed", started_at: at(4), ended_at: at(2), error: "exit 1: token ghp_xyz leaked", repo: "photocraft" }));
-  const bad = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
+  const bad = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
   await db.run(db.k.updateTable("agent_runs").set({ state: "failed", ended_at: at(1), error: "stack: boom in /srv/app" }).where("id", "=", bad));
   const texts = (n: Awaited<ReturnType<typeof now>>) => JSON.stringify(n.entries.filter((e) => e.state === "failed").map((e) => [e.title, e.summary]));
   const staff = texts(await now(db, req("operator")));

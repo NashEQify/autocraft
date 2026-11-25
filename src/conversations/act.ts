@@ -15,7 +15,7 @@ import { actBlockedReason } from "../runner/autopilot.ts";
 import { addLabels, closeItem, commentOn, createIssue, IssueError, assignTo, removeLabel, reopenItem, requestReviewers, transferIssue, type Note, type Writer } from "../github/write.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { runPipelineStep } from "../preapproval/index.ts";
-import { answerSeqOf, holdFollowup } from "./held.ts";
+import { holdFollowup } from "./held.ts";
 import type { CardEdit } from "../../web/src/api/types.ts";
 import { repoLabels } from "../labels/github.ts";
 import { Client, type Querier } from "../mirror.ts";
@@ -475,10 +475,8 @@ async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, c
         : await resolveDecision(db, c, s.decision, s.stamp, ctx.note ? `${s.summary}: ${ctx.note}` : s.summary, by, at)).result);
     }
     if (hold.length) {
-      // Bound to the merge path this press made: the pre-approved merge it started, or its Merge answer as the decision's answer history now stands.
-      const decision = preapproval === null && p.settle?.kind === "answer" ? p.settle.decision : null;
-      const answerSeq = decision === null ? null : await answerSeqOf(db, decision);
-      for (const st of hold) await holdFollowup(db, { card_id: c.id, choice_id: c.choice_id ?? null, decision_id: decision, answer_seq: answerSeq, preapproval_id: preapproval, repo: c.repo, number: c.number, issue_repo: st.repo, title: st.title, body: st.body, by, at });
+      // NEEDS card press on runCommand: the held row is bound to the workflow and merge approval the press ran under (`workflow_id`, `approved_at`); until the press runs commands there is none to bind.
+      for (const st of hold) await holdFollowup(db, { card_id: c.id, workflow_id: null, approved_at: null, repo: c.repo, number: c.number, issue_repo: st.repo, title: st.title, body: st.body, by, at });
     }
   } catch (e) {
     const msg = String((e as Error).message ?? e);
@@ -669,10 +667,8 @@ async function failQueued(db: Db, c: CardRow, error: string, deps: StoreDeps): P
 export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?: number } = {}): Promise<{ ran: number; writes: number }> {
   let ran = 0, used = 0;
   for (const q of await queuedCards(db, { all: true })) {
-    if (q.dispute_by) continue;
     const c = await cardOf(db, q.id);
-    // Read again now: a dispute that landed since the list was taken stops the press.
-    if (!c || c.state !== "queued" || !c.acted_by || c.dispute_by) continue;
+    if (!c || c.state !== "queued" || !c.acted_by) continue;
     const nowMs = (deps.now?.() ?? new Date()).getTime();
     let args: QueueArgs, params: CardParams, need: number;
     try {
@@ -692,7 +688,7 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
       const r = await doCard(db, c.id, c.acted_by, { ...deps, drain: true, skip: args.skip, note: args.note, noteStaysOut: args.noteStaysOut, role: args.role, canWrite: undefined });
       if (r.ran) { ran++; used += need; }
       // Room was taken by someone else between the check and the claim: a smaller card behind this one does not jump it.
-      else if ((await cardOf(db, c.id))?.state === "queued" && !(await cardOf(db, c.id))?.dispute_by) break;
+      else if ((await cardOf(db, c.id))?.state === "queued") break;
     } catch (e) {
       if (e instanceof ConversationError && e.status === 503) continue;
       await failQueued(db, c, oneLine(String((e as Error).message ?? e)), deps);

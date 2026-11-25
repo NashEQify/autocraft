@@ -204,7 +204,7 @@ describe("security deep scan", () => {
     const jobs = (c: Client) => c.get<{ jobs: { step: string }[] }>("/api/pipeline/jobs");
     assert.equal((await jobs(viewer)).jobs.filter((j) => j.step === "security-scan").length, 0);
     assert.equal((await jobs(boss)).jobs.filter((j) => j.step === "security-scan").length, 1);
-    const runId = await insertRun(db, { jobId: null, step: "security-scan", stage: 9, promptId: "security.area", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: securityRepo("photocraft"), number: 1 }], prompt: "p" });
+    const runId = await insertRun(db, { jobId: null, step: "security-scan", stage: 9, promptId: "security.area", promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: securityRepo("photocraft"), number: 1 }], prompt: "p" });
     const runs = (c: Client) => c.get<{ runs: { id: number }[] }>("/api/agents?limit=200");
     assert.ok(!(await runs(viewer)).runs.some((r) => r.id === runId));
     assert.ok((await runs(maint)).runs.some((r) => r.id === runId));
@@ -225,7 +225,7 @@ describe("security deep scan", () => {
     const id = await newScan(null);
     const model = fakeModel();
     const ask = (async (kind: string, input: unknown) => {
-      const runId = await insertRun(db, { jobId: null, step: "security-scan", stage: 9, promptId: kind, promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: securityRepo("photocraft"), number: id }], prompt: `prompt of ${kind}` });
+      const runId = await insertRun(db, { jobId: null, step: "security-scan", stage: 9, promptId: kind, promptVersion: "1", provider: "claude", model: "opus", items: [{ repo: securityRepo("photocraft"), number: id }], prompt: `prompt of ${kind}` });
       return { ...(await (model.ask as (k: string, i: unknown) => Promise<object>)(kind, input)), runId };
     }) as Ask;
     await runScan(db, id, { ...model, ask });

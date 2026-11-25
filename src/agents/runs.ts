@@ -148,3 +148,6 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
 export async function pruneRuns(db: Db, nowMs: number = Date.now()): Promise<{ texts: number; runs: number }> {
   return await inference.pruneRuns(db, nowMs);
 }
+
+/** Server accounts are retired: no run carries an account label. Kept for the job pages until they drop the field. */
+export const accountLabelsByJob = async (_db: Db, _jobIds: number[]): Promise<Map<number, string[]>> => new Map();
