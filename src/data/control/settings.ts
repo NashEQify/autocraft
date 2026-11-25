@@ -166,7 +166,13 @@ function makeConfig(get: Get): Config {
 
 // ---- the snapshot ------------------------------------------------------------------------------------------------------
 
-type Store = { db: Db; map: Map<string, string | null>; live: ReadonlySet<string>; watch: boolean; dirty: boolean; reread?: Promise<void>; at: number };
+type Store = {
+  db: Db; map: Map<string, string | null>; live: ReadonlySet<string>; watch: boolean; dirty: boolean; reread?: Promise<void>; at: number;
+  /** Writes of the table seen on the handle. */
+  writes: number;
+  /** The reading of each open transaction that found the snapshot due, for that transaction alone; `writes` as of that reading. */
+  tx: WeakMap<object, { read: Promise<SettingsSnapshot>; map?: SettingsSnapshot; writes: number }>;
+};
 
 /** The snapshot of the pass running in the current async context, for the handle it was read on. */
 const pass = new AsyncLocalStorage<Store>();
@@ -175,7 +181,10 @@ const pass = new AsyncLocalStorage<Store>();
 // so a step reads back what it wrote. A planner pass writes its cursors through writeSetting, which keeps its map current.
 onSettingsWrite((db) => {
   const s = pass.getStore();
-  if (s?.watch && s.db === db) s.dirty = true;
+  if (s?.watch && s.db === db) {
+    s.dirty = true;
+    s.writes++;
+  }
 });
 
 /** A watching snapshot older than this is read again, so settings other processes change reach a long job. */
@@ -187,19 +196,24 @@ export const freshSettings = <T>(fn: () => Promise<T>): Promise<T> => pass.getSt
 /**
  * The snapshot's map, read again first when it is watching and due; undefined outside a snapshot on `db` and for `live` keys.
  * A read due is shared by the contexts that wait for it, except inside a transaction: a transaction that waited for a read
- * queued behind its own connection would never end. It reads on its own connection and leaves the shared read due.
+ * queued behind its own connection would never end. It reads on its own connection, once unless the table is written, keeps
+ * that reading to itself (it may be older than the shared one, or never be committed) and leaves the shared read due.
  */
 const snapshotOf = async (db: Db, ...keys: string[]): Promise<Map<string, string | null> | undefined> => {
   const s = pass.getStore();
   if (s?.db !== db || keys.some((k) => s.live.has(k))) return undefined;
   if (s.watch && Date.now() - s.at > MAX_AGE_MS) s.dirty = true;
   const read = (): Promise<SettingsSnapshot> => db.fresh(() => readSettingsSnapshot(db));
-  if (db.inTransaction()) {
-    if (s.dirty) {
-      s.map = await read();
-      s.dirty = true;
-    }
-    return s.map;
+  const tx = db.transaction();
+  if (tx) {
+    const had = s.tx.get(tx);
+    if (had?.writes === s.writes) return await had.read;
+    if (!had && !s.dirty) return s.map;
+    const own: NonNullable<typeof had> = { read: read(), writes: s.writes };
+    s.tx.set(tx, own);
+    // A read that failed is made again by the next caller.
+    own.read.then((m) => { own.map = m; }, () => { if (s.tx.get(tx) === own) s.tx.delete(tx); });
+    return await own.read;
   }
   while (s.dirty || s.reread) {
     if (!s.reread) {
@@ -210,6 +224,22 @@ const snapshotOf = async (db: Db, ...keys: string[]): Promise<Map<string, string
   }
   return s.map;
 };
+
+/** The stored values as this context's last reading has them: its transaction's, else the shared ones. */
+const mapOf = (s: Store): Map<string, string | null> => {
+  const tx = s.db.transaction();
+  return (tx && s.tx.get(tx)?.map) || s.map;
+};
+
+/** Keeps the snapshot on `db` current after a write; null deletes. */
+function noteWritten(db: Db, rows: Iterable<readonly [string, string | null]>): void {
+  const s = pass.getStore();
+  if (s?.db !== db) return;
+  for (const map of new Set([s.map, mapOf(s)])) for (const [key, value] of rows) {
+    if (value === null) map.delete(key);
+    else map.set(key, value);
+  }
+}
 
 export interface SnapshotOptions {
   /** Keys every read takes from the table: settings a running step polls (the pipeline switch, limits). */
@@ -229,7 +259,7 @@ export async function withSettingsSnapshot<T>(db: Db, fn: () => Promise<T>, read
     await snapshotOf(db);
     return await fn();
   }
-  return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)), live: new Set(opts.live), watch: !!opts.watchWrites, dirty: false, at: Date.now() }, fn);
+  return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)), live: new Set(opts.live), watch: !!opts.watchWrites, dirty: false, at: Date.now(), writes: 0, tx: new WeakMap() }, fn);
 }
 
 export type SettingsSnapshot = Map<string, string | null>;
@@ -283,15 +313,13 @@ export async function hasSetting(db: Db, key: string): Promise<boolean> {
 export async function writeSetting(db: Db, key: string, value: string): Promise<void> {
   const q = queryDb(db);
   await q.run(q.k.insertInto("main.settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
-  const s = pass.getStore();
-  if (s?.db === db) s.map.set(key, value);
+  noteWritten(db, [[key, value]]);
 }
 
 export async function deleteSetting(db: Db, key: string): Promise<void> {
   const q = queryDb(db);
   await q.run(q.k.deleteFrom("main.settings").where("key", "=", key));
-  const s = pass.getStore();
-  if (s?.db === db) s.map.delete(key);
+  noteWritten(db, [[key, null]]);
 }
 
 // ---- configuration ----------------------------------------------------------------------------------------------------
@@ -310,7 +338,7 @@ export async function withConfig<T>(db: Db, fn: () => Promise<T>, o?: { live?: r
 export function config(db: Db): Config {
   const s = pass.getStore();
   if (s?.db !== db) throw new Error("config: no settings snapshot on this handle (wrap the unit of work in withConfig)");
-  return makeConfig((k) => s.map.get(k) ?? undefined);
+  return makeConfig((k) => mapOf(s).get(k) ?? undefined);
 }
 
 /**
@@ -371,11 +399,7 @@ export async function saveSettings(db: Db, rows: SettingPatch[], by: string, aud
     for (const part of kx.batches(dels)) await q.run(q.k.deleteFrom("main.settings").where(kx.inList(db, "key", part)));
     await addAudit(db, [{ login: by, action: audit?.action ?? "settings-save", target: audit?.target ?? "settings", details: audit?.details ?? { set: sets.map((s) => s.key), deleted: dels } }]);
   });
-  const s = pass.getStore();
-  if (s?.db === db) {
-    for (const r of sets) s.map.set(r.key, r.value);
-    for (const k of dels) s.map.delete(k);
-  }
+  noteWritten(db, [...keyed]);
   return keyed.size;
 }
 

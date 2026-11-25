@@ -7,6 +7,9 @@ import { CLAUDE_PROMPTS, type ClaudePromptId } from "../prompts/index.ts";
 import { AREAS_MAX, FINDINGS_PER_AREA_MAX } from "../security/rules.ts";
 import { stepMaxMin } from "../stages/registry.ts";
 
+/** How long a part of the runner's work fails before it counts as failing (the health check, and which failure it shows). */
+export const RUNNER_FAILING_MS = 60_000;
+
 /** One call per item. `lint`: follow-up turns of the same call (one per lint round). */
 type Call = { id: ClaudePromptId; lint?: boolean };
 /** `items`: the job's items when its params have no `limit`. */

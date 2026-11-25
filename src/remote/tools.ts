@@ -315,6 +315,9 @@ export async function archiveOf(lease: TaskLease, repo: string, sha: string, opt
         try { renameSync(tmp, file); pruneArchives(dir, name); } catch { rmSync(tmp, { force: true }); }
       });
     });
-  })();
+  })().catch((e: unknown) => {
+    release();
+    out.destroy(e as Error);
+  });
   return out;
 }

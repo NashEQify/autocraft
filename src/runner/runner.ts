@@ -36,7 +36,7 @@ import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
 import { noTakerFor } from "../remote/takers.ts";
-import { JOB_DEADLINE_ENV, stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
+import { JOB_DEADLINE_ENV, RUNNER_FAILING_MS, stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
@@ -57,7 +57,7 @@ export function runnerLockPath(): string {
 
 /** The lane_state mark the runner writes on every tick. */
 export const HEARTBEAT_MARK = "heartbeat";
-/** The failure of the runner's passes as JSON TickFailure, written with the heartbeat; "" once a pass went through. */
+/** The worst failure of the runner's parts as JSON TickFailure, written with the heartbeat; "" while none fails. */
 export const TICK_FAILURE_MARK = "tick_failure";
 /** How often queued webhook items are read again from GitHub. */
 export const WEBHOOK_DRAIN_MS = 5_000;
@@ -123,10 +123,13 @@ function numberOfParams(params: string): number | null {
 type TickReads = Awaited<ReturnType<Runner["load"]>>;
 
 /**
- * Since when every pass of the runner failed in some part, and the latest pass's error: `fail` when its reads, its cancels or
- * the pass itself failed, `warn` when only another part did (one that reads GitHub fails with it).
+ * Since when a part of the runner's work has failed each time it ran, and its latest error: `fail` for a pass's reads, its
+ * cancels or the pass itself, `warn` for any other part.
  */
 export type TickFailure = { since: string; state: "warn" | "fail"; error: string };
+
+/** The part that reads a pass's one wave; when it fails, the parts read one by one. */
+const READS = "the pass's reads, now made one by one";
 
 export class Runner {
   readonly db: Db;
@@ -144,10 +147,9 @@ export class Runner {
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
   private detected: Detected | null = null;
-  /** How the passes fail now, and what is stored of it (undefined: what an earlier runner left). */
-  private tickFailure: TickFailure | null = null;
+  /** The parts that failed when they last ran (not every part runs on every pass), and what is stored of them (undefined: what an earlier runner left). */
+  private readonly failing = new Map<string, TickFailure>();
   private storedFailure: string | undefined;
-  private passErrors: Omit<TickFailure, "since">[] = [];
   /** Jobs were queued at the last look: the next tick reads the model queue's room with the rest. */
   private jobsWaited = false;
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
@@ -195,26 +197,29 @@ export class Runner {
    * One pass: heartbeat, cancels, autopilot, new jobs. Everything it decides on is read in one wave; a part that changed
    * something (a job's end recorded, proposals applied) makes the parts after it read again, and so does a wave that failed:
    * one broken read then stops its own part only. The heartbeat and the jobs' new log lines are written beside it: it ends
-   * once they have landed. The heartbeat carries how the passes before it failed, for the health check.
+   * once they have landed. The heartbeat carries how the parts fail since the passes before it, for the health check.
    */
   async tick(): Promise<void> {
-    const failure = this.tickFailure ? JSON.stringify(this.tickFailure) : "";
+    const worst = this.worstFailure(), failure = worst ? JSON.stringify(worst) : "";
+    // Writes are awaited at the end of the pass, so each handles its own failure: a promise that rejects before that would end the process.
     const beside = [saveLaneState(this.db, [{ kind: "mark", step: HEARTBEAT_MARK, value: now() }, ...(failure !== this.storedFailure ? [{ kind: "mark" as const, step: TICK_FAILURE_MARK, value: failure }] : [])])
-      .then(() => { this.storedFailure = failure; })];
-    this.passErrors = [];
+      .then(() => { this.storedFailure = failure; }, (e) => this.o.log(`runner: heartbeat not stored: ${(e as Error)?.message ?? String(e)}`))];
     try {
       await this.pass(beside);
+      this.passed("pass");
     } catch (e) {
-      this.passErrors.push({ state: "fail", error: errorText(e) });
+      this.noteFailure("pass", e, "fail");
       throw e;
     } finally {
-      const worst = this.passErrors.find((e) => e.state === "fail") ?? this.passErrors[0];
-      this.tickFailure = worst ? { since: this.tickFailure?.since ?? now(), ...worst } : null;
-      const ends = await Promise.allSettled(beside);
-      const failed = ends.find((e) => e.status === "rejected");
-      // A pass that failed has its own error on the way.
-      if (failed) this.o.log(`runner: heartbeat or job logs not stored: ${(failed.reason as Error)?.message ?? String(failed.reason)}`);
+      await Promise.all(beside);
     }
+  }
+
+  /** The failure the health check shows: of those that have lasted, else of all, a `fail` before a `warn`, then the oldest. */
+  private worstFailure(): TickFailure | null {
+    const t = Date.now();
+    const rank = (f: TickFailure): number => (t - Date.parse(f.since) >= RUNNER_FAILING_MS ? 2 : 0) + (f.state === "fail" ? 1 : 0);
+    return [...this.failing.values()].sort((a, b) => rank(b) - rank(a) || Date.parse(a.since) - Date.parse(b.since))[0] ?? null;
   }
 
   private async pass(beside: Promise<void>[]): Promise<void> {
@@ -232,6 +237,7 @@ export class Runner {
         await this.checkRunning(wave.jobs.running);
         beside.push(this.copyRunningLogs());
       } else await this.cancels();
+      this.passed("cancels");
     } catch (e) { this.fault("cancels", e, "fail"); }
     if (await this.recordEnds()) read.stale = true;
     if (this.stopping) return;
@@ -241,10 +247,14 @@ export class Runner {
         read.stale = true;
         this.o.log(`${lost} build tasks lost their worker`);
       }
+      this.passed("build tasks");
     } catch (e) { this.fault("build tasks", e); }
     try {
       const hooks = wave ? wave.webhooks : read.webhooksDue ? await this.webhookWork() : null;
-      if (hooks) this.webhookTick(...hooks);
+      if (hooks) {
+        this.passed("webhooks");
+        this.webhookTick(...hooks);
+      }
     } catch (e) { this.fault("webhooks", e); }
     this.reconcileTick();
     await this.pruneTick();
@@ -253,9 +263,18 @@ export class Runner {
     await this.startJobs(read);
   }
 
-  /** Logs the failure of a part of the pass; the pass goes on and counts as failed (TickFailure). */
+  /** The part ran and did not fail. */
+  private passed(part: string): void {
+    this.failing.delete(part);
+  }
+
+  private noteFailure(part: string, e: unknown, state: TickFailure["state"]): void {
+    this.failing.set(part, { since: this.failing.get(part)?.since ?? now(), state, error: `${part}: ${errorText(e)}` });
+  }
+
+  /** Logs the failure of a part of the pass; the pass goes on, and the part counts as failing until it runs through (TickFailure). */
   private fault(part: string, e: unknown, state: TickFailure["state"] = "warn"): void {
-    this.passErrors.push({ state, error: `${part}: ${errorText(e)}` });
+    this.noteFailure(part, e, state);
     this.o.log(`${part}: ${(e as Error)?.message ?? String(e)}`);
   }
 
@@ -273,9 +292,10 @@ export class Runner {
         webhooksDue ? this.webhookWork() : null,
         refreshReadIdentity(db).catch((e: unknown) => this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`)),
       ]));
+      this.passed(READS);
       return { at, wave: { ...start, staleTasks, fixes, scanTests, seqs, plan, webhooks }, webhooksDue, stale: false };
     } catch (e) {
-      this.fault("the pass's reads, now made one by one", e, "fail");
+      this.fault(READS, e, "fail");
       return { at, wave: null, webhooksDue, stale: true };
     }
   }
@@ -374,6 +394,7 @@ export class Runner {
           const fixes = await autoFixConfirmed(this.db);
           if (fixes) this.o.log(`autopilot: started the private fix of ${fixes} confirmed security findings`);
         }
+        this.passed("autopilot");
       } catch (e) { this.fault("autopilot", e); }
     }
     // What a part reads while nothing wrote since the wave.
@@ -384,6 +405,7 @@ export class Runner {
       const next = await (w ? advanceSecurityFixes(this.db, w.on, w.fixes) : advanceSecurityFixes(this.db, await isEnabled(this.db)));
       if (next) read.stale = true;
       if (next) this.o.log(`security: continued the private fix of ${next} findings after their builds`);
+      this.passed("security fixes");
     } catch (e) { this.fault("security fixes", e); }
     // The build task of a scan test is read here (database only); a finding whose test ended can then start its automatic fix.
     try {
@@ -392,37 +414,60 @@ export class Runner {
         this.o.log(`security: scan test of ${t.repo} finding ${t.number}: ${t.state}`);
         if (await isEnabled(this.db) && t.state !== "not-shown") await autoFixConfirmed(this.db, t.repo, t.number);
       }
+      this.passed("security scan tests");
     } catch (e) { this.fault("security scan tests", e); }
     // Pre-approved merges move on rows other steps wrote; they are read here, not on a timer of their own.
     try { await this.preapprovals(read); } catch (e) { this.fault("preapprovals", e); }
+    if (this.planning) return;
     try {
-      if (this.planning || !await planDue(this.db, read.at, wave()?.plan ?? undefined)) return;
+      const due = await planDue(this.db, read.at, wave()?.plan ?? undefined);
+      this.passed("planner reads");
+      if (!due) return;
     } catch (e) {
-      this.fault("autopilot", e);
+      this.fault("planner reads", e);
       return;
     }
     this.planning = this.detect(Date.now())
-      .then((d) => { this.detected = d; }, (e) => this.o.log(`autopilot: detection failed: ${(e as Error).message}`))
+      .then((d) => { this.detected = d; this.passed("planner"); }, (e) => this.fault("planner", e))
       .finally(() => (this.planning = null));
   }
 
   /**
    * The pre-approval pass, when what it reads changed since the last one (read before it runs, so its own moves make the next tick run it
-   * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that throws runs
-   * again on the next tick.
+   * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that failed in any
+   * part runs again on the next tick.
    */
   private async preapprovals(read: TickReads): Promise<void> {
     const t = Date.now();
     const sig = preapprovalInputs(read.stale || !read.wave ? await this.db.seqs() : read.wave.seqs);
     const m = this.preapprovalMark;
-    if (m && m.sig === sig && t < m.wakeAt) return;
+    if (m && m.sig === sig && t < m.wakeAt) return this.passed("preapprovals");
     this.preapprovalMark = null;
     read.stale = true;
     const next = { sig, wakeAt: Infinity };
-    // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on.
-    try { await advanceWorkflows(this.db, this.o.log); } catch (e) { this.fault("workflows", e); }
-    try { await endGoneCloses(this.db); } catch (e) { this.fault("closes", e); }
-    await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < next.wakeAt) next.wakeAt = at; });
+    const wake = (at: number): void => { if (at < next.wakeAt) next.wakeAt = at; };
+    // The maintainer workflow's blockers and recommendations come first: a blocker stops its merge leg before the leg moves on,
+    // so legs wait while the blockers could not be checked.
+    let checked = false;
+    try {
+      await advanceWorkflows(this.db, this.o.log, wake);
+      checked = true;
+      this.passed("workflows");
+    } catch (e) {
+      this.fault("workflows", e);
+      wake(t);
+    }
+    try {
+      await endGoneCloses(this.db);
+      this.passed("closes");
+    } catch (e) {
+      this.fault("closes", e);
+      wake(t);
+    }
+    if (checked) {
+      await advancePreapprovals(this.db, this.o.log, {}, wake);
+      this.passed("preapprovals");
+    }
     this.preapprovalMark = next;
   }
 

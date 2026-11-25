@@ -9,7 +9,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import type { Ref } from "../keys.ts";
 import { addAudit } from "../control/audit.ts";
 import { loadItems, loadMergedClosures } from "../mirror/index.ts";
-import { dupeEdgeRows, dupeMemberRows, uncheckedCountRows, uncheckedPairRows } from "./cross.ts";
+import { dupeEdgeRows, dupeMemberRows, onEdgeExpr, uncheckedCountRows, uncheckedPairRows } from "./cross.ts";
 import type { CanonInfo, ComparisonPut, DupeGroupPut, DupeSignal, DupeState, Pair, PairKey, PairVerdictPut, RefKey, ScanContext } from "./types.ts";
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
@@ -205,13 +205,14 @@ export async function loadDupeGroups(db: Db, o: { repo?: string } = {}): Promise
   return [...out.values()];
 }
 
-/** The item's group id, role, target and the reason of the newest comparison that covers it. */
+/** The item's group id, role, target and the reason of the newest comparison that covers it; none while no duplicate edge of the item holds, whatever group is stored. */
 export async function loadDupeSignals(db: Db, keys: KeySource): Promise<Map<RefKey, DupeSignal>> {
   if (Array.isArray(keys) && !keys.length) return new Map();
   const q = queryDb(db), k = q.k as any;
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("dupe_group_items as gi").innerJoin(resolveKeys(db, keys, "kk"), onKey("kk", "gi"))
     .leftJoin("dupe_comparisons as c", (j: any) => j.onRef("c.repo", "=", "gi.repo").onRef("c.kind", "=", "gi.kind").on((w: any) =>
       w.exists(w.selectFrom(kx.jsonEach(db, "c.members", "je", "bigint")).select(w.lit(1).as("one")).whereRef("je.value", "=", "gi.number"))))
+    .where((e: any) => onEdgeExpr(db, e, "gi.repo", "gi.number"))
     .select((e: any) => ["gi.repo", "gi.number", "gi.role", "gi.target", "c.reason", "gi.group_id",
       e.fn.agg("row_number").over((o: any) => o.partitionBy(["gi.repo", "gi.number"]).orderBy("c.at", (d: any) => d.desc().nullsLast()).orderBy("gi.group_id", "desc")).as("rn")]).as("t"))
     .select(["t.repo", "t.number", "t.role", "t.target", "t.reason", "t.group_id"]).where("t.rn", "=", 1)) as { repo: string; number: number; role: string; target: number | null; reason: string | null; group_id: string }[];

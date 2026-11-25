@@ -376,6 +376,7 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const rowsDone = c?.[1] === "x", pendingDone = c?.[2] === "x";
   // Rows done: the pre-approvals are all that is left, so the queue page is not built again.
   const visibleNames = visibleTo(env.db, user);
+  void visibleNames.catch(() => {});
   const [page, merging, legs] = await Promise.all([
     rowsDone
       ? { total: 0, mergeRows: [], nextMerges: [], batches: [], next: null }

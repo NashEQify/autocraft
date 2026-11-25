@@ -154,6 +154,8 @@ export interface Db {
   afterCommit(fn: () => void | Promise<void>): void;
   /** Whether a transaction is open in the current async context; with `mode`, one of that kind (a read snapshot or a write). */
   inTransaction(mode?: "read" | "write"): boolean;
+  /** The open transaction of the current async context, as a key for what belongs to it alone; undefined outside one. */
+  transaction(): object | undefined;
   /**
    * Makes this handle see tracked repos only: views filtered to tracked_repos shadow the mirror and work tables
    * (src/db/scoped.ts), and writes to those tables name them with `main.`. On SQLite they are TEMP views on the

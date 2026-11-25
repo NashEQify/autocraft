@@ -3833,7 +3833,11 @@ async function cmdWork(argv) {
   /** @type {Promise<void>[]} */
   const interactiveRuns = [];
   /** @param {number} want */
-  const startInteractive = (want) => { while (interactiveLoops < want) { interactiveLoops++; interactiveRuns.push(loop(false, false, true).then(() => {})); } };
+  const startInteractive = (want) => { while (interactiveLoops < want) { interactiveLoops++; interactiveRuns.push(loop(false, false, true).catch((e) => {
+    // The server's next reply starts another.
+    interactiveLoops--;
+    console.log(`an interactive lane ended: ${msg(e)}`);
+  })); } };
   /** @param {number | undefined} slot @param {boolean} fastLane @param {boolean} ownLane @param {boolean} [interactiveLane] */
   const claimLoop = async (slot, fastLane, ownLane, interactiveLane = false) => {
     let claimId = newClaimId();

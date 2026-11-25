@@ -577,6 +577,7 @@ export class Handle implements QueryDb {
       r = await fn();
     } catch (e) {
       await this.#engine.script(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`, tx);
+      if (settingsWriteHook && this.#settingsTx.has(tx)) settingsWriteHook(this);
       throw e;
     }
     await this.#engine.script(`RELEASE SAVEPOINT ${name}`, tx);
@@ -586,6 +587,11 @@ export class Handle implements QueryDb {
   inTransaction(mode?: Tx["mode"]): boolean {
     const tx = this.#current();
     return tx !== undefined && (mode === undefined || tx.mode === mode);
+  }
+
+  transaction(): object | undefined {
+    const tx = this.#als.getStore();
+    return tx?.state === "open" ? tx : undefined;
   }
 
   async scope(): Promise<void> {

@@ -51,6 +51,25 @@ test("a switch changed by another process reaches a running job", async () => {
   }, db);
 });
 
+test("a transaction reads the settings once when they are due, sees its own write, and keeps its reading to itself", async () => {
+  const { db } = await world();
+  await asJob(async (put, later) => {
+    const outside = new AsyncResource("another branch of the job");
+    later();
+    await db.write(async () => {
+      const { stats } = await db.meter(async () => {
+        for (let i = 0; i < 3; i++) assert.equal(await featureOn(db, "implement", "app"), false);
+      });
+      assert.equal(stats.statements, 1);
+      await put("on");
+      assert.equal(await featureOn(db, "implement", "app"), true);
+      assert.equal(config(db).repo("app").buildFeature("implement"), true);
+      assert.equal(outside.runInAsyncScope(() => config(db).repo("app").buildFeature("implement")), false, "not committed yet");
+    });
+    assert.equal(await featureOn(db, "implement", "app"), true);
+  }, db);
+});
+
 test("a settings read in a transaction does not wait for one outside it", async () => {
   const { db } = await world();
   await asJob(async (_put, later) => {

@@ -14,6 +14,7 @@ import { acceptedModels, familyOf } from "./remote/mode.ts";
 import { envVar } from "./env.ts";
 import type { Db } from "./db/index.ts";
 import { BEAT_MS } from "./db/leader.ts";
+import { RUNNER_FAILING_MS } from "./runner/deadlines.ts";
 import { STATUS_FRESH_MS } from "./data/runners/index.ts";
 import { loadHealthFacts, loadTakerRows, type HealthEnv, type HealthFacts, type TakerRow } from "./data/views/health.ts";
 
@@ -21,8 +22,8 @@ import { loadHealthFacts, loadTakerRows, type HealthEnv, type HealthFacts, type 
 export const THRESHOLDS = {
   /** The runner writes its heartbeat every few seconds. */
   runnerStaleMs: 2 * 60_000,
-  /** A pass that failed is followed by the next within seconds; passes that keep failing this long show. */
-  runnerFailingMs: 60_000,
+  /** A part of the runner's work that keeps failing this long shows. */
+  runnerFailingMs: RUNNER_FAILING_MS,
   /** The leader of the runner and of the periodic chores writes its status every BEAT_MS; standbys too. */
   leaderStaleMs: 6 * BEAT_MS,
   /** The leader rewrites the worker API's EndpointSlice at its next beat; past this it names another address for real. */
@@ -85,7 +86,7 @@ async function runnerCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
   if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) {
     const t = f.tickFailure;
     if (!t || nowMs - Date.parse(t.since) < THRESHOLDS.runnerFailingMs) return [ok("runner", "/pipeline")];
-    const brief = "Parts of the runner's work have failed on every pass";
+    const brief = "A part of the runner's work has been failing";
     return [{ id: "runner", state: t.state, text: `${brief} for ${minutes(nowMs - Date.parse(t.since))}: ${t.error}`, brief, since: t.since, to: "/pipeline" }];
   }
   const text = Number.isNaN(beat) ? "The runner has not reported" : `The runner has not reported for ${minutes(nowMs - beat)}`;

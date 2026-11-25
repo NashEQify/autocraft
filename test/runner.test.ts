@@ -242,6 +242,85 @@ describe("runner", () => {
     await r.stop();
   });
 
+  test("a part that fails each time it runs shows although the passes between did not run it, until it runs through", async (t) => {
+    const lines: string[] = [];
+    let detect: () => Promise<{ proposals: []; logs: [] }> = async () => ({ proposals: [], logs: [] });
+    const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: (l) => lines.push(l), detect: () => detect() });
+    const check = async () => (await computeChecks(db, Date.now() + 90_000)).find((c) => c.id === "runner")!;
+    const webhooksDue = () => { (r as unknown as { webhookAt: number }).webhookAt = 0; };
+    const planAgain = () => db.run(db.k.deleteFrom("lane_state").where("kind", "=", "mark").where("step", "=", "planned_at"));
+    const pass = async () => { await r.tick(); await new Promise((ok) => setTimeout(ok, 20)); };
+    await pass();
+    const broken = t.mock.method(r as unknown as { webhookWork: () => Promise<unknown> }, "webhookWork", async () => { throw new Error("no webhook reads"); });
+    webhooksDue();
+    for (let i = 0; i < 3; i++) await pass();
+    const { since } = await check();
+    assert.ok(since);
+    webhooksDue();
+    for (let i = 0; i < 3; i++) await pass();
+    const bad = await check();
+    assert.deepEqual([bad.state, bad.since], ["warn", since]);
+    assert.match(bad.text, /no webhook reads/);
+    broken.mock.restore();
+    webhooksDue();
+    await pass();
+    await pass();
+    assert.equal((await check()).state, "ok");
+
+    detect = async () => { throw new Error("no plan"); };
+    await planAgain();
+    await pass();
+    await pass();
+    assert.match((await check()).text, /no plan/);
+    detect = async () => ({ proposals: [], logs: [] });
+    await planAgain();
+    await pass();
+    await pass();
+    assert.equal((await check()).state, "ok");
+    await r.stop();
+  });
+
+  test("a workflow pass that throws runs again on the next tick, and the merge legs wait for it", async (t) => {
+    const lines: string[] = [];
+    const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });
+    await r.tick();
+    await r.tick();
+    (r as unknown as { preapprovalMark: null }).preapprovalMark = null;
+    const all = db.all.bind(db);
+    t.mock.method(db, "all", async (q: Parameters<typeof db.all>[0], o?: never) => {
+      if (/item_workflows/.test(q.compile().sql)) throw new Error("no workflows");
+      return await all(q, o);
+    });
+    try {
+      await r.tick();
+      await r.tick();
+      assert.equal(lines.filter((l) => l === "workflows: no workflows").length, 2, lines.join("\n"));
+      assert.ok(!lines.some((l) => l.startsWith("preapproval")), lines.join("\n"));
+    } finally { t.mock.restoreAll(); }
+    lines.length = 0;
+    await r.tick();
+    await r.tick();
+    assert.deepEqual(lines, []);
+    await r.stop();
+  });
+
+  test("a heartbeat that cannot be stored while the pass still runs is logged and ends nothing", async (t) => {
+    const lines: string[] = [];
+    const r = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });
+    const seqs = db.seqs.bind(db);
+    t.mock.method(db, "seqs", async (topics?: readonly string[]) => { await new Promise((ok) => setTimeout(ok, 100)); return await seqs(topics); });
+    const run = db.run.bind(db);
+    let refused = 0;
+    t.mock.method(db, "run", async (q: Parameters<typeof db.run>[0]) => {
+      if (!refused && q.compile().sql.includes("lane_state")) { refused++; throw new Error("lock timeout"); }
+      return await run(q);
+    });
+    try { await r.tick(); } finally { t.mock.restoreAll(); }
+    assert.equal(refused, 1);
+    assert.ok(lines.some((l) => /heartbeat not stored: lock timeout/.test(l)), lines.join("\n"));
+    await r.stop();
+  });
+
   test("a resumed job does not post again a comment its earlier run posted", async () => {
     const id = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "boss", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString() }).returning("id")))!.id);
     setCallContext({ jobId: id, step: "test-echo", stage: 2, cancelled: async () => false });

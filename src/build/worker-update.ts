@@ -55,6 +55,8 @@ export const sshAdmin: WorkerAdmin = {
     let gitErr = "";
     git.stderr.on("data", (d) => (gitErr += d));
     const gitDone = new Promise<number | null>((resolve, reject) => { git.on("error", reject); git.on("close", resolve); });
+    // Awaited only after ssh has ended: a git that cannot start fails this update, not the process.
+    gitDone.catch(() => {});
     const r = await collect("ssh", [...sshArgs(s), "update", s.sha], git.stdout);
     const gitCode = await gitDone;
     if (gitCode !== 0) throw new Error(`git archive failed: ${gitErr.trim().slice(-300)}`);
