@@ -12,26 +12,24 @@ import type { RunRow, ItemRun } from "../inference/types.ts";
 import type { TaskCard, TaskEvent, ArtifactRow } from "../build/types.ts";
 import type { MentionRow } from "../discord/types.ts";
 
-// S1: each alias below stands for a type of a module written by package S1. Replace it with an `import type` from
-// `../<module>/types.ts` once that module is merged.
-export type TrackedRepo = Record<string, unknown>;
-export type RepoRow = Record<string, unknown>;
-export type TripRow = Record<string, unknown>;
-export type HeldAuthorRow = Record<string, unknown>;
-export type StoredEvent = Record<string, unknown>;
-export type Preapproval = Record<string, unknown>;
-export type LegWaitInputs = Record<string, unknown>;
-export type DuplicateRow = Record<string, unknown>;
-export type HoldStatus = Record<string, unknown>;
-export type WriteLogRow = Record<string, unknown>;
-export type CommentRow = Record<string, unknown>;
-export type HealthFacts = Record<string, unknown>;
-export type JobRow = Record<string, unknown>;
-export type JobItemRow = Record<string, unknown>;
-export type LaneFacts = Record<string, unknown>;
+import type { TrackedRepo, TripRow, WriteLogRow } from "../control/types.ts";
+import type { RepoRow, CommentRow } from "../mirror/types.ts";
+import type { HeldAuthorRow, HoldStatus } from "../intake/types.ts";
+import type { Preapproval, StoredEvent } from "../workflow/types.ts";
+import type { JobItemRow, JobRow } from "../jobs/types.ts";
+import type { DupeSignal } from "../triage/types.ts";
 
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+export type { TrackedRepo, TripRow, WriteLogRow, RepoRow, CommentRow, HeldAuthorRow, HoldStatus, Preapproval, StoredEvent, JobItemRow, JobRow };
+// S1 has no types for these three; they stay open until the view files define them.
+export type LegWaitInputs = Record<string, unknown>;
+export type HealthFacts = Record<string, unknown>;
+export type LaneFacts = Record<string, unknown>;
+/** S1 names the duplicate signal of an item `DupeSignal`. */
+export type DuplicateRow = DupeSignal;
+
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 export type Role = "operator" | "maintainer" | "viewer";
 export type HiddenRepos = string[] & { visible?: string[] };
 export type Permission = "read" | "write" | "admin";

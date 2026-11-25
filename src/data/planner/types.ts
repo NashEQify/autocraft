@@ -1,11 +1,11 @@
+import type { RefKey } from "../mirror/types.ts";
 import type { Action, ActionKind, WaitKind } from "../../core/plan.ts";
 import type { CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView } from "../../core/plan-cache.ts";
 import type { KeySource } from "../keys.ts";
 
 export type { Action, ActionKind, CifixBucket, FixupBucket, PlanHistoryRow, PlanRow, PlanView, QueueView, WaitKind };
 
-// S1: same as RefKey in ../mirror/types.ts; import it from there once S1 is merged.
-export type RefKey = string;
+export type { RefKey };
 export type ItemKeys = KeySource;
 export type HiddenRepos = ReadonlySet<string>;
 

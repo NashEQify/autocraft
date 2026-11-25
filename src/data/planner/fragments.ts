@@ -6,6 +6,9 @@ import * as kx from "../../db/kx.ts";
 import { schemaEb, type Eb } from "../../db/kx.ts";
 import { PASS_SOURCES, registerKeySource, resolveKeys, type KeyRow, type KeySource, type Ref } from "../keys.ts";
 import { ENDED_STATES } from "../implement/types.ts";
+import { hasTakeReview } from "../review/fragments.ts";
+import { trackedRepo } from "../control/fragments.ts";
+import { mergedByUs } from "../merge/fragments.ts";
 
 /** A change log longer than this selects nothing: the pass becomes a full pass (core/plan-changes.ts). */
 const CHANGES_CAP = 50_000;
@@ -18,19 +21,17 @@ const QUEUE_STATES = [
   "batch-checking", "in-batch", "batch-failed", "ci-approval", "changes-requested", "waiting-main-ci",
 ] as const;
 
-// S1: the full pass composes the owners' fragments (mirror open items, review take reviews, control tracked repos) once
-// their modules are merged; until then it names `items`, `final_reviews` and `tracked_repos` directly.
 registerKeySource<undefined>(PASS_SOURCES.full, (db) => {
   const k = queryDb(db).k;
   return k.selectFrom("items as i").select(["i.repo as repo", "i.number as number"])
     .where((eb) => eb.or([
       eb.and([eb("i.kind", "=", "pr"), eb.or([
         eb("i.state", "=", "OPEN"),
-        eb.and([eb("i.state", "=", "MERGED"), eb.exists(eb.selectFrom("final_reviews as l").select(eb.lit(1).as("one")).whereRef("l.repo", "=", "i.repo").whereRef("l.number", "=", "i.number").where("l.verdict", "in", ["take", "take-fix"]))]),
-        eb.exists(eb.selectFrom("merges as mm").select(eb.lit(1).as("one")).whereRef("mm.repo", "=", "i.repo").whereRef("mm.number", "=", "i.number").where("mm.outcome", "=", "merged")),
+        eb.and([eb("i.state", "=", "MERGED"), hasTakeReview(eb, "i.repo", "i.number")]),
+        mergedByUs(eb, "i.repo", "i.number"),
         eb.exists(eb.selectFrom("implementations as im").select(eb.lit(1).as("one")).whereRef("im.repo", "=", "i.repo").whereRef("im.pr_number", "=", "i.number").where("im.state", "not in", [...ENDED_STATES])),
       ])]),
-      eb.and([eb("i.kind", "=", "issue"), eb("i.state", "=", "OPEN"), eb.exists(eb.selectFrom("tracked_repos as t").select(eb.lit(1).as("one")).whereRef("t.name", "=", "i.repo"))]),
+      eb.and([eb("i.kind", "=", "issue"), eb("i.state", "=", "OPEN"), trackedRepo(eb, "i.repo")]),
     ])) as SelectQueryBuilder<any, any, KeyRow>;
 });
 

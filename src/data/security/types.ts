@@ -3,8 +3,9 @@ import type { FindingState, ScanState } from "../../../web/src/api/types.ts";
 import type { DB } from "../../db/types.ts";
 
 export type { FindingState, ScanState };
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 export type HiddenRepos = string[] & { visible?: string[] };
 /** `repo#number` of a finding; its number is the finding's own per-repo sequence, not a PR's. */
 export type FindingKey = string;

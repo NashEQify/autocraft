@@ -2,8 +2,9 @@ import type { ItemRef } from "../../../web/src/api/types.ts";
 import type { HelperStatus, Machine, Readiness, Reserve, TaskBundle, Tier } from "../../remote/protocol.ts";
 
 export type { HelperStatus, Machine, Readiness, Reserve, TaskBundle, Tier };
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 export type LowerLogin = string;
 export type Role = "operator" | "maintainer" | "viewer";
 

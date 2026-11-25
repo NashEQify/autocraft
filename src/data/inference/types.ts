@@ -2,8 +2,9 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import type { AgentRunFilter, AgentRunState, CostReport, ItemRef } from "../../../web/src/api/types.ts";
 import type { KeySource } from "../keys.ts";
 
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 /** Hidden repos (empty: no filter) and whether the viewer may read texts. */
 export type HiddenRepos = string[] & { visible?: string[] };
 export type RunVisibility = { hidden: HiddenRepos; staff: boolean };

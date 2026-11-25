@@ -1,5 +1,6 @@
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 export const EVENT_KINDS = ["started", "junk", "filed", "link", "limits"] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 export type EventCounts = Record<EventKind, { day: number; week: number }>;

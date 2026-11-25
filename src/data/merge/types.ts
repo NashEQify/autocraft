@@ -1,9 +1,9 @@
+import type { RefKey } from "../mirror/types.ts";
 import type { BuildTask, TaskResult, TaskStep } from "../../../web/src/api/types.ts";
 
-// S1: same as RefKey in ../mirror/types.ts; import it from there once S1 is merged.
-export type RefKey = string;
+export type { RefKey };
 /** `repo#number@head`. */
-// S1: same as HeadRef in ../mirror/types.ts.
+// `repo#number@head`; mirror/types.ts has no HeadRef.
 export type HeadRef = string;
 
 export const BATCH_STATES = ["checking", "open", "merged", "failed", "split", "superseded"] as const;

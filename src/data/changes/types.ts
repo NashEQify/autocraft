@@ -1,6 +1,6 @@
+import type { RefKey } from "../mirror/types.ts";
 /** `repo#number`, the key of the maps loaders return. */
-// S1: same as RefKey in ../mirror/types.ts; import it from there once S1 is merged.
-export type RefKey = string;
+export type { RefKey };
 import type { TaskState } from "../build/types.ts";
 
 export type PatchKind = "fixup" | "cifix" | "conflict";

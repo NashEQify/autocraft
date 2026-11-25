@@ -6,8 +6,9 @@ import type { DB } from "../../db/types.ts";
 import type { KeySource } from "../keys.ts";
 
 export type { BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, CacheReport, Requires, TaskFilter, TaskPage, TaskResult, TaskStep, WorkspacePage };
-// S1: result maps are keyed by RefKey of ../mirror/types.ts ("repo#number"); same type.
-export type Ref = string;
+import type { RefKey } from "../mirror/types.ts";
+
+export type Ref = RefKey;
 export type HiddenRepos = string[] & { visible?: string[] };
 /** Which rows a viewer may see: hidden repos are filtered out, and only staff read logs and patches. */
 export type ViewScope = { hiddenRepos: HiddenRepos; staff: boolean };

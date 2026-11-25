@@ -1,3 +1,4 @@
+import type { RefKey } from "../mirror/types.ts";
 // The vocabulary of an implementation of a queued issue (the Implement stage): its states, rounds and the replies of
 // its model calls. The planner and the dashboard bundle use it.
 
@@ -122,8 +123,7 @@ export type SessionReport = {
 
 // ---- results of the loaders (src/data/implement) --------------------------------------------------------------------
 
-// S1: same as RefKey in ../mirror/types.ts; import it from there once S1 is merged.
-export type RefKey = string;
+export type { RefKey };
 /** One `implementations` row without the large JSON columns. */
 export type AttemptLite = Omit<Implementation, "plan" | "planMd" | "report">;
 export type IssueAttempt = {
