@@ -331,9 +331,10 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
  * one, at most once a minute (tried_at), so the command does not wait for a poll that may never read it again.
  */
 async function waitsForRead(db: Db, r: Row, now: Date): Promise<boolean> {
-  const stale = await requestReadsAfter(db, [{ ref: refOf(r), after: r.requested_at }], now.toISOString());
+  const { stale, asked } = await requestReadsAfter(db, [{ ref: refOf(r), after: r.requested_at }], now.toISOString());
   if (!stale.length) return false;
-  await saveCommandProgress(db, [{ commentId: Number(r.comment_id), triedAt: now.toISOString() }]);
+  // Only the drain that queued the read sets the command back: one waiting for a read already queued is looked at on every drain.
+  if (asked.length) await saveCommandProgress(db, [{ commentId: Number(r.comment_id), triedAt: now.toISOString() }]);
   return true;
 }
 

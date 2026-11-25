@@ -71,7 +71,7 @@ export function noteIdentity(app: boolean): void {
   held = { app, seq: null, at: Date.now() };
 }
 
-/** Started once per process by `openDb`: subscribes to the `settings` topic and drops the cache on change. */
+/** Subscribes the process cache to the `settings` topic through `db`, which its reads then go through; a change drops the cache. The caller keeps one watch at a time and ends it with `off`. */
 export function watchIdentity(db: Db): Subscription {
   watched = db;
   const sub = db.listen("settings", () => { invalidations++; if (held) held.at = 0; });

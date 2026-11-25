@@ -21,7 +21,8 @@ class FakeRest implements DmRest {
   sent: { channelId: string; body: MessageBody }[] = [];
   responses: string[] = [];
   async createDm(userId: string) { return { id: `dm-${userId}` }; }
-  async createMessage(channelId: string, body: MessageBody) { this.sent.push({ channelId, body }); return { id: `m${this.sent.length}` }; }
+  refuse = (_channelId: string): void => {};
+  async createMessage(channelId: string, body: MessageBody) { this.refuse(channelId); this.sent.push({ channelId, body }); return { id: `m${this.sent.length}` }; }
   async editMessage() {}
   async deleteMessage() {}
   async interactionCallback() {}
@@ -71,4 +72,17 @@ test("a workflow waiting for an answer reaches operators and maintainers with wr
   await workflow(4, "recommending", null);
   await alerts.sync();
   assert.equal(rest.sent.filter((m) => m.channelId === "dm-1").length, 2, "the hourly limit holds the third message back");
+
+  // A pass that stops half-way has recorded what it sent: the next one does not send it again.
+  await db.run(db.k.deleteFrom("discord_alert_msgs"));
+  await db.run(db.k.deleteFrom("item_workflows").where("number", "in", [3, 4]));
+  rest.sent.length = 0;
+  let died = false;
+  const interrupted = new Alerts({ db, keys, rest, log: () => { if (!died) { died = true; throw new Error("the process ends here"); } }, baseUrl: "https://ac.example", perHour: 2 });
+  rest.refuse = () => { if (rest.sent.length) throw new Error("lost"); };
+  await interrupted.sync().catch(() => {});
+  assert.equal(died, true);
+  rest.refuse = () => {};
+  await alerts.sync();
+  assert.deepEqual(rest.sent.map((m) => m.channelId).sort(), ["dm-1", "dm-2"], "each person got it once");
 });

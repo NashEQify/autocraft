@@ -8,6 +8,8 @@ import { AppError } from "../src/github/app.ts";
 import { RepoNotInInstallationError } from "../src/github/install-token.ts";
 import { commitIdentity, identityFor, githubIdentity, IdentityRefused, setGithubIdentity, setGithubIdentityChecked } from "../src/github/identity.ts";
 import { closeItem } from "../src/github/write.ts";
+import { refreshReadIdentity } from "../src/github/read.ts";
+import type { Db } from "../src/db/index.ts";
 import type { GuardedItem } from "../src/core/guard.ts";
 import type { Querier } from "../src/mirror.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -83,4 +85,21 @@ test("switching to the app is refused with the uncovered repos listed, and a swi
   await db.run(db.k.insertInto("sessions").values({ id_hash: "h", login: "op", csrf: "c", created_at: new Date().toISOString(), last_seen: new Date().toISOString(), expires_at: new Date(Date.now() + 1e6).toISOString() }));
   assert.equal(await setGithubIdentityChecked(db, "op", "app", { registered: () => true, mint }), true);
   assert.equal((await db.get(db.k.selectFrom("sessions").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
+});
+
+test("a process with several handles keeps one settings listener, however the reads alternate, and moves it when the handle that listens is gone", async () => {
+  const db = await connectDb(join(SCRATCH, `identity-watch-${process.pid}.db`));
+  let on = 0, alive = true;
+  const handle = (): Db => new Proxy(db as unknown as Db, { get: (t, k) => {
+    if (k === "dialect") return "postgres";
+    if (k === "listen") return () => { on++; return { listening: () => alive, off: () => { on--; } }; };
+    const v = Reflect.get(t, k) as unknown;
+    return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+  } });
+  const a = handle(), b = handle();
+  for (let k = 0; k < 4; k++) for (const h of [a, b]) await refreshReadIdentity(h).catch(() => {});
+  assert.equal(on, 1);
+  alive = false;
+  await refreshReadIdentity(b).catch(() => {});
+  assert.equal(on, 1, "the closed handle's listener is replaced, not added to");
 });

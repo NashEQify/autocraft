@@ -177,6 +177,16 @@ describe("drainCommands", () => {
     assert.equal(await started(w, 1), "review");
   });
 
+  test("a command that waits for a re-read already queued is carried out by the first drain after it", async () => {
+    const w = await (await fresh()).pr(1);
+    await readAt(w, 1, new Date(Date.now() - 60_000));
+    await deliver(w, payload({ body: `@${SLUG} review` }));
+    for (let k = 0; k < 2; k++) assert.equal(await drainCommands(w.db, deps(w, { exec: ghFake().exec })), 0, "the re-read is still queued");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
+    await readAt(w, 1, new Date(Date.now() + 1000));
+    assert.equal(await drainCommands(w.db, deps(w, { exec: ghFake().exec })), 1);
+  });
+
   test("a read stamped at the comment's own instant does not count: it may have started before it", async () => {
     const w = await (await fresh()).pr(1);
     await deliver(w, payload({ body: `@${SLUG} review` }));
