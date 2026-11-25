@@ -88,7 +88,9 @@ async function seedJob(w: World, state: "running" | "done", list: readonly numbe
   return id;
 }
 
-test("a full planner pass, and one over the items that changed, read in sets", async () => {
+test("a full planner pass, and one over the items that changed, read in sets", async (t) => {
+  // Reads kept for a second or so (the Task Runner snapshot) must not expire in a slow pass.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const full = unit(async (w, n) => {
     await seedPrs(w, n);
     for (const i of numbers(n, 100)) await w.issue(i);
@@ -142,9 +144,9 @@ test("calls that wait for their result share one poll", async () => {
     const ids: number[] = [];
     for (const i of numbers(n)) ids.push(await queueCall(w, i));
     await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "failed", error: "ended" }));
-    // Each await is one model call, which may open and close its own relays.
+    // Each await is one model call, which opens and closes its own relays; a call whose relays open late joins the next poll.
     return () => Promise.all(ids.map((id) => { effect("model-call"); return awaitCall(w.db, id, { log: () => {} }); }));
-  }), 1, 8);
+  }), 1, 8, { perEffect: 3 });
 });
 
 test("a runner tick reads its running and queued jobs in sets", async () => {

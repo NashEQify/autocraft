@@ -940,7 +940,7 @@ How long a failover takes, until the new leader starts its recovery:
 |---|---|---|
 | Clean stop (rolling update, pod deleted, node drained) | after the leader has stopped its jobs (at most `AUTOCRAFT_STOP_TIMEOUT`, 25 seconds) and ended its lease | at most 2 seconds later |
 | Process or container killed, out of memory | when the lease expires, at most 10 seconds after the last renewal | at most 12 seconds |
-| Node lost, network split, process frozen | when the lease expires, at most 10 seconds after the last renewal; a leader still running stopped itself after 8, a frozen one stops when it runs again | at most 12 seconds, when the lost leader had no write transaction open. Otherwise the takeover waits for the writer lock until that transaction ends: about 11 seconds when the server reaches the client directly and drops it, and up to 10 seconds (`idle_in_transaction_session_timeout`) behind a proxy; the takeover's lock wait gives up after 30 seconds and tries again |
+| Node lost, network split, process frozen | when the lease expires, at most 10 seconds after the last renewal; a leader still running stopped itself after 8, a frozen one stops when it runs again | at most 12 seconds, when the lost leader had no write transaction open. Otherwise the takeover waits for the writer lock until that transaction ends: at most 10 seconds (`idle_in_transaction_session_timeout`); the takeover's lock wait gives up after 30 seconds and tries again |
 | Lease connection dropped, leader still running | the leader renews on a new connection at its next renewal | none |
 
 Before enabling two replicas on PlanetScale:
