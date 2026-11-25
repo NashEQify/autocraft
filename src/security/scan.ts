@@ -3,7 +3,7 @@
 // default branch; nothing here writes to GitHub.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import type { FindingState, FindingVerification } from "../../web/src/api/types.ts";
+import type { FindingVerification } from "../../web/src/api/types.ts";
 import { addAudit, config, withConfig } from "../data/control/index.ts";
 import * as sec from "../data/security/index.ts";
 import type { CratesResult } from "../verify/crates.ts";
@@ -147,8 +147,7 @@ export async function linkRepeatedFindings(db: Db): Promise<number> {
   });
 }
 
-// NEEDS security.FindingState: the module types leave the scan's own states `unverified` and `disproved` out of FindingState.
-const UNVERIFIED = ["unverified"] as unknown as FindingState[];
+const UNVERIFIED: sec.StoredFindingState[] = ["unverified"];
 
 const parse = <T>(s: string): T => JSON.parse(s) as T;
 
@@ -309,7 +308,7 @@ async function scanJob(db: Db, scanId: number, deps: ScanDeps): Promise<string> 
           verifyCalls.push(checked.cost);
           const verdict = checked.value;
           const v: FindingVerification = { kind: "reasoning", result: verdict.result, notes: verdict.notes, score: verdict.score, proposedTest: verdict.proposedTest };
-          await sec.advanceFinding(db, { repo, number: f.number, from: UNVERIFIED, to: (survives(verdict) ? "new" : "disproved") as FindingState, set: { verification: JSON.stringify(v) } });
+          await sec.advanceFinding(db, { repo, number: f.number, from: UNVERIFIED, to: survives(verdict) ? "new" : "disproved", set: { verification: JSON.stringify(v) } });
           if (survives(verdict)) {
             // The test row is written before `confirmed`, so the automatic fix sees it and waits for the result.
             if (verdict.proposedTest?.trim() && deps.writeTest && deps.crates && config(db).scanTestsEnabled) {
