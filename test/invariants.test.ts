@@ -222,8 +222,8 @@ const EXCEPTIONS: Exception[] = [
     covers: ({ w }) => w.workflow?.state === "blocked", example: greenRows({ workflow: BLOCKED, legs: [], mergeable: "CONFLICTING" }),
   },
   {
-    id: "author-push-window", rules: ["unaccepted-push"], why: "The planner does not read the accepted head: after someone else's push our pushes go on until the next workflow pass blocks the item.",
-    covers: ({ w }) => !reached(w, w.workflow!.baseHead, headOf(w)),
+    id: "author-push-window", rules: ["unaccepted-push", "refused-merge", "dead-end"], why: "The planner does not read the accepted head: after someone else's push our pushes, and a merge its gate refuses, stay planned until the next workflow pass blocks the item.",
+    covers: ({ w }) => w.workflow?.kind === "pr" && !!w.workflow.approvedBy && !reached(w, w.workflow.baseHead, headOf(w)),
     example: greenRows({ commits: [{ sha: "c0", by: "author" }, { sha: "c1", by: "author" }], review: reviewed("take", "c1"), checks: { head: "c1", overall: "success", approvedRuns: false }, mergeable: "CONFLICTING" }),
   },
   {

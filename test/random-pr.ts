@@ -148,15 +148,16 @@ export function randomPrRows(x: Rnd): PrRows {
   const legs: Leg[] = [];
   let inBatch = false;
   if (workflow?.approvedBy && workflow.state !== "recommending") {
-    // It is at the head, or (for a moment after someone else's push) at the head the workflow accepted.
+    // It is at the head, or (for a moment after someone else's push) at the head the workflow accepted. A leg at a head the workflow
+    // did not accept should not exist; the merge must be refused all the same.
     const ok = workflow.baseHead === null || reached({ commits } as PrRows, workflow.baseHead, head);
     const at0 = workflow.baseHead ?? head;
     const state = x.pick(["review", "ci", "queued", "queued", "queued", null] as const);
     const leg = (s: Leg["state"], h: string | null): Leg => ({ state: s, head: h, fromHead: at0, workflow: 7, updatedAt: x.pick([at("10:20"), at("10:20"), at("09:50")]), fixId: null });
     if (workflow.state === "blocked") { if (x.bool(0.2)) { legs.push(leg("queued", ok ? head : at0)); inBatch = true; } }
     else if (request && request.from === head && x.bool(0.5)) legs.push({ ...leg("fixup", null), fixId: request.id });
-    else if (state) legs.push(leg(state, ok && x.bool(0.9) ? head : at0));
-  }
+    else if (state) legs.push(leg(state, x.bool(ok ? 0.9 : 0.3) ? head : at0));
+  } else if (workflow && x.bool(0.05)) legs.push({ state: "queued", head, fromHead: head, workflow: 7, updatedAt: at("10:20"), fixId: null });
   const review: PrRows["review"] = x.bool(0.08) || workflow?.entry === "merge" && x.bool() ? null : {
     head: some(0.88), verdict: x.pick(["take", "take", "take", "take", "take-fix", "take-fix", "hold", "close"] as const), sure: x.bool(0.8), fixes: x.int(3), stale: x.bool(0.06), capped: x.bool(0.2),
     mode: x.bool(0.95) ? "full" : "skipped", blockedBy: x.pick([null, "open", "asked", "settled"] as const),
