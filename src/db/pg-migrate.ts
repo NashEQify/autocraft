@@ -63,6 +63,8 @@ export interface MigrationOpts {
   now?: () => number;
   log?: (line: string) => void;
   windowMs?: number;
+  /** Builds new indexes inside their table's step rather than CONCURRENTLY: for a database nothing else is using. */
+  plainIndexes?: boolean;
 }
 
 /** A unit of work in its own transaction. `table` is the one table it locks, named in the wait log. */
@@ -327,7 +329,7 @@ export async function withMigrationLock<T>(client: PgClient, fn: (m: Migration) 
     step,
     async ddl(sql, label) {
       const cat = await readCatalog(client);
-      existed ??= cat.tables;
+      existed ??= opts.plainIndexes ? new Set() : cat.tables;
       for (const s of planDdl(sql, cat, existed, label)) await (isIndexStep(s) ? index(s) : step(s));
     },
   };

@@ -20,6 +20,7 @@ import { pgScopeViews, SCOPED_SCHEMA } from "./scoped.ts";
 import { splitStageTripsPg, TRIP_SPLIT_VERSION } from "./trip-split.ts";
 import { featuresRepoOnlyPg, FEATURES_REPO_ONLY_VERSION } from "./feature-repo-only.ts";
 import { retireFixAttemptsPg } from "./fix-retire.ts";
+import { PG_SCHEMA_GENERATION } from "./pg-generation.ts";
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 type Op = (typeof OPS)[number];
@@ -150,7 +151,8 @@ BEGIN
     CREATE CONSTRAINT TRIGGER ac_flush AFTER INSERT ON live_flush DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ac_flush();
   END IF;
 END $$;`,
-    blockers: ["DELETE FROM review_blockers;", blockerFill("postgres")],
+    // SHARE keeps opus_reviews writes (whose triggers maintain review_blockers) out until the rebuild commits.
+    blockers: ["LOCK TABLE opus_reviews IN SHARE MODE;", "DELETE FROM review_blockers;", blockerFill("postgres")],
   };
 }
 
@@ -187,16 +189,37 @@ export async function storedPgStamp(rows: (sql: string) => Promise<Record<string
   return ((await rows(STAMP_SQL))[0]?.value as string | undefined) ?? null;
 }
 
+/** The schema generation the database stores (src/db/pg-generation.ts), 0 before any. `rows` runs one statement. */
+export async function storedPgGeneration(rows: (sql: string) => Promise<Record<string, unknown>[]>): Promise<number> {
+  if (!(await rows("SELECT to_regclass('settings') IS NOT NULL AS ok"))[0]?.ok) return 0;
+  return Number((await rows("SELECT value FROM settings WHERE key = 'schema_generation'"))[0]?.value ?? 0) || 0;
+}
+
+let newerSaid = false;
+
+/**
+ * True when a newer version migrated the database: an older process (a rollout's old pods and their job processes) serves
+ * on the newer schema as it is rather than migrate it back. Said in the log once per process.
+ */
+export async function newerPgSchema(rows: (sql: string) => Promise<Record<string, unknown>[]>): Promise<boolean> {
+  const stored = await storedPgGeneration(rows);
+  if (stored <= PG_SCHEMA_GENERATION.generation) return false;
+  if (!newerSaid) console.warn(`schema migration: skipped: the database has schema generation ${stored}, newer than this version's ${PG_SCHEMA_GENERATION.generation}`);
+  newerSaid = true;
+  return true;
+}
+
 /**
  * Brings the database at `client` to the current schema, triggers and views under the migration lock, in small steps that
  * each lock at most one table (src/db/pg-migrate.ts), unless it already stores the current stamp (checked again under the
- * lock, so concurrent openers migrate once). The stamp is written last, so it marks a database with every step applied.
+ * lock, so concurrent openers migrate once) or a newer version migrated it (newerPgSchema). The stamp and the generation
+ * are written last, so they mark a database with every step applied.
  */
 export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Promise<void> {
   const stamp = pgStamp();
   const rows = async (sql: string) => (await client.query(sql)).rows;
   await withMigrationLock(client, async (m) => {
-    if ((await storedPgStamp(rows)) === stamp) return;
+    if ((await storedPgStamp(rows)) === stamp || (await newerPgSchema(rows))) return;
     // Columns are only ever added, which the views over the tables allow, so the views are replaced after the schema.
     await m.ddl(pgSchemaSql(), "schema");
     const parts = pgTriggerParts(pgColumns(await rows(PG_COLUMNS_SQL) as { t: string; c: string }[]));
@@ -212,7 +235,7 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
       await m.step({ label: `triggers: ${table}`, table, sql: [...(parts.triggers.get(table) ?? []).map((t) => t.sql), ...(old.get(table) ?? [])] });
     }
     await m.step({ label: "flush trigger", table: "live_flush", sql: [parts.flush] });
-    await m.step({ label: "review blockers", sql: parts.blockers });
+    await m.step({ label: "review blockers", table: "opus_reviews", sql: parts.blockers });
     await m.step({ label: "scoped schema", sql: [`CREATE SCHEMA IF NOT EXISTS ${SCOPED_SCHEMA}`] });
     const views = pgScopeViews((await rows("SELECT current_schema() AS s"))[0]!.s as string);
     for (const v of views) await m.step({ label: `view ${v.view}`, table: v.view, sql: [v.sql], fallback: [`DROP VIEW IF EXISTS ${v.view}`, v.sql.replace("CREATE OR REPLACE VIEW", "CREATE VIEW")] });
@@ -222,6 +245,7 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     await m.step({ label: "stage trips", run: () => splitStageTripsPg(client) });
     await m.step({ label: "fix attempts", run: () => retireFixAttemptsPg(client) });
     await m.step({ label: "features", run: () => featuresRepoOnlyPg(client) });
-    await m.step({ label: "stamp", run: async () => void (await client.query("INSERT INTO settings (key, value) VALUES ('schema_stamp', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [stamp])) });
+    await m.step({ label: "stamp", run: async () => void (await client.query(`INSERT INTO settings (key, value) VALUES ('schema_stamp', $1), ('schema_generation', $2)
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value`, [stamp, String(PG_SCHEMA_GENERATION.generation)])) });
   }, opts);
 }

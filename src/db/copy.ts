@@ -354,16 +354,19 @@ export function pgSchemaWithoutTriggers(sql: string = pgSchemaSql()): string {
 }
 
 /**
- * Brings a Postgres target to the app's schema and triggers once the copied rows are in, in one transaction under the
- * migration lock, so the copied rows fire nothing. This is the one place the copy migrates: `migratePg` applies the schema
- * file with its hand-translated triggers, creates the RUNTIME_TABLES with their runtime triggers and stores the stamp.
+ * Brings a Postgres target to the app's schema and triggers once the copied rows are in, under the migration lock; the
+ * triggers are created after the rows, so the copied rows fire nothing. This is the one place the copy migrates: `migratePg`
+ * applies the schema file with its hand-translated triggers, creates the RUNTIME_TABLES with their runtime triggers and
+ * stores the stamp. With no other session working on the target, the indexes are built plainly, which is faster than
+ * CONCURRENTLY.
  */
 async function migratePgTarget(url: string): Promise<void> {
   const pg = await loadPg();
   const client = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-copy" });
   await client.connect();
   try {
-    await migratePg(client);
+    const busy = (await client.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'")).rows[0]!.n as number;
+    await migratePg(client, { plainIndexes: busy === 0 });
   } finally {
     await client.end();
   }
