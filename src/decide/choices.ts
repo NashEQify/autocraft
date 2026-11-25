@@ -3,7 +3,7 @@
 // Only Opus's drafts and pick are stored; the offered cores are computed whenever they are read.
 import { randomUUID } from "node:crypto";
 import { writeEffect } from "../act/index.ts";
-import { applicableSteps } from "../conversations/cards.ts";
+import { applicableSteps } from "./choices-parse.ts";
 import { getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import {
   coreKey, MAX_ADDED_CORES, parseCoreKey,

@@ -12,7 +12,7 @@ import { referenceDir } from "../reference.ts";
 import { SUMMARY_MIN, summaryInput } from "../classify/parse.ts";
 import { pool } from "../classify/run.ts";
 import { itemsOf, optionsOf, factsOf, type DecisionRow, type Kind } from "../decisions.ts";
-import { openDecision, type NewCard } from "../conversations/cards.ts";
+import { openDecision, type NewCard } from "./choices-parse.ts";
 import { choicesTexts, parseChoices, type ParsedChoices } from "./choices-parse.ts";
 import { coreSummaries } from "./choices.ts";
 import { parseCoreKey, type CoreKey } from "./choices-types.ts";
@@ -20,7 +20,7 @@ import { ensureConversation, insertTurn, opusBlock, refreshItem, turnsOf, type D
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { codeDiff } from "../review/diff.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
-import { applicableSteps } from "../conversations/cards.ts";
+import { applicableSteps } from "./choices-parse.ts";
 import { inScopeExpr } from "../data/workflow/fragments.ts";
 import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { judgementModel } from "./judgement.ts";

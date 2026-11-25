@@ -14,7 +14,6 @@
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
 import { settleMemo, settlesNow } from "../settlers.ts";
 import type { Preapproval } from "../../web/src/api/types.ts";
-import type { Step } from "../conversations/cards.ts";
 import { systemBlock } from "../conversations/store.ts";
 import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
@@ -45,7 +44,7 @@ import {
 import type { Db } from "../db/index.ts";
 import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
-export type PipelineStep = Extract<Step, { kind: "review" | "fixup" }>;
+export type PipelineStep = { kind: "review" } | { kind: "fixup"; instructions: string; merge: boolean };
 
 const ACTOR = "pipeline";
 export const INSTRUCTIONS_MAX = 1500;

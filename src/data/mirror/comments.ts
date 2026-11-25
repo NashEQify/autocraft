@@ -94,6 +94,18 @@ export async function loadActivityByLogins(db: Db, repo: string, logins: string[
   return new Set(logins.filter((l) => found.has(l.toLowerCase())));
 }
 
+/** Logins (lower case) with an item or a comment in the repo written under one of `associations` (GitHub's author association); the match ignores case. */
+export async function loadAuthoredIn(db: Db, repo: string, logins: string[], associations: string[]): Promise<Set<string>> {
+  if (!logins.length || !associations.length) return new Set();
+  const q = queryDb(db);
+  const lower = [...new Set(logins.map((l) => l.toLowerCase()))];
+  const rows = await q.all(q.k.selectFrom("items").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
+    .where((eb) => kx.inList(db, "author_association", associations))
+    .union(q.k.selectFrom("comments").select((eb) => eb.fn<string>("lower", ["author"]).as("login")).where("repo", "=", repo).where((eb) => kx.inList(db, eb.fn("lower", ["author"]), lower))
+      .where((eb) => kx.inList(db, "author_association", associations))), { label: "mirror.loadAuthoredIn" });
+  return new Set(rows.map((r) => r.login));
+}
+
 const MARKS: SnippetMarks = { open: "\u0002", close: "\u0003", words: 24 };
 
 /** Full-text comment search, best first (lower score); `limit` defaults to 20. */
