@@ -14,13 +14,14 @@ import { envVar } from "../env.ts";
 import { appChildEnv } from "./install-token.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { Client, GithubError, Transient, type Querier } from "../mirror.ts";
+import { ACTION_WAITS } from "../core/may.ts";
 import { slugOf } from "../owners.ts";
 import { loadAccess, loadUserTokenStatus } from "../data/access/index.ts";
 import { queueActions, retryActions, saveActions, type ActionState, type NewAction, type WorkflowAction } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 
 export type ExecState = ActionState;
-export { ACTION_WAITS as WAITING } from "../core/may.ts";
+export { ACTION_WAITS as WAITING };
 
 export const SIGN_IN_REASON = "Sign in to let AutoCraft finish this as you";
 export const noWriteReason = (repo: string): string => `You have no write access to ${slugOf(repo)}`;
