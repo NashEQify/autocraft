@@ -3,7 +3,7 @@
 import { refOf, parseHaikuReply, jevVerdict, type Item, type JevAnswers, type Verdict } from "../classify/parse.ts";
 import { jevAreaChoice, parseAreaReply, settles, type AreaAnswer } from "../areas/parse.ts";
 import type { Area, AreaItem } from "../areas/types.ts";
-import { parsePairReply, type DupePair, type PairAnswer } from "../dupes/pair.ts";
+import { askKey, parsePairReply, type DupeAsk, type DupePair, type PairAnswer } from "../dupes/pair.ts";
 import { carryTexts, lintComparison, parseIssueComparison, parsePrComparison, type CompareIssues, type ComparePrs, type IssueComparison, type PrComparison } from "../dupes/group.ts";
 import { jevImpact, parseHaikuImpacts, SURE, type Impact, type JevImpactAnswers } from "../priority/score.ts";
 import { renderAreaJev, renderClassifyJev, renderReferenceJev, type ClassifyExtras } from "../prompts/index.ts";
@@ -108,10 +108,21 @@ export const AREAS: TieredStep<AreaItem, AreaAnswer, string | null, AreasCtx, Ar
 };
 
 // Duplicate pairs: Jev's probability, Haiku for the unsure pairs (the bands are in src/dupes/pair.ts).
-export const DUPES_JEV: JevStep<DupePair, number> = {
+// One request per item: Jev's yes-probability for each candidate, by pair ref. A candidate without a valid answer is asked again.
+export const DUPES_JEV: JevStep<DupeAsk, Record<string, number>> = {
   provider: "jev", id: "dupes.jev",
-  request: (pair) => ({ item: pair }),
-  parse: (answers) => single(probability((answers as { same?: { noul?: unknown } } | undefined)?.same?.noul)),
+  request: (ask) => ({ item: ask }),
+  parse: (answers, ask) => {
+    const a = answers as Record<string, { noul?: unknown } | undefined> | undefined;
+    const value: Record<string, number> = {};
+    const left: DupeAsk["candidates"] = [];
+    for (const c of ask.candidates) {
+      const p = probability(a?.[askKey(c)]?.noul);
+      if (p === null) left.push(c); else value[c.ref] = p;
+    }
+    if (!left.length) return { value };
+    return Object.keys(value).length ? { value, rest: { ...ask, candidates: left } } : null;
+  },
 };
 export const DUPES_HAIKU: ClaudeStep<DupePair[], PairAnswer[]> = {
   provider: "claude", id: "dupes.haiku",

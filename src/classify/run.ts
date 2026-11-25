@@ -29,7 +29,7 @@ import { CLASSIFY_HAIKU, CLASSIFY_JEV, type ClassifyAnswer, type JevImpact } fro
 import type { AreaAnswer } from "../areas/parse.ts";
 import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import { stripMarks } from "../prompts/harness.ts";
-import type { DupePair } from "../dupes/pair.ts";
+import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
@@ -243,7 +243,11 @@ export function promptVersion(id: ClaudePromptId | JevPromptId): string {
 function refsOf(input: readonly unknown[]): ItemRef[] {
   const out: ItemRef[] = [];
   for (const x of input as { repo?: string; number?: number; ref?: string; a?: { number: number }; b?: { number: number }; items?: unknown[] }[]) {
-    if (typeof x.repo === "string" && typeof x.number === "number") out.push({ repo: x.repo, number: x.number });
+    // A duplicate request: the item and each of its candidates.
+    if (typeof x.repo === "string" && (x as { item?: { number: number } }).item && Array.isArray((x as { candidates?: unknown }).candidates)) {
+      const ask = x as unknown as DupeAsk;
+      out.push({ repo: ask.repo, number: ask.item.number }, ...ask.candidates.map((c) => ({ repo: ask.repo, number: c.other.number })));
+    } else if (typeof x.repo === "string" && typeof x.number === "number") out.push({ repo: x.repo, number: x.number });
     // An area batch: one repo's list and its items.
     else if (typeof x.repo === "string" && Array.isArray((x as { items?: unknown }).items)) out.push(...refsOf((x as { items: unknown[] }).items));
     // A duplicate pair: both items.
@@ -527,7 +531,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
 }
 
 /** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
-export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupePair), perCallUsage = true): Promise<Proc> {
+export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupeAsk), perCallUsage = true): Promise<Proc> {
   effect("model-call", id);
   const runId = await startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
   const start = now();
