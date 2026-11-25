@@ -70,7 +70,7 @@ export type UsageReport = Omit<CostReport, "itemsClassified">;
 export type PromptSpend = { prompt: string; dayCalls: number; dayUsd: number; weekCalls: number; weekUsd: number };
 
 export type ResultState = "queued" | "pass" | "fail" | "error" | "skipped" | "warn";
-export type NightlyResult = { runId: number; checkId: string; taskId: number | null; state: ResultState; summary: string | null; issueNumber: number | null; finishedAt: string | null };
+export type NightlyResult = { runId: number; checkId: string; taskId: number | null; state: ResultState; summary: string | null; /** The issue opened for the failing streak the night is in. */ issueNumber: number | null; /** An issue is being opened for the streak, or its outcome is not known yet. */ issueClaimed: boolean; finishedAt: string | null };
 export type NightlyRun = { id: number; repo: string; sha: string; startedAt: string; state: "running" | "done" };
 export type NightlySelection = { repo: string; checkId: string; enabled: boolean; crates: string[]; targets: string[] };
 export type BenchPoint = { repo: string; bench: string; sha: string; at: string; value: number; unit: string };

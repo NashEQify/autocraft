@@ -280,6 +280,7 @@ export function createHttpApi(): Api {
       grid: () => get("/api/nightly"),
       series: (repo, bench) => get(`/api/nightly/bench/${encodeURIComponent(repo)}/${encodeURIComponent(bench)}`),
       select: (input) => post("/api/nightly/select", input),
+      openIssue: (input) => post("/api/nightly/issue", input),
     },
     screenshotSetup: {
       list: () => get("/api/build/screenshots"),

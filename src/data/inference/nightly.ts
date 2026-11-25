@@ -16,8 +16,10 @@ const paramsOf = (s: string | null): { crates: string[]; targets: string[] } => 
 };
 const selectionOf = (r: { repo: string; check_id: string; enabled: number; params: string | null }): NightlySelection => ({ repo: r.repo, checkId: r.check_id, enabled: Number(r.enabled) === 1, ...paramsOf(r.params) });
 const resultOf = (r: { run_id: number; check_id: string; task_id: number | null; state: string; summary: string | null; issue_number: number | null; finished_at: string | null }): NightlyResult =>
-  ({ runId: Number(r.run_id), checkId: r.check_id, taskId: r.task_id === null ? null : Number(r.task_id), state: r.state as ResultState, summary: r.summary, issueNumber: r.issue_number === null ? null : Number(r.issue_number), finishedAt: r.finished_at });
+  ({ runId: Number(r.run_id), checkId: r.check_id, taskId: r.task_id === null ? null : Number(r.task_id), state: r.state as ResultState, summary: r.summary, issueNumber: Number(r.issue_number) || null, issueClaimed: r.issue_number !== null && Number(r.issue_number) === CLAIMED, finishedAt: r.finished_at });
 const runOf = (r: { id: number; repo: string; sha: string; started_at: string; state: string }): NightlyRun => ({ id: Number(r.id), repo: r.repo, sha: r.sha, startedAt: r.started_at, state: r.state as NightlyRun["state"] });
+/** `issue_number` of a streak whose issue is being opened. */
+const CLAIMED = 0;
 const RESULT_COLS = ["run_id", "check_id", "task_id", "state", "summary", "issue_number", "finished_at"] as const;
 const group = <K, V>(rows: V[], key: (v: V) => K): Map<K, V[]> => {
   const out = new Map<K, V[]>();
@@ -173,6 +175,22 @@ export async function markIssue(db: Db, o: { repo: string; checkId: string; runI
     await q.run(q.k.updateTable("main.nightly_results").set({ issue_number: o.issue }).where("check_id", "=", o.checkId).where(kx.inList(db, "run_id", part, "bigint"))
       .where("run_id", "in", q.k.selectFrom("main.nightly_runs").select("id").where("repo", "=", o.repo)));
   }
+}
+
+/** Claims the streak's results of one check that name no issue, before its issue is opened. 1 statement. */
+export async function claimIssue(db: Db, o: { repo: string; checkId: string; runIds: number[] }): Promise<void> {
+  const q = queryDb(db);
+  for (const part of kx.chunks(o.runIds)) {
+    await q.run(q.k.updateTable("main.nightly_results").set({ issue_number: CLAIMED }).where("check_id", "=", o.checkId).where(kx.inList(db, "run_id", part, "bigint")).where("issue_number", "is", null)
+      .where("run_id", "in", q.k.selectFrom("main.nightly_runs").select("id").where("repo", "=", o.repo)));
+  }
+}
+
+/** Gives a claim back: no issue was opened. 1 statement. */
+export async function releaseIssue(db: Db, o: { repo: string; checkId: string }): Promise<void> {
+  const q = queryDb(db);
+  await q.run(q.k.updateTable("main.nightly_results").set({ issue_number: null }).where("check_id", "=", o.checkId).where("issue_number", "=", CLAIMED)
+    .where("run_id", "in", q.k.selectFrom("main.nightly_runs").select("id").where("repo", "=", o.repo)));
 }
 
 /**

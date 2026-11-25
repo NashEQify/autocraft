@@ -528,6 +528,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/nightly", nightly.grid),
     get("/api/nightly/bench/:repo/:bench", nightly.series),
     { method: "POST", pattern: "/api/nightly/select", handler: ok(nightly.select) },
+    { method: "POST", pattern: "/api/nightly/issue", handler: ok((db, req) => nightly.openIssue(db, req)) },
     get("/api/build/summary", build.buildSummary),
     get("/api/build/features", build.features),
     { method: "POST", pattern: "/api/build/features", handler: ok(build.postFeature) },
