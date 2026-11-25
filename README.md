@@ -28,10 +28,6 @@ Stages run in this order. Details, limits and rules for each are in [docs/pipeli
 | Post-merge review | Opus reviews each PR the pipeline merged a second time, reading what landed with the pipeline's own commits and reviews of the PR, and lists defects and minor findings. Each defect that no open item covers becomes one follow-up issue in repos approved for commenting, except on a security fix whose advisory is not published yet (its findings are only shown); minor findings are only shown. | Opus | yes: per-repo approval |
 <!-- stages:end stage-table -->
 
-![Pipeline flowchart on the dashboard home page, with mock data](docs/images/flowchart.png)
-
-The image is the dashboard's home page (mock data). Each column is a stage with its counts, and the chips above it list what waits for a person.
-
 ### Trust boundaries
 
 - Untrusted code runs only in a separate build environment (a worker as another OS user, with rootless Podman), never where GitHub or Claude credentials are.
@@ -208,7 +204,7 @@ The mock API serves fixture data; pick the role with `?as=operator|maintainer|vi
 | `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Agent runs and Jev calls, prompts, bubblewrap, read-only item tools |
 | `src/github` | `write.ts`, the only module that writes to GitHub |
 | `src/runner`, `src/worker`, `src/build` | Job runner, sandbox worker, build environments |
-| `src/dash`, `src/flow` | Dashboard server, API and flowchart counts |
+| `src/dash` | Dashboard server and API |
 | `web/` | React frontend |
 | `test/` | Tests |
 | `docs/` | `pipeline.md`, `dashboard-spec.md`, `ui-design.md`, `operations.md` |

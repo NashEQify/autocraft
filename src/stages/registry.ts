@@ -1,7 +1,6 @@
 // The pipeline's stages in one place: runner steps, lanes, limits, models,
-// prompts, swimlane cards and waits. Plain data with type-only imports, so the
+// prompts and waits. Plain data with type-only imports, so the
 // dashboard bundle and the runner both load it. No Node imports, no prompt texts.
-import type { LaneId } from "../../web/src/ui/organisms/swimlaneDef.ts";
 
 export type StageId = "synced" | "dupes" | "classify" | "priority" | "decide" | "labels" | "review" | "fix" | "fixup" | "verify" | "merge" | "postmerge" | "act";
 
@@ -30,7 +29,6 @@ export type StageDef = {
   writes: { what: string; approval?: "label" | "comment" | "push" | "fix" | "merge" | "ci" | "main-fix" | "status" }[];
   /** What stops for a person, or null. */
   person: string | null;
-  swimlane: { id: string; lane: LaneId; row: number; lines: string[]; approval?: string }[];
 };
 
 export const STAGES: StageDef[] = [
@@ -52,11 +50,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [],
     person: null,
-    swimlane: [
-      { id: "open", lane: "contributor", row: 0, lines: ["Opens or updates", "an issue or PR"] },
-      { id: "sync", lane: "auto", row: 1, lines: ["Sync", "every minute, to local DB"] },
-      { id: "embed", lane: "auto", row: 2, lines: ["Embed", "vector per item, local"] },
-    ],
   },
   {
     id: "dupes", title: "Duplicates", order: 2, runStage: 3, docSection: "Duplicates", mode: "steps",
@@ -76,10 +69,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [],
     person: null,
-    swimlane: [
-      { id: "dups", lane: "auto", row: 3, lines: ["Duplicates", "nearest neighbours"] },
-      { id: "dupcheck", lane: "models", row: 4, lines: ["Duplicate check", "Jev first, Haiku settles"] },
-    ],
   },
   {
     id: "classify", title: "Classify", order: 3, runStage: 2, docSection: "Classify", mode: "steps",
@@ -98,10 +87,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [],
     person: null,
-    swimlane: [
-      { id: "classify", lane: "models", row: 6, lines: ["Classify", "Jev, Haiku backup"] },
-      { id: "referee", lane: "models", row: 7, lines: ["Sonnet referee", "settles type disagreements"] },
-    ],
   },
   {
     id: "priority", title: "Priority", order: 4, runStage: 2, docSection: "Priority", mode: "steps",
@@ -115,9 +100,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [],
     person: null,
-    swimlane: [
-      { id: "priority", lane: "models", row: 8, lines: ["Priority", "Jev, level P0 to P4"] },
-    ],
   },
   {
     id: "decide", title: "Conversations", order: 5, runStage: 3, docSection: "Conversations", mode: "steps",
@@ -129,9 +111,6 @@ export const STAGES: StageDef[] = [
     waits: [],
     writes: [],
     person: "A person runs the commands a reply proposes",
-    swimlane: [
-      { id: "decide", lane: "operator", row: 9, lines: ["Start", "review, fix-up, implement, merge"] },
-    ],
   },
   {
     id: "labels", title: "Labels", order: 6, runStage: 4, docSection: "Label", mode: "steps",
@@ -145,9 +124,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Type and flag labels", approval: "label" }],
     person: "Per-repo approval",
-    swimlane: [
-      { id: "label", lane: "writes", row: 9, lines: ["Label", "type labels"], approval: "label approval" },
-    ],
   },
   {
     id: "review", title: "Review", order: 7, runStage: 5, docSection: "Review", mode: "steps",
@@ -166,11 +142,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Final review comment", approval: "comment" }],
     person: "Hold and close verdicts, and every review of an item not approved for merge: one recommendation to answer",
-    swimlane: [
-      { id: "review", lane: "models", row: 12, lines: ["Opus review", "reads the repo"] },
-      { id: "closeq", lane: "operator", row: 13, lines: ["Recommendation", "yes, or another command"] },
-      { id: "postrev", lane: "writes", row: 12, lines: ["Post review", "one review per PR"], approval: "comment approval" },
-    ],
   },
   {
     id: "fix", title: "Implement", order: 8, runStage: 7, docSection: "Implement", mode: "steps",
@@ -191,11 +162,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Branch and pull request", approval: "fix" }, { what: "A question to the author on the issue, and on a maintainer's close a comment and the close", approval: "comment" }],
     person: "Starting an issue, per-repo approval, questions the plan leaves open, stuck implementations",
-    swimlane: [
-      { id: "fix", lane: "sandbox", row: 10, lines: ["Implement (issues)", "Opus plan and session"], approval: "fix approval" },
-      { id: "hold1", lane: "operator", row: 11, lines: ["Blocker", "a maintainer answers"] },
-      { id: "prfork", lane: "writes", row: 11, lines: ["Open PR from fork", "our fix, as a PR"], approval: "fix approval" },
-    ],
   },
   {
     id: "fixup", title: "Fix-up", order: 9, runStage: 6, docSection: "Fix-up", mode: "steps",
@@ -216,11 +182,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Push to the PR branch", approval: "push" }, { what: "Comment with the fixes", approval: "comment" }, { what: "Rerun failed CI jobs", approval: "ci" }, { what: "Rerun a red default branch's failed jobs; open a fix PR from the pipeline account's fork; open an issue for an infrastructure failure", approval: "main-fix" }],
     person: "Per-repo approval",
-    swimlane: [
-      { id: "fixup", lane: "writes", row: 13, lines: ["Fix-up", "Sonnet patch, Opus check"], approval: "push approval" },
-      { id: "ask", lane: "writes", row: 14, lines: ["Comment fixes", "asked the contributor"], approval: "comment approval" },
-      { id: "push", lane: "contributor", row: 15, lines: ["Pushes a new head", "or answers"] },
-    ],
   },
   {
     id: "verify", title: "Verify", order: 10, runStage: 6, docSection: "Verify", mode: "steps",
@@ -240,10 +201,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [],
     person: "Failures and errors: a blocker to answer",
-    swimlane: [
-      { id: "verify", lane: "sandbox", row: 13, lines: ["Verify", "CI, or Sonnet plan + build"] },
-      { id: "vfail", lane: "models", row: 14, lines: ["Failure summary", "Haiku"] },
-    ],
   },
   {
     id: "merge", title: "Merge queue", order: 11, runStage: 6, docSection: "Merge queue", mode: "steps",
@@ -253,7 +210,7 @@ export const STAGES: StageDef[] = [
     models: [{ model: "opus", use: "Pre-merge review of the head commit" }],
     promptIds: ["premerge.opus"], promptStage: "Merge",
     waits: [
-      { name: "Pre-merge review", why: "A PR the rule would merge, or a pre-approved merge before its hand-over, waits for an adversarial Opus review of its head commit (one model call per head); while the step cannot run (pipeline off, usage pause) it waits", howLong: "Until the call ends; a failed call is tried again after 1 hour, at most 3 tries, then a person decides", showsAs: "Queue state `waiting-premerge`", kind: "external" },
+      { name: "Pre-merge review", why: "A PR the rule would merge, or a pre-approved merge before its hand-over, waits for an adversarial Opus review of its head commit (one model call per head); while the step cannot run (pipeline off) it waits", howLong: "Until the call ends; a failed call is tried again after 1 hour, at most 3 tries, then a person decides", showsAs: "Queue state `waiting-premerge`", kind: "external" },
       { name: "Pre-merge review retry", why: "The model call for the head failed or returned no valid review", howLong: "1 hour between tries; after 3 failed tries the merge queue asks a person", showsAs: "Queue state `waiting-premerge` (tries left) or `needs-decision` (\"the pre-merge review failed\")", kind: "backoff" },
       { name: "Diff re-read", why: "The diff the reviews cached lacks what the merge rule reads beside it (the head text of edited manifests and lockfiles, the workflows' run steps), or the last read of it failed; the PR holds on the conservative reasons until the pre-merge step reads the diff again (no model call)", howLong: "At once, then 1 hour after each read that left it incomplete; after 3 reads the rule judges with what it has", showsAs: "The reason \"waiting to read the files the merge rule checks beside the diff\"", kind: "backoff" },
       { name: "Diff re-read pace", why: "The re-reads share the account's GitHub rate with the sync and every other step: at most 800 run in a rolling hour across the instance, and none while the token's core rate is below the sync's reserve (1,000)", howLong: "Until the hour's oldest re-read ages out, or until GitHub's rate limit resets", showsAs: "The reason \"waiting to read the files the merge rule checks beside the diff\"", kind: "external" },
@@ -273,15 +230,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Merge of the batch PR", approval: "merge" }, { what: "Approval of held workflow runs", approval: "ci" }, { what: "Rerun of the failed CI runs of the batch PR (once per batch)", approval: "merge" }, { what: "One status comment per PR, edited in place", approval: "status" }],
     person: "Approval to merge, for PRs outside the rules",
-    swimlane: [
-      { id: "queue", lane: "auto", row: 14, lines: ["Merge queue", "rule met at this head?"] },
-      { id: "premerge", lane: "models", row: 15, lines: ["Pre-merge review", "Opus, adversarial, at the head"] },
-      { id: "hold2", lane: "operator", row: 14, lines: ["Blocker", "a maintainer answers"] },
-      { id: "mergeq", lane: "operator", row: 15, lines: ["Merge approval", "a maintainer's yes"] },
-      { id: "batch", lane: "sandbox", row: 16, lines: ["Integration batch", "up to 50 PRs, upstream CI"] },
-      { id: "ciapprove", lane: "writes", row: 16, lines: ["Approve CI runs", "outside contributors' PRs"], approval: "CI approval" },
-      { id: "merge", lane: "writes", row: 17, lines: ["Merge", "batch PR, safe-merge --merge"], approval: "merge approval" },
-    ],
   },
   {
     id: "act", title: "Act", order: 12, runStage: 6, docSection: "Act", mode: "steps",
@@ -295,9 +243,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Comment, then close", approval: "comment" }],
     person: "Per-repo approval",
-    swimlane: [
-      { id: "act3", lane: "writes", row: 15, lines: ["Act", "comment, then close"], approval: "comment approval" },
-    ],
   },
   {
     id: "postmerge", title: "Post-merge review", order: 13, runStage: 8, docSection: "Post-merge review", mode: "steps",
@@ -312,10 +257,6 @@ export const STAGES: StageDef[] = [
     ],
     writes: [{ what: "Follow-up issue", approval: "comment" }],
     person: "Per-repo approval",
-    swimlane: [
-      { id: "pmreview", lane: "models", row: 18, lines: ["Post-merge review", "Opus reads the merge"] },
-      { id: "pmfile", lane: "writes", row: 19, lines: ["File issues", "one per defect"], approval: "comment approval" },
-    ],
   },
 ];
 
@@ -353,7 +294,6 @@ export const GLOBAL_WAITS: { name: string; why: string; howLong: string; showsAs
   { name: "Started work on its owner's Task Runner", why: "A queued call for work a maintainer started or approved in the maintainer workflow goes to their own Task Runners first: other users' Task Runners pass it over while one of the owner's is fresh, ready, not cooling off, offers its tier and may take it", howLong: "Until one of the owner's Task Runners claims it, at most 10 minutes from its queueing; then any Task Runner takes it under its own limits. An owner's Task Runner that is offline, not ready or cooling off still counts as a taker, so the work waits for it instead of being skipped for want of one", showsAs: "As the state line of an approved item whose pre-merge check waits: \"Waiting for <login>'s Task Runner (offline)\" (or usage limit, cooling off, not ready) when only that person's runner takes it, \"Waiting for the pre-merge check: no Task Runner can take it\" when nothing does", kind: "external" },
   { name: "Task Runner for the repo", why: "The planner proposes no job of a step that calls Claude for a repo that no Task Runner may take now (the taker rule of the remote call queue: a fresh, ready runner whose user is not cooling off, may take calls on the repo and takes the step's task in My tasks). An item Jev was unsure of, whose answer is kept until Haiku decides, waits the same way, so the prioritize step is not queued again for it. A queued job of such a repo, one an operator started or one queued before the last runner left, stays queued, does not start, holds no repo of step_parallel and keeps none of the daily limit", howLong: "Until a Task Runner that may take the repo and the step's task connects or becomes ready, or a user ticks the task; the planner is woken by the change in the set of runners or their settings, no timer runs", showsAs: "\"No Task Runner takes <repo>\", or \"No Task Runner takes <task> tasks on <repo>\" when the repo's takers have all unticked the task, as the stage's status on the Pipeline page, on the repo's items on the Next page and their held decisions, and on the queued job in the Jobs list and job page", kind: "external" },
   { name: "Manual only Task Runners", why: "The Task Runners of a user who switched on Manual only (Connect page, My settings) take only the calls the user picked and follow-ups of the user's own sessions. While every ready runner is Manual only, other calls wait for a person to pick them; there is no automatic fallback", howLong: "Until a user picks the call or a Task Runner that takes calls on its own is ready; the 12-hour cap on a job's queue time still applies, and health check remote-manual warns once calls have waited 10 minutes", showsAs: "\"Every ready Task Runner is Manual only\" in the model call queue", kind: "external" },
-  { name: "Claude usage pause", why: "Account headroom", howLong: "Until usage reading recovers; re-read every minute", showsAs: "Claude pause reason", kind: "external" },
   { name: "Rate limits", why: "GitHub. Writes are also paced under GitHub's limits: at most 60 a minute and 400 an hour per identity and repo owner (only `user:` identities, a person's own token, are exempt), and a key pauses 60 seconds after a secondary-limit failure. A write waits at most 15 seconds for its turn, then fails as paced and the planner retries it", howLong: "Per the API's reset; write pacing frees as the minute and hour windows move", showsAs: "Job log", kind: "external" },
   { name: "Planner fallback", why: "Safety net; the planner normally runs on a change", howLong: "5 minutes", showsAs: "none", kind: "backoff" },
   { name: "Vector index", why: "Search cache", howLong: "30 minutes at most; also rebuilt on change", showsAs: "none", kind: "backoff" },

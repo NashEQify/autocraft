@@ -154,7 +154,7 @@ Rehearsed with rootless Docker on a copy of the newest production snapshot (1.2 
 | `pipeline status` | `OFF` |
 | Runner with the pipeline off | one planner pass of about 4 s at start, then idle (a wake time that had passed no longer repeats the pass); no job is queued or started |
 | `backup predeploy` in the container | 12.7 s, snapshot written to `/data/backups` |
-| Runner stop (SIGTERM) | under 1 s; the flowchart summary's duplicate-pairs query uses the pairs index first, so no helper thread sits in a long statement. If a stop still exceeds `AUTOCRAFT_STOP_TIMEOUT` the runner kills itself. The next start worked every time (stale lock recognised, no recovery needed with no job running). The dashboard stops in under 0.1 s. |
+| Runner stop (SIGTERM) | under 1 s; the duplicate-pairs summary query uses the pairs index first, so no helper thread sits in a long statement. If a stop still exceeds `AUTOCRAFT_STOP_TIMEOUT` the runner kills itself. The next start worked every time (stale lock recognised, no recovery needed with no job running). The dashboard stops in under 0.1 s. |
 | Sealed GitHub tokens read with another `session_key` | `null` (unavailable), no error |
 
 Not covered: the dashboard pages that need a signed-in session and the GitHub App, Claude and GitHub calls, and a runner with a running job.

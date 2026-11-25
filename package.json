@@ -19,7 +19,6 @@
     "db-types:check": "node scripts/gen-db-types.ts --check",
     "docs": "node scripts/gen-docs.ts",
     "docs:check": "node scripts/gen-docs.ts --check",
-    "docs:image": "node scripts/flowchart-shot.mjs",
     "gql-schema": "scripts/gql-schema.sh",
     "pg-schema": "node scripts/gen-pg-schema.ts",
     "pg-schema:check": "node scripts/gen-pg-schema.ts --check",

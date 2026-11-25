@@ -18,7 +18,7 @@
 
 **Model.** Jev first, Haiku for the unclear pairs.
 
-**You see.** A "Duplicate?" question on the Needs you page. An open one holds the item out of Review, Verify, Implement and the merge queue.
+**You see.** A duplicate signal on the items. It closes nothing and holds nothing back.
 
 **Can go wrong.** A pair you already ruled on is not asked again.
 
@@ -30,7 +30,7 @@
 
 **Model.** Jev first, Haiku for a second opinion.
 
-**You see.** The type and flags on the item. A disagreement on a scope label becomes a question.
+**You see.** The type and flags on the item. A disagreement on the type goes to a referee model; if it is unsure, the item gets the needs-decision flag and stays off the automatic path.
 
 **Can go wrong.** When Jev is unavailable, Haiku decides alone.
 

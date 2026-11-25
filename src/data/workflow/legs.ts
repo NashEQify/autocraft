@@ -9,9 +9,8 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { trackedRepo } from "../control/fragments.ts";
 import { addAudit } from "../control/audit.ts";
-import { openItem } from "../mirror/fragments.ts";
 import { LIVE_STATES } from "./fragments.ts";
-import type { Entry, FixupRequest, LegContext, LegMove, LegMoved, LegPass, MergeApproval, NewFixupRequest, NewLeg, Preapproval, RefKey, Surface, WorkflowState } from "./types.ts";
+import type { Entry, FixupRequest, LegContext, LegMove, LegMoved, LegPass, NewFixupRequest, NewLeg, Preapproval, RefKey, WorkflowState } from "./types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 /** A leg in one of these states no longer works its request. */
@@ -267,30 +266,4 @@ export async function loadFixupRequests(db: Db, f: { open?: true; refs?: { repo:
     .$if(!f.refs, (b: any) => b.where((eb: any) => trackedRepo(eb, "o.repo")))
     .orderBy("o.repo").orderBy("o.number").orderBy("o.from_head").orderBy("o.id")) as FixupRequest[];
   return rows.map(requestOf);
-}
-
-/**
- * The merge queue's operator path: an open PR whose live workflow is approved (or entry `merge`, whose command is the approval) and whose leg is
- * `queued`. `by`, `at` and `via` are the approval's, else the start's.
- */
-export async function loadMergeApprovals(db: Db, f: { repo?: string; refs?: { repo: string; number: number }[] } = {}): Promise<Map<RefKey, MergeApproval>> {
-  const out = new Map<RefKey, MergeApproval>();
-  if (f.refs?.length === 0) return out;
-  const q = queryDb(db);
-  const k = q.k as any;
-  const rows = await q.all(k.selectFrom("main.item_workflows as w").innerJoin("main.preapprovals as p", (j: any) => j.onRef("p.workflow_id", "=", "w.id").on("p.state", "=", "queued"))
-    .select(["w.id as wid", "w.repo as repo", "w.number as number", "w.approved_by", "w.approved_at", "w.approved_via", "w.started_by", "w.started_at", "w.started_via", "p.id as leg", "p.state as leg_state", "p.head as leg_head"])
-    .where("w.state", "in", LIVE_STATES)
-    .where((eb: any) => eb.or([eb("w.approved_by", "is not", null), eb("w.entry", "=", "merge")]))
-    .where((eb: any) => openItem(eb, "w.repo", "w.number", { kind: "pr" }))
-    .$if(f.repo !== undefined, (b: any) => b.where("w.repo", "=", f.repo!))
-    .$if(!!f.refs, (b: any) => b.where(kx.refIn(db, "w", f.refs!.map((r) => [r.repo, r.number] as const))))
-    .orderBy("w.id")) as { wid: number; repo: string; number: number; approved_by: string | null; approved_at: string | null; approved_via: Surface | null; started_by: string; started_at: string; started_via: Surface; leg: number; leg_state: string; leg_head: string | null }[];
-  for (const r of rows) {
-    out.set(refKey(r.repo, num(r.number)), {
-      workflowId: num(r.wid), by: r.approved_by ?? r.started_by, at: r.approved_at ?? r.started_at, via: r.approved_by ? r.approved_via ?? r.started_via : r.started_via,
-      leg: { id: num(r.leg), state: r.leg_state as "queued", head: r.leg_head },
-    });
-  }
-  return out;
 }

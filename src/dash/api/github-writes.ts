@@ -31,7 +31,6 @@ type CommentRow = { id: string; kind: string | null; url: string | null; created
 
 /** A comment without a creation time never falls inside a window. */
 const timeOf = (t: string | null): number => (t === null ? NaN : Date.parse(t));
-const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 /** The writes AutoCraft made on `repo#number`, oldest first. */
 export async function writesOf(db: Db, repo: string, number: number): Promise<WriteRow[]> {

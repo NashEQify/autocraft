@@ -114,9 +114,6 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   return until > nowMs ? { until } : null;
 }
 
-export const UNSURE_AT_SQL = `SELECT 1 FROM opus_review_history WHERE repo = ?1 AND number = ?2 AND head_oid = ?3 AND verdict IN ('take', 'take-fix') AND sure = 0
-  UNION ALL SELECT 1 FROM opus_reviews WHERE repo = ?1 AND number = ?2 AND head_oid = ?3 AND verdict IN ('take', 'take-fix') AND sure = 0 LIMIT 1`;
-
 /** The audit target of a merge at one head (an operator's Retry after a refusal names it). */
 export const mergeDecisionId = (repo: string, number: number, head: string): string => `${repo}#${number}:merge@${head}`;
 

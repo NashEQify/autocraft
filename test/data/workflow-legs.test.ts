@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadMergeApprovals, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
+import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number, o: Record<string, unknown> = {}) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT, ...o });
@@ -61,21 +61,6 @@ both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue'
   assert.deepEqual((await listWorkflowLegs(db, [byLeg])).map((l) => l.number), [3]);
 });
 
-both("loadMergeApprovals needs an approved (or merge-entry) live workflow, an open PR and a queued leg", async ({ db }) => {
-  const ids = await seed(db, 4);
-  const q = queryDb(db);
-  const k = q.k as any;
-  const approvals = await loadMergeApprovals(db, {});
-  assert.deepEqual([...approvals.keys()].sort(), ["o/a#2", "o/a#4"], "queued legs of approved workflows of open PRs");
-  assert.equal(approvals.get("o/a#2")!.by, "ann");
-  assert.equal(approvals.get("o/a#2")!.workflowId, ids.get("o/a#2"));
-  assert.equal(approvals.get("o/a#2")!.leg!.state, "queued");
-  assert.deepEqual([...await loadMergeApprovals(db, { refs: [{ repo: "o/a", number: 4 }] })].map(([key]) => key), ["o/a#4"]);
-  assert.equal((await loadMergeApprovals(db, { refs: [] })).size, 0);
-  await q.run(k.updateTable("main.items").set({ state: "MERGED" }).where("number", "=", 2));
-  assert.ok(!(await loadMergeApprovals(db, { repo: "o/a" })).has("o/a#2"));
-});
-
 both("loadFixupRequests: queued requests of makers who may act, ordered, narrowed by refs", async ({ db }) => {
   const q = queryDb(db);
   const k = q.k as any;
@@ -113,7 +98,6 @@ async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; clo
     run: async () => {
       await loadLegs(o.db, keys, { latestOnly: true });
       await loadLegPass(o.db);
-      await loadMergeApprovals(o.db, { refs: keys });
       await loadFixupRequests(o.db, { open: true });
       await loadHolds(o.db, { refs: keys });
     },

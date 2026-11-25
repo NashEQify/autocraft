@@ -640,17 +640,7 @@ A step lists the models it calls in `models` (a list, or a function of the param
 
 Param kinds are `enum`, `repo` (a tracked repo), `int` and `run-id`; there is no free-text kind, so nothing typed on the dashboard reaches a prompt. `run` gets the database, the validated params, `progress(text)`, `log(line)`, `handled(n)` (the running total of units the job has attempted, saved at once and counted against the stage's daily limit), `usageRun(runId)` (token use recorded under that run from the job's start counts as the job's) and `cancelled()`, and returns a one-line summary; throwing fails the job with the error's message. `available()` and `check(db, params)` can refuse a step or a request with a reason. The Pipeline page, the API, the autopilot and the CLI pick the step up from the list.
 
-After a change to a stage in `src/stages/registry.ts`, run `npm run docs` and `npm run docs:image`.
-
-`npm run docs:image -- <url>` screenshots the dashboard home page into `docs/images/flowchart.png`. Build the mock UI and serve it first:
-
-```sh
-(cd web && VITE_MOCK=1 npx vite build --outDir <dir> --emptyOutDir)
-node scripts/serve-spa.mjs <dir> 8980 &
-PLAYWRIGHT_DIR=<dir with node_modules/playwright-core> CHROMIUM_PATH=<chromium binary> npm run docs:image -- http://127.0.0.1:8980
-```
-
-Playwright is not a dependency of the repo; the header of `scripts/flowchart-shot.mjs` lists the two variables.
+After a change to a stage in `src/stages/registry.ts`, run `npm run docs`.
 
 ## Running a worker
 

@@ -20,7 +20,6 @@ import { loadQuiet } from "../../data/security/index.ts";
 import { loadShown } from "../../data/mirror/index.ts";
 import { loadItemTrace, loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
 import type { AuditRow } from "../../data/control/types.ts";
-import type { StoredEvent } from "../../data/workflow/types.ts";
 
 export type Ev = TraceEvent & { detail?: Record<string, unknown> };
 /** `staff`: operators and maintainers; `hidden`: repos the viewer may not see, whose runs are left out like getRun does. */

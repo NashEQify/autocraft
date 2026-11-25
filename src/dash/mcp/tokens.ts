@@ -21,7 +21,6 @@ export const MCP_TOKENS_PER_LOGIN = 5;
 export const MCP_TOKEN_PREFIX = "acmcp_";
 export const RUNNER_TOKEN_PREFIX = "acrun_";
 const LABEL_MAX = 60;
-const TOUCH_EVERY = 60_000;
 
 export type TokenKind = "connector" | "runner";
 export type McpTokenRow = { id: number; label: string | null; kind: TokenKind; canAnswer: boolean; /** A runner credential may also use /mcp; true for every connector. */ canAgent: boolean; /** Equal to `kind === "runner"`: the credential may claim model calls in the user-local inference mode (src/remote/). */ canRun: boolean; createdAt: string; lastUsedAt: string | null; expiresAt: string };

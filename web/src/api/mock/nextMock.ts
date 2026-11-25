@@ -13,7 +13,7 @@ const STEPS: NextStep[] = ([
     items: [item(a!, 412, "classify", "Needs a first classification", { kind: "issue" }), item(a!, 418, "classify", "Changed since its last classification", { kind: "issue" }), item(b!, 77, "classify", "Needs a first classification", { kind: "issue" })],
   },
   {
-    lane: "premerge", title: "Review before merging", stage: "Merge queue", steps: ["premerge"], canRun: false, kind: "account", why: "No Task Runner takes Opus calls now", note: null,
+    lane: "premerge", title: "Review before merging", stage: "Merge queue", steps: ["premerge"], canRun: false, kind: "backoff", why: "No Task Runner takes Opus calls now", note: null,
     items: [item(a!, 390, "premerge", "Pre-merge review of the head", { rank: 71 }), item(b!, 64, "premerge", "Pre-merge review of the head", { rank: 52 })],
   },
   {
