@@ -10,6 +10,7 @@ import { VectorIndex } from "../src/embed/vectors.ts";
 import { dispatcher } from "../src/discord/index.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
+import { addSentAlerts } from "../src/data/discord/index.ts";
 import { installAccountCommands } from "../src/discord/commands.ts";
 import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
@@ -255,6 +256,15 @@ describe("/autocraft do", () => {
     await db.run(db.k.insertInto("main.repo_permissions").values({ login: "nora", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() }));
     await run("d5", "u70", "review: photocraft#4");
     assert.equal(await workflows(), 1);
+
+    // An answer is for the question the person's alert showed; the refusal shows the one that took its place, as an alert does.
+    const rec = JSON.stringify({ text: "Review it again.", parts: { fix: [], drop: [] }, merges: false, again: "review" });
+    await db.run(db.k.updateTable("main.item_workflows").set({ state: "recommending", rec, rec_at: "2026-11-02T00:00:00.000Z" }));
+    const id = Number((await db.get(db.k.selectFrom("main.item_workflows").select("id")))!.id);
+    await addSentAlerts(db, [{ userHash: keys.hash("author", "u70"), workflowId: id, recAt: "2026-11-01T00:00:00.000Z", sentAt: "2026-11-01T00:00:01.000Z" }]);
+    assert.match(await run("d6", "u70", "yes: photocraft#4"), /A new question follows\. Recommendation: Review it again\./);
+    assert.doesNotMatch(await run("d7", "u70", "yes: photocraft#4"), /new question/);
+    assert.equal((await db.get(db.k.selectFrom("main.item_workflows").select("state")))!.state, "running");
   });
 });
 

@@ -1,4 +1,4 @@
-// reads: mirror.comments, mirror.items, mirror.repos, access.access, control.audit, implement.implementations
+// reads: mirror.comments, mirror.items, mirror.repos, access.access, control.audit, implement.implementations, workflow.item_workflows
 // The discussion statements filter comments by "not ours" inside an aggregate, so they join the mirror, access and audit rows in
 // one statement. loadFollowupFixPrs and loadPendingDefects read `implementations.pr_number`;
 // the pre-merge base match reads the repo's default branch.
@@ -6,6 +6,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
+import { inMergeEntry } from "../workflow/fragments.ts";
 import { reviewWindow } from "./rows.ts";
 
 const MAINTAINER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
@@ -83,6 +84,14 @@ export function premergeBase(db: Db) {
     .leftJoin("main.opus_reviews as o", (j) => j.onRef("o.repo", "=", "p.repo").onRef("o.number", "=", "p.number").onRef("o.head_oid", "=", "p.head_oid"))
     .leftJoin("main.repos as r", "r.name", "p.repo")
     .where((eb) => eb.or([eb("p.base_ref", "is", null), eb(eb.fn.coalesce("o.base_ref", "r.default_branch"), "is", null), eb("p.base_ref", "=", eb.fn.coalesce("o.base_ref", "r.default_branch"))]));
+}
+
+/** The reviewed heads of the PRs of `keys` that have a live workflow of the merge entry. */
+export function mergeEntryReviews(db: Db, keys: KeySource) {
+  const q = queryDb(db);
+  return q.k.selectFrom("main.opus_reviews as o")
+    .innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "o.repo").onRef("kk.number", "=", "o.number"))
+    .select(["o.repo", "o.number", "o.head_oid", "o.at"]).where("o.verdict", "is not", null).where((eb) => inMergeEntry(eb, "o.repo", "o.number"));
 }
 
 /** `(repo, pr_number)` of implementation PRs that fix a follow-up issue this stage filed, for the PRs of `keys`. */

@@ -116,9 +116,10 @@ export const afterPush = (rec: Recommendation): Recommendation => ({ ...rec, tex
  * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix; a stuck implementation comes back through question.ts);
  * - findings of the pre-merge review (`params.premerge`: their plan parts) are fixed first, never merged as they are;
  * - a major finding or a change outside the purpose takes the review's own recommendation when it gave one;
+ * - the author's commits on a PR that merges without a review (`mergeEntry`) are reviewed; on any other they are anyway;
  * - for the rest, what the blocker was about is accepted as it is.
  */
-export function atBlocker(found: Found, review: ReviewView | null, plan: readonly PlanPart[]): Recommendation {
+export function atBlocker(found: Found, review: ReviewView | null, plan: readonly PlanPart[], mergeEntry = false): Recommendation {
   const drop = droppedOf(plan);
   const go = (text: string, extra: Partial<Recommendation> = {}): Recommendation => ({ text, parts: { fix: [], drop }, merges: true, ...extra });
   const p = found.params;
@@ -128,7 +129,7 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
-    case "author-commits": return go(t("Review the new commits, then merge."));
+    case "author-commits": return go(t("Review the new commits, then merge."), mergeEntry ? { again: "review" } : {});
     case "failed-twice": {
       if (p.step === "fix-up") {
         const fix = planned(plan);

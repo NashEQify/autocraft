@@ -63,7 +63,7 @@ both("opening a PR links the issue's live workflow and nothing else of it: a com
   assert.deepEqual(await linkWorkflows(db), []);
   const after = (await listWorkflows(db, { ids: [w] }))[0]!;
   assert.deepEqual(after, { ...before, prNumber: 100 });
-  assert.equal((await moveWorkflows(db, [{ id: w, patch: { state: "waiting" }, at: at(13), was: { state: before.state, updatedAt: before.updatedAt } }])).size, 1);
+  assert.equal((await moveWorkflows(db, [{ id: w, patch: { state: "waiting" }, at: at(13), was: { state: before.state, updatedAt: before.updatedAt, version: before.version } }])).size, 1);
   // Two writers with the same reading: one writes.
   await queryDb(db).run((queryDb(db).k as any).updateTable("main.item_workflows").set({ pr_number: null }).where("id", "=", w));
   const both2 = await Promise.all([linkWorkflows(db), linkWorkflows(db)]);

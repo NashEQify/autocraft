@@ -4,7 +4,7 @@
 import { conflictAskRetryAtOf, conflictBucketOf, attemptsIn, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, pushChainOf } from "../src/data/changes/index.ts";
 import type { CifixRow, ConflictRow, FixupRow, PatchFacts, PushEdge, TaskStates } from "../src/data/changes/types.ts";
 import { pushAllowed } from "../src/core/gates.ts";
-import { ownPushes, reviewOwed } from "../src/core/evidence.ts";
+import { ownPushes, neededReview } from "../src/core/evidence.ts";
 import { workflowGate } from "../src/core/may.ts";
 import type { EndedWorkflow, PrFacts, StandingFact } from "../src/core/plan.ts";
 import { FIXUP_MAX_ATTEMPTS, sizeOf } from "../src/core/rules.ts";
@@ -252,7 +252,8 @@ export function factsOf(w: PrRows): PrFacts {
   const made = (by: CommitBy) => w.commits.flatMap((c, i) => (i > 0 && c.by === by ? [{ from: w.commits[i - 1]!.sha, to: c.sha, at: c.at ?? at("08:00") }] : []));
   const ours = ownPushes([], w.patches.pushes, [...made("revision").map((p) => ({ ...p, action: "implement-push" })), ...outEdge.map((e) => ({ ...e, action: "fixup-push", at: at("11:50") }))], made("repin"));
   const moves = ours.map(({ from, to }) => ({ from, to }));
-  const owed = open && live?.entry === "merge" && reviewOwed(ours, head, at("09:00"));
+  const needed = open && live?.entry === "merge" ? neededReview({ entry: "merge", startedAt: at("09:00"), since: at("09:00"), reviewAskedAt: null }, ours, head, w.review ? [{ head: w.review.head, at: at("10:00") }] : []) : null;
+  const owed = needed !== null;
   const ownCommit = (h: string): boolean => w.commits.some((c) => c.sha === h && isOurs(c));
   const ownHead = pushChainOf(moves, head).some((h) => ownCommit(h) && !moves.some((m) => m.to === h && m.from !== h));
   const f: PrFacts = {
@@ -281,7 +282,7 @@ export function factsOf(w: PrRows): PrFacts {
   if (open && (w.ruledOut || w.baseOffDefault)) f.ruledOut = [...(w.ruledOut ? ["changes the README"] : []), ...(w.baseOffDefault ? ["its base is not the default branch"] : [])];
   f.label = w.label; f.labelUnsure = w.labelUnsure; f.needsDecisionFlag = w.needsDecision;
   f.tier = w.tier === "not" && w.ours && ownHead ? "whitelisted" : w.tier;
-  const mx = open && live?.entry === "merge" && !owed, r = w.review;
+  const mx = open && live?.entry === "merge" && !owed, r = needed?.from != null && at("10:00") <= needed.from ? null : w.review;
   const fresh = w.checks.head === (mx ? head : r?.head ?? head);
   f.mergeable = fresh ? w.mergeable : w.mergeable === "CONFLICTING" ? "CONFLICTING" : "UNKNOWN";
   f.pushable = w.pushable;

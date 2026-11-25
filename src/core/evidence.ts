@@ -55,16 +55,16 @@ export function ownPushes(made: readonly MadePush[], edges: readonly PushEdge[],
  * Whether a push is ours: `head` is `base`, or is reached from it through our own pushes alone, step by step. A head whose parent is not
  * recorded, or whose chain passes through a commit we did not push, is not: someone else's commits are under it.
  */
-export function chainsOwn(pushes: readonly OwnPush[], base: string, head: string): boolean {
+export const chainsOwn = (pushes: readonly OwnPush[], base: string, head: string): boolean => ownHeads(pushes, head).has(base);
+
+/** The head and the heads our own pushes alone moved it from. */
+function ownHeads(pushes: readonly OwnPush[], head: string): Set<string> {
   const reached = new Set([head]);
-  for (const h of reached) {
-    if (h === base) return true;
-    for (const p of pushes) if (p.to === h) reached.add(p.from);
-  }
-  return false;
+  for (const h of reached) for (const p of pushes) if (p.to === h) reached.add(p.from);
+  return reached;
 }
 
-/** Our pushes that lead to `head`, made after `since` (when a person last chose to go on with the PR), newest first. */
+/** Our pushes that lead to `head`, made after `since` (up to when a person has seen the PR and chose to go on with it), newest first. */
 export function pushesSince(pushes: readonly RecordedPush[], head: string, since: string): RecordedPush[] {
   const out: RecordedPush[] = [], reached = new Set([head]);
   for (const h of reached) for (const p of pushes) if (p.to === h && p.from !== h && p.at > since) { out.push(p); reached.add(p.from); }
@@ -74,12 +74,48 @@ export function pushesSince(pushes: readonly RecordedPush[], head: string, since
 /** The head the person chose to go on with: `head` without our pushes since. */
 export const approvedHead = (pushes: readonly RecordedPush[], head: string, since: string): string => pushesSince(pushes, head, since).at(-1)?.from ?? head;
 
-/** A push of ours since the person chose to go on changed more than a checked merge does: the head needs a model's review, also of a PR that merges without one. */
-export const reviewOwed = (pushes: readonly RecordedPush[], head: string, since: string): boolean => pushesSince(pushes, head, since).some((p) => !p.small);
+/**
+ * Our pushes after `since` that changed more than a checked merge does and that the head holds (`reached`: its ownHeads): the ones it was
+ * reached through, and those under someone else's commits. One that never landed, or is gone from the branch again, is not.
+ */
+const codePushes = (pushes: readonly RecordedPush[], reached: ReadonlySet<string>, since: string): RecordedPush[] =>
+  pushes.filter((p) => !p.small && p.from !== p.to && p.at > since && (reached.has(p.to) || (p.landed && !reached.has(p.from))));
+
+/** Up to when a person accepted a PR's code: an approval that answers no question (made after they last started or answered it, `said`) accepts what was pushed before it, else what they had seen (`since`). */
+export const agreedAt = (w: { approvedAt: string | null; since: string; said: string }): string => (w.approvedAt !== null && w.approvedAt > w.said ? w.approvedAt : w.since);
+
+/** A started PR as its person last left it. `since`: up to when they have seen it. `reviewAskedAt`: they asked for a model review newer than this of a PR that merges without one. */
+export type GoneOnPr = { entry: string; startedAt: string; since: string; reviewAskedAt: string | null };
+/** A head a model reviewed, and when. */
+export type HeadReview = { head: string; at: string };
+
+/**
+ * The review a started PR's head merges after, null when it needs none; `from`: only one made after this counts (null: any). Every entry
+ * needs one but the merge entry, which needs:
+ * - the one a person asked for;
+ * - one at every push of ours since its start that changed more than a checked merge does, or at a later head of ours. No answer ends that.
+ *   A push under someone else's commits (its chain to the head is cut) needs one at what followed them;
+ * - then what such a review says, until the person has been asked about it.
+ */
+export function neededReview(w: GoneOnPr, pushes: readonly RecordedPush[], head: string, reviews: readonly HeadReview[]): { from: string | null } | null {
+  if (w.entry !== "merge") return { from: null };
+  const reached = ownHeads(pushes, head);
+  const made = reviews.filter((r) => reached.has(r.head));
+  let from = w.since, owed = false, reviewed = w.reviewAskedAt !== null || w.since > w.startedAt;
+  const owe = (at: string): void => { owed = true; if (at > from) from = at; };
+  if (w.reviewAskedAt !== null && !made.some((r) => r.at > w.reviewAskedAt!)) owe(w.reviewAskedAt);
+  for (const p of codePushes(pushes, reached, w.startedAt)) {
+    const on = reached.has(p.to);
+    reviewed = true;
+    // A head on the push was reviewed after it, whatever the times say; one that followed someone else's commits goes by them.
+    if (!made.some((r) => (on ? chainsOwn(pushes, p.to, r.head) : r.at > p.at))) owe(on ? w.since : p.at);
+  }
+  return owed || (reviewed && made.some((r) => r.at > w.since)) ? { from } : null;
+}
 
 // ---- the review after a merge
 
-/** A person's approval of a merge. `since`: when they last chose to go on with the PR. `prOpenedAt`: an implementation's PR, when it was opened. */
+/** A person's approval of a merge. `since`: up to when they accepted the PR's code (agreedAt). `prOpenedAt`: an implementation's PR, when it was opened. */
 export type LandedApproval = { approvedAt: string; since: string; prOpenedAt: string | null };
 
 /** Why the merge of `head` gets a review of what it landed; null when it merged as a person approved it. */
@@ -87,7 +123,7 @@ export function landedWhy(m: { head: string; approval: LandedApproval | null; pu
   const a = m.approval;
   if (!a) return "rule";
   if (a.prOpenedAt !== null && Date.parse(a.prOpenedAt) > Date.parse(a.approvedAt)) return "implementation";
-  return reviewOwed(m.pushes, m.head, a.since) ? "push" : null;
+  return codePushes(m.pushes, ownHeads(m.pushes, m.head), a.since).length ? "push" : null;
 }
 
 // ---- CI
@@ -132,13 +168,15 @@ export function ciAt(
 // ---- the heads a person accepted
 
 /**
- * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`): the workflow's own,
- * and for an issue's implementation PR the heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
+ * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`). A PR's is its base head,
+ * which every release writes. An issue's is the accepted head of its implementation PR; a row without one says it with the base head and the
+ * heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
  */
 export function acceptedHeads(
   w: { kind: "pr" | "issue"; baseHead: string | null; acceptedHead: string | null }, legs: readonly { from_head: string | null; head: string | null }[],
 ): string[] {
-  return [w.baseHead, ...(w.kind === "issue" ? legs.flatMap((l) => [l.from_head, l.head]) : [])].filter((h) => h !== null);
+  const heads = w.kind === "pr" ? [w.baseHead ?? w.acceptedHead] : w.acceptedHead !== null ? [w.acceptedHead] : [w.baseHead, ...legs.flatMap((l) => [l.from_head, l.head])];
+  return heads.filter((h) => h !== null);
 }
 
 /** Whether `head` is one of `heads` or our own pushes on top of one. */

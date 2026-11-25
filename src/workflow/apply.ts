@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -45,11 +45,16 @@ export type CommandInput = {
   at?: string;
   exec?: Exec;
   clock?: Clock;
+  /**
+   * When the question the person read on the item (`ref`: repo#number, as they named it) was asked, as their surface showed it, or a time they
+   * had read it by; null or undefined when the surface cannot tell.
+   */
+  asked?: (o: { ref: string; workflow: ItemWorkflow }) => string | null | undefined;
   /** The app's mention name, for replies that tell the sender what to write back. */
   mention?: string;
 };
 
-export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null };
+export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string } };
 export type CommandResult = { items: ItemOutcome[]; lines: string[] };
 
 /** The actions that close an item as the person, and their states before they end. */
@@ -229,21 +234,25 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number }) : undefined;
   if (started) return out("refused", worksElsewhere(ref, started, input.clock), started.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
-    ({ workflowId, repo: item.repo, number: item.number, login, via, kind, parsed: input.parsed, line, at });
+    ({ workflowId, repo: item.repo, number: item.number, login, via, kind, parsed: input.parsed, line, at, ...(kind === "answered" ? { seenAt: wf?.recAt ?? null } : {}) });
   if (r.kind === "ambiguous") {
     const line = replyLine(r, input.clock, input.mention);
     await recordEvents(db, [event("ambiguous", wf?.id ?? null, noted(line))]);
     return out("ambiguous", reply(line), wf?.id ?? null);
+  }
+  // Runs the open question's answer, as against a word that ends the work whatever was asked.
+  const accepts = r.kind === "run" && r.run.answers && (r.run.end === null || (r.run.end === "close" && !says(input.parsed, "close")));
+  const read = accepts && wf?.recAt ? input.asked?.({ ref: key, workflow: wf }) : null;
+  if (read && Date.parse(wf!.recAt!) > Date.parse(read)) {
+    const why = t("The question changed after you read it. A new question follows. {question}", { question: recommendationLine(wf!.rec) ?? "" });
+    return { ...out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why })), wf!.id), question: { workflowId: wf!.id, recAt: wf!.recAt! } };
   }
   if (r.kind === "refused") return out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null);
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}) };
   try {
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
-    const closes = r.run.end === "close" && says(input.parsed, "close");
-    const close = closes ? said : on;
-    // Runs the open question's answer, as against a word that ends the work whatever was asked.
-    const accepts = r.run.answers && (r.run.end === null || (r.run.end === "close" && !closes));
+    const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
     const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts });
@@ -322,9 +331,11 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   let read: Promise<fx.Target | null> | undefined;
   const issuePr = (w: ItemWorkflow): Promise<fx.Target | null> => (read ??= implementationPr(db, w));
   // An answer at another head than the question's would accept code nobody was shown.
+  let shown: { shown?: string } = {};
   if (o.accepts && wf?.recHead && !r.pick) {
     const pr = item.kind === "pr" ? item : await issuePr(wf);
     if (pr?.head && !await ownSince(db, pr, wf.recHead, pr.head)) throw new fx.EffectError(PUSHED_SINCE());
+    if (pr?.head) shown = { shown: wf.recHead };
   }
   if (r.end !== null) {
     if (r.end === "close" && o.close.kind === "pr" && !o.close.head) throw new fx.EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: refText(o.close.repo, o.close.number) }));
@@ -384,12 +395,12 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.weight !== null && r.weight !== live.weight) patch.weight = r.weight;
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
-  let on: fx.Ctx = { ...c, workflowId: live.id };
+  let on: fx.Ctx = { ...c, ...shown, workflowId: live.id };
   if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await issuePr(live);
     // A command written on the PR is about its head then, and about that PR.
     if (o.said.kind === "pr" && (pr?.number !== o.said.number || (o.said.head !== null && pr.head !== o.said.head))) throw new fx.EffectError(CHANGED());
-    if (pr) on = { ...c, item: pr, workflowId: live.id };
+    if (pr) on = { ...c, ...shown, item: pr, workflowId: live.id };
     else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
@@ -398,10 +409,18 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
-  // Approving at this head: commits the person could see are no longer new (blocker 2 counts from here).
-  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null, ...(item.head ? { baseHead: item.head } : {}) });
-  // The person answered at this head: commits they could see are no longer new (blocker 2 counts from here).
-  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null, ...(item.head ? { baseHead: item.head } : {}) });
+  if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null });
+  if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null });
+  // The person approved or answered at this head: commits they could see are no longer new (blocker 2 counts from here). An option of an
+  // implementation's question is about its work, not about a head.
+  if (r.approve || r.answers) {
+    if (item.head) Object.assign(patch, { baseHead: item.head, acceptedHead: item.head });
+    const pr = live.kind === "issue" && !r.pick ? await issuePr(live) : null;
+    if (pr?.head) patch.acceptedHead = pr.head;
+  }
+  // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts).
+  if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
+  else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits") patch.reviewAskedAt = null;
   if (runs) patch.state = r.again !== null || r.merges || r.pick ? "running" : r.answers ? "done" : live.state;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
@@ -410,7 +429,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     commit: async () => {
       const now = (await listWorkflows(db, { ids: [live.id], live: true }))[0];
       if (!now) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
-      if (now.state !== live.state || now.updatedAt !== live.updatedAt) throw new Moved();
+      if (!sameWorkflow(now, live)) throw new Moved();
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);

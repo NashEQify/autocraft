@@ -8,16 +8,16 @@ import { canActExpr, writeCheckedAt } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
-import { linkRows, LIVE_STATES, notArchived, prIssueWorkflows, workScore } from "./fragments.ts";
+import { goOnAt, isGoOn, linkRows, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
+import { patchRows } from "./update.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
-  SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
+  GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
 import { ASKING_STATES, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
-const GO_ON_EVENTS = ["started", "answered"];
 
 const refKey = (repo: string, number: number): RefKey => `${repo}#${number}`;
 const isEmpty = (keys: KeySource): boolean => Array.isArray(keys) && keys.length === 0;
@@ -33,7 +33,7 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null; review_asked_at: string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
@@ -45,7 +45,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
-    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
+    plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), reviewAskedAt: r.review_asked_at, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
   };
 }
 
@@ -53,14 +53,14 @@ const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFac
   const dropped = w.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
   return {
     id: w.id, entry: w.entry, approved: w.approvedBy !== null, approvedBy: w.approvedBy, startedBy: w.startedBy, startedAt: w.startedAt, weight: w.weight, state: w.state, own,
-    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt,
+    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt, reviewAskedAt: w.reviewAskedAt,
     ...(dropped.length ? { dropped } : {}),
   };
 };
 
 /**
- * Who an implement workflow acts for, the newest first: whoever last answered it, approved its merge or started it. Their command is the
- * authority of the implementation and of its PR's revisions (src/workflow/work.ts settlerOf picks the one who may act).
+ * Who a workflow acts for, the newest first: whoever last answered it, approved its merge or started it. Their command is the authority of
+ * its work, an implementation and its PR's revisions among it (src/workflow/work.ts settlerOf picks the one who may act).
  */
 export function workflowActors(w: Pick<ItemWorkflow, "startedBy" | "startedAt" | "approvedBy" | "approvedAt">, answer: { login: string; at: string } | null | undefined): string[] {
   const said = [
@@ -98,8 +98,8 @@ export async function loadEndedWorkflows(db: Db, keys: KeySource): Promise<Map<R
 
 /**
  * The planner pass's set loader: live workflows with the PR an implement workflow works on, latest ended state per item (a PR's own or its issue's), merge holds, queued requests and
- * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`, a
- * write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
+ * active legs; five statements in one wave. A request counts only while its maker may still act on the repo (`access.canActExpr`: the
+ * app identity, and a write permission GitHub confirmed within `HOLD_MAX` of `nowMs`) and while no final fix-up row of it exists.
  */
 export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: number } = {}): Promise<WorkflowPassFacts> {
   const out: WorkflowPassFacts = { live: new Map(), ofPr: new Map(), actors: new Map(), ended: new Map(), holds: new Set(), operator: new Map() };
@@ -109,9 +109,9 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   const after = new Date((o.nowMs ?? Date.now()) - HOLD_MAX).toISOString();
   const keyed = (alias: string, a: string, b: string) => (eb: any) => eb.exists(k.selectFrom(resolveKeys(db, keys, alias)).select(one(eb)).whereRef(`${alias}.repo`, "=", a).whereRef(`${alias}.number`, "=", b));
 
-  /** A column of the newest answer to an implement workflow. */
+  /** A column of the newest answer to a workflow. */
   const lastAnswer = (alias: string, col: string) => k.selectFrom(`main.workflow_events as ${alias}`).select(`${alias}.${col}`).whereRef(`${alias}.workflow_id`, "=", "w.id")
-    .where(`${alias}.kind`, "=", "answered").where("w.entry", "=", "implement").orderBy(`${alias}.id`, "desc").limit(1);
+    .where(`${alias}.kind`, "=", "answered").orderBy(`${alias}.id`, "desc").limit(1);
   const liveQ = k.selectFrom("main.item_workflows as w")
     .leftJoin(linkRows(db, LIVE_STATES).as("l"), "l.wid", "w.id")
     .selectAll("w")
@@ -120,7 +120,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
       eb.case().when(keyed("ko", "w.repo", "w.number")(eb)).then(1).else(0).end().as("own"),
       eb.case().when(eb.and([eb("l.pr", "is not", null), keyed("kp", "w.repo", "l.pr")(eb)])).then(1).else(0).end().as("pr_hit"),
       lastAnswer("a1", "login").as("answer_by"), lastAnswer("a2", "at").as("answer_at"),
-      eb.selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max("ge.at").as("at")).whereRef("ge.workflow_id", "=", "w.id").where("ge.kind", "in", GO_ON_EVENTS).as("go_on"),
+      goOnAt(eb, "w.id").as("go_on"),
     ])
     .where("w.state", "in", LIVE_STATES)
     .where((eb: any) => eb.or([keyed("ko2", "w.repo", "w.number")(eb), eb.and([eb("l.pr", "is not", null), keyed("kp2", "w.repo", "l.pr")(eb)])]))
@@ -144,7 +144,7 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
 
   for (const r of live) {
     const w = workflowOf(r);
-    if (w.entry === "implement") out.actors.set(w.id, workflowActors(w, r.answer_by !== null ? { login: r.answer_by, at: r.answer_at! } : null));
+    out.actors.set(w.id, workflowActors(w, r.answer_by !== null ? { login: r.answer_by, at: r.answer_at! } : null));
     if (flag(r.own)) out.live.set(refKey(w.repo, w.number), factOf(w, true, r.go_on));
     if (flag(r.pr_hit) && w.entry === "implement" && r.pr !== null) out.ofPr.set(refKey(w.repo, Number(r.pr)), factOf(w, false, r.go_on));
   }
@@ -277,17 +277,18 @@ export async function loadAnswers(db: Db, workflowIds: number[]): Promise<Map<nu
   return out;
 }
 
-/** Latest `started` or `answered` event time, else the start: when a person last chose to go on with what the workflow showed them. */
-export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
+/** Up to when a person has seen each workflow's item and chose to go on with it, and when they last said so; its start without an event. */
+export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, GoneOn>> {
+  const out = new Map<number, GoneOn>();
   if (workflows.length === 0) return out;
   const q = queryDb(db);
-  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => eb.fn.max("e.at").as("at"))
-    .where("e.kind", "in", GO_ON_EVENTS).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; at: string | null }[];
-  const latest = new Map(rows.map((r) => [Number(r.workflow_id), r.at]));
+  const rows = await q.all((q.k as any).selectFrom("main.workflow_events as e").select(["e.workflow_id"]).select((eb: any) => [eb.fn.max(seenAt(eb, "e")).as("seen"), eb.fn.max("e.at").as("said")])
+    .where((eb: any) => isGoOn(eb, "e")).where(kx.inList(db, "e.workflow_id", workflows.map((w) => w.id), "bigint")).groupBy("e.workflow_id")) as { workflow_id: number; seen: string | null; said: string | null }[];
+  const latest = new Map(rows.map((r) => [Number(r.workflow_id), r]));
   for (const w of workflows) {
-    const at = latest.get(w.id) ?? null;
-    out.set(w.id, at !== null && at > w.startedAt ? at : w.startedAt);
+    const r = latest.get(w.id);
+    const from = (at: string | null | undefined): string => (at != null && at > w.startedAt ? at : w.startedAt);
+    out.set(w.id, { since: from(r?.seen), said: from(r?.said) });
   }
   return out;
 }
@@ -302,8 +303,8 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
 
 /**
  * Inserts workflows in the `running` state, one statement per 500 rows, `ON CONFLICT DO NOTHING` against the unique index of live workflows: a
- * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`. An implement workflow takes over the
- * PR of an attempt that has not ended (linkWorkflows). Joins the caller's `db.write`.
+ * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`; a PR's base head is the head its
+ * starter accepted. An implement workflow takes over the PR of an attempt that has not ended (linkWorkflows). Joins the caller's `db.write`.
  */
 export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<RefKey, number>> {
   const out = new Map<RefKey, number>();
@@ -316,7 +317,7 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
         const at = w.at ?? now;
         return {
           repo: w.repo, number: w.number, kind: w.kind, entry: w.entry, weight: w.weight, state: "running", started_by: w.startedBy, started_at: at, started_via: w.startedVia,
-          base_head: w.baseHead ?? null, approved_by: w.approvedBy ?? null, approved_at: w.approvedBy ? at : null, approved_via: w.approvedBy ? w.approvedVia ?? null : null,
+          base_head: w.baseHead ?? null, accepted_head: w.kind === "pr" ? w.baseHead ?? null : null, approved_by: w.approvedBy ?? null, approved_at: w.approvedBy ? at : null, approved_via: w.approvedBy ? w.approvedVia ?? null : null,
           plan: JSON.stringify(w.plan ?? []), step: w.step ?? null, updated_at: at,
         };
       })).onConflict((oc: any) => oc.doNothing()).returning(["id", "repo", "number"])) as { id: number; repo: string; number: number }[];
@@ -334,7 +335,7 @@ const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell
   approvedBy: (v) => ["approved_by", v], approvedAt: (v) => ["approved_at", v], approvedVia: (v) => ["approved_via", v],
   stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], blocker: (v) => ["blocker", v],
   blockerParams: (v) => ["blocker_params", v ? JSON.stringify(v) : null], rec: (v) => ["rec", v ? JSON.stringify(v) : null], recAt: (v) => ["rec_at", v],
-  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
+  recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], reviewAskedAt: (v) => ["review_asked_at", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
 };
 
 /** The rows to write per distinct column set; patches of the same id merge in order. Every row sets `updated_at` (the live topic `workflows`). */
@@ -359,27 +360,36 @@ function patchGroups(rows: { id: number; patch: WorkflowPatch; at?: string }[]):
   return [...groups.values()];
 }
 
-/** Batched update, one statement per distinct patch column set. Returns the rows changed. */
+/** The columns of a patch that are not text. */
+const BIGINT: readonly string[] = ["id", "weight", "legacy_preapproval_id"];
+
+/** Batched update, one statement per distinct patch column set; each row's `version` goes up by one. Returns the rows changed. */
 export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
   if (rows.length === 0) return 0;
   return await db.write(async () => {
     let changed = 0;
-    for (const group of patchGroups(rows)) changed += await kx.updateFrom(db, "main.item_workflows", ["id"], group);
+    for (const group of patchGroups(rows)) {
+      const set = Object.fromEntries(Object.keys(group[0]!).filter((c) => c !== "id").map((c) => [c, BIGINT.includes(c) ? "bigint" as const : "text" as const]));
+      changed += await patchRows(db, "main.item_workflows", { id: "bigint" }, set, group, { also: (eb) => ({ version: eb("main.item_workflows.version", "+", 1) }) });
+    }
     return changed;
   });
 }
 
+/** The row is as it was read. A release before `version` writes the row without raising it, so the state and the time of its last write count too. */
+export const sameWorkflow = (now: WorkflowRead, was: WorkflowRead): boolean => now.version === was.version && now.state === was.state && now.updatedAt === was.updatedAt;
+
 /**
- * `saveWorkflows` for rows read before this write: one that changed since (`was`: the state and `updated_at` it was read with) is left as it
- * is. One patch per id. Returns the ids written. Joins the caller's `db.write`.
+ * `saveWorkflows` for rows read before this write: one that changed since (`was`: how it was read) is left as it is. One patch per id. Returns
+ * the ids written. Joins the caller's `db.write`.
  */
 export async function moveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at: string; was: WorkflowRead }[]): Promise<Set<number>> {
   if (rows.length === 0) return new Set();
   const q = queryDb(db);
   return await db.write(async () => {
-    const now = new Map((await q.all((q.k as any).selectFrom("main.item_workflows as w").select(["w.id", "w.state", "w.updated_at"]).where(kx.inList(db, "w.id", rows.map((r) => r.id), "bigint"))) as
-      { id: number | string; state: string; updated_at: string }[]).map((r) => [Number(r.id), r]));
-    const same = rows.filter((r) => { const n = now.get(r.id); return n?.state === r.was.state && n.updated_at === r.was.updatedAt; });
+    const now = new Map((await q.all((q.k as any).selectFrom("main.item_workflows as w").select(["w.id", "w.state", "w.updated_at", "w.version"]).where(kx.inList(db, "w.id", rows.map((r) => r.id), "bigint"))) as
+      { id: number | string; state: WorkflowState; updated_at: string; version: number | string }[]).map((r) => [Number(r.id), { state: r.state, updatedAt: r.updated_at, version: Number(r.version) }]));
+    const same = rows.filter((r) => { const n = now.get(r.id); return n !== undefined && sameWorkflow(n, r.was); });
     await saveWorkflows(db, same);
     return new Set(same.map((r) => r.id));
   });
@@ -394,7 +404,7 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
     for (const batch of kx.batches(rows)) {
       await q.run((q.k as any).insertInto("main.workflow_events").values(batch.map((e) => ({
         workflow_id: e.workflowId, repo: e.repo, number: e.number, login: e.login, via: e.via ?? "cli", kind: e.kind,
-        parsed: e.parsed ? JSON.stringify(e.parsed) : null, line: e.line ?? null, at: e.at ?? now,
+        parsed: e.parsed ? JSON.stringify(e.parsed) : null, line: e.line ?? null, at: e.at ?? now, seen_at: e.seenAt ?? null,
       }))));
     }
   });
@@ -487,7 +497,7 @@ export async function loadActingPairs(db: Db): Promise<{ login: string; repo: st
   const approvers = k.selectFrom("main.item_workflows as w").select(["w.approved_by as login", "w.repo as repo"]).where("w.state", "in", LIVE_STATES).where("w.approved_by", "is not", null);
   const starters = k.selectFrom("main.item_workflows as w").select(["w.started_by as login", "w.repo as repo"]).where("w.state", "in", LIVE_STATES);
   const answerers = k.selectFrom("main.item_workflows as w").innerJoin("main.workflow_events as e", "e.workflow_id", "w.id").select(["e.login as login", "w.repo as repo"])
-    .where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("e.kind", "=", "answered");
+    .where("w.state", "in", LIVE_STATES).where("e.kind", "=", "answered");
   return await q.all(k.selectFrom(legs.union(requests).union(approvers).union(starters).union(answerers).as("a")).select(["a.login", "a.repo"]).orderBy("a.repo").orderBy("a.login")) as { login: string; repo: string }[];
 }
 

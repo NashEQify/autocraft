@@ -182,7 +182,8 @@ export interface Api {
     /** Items: four lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
     items(query: MaintainItemsQuery): Promise<MaintainItems>;
     /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
-    command(text: string): Promise<MaintainCommandResult>;
+    /** `asked`: the `asked` of the rows shown, by repo#number. */
+    command(text: string, asked?: Record<string, string>): Promise<MaintainCommandResult>;
     /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
     repos(): Promise<MaintainRepo[]>;
     /** Per visible repo, the started items that wait for an answer; repos with none are left out. */
@@ -194,7 +195,8 @@ export interface Api {
   maintainItem: {
     get(repo: RepoName, number: number): Promise<MaintainItem>;
     /** A command written on the item; the reply is the confirmation, or what was understood when nothing ran. */
-    command(repo: RepoName, number: number, text: string): Promise<MaintainReply>;
+    /** `asked`: the `asked` of the status shown. */
+    command(repo: RepoName, number: number, text: string, asked?: string | null): Promise<MaintainReply>;
     /** A registered control on the item: release an outside hold, or resume a breaker by its key. */
     control(body: { control: "release-outside"; repo: RepoName; number: number } | { control: "resume-breaker"; key: string }): Promise<MaintainReply>;
   };

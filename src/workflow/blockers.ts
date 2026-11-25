@@ -1,8 +1,8 @@
 // The six blockers of the maintainer workflow: when AutoCraft stops an item and comes back to a person even though the merge is
 // approved. Pure: advance.ts reads the facts and records what this returns; the merge approval stays on the workflow row.
 //
-// Every detector looks only at what happened after `since`, the last time a person started, approved or answered the item: what
-// they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
+// Every detector looks only at what happened after `since`, up to when the person who last started or answered the item has seen it (an
+// answer: when its question was asked): what they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
 import { stopCodeOf, type StopCode } from "../core/codes.ts";
 import type { Blocker, Entry } from "./types.ts";
 

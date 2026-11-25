@@ -14,6 +14,10 @@ export const trackedRepo = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<S
 export const pipelineOn = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.tracked_repos as tp").select(one(eb)).where("tp.name", "=", kx.exprOf(eb, repoCol)).where("tp.pipeline", "=", 1));
 
+/** GitHub writes go out as the app (the registry's `githubIdentity`), not as the box account. */
+export const appIdentity = (eb: kx.AnyEb): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.settings as sg").select(one(eb)).where("sg.key", "=", "github_identity").where("sg.value", "=", "app"));
+
 /** The viewer's repo filter on the repo in `col`: true when the repo is visible to them (a hidden list is a denylist, `visible` an allowlist). */
 export const hiddenRepos = (db: Db, col: kx.Ex, hidden: HiddenRepos): AliasableExpression<SqlBool> =>
   (hidden.visible ? kx.inList(db, col, hidden.visible) : kx.inList(db, col, [...hidden], "text", true)) as AliasableExpression<SqlBool>;

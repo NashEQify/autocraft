@@ -13,8 +13,9 @@ export const FAST_FLOOR = 1e15 / 2;
 export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;
   weight: number; state: WorkflowState; own: boolean;
-  /** When a person last chose to go on with what the workflow showed them (its start, or an answer). */
+  /** Up to when a person has seen the item and chose to go on with it: its start, or when the question they answered was asked. */
   since: string;
+  reviewAskedAt: string | null;
   /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
   dropped?: string[];
 };
@@ -25,7 +26,7 @@ export type OperatorWork = { requests: (FixupRequest & { maker_checked_at?: stri
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;
   ofPr: Map<RefKey, WorkflowFact>;
-  /** Who each live implement workflow acts for, newest first (workflowActors), by its id. */
+  /** Who each live workflow acts for, newest first (workflowActors), by its id. */
   actors: Map<number, string[]>;
   ended: Map<RefKey, EndedWorkflow>;
   holds: Set<RefKey>;
@@ -42,7 +43,9 @@ export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" 
 export type WorkflowLink = { workflowId: number; repo: string; issue: number; pr: number; live: boolean };
 export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
-export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string };
+export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string; /** An answer's: when its question was asked. */ seenAt?: string | null };
+/** Up to when a person has seen an item and chose to go on with it (`since`), and when they said so (`said`). */
+export type GoneOn = { since: string; said: string };
 export type StoredEvent = WorkflowEvent & { id: number; at: string };
 /** A stored event of the maintainer workflow itself. */
 export type SaidEvent = StoredEvent & { kind: WorkflowEventKind };
@@ -56,13 +59,12 @@ export type StartedFilter = { /** Live states only. */ states?: WorkflowState[];
 export type LegState = "fixup" | "review" | "ci" | "queued" | "merged" | "cancelled" | "failed";
 export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { state: LegState };
 export type LegRow = Preapproval;
-/** `actors`: who the workflow acts for, newest first (workflowActors). */
-export type LegContext = { workflowId: number; entry: Entry; since: string; startedBy: string; approvedBy: string | null; actors: string[] };
+export type LegContext = { workflowId: number; entry: Entry; startedAt: string; since: string; reviewAskedAt: string | null; approvedBy: string | null };
 /** `requests`: the queued requests of the active legs. */
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
 export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; /** What `reason` is, as a code, with its parts. */ code?: StopCode; params?: Params; by?: string; via?: string };
 /** What a row was read with, for a write that takes place only while it is still the same. */
-export type WorkflowRead = { state: WorkflowState; updatedAt: string; version?: number };
+export type WorkflowRead = { state: WorkflowState; updatedAt: string; version: number };
 /** A queued fix-up request follows the PR's head from `from` to `to`. */
 export type FixupRequestMove = { id: number; from: string; to: string };
 export type LegMoved = LegMove & { repo: string; number: number };

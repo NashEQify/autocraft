@@ -2308,7 +2308,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
   pr_number INTEGER,                  -- an implement workflow: the PR it works on, the newest an attempt of its issue opened for it; null before that (src/data/workflow/link.ts)
   version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
-  accepted_head TEXT                  -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
+  accepted_head TEXT,                 -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
+  review_asked_at TEXT                -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);
@@ -2325,7 +2326,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   kind TEXT NOT NULL,
   parsed TEXT,                        -- JSON Parsed (src/workflow/types.ts)
   line TEXT,                          -- the confirmation line given
-  at TEXT NOT NULL
+  at TEXT NOT NULL,
+  seen_at TEXT                        -- an answer: when its question was asked, the last moment of which the person had been shown anything
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
 CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);

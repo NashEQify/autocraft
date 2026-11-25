@@ -1154,6 +1154,7 @@ export interface ItemWorkflows {
   pr_number: number | null;
   version: Generated<number>;
   accepted_head: string | null;
+  review_asked_at: string | null;
 }
 
 export interface Items {
@@ -2468,6 +2469,7 @@ export interface WorkflowEvents {
   parsed: string | null;
   line: string | null;
   at: string;
+  seen_at: string | null;
 }
 
 export interface WorkspaceCalls {
@@ -3059,7 +3061,7 @@ export const COLUMNS = {
   item_settled_dirty: ["run_id", "repo", "number", "n"],
   item_settled_runs: ["run", "refreshed_at"],
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
-  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number", "version", "accepted_head"],
+  item_workflows: ["id", "repo", "number", "kind", "entry", "weight", "state", "started_by", "started_at", "started_via", "base_head", "approved_by", "approved_at", "approved_via", "stopped_by", "stopped_at", "blocker", "blocker_params", "rec", "rec_at", "rec_head", "plan", "legacy_preapproval_id", "updated_at", "step", "pr_number", "version", "accepted_head", "review_asked_at"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "jev_failed_hash", "text_refs", "author_id"],
   jev_unsure: ["prompt_id", "ref", "input_hash", "answer", "at"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
@@ -3165,7 +3167,7 @@ export const COLUMNS = {
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
   workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at", "close_as"],
-  workflow_events: ["id", "workflow_id", "repo", "number", "login", "via", "kind", "parsed", "line", "at"],
+  workflow_events: ["id", "workflow_id", "repo", "number", "login", "via", "kind", "parsed", "line", "at", "seen_at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],
   workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit"],

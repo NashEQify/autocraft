@@ -4,7 +4,7 @@
 // and the pre-merge review. States (see Preapproval in web/src/api/types.ts):
 //   fixup   -> the fix-up step works the operator's instructions (source 'operator' in its fixups rows)
 //   review  -> the fix-up pushed; waiting for the Opus review of the pushed head. A row with no fix-up (the merge of an approved workflow) starts
-//              here at its head. A merge-queue entry waits here only for a review that a push of ours owes (src/core/evidence.ts reviewOwed).
+//              here at its head. A merge-queue entry waits here only for a review it owes (src/core/evidence.ts neededReview).
 //   ci      -> that review says take (sure or unsure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it.
 //              A take-fix review keeps the row in review while the pipeline's fix-up of its fixes runs; that push is reviewed again. The
 //              pre-merge review's defects get one fix-up round, and fixes or red CI the pipeline cannot repair wait for the contributor.
@@ -23,7 +23,7 @@ import type { Params, Stop, StopCode } from "../core/codes.ts";
 import { byHand, conflictPath, decidePr, fixAllowed, fixupOf, isDraft as draftPr, notStarted, premergeFix, refusalStuck } from "../core/decide.ts";
 import { pushRefusal } from "../core/gates.ts";
 import { draftOf, loadPrFact, loadPrFacts } from "../core/facts.ts";
-import { chainsOwn, ciAt, reviewOwed, type RecordedPush } from "../core/evidence.ts";
+import { chainsOwn, ciAt, neededReview, type HeadReview, type RecordedPush } from "../core/evidence.ts";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
 import { mayPush, mergeApproved, type WorkflowGate } from "../core/may.ts";
 import { standingFor } from "../core/standing.ts";
@@ -45,7 +45,7 @@ import { loadChecks, loadItems, loadRepos, type PrChecksView } from "../data/mir
 import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
 import { loadOperatorFixResults } from "../data/changes/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
-import { loadReviewsAt, type ReviewFinding } from "../data/review/index.ts";
+import { loadMergeEntryReviews, loadReviewsAt, type ReviewFinding } from "../data/review/index.ts";
 import { verdictKept } from "../workflow/work.ts";
 import { isRunning } from "../data/jobs/index.ts";
 import { permKey, standings, type Standing } from "../data/access/index.ts";
@@ -92,7 +92,7 @@ async function sayAll(db: Db, lines: { repo: string; number: number; text: strin
   if (!lines.length) return;
   await addTurns(db, lines.map((l) => ({ ref: refOf(l.repo, l.number), kind: "system", login: "system", body: l.text, block: systemBlock(l.text), onlyIfThread: true })));
 }
-const say = async (db: Db, repo: string, n: number, text: string): Promise<void> => await sayAll(db, [{ repo, number: n, text }]);
+export const say = async (db: Db, repo: string, n: number, text: string): Promise<void> => await sayAll(db, [{ repo, number: n, text }]);
 
 /** The ends that leave nobody anything to settle. */
 const SETTLED: ReadonlySet<StopCode> = new Set(["workflow-ended", "pr-gone", "pr-closed", "pr-merged"]);
@@ -135,18 +135,23 @@ function mergeGate(wf: WorkflowFact | null, head: string, by: string): { ok: tru
   return r.ok ? { ok: true } : { ok: false, why: r.why };
 }
 
+/** Why a cancel of the leg can no longer stop its merge, past the guard of the merge queue: a batch holds the PR, or it is merged. Null while it can. */
+export async function pastCancel(db: Db, p: Pick<Row, "repo" | "number" | "state" | "head">): Promise<string | null> {
+  if (p.state !== "queued") return null;
+  const [batched, merging, merges] = await db.together(() => Promise.all([inActiveBatch(db, p.repo, p.number), mergeRunning(db, p.repo), loadMergeFacts(db, [{ repo: p.repo, number: p.number }])]));
+  if (batched) return "the PR is still in an integration batch";
+  if (merging) return "a merge of the repo is running: it may be merging this PR";
+  return mergedAt(merges, p.repo, p.number, p.head) ? "the PR is already merged" : null;
+}
+
 /** Cancels the row in one transaction, whatever state the caller read. False when the row had ended meanwhile. */
 async function cancelRow(db: Db, leg: { id: number; repo: string; number: number }, by: string, stop: Stop, line: string, guard = false, via?: string): Promise<boolean> {
   // Nothing is written before an early return, so committing leaves the database as a rollback would.
   const p = await db.write(async () => {
     const p = (await loadLegs(db, [{ repo: leg.repo, number: leg.number }], { activeOnly: true })).get(refOf(leg.repo, leg.number))?.find((r) => r.id === leg.id);
     if (!p || !ACTIVE.includes(p.state)) return null;
-    // Past the guard of the merge queue, a cancel cannot stop the merge: a batch holds the PR, or it is merged.
-    if (guard && p.state === "queued") {
-      if (await inActiveBatch(db, p.repo, p.number)) throw new Error("the PR is still in an integration batch");
-      if (await mergeRunning(db, p.repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
-      if (mergedAt(await loadMergeFacts(db, [{ repo: p.repo, number: p.number }]), p.repo, p.number, p.head)) throw new Error("the PR is already merged");
-    }
+    const late = guard ? await pastCancel(db, p) : null;
+    if (late !== null) throw new Error(late);
     return await moveRaw(db, p, "cancelled", { by, stop, via }) ? p : null;
   });
   if (!p) return false;
@@ -297,6 +302,10 @@ type PassFacts = {
   /** Every push of ours to each PR. */
   pushes: Map<string, RecordedPush[]>;
   workflows: Map<number, WorkflowFact>;
+  /** Who each of the workflows acts for, newest first. */
+  actors: Map<number, string[]>;
+  /** The reviewed heads of merge entries. */
+  mergeEntryReviews: Map<string, HeadReview[]>;
   reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[] }>;
   /** Who still counts on the repo, of the people the legs act for, keyed by permKey. */
   stands: Map<string, Standing>;
@@ -312,7 +321,8 @@ type PassFacts = {
  */
 function standsOf(p: Row, leg: LegContext, pf: PassFacts): Standing {
   const of = (login: string): Standing => pf.stands.get(permKey(login, p.repo)) ?? "unknown";
-  return standingFor(leg, p.state === "queued" ? "merge" : "work", of)?.standing ?? of(p.by);
+  const w = pf.workflows.get(leg.workflowId);
+  return standingFor(w ? { ...w, actors: pf.actors.get(w.id) ?? [] } : null, p.state === "queued" ? "merge" : "work", of)?.standing ?? of(p.by);
 }
 
 async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFacts> {
@@ -320,11 +330,11 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   const repos = [...new Set(rows.map((r) => r.repo))];
   const heads = rows.flatMap((r) => (r.head ? [{ repo: r.repo, number: r.number, head: r.head }] : []));
   const fixIds = rows.flatMap((r) => (r.fix_id !== null ? [r.fix_id] : []));
-  const [items, checks, repoRows, merge, fixResults, pushes, wfFacts, reviews, identity, optional] = await db.together(() => Promise.all([
+  const [items, checks, repoRows, merge, fixResults, pushes, wfFacts, reviews, identity, mergeEntryReviews, optional] = await db.together(() => Promise.all([
     loadItems(db, refs, "pr"), loadChecks(db, refs), loadRepos(db, { names: repos }), loadMergeFacts(db, refs), loadOperatorFixResults(db, fixIds),
-    loadOwnPushes(db, refs), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads), githubIdentity(db), optionalChecksOf(db),
+    loadOwnPushes(db, refs), loadWorkflowFacts(db, refs), loadReviewsAt(db, heads), githubIdentity(db), loadMergeEntryReviews(db, refs), optionalChecksOf(db),
   ]));
-  const acting = rows.flatMap((r) => { const c = context.get(r.id); return [r.by, ...(typeof c === "object" ? c.actors : [])].map((login) => ({ login, repo: r.repo })); });
+  const acting = rows.flatMap((r) => { const c = context.get(r.id); return [r.by, ...(typeof c === "object" ? wfFacts.actors.get(c.workflowId) ?? [] : [])].map((login) => ({ login, repo: r.repo })); });
   const stands = await standings(db, acting, { identity });
   const staleReads = new Map<string, ReturnType<PassFacts["stale"]>>();
   const readStale: PassFacts["stale"] = async (repo) => {
@@ -339,7 +349,7 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   const workflows = new Map<number, WorkflowFact>();
   for (const f of [...wfFacts.live.values(), ...wfFacts.ofPr.values()]) workflows.set(f.id, f);
   return {
-    items, checks, merge, fixResults, pushes, workflows, stands, optional, stale,
+    items, checks, merge, fixResults, pushes, mergeEntryReviews, workflows, actors: wfFacts.actors, stands, optional, stale,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
     reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes }])),
   };
@@ -391,9 +401,10 @@ type ReviewRead = { kind: "none" | "stale" | "take" | "takefix"; unsure: boolean
  * so a take-fix is the pipeline's own fix-up to make and the pre-approval goes on with its push; one whose fixes a person all dropped is a
  * take. Any other verdict stops it.
  */
-async function reviewAt(p: Row, head: string, pf: PassFacts, wake?: Wake): Promise<ReviewRead> {
+async function reviewAt(p: Row, leg: LegContext | null, head: string, pf: PassFacts, wake?: Wake): Promise<ReviewRead> {
   const r = pf.reviews.get(`${refOf(p.repo, p.number)}@${head}`);
-  if (!r) return { kind: "none", unsure: false };
+  const from = neededAt(leg, pf, refOf(p.repo, p.number), head)?.from ?? null;
+  if (!r || (from !== null && r.at <= from)) return { kind: "none", unsure: false };
   const ref = refOf(p.repo, p.number);
   const stale = await pf.stale(p.repo);
   const at = stale.refresh.get(ref);
@@ -426,8 +437,11 @@ function ownPush(pf: PassFacts, ref: string, from: string | null, cur: string): 
   return from !== null && from !== cur && chainsOwn(pushes, from, cur) ? pushes.find((x) => x.to === cur)?.what ?? null : null;
 }
 
-/** The leg's head needs an Opus review: always, except for a merge-queue entry at a head that no push of ours owes one. */
-const needsReview = (leg: LegContext | null, pf: PassFacts, ref: string, head: string): boolean => leg?.entry !== "merge" || reviewOwed(pf.pushes.get(ref) ?? [], head, leg.since);
+/** The Opus review the leg's head needs, as the planner judges it. */
+const neededAt = (leg: LegContext | null, pf: PassFacts, ref: string, head: string): { from: string | null } | null =>
+  (leg ? neededReview(leg, pf.pushes.get(ref) ?? [], head, pf.mergeEntryReviews.get(ref) ?? []) : { from: null });
+/** The leg's head needs an Opus review. */
+const needsReview = (leg: LegContext | null, pf: PassFacts, ref: string, head: string): boolean => neededAt(leg, pf, ref, head) !== null;
 
 /** A push of ours moved the PR off the head the mirror shows, until a sync that began after the push has finished: no step works the old head any more, and the new one is not here yet. */
 function mirrorBehind(pushes: readonly RecordedPush[], head: string | null, syncedAt: string | null): boolean {
@@ -553,7 +567,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     return void await move(db, p, "ci", { line: `In the merge queue at ${short(head)} with no review; waiting for CI and a clean pre-merge review.` });
   }
   if (p.state === "review") {
-    const r = accepted(await reviewAt(p, head, pf, wake));
+    const r = accepted(await reviewAt(p, leg, head, pf, wake));
     if (r.kind === "stale") return;
     if (r.kind === "none") {
       // No review is coming for a PR the planner does not review (a backlog item, say).
@@ -588,7 +602,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
 
   if (p.state === "ci") {
     // A re-review since the move to ci counts: the hand-over needs a take at this head now.
-    const r: ReviewRead = !reviewed ? { kind: "take", unsure: false } : accepted(await reviewAt(p, head, pf, wake));
+    const r: ReviewRead = !reviewed ? { kind: "take", unsure: false } : accepted(await reviewAt(p, leg, head, pf, wake));
     if (r.kind === "none" || r.kind === "stale") return void await move(db, p, "review", { line: `The review of ${headName(p)} is out of date; Opus reviews it again.` });
     if (r.kind === "takefix") return void await move(db, p, "review", { line: `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.` });
     if (r.kind === "bad") return await stop(r.stop);
@@ -639,7 +653,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (moved) await say(db, p.repo, p.number, line);
   };
   // A new review that asks for fixes, sure or not, of a PR approved for merge: the pipeline's fix-up runs under that approval, and its push is the leg's own again.
-  if (reviewed && keptVerdict(p, head, pf) === "take-fix" && (await reviewAt(p, head, pf, wake)).kind === "takefix") return await leave("review", null, `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.`);
+  if (reviewed && keptVerdict(p, head, pf) === "take-fix" && (await reviewAt(p, leg, head, pf, wake)).kind === "takefix") return await leave("review", null, `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.`);
   const f = cur === head ? await factOf() : null;
   const why = f?.head === head ? queueStop(p, f) : null;
   if (why !== null) await leave("failed", why, `The pre-approved merge stopped: ${why.text}.`);
@@ -784,7 +798,7 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
   const p = (await loadLegs(db, [{ repo, number: n }], { activeOnly: true })).get(refOf(repo, n))?.at(-1);
   if (!p) throw new Error(`${repo}#${n} has no pre-approved merge in progress`);
   const finish = async () => {
-    if (!await cancelRow(db, p, by, stopOf(by === ACTOR ? "blocked" : "person", `cancelled by ${by}`), `${by} cancelled the pre-approved merge.`, true, via)) throw new Error("the pre-approved merge changed a moment ago");
+    if (!await cancelRow(db, p, by, stopOf("person", `cancelled by ${by}`), `${by} cancelled the pre-approved merge.`, true, via)) throw new Error("the pre-approved merge changed a moment ago");
   };
   if (p.state === "queued" && await inActiveBatch(db, repo, n)) {
     if (await mergeRunning(db, repo)) throw new Error("a merge of the repo is running: it may be merging this PR");

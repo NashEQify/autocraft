@@ -21,8 +21,7 @@ export type WorkflowGate = {
 
 /**
  * What `mayMerge` and `mayPush` read of a live workflow row; null without a live one. `legs`: the PR's active merge legs, newest last.
- * An issue's workflow has no head of its own to accept (its base_head only says which implementation head its files were shown at),
- * so its implementation PR's base is the head its leg is at: the leg starts at a head of ours or one a person answered at, and
+ * An issue's base_head only says which implementation head its files were shown at, so its implementation PR's base is the head its leg is at: the leg starts at a head of ours or one a person answered at, and
  * follows our own pushes only.
  */
 export function workflowGate(w: ItemWorkflow | null | undefined, o: { legs?: readonly Pick<Preapproval, "workflow_id" | "state" | "from_head" | "head">[] } = {}): WorkflowGate | null {

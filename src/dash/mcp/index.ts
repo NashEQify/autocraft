@@ -200,6 +200,7 @@ export const WORKFLOW_COMMAND_TOOLS = [
       properties: {
         item: { type: "string", description: ITEM_HELP },
         text: { type: "string", maxLength: 4000, description: "The command in words, e.g. \"fix-up and merge\", \"urgent\", \"yes\", \"drop 2\". Send only what your user chose." },
+        asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
       },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -323,12 +324,12 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
       ...(on ? { item: on } : {}),
-      state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
+      state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), ...(wf.rec && wf.recAt ? { asked: wf.recAt } : {}), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
+  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
   return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
 
@@ -350,7 +351,8 @@ function helpText(): ToolResult {
 
 async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   requireCommands(env);
-  const a = args(raw, { item: "item", text: "text" }, ["item", "text"]);
+  const a = args(raw, { item: "item", text: "text", asked: "text" }, ["item", "text"]);
+  if (a.asked !== undefined && Number.isNaN(Date.parse(a.asked as string))) throw new BadArgs(`"asked" must be the time get_item gave`);
   const r = itemArg(a.item);
   const user = await env.user(true);
   if (user.role !== "operator" && user.role !== "maintainer") throw new HttpError(403, `only operators and maintainers send commands; ${user.login} is a ${user.role}`);
@@ -358,7 +360,7 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
   const done = await runCommand(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
-    parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo),
+    parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
   });
   const text = done.lines.join("\n");
   return { text: /has no write access to/.test(text) ? text + PERMISSION_HINT : text };

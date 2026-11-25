@@ -160,9 +160,9 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
     loadItems(db, [{ repo, number: c.number }], "pr"), loadReviewRows(db, [{ repo, number: c.number }]), loadRepos(db, { names: [repo] }),
     loadPrWorkflows(db, [{ repo, number: c.number }]),
   ]));
-  // A PR a person sent to merge without a review is reviewed for our own push alone: what they went past is no base of it.
+  // A PR a person sent to merge without a review is reviewed for what came after: what they went past is no base of it.
   const wf = workflows.get(ref);
-  const since = wf?.entry === "merge" ? (await loadGoOnAt(db, [wf])).get(wf.id)! : null;
+  const since = wf?.entry === "merge" ? (await loadGoOnAt(db, [wf])).get(wf.id)!.since : null;
   const rows = since === null ? stored : new Map([...stored].map(([k, rs]) => [k, rs.filter((r) => r.at > since)]));
   const liveBase = items.get(ref)?.base_ref;
   const scope = scopeSettled(workflows.get(ref));

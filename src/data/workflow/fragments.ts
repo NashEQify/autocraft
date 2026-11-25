@@ -18,6 +18,20 @@ export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
  */
 export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => eb(kind, "<>", kx.literal("archived"));
 
+/** The events by which a person chooses to go on with an item. */
+const GO_ON_EVENTS = ["started", "answered"];
+
+/** Up to when the person of a go-on event `e` had seen the item: an answer is about what its question showed, not about what came between the two. */
+export const seenAt = (eb: kx.AnyEb, e: string) => eb.fn.coalesce(`${e}.seen_at`, `${e}.at`);
+export const isGoOn = (eb: kx.AnyEb, e: string): Expression<SqlBool> => eb(`${e}.kind`, "in", GO_ON_EVENTS);
+/** The newest `seenAt` of the workflow's go-on events (`w`: its id column). */
+export const goOnAt = (eb: kx.AnyEb, w: string) =>
+  kx.schemaEb(eb).selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max(seenAt(g, "ge")).as("at")).where("ge.workflow_id", "=", kx.ref<number>(w)).where((g: any) => isGoOn(g, "ge"));
+
+/** When a person last said so: the newest of the workflow's go-on events (`w`: its id column). */
+export const saidAt = (eb: kx.AnyEb, w: string) =>
+  kx.schemaEb(eb).selectFrom("main.workflow_events as gs").select((g: any) => g.fn.max("gs.at").as("at")).where("gs.workflow_id", "=", kx.ref<number>(w)).where((g: any) => isGoOn(g, "gs"));
+
 /** Attempt states that no longer work a PR (src/implement/types.ts ENDED_STATES). */
 const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 
@@ -120,6 +134,11 @@ export function prIssueWorkflows(db: Db, keys: KeySource): SelectQueryBuilder<an
         .where((m: any) => m.or([m("mi.closed_at", "is", null), m("mi.closed_at", ">=", m.ref("w.started_at"))]))))]))
     .select(["i.repo as repo", "i.pr_number as number", "w.state as state", "w.id as id"]);
 }
+
+/** The PR has a live workflow of the merge entry. */
+export const inMergeEntry = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as mw").select(one(eb)).where("mw.repo", "=", kx.exprOf(eb, repo)).where("mw.number", "=", kx.exprOf(eb, number))
+    .where("mw.entry", "=", "merge").where("mw.state", "in", LIVE_STATES));
 
 /** A live workflow approved for merge (an approver, or a merge entry) handed the PR over to the merge queue at `head`: its leg is queued there. */
 export const handedOverAt = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.Ex): AliasableExpression<SqlBool> =>

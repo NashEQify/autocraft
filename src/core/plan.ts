@@ -160,7 +160,7 @@ export type PrFacts = {
   gateRed?: boolean;
   /** The head has no review, but the review of the earlier head carries to it (src/review/carry.ts): the Carry step stores it and no model reviews the head. */
   carriable?: boolean;
-  /** A PR of the merge entry, which merges without a review, whose head holds pushes of ours since a person approved it that a model has to read: it needs a review like any other PR. */
+  /** A PR of the merge entry, which merges without a review, whose head a model has to read (core/evidence.ts neededReview): it needs a review like any other PR. */
   reviewOwed?: boolean;
   /** Why a due review waits (src/review/gate.ts): an open blocker, CI at the head not finished or not passed, the PR's daily review cap, or the minimum time since its last review. */
   reviewHold?: { kind: "blocked" | "ci" | "cap" | "interval" | "failed"; wait: string; /** When a timed wait ends (ms). */ until?: number; /** A ci hold whose head's CI has failed. */ red?: boolean; person?: boolean };

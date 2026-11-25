@@ -43,8 +43,8 @@ const ruledOut = (f: PrFacts): boolean => !!f.ruledOut?.length && !f.brokeByUs &
 /** An open PR that nobody started and that is not on the auto path: it gets no model work. */
 export const notStarted = (f: PrFacts): boolean => !workflowOf(f) && (!onAutoPath(f) || ruledOut(f));
 /**
- * The merge entry: the PR goes to the merge queue with no Opus review; the pre-merge review, Verify, CI and GitHub's gates still apply. Once a
- * push of ours owes a review, the PR goes the way of a reviewed one.
+ * The merge entry: the PR goes to the merge queue with no Opus review; the pre-merge review, Verify, CI and GitHub's gates still apply. Once it
+ * owes a review (core/evidence.ts neededReview), the PR goes the way of a reviewed one.
  */
 export const mergeEntry = (f: PrFacts): boolean => workflowOf(f)?.entry === "merge" && !f.reviewOwed;
 /** A started PR not approved for merge stops when its steps are done, for a person's answer to the recommendation. */
