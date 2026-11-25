@@ -1,5 +1,6 @@
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
+import type { InstanceConfig } from "./settings.ts";
 
 /** The repos a viewer may not see; a list from the dashboard carries the visible repos in `visible`. */
 export type HiddenRepos = string[] & { visible?: string[] };
@@ -29,7 +30,7 @@ export type NewPush = { action: string; repo: string; number: number | null; fro
 export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; brokeHead: string | null };
 export type TripStageKey = "outside-surge" | string;
 
-export type SettingType = "bool" | "int" | "text" | "json";
+export type SettingType = "bool" | "int" | "float" | "text" | "json";
 export type SettingScope = "instance" | "repo";
 /** One key of the registry: declared once with its type, default, scope and whether it is live (read from a short cache, not the snapshot). */
 export type SettingDef = { name: string; type: SettingType; default: unknown; scope: SettingScope; live: boolean; owner: string; shown?: boolean };
@@ -45,14 +46,10 @@ export type ControlSnapshot = {
   trips: Map<string, TripRow>;
   limits: Map<string, LimitRow>;
 };
-export type RepoConfig = { optionalChecks: string[]; prBuildsScope: string | null; batchSize: number | null; testRepo: boolean; buildFeature(feature: string): boolean };
-/** Typed instance properties of the registry (`singleMergeMax`, `pipelineEnabled`, ...) plus the per-repo accessor. M05 completes the property list from the registry. */
-export interface Config {
-  readonly pipelineEnabled: boolean;
-  readonly githubIdentity: "app" | "box";
-  readonly pilotItems: string[];
-  readonly singleMergeMax: number;
-  repo(repo: string): RepoConfig;
-}
-export type LiveConfig = { pipelineEnabled: boolean; drain: boolean; changedBy: string | null; changedAt: string | null; jevParallel: number | null; usagePause: string | null; stepParallel: Record<string, number> };
+export type UsagePause = { fiveHour: number; weekly: number };
+export type RepoConfig = { readonly optionalChecks: string[]; readonly prBuildsScope: "all" | "outside"; readonly batchSize: number; readonly testRepo: boolean; buildFeature(feature: string): boolean };
+/** Typed instance properties of the registry (`SETTINGS` in settings.ts) plus the per-repo accessor. */
+export type Config = InstanceConfig & { repo(repo: string): RepoConfig };
+/** The live keys with their defaults applied (`stepParallel` is Infinity for "none"). */
+export type LiveConfig = { pipelineEnabled: boolean; drain: boolean; changedBy: string | null; changedAt: string | null; jevParallel: number; usagePause: UsagePause; stepParallel: number };
 export type StageDefaults = Record<string, number | null>;
