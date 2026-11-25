@@ -69,7 +69,7 @@ export type WorkspaceRow = Omit<Selectable<DB["workspaces"]>, "checkpoint"> & { 
 export type SessionRow = Selectable<DB["workspace_sessions"]>;
 export type WorkspaceCallRow = Selectable<DB["workspace_calls"]>;
 export type NewSession = import("kysely").Insertable<DB["workspace_sessions"]>;
-export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string; createdAt: string };
+export type ArtifactRow = { taskId: number; name: string; bytes: number; contentType: string; file: string };
 
 export type TaskCard = {
   id: number; jobId: number | null; step: string; state: TaskState; repo: string; number: number | null; queuedAt: string; startedAt: string | null; endedAt: string | null;
