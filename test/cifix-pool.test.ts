@@ -11,6 +11,7 @@ import { exec, type Exec } from "../src/fixup/git.ts";
 import type { Querier } from "../src/mirror.ts";
 import { take } from "../src/runner/leases.ts";
 import { validating } from "./gql.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 
@@ -52,8 +53,7 @@ async function setup(calls = 2) {
   }
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
-  await db.run(db.k.insertInto("claude_accounts").values({ id: "a1", label: "a1" }).onConflict((oc) => oc.doNothing()));
-  await db.run(db.k.updateTable("claude_accounts").set({ enabled: 1, max_concurrent: 8 }).where("id", "=", "a1"));
+  await reportingTaskRunner(db);
   const querier: Querier = validating({
     spent: 0, remaining: 5000,
     async query(_q: string, v: { n: number }) {

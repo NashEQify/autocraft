@@ -7,6 +7,7 @@ import { setPushApproval } from "../src/fixup/approval.ts";
 import type { Exec, ExecResult } from "../src/fixup/git.ts";
 import { runFixup, type FixupDeps } from "../src/fixup/index.ts";
 import { CancelledError, StoppedError } from "../src/agents/call.ts";
+import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
 import type { Db } from "../src/db/index.ts";
@@ -21,7 +22,7 @@ const head = (n: number) => String(n).repeat(40);
 
 async function setup(prs: number): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 8 }));
+  await reportingTaskRunner(db);
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   for (let n = 1; n <= prs; n++) {
