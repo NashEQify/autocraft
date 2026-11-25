@@ -26,9 +26,12 @@
 // - agent_runs first item, remote_call_items, merge_batch_prs.repo, merge_batches.fork, discord_alert_msgs workflow key,
 //   duplicate group ids, a Task Runner's machine: filled where empty.
 // - discord_filed, plan_pass_stats and every other table: one place for both, nothing to carry.
+import { decideAct, isWrite, loadActFacts, permKey, type ActIdentity } from "../data/access/index.ts";
+import { loadImplementFacts } from "../data/implement/index.ts";
 import type { ReviewWorkflow } from "../data/review/types.ts";
 import { LIMIT_IMPLEMENT, type QuestionOption } from "../implement/questions.ts";
 import { MAX_ATTEMPTS_PER_TEXT, STUCK_CAUSES, STUCK_OPTIONS } from "../implement/stuck.ts";
+import { openQuestionOf, viewOf } from "../workflow/question.ts";
 import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
 import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
 import type { Db, Statement } from "./index.ts";
@@ -92,14 +95,19 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   };
   await carryState(db, r, { now, since, keepAfter: marker ? null : since, perDay: o.perDay });
   await carryColumns(db, r, since);
-  await archiveDecisions(db, r, now, true);
+  await archiveDecisions(db, r, now, true, new Set((await askingAttempts(db)).flatMap((x) => (x.a.decision === null ? [] : [x.a.decision as string]))));
   await archiveActions(db, r);
   await db.write(async () => {
     await endAskedLegs(db, r, now);
     await carryQuestions(db, r, now);
+    await carryDrafts(db, now);
+    await keepRecommendations(db, now);
     r.repos = (await run(db, q(db).updateTable("main.tracked_repos").set({ workflow: "new" }).where("workflow", "<>", "new"))).changes;
     await startWorkflows(db, r, now);
-    r.unapplied = (await all(db, q(db).selectFrom("main.decisions").select("id").where("answer", "is not", null).where("answer", "not in", [WITHDRAWN, BACKLOG]).where("applied_at", "is", null).orderBy("id").limit(LISTED)))
+    r.unapplied = (await all(db, q(db).selectFrom("main.decisions as d").select("d.id").where("d.answer", "is not", null).where("d.answer", "not in", [WITHDRAWN, BACKLOG]).where("d.applied_at", "is", null)
+      .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.implementations as im").innerJoin("main.implementation_rounds as ir", "ir.implementation_id", "im.id").select(eb.lit(1).as("one"))
+        .whereRef("im.decision_id", "=", "d.id").where("ir.kind", "=", "answer").whereRef("ir.at", "=", "d.answered_at"))))
+      .orderBy("d.id").limit(LISTED)))
       .map((d) => d.id as string);
     await run(db, q(db).insertInto("main.audit").values({ at: now, login: ACTOR, action: "workflow-switch", target: null, details: JSON.stringify(r) }));
     await run(db, q(db).insertInto("main.settings").values({ key: SWITCH_KEY, value: JSON.stringify({ at: now, heartbeat }) })
@@ -353,9 +361,10 @@ function labelOf(d: Row, answer: string): string {
 /**
  * Archives every decision a person answered, at the time of the answer, and, with `open`, every unanswered one as withdrawn:
  * one event per item it names (open questions with the same text on one item make one), or an audit row for a decision that
- * names none. What the pipeline withdrew or replaced by itself is left out. Paged by id, a transaction per page.
+ * names none. What the pipeline withdrew or replaced by itself is left out. A question in `kept` is one an implementation still asks.
+ * Paged by id, a transaction per page.
  */
-export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">, now: string, open: boolean): Promise<void> {
+export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">, now: string, open: boolean, kept: ReadonlySet<string> = new Set()): Promise<void> {
   const listed = new Set((await all(db, q(db).selectFrom("main.audit").select("target").where("action", "=", "decision-archived"))).map((x) => x.target as string));
   for (let last = ""; ;) {
     const page = await all(db, q(db).selectFrom("main.decisions").select(["id", "kind", "repo", "number", "items", "question", "options", "exceptions", "answer", "answered_by", "answered_at", "asked_at"])
@@ -364,21 +373,23 @@ export async function archiveDecisions(db: Db, r: Pick<SwitchReport, "archived">
     last = page.at(-1)!.id as string;
     const answered: Archived[] = [];
     const withdrawn: Archived[] = [];
+    const stays: Archived[] = [];
     const audits: Row[] = [];
     for (const d of page) {
       const done = d.answer !== null;
       const items = itemsOf(d);
-      const line = (answer: string | null): string => (answer === null ? `${oneLine(d.question)} Withdrawn at the switch to the maintainer workflow.`
+      const line = (answer: string | null): string => (answer === null ? `${oneLine(d.question)} ${kept.has(d.id) ? "The implementation still asks it." : "Withdrawn at the switch to the maintainer workflow."}`
         : `${oneLine(d.question)} Answer: ${oneLine(labelOf(d, answer))}.`);
       const login = (d.answered_by as string | null) ?? ACTOR;
       const at = (done ? (d.answered_at ?? d.asked_at) as string : now);
       const id = `decision:${d.id}${done ? "" : ":open"}`;
       const legacy = done ? id : `open:${oneLine(d.question)}`;
-      for (const i of items) (done ? answered : withdrawn).push({ repo: i.repo, number: i.number, login, legacy, line: line(done ? i.answer ?? d.answer as string : null), at });
+      for (const i of items) (done ? answered : kept.has(d.id) ? stays : withdrawn).push({ repo: i.repo, number: i.number, login, legacy, line: line(done ? i.answer ?? d.answer as string : null), at });
       if (!items.length && !listed.has(id)) audits.push({ at, login, action: "decision-archived", target: id, details: JSON.stringify({ repo: d.repo, kind: d.kind, line: line(d.answer as string | null) }) });
     }
     await db.write(async () => {
       r.archived.answered += await addArchived(db, answered);
+      await addArchived(db, stays);
       r.archived.withdrawn += await addArchived(db, withdrawn);
       if (audits.length) await run(db, q(db).insertInto("main.audit").values(audits));
     });
@@ -438,51 +449,148 @@ async function endAskedLegs(db: Db, r: SwitchReport, now: string): Promise<void>
 /** Options of the decision system that are commands of their own, or words. */
 const NOT_OPTIONS = new Set([BACKLOG, "answer", "close", "close-issue", "close-pr"]);
 
+/** `exec_state` of an answer nobody may act on: someone disputed it, or it waits for its person's sign-in or access. */
+const HELD_ANSWERS = ["disputed", "waiting-token", "waiting-permission"];
+
+type Asking = { a: Row; rounds: Row[]; questions: { id: number; at: string; result: Row }[] };
+
+/** The attempts in `states` with their decision and their rounds. */
+async function attemptsIn(db: Db, states: string[]): Promise<Asking[]> {
+  const attempts = await all(db, q(db).selectFrom("main.implementations as im").leftJoin("main.decisions as d", "d.id", "im.decision_id")
+    .select(["im.id", "im.repo", "im.number", "im.state", "im.text_hash", "im.pr_number", "im.reason", "d.id as decision", "d.question", "d.options", "d.recommended", "d.facts", "d.answer", "d.answer_note", "d.answered_by", "d.answered_at", "d.applied_at", "d.exec_state"])
+    .where("im.state", "in", states).orderBy("im.id"));
+  const out: Asking[] = [];
+  for (const a of attempts) {
+    const rounds = await all(db, q(db).selectFrom("main.implementation_rounds").select(["id", "kind", "result", "at"]).where("implementation_id", "=", a.id).orderBy("id"));
+    out.push({ a, rounds, questions: rounds.filter((x) => x.kind === "question").map((x) => ({ id: Number(x.id), at: x.at as string, result: (parse(x.result) ?? {}) as Row })) });
+  }
+  return out;
+}
+
+/** The attempts that wait for a maintainer. */
+async function askingAttempts(db: Db): Promise<Asking[]> {
+  return (await attemptsIn(db, ["asked", "stuck"])).filter(({ a, questions }) => {
+    const last = questions.at(-1)?.result;
+    return a.state === "stuck" || (last?.audience === "maintainer" && (last.options !== undefined || a.decision !== null));
+  });
+}
+
+/** The newest question when it is the stuck question of the attempt as it is now: nothing but answers came after it. */
+function stuckRound({ rounds, questions }: Asking): Asking["questions"][number] | null {
+  const last = questions.at(-1);
+  return last?.result.stuck === true && !rounds.some((x) => Number(x.id) > last.id && x.kind !== "answer" && x.kind !== "guidance") ? last : null;
+}
+
+const decisionOptions = (a: Row): QuestionOption[] => ((parse(a.options) ?? []) as Row[]).filter((o) => typeof o?.key === "string" && typeof o.label === "string" && !NOT_OPTIONS.has(o.key))
+  .map((o) => ({ key: o.key, label: o.label, hint: typeof o.hint === "string" ? o.hint : "" }));
+
+async function addQuestion(db: Db, a: Row, options: QuestionOption[], now: string): Promise<number> {
+  const reason = (a.reason as string | null) ?? "the reason was not recorded";
+  const cause = Object.entries(STUCK_CAUSES).find(([, line]) => reason.startsWith(line))?.[0];
+  const result = {
+    audience: "maintainer", text: `The implementation is stuck: ${reason}.`, options, recommended: options.some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? STUCK_OPTIONS.tryAgain.key : null,
+    stuck: true, ...(cause && { cause }), facts: (parse(a.facts) ?? []) as unknown[],
+  };
+  const [added] = await all(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "question", call_id: null, result: JSON.stringify(result), at: now }).returning("id"));
+  return Number(added!.id);
+}
+
+async function addAnswer(db: Db, a: Row, question: number, option: string | undefined): Promise<void> {
+  const words = (a.answer_note as string | null)?.trim() || undefined;
+  const answer = { by: a.answered_by, via: "cli", at: a.answered_at, question, ...(option !== undefined && { option }), ...(words && { text: words }) };
+  await run(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "answer", call_id: null, result: JSON.stringify(answer), at: a.answered_at }));
+}
+
 /**
  * An attempt that is stuck, or that asked the maintainers, shows its question through its newest `question` round. An older release kept
  * the options, the recommended one and the answer in a decision, and wrote no round for a stuck attempt: the round gets them here, and an
- * answer nothing had acted on yet becomes the attempt's answer.
+ * answer nothing had acted on yet becomes the attempt's answer, also one given to a question carried before (an older release ran again).
  */
 async function carryQuestions(db: Db, r: SwitchReport, now: string): Promise<void> {
-  const attempts = await all(db, q(db).selectFrom("main.implementations as im").leftJoin("main.decisions as d", "d.id", "im.decision_id")
-    .select(["im.id", "im.repo", "im.number", "im.state", "im.text_hash", "im.pr_number", "im.reason", "d.id as decision", "d.question", "d.options", "d.recommended", "d.facts", "d.answer", "d.answer_note", "d.answered_by", "d.answered_at", "d.applied_at"])
-    .where("im.state", "in", ["asked", "stuck"]).orderBy("im.id"));
-  for (const a of attempts) {
-    const rounds = await all(db, q(db).selectFrom("main.implementation_rounds").select(["id", "kind", "result", "at"]).where("implementation_id", "=", a.id).orderBy("id"));
-    const questions = rounds.filter((x) => x.kind === "question").map((x) => ({ id: Number(x.id), at: x.at as string, result: (parse(x.result) ?? {}) as Row }));
+  const identity: ActIdentity = await setting(db, "github_identity") === "app" ? "app" : "box";
+  for (const x of await askingAttempts(db)) {
+    const { a, questions } = x;
     const last = questions.at(-1);
-    const kept = ((parse(a.options) ?? []) as Row[]).filter((o) => typeof o?.key === "string" && typeof o.label === "string" && !NOT_OPTIONS.has(o.key));
-    let options = kept.map((o): QuestionOption => ({ key: o.key, label: o.label, hint: typeof o.hint === "string" ? o.hint : "" }));
+    let options = decisionOptions(a);
     let round: { id: number; at: string };
+    let carried = false;
     if (a.state === "stuck") {
-      // The stuck question of this release, with nothing but answers after it.
-      if (last?.result.stuck === true && !rounds.some((x) => Number(x.id) > last.id && x.kind !== "answer" && x.kind !== "guidance")) continue;
-      if (a.decision === null) options = await stuckOptions(db, a);
-      const reason = (a.reason as string | null) ?? "the reason was not recorded";
-      const cause = Object.entries(STUCK_CAUSES).find(([, line]) => reason.startsWith(line))?.[0];
-      const result = {
-        audience: "maintainer", text: `The implementation is stuck: ${reason}.`, options, recommended: options.some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? STUCK_OPTIONS.tryAgain.key : null,
-        stuck: true, ...(cause && { cause }), facts: (parse(a.facts) ?? []) as unknown[],
-      };
-      const [added] = await all(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "question", call_id: null, result: JSON.stringify(result), at: now }).returning("id"));
-      round = { id: Number(added!.id), at: "" };
+      const have = stuckRound(x);
+      if (have) {
+        options = (have.result.options ?? []) as QuestionOption[];
+        round = have;
+      } else {
+        if (a.decision === null) options = await stuckOptions(db, a);
+        round = { id: await addQuestion(db, a, options, now), at: "" };
+        carried = true;
+      }
+    } else if (last!.result.options !== undefined) {
+      options = last!.result.options as QuestionOption[];
+      round = last!;
     } else {
-      if (!last || last.result.audience !== "maintainer" || last.result.options !== undefined || a.decision === null) continue;
       const limit = /:implement-limit-\d+$/.test(a.decision);
       const named = limit ? LIMIT_IMPLEMENT.key : a.recommended;
       // The decision's options belong to its first question, which is the newest round's here; the other one changes places with it.
-      const first = questions.find((x) => x.result.decisionId === a.decision) ?? last;
-      if (first !== last) await setResult(db, first.id, { ...first.result, text: last.result.text });
-      await setResult(db, last.id, { ...last.result, text: a.question, options, recommended: options.some((o) => o.key === named) ? named : null, ...(limit && { limit: true }) });
-      round = last;
+      const first = questions.find((y) => y.result.decisionId === a.decision) ?? last!;
+      if (first !== last) await setResult(db, first.id, { ...first.result, text: last!.result.text });
+      await setResult(db, last!.id, { ...last!.result, text: a.question, options, recommended: options.some((o) => o.key === named) ? named : null, ...(limit && { limit: true }) });
+      round = last!;
+      carried = true;
     }
-    r.questions.push(`${key(a as never)} ${a.state}`);
-    const answered = a.answer !== null && !PIPELINE_ANSWERS.includes(a.answer) && a.applied_at === null && (a.answered_at ?? "") > round.at;
+    const answered = a.answer !== null && !PIPELINE_ANSWERS.includes(a.answer) && a.applied_at === null && (a.answered_at ?? "") > round.at
+      && !x.rounds.some((y) => y.kind === "answer" && Number(y.id) > round.id) && !HELD_ANSWERS.includes(a.exec_state) && await mayAct(db, a.answered_by, a.repo, identity);
+    if (answered && a.answer === BACKLOG) {
+      const moved = await backlogWorkflow(db, a, now);
+      r.backlog += moved;
+      if (moved) continue;
+    }
+    if (carried) r.questions.push(`${key(a as never)} ${a.state}`);
     const option = options.find((o) => o.key === a.answer)?.key;
-    const words = (a.answer_note as string | null)?.trim() || undefined;
-    if (!answered || (option === undefined && !(a.answer === "answer" && words))) continue;
-    const answer = { by: a.answered_by, via: "cli", at: a.answered_at, question: round.id, ...(option !== undefined && { option }), ...(words && { text: words }) };
-    await run(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "answer", call_id: null, result: JSON.stringify(answer), at: a.answered_at }));
+    if (answered && (option !== undefined || (a.answer === "answer" && (a.answer_note as string | null)?.trim()))) await addAnswer(db, a, round.id, option);
+  }
+}
+
+/** Whether the person passes the act rule on the repo, by what GitHub last answered: nothing is asked of GitHub here. */
+async function mayAct(db: Db, login: string | null, repo: string, identity: ActIdentity): Promise<boolean> {
+  if (login === null) return false;
+  const facts = (await loadActFacts(db, [{ login, repo }])).get(permKey(login, repo));
+  return !!facts && decideAct(facts, isWrite(facts.perm?.permission) ? "cached" : "no", identity).ok;
+}
+
+/** A Backlog answer to the question of a started issue ends its workflow as the backlog command does; a later start stands. */
+async function backlogWorkflow(db: Db, a: Row, now: string): Promise<number> {
+  return (await run(db, q(db).updateTable("main.item_workflows").set({ state: BACKLOG, rec: null, rec_at: null, rec_head: null, blocker: null, blocker_params: null, updated_at: now })
+    .where("repo", "=", a.repo).where("number", "=", a.number).where("kind", "=", "issue").where("state", "in", LIVE).where("started_at", "<", a.answered_at))).changes;
+}
+
+/** An attempt the Open as draft PR answer handed to the PR step (or to the undo turn that step asked for) opens a draft when its rounds hold that answer. */
+async function carryDrafts(db: Db, now: string): Promise<void> {
+  for (const x of await attemptsIn(db, ["checking", "fixing", "opening"])) {
+    const { a, rounds, questions } = x;
+    const draft = STUCK_OPTIONS.draft.key;
+    const last = questions.at(-1);
+    if (a.answer !== draft || (last?.result.stuck === true && rounds.some((y) => y.kind === "answer" && Number(y.id) > last.id && (parse(y.result) as Row | null)?.option === draft))) continue;
+    await addAnswer(db, { ...a, answered_at: a.answered_at ?? now }, stuckRound(x)?.id ?? await addQuestion(db, a, decisionOptions(a), now), draft);
+  }
+}
+
+/**
+ * A started issue that came back with the question of its implementation names the question by its decision: its recommendation and
+ * its parts become those of the carried question, at the time the person was told of it, so it does not come back a second time.
+ */
+async function keepRecommendations(db: Db, now: string): Promise<void> {
+  const back = (await all(db, q(db).selectFrom("main.item_workflows").select(["id", "repo", "number", "state", "rec", "plan", "approved_by", "blocker_params"])
+    .where("kind", "=", "issue").where("state", "in", ["blocked", "recommending"]).orderBy("id"))).filter((w) => typeof (parse(w.rec) as Row | null)?.question === "string");
+  if (!back.length) return;
+  const facts = (await loadImplementFacts(db, back.map((w) => ({ repo: w.repo as string, number: Number(w.number) })), { withPlans: true })).byIssue;
+  for (const w of back) {
+    const attempt = facts.get(`${w.repo}#${Number(w.number)}`);
+    const question = openQuestionOf(attempt);
+    // Another question than the one it came back with is news.
+    const same = attempt && question && (await get(db, q(db).selectFrom("main.implementations").select("decision_id").where("id", "=", attempt.attempt.id)))?.decision_id === (parse(w.rec) as Row).question;
+    if (!same) continue;
+    const { plan, rec } = viewOf(attempt, question, (parse(w.plan) ?? []) as PlanPart[], w.approved_by !== null);
+    await run(db, q(db).updateTable("main.item_workflows").set({ plan: JSON.stringify(plan), rec: JSON.stringify(rec), ...(w.state === "blocked" && { blocker_params: JSON.stringify({ step: "implement" }) }), updated_at: now }).where("id", "=", w.id));
   }
 }
 
