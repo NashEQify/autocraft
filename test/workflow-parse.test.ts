@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { parse, parseComment } from "../src/workflow/parse.ts";
 import { resolve, type ItemState } from "../src/workflow/resolve.ts";
-import { recommendationLine } from "../src/workflow/status.ts";
+import { recommendationLine, replyLine } from "../src/workflow/status.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "../src/workflow/types.ts";
 
 const SLUG = "autocraft-bot";
@@ -28,6 +28,20 @@ describe("workflow commands", () => {
     assert.equal(run("please merge it soon", pr()).kind, "ambiguous");
     assert.equal(run("weight 12, merge", pr()).kind, "ambiguous");
     assert.equal(run("review and implement", { kind: "issue", workflow: null }).kind, "ambiguous");
+  });
+
+  test("ordinary phrasing around command words reads as the command; hedged replies stay unread", () => {
+    const words = (text: string) => { const p = parse(text, { slug: SLUG }); return p.kind === "commands" ? p.parts.map((x) => ("part" in x ? `${x.word} ${x.part}` : x.word)).join(",") : p.kind; };
+    for (const [text, want] of [
+      ["merge it", "merge"], ["please merge this", "merge"], ["ok go ahead and merge", "merge"], ["merge it please", "merge"], ["yes merge it", "merge"],
+      ["LGTM, merge", "merge"], ["sounds good, merge it now", "merge"], ["fix-up and merge it", "fix-up,merge"], ["drop 2 and merge the rest", "drop 2,merge"],
+      ["thanks, merge", "merge"], ["@autocraft-bot merge the PR", "merge"], ["go ahead", "yes"],
+    ] as const) assert.equal(words(text), want, text);
+    for (const text of ["don't merge it", "merge it but not yet", "wait", "no", "merge it later", "merge if CI is green", "hold the merge", "merge it please soon"]) assert.equal(words(text), "ambiguous", text);
+    const reply = (text: string, mention?: string) => { const r = resolve(parse(text), pr()); return r.kind === "ambiguous" ? replyLine(r, undefined, mention) : ""; };
+    assert.match(reply("merge it but soon", "autocraft-bot"), /couldn't read/);
+    assert.match(reply("let's review sometime", "autocraft-bot"), /I read this as `review`\. Reply `@autocraft-bot yes`/);
+    assert.match(reply("don't merge it"), /couldn't read.*Commands: review/);
   });
 
   test("combined commands and a weight word anywhere", () => {

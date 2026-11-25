@@ -115,6 +115,14 @@ function readYes(s: string): { weight: number | null } | null {
   return !bad && YES_WORDS.includes(rest) ? { weight } : null;
 }
 
+/**
+ * Filler a maintainer writes around a command word: "please merge it now", "ok go ahead and merge", "yes, merge the PR". A small
+ * explicit list; words that change a meaning (don't, not, no, wait, hold, later, unless, but, if, instead) are never in it, so such
+ * a reply stays unread.
+ */
+const FILLER = /(?<![\w-])(?:thank you|the pull request|the pr|the rest|go ahead|sounds good|lgtm|yes|yep|yeah|ok|okay|sure|please|pls|thanks|thx|now|it|this|that)(?![\w-])/gi;
+const stripFiller = (seg: string): string => seg.replace(FILLER, " ").replace(/\s+/g, " ").trim();
+
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
 function readWords(src: string): Read {
   const parts: CommandPart[] = [];
@@ -138,8 +146,12 @@ function readWords(src: string): Read {
     if (!parts.some((q) => JSON.stringify(q) === key)) parts.push(p);
   };
   for (const raw of s.split(/\s*[,;\n]\s*|\s+(?:and\s+then|then|and|&)\s+/i)) {
-    const seg = raw.trim().replace(/\s+/g, " ").replace(/^(?:(?:and then|then|and|please) )+/i, "").replace(/(?: (?:and|&))+$/i, "").trim();
+    let seg = raw.trim().replace(/\s+/g, " ").replace(/^(?:(?:and then|then|and|please) )+/i, "").replace(/(?: (?:and|&))+$/i, "").trim();
     if (!seg) continue;
+    if (!/^auto[-\s]?repin(?:\s|$)/i.test(seg)) {
+      seg = stripFiller(seg);
+      if (!seg) continue;
+    }
     const repin = /^auto[-\s]?repin(?:\s+(.+))?$/i.exec(seg);
     if (repin) {
       const args = repin[1]?.trim().replace(/\s+/g, " ") ?? "";

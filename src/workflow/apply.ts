@@ -33,6 +33,8 @@ export type CommandInput = {
   at?: string;
   exec?: Exec;
   clock?: Clock;
+  /** The app's mention name, for replies that tell the sender what to write back. */
+  mention?: string;
 };
 
 export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null };
@@ -110,11 +112,11 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string) =>
     addEvent(db, { workflowId, repo, number: target.number, login, via, kind, parsed: input.parsed, line, at });
   if (r.kind === "ambiguous") {
-    const line = replyLine(r, input.clock);
+    const line = replyLine(r, input.clock, input.mention);
     await event("ambiguous", wf?.id ?? null, line);
     return out("ambiguous", line, wf?.id ?? null);
   }
-  if (r.kind === "refused") return out("refused", replyLine(r, input.clock), wf?.id ?? null);
+  if (r.kind === "refused") return out("refused", replyLine(r, input.clock, input.mention), wf?.id ?? null);
 
   const c: fx.Ctx = { db, by: login, via, at, item: { repo, number: target.number, kind, head }, ...(input.exec ? { exec: input.exec } : {}) };
   try {

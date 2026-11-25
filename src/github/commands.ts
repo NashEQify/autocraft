@@ -441,7 +441,9 @@ async function carryOutAnswer(db: Db, r: Row, deps: CommandDeps, now: Date, qp: 
     return "retry";
   }
   const slug = deps.slug === undefined ? appSlug() : deps.slug;
-  const again = c.kind === "ok" && c.authorId === r.github_id ? parseComment(c.body, await commentNames(db, slug), { repo: r.repo }) : null;
+  const names = await commentNames(db, slug);
+  const mentionName = names[0];
+  const again = c.kind === "ok" && c.authorId === r.github_id ? parseComment(c.body, names, { repo: r.repo }) : null;
   if (!again || JSON.stringify(again) !== r.parsed) {
     await settle(db, r, "ignored", c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command", clock());
     return "settled";
@@ -479,7 +481,7 @@ async function carryOutAnswer(db: Db, r: Row, deps: CommandDeps, now: Date, qp: 
   }
   try {
     const own: Parsed = parsed.kind === "ambiguous" || items.length !== 1 ? parsed : { ...parsed, items: [] };
-    const res = await runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), at: now.toISOString() });
+    const res = await runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString() });
     const o = res.items[0];
     await settle(db, r, o?.outcome === "run" ? "done" : "refused", o?.line ?? (res.lines.join(" ") || NOT_RUN), now, { reply, allowed });
   } catch (e) {

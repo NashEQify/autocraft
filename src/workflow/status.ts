@@ -4,7 +4,7 @@
 import { t, tk } from "../i18n/index.ts";
 import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
-import { ENTRY_LABEL, weightWord } from "./vocab.ts";
+import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend";
 export type StepState = "done" | "running" | "waiting" | "stopped" | "next";
@@ -214,15 +214,29 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
 }
 
 /** The reply when nothing ran: what was understood, and why it waits. */
-export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock): string {
-  return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity) : refusalText(r.refusal, clock);
+export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string): string {
+  return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity, mention) : refusalText(r.refusal, clock);
 }
 
-function ambiguityText(understood: string, a: Ambiguity): string {
+/** Words that reverse or postpone a command: a reply holding one is never read back as that command. */
+const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|later|unless|but|if|instead|n't)(?![\w-])|n't(?![\w-])/i;
+
+/** The one start-or-approve command a leftover text names, or null when it names none, several, or is hedged. */
+function singleCommand(rest: string): string | null {
+  if (MEANING_WORDS.test(rest)) return null;
+  const found = COMMANDS.filter((c) => !c.answer && c.word !== "autorepin" && [c.word, ...c.aliases].some((w) => new RegExp(`(?<![\\w-])${w.replace(/[- ]/g, "[-\\s]?")}(?![\\w-])`, "i").test(rest)));
+  return found.length === 1 ? found[0]!.word : null;
+}
+
+function ambiguityText(understood: string, a: Ambiguity, mention?: string): string {
   switch (a.why) {
     case "unreadable":
       if (understood && a.rest) return t("I understood “{understood}” but not “{rest}”. Nothing runs until the instruction is clear.", { understood, rest: a.rest });
-      if (a.rest) return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear.", { rest: a.rest });
+      if (a.rest) {
+        const one = singleCommand(a.rest);
+        if (one) return t("I read this as `{command}`. Reply `{reply}` to run it.", { command: one, reply: mention ? `@${mention} yes` : "yes" });
+        return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: COMMANDS.filter((c) => !c.answer || c.word === "drop").map((c) => c.usage).join(", ") });
+      }
       if (understood) return t("I understood “{understood}” but not which items. Nothing runs until the instruction is clear.", { understood });
       return t("There was no command. Nothing runs.");
     case "nothing-to-answer": return t("There is no open recommendation to say yes to. Nothing runs.");
