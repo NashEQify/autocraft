@@ -1,7 +1,7 @@
 // Claim reads and the orphan return (package runners-a).
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { ciEq, indexedBy, inList, literal } from "../../db/kx.ts";
+import { ciEq, excluded, indexedBy, inList, literal } from "../../db/kx.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
 import { loadCooloffs } from "./cooloffs.ts";
 import { goneCallExpr, loadLiveness } from "./calls-expiry.ts";
@@ -10,7 +10,8 @@ import { INTERACTIVE_PROMPTS, dropQueueCache, lostLeaseExpr } from "./calls-shar
 import { unlease } from "./calls-unlease.ts";
 import { loadRunnerRole } from "./cross.ts";
 import { loadRunnerSnapshot } from "./runner-snapshot.ts";
-import { loadUserSettings } from "./user-settings.ts";
+import { dropSnapshotCache } from "./snapshot-cache.ts";
+import { DEFAULT_RESERVE, loadUserSettings } from "./user-settings.ts";
 import type { ClaimCaller, ClaimFacts, LeaseSource, QueueSnapshot, RunnerSnapshot, UserSettings } from "./types.ts";
 
 /** A login with no stored settings. */
@@ -64,11 +65,19 @@ export async function loadLeaseSource(db: Db, id: number): Promise<LeaseSource |
   return r ? { bundle: r.bundle, baseStdin: r.base_stdin, jobId: r.job_id, step: r.step, stage: Number(r.stage), promptId: r.prompt_id, promptVersion: r.prompt_version, askedModel: r.asked_model, items: JSON.parse(r.items) as ItemRef[] } : null;
 }
 
-/** Records an idle helper's tiers and repos. */
-export async function markHelperIdle(db: Db, tokenId: number, a: { now: number; tiers: string[]; repos: string[] | null }): Promise<void> {
+/**
+ * Records an idle helper's tiers and repos. A helper that has not reported a status yet gets its row here, with no status
+ * (`reported_at = 0`, as `addHelper` makes it).
+ */
+export async function markHelperIdle(db: Db, caller: ClaimCaller, a: { now: number; tiers: string[]; repos: string[] | null }): Promise<void> {
   const q = queryDb(db);
-  await q.run(q.k.updateTable("main.remote_helpers").set({ idle_claim_at: a.now, idle_tiers: JSON.stringify(a.tiers), idle_repos: a.repos ? JSON.stringify(a.repos) : null }).where("token_id", "=", tokenId));
-  dropQueueCache(db);
+  await q.run(q.k.insertInto("main.remote_helpers")
+    .values({
+      token_id: caller.tokenId, login: caller.login, readiness: "paused", harness: "claude", models: "{}", reserve: JSON.stringify(DEFAULT_RESERVE), reported_at: 0,
+      idle_claim_at: a.now, idle_tiers: JSON.stringify(a.tiers), idle_repos: a.repos ? JSON.stringify(a.repos) : null,
+    })
+    .onConflict((oc) => oc.column("token_id").doUpdateSet(excluded(["idle_claim_at", "idle_tiers", "idle_repos"]))));
+  dropSnapshotCache(db);
 }
 
 /** Clears picks of calls, optionally only those of `login`. */

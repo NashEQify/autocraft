@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { BatchMember, BatchState, BatchView, MergedInfo } from "./types.ts";
 import { BLOCKED_BY_REVIEW, CLOSED_BY_PERSON, PUBLISH_FAILED } from "./types.ts";
@@ -46,11 +45,12 @@ export async function mergedInfoOf(db: Db, keys: KeySource): Promise<Map<string,
   const rows: MergedRaw[] = await queryDb(db).all(
     k.selectFrom((eb: any) => eb.selectFrom("merges as m")
       .innerJoin(resolveKeys(db, keys, "kk"), (j: any) => j.onRef("kk.repo", "=", "m.repo").onRef("kk.number", "=", "m.number"))
-      .select([
+      .select((e: any) => [
         "m.repo", "m.number", "m.head_oid", "m.outcome", "m.reason", "m.at", "m.method",
-        sql<string | null>`min(case when m.outcome = 'merged' then m.at end) over (partition by m.repo, m.number)`.as("first_at"),
-        sql<number>`row_number() over (partition by m.repo, m.number order by m.at desc, ${kx.rowid("merges", "m")} desc)`.as("rn_all"),
-        sql<number>`row_number() over (partition by m.repo, m.number, (m.outcome = 'merged') order by m.at desc, ${kx.rowid("merges", "m")} desc)`.as("rn_kind"),
+        e.fn.min(e.case().when("m.outcome", "=", kx.literal("merged")).then(e.ref("m.at")).end()).over((o: any) => o.partitionBy(["m.repo", "m.number"])).as("first_at"),
+        e.fn.agg("row_number").over((o: any) => o.partitionBy(["m.repo", "m.number"]).orderBy("m.at", "desc").orderBy(kx.rowid("merges", "m"), "desc")).as("rn_all"),
+        e.fn.agg("row_number").over((o: any) => o.partitionBy(["m.repo", "m.number", e.case().when("m.outcome", "=", kx.literal("merged")).then(e.lit(1)).else(e.lit(0)).end()])
+          .orderBy("m.at", "desc").orderBy(kx.rowid("merges", "m"), "desc")).as("rn_kind"),
       ]).as("t"))
       .select((eb: any) => [
         "t.repo", "t.number", "t.head_oid", "t.outcome", "t.reason", "t.at", "t.method", "t.first_at",

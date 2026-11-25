@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { AppError } from "../src/github/app.ts";
 import { RepoNotInInstallationError } from "../src/github/install-token.ts";
-import { commitIdentity, identityFor, identityOfDecision, githubIdentity, IdentityRefused, setGithubIdentity, setGithubIdentityChecked } from "../src/github/identity.ts";
+import { commitIdentity, identityFor, githubIdentity, IdentityRefused, setGithubIdentity, setGithubIdentityChecked } from "../src/github/identity.ts";
 import { closeItem } from "../src/github/write.ts";
 import type { GuardedItem } from "../src/core/guard.ts";
 import type { Querier } from "../src/mirror.ts";
@@ -17,20 +17,10 @@ import * as kx from "../src/db/kx.ts";
 const grant = (as: string): GuardedItem => ({ scope: "item", action: { kind: "act" }, repo: "app", number: 7, as }) as unknown as GuardedItem;
 const q: Querier = { query: async () => ({}) } as unknown as Querier;
 
-test("a decision answered by someone maps to that login, anything else to the app", async () => {
-  mkdirSync(SCRATCH, { recursive: true });
-  const db = await connectDb(join(SCRATCH, `identity-${process.pid}.db`));
-  const ins = (id: string, answer: string | null) => db.run(db.k.insertInto("decisions")
-    .values({ id, kind: "close", question: "q", options: "[]", asked_at: "t", answer, answered_by: "example-user" }));
-  await ins("d1", "yes");
-  await ins("d2", null);
-  assert.equal(await identityOfDecision(db, "d1"), "user:example-user");
-  assert.equal(await identityOfDecision(db, "d2"), "app");
-  assert.equal(await identityOfDecision(db, "missing"), "app");
-  assert.equal(await identityOfDecision(db, undefined), "app");
+test("only a close or merge runs as the person of the grant; any other write is the app's", () => {
   assert.equal(identityFor(grant("user:example-user"), "close"), "user:example-user");
   assert.equal(identityFor(grant("user:example-user"), "merge"), "user:example-user");
-  assert.equal(identityFor(grant("user:example-user")), "app", "any other write is the app's");
+  assert.equal(identityFor(grant("user:example-user")), "app");
 });
 
 test("the audit row records legacy until the identity is switched, then the grant's identity", async () => {

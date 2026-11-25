@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { loadArtifacts, loadTasks } from "../build/index.ts";
 import type { TaskRecord } from "../build/types.ts";
 import { addAudit } from "../control/index.ts";
@@ -106,7 +105,7 @@ const taskOf = (role: "head" | "base", t: TaskRecord | undefined): VerificationT
 export async function loadPendingScreenshotRuns(db: Db): Promise<PendingShotRun[]> {
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("screenshot_runs as r")
-    .select((eb: any) => [...runCols, openItem(eb, "r.repo", "r.number").as("is_open"), sql<string | null>`${itemHead(eb, "r.repo", "r.number")}`.as("item_head")])
+    .select((eb: any) => [...runCols, openItem(eb, "r.repo", "r.number").as("is_open"), itemHead(eb, "r.repo", "r.number").as("item_head")])
     .where("r.state", "in", ["planned", "running"])
     .where((eb: any) => inScopeExpr(db, eb, "r.repo", "r.number"))
     .orderBy("r.created_at").orderBy("r.number")) as (RunRow & { is_open: unknown; item_head: string | null })[];

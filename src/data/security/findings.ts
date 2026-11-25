@@ -5,7 +5,6 @@ import { queryDb } from "../../db/query-db.ts";
 // reads: control.hiddenRepos (fragment, tracked_repos hidden list)
 import { hiddenRepos } from "../control/fragments.ts";
 import { jobsOfItems, liveJobOfFinding } from "../jobs/fragments.ts";
-import { sql } from "kysely";
 import { briefCols, nowIso, severityRank } from "./internal.ts";
 import {
   ENV_WAIT_NOTE, INTERNAL_FINDING_STATES, TRANSITIONS, findingKey,
@@ -129,11 +128,11 @@ export async function loadFixesToAdvance(db: Db): Promise<FixAdvanceRow[]> {
   const noJob = (eb: kx.AnyEb) => eb.not(liveJobOfFinding(db, eb, FIX_STEPS, "f.repo", "f.number"));
   const building = q.k.selectFrom("security_findings as f").innerJoin("security_fix_rounds as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number").on("r.state", "=", "building"))
     .select(["f.repo", "f.number", "f.decided_by as by", "r.created_at as round_at", "r.head_task as head", "r.base_task as base"])
-    .select([kx.literal(0).as("src"), sql<string | null>`NULL`.as("env_at")])
+    .select((eb) => [kx.literal(0).as("src"), eb.lit(null).as("env_at")])
     .where("f.state", "=", "fixing").where(noJob);
   const waiting = q.k.selectFrom("security_findings as f")
     .select(["f.repo", "f.number", "f.decided_by as by"])
-    .select([sql<string | null>`NULL`.as("round_at"), sql<number | null>`NULL`.as("head"), sql<number | null>`NULL`.as("base"), kx.literal(1).as("src")])
+    .select((eb) => [eb.lit(null).as("round_at"), eb.lit(null).as("head"), eb.lit(null).as("base"), kx.literal(1).as("src")])
     .select("f.env_wait_at as env_at")
     .where("f.state", "=", "fixing").where("f.env_wait_at", "is not", null).where(noJob);
   const rows = (await q.all((building as any).unionAll(waiting as any).orderBy("src").orderBy("repo").orderBy("number"))) as {

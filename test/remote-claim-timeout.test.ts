@@ -25,7 +25,7 @@ test("a claim limited by its login's refresh leases the short call, leaves the l
   let n = 0;
   const claim = async (extra: Partial<Claim>) => await claimCall(db, { tokenId, login: "olga", role: "operator" },
     { requestId: `timeout-claim-${++n}`, protocol: PROTOCOL_VERSION, helperVersion: "1.4.2", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" }, ...extra }, async () => true);
-  const idleAt = async () => (await db.get(db.k.selectFrom("mcp_tokens").select("idle_claim_at").where("id", "=", tokenId)))!.idle_claim_at;
+  const idleAt = async () => (await db.get(db.k.selectFrom("remote_helpers").select("idle_claim_at").where("token_id", "=", tokenId)))!.idle_claim_at;
 
   const first = await claim({ maxTimeoutSeconds: 600 });
   assert.equal(first.lease?.id, short, "the call that fits, although the long one is ahead of it");

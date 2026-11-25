@@ -2,7 +2,6 @@
 // reads: mirror.comments, access.access (operators' comments that become statements, in one statement)
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
-import { sql } from "../../db/sql.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as control from "../control/index.ts";
 import { quietPrExpr } from "../security/fragments.ts";
@@ -117,12 +116,11 @@ export async function loadStatementWork(db: Db, modelId: string, limit: number):
 /** Stores vectors: one `UPDATE .. FROM` per batch of 32 (blobs cannot travel as JSON). */
 export async function setStatementVectors(db: Db, rows: { id: number; vec: Uint8Array; model: string }[]): Promise<void> {
   if (!rows.length) return;
-  const q = queryDb(db), pg = db.dialect === "postgres";
+  const q = queryDb(db);
   await db.write(async () => {
     for (let i = 0; i < rows.length; i += STATEMENT_BATCH) {
       const part = rows.slice(i, i + STATEMENT_BATCH);
-      const picks = part.map((r) => pg ? sql`SELECT ${r.id}::bigint AS id, ${r.vec}::bytea AS embedding, ${r.model}::text AS model` : sql`SELECT ${r.id} AS id, ${r.vec} AS embedding, ${r.model} AS model`);
-      const v = sql<{ id: number; embedding: Uint8Array; model: string }>`(${sql.join(picks, sql` UNION ALL `)})`.as("v");
+      const v = kx.blobTable(db, part.map((r) => ({ id: r.id, embedding: r.vec, model: r.model })), { id: "bigint", embedding: "bytea", model: "text" }, "v");
       await q.run(q.k.updateTable("main.owner_statements").from(v).set((eb) => ({ embedding: eb.ref("v.embedding"), model: eb.ref("v.model") })).where("main.owner_statements.id", "=", (eb) => eb.ref("v.id")));
     }
   });

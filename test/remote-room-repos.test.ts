@@ -14,6 +14,9 @@ import { remoteRoom } from "../src/remote/room.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
+import { dropQueueCache } from "../src/data/runners/calls-shared.ts";
+import { markHelperIdle } from "../src/data/runners/index.ts";
+import type { Role } from "../src/dash/types.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
@@ -24,12 +27,16 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
     await db.run(db.k.insertInto("access").values({ login, role }));
     const id = (await createToken(db, login, "helper", { kind: "runner" })).row.id;
     await storeStatus(db, id, login, parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
+    await markHelperIdle(db, { tokenId: id, login, role: role as Role }, { now: Date.now(), tiers: ["top"], repos: null });
     return id;
   };
   const perm = async (login: string, repo: string, permission: string) =>
     await db.run(db.k.insertInto("repo_permissions").values({ login, repo, permission, checked_at: at }).onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
-  const room = async (repos?: string[]) => await remoteRoom(db, 0, Date.now(), repos);
+  // Rows are written directly: each question is answered from a new reading.
+  const room = async (repos?: string[]) => {
+    dropQueueCache(db);
+    return await remoteRoom(db, 0, Date.now(), repos);
+  };
 
   // The operator takes deckcraft and designcraft only; no permission of theirs on designcraft is cached yet.
   await runner("olga", "operator");
@@ -61,7 +68,7 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
   assert.equal(await room(["photocraft", "deckcraft"]), 0, "nobody takes a call on both");
 
   // A job's repo param is added to the repos a pool names.
-  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }).where("id", "=", dave));
+  await db.run(db.k.updateTable("remote_helpers").set({ idle_claim_at: null }).where("token_id", "=", dave));
   await setUserRepos(db, "olga", ["designcraft"]);
   assert.equal(await queueRoom(db, 0, ["designcraft"]), 1);
   const job = (repo: string) => setCallContext({ jobId: 1, step: "opus-review", stage: 5, repo, cancelled: async () => false });
@@ -81,7 +88,7 @@ test("room and takers count only the runners whose users take the call's task (M
   await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
+  await markHelperIdle(db, { tokenId: id, login: "olga", role: "operator" }, { now: Date.now(), tiers: ["top"], repos: null });
   await setUserTasks(db, "olga", TASK_CHOICES.map((t) => t.id).filter((t) => t !== "review"));
   const room = async (repos: string[] | undefined, step: string) => await remoteRoom(db, 0, Date.now(), repos, step);
   assert.ok(await room(["deckcraft"], "fixissue") > 0);

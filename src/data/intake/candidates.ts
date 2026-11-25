@@ -3,7 +3,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { isStaff } from "../access/fragments.ts";
 import { pipelineOn, tripActiveSince } from "../control/fragments.ts";
 import { followupParentOf } from "../review/fragments.ts";
@@ -18,9 +17,7 @@ type Row = { repo: string; number: number | string; kind: string; state: string;
  */
 const surgeFromSql = (db: Db, eb: kx.AnyEb) => {
   const t = tripActiveSince(eb, OUTSIDE_SURGE);
-  return db.dialect === "postgres"
-    ? sql<string | null>`to_char((${t}::timestamptz - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`
-    : sql<string | null>`strftime('%Y-%m-%dT%H:%M:%fZ', ${t}, '-1 hours')`;
+  return kx.isoMinusHours(db, t, 1);
 };
 
 /**

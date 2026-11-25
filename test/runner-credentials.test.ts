@@ -146,23 +146,20 @@ describe("over HTTP", async () => {
     assert.match(String((noAgent.body.error as { message: string }).message), /tick Agent access/);
   });
 
-  test("a runner's scopes: agent access opens /mcp, answering adds the answer tools, and the owner changes both", async () => {
-    try {
-      const boss = await signedIn("boss");
-      const { token, row } = await createToken(db, "boss", "studio", { kind: "runner", canAgent: true });
-      const tools = await toolNames(token);
-      assert.ok(tools.includes("list_inbox"), tools.join());
-      assert.ok(!tools.includes("answer_decision"));
-      const list = await boss<RunnersReply>("POST", "/api/runners/scopes", { id: row.id, agent: true, answer: true });
-      assert.deepEqual(list.runners.filter((r) => r.tokenId === row.id).map((r) => [r.agent, r.answer]), [[true, true]]);
-      assert.equal(list.answering, true);
-      assert.ok((await toolNames(token)).includes("answer_decision"));
-      assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'runner-scopes' AND login = 'boss'").get());
-      await boss("POST", "/api/runners/scopes", { id: row.id, agent: false, answer: false });
-      assert.equal((await post("/mcp", { jsonrpc: "2.0", id: 1, method: "ping" }, token)).status, 403);
-      await (await signedIn("maint"))("POST", "/api/runners/scopes", { id: row.id, agent: true, answer: false }, 404);
-    } finally {
-    }
+  test("a runner's scopes: agent access opens /mcp, answering adds the command tool, and the owner changes both", async () => {
+    const boss = await signedIn("boss");
+    const { token, row } = await createToken(db, "boss", "studio", { kind: "runner", canAgent: true });
+    const tools = await toolNames(token);
+    assert.ok(tools.includes("list_repos"), tools.join());
+    assert.ok(!tools.includes("command"));
+    const list = await boss<RunnersReply>("POST", "/api/runners/scopes", { id: row.id, agent: true, answer: true });
+    assert.deepEqual(list.runners.filter((r) => r.tokenId === row.id).map((r) => [r.agent, r.answer]), [[true, true]]);
+    assert.equal(list.answering, true);
+    assert.ok((await toolNames(token)).includes("command"));
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "runner-scopes").where("login", "=", "boss")));
+    await boss("POST", "/api/runners/scopes", { id: row.id, agent: false, answer: false });
+    assert.equal((await post("/mcp", { jsonrpc: "2.0", id: 1, method: "ping" }, token)).status, 403);
+    await (await signedIn("maint"))("POST", "/api/runners/scopes", { id: row.id, agent: true, answer: false }, 404);
   });
 
   test("a maintainer approves a Task Runner that sends commands; a viewer cannot", async () => {

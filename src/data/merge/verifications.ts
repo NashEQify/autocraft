@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { loadTasks } from "../build/index.ts";
 import { taskEndedExpr, taskStateExpr } from "../build/fragments.ts";
 import { TERMINAL, type TaskRecord } from "../build/types.ts";
@@ -78,7 +77,8 @@ export async function loadLatestVerification(db: Db, refs: { repo: string; numbe
   const k = q.k as any;
   const rows = await q.all(k.selectFrom((eb: any) => eb.selectFrom("verifications as v")
     .innerJoin(kx.refPairs(db, refs.map((r) => [r.repo, r.number] as const), "kk"), (j: any) => j.onRef("kk.repo", "=", "v.repo").onRef("kk.number", "=", "v.number"))
-    .select([...cols, sql<number>`row_number() over (partition by v.repo, v.number order by (v.head_sha = ${itemHead(eb, "v.repo", "v.number")}) desc, v.created_at desc)`.as("rn")]).as("t"))
+    .select((e: any) => [...cols, e.fn.agg("row_number").over((o: any) => o.partitionBy(["v.repo", "v.number"])
+      .orderBy(e.case().when("v.head_sha", "=", itemHead(e, "v.repo", "v.number")).then(e.lit(0)).else(e.lit(1)).end()).orderBy("v.created_at", "desc")).as("rn")]).as("t"))
     .selectAll().where("rn", "=", 1)) as (Row & { rn: number })[];
   const tasks = await tasksOf(db, rows);
   return new Map(rows.map((r) => [refOf(r.repo, r.number), { head: r.head_sha, view: viewOf(r, tasks) }]));
@@ -114,7 +114,7 @@ export async function loadVerifyDue(db: Db): Promise<VerifyDue> {
 export async function loadPendingVerifications(db: Db): Promise<PendingVerification[]> {
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("verifications as v")
-    .select((eb: any) => [...cols, openItem(eb, "v.repo", "v.number").as("is_open"), sql<string | null>`${itemHead(eb, "v.repo", "v.number")}`.as("item_head")])
+    .select((eb: any) => [...cols, openItem(eb, "v.repo", "v.number").as("is_open"), itemHead(eb, "v.repo", "v.number").as("item_head")])
     .where("v.state", "in", ["planned", "running"])
     .where((eb: any) => inScopeExpr(db, eb, "v.repo", "v.number"))
     .orderBy("v.created_at").orderBy("v.number")) as (Row & { is_open: unknown; item_head: string | null })[];

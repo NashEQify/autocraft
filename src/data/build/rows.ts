@@ -4,7 +4,6 @@ import type { Db } from "../../db/index.ts";
 import type { Eb } from "../../db/kx.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { ONLINE_MS } from "./types.ts";
 import type { BuildEnv, EnvHealth, EnvRecord, EnvTask, IdSource, Requires, SandboxEnv, TaskRecord, TaskResult, TaskState, TaskStep } from "./types.ts";
 
@@ -62,10 +61,8 @@ export async function lastLogSteps(db: Db, ids: IdSource): Promise<Map<number, s
 }
 
 
-/** The byte length of the text in `col`: Postgres `octet_length`, SQLite `length` of the value as a blob. */
-export function byteLen(db: Db, col: string): RawBuilder<number> {
-  return db.dialect === "postgres" ? sql<number>`octet_length(${sql.ref(col)})` : sql<number>`length(CAST(${sql.ref(col)} AS BLOB))`;
-}
+/** The byte length of the text in `col`. */
+export const byteLen = (db: Db, col: string): RawBuilder<number> => kx.byteLength(db, col);
 
 /** The name of the first plan step with no result yet; null when the plan or results cannot be read. */
 export function currentStep(plan: string | null, results: string | null): string | null {

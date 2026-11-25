@@ -14,8 +14,8 @@ import { BuildError } from "./envs.ts";
 import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
 import { diffStat, LIVE_STATES } from "./workspaces.ts";
 
-/** Servers a workspace session may have beside `workspace`. */
-const EXTRA_SERVERS = new Set([ITEM_SERVER, REFERENCE_SERVER]);
+/** Servers a workspace session may have beside `workspace`. A function: these modules import each other, so a constant could be read before its module ran. */
+const extraServer = (name: string): boolean => name === ITEM_SERVER || name === REFERENCE_SERVER;
 
 export type WorkspaceCallRequest = {
   workspaceId: number;
@@ -59,7 +59,7 @@ export function workspaceClaudeArgs(r: Pick<WorkspaceCallRequest, "model" | "eff
  */
 export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promise<number> {
   const extra = [...new Set(r.servers ?? [])];
-  const bad = extra.find((s) => !EXTRA_SERVERS.has(s));
+  const bad = extra.find((s) => !extraServer(s));
   if (bad) throw new BuildError(400, `a workspace session cannot have the ${bad} server`);
   if (extra.includes(REFERENCE_SERVER) && !r.referenceRepo) throw new BuildError(400, "the reference server needs referenceRepo");
   const servers = [WORKSPACE_SERVER, ...extra].sort();

@@ -19,7 +19,7 @@ export function cachedSnapshot(db: Db, now: number): Promise<RunnerSnapshot> | n
 export function keepSnapshot(db: Db, now: number, snapshot: Promise<RunnerSnapshot>): Promise<RunnerSnapshot> {
   const entry = { at: now, snapshot };
   caches.set(db, entry);
-  snapshot.catch(() => { if (caches.get(db) === entry) caches.delete(db); });
+  void snapshot.catch(() => { if (caches.get(db) === entry) caches.delete(db); });
   return snapshot;
 }
 

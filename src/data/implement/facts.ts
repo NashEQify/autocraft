@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { sql } from "../../db/sql.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { ENDED, IMPL_COLS, num, ofRow, parse, roundOf, type ImplRow, type RoundRow } from "./rows.ts";
@@ -23,6 +22,9 @@ const liteOf = (r: ImplRow): AttemptLite => {
 
 type AttemptRow = ImplRow & { rn: number | string; a: number | string; b: number | string; counts: string | null };
 
+/** Order: attempts that ended come after the current one. */
+const endedLast = (eb: any, state: string) => eb.case().when(state, "in", ENDED.map((s) => kx.literal(s))).then(eb.lit(1)).else(eb.lit(0)).end();
+
 /**
  * The latest attempt per issue and per PR, question and answer state, revise heads and per-text attempt counts. Keys may be
  * issue refs or PR refs; the loader matches either. 3 statements in one `together` wave.
@@ -41,7 +43,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
   const [attempts, rounds, live] = await db.together(() => Promise.all([
     q.all(k.selectFrom(k.selectFrom("main.implementations as im").select((eb: any) => [
       ...LITE_COLS.map((c) => `im.${c}`), ...wide,
-      sql<number>`row_number() OVER (PARTITION BY im.repo, im.number ORDER BY CASE WHEN im.state IN (${sql.join(ENDED.map((s) => sql.lit(s)))}) THEN 1 ELSE 0 END, im.attempt DESC, im.id DESC)`.as("rn"),
+      eb.fn.agg("row_number").over((o: any) => o.partitionBy(["im.repo", "im.number"]).orderBy(endedLast(eb, "im.state")).orderBy("im.attempt", "desc").orderBy("im.id", "desc")).as("rn"),
       eb.case().when(byNumber(eb)).then(eb.lit(1)).else(eb.lit(0)).end().as("a"),
       eb.case().when(byPrNumber(eb)).then(eb.lit(1)).else(eb.lit(0)).end().as("b"),
     ]).where((eb: any) => eb.or([byNumber(eb), byPrNumber(eb)])).as("t"))
@@ -125,7 +127,7 @@ export async function loadImplementationView(db: Db, ref: RefKey): Promise<Imple
     q.all(k.selectFrom("main.implementations").select([...IMPL_COLS]).where("repo", "=", repo).where("number", "=", number).orderBy("attempt", "desc").orderBy("id", "desc")) as Promise<ImplRow[]>,
     q.all(k.selectFrom("main.implementation_rounds").select(["id", "implementation_id", "kind", "call_id", "result", "at"]).where("implementation_id", "in", (eb: any) =>
       eb.selectFrom("main.implementations as l").select("l.id").where("l.repo", "=", repo).where("l.number", "=", number)
-        .orderBy(sql`CASE WHEN l.state IN (${sql.join(ENDED.map((s) => sql.lit(s)))}) THEN 1 ELSE 0 END`).orderBy("l.attempt", "desc").orderBy("l.id", "desc").limit(1)).orderBy("id")) as Promise<RoundRow[]>,
+        .orderBy((e: any) => endedLast(e, "l.state")).orderBy("l.attempt", "desc").orderBy("l.id", "desc").limit(1)).orderBy("id")) as Promise<RoundRow[]>,
   ]));
   if (all.length === 0) return null;
   const impls = all.map(ofRow);
@@ -181,8 +183,8 @@ export async function loadStuckStreaks(db: Db, sinceByRepo: Map<string, string>,
   const k = q.k as any;
   const v = kx.valuesTable(db, [...sinceByRepo].map(([repo, since]) => ({ repo, since })), { repo: "text", since: "text" }, "w");
   const rows = await q.all(k.selectFrom(k.selectFrom("main.implementations as im").innerJoin(v, (j: any) => j.onRef("w.repo", "=", "im.repo"))
-    .select(["im.repo as repo", "im.number as number", "im.attempt as attempt", "im.state as state", "im.pr_number as pr_number",
-      sql<number>`row_number() OVER (PARTITION BY im.repo ORDER BY im.updated_at DESC, im.id DESC)`.as("rn")])
+    .select((eb: any) => ["im.repo as repo", "im.number as number", "im.attempt as attempt", "im.state as state", "im.pr_number as pr_number",
+      eb.fn.agg("row_number").over((o: any) => o.partitionBy("im.repo").orderBy("im.updated_at", "desc").orderBy("im.id", "desc")).as("rn")])
     .where((eb: any) => eb("im.updated_at", ">", eb.ref("w.since")))
     .where((eb: any) => eb.or([eb("im.pr_number", "is not", null), eb("im.state", "in", ["stuck", "failed"])])).as("t"))
     .select(["t.repo", "t.number", "t.attempt", "t.state", "t.pr_number"]).where("t.rn", "<=", n).orderBy("t.repo").orderBy("t.rn")) as { repo: string; number: number | string; attempt: number | string; state: ImplementationState; pr_number: number | string | null }[];

@@ -63,5 +63,5 @@ export const fakeDeps: SnapshotDeps = {
 
 /** Puts the snapshot (read with `fakeDeps`) in the handle's cache, for loaders that read it without taking dependencies. */
 export async function primeSnapshot(db: Db): Promise<void> {
-  keepSnapshot(db, NOW, loadRunnerSnapshot(db, NOW, fakeDeps));
+  await keepSnapshot(db, NOW, loadRunnerSnapshot(db, NOW, fakeDeps));
 }

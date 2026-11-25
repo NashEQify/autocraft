@@ -2,7 +2,6 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
-import { sql } from "kysely";
 import { MAX_RESUMES, MAX_TOTAL_RESUMES } from "../../runner/resuming.ts";
 import { flushJobItems } from "./items.ts";
 import { nowIso } from "./sql.ts";
@@ -64,7 +63,7 @@ export async function markEnded(db: Db, rows: { id: number; state: string; error
     n += (await q.run(q.k.updateTable("jobs").set({
       state: kx.caseOf("id", part.map((r) => [r.id, r.state] as const)), ended_at: t, pid: null,
       error: kx.caseOf<string | null>("id", part.map((r) => [r.id, r.error] as const)),
-      progress: (eb) => eb.case().when(kx.inList(db, "id", part.filter((r) => r.clearProgress).map((r) => r.id), "bigint")).then(sql<null>`NULL`).else(eb.ref("progress")).end(),
+      progress: (eb) => eb.case().when(kx.inList(db, "id", part.filter((r) => r.clearProgress).map((r) => r.id), "bigint")).then(eb.lit(null)).else(eb.ref("progress")).end(),
     }).where(kx.inList(db, "id", ids, "bigint")).where("state", "=", "running"))).changes;
   }
   return n;
