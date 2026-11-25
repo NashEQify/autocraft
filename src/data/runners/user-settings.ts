@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { addAudit, type NewAudit } from "../control/index.ts";
+import { dropSnapshotCache } from "./snapshot-cache.ts";
 import type { LowerLogin, Reserve, UserSettings } from "./types.ts";
 
 export const DEFAULT_RESERVE: Reserve = { fiveHour: 20, weekly: 20 };
@@ -132,6 +133,8 @@ export async function saveUserSettings(db: Db, login: string, patch: Partial<Use
     if (was.interactiveSlots !== next.interactiveSlots) rows.push(audit("interactive-slots", { interactiveSlots: next.interactiveSlots, was: was.interactiveSlots }));
     if (was.runnerPrivate !== next.runnerPrivate) rows.push(audit("runner-private", { runnerPrivate: next.runnerPrivate }));
     if (rows.length) await addAudit(db, rows);
+    // The snapshot embeds the settings: the person's next claim and the room follow the change.
+    if (changed.length) db.afterCommit(() => dropSnapshotCache(db));
     return next;
   });
 }

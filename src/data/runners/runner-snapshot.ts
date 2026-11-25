@@ -94,15 +94,27 @@ const takerExpr = (eb: kx.Eb, now: number) => eb.and([
   eb.not(eb.exists(kx.schemaEb(eb).selectFrom("main.remote_cooloffs as co").select(eb.lit(1).as("one")).where("co.login", "=", eb.ref("t.login")).where("co.until", ">", now))),
 ]);
 
+const lastSignature = new WeakMap<Db, string>();
+
 /**
  * The runners the taker rule reads, in a form that changes only when they or what decides their repos change: each one's login, role,
  * My repos, own repo list and skipped tasks. The planner adds it to its input, so work left for want of a taker is planned again when one
  * connects or comes back, without every status report waking the planner. Then, per user with an item choice, the repos of the items they
  * take (started work, or the work they started or approved), and the oldest cached non-write permission check of live runner logins, so
  * the signature changes when that one expires. One wave: the grouped string, the takers with their item choice, the started work and the
- * permission checks.
+ * permission checks. A signature that differs from the handle's last one drops the cached snapshot: work planned on it must not be
+ * judged on an older reading, which would leave it waiting for a signature that does not change again.
  */
 export async function loadTakerSignature(db: Db, now: number, deps: SnapshotDeps = REAL): Promise<string> {
+  const sig = await readTakerSignature(db, now, deps);
+  if (lastSignature.get(db) !== sig) {
+    lastSignature.set(db, sig);
+    dropSnapshotCache(db);
+  }
+  return sig;
+}
+
+async function readTakerSignature(db: Db, now: number, deps: SnapshotDeps): Promise<string> {
   const q = queryDb(db);
   const [sig, takers, started, denials] = await db.together(() => Promise.all([
     q.get(q.k.selectFrom((eb) => eb.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
