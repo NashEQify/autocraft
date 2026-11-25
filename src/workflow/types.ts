@@ -146,7 +146,7 @@ export type CommandPart =
  */
 export type Parsed =
   | { kind: "yes"; items?: ItemRef[]; weight?: number }
-  | { kind: "commands"; items: ItemRef[]; parts: CommandPart[] }
+  | { kind: "commands"; items: ItemRef[]; parts: CommandPart[]; /** A yes-word stood beside the commands ("yes, merge"). */ yes?: true }
   | { kind: "ambiguous"; understood: string; rest: string };
 
 /** A registered control: a state change a panel needs that is not one of the command words. */

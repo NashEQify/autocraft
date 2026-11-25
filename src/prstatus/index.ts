@@ -7,8 +7,9 @@
 // queues the step when a PR's line differs from the one posted; a PR whose writes keep failing waits out a backoff.
 //
 // Every item a person started, issue or PR, gets the comment as soon as it starts, built from the workflow's lines (src/workflow/status.ts): where it stands, who started,
-// approved, answered or stopped it, its steps, its place in the merge queue, its numbered parts and the open recommendation.
-// A quiet PR's comment carries no parts, recommendation or blocker reason. Items nobody started keep the line above.
+// approved, answered or held it, its steps, its place in the merge queue, its numbered parts and the open recommendation.
+// A quiet PR's comment carries no parts, recommendation or blocker reason. Items nobody started keep the line above; one that was held
+// before anyone started it has no steps, and its comment says so once nobody holds it any more.
 import { commentStatuses, type PublicStatus, type PublicStep } from "../public/status.ts";
 import { guardRepo } from "../core/guard.ts";
 import type { By } from "../core/gates.ts";
@@ -28,7 +29,7 @@ import { freshConfig } from "../data/control/index.ts";
 import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
-import type { ItemWorkflow } from "../workflow/types.ts";
+import { heldWork, type ItemWorkflow } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
 
 export const ACTOR = "pr-status";
@@ -91,7 +92,7 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
   const head = s.step === "Merged" ? (f.batch ? t("Merged with merge batch #{pr}", { pr: f.batch.pr }) : t("Merged"))
     : s.step === "Closed" ? t("Closed")
       : quiet && waits ? t("Waiting for a maintainer decision") : stateLine(wf, currentStep(steps), undefined, wait ?? null);
-  const out = [`**${head}**`, attributionLines(wf, answered).join("\n"), stepLines(steps).join("\n")];
+  const out = [`**${head}**`, attributionLines(wf, answered).join("\n"), ...(wf.state === "stopped" && heldWork(wf).unstarted ? [] : [stepLines(steps).join("\n")])];
   if (s.step === "In the merge queue") {
     if (f.batch) out.push(t("Checked in merge batch #{pr}", { pr: f.batch.pr }));
     else if (s.queue) out.push(s.queue.position <= QUEUE_EXACT ? queueLine(s.queue.position) : t("{n} or more items ahead", { n: QUEUE_EXACT }));
@@ -137,7 +138,11 @@ export function commentBody(repo: string, number: number, line: string, history:
 
 
 type Stored = StatusRow;
-export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null };
+/** `released`: the comment of a held item that nobody had started, and that nobody holds any more. */
+export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null; released?: true };
+
+/** A started or held item's line: its whole comment text, in paragraphs. */
+const isWorkflowText = (line: string | null | undefined): boolean => !!line?.includes("\n\n");
 
 const parseSteps = (s: string): HistoryStep[] => {
   try {
@@ -158,7 +163,7 @@ const retryAt = (failures: number, now: number): string =>
 /**
  * The PRs of each of `repos` whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
  * whose posted line differs from its line now. Out of scope (the repo's Pipeline off, a person ended the item) a posted
- * comment still gets its Merged or Closed edit. Batch PRs get none; a PR waiting out a failure backoff is left out; a member
+ * comment still gets its Merged or Closed edit, and that of an item whose hold left nothing to go on with says it is not held any more. Batch PRs get none; a PR waiting out a failure backoff is left out; a member
  * of a batch whose PR has not opened yet keeps its line.
  */
 export async function statusDueIn(db: Db, repos: readonly string[], now: number = Date.now()): Promise<Map<string, Due[]>> {
@@ -184,7 +189,10 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     if (!status) continue;
     const ended = status.step === "Merged" || status.step === "Closed";
     const w = started.get(n);
-    if (!inScope.has(n) && !w?.open && !ended) continue;
+    if (!inScope.has(n) && !w?.open && !ended) {
+      if (w === undefined && prev && isWorkflowText(prev.line)) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts: { status }, line: t("Not held any more. AutoCraft has no work on it."), prev, released: true });
+      continue;
+    }
     const open = status.queue ? batches.get(`open:${key}`) : undefined;
     if (open && open.pr === null) continue;
     const merged = status.step === "Merged" ? batches.get(`merged:${key}`) : undefined;
@@ -282,6 +290,7 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
       const ended = d.facts.status.step === "Merged" || d.facts.status.step === "Closed";
       const body = wf
         ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && wf.wf.rec !== null, slug, base)
+        : d.released ? workflowBody(p.repo, d.number, [`**${d.line}**`], false, slug, base)
         : commentBody(p.repo, d.number, d.line, history, d.facts.status.step === "In the merge queue", base);
       const shown = d.line.split("\n")[0];
       const row = { line: d.line, steps: JSON.stringify(history), final: d.facts.status.step === "Merged" ? 1 : 0, failures: 0, retry_at: null, updated_at: at };

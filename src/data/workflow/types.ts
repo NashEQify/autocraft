@@ -41,8 +41,8 @@ export type WorkflowLink = { workflowId: number; repo: string; issue: number; pr
 export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
 export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string; /** An answer's: when its question was asked. */ seenAt?: string | null };
-/** Up to when a person has seen an item and chose to go on with it (`since`), and when they said so (`said`). */
-export type GoneOn = { since: string; said: string };
+/** Up to when a person has seen an item and chose to go on with it (`since`), when they said so (`said`), and when someone last resumed it. */
+export type GoneOn = { since: string; said: string; resumed: string | null };
 export type StoredEvent = WorkflowEvent & { id: number; at: string };
 /** A stored event of the maintainer workflow itself. */
 export type SaidEvent = StoredEvent & { kind: WorkflowEventKind };

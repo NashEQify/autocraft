@@ -2,7 +2,8 @@
 // from its start), without which nobody's started work counts; the merge, made as the approver, waiting for them
 // to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, with no Task Runner that may take it, or only
 // the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
-// close from being made. A contributor, or a person on GitHub, whom the item waits for without a question. The status comment, the item page and the agent show it as the state line.
+// close from being made. A merge refused for its approver's access is no wait but a question (ask.ts), which an answer closes, or the
+// approver's next sign-in (src/github/user-lane.ts retryWaiting). A contributor, or a person on GitHub, whom the item waits for without a question. The status comment, the item page and the agent show it as the state line.
 import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
 import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import { loadPlans } from "../data/planner/index.ts";

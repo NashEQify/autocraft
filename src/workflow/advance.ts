@@ -140,10 +140,10 @@ const HOLD_ENDS = ["person", "workflow-ended"];
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
 
 /** The merge leg of the workflow that ended after `since` (and none active), with its reason. One a hold ended says nothing once someone resumed the item. */
-function endedLeg(pass: Pass, w: ItemWorkflow, since: string): EndedLeg | null {
+function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | null): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
-  if (HOLD_ENDS.includes(r.reason_code ?? "") && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
+  if (HOLD_ENDS.includes(r.reason_code ?? "") && resumed !== null && r.updated_at <= resumed) return null;
   return { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
 }
 
@@ -437,7 +437,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     w = { ...w, ...on };
   }
   if (!head) return settle(base);
-  const { since, said } = pass.goOn.get(w.id) ?? { since: w.startedAt, said: w.startedAt };
+  const { since, said, resumed } = pass.goOn.get(w.id) ?? { since: w.startedAt, said: w.startedAt, resumed: null };
   const agreed = agreedAt({ approvedAt: w.approvedAt, since, said });
   const patch: WorkflowPatch = { ...base };
 
@@ -496,7 +496,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const f = read?.may.workflow && w.state !== w0.state ? { ...read, may: { ...read.may, workflow: { ...read.may.workflow, state: w.state, blocker: null } }, ...(retried ? { mergeWaiting: false, mergeLacksAccess: false } : {}) } : read;
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => onConflict(atBlocker(x, view, parts, w.entry === "merge"), conflict);
-  const ended = approved ? endedLeg(pass, w, since) : null;
+  const ended = approved ? endedLeg(pass, w, since, resumed) : null;
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.

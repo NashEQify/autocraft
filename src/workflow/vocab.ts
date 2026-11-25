@@ -110,6 +110,9 @@ export const COMMANDS: readonly CommandDef[] = [
   },
 ];
 
+/** The words that mean a hold, lower case. */
+export const HOLD_WORDS: readonly string[] = COMMANDS.filter((c) => c.word === "hold").flatMap((c) => [c.word, ...c.aliases]);
+
 /** Answers that run the open recommendation as it stands, lower case and without punctuation. */
 export const YES_WORDS: readonly string[] = [
   "yes", "y", "yep", "yeah", "yup", "ok", "okay", "approve", "approved", "lgtm", "go", "go ahead", "sounds good", "do it", "ship it",

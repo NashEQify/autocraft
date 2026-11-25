@@ -9,10 +9,11 @@
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
 //   yes / lgtm / go                  runs the open recommendation
+//   stop / no, wait / hold for now   a message that only says to hold, with nothing else asked for, is a hold
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
-import { commandOf, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
+import { commandOf, COMMANDS, HOLD_WORDS, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
 
 export type ParseOptions = {
   /** The app's slug, and its mention name when set: a leading `@<slug>` (or `@<slug>[bot]`) is not part of the command. */
@@ -78,16 +79,18 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   }
   const yes = readYes(s);
   if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
+  if (saysHold(s)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   const r = readWords(s);
   if (r.unknown.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, items), rest: r.unknown.join(", ") };
-  return { kind: "commands", items, parts: r.parts };
+  return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
 }
 
 /**
  * The command in a GitHub comment, or null when no line of it is addressed to the app. A command starts on a line of its own with
  * `@<slug>`; quoted, fenced, indented and HTML-commented lines never count (commentLines). In the list form, the lines after
  * `@<slug> merge:` up to the next blank or hidden line are the items. Several addressed lines are read as one text, so an unclear
- * mix is ambiguous rather than half run.
+ * mix is ambiguous rather than half run. A command whose comment goes on with a condition ("merge", then "after CI is green") is
+ * ambiguous too; a hold stands, whatever the comment says about it.
  */
 export function parseComment(body: unknown, slug: string | readonly string[], opts: Omit<ParseOptions, "slug"> = {}): Parsed | null {
   const names = [slug].flat().filter(Boolean);
@@ -95,6 +98,7 @@ export function parseComment(body: unknown, slug: string | readonly string[], op
   const lines = commentLines(body.slice(0, BODY_MAX));
   const mention = mentionRe(names);
   const texts: string[] = [];
+  let condition: string | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (!mention.test(line)) continue;
@@ -103,18 +107,50 @@ export function parseComment(body: unknown, slug: string | readonly string[], op
       while (i + 1 < lines.length && lines[i + 1] && !mention.test(lines[i + 1]!)) text += `\n${lines[++i]}`;
     }
     texts.push(text);
+    condition ??= conditionIn(lines.slice(i + 1), mention);
   }
-  return texts.length ? parse(texts.join("\n"), opts) : null;
+  if (!texts.length) return null;
+  const p = parse(texts.join("\n"), opts);
+  if (condition === null || (p.kind === "commands" && p.parts.every((x) => x.word === "hold"))) return p;
+  if (p.kind === "ambiguous") return { ...p, rest: [p.rest, condition].filter(Boolean).join(", ") };
+  return { kind: "ambiguous", understood: p.kind === "yes" ? "yes" : describe(p.parts, p.items), rest: condition };
 }
 
-type Read = { parts: CommandPart[]; unknown: string[]; conflict: boolean };
+/** Words that open a condition on what was said before. */
+const CONDITION = /^(?:if|unless|but|wait|after|when|until|not)$/;
+/** Words a condition may start with before its own ("please only merge it when ..."). */
+const LEAD_IN = new Set(["and", "so", "then", "only", "just", "please", "pls", "also", "though", "maybe", "perhaps", "thanks", "ok", "okay", "yes", "no", "let", "us", "lets", "let's", "i", "i'd", "we", "we'd", "would", "should", "do", "go", "land", "merge", "it", "this", "that", "the"]);
+
+/**
+ * The sentence with a condition in what follows an addressed line, up to the end of the next paragraph, or null. A condition opens its line or
+ * clause ("but wait for CI", "only merge it when CI is green"); the same word inside another sentence ("it crashed when a file was empty") is a reason.
+ * `don't` counts as `do not`; unless and until count anywhere.
+ */
+function conditionIn(after: readonly string[], mention: RegExp): string | null {
+  let gaps = 0, text = false;
+  for (const line of after) {
+    if (mention.test(line)) return null;
+    if (!line) { gaps += text || gaps === 0 ? 1 : 0; text = false; if (gaps > 2) return null; continue; }
+    text = true;
+    if (gaps > 1) return null;
+    for (const sentence of line.split(/(?<=[.!?])\s+/)) {
+      for (const clause of sentence.toLowerCase().replace(/\u2019/g, "'").replace(/\bdon'?t\b/g, "do not").split(/[,;:()]|\s[-\u2013\u2014]\s/)) {
+        const words = clause.replace(/[^\p{L}\p{N}' -]+/gu, " ").replace(/^[\s-]+/, "").split(/\s+/).filter(Boolean);
+        if (CONDITION.test(words.find((w) => !LEAD_IN.has(w)) ?? "") || words.some((w) => w === "unless" || w === "until")) return sentence.replace(/[.!]+$/, "").slice(0, 200);
+      }
+    }
+  }
+  return null;
+}
+
+type Read = { parts: CommandPart[]; unknown: string[]; conflict: boolean; /** A yes-word stood beside the commands ("yes, merge"). */ yes: boolean };
 
 /** A yes-word with nothing else but a weight and politeness: `yes`, `lgtm, thanks`, `go ahead, urgent`. */
 function readYes(s: string): { weight: number | null } | null {
   let weight: number | null = null;
   let bad = false;
   const setW = (w: number) => { if (weight !== null && weight !== w) bad = true; weight = w; };
-  let t = norm(s.replace(/[,.!?;]+/g, " "));
+  let t = norm(s.replace(/[,.!;]+/g, " "));
   t = t.replace(/(^| )weight (\d+)(?= |$)/g, (_m, pre: string, n: string) => {
     const w = Number(n);
     if (w < WEIGHT_MIN || w > WEIGHT_MAX) bad = true;
@@ -141,12 +177,29 @@ function readYes(s: string): { weight: number | null } | null {
  */
 const FILLER = /(?<![\w-])(?:thank you|the pull request|the pr|the rest|go ahead|sounds good|lgtm|yes|yep|yeah|ok|okay|sure|please|pls|thanks|thx|now|it|this|that)(?![\w-])/gi;
 const stripFiller = (seg: string): string => seg.replace(FILLER, " ").replace(/\s+/g, " ").trim();
+const saysYes = (seg: string): boolean => (seg.match(FILLER) ?? []).some((w) => YES_WORDS.includes(w.toLowerCase()));
+
+const any = (words: readonly string[]): string => words.map(escape).sort((a, b) => b.length - a.length).join("|");
+/** Nothing but a hold word and what people write around one: "no, stop", "let's wait", "hold the merge for now". */
+const HOLD_ONLY = new RegExp(`^(?:(?:no|oh|ok|okay|sorry|actually|please|pls|just|let'?s|let us|we should) )*(?:${any(HOLD_WORDS)})(?: (?:${any([...HOLD_WORDS, "please", "pls", "thanks", "thank you", "thx", "for now", "right now", "now", "for a moment", "a moment", "a minute", "a sec", "the merge", "merging", "it", "this", "that", "everything"])}))*$`);
+/** What a text beside a hold word may not hold: another command, a yes, or a condition. */
+const ASKS = new RegExp(`(?<![\\w-])(?:${any([...COMMANDS.filter((c) => c.word !== "hold").flatMap((c) => [c.word, ...c.aliases]), ...YES_WORDS, "merging", "if", "unless", "until", "but", "after", "when", "then", "not", "instead", "only"])})(?![\\w-])|n't(?![\\w-])`, "i");
+
+/** The message only says to hold: hold words first, and after them nothing that asks for anything ("stop. I will look"). */
+function saysHold(s: string): boolean {
+  const sentences = s.replace(/\u2019/g, "'").split(/[.!;\n]+/).map((x) => norm(x.replace(/,/g, " "))).filter(Boolean);
+  for (let k = sentences.length; k > 0; k--) {
+    if (HOLD_ONLY.test(sentences.slice(0, k).join(" "))) return !sentences.slice(k).some((x) => ASKS.test(x));
+  }
+  return false;
+}
 
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
 function readWords(src: string): Read {
   const parts: CommandPart[] = [];
   const unknown: string[] = [];
   const weights: { text: string; w: number }[] = [];
+  let yes = false;
   let s = src.trim().replace(/[.!]+$/, "");
   s = s.replace(/(^|[\s,;])weight\s+(\d+)(?=$|[\s,;])/gi, (m, pre: string, n: string) => {
     const w = Number(n);
@@ -168,8 +221,12 @@ function readWords(src: string): Read {
     let seg = raw.trim().replace(/\s+/g, " ").replace(/^(?:(?:and then|then|and|please) )+/i, "").replace(/(?: (?:and|&))+$/i, "").trim();
     if (!seg) continue;
     if (!/^auto[-\s]?repin(?:\s|$)/i.test(seg)) {
-      seg = stripFiller(seg);
-      if (!seg) continue;
+      const bare = stripFiller(seg);
+      yes ||= saysYes(seg);
+      if (!bare) continue;
+      // "yes?" asks, so what is left of it says nothing: the words as written are what was not understood.
+      if (!/[\p{L}\p{N}]/u.test(bare)) { unknown.push(seg); continue; }
+      seg = bare;
     }
     const repin = /^auto[-\s]?repin(?:\s+(.+))?$/i.exec(seg);
     if (repin) {
@@ -215,7 +272,7 @@ function readWords(src: string): Read {
   const conflict = distinct.length > 1;
   if (conflict) unknown.push(...weights.map((w) => w.text));
   else if (distinct.length) push({ word: "weight", weight: distinct[0]! });
-  return { parts, unknown, conflict };
+  return { parts, unknown, conflict, yes };
 }
 
 /** The part numbers when the tokens are numbers (with `part`, `finding` or `change` before them, and weight words), else null. */

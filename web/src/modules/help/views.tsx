@@ -358,7 +358,7 @@ function Roles() {
   ];
   return (
     <Page id="roles">
-      <p>{t("Every action is logged with who did it: “approved by mira”, “stopped by jonas”.")}</p>
+      <p>{t("Every action is logged with who did it: “approved by mira”, “held by jonas”.")}</p>
       {rows.map(([who, can]) => (
         <Part key={who} title={who}>
           <ul className="flex list-disc flex-col gap-1 pl-5">
