@@ -31,7 +31,7 @@ import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
-import { loadPrWorkflows } from "../data/workflow/index.ts";
+import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
 import { droppedTitles, keptFixes } from "../workflow/work.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
@@ -156,10 +156,14 @@ export function scopeSettled(w: ItemWorkflow | undefined): { scope_settled?: Non
  */
 export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean; off?: () => Promise<string | null> } = {}): Promise<PreparedOpus> {
   const ref = refOf(c);
-  const [items, rows, repos, workflows] = await db.together(() => Promise.all([
+  const [items, stored, repos, workflows] = await db.together(() => Promise.all([
     loadItems(db, [{ repo, number: c.number }], "pr"), loadReviewRows(db, [{ repo, number: c.number }]), loadRepos(db, { names: [repo] }),
     loadPrWorkflows(db, [{ repo, number: c.number }]),
   ]));
+  // A PR a person sent to merge without a review is reviewed for our own push alone: what they went past is no base of it.
+  const wf = workflows.get(ref);
+  const since = wf?.entry === "merge" ? (await loadGoOnAt(db, [wf])).get(wf.id)! : null;
+  const rows = since === null ? stored : new Map([...stored].map(([k, rs]) => [k, rs.filter((r) => r.at > since)]));
   const liveBase = items.get(ref)?.base_ref;
   const scope = scopeSettled(workflows.get(ref));
   const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff, liveBase);

@@ -127,11 +127,12 @@ test("the review a push of ours owes a merge entry stops it on a hold, and has i
 test("a push of ours while the approved fix-up waits takes the fix-up to the new head", async () => {
   const w = (current = await (await (await world()).repo()).acting());
   for (const n of [1, 2]) { await (await (await w.pr(n)).workflow(n)).review(n, { verdict: "take-fix" }); await w.fixup(n, n === 1); }
+  await w.db.run(w.db.k.updateTable("items").set({ maintainer_can_modify: 1 }));
   // A try stored at the old head for its lint check is dropped there, and says nothing about the request.
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "sha1", state: "superseded", attempt: 1, created_at: T0, source: "operator", operator_fix: Number((await w.rows("SELECT id FROM operator_fixups WHERE number = 1"))[0]!.id) }));
   for (const n of [1, 2]) { await cifix(w, n, `sha${n}`, `sha${n}b`); await w.synced(n, `sha${n}b`); }
   await tick(w);
-  assert.deepEqual([(await legOf(w, 1)).state, (await legOf(w, 1)).fromHead], ["fixup", "sha1b"]);
+  assert.deepEqual([(await legOf(w, 1)).state, (await legOf(w, 1)).fromHead, (await legOf(w, 1)).reason], ["fixup", "sha1b", null]);
   for (const n of [1, 2]) {
     assert.deepEqual(await w.rows("SELECT state, from_head FROM operator_fixups WHERE number = ?", n), [{ state: "queued", from_head: `sha${n}b` }]);
     assert.ok((await w.prPlan(n)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"), `${n}`);
