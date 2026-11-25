@@ -335,9 +335,6 @@ export async function getTaskDetail(db: Db, id: number): Promise<BuildTaskDetail
 /** The step of a security fix's builds: its tasks run under the finding's real repo, so viewers must not see them. */
 export const FIX_CHECK_STEP = "fix-check";
 
-/** SQL for the steps hidden from viewers, for `step NOT IN (...)`. */
-export const PRIVATE_STEPS_SQL = PRIVATE_STEPS.map((x) => `'${x}'`).join(", ");
-
 /**
  * Since when the private tasks can be claimed: the earliest first worker call of an enabled confidential environment
  * after its flag (or the environment) was turned on; null while none has called since.

@@ -9,7 +9,7 @@ import { hiddenTestExpr, type HiddenRepos } from "../src/hidden-sql.ts";
 import { quietPrExpr } from "../src/data/security/fragments.ts";
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { phaseOf } from "../src/data/views/maintain-items.ts";
-import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
+import { PRIVATE_STEPS, privateStepExpr } from "../src/build/tasks.ts";
 import { MANUAL_ONLY_KEY } from "../src/remote/manual-only.ts";
 import { manualOnlyExpr } from "../src/data/runners/fragments.ts";
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
@@ -172,7 +172,7 @@ function cases(db: Db): Case[] {
     built: (d) => d.k.selectFrom("main.items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
       .select((eb) => ["i.number", phaseOf(d, eb).as("phase")]).where("i.repo", "=", "app").where("i.number", "<=", 5).orderBy("i.number") });
   for (const not of [false, true]) {
-    out.push({ name: `PRIVATE_STEPS_SQL${not ? " (NOT IN)" : ""}`, text: [`SELECT step AS k FROM build_tasks WHERE step ${not ? "NOT " : ""}IN (${PRIVATE_STEPS_SQL}) ORDER BY step`],
+    out.push({ name: `PRIVATE_STEPS_SQL${not ? " (NOT IN)" : ""}`, text: [`SELECT step AS k FROM build_tasks WHERE step ${not ? "NOT " : ""}IN (${PRIVATE_STEPS.map((x) => `'${x}'`).join(", ")}) ORDER BY step`],
       expect: not ? ["build"] : [...PRIVATE_STEPS].sort(),
       built: (d) => d.k.selectFrom("build_tasks").select("step as k").where((eb) => (not ? eb.not(privateStepExpr(eb, "step")) : privateStepExpr(eb, "step"))).orderBy("step") });
   }

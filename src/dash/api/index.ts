@@ -532,8 +532,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/pipeline/jobs/:id/cancel", handler: ok(pipeline.cancel) },
     get("/api/pipeline/state", pipeline.state),
     { method: "PUT", pattern: "/api/pipeline/state", operator: true, handler: ok(pipeline.putState) },
-    { method: "GET", pattern: "/api/pipeline/judgement-model", operator: true, handler: ok(async (db) => await pipeline.getJudgementModel(db)) },
-    { method: "PUT", pattern: "/api/pipeline/judgement-model", operator: true, handler: ok(pipeline.putJudgementModel) },
     { method: "PUT", pattern: "/api/pipeline/blocker-thresholds", operator: true, handler: ok(pipeline.putBlockers) },
     { method: "PUT", pattern: "/api/pipeline/limits/:step", operator: true, handler: ok(pipeline.putLimit) },
     { method: "POST", pattern: "/api/pipeline/limits/:step/reset", operator: true, handler: ok(pipeline.resetLimit) },
