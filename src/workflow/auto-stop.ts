@@ -14,12 +14,11 @@ import type { Plan, PlanState, PrFacts } from "../core/plan.ts";
 import { EXTRAS_PENDING_REASON, UNCHECKED_REASON } from "../core/sensitive.ts";
 import { listPlans } from "../data/planner/index.ts";
 import { loadReviewRows, type ReviewRow } from "../data/review/index.ts";
-import { loadStartedRefs } from "../data/workflow/index.ts";
+import { loadStartedRefs, recordEvents, saveWorkflows, startWorkflows } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { questionFor } from "./ask.ts";
 import { planOf, ruleStopped } from "./recommend.ts";
-import { addEvent, insertWorkflow } from "./store.ts";
-import { RULE_STARTER, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
+import { RULE_STARTER, WEIGHT_NORMAL, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
 
 /** The waits of a stop that only a person's judgement settles. */
 export const JUDGEMENT_WAITS: readonly WaitCode[] = ["answer", "verification-failed", "screenshots"];
@@ -59,24 +58,19 @@ export async function findAutoStops(db: Db, o: { repos?: string[] } = {}): Promi
 }
 
 /**
- * Starts the workflow of each judgement stop, in the state that waits for its answer, and returns how many it started. A PR someone
- * started meanwhile keeps their workflow.
+ * Starts the workflow of each judgement stop, in the state that waits for its answer, and returns how many it started: the rows, their
+ * question and their events in one write, a few statements whatever their number. A PR someone started meanwhile keeps their workflow.
  */
 export async function startAutoStops(db: Db, at: string = new Date().toISOString()): Promise<number> {
-  let n = 0;
-  for (const s of await findAutoStops(db)) {
-    let id: number;
-    try {
-      id = await insertWorkflow(db, {
-        repo: s.repo, number: s.number, kind: "pr", entry: "review", state: "recommending", startedBy: RULE_STARTER, startedAt: at, startedVia: "cli",
-        baseHead: s.head, acceptedHead: s.head, plan: s.plan, rec: s.rec, recAt: at, recHead: s.head,
-      }, at);
-    } catch (e) {
-      if (/already has a live workflow/.test((e as Error).message)) continue;
-      throw e;
-    }
-    await addEvent(db, { workflowId: id, repo: s.repo, number: s.number, login: RULE_STARTER, via: "cli", kind: "set", line: s.rec.text, at });
-    n++;
-  }
-  return n;
+  const stops = await findAutoStops(db);
+  if (!stops.length) return 0;
+  return await db.write(async () => {
+    const ids = await startWorkflows(db, stops.map((s) => ({
+      repo: s.repo, number: s.number, kind: "pr" as const, entry: "review" as const, weight: WEIGHT_NORMAL, startedBy: RULE_STARTER, startedVia: "cli" as const, baseHead: s.head, plan: s.plan, at,
+    })));
+    const started = stops.flatMap((s) => { const id = ids.get(`${s.repo}#${s.number}`); return id === undefined ? [] : [{ s, id }]; });
+    await saveWorkflows(db, started.map(({ s, id }) => ({ id, at, patch: { state: "recommending", acceptedHead: s.head, rec: s.rec, recAt: at, recHead: s.head } })));
+    await recordEvents(db, started.map(({ s, id }) => ({ workflowId: id, repo: s.repo, number: s.number, login: RULE_STARTER, via: "cli" as const, kind: "set" as const, line: s.rec.text, at })));
+    return started.length;
+  });
 }
