@@ -52,12 +52,13 @@ export function heldVerdict(h: HeldInput): { file: true } | { drop: string } | n
 export const HELD_STUCK_MS = Math.max(10 * 60_000, 4 * PACE_MAX_WAIT_MS);
 
 /**
- * What the audit row of a row left in `filing` tells: "filed" (with the issue) when the create finished with a URL, "held" when no finished
- * write was recorded for it (nothing was sent), null when the row is not old enough to judge.
+ * What the audit row of a row left in `filing` tells: "filed" (with the issue) when the create finished with a URL, "held" when no create
+ * was begun (nothing was sent), null when the row is not old enough to judge, or its create was begun and is not known to have opened an issue.
  */
-export function filingOutcome(h: HeldInput, ms: number = Date.now()): { state: "filed"; number: number; url: string } | { state: "held" } | null {
+export function filingOutcome(h: Pick<HeldInput, "state" | "updated_at" | "filingAudit">, ms: number = Date.now()): { state: "filed"; number: number; url: string } | { state: "held" } | null {
   if (h.state !== "filing" || Date.parse(h.updated_at) > ms - HELD_STUCK_MS) return null;
-  return h.filingAudit ? { state: "filed", number: h.filingAudit.number, url: h.filingAudit.url } : { state: "held" };
+  if (!h.filingAudit) return { state: "held" };
+  return h.filingAudit.issue ? { state: "filed", ...h.filingAudit.issue } : null;
 }
 
 /** The held rows of the PRs of `repo` (all repos without one) that the Act step has to file or drop now, from one `loadDueHeld`. */

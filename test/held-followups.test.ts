@@ -75,6 +75,16 @@ test("a row left in filing is settled from its audit row, and a merged PR files 
   await audit("act-open-issue", "2026-01-02T08:00:00Z", "app#1", "not json");
   await audit("act-open-issue", "2026-01-02T08:01:00Z", "app#1", JSON.stringify({ held: id + 1, state: "done", url: "https://github.com/storytold/app/issues/5" }));
   assert.deepEqual(filingOutcome(await due(), later), { state: "held" }, "another row's create does not settle this one");
+  await audit("act-open-issue", "2025-12-31T08:00:00Z", "app#1", JSON.stringify({ held: id, state: "failed", error: "HTTP 403" }));
+  assert.deepEqual(filingOutcome(await due(), later), { state: "held" }, "a refused earlier try does not settle this filing");
+  for (const state of ["started", "failed"]) {
+    await audit("act-open-issue", "2026-01-02T08:01:30Z", "app#1", JSON.stringify({ held: id, state }));
+    assert.equal(filingOutcome(await due(), later), null, `a create that is ${state} may have opened the issue`);
+  }
+  let creates = 0;
+  const exec: Exec = async (_cmd, args) => { if (args[1] === "create") creates++; return { code: 1, stdout: "", stderr: "timeout" }; };
+  await runAct(w.db, { repo: "app", dryRun: false }, () => {}, { ...w.gh.actDeps(), exec });
+  assert.deepEqual([creates, (await heldOf(w.db, "app", 1))[0]!.state], [0, "filing"], "a create of unknown outcome is not made again");
   await audit("act-open-issue", "2026-01-02T08:02:00Z", "app#1", JSON.stringify({ held: id, state: "done", url: "https://github.com/storytold/app/issues/7" }));
   assert.deepEqual(filingOutcome(await due(), later), { state: "filed", number: 7, url: "https://github.com/storytold/app/issues/7" });
 });

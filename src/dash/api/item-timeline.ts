@@ -4,7 +4,7 @@
 import type { HistoryCall, TimelineEntry, TimelineTone } from "../../../web/src/api/types.ts";
 import type { Preapproval } from "../../../web/src/api/types.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
-import { HELD_STUCK_MS } from "../../conversations/held.ts";
+import { filingOutcome, HELD_STUCK_MS } from "../../conversations/held.ts";
 import type { ItemPageFacts } from "../../data/views/item-page.ts";
 import { arr, clip, stepTitle, type Ctx, type Ev } from "./trace.ts";
 import { implementationLines, implementationRunIds, type ImplementationData } from "./item-implementation.ts";
@@ -205,8 +205,9 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[], impl: 
     t.major = true;
     if (staff && !c.veiled) { t.body = h.title; if (h.state === "held" && h.reason) t.lines = [`Waiting: ${h.reason}`]; }
     out.push(t);
-    // A stopped create the Act step cannot settle from its audit row stays unknown.
-    const stuck = h.state === "filing" && Date.parse(h.updated_at) < Date.now() - HELD_STUCK_MS && !f.heldAudits.has(h.id);
+    // A create that was begun and that the Act step cannot settle from its audit row stays unknown.
+    const now = Date.now();
+    const stuck = h.state === "filing" && Date.parse(h.updated_at) < now - HELD_STUCK_MS && filingOutcome({ ...h, filingAudit: f.heldAudits.get(h.id) ?? null }, now) === null;
     if (h.state !== "dropped" && h.state !== "failed" && !stuck) continue;
     const end = base(`held:${h.id}:end`, h.updated_at, "harness", "AutoCraft", "github",
       h.state === "dropped" ? `Held issue dropped: ${h.reason ?? "no reason recorded"}` : stuck ? "Held issue: the create's outcome is unknown, check GitHub" : `Held issue not opened${staff && h.reason ? `: ${clip(h.reason, 120)}` : ""}`);

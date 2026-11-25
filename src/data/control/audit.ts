@@ -262,22 +262,23 @@ export async function loadAssignments(db: Db, scope: { repo?: string } | { refs:
   return out;
 }
 
-/** Filing outcomes of held follow-ups: the latest `act-open-issue` row of each held id, when it finished with an issue URL. */
-export async function loadHeldIssueAudits(db: Db, heldIds: number[]): Promise<Map<number, { number: number; url: string }>> {
-  const out = new Map<number, { number: number; url: string }>();
-  if (!heldIds.length) return out;
+/**
+ * The create each held follow-up's filing recorded: the latest `act-open-issue` row of its id no older than `since` (when the filing
+ * began), with the issue once the row is done with its URL, else null (the create is still running, failed, or lost its answer). No entry: no create was begun.
+ */
+export async function loadHeldIssueAudits(db: Db, held: { id: number; since: string }[]): Promise<Map<number, { issue: { number: number; url: string } | null }>> {
+  const out = new Map<number, { issue: { number: number; url: string } | null }>();
+  if (!held.length) return out;
+  const since = new Map(held.map((h) => [h.id, h.since]));
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom(AUDIT).select(["details"]).$narrowType<{ details: string }>()
-    .where("action", "=", "act-open-issue").where((eb) => kx.inList(db, kx.jsonNum(db, valid(db, eb), "$.held"), heldIds, "bigint"))
+  const rows = await q.all(q.k.selectFrom(AUDIT).select(["at", "details"]).$narrowType<{ details: string }>()
+    .where("action", "=", "act-open-issue").where((eb) => kx.inList(db, kx.jsonNum(db, valid(db, eb), "$.held"), [...since.keys()], "bigint"))
     .orderBy(kx.rowid(AUDIT)));
-  const latest = new Map<number, Details>();
   for (const r of rows) {
     const d = parseDetails(r.details);
-    if (d && typeof d.held === "number") latest.set(d.held, d);
-  }
-  for (const [id, d] of latest) {
+    if (!d || typeof d.held !== "number" || r.at < since.get(d.held)!) continue;
     const m = d.state === "done" ? /\/issues\/(\d+)/.exec(String(d.url ?? "")) : null;
-    if (m) out.set(id, { number: Number(m[1]), url: String(d.url) });
+    out.set(d.held, { issue: m ? { number: Number(m[1]), url: String(d.url) } : null });
   }
   return out;
 }
