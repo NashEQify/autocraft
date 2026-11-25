@@ -1,4 +1,5 @@
 import type { RefKey } from "../mirror/types.ts";
+import type { HiddenRepos } from "../control/types.ts";
 import type { BuildTask, TaskResult, TaskStep } from "../../../web/src/api/types.ts";
 
 export type { RefKey };
@@ -8,6 +9,17 @@ export type HeadRef = string;
 
 export const BATCH_STATES = ["checking", "open", "merged", "failed", "split", "superseded"] as const;
 export type BatchState = (typeof BATCH_STATES)[number];
+/** States of a batch that is still being worked on. */
+export const ACTIVE_BATCH: BatchState[] = ["checking", "open"];
+/** Summary of a batch whose PR a person closed. */
+export const CLOSED_BY_PERSON = "the batch PR was closed by a person";
+/** Summary of a batch that failed because a maintainer requested changes on its PR. */
+export const BLOCKED_BY_REVIEW = "a maintainer requested changes on the batch PR";
+/** Summary prefix of a batch whose branch could not be pushed or PR opened: its PRs go back to the queue. */
+export const PUBLISH_FAILED = "could not open the batch PR";
+export const MAX_BATCH = 50;
+/** A repo's batch size until its batches pass or fail. */
+export const START_BATCH = 20;
 export const VERIFICATION_STATES = ["planned", "running", "passed", "failed", "error", "ci-enough", "stale", "unavailable"] as const;
 export type VerificationState = (typeof VERIFICATION_STATES)[number];
 
@@ -31,7 +43,8 @@ export type NewBatch = {
   build: "pending" | "skipped" | null; runId: string; prs: number[];
 };
 export type StageRow = { repo: string; number: number; stage: string; at: string; actor: string | null; note: string | null };
-export type AuditRow = { at: string; actor: string; action: string; repo: string | null; number: number | null; details: unknown };
+/** An audit row a caller hands a writer: `target` is `repo#number`, `repo:branch` or null. */
+export type AuditRow = { at: string; actor: string; action: string; target: string | null; details?: unknown };
 
 export type MergeAttempt = { outcome: "merged" | "refused"; reason: string | null; ci: string | null; mergeable: string | null; at: string; refusals: number; path: string; method: string | null };
 export type MergedInfo = { firstAt: string; lastAt: string; lastHead: string; method: string | null; viaBatch: boolean; last: { outcome: string; reason: string | null } };
@@ -64,7 +77,7 @@ export type MergeFacts = {
 export type BatchMembership = { batchId: number; state: string; branch: string; prNumber: number | null };
 export type BatchPageView = { batch: BatchView; parent: BatchState | null; children: { id: number; createdAt: string }[] };
 export type BatchListRow = BatchView & { areas: string[] };
-export type HiddenRepos = ReadonlySet<string>;
+export type { HiddenRepos };
 export type BatchByTask = { id: number; repo: string; branch: string; commitSha: string; baseSha: string; fork: string | null; members: number[] };
 export type BatchDue = { repo: string; id: number; memberRefs: RefKey[] };
 export type BatchEnd = { id: number; by: string; state: "superseded" | "merged" | "failed"; summary: string | null; heldRefs?: RefKey[]; stage?: StageRow[]; audit?: AuditRow[] };
@@ -111,4 +124,4 @@ export type Suite = { id: number; name: string; event: string; status: string; c
 export type RunsInput = { repo: string; number: number; head_oid: string; state: string; cross_repo?: boolean; suites?: Suite[] };
 export type RunResult = { key: HeadRef; runs: WaitingRun[]; approved: number[]; failed: Record<string, number>; approvedNow: boolean };
 /** The row `noteMergeable` takes from the checks step: one open PR's head and mergeable state. */
-export type PrChecks = { repo: string; number: number; head_oid: string; mergeable: string | null };
+export type PrChecks = { repo: string; number: number; head_oid: string; mergeable: string | null; state: string; overall: string | null };
