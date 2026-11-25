@@ -1,7 +1,7 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, labels, implementation.
 // Built for a whole pass or a slice of it from the module loads of core/pass-load.ts. Reads only: a text hash sync has not written
 // yet is computed here.
-import { decideAct, freshWrite, permKey, PERM_READ_TTL, type ActFacts } from "../data/access/index.ts";
+import { permKey, stillCounts, type ActFacts } from "../data/access/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import type { IssueAttempt } from "../data/implement/types.ts";
 import { openItemKeys } from "../data/mirror/index.ts";
@@ -87,12 +87,6 @@ function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<stri
     if (q) out.logins.push({ login: q.by, repo: i.repo });
   }
   return out;
-}
-
-/** A person who started work still counts on the repo: an operator, or a maintainer the act rule lets act with the cached write permission. */
-function mayStart(f: ActFacts | undefined, now: number, identity: "app" | "box"): boolean {
-  if (!f) return false;
-  return f.role === "operator" || decideAct(f, freshWrite(f.perm, PERM_READ_TTL, now) ? "cached" : "unknown", identity).ok;
 }
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
@@ -186,7 +180,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
         openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null, impact: t.priority?.impact ?? null, scopeDecision: null,
       },
       implement: {
-        queuedBy: q?.by ?? null, settles: q !== null && mayStart(d.act.get(permKey(q.by, r.repo)), now, cfg.githubIdentity), featureOn: cfg.repo(r.repo).buildFeature("implement"),
+        queuedBy: q?.by ?? null, settles: q !== null && stillCounts(d.act.get(permKey(q.by, r.repo)), cfg.githubIdentity, now), featureOn: cfg.repo(r.repo).buildFeature("implement"),
         row: a ? {
           state: a.attempt.state, attempt: a.attempt.attempt,
           textChanged: textHash(text?.title ?? "", text?.body ?? "") !== a.attempt.textHash,

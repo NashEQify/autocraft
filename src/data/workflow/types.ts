@@ -13,6 +13,8 @@ export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;
   weight: number; state: WorkflowState; own: boolean;
 };
+/** Live workflows of PRs, by the PR. */
+export type PrWorkflows = Map<RefKey, ItemWorkflow>;
 export type OperatorWork = { requests: FixupRequest[]; legs: Preapproval[] };
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;

@@ -30,10 +30,9 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import { mergeWaits, type WorkflowGate } from "./may.ts";
+import { legHeadOf, mergeWaits, workflowGate } from "./may.ts";
 import { loadPrPass, type PrPassData } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
-import type { ItemWorkflow } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
 export type { PrFacts } from "./plan.ts";
@@ -81,15 +80,6 @@ function currentHead(m: Mirrored): string | null {
 
 /** The live workflow of the PR, or of the issue whose implementation PR it is. */
 const workflowFactOf = (d: PrPassData, ref: string) => d.workflow.live.get(ref) ?? d.workflow.ofPr.get(ref) ?? null;
-
-/** What `mayMerge` and `mayPush` read of a live workflow row; null without a live one. */
-export function workflowGate(w: ItemWorkflow | undefined, fixupAsked: boolean): WorkflowGate | null {
-  if (!w) return null;
-  return {
-    live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: w.state, startedBy: w.startedBy, approvedBy: w.approvedBy, approvedAt: w.approvedAt,
-    blocker: w.blocker, baseHead: w.baseHead, fixupAsked,
-  };
-}
 
 /** An item's assignment from its last successful assign and its mirrored `assignees` (JSON). Without a recorded account, the audit's own assignee stands for it. */
 export function assignmentIn(pipelineLogin: string | null, assigned: { assignee: string | null } | undefined, assignees: string | null): AssignFacts {
@@ -250,7 +240,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     decision: NO_DECISION,
     premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: d.merge.activeBatched.has(ref),
     fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
-    may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, (operator?.requests.length ?? 0) > 0), ownHeads: head ? ownHeads(head) : [],
+    may: { repoMerge: approvals.merge ?? null, repoPush: approvals.push ?? null, workflow: workflowGate(wfRow, { fixupAsked: (operator?.requests.length ?? 0) > 0, legHead: legHeadOf(operator?.legs, wfRow) }), ownHeads: head ? ownHeads(head) : [],
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);

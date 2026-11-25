@@ -1,10 +1,10 @@
 // Moves each live maintainer workflow on from what the pipeline recorded: its numbered plan from the latest review, a blocker that
 // stops an approved item, the one recommendation an unapproved item comes back with when its steps are done, the merge leg of an
 // approved PR (the pre-approved merge in src/preapproval, owned through preapprovals.workflow_id, which merges as the approver), and
-// the end once the PR merged or closed. The runner runs it on each tick its inputs changed, before the pre-approval pass. An
-// implementation's questions and a stuck implementation come back through src/implement, which writes their recommendation.
+// the end once the PR merged or closed. An implementation's open question, and a stuck implementation, come back as the issue's
+// recommendation (question.ts). The runner runs it on each tick its inputs changed, before the pre-approval pass.
 //
-// It never asks a question: a person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. The
+// A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end.
 import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
@@ -23,6 +23,7 @@ import { t } from "../i18n/index.ts";
 import { detectBlocker, PREMERGE_STOP, type BlockerFacts, type Found } from "./blockers.ts";
 import { afterSteps, atBlocker, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
+import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { listText, stepsFor, type StepName } from "./status.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "./types.ts";
 
@@ -223,7 +224,7 @@ const stepIn = (w: ItemWorkflow, ...names: StepName[]): StepName => {
 
 async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, target: Target | null): Promise<ItemWorkflow["state"] | null> {
   const at = new Date().toISOString();
-  const w = w0;
+  let w = w0;
   /** The step the pass found the workflow at; written with the pass's other changes, or alone when only it changed. */
   let step: StepName | null = null;
   /** The step to record: an item back with its end recommendation is at "recommend"; one back with a question waits at its step. */
@@ -244,28 +245,50 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
     return Object.keys(patch).length || (s !== null && s !== w0.step) ? write(patch) : null;
   };
   const self = pass.items.get(key(w.repo, w.number));
+  const attempt = w.kind === "issue" ? pass.implement.byIssue.get(key(w.repo, w.number)) : undefined;
+  const base: WorkflowPatch = {};
+  // A recommendation that stands for an implementation's question goes once the question is answered or set aside elsewhere (a
+  // comment on the issue, an edited issue, a later round): the workflow runs on.
+  const asks = askedBy(w.rec);
+  if ((w.state === "blocked" || w.state === "recommending") && asks && !isOpenQuestion(attempt, asks)) {
+    const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
+    Object.assign(base, on);
+    w = { ...w, ...on };
+  }
+  /** The attempt's open question, as the issue's recommendation; a stuck attempt of an approved issue is a step that failed twice. */
+  const comeBack = (patch: WorkflowPatch, head: string | null): { to: ItemWorkflow["state"] | null } | null => {
+    const q = openQuestionOf(attempt);
+    if (!attempt || !q) return null;
+    const { plan, rec } = viewOf(attempt, q, patch.plan ?? w.plan, w.approvedBy !== null);
+    const asked: WorkflowPatch = { ...patch, plan, rec, recAt: at, recHead: head };
+    return { to: attempt.attempt.state === "stuck" && w.approvedBy !== null
+      ? write({ ...asked, state: "blocked", blocker: "failed-twice", blockerParams: { step: "implement" } }, "blocked")
+      : write({ ...asked, state: "recommending", blocker: null, blockerParams: null }) };
+  };
   if (!target) {
-    // An issue with no PR yet: it ends when the issue closes, and shows a ready plan's parts.
+    // An issue with no PR yet: it ends when the issue closes, comes back with its implementation's question, and shows a ready plan's parts.
     if (self && self.state !== "OPEN") return write({ state: "closed", rec: null, blocker: null, blockerParams: null });
     step = stepIn(w, "implement");
-    if (w.state === "blocked" || w.state === "recommending") return settle({});
-    const a = w.kind === "issue" ? pass.implement.byIssue.get(key(w.repo, w.number)) : undefined;
-    if (!a) return settle({});
+    if (w.state === "blocked" || w.state === "recommending") return settle(base);
+    const a = attempt;
+    if (!a) return settle(base);
+    const asked = comeBack(base, null);
+    if (asked) return asked.to;
     // A ready plan's parts; an answered question's options are no plan any more.
     const parts = implementParts(w.plan, (a.planned?.plan ?? null) as PlanReply | null) ?? (w.plan.some((p) => p.option !== undefined) ? [] : null);
-    return settle(parts && !sameJson(parts, w.plan) ? { plan: parts } : {});
+    return settle({ ...base, ...(parts && !sameJson(parts, w.plan) ? { plan: parts } : {}) });
   }
   const ref = key(w.repo, target.number);
   const pr = pass.items.get(ref);
-  if (!pr) return settle({});
+  if (!pr) return settle(base);
   if (pr.state === "MERGED") return write({ state: "done", rec: null, blocker: null, blockerParams: null });
   if (pr.state !== "OPEN") return write({ state: "closed", rec: null, blocker: null, blockerParams: null });
   // Waiting for a person: nothing moves until they answer.
-  if (w.state === "blocked" || w.state === "recommending") return settle({});
+  if (w.state === "blocked" || w.state === "recommending") return settle(base);
   const head = pr.head_oid;
-  if (!head) return settle({});
+  if (!head) return settle(base);
   const since = pass.goOn.get(w.id) ?? w.startedAt;
-  const patch: WorkflowPatch = {};
+  const patch: WorkflowPatch = { ...base };
 
   // The head the workflow accepted moves along our own pushes; any other push is the author's.
   let authorPush: BlockerFacts["authorPush"] = null;
@@ -294,6 +317,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
   else if (review.verdict === "take-fix" && plan.some((p) => p.state === "planned") && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
   else step = stepIn(w, "merge", "recommend");
 
+  // A stuck revision of the implementation PR comes back before anything else the PR needs.
+  const asked = w.kind === "issue" ? comeBack(patch, head) : null;
+  if (asked) return asked.to;
   // An implementation's files beyond its plan are shown once: base_head of an implement issue is the implementation PR head the
   // workflow showed them at, and it follows our own pushes; a new attempt's PR, or someone else's push, is shown again.
   let beyond: string[] | null = null;

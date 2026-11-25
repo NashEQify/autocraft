@@ -33,7 +33,7 @@ import { addAudit } from "../data/control/index.ts";
 import { recordAttempts, verificationOf } from "../data/merge/index.ts";
 import type { AttemptInput } from "../data/merge/types.ts";
 import { addStageEventsOnce } from "../data/planner/index.ts";
-import { listWorkflows, loadActions, loadWorkScores, queueActions, saveActions, type ActionState } from "../data/workflow/index.ts";
+import { loadActions, loadPrWorkflows, loadWorkScores, queueActions, saveActions, type ActionState } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -180,9 +180,9 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   let picks = open.filter((e) => mergeDue.has(e.number) && (!params.only || params.only(e)) && (!params.singleOnly || mergeDue.get(e.number)!.singleOnly))
     .sort((a, b) => score(b) - score(a) || a.number - b.number);
   const refs = picks.map((e) => ({ repo, number: e.number }));
-  const [live, waits] = await db.together(() => Promise.all([listWorkflows(db, { refs, live: true }), loadActions(db, { refs, kinds: ["merge"], states: ACTION_WAITS })]));
+  const [live, waits] = await db.together(() => Promise.all([loadPrWorkflows(db, refs), loadActions(db, { refs, kinds: ["merge"], states: ACTION_WAITS })]));
   // A merge that waits for its approver's sign-in or access stays put.
-  picks = picks.filter((e) => !mergeWaits(waits.get(refOf(e)), live.find((w) => w.number === e.number), e.head));
+  picks = picks.filter((e) => !mergeWaits(waits.get(refOf(e)), live.get(refOf(e)), e.head));
   if (params.limit !== undefined) picks = picks.slice(0, params.limit);
   const summary: MergeSummary = { runId, repo, dryRun, states, attempted: [], merged: [], refused: [], asked: [] };
   log(`merge ${repo}: ${queue.length} in the queue (${QUEUE_STATES.filter((s) => states[s]).map((s) => `${states[s]} ${s}`).join(", ") || "none"})`);
@@ -314,8 +314,8 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
  */
 async function noteMergeAction(db: Db, repo: string, e: QueueEntry, by: string, state: ActionState, reason: string | null): Promise<void> {
   const ref = { repo, number: e.number };
-  const [workflows, actions] = await db.together(() => Promise.all([listWorkflows(db, { refs: [ref], live: true }), loadActions(db, { refs: [ref] })]));
-  const wf = workflows.at(-1);
+  const [workflows, actions] = await db.together(() => Promise.all([loadPrWorkflows(db, [ref]), loadActions(db, { refs: [ref] })]));
+  const wf = workflows.get(`${repo}#${e.number}`);
   if (!wf) return;
   const at = new Date().toISOString();
   const row = actions.get(`${repo}#${e.number}`)?.find((a) => a.kind === "merge" && a.workflow_id === wf.id);

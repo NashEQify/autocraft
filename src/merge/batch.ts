@@ -55,7 +55,7 @@ import type { StageRow } from "../data/merge/types.ts";
 import { loadItems, loadMainCiAt } from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadItemAreas } from "../data/triage/index.ts";
-import { holdMerges, listWorkflows, loadHolds, loadWorkScores } from "../data/workflow/index.ts";
+import { holdMerges, loadHolds, loadPrWorkflows, loadWorkScores } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -138,8 +138,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     const active = (await loadBatchRun(db, repo)).active;
     if (fullScope) return { mine: active, outside: [] };
     const refs = active.flatMap((b) => b.members.map((m) => ({ repo, number: m.number })));
-    const live = new Set((await listWorkflows(db, { refs, live: true })).map((w) => w.number));
-    const isMine = (b: BatchView) => b.members.every((m) => live.has(m.number));
+    const live = await loadPrWorkflows(db, refs);
+    const isMine = (b: BatchView) => b.members.every((m) => live.has(`${repo}#${m.number}`));
     return { mine: active.filter(isMine), outside: active.filter((b) => !isMine(b)) };
   };
   const activeCount = async (): Promise<number> => (await loadBatchRun(db, repo)).active.length;

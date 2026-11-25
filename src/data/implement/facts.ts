@@ -86,7 +86,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
     const rs = roundsOf.get(id) ?? [];
     const questions = rs.filter((x) => x.kind === "question");
     const q1 = questions.at(-1);
-    const qr = (q1?.result ?? null) as Partial<QuestionRound> | null;
+    const qr = (q1?.result ?? null) as Partial<QuestionRound & { cause: string }> | null;
     const audience: QuestionAudience | null = qr?.audience === "author" || qr?.audience === "maintainer" ? qr.audience : null;
     const answer = rs.filter((x) => x.kind === "answer" && x.id > (q1?.id ?? 0)).at(-1);
     const revises = rs.filter((x) => x.kind === "revise");
@@ -96,7 +96,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
     out.byIssue.set(refKey(r.repo, Number(r.number)), {
       attempt: liteOf(r),
       ...(planned && { planned }),
-      question: (r.state === "asked" || r.state === "stuck") && q1 ? { round: q1.id, at: q1.at, audience, limit: qr?.limit === true, options: qr?.options ?? [], recommended: qr?.recommended ?? null } : null,
+      question: (r.state === "asked" || r.state === "stuck") && q1 ? { round: q1.id, at: q1.at, audience, text: qr?.text ?? "", limit: qr?.limit === true, cause: qr?.cause ?? null, options: qr?.options ?? [], recommended: qr?.recommended ?? null } : null,
       answer: answer && answer.result && typeof answer.result === "object" ? (answer.result as AnswerRound) : null,
       guidance: rs.filter((x) => x.kind === "guidance").flatMap((x) => {
         const g = x.result as { text?: unknown; by?: unknown } | null;

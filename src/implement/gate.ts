@@ -1,14 +1,15 @@
 // What an implement job needs before it starts, checked again at the run: the repo's issue implementation approval, its
-// Implement switch, and a live implement workflow on the issue started by someone who settles on the repo (src/settlers.ts).
+// Implement switch, and a live implement workflow on the issue started by someone who still acts on the repo (data/access stillCounts).
 // A job that only ends an attempt whose PR merged or closed needs none of them.
 import { featureOn } from "../build/features.ts";
 import type { Db } from "../db/index.ts";
+import { loadActFacts, permKey, stillCounts } from "../data/access/index.ts";
 import { repoStepApproval } from "../data/control/index.ts";
 import { loadImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../data/workflow/index.ts";
-import { settlesNow } from "../settlers.ts";
+import { githubIdentity } from "../github/identity.ts";
 import { ENDED_STATES } from "./types.ts";
 
 /** Who started the issue's live implement workflow, or null. */
@@ -35,6 +36,7 @@ export async function implementRefusal(db: Db, repo: string, number: number, o: 
   if (!o.dry && !await featureOn(db, "implement", repo)) return `Implement is off for ${repo}`;
   const by = queuerOfWorkflow(workflows[0]);
   if (!by) return `${ref} is not queued`;
-  if (!await settlesNow(db, by, [repo])) return `${by}, who queued ${ref}, does not settle on ${repo}`;
+  const [act, identity] = await Promise.all([loadActFacts(db, [{ login: by, repo }]), githubIdentity(db)]);
+  if (!stillCounts(act.get(permKey(by, repo)), identity)) return `${by}, who queued ${ref}, does not settle on ${repo}`;
   return null;
 }
