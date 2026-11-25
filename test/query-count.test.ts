@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import type { Kysely } from "kysely";
 import { join } from "node:path";
 import { effect } from "../src/db/effects.ts";
+import { COLUMNS } from "../src/db/types.ts";
 import { activity } from "../src/dash/api/activity.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
 import { setMainFixApproval } from "../src/mainfix/approval.ts";
@@ -65,10 +66,10 @@ async function seedPrs(w: World, n: number): Promise<void> {
 /** More tracked repos, each with the rows of "app". */
 async function addRepos(w: World, names: readonly string[]): Promise<void> {
   const k = w.db.k as unknown as Kysely<Record<string, Record<string, unknown>>>;
-  for (const table of ["tracked_repos", "repos", "items", "classifications", "pr_checks", "opus_reviews", "item_priority", "repo_step_approvals", "main_ci"]) {
+  for (const table of ["tracked_repos", "repos", "items", "classifications", "pr_checks", "opus_reviews", "item_priority", "repo_step_approvals", "main_ci"] as const) {
     const repoCol = table === "tracked_repos" || table === "repos" ? "name" : "repo";
-    const rows = await w.db.all(k.selectFrom(table).selectAll().where(repoCol, "=", "app"));
-    for (const name of names) if (rows.length) await w.db.run(k.insertInto(table).values(rows.map(({ id: _, rowid: __, ...r }) => ({ ...r, [repoCol]: name }))));
+    const rows = await w.db.all(k.selectFrom(table).select([...COLUMNS[table]]).where(repoCol, "=", "app"));
+    for (const name of names) if (rows.length) await w.db.run(k.insertInto(table).values(rows.map((r) => ({ ...r, [repoCol]: name }))));
   }
 }
 
