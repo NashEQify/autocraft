@@ -14,18 +14,6 @@ export const trackedRepo = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<S
 export const pipelineOn = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.tracked_repos as tp").select(one(eb)).where("tp.name", "=", kx.exprOf(eb, repoCol)).where("tp.pipeline", "=", 1));
 
-/** True when no pilot list is set, or the item is in the list (`pilot_items`). The workflow scope fragment embeds it with its own terms. */
-export function pilotNarrows(db: Db, eb: kx.AnyEb, repoCol: kx.Ex, numberCol: kx.Ex): AliasableExpression<SqlBool> {
-  const t = kx.schemaEb(eb);
-  const list = t.selectFrom("main.settings as ps").select((s) => s.case().when(kx.jsonValid(db, "ps.value")).then(s.ref("ps.value")).else(s.val("[]")).end().as("v")).where("ps.key", "=", "pilot_items");
-  const pj = kx.jsonEach(db, list, "pj");
-  const ref = eb(eb(kx.exprOf(eb, repoCol), "||", eb.val("#")), "||", kx.exprOf(eb, numberCol));
-  return eb.or([
-    eb(eb.fn.coalesce(kx.jsonArrayLength(db, list), eb.lit(0)), "=", 0),
-    eb.exists(t.selectFrom(pj).select(one(eb)).where("pj.value", "=", ref)),
-  ]);
-}
-
 /** The viewer's repo filter on the repo in `col`: true when the repo is visible to them (a hidden list is a denylist, `visible` an allowlist). */
 export const hiddenRepos = (db: Db, col: kx.Ex, hidden: HiddenRepos): AliasableExpression<SqlBool> =>
   (hidden.visible ? kx.inList(db, col, hidden.visible) : kx.inList(db, col, [...hidden], "text", true)) as AliasableExpression<SqlBool>;

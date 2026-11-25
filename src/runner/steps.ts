@@ -44,7 +44,7 @@ export type StepContext = {
   usageRun(runId: string): void;
   /** Items this job has handled so far (units attempted, such as items sent to a model), counted against the stage's daily limit. Pass the running total as work goes: it is saved at once, so a failed or stopped job keeps its count. */
   handled(n: number): void;
-  /** Progress that is not an item: a batch started, opened or advanced, a decision asked. A job with no items and no acted is recorded as having done nothing, and the autopilot does not queue it again until its input changes. */
+  /** Progress that is not an item: a batch started, opened or advanced. A job with no items and no acted is recorded as having done nothing, and the autopilot does not queue it again until its input changes. */
   acted(n: number): void;
   /** Set when a cancel was requested; long loops should stop between units of work. */
   cancelled(): Promise<boolean>;
@@ -319,17 +319,17 @@ export const STEPS: StepDef[] = [
       const repo = String(ctx.params.repo), limit = Number(ctx.params.limit);
       const singly = await runSingles(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       if (singly) {
-        ctx.acted(singly.merged.length + singly.asked.length);
-        return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused, ${singly.asked.length} decisions asked`;
+        ctx.acted(singly.merged.length);
+        return `${repo}: ${singly.merged.length} merged singly, ${singly.refused.length} refused`;
       }
       const b = await runBatches(ctx.db, { repo, limit, onMerged: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(b.runId);
-      let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[], asked: [] as string[] };
+      let single = { merged: [] as string[], attempted: [] as string[], refused: [] as unknown[] };
       if (limit > b.merged.length) {
         single = await runMerge(ctx.db, { repo, limit: limit - b.merged.length, dryRun: false, singleOnly: true, onMerged: (n) => ctx.handled(b.merged.length + n), by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       }
-      ctx.acted(b.started.length + b.published.length + b.split.length + b.superseded.length + b.failed.length + single.merged.length + single.asked.length + b.merged.length);
-      return `${repo}: ${b.merged.length} merged in batches (${b.started.length} started, ${b.published.length} opened, ${b.split.length} split), ${single.merged.length} merged singly, ${single.asked.length} decisions asked`;
+      ctx.acted(b.started.length + b.published.length + b.split.length + b.superseded.length + b.failed.length + single.merged.length + b.merged.length);
+      return `${repo}: ${b.merged.length} merged in batches (${b.started.length} started, ${b.published.length} opened, ${b.split.length} split), ${single.merged.length} merged singly`;
     },
   },
   {
@@ -449,7 +449,7 @@ export const STEPS: StepDef[] = [
   {
     name: "dupes",
     title: "Find duplicates",
-    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. Each confirmed duplicate becomes a \"Close as a duplicate?\" decision; the act step closes only on an operator's answer. Writes nothing to GitHub.",
+    description: "Looks up the nearest neighbours of new and changed open items in the same repo, among open items and items closed in the last year. Jev checks each pair; Haiku gives a second opinion where Jev is under 90 % sure either way. A confirmed duplicate is a signal on both items; it closes and holds nothing. Writes nothing to GitHub.",
     stage: runStage("dupes"),
     requires: "operator",
     exclusive: "dupes",
@@ -459,8 +459,8 @@ export const STEPS: StepDef[] = [
       const { runDupes } = await import("../dupes/index.ts");
       const r = await runDupes(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
-      ctx.acted(r.scanned + r.pairsAdded + r.asked.length + r.answersApplied);
-      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}; ${r.asked.length} decisions asked, ${r.answersApplied} answers applied`;
+      ctx.acted(r.scanned + r.pairsAdded);
+      return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}`;
     },
   },
   {
@@ -649,7 +649,7 @@ export const STEPS: StepDef[] = [
   {
     name: "referee",
     title: "Referee label disagreements",
-    description: "Sonnet settles items where Jev and Haiku chose different type labels and at least one is not a scope label (scope disagreements go to Decide). A sure answer settles the type. When Sonnet is unsure, Opus answers; its label settles the item either way, and an unsure Opus also flags a scope decision for an operator.",
+    description: "Sonnet settles items where Jev and Haiku chose different type labels. A sure answer settles the type. When Sonnet is unsure, Opus answers; its label settles the item either way, and an unsure Opus keeps the item off the automatic merge path.",
     stage: runStage("referee"),
     requires: "operator",
     models: ["sonnet", "opus"],
@@ -786,7 +786,7 @@ export const STEPS: StepDef[] = [
   {
     name: "dupes-compare",
     title: "Compare duplicate groups",
-    description: "Compares each group of duplicates in one pass: Opus, with read-only tools on the base checkout, for the pull requests of a group (diffs, titles, bodies and linked issues; CI and review state as background), Sonnet for its issues. It picks the best item to keep, lists what the others do better or add, and asks one decision per group. A closed or merged member wins without a call; a failed call falls back to the older-wins rule. A group is compared again only when a member's state, head or text changes. Writes nothing to GitHub.",
+    description: "Compares each group of duplicates in one pass: Opus, with read-only tools on the base checkout, for the pull requests of a group (diffs, titles, bodies and linked issues; CI and review state as background), Sonnet for its issues. It picks the best item to keep, and lists what the others do better or add. A closed or merged member wins without a call; a failed call falls back to the older-wins rule. A group is compared again only when a member's state, head or text changes. Writes nothing to GitHub.",
     stage: runStage("dupes-compare"),
     requires: "operator",
     exclusive: "dupes",
@@ -795,14 +795,14 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runDupeCompare } = await import("../dupes/compare.ts");
       const r = await runDupeCompare(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled }, ctx.log);
-      return `${r.due} due: ${r.compared} compared by a model, ${r.byRule} by rule, ${r.closedWins} won by a closed member, ${r.single} single, ${r.dropped} dropped; ${r.asked.length} decisions asked`;
+      return `${r.due} due: ${r.compared} compared by a model, ${r.byRule} by rule, ${r.closedWins} won by a closed member, ${r.single} single, ${r.dropped} dropped`;
     },
   },
   {
     name: "conversation",
     priority: 1,
     title: "Answer conversations",
-    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
+    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that a person runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
     stage: runStage("conversation"),
     requires: "operator",
     models: ["opus"],
@@ -993,7 +993,7 @@ export const STEPS: StepDef[] = [
     name: "main-fix",
     priority: 1,
     title: "Handle a red default branch",
-    description: "For a repo approved for it whose default branch is red, reads the failed gate checks' logs and has Haiku sort each: a flaky failure gets its failed jobs rerun once, an infrastructure failure becomes an operator decision about opening an upstream issue, and a code failure is recorded as needing a fix and gets a fix PR (the CI fix patch path against the default branch head: Sonnet patch, Opus check, pushed to the pipeline account's fork) unless main is green again or an open PR already covers it. Opens the issue only on an operator's answer.",
+    description: "For a repo approved for it whose default branch is red, reads the failed gate checks' logs and has Haiku sort each: a flaky failure gets its failed jobs rerun once, an infrastructure failure opens an issue in the repo, and a code failure is recorded as needing a fix and gets a fix PR (the CI fix patch path against the default branch head: Sonnet patch, Opus check, pushed to the pipeline account's fork) unless main is green again or an open PR already covers it.",
     stage: runStage("main-fix"),
     requires: "operator",
     models: ["haiku", "sonnet", "opus"],
@@ -1004,14 +1004,14 @@ export const STEPS: StepDef[] = [
       const refused = await checkMainFixApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runMainFix(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.reran + r.asked + r.needsFix + r.issues + r.prs);
-      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, asked ${r.asked}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened`;
+      ctx.acted(r.reran + r.needsFix + r.issues + r.prs);
+      return `${r.repo}: classified ${r.classified} heads, reran ${r.reran}, ${r.needsFix} need a fix, ${r.issues} issues opened, ${r.prs} fix PRs opened`;
     },
   },
   {
     name: "nightly",
     title: "Nightly checks",
-    description: "For a repo with the Nightly checks build feature on, queues its selected checks (dependency audit, cross builds, Miri, benchmarks) once a day as low-priority sandbox tasks at the default branch head, and collects the results of finished ones. A check that fails two nights in a row becomes an operator decision about opening an issue. Calls no model.",
+    description: "For a repo with the Nightly checks build feature on, queues its selected checks (dependency audit, cross builds, Miri, benchmarks) once a day as low-priority sandbox tasks at the default branch head, and collects the results of finished ones. A check that fails two nights in a row is shown on the Nightly page, where a person opens an issue for it. Calls no model.",
     stage: runStage("nightly"),
     requires: "operator",
     params: [{ name: "repo", label: "Repo", kind: "repo", required: true }],

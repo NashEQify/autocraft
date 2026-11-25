@@ -490,7 +490,7 @@ export function commentHits<A extends string, O extends CommentHitOpts = {}>(d: 
 }
 
 // ---- fragment twins ------------------------------------------------------------------------------------------------
-// Typed twins of SQL-text fragments that other files splice into their statements (`pilotSql` → `pilotExpr`). A twin
+// Typed twins of SQL-text fragments that other files splice into their statements. A twin
 // takes its caller's expression builder and names the caller's tables by alias strings, as the text version does.
 
 /** The expression builder a fragment twin takes from its caller: any query's, since the twin names the caller's tables by alias. */

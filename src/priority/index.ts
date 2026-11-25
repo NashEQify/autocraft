@@ -5,13 +5,14 @@
 // while Jev is unavailable (src/agents/jev.ts). The reach is
 // recomputed from the mirror's reach signals on every pass, without a model.
 import { takersFirst } from "../agents/call.ts";
-import { runTiered } from "../agents/step.ts";
+import { keptIsCurrent, runTiered } from "../agents/step.ts";
 import { PRIORITY, type JevImpact } from "../agents/steps.ts";
 import { type Item, refOf } from "../classify/parse.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { savePriorities, rescoreReach, type PriorityRow } from "../data/triage/index.ts";
 import { settleImpact, type Impact } from "./score.ts";
-import { itemsOf, plannedItems } from "../core/select-items.ts";
+import { loadUnsure } from "../data/inference/index.ts";
+import { itemsOf, plannedItems, type PlannedItem } from "../core/select-items.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -25,6 +26,26 @@ async function dueItems(db: Db): Promise<Due[]> {
   const planned = await plannedItems(db, "prioritize");
   // itemsOf also reads class_hash, which the model steps do not take.
   return (await itemsOf(db, planned.map((p) => p.facts))).map(({ classHash: _, ...item }, i) => ({ ...item, hash: planned[i]!.facts.embedHash }));
+}
+
+/** The last answer of `waitsForHaiku` per item: it holds while the item's text and the kept Jev answer stay the same. */
+const waitMemo = new Map<string, { text: string; kept: string; waits: boolean }>();
+
+/**
+ * The items (refs) due for rating whose Jev answer at their current text is kept because Haiku, which decides them, had no Task Runner: a pass
+ * without one rates none of them, whether Jev may be called or not.
+ */
+export async function waitsForHaiku(db: Db, due: readonly PlannedItem[]): Promise<Set<string>> {
+  const byRef = new Map(due.map((p) => [`${p.facts.repo}#${p.facts.number}`, p.facts]));
+  const kept = await loadUnsure(db, PRIORITY.jev.id, [...byRef.keys()]);
+  const known = (ref: string): boolean => { const m = waitMemo.get(ref); return !!m && m.text === byRef.get(ref)!.embedHash && m.kept === kept.get(ref)!.hash; };
+  const unread = [...kept.keys()].filter((ref) => !known(ref)).map((ref) => byRef.get(ref)!);
+  for (const { classHash: _, ...item } of await itemsOf(db, unread)) {
+    const ref = refOf(item), hash = kept.get(ref)!.hash;
+    waitMemo.set(ref, { text: byRef.get(ref)!.embedHash, kept: hash, waits: await keptIsCurrent(db, PRIORITY, item, hash, undefined) });
+  }
+  for (const ref of waitMemo.keys()) if (!kept.has(ref)) waitMemo.delete(ref);
+  return new Set([...kept.keys()].filter((ref) => waitMemo.get(ref)!.waits));
 }
 
 type Verdict = { jev: { impact: Impact; p: number } | null; haiku: { impact: Impact; reason: string } | null };

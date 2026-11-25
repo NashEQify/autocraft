@@ -7,8 +7,6 @@ import { registerKeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as control from "../control/fragments.ts";
 import * as intake from "../intake/fragments.ts";
-import * as review from "../review/fragments.ts";
-import * as security from "../security/fragments.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 /** Live states of `item_workflows`, spelled out so the SQL needs no import of the store. */
@@ -26,9 +24,8 @@ export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Alia
 }
 
 /**
- * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible (the repo's pipeline is on, an outside-author hold does not keep it back,
- * a pilot list narrows it only when set, and a follow-up issue of an in-scope merged PR or a quiet security PR counts). Not ended by a person
- * (stopped, backlog).
+ * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible (the repo's pipeline is on and an outside-author hold does not keep it back). Not ended
+ * by a person (stopped, backlog, closed).
  */
 export function inScopeExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
@@ -41,11 +38,6 @@ export function inScopeExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): A
       control.pipelineOn(eb, repo),
       eb.not(intake.heldExpr(eb, repo, number)),
       eb.not(eb.exists(endedByPerson)),
-      eb.or([
-        control.pilotNarrows(db, eb, repo, number),
-        security.quietPrExpr(eb, repo, number),
-        eb(review.followupParentOf(eb, repo, number), "is not", null),
-      ]),
     ]),
   ]);
 }

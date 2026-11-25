@@ -2418,7 +2418,6 @@ export interface NextItem extends ItemRef, ItemShown {
   bucket: string | null;
   /** The item's next-step text from the planner. */
   why: string;
-  fast: boolean;
   rank: number | null;
   inFlight: boolean;
   /** The step's next job covers this item. */

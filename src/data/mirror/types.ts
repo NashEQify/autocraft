@@ -32,7 +32,7 @@ export type ItemFilter = {
   /** Ranges are [from, to): `from` included, `to` excluded. `updatedSince` includes its time. */
   createdBetween?: [string, string]; updatedSince?: string; closedBetween?: [string, string]; mergedBetween?: [string, string];
   headOid?: string;
-  /** Embeds the workflow scope fragment (replaces `pilotExpr`). */
+  /** Embeds the workflow scope fragment. */
   inScope?: boolean;
   hidden?: HiddenRepos;
   page?: { after: RefKey; limit: number };

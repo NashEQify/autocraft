@@ -185,9 +185,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const repo = i.repo, number = i.number;
   const state = i.state as PrFacts["ghState"];
   const integration = integrationOf(d, ref);
-  const inPilot = d.inScope.has(ref);
+  const itemScope = d.inScope.has(ref);
   // The queue leaves merged PRs outside the scope and our own integration PRs out.
-  if (state !== "OPEN" && (!inPilot || integration)) return null;
+  if (state !== "OPEN" && (!itemScope || integration)) return null;
   const cfg = config(db);
   const approvals = d.control.approvals.get(repo) ?? {};
   const repoRow = d.repos.get(repo);
@@ -205,7 +205,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   // An integration PR's head is the batch tip, where the run approvals are recorded.
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
-  const inScope = integration ? pipelineRepo || (!!batchRow && batchRow.members.length > 0 && batchRow.members.every((x) => d.inScope.has(`${repo}#${x.number}`))) : inPilot;
+  const inScope = integration ? pipelineRepo || (!!batchRow && batchRow.members.length > 0 && batchRow.members.every((x) => d.inScope.has(`${repo}#${x.number}`))) : itemScope;
   const head = batchRow?.commitSha ?? currentHead(m);
   const patch = d.patches.get(ref) ?? { fixups: [], cifixes: [], conflicts: [], pushes: [] };
   const push = d.pushes.get(ref);

@@ -10,7 +10,7 @@
 //
 // The planner reads the database, writes only its Plan cache (item_plans) and queues jobs; the runner starts them.
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
-import { RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
+import { REFEREE_RETRY_MS } from "../core/item-rules.ts";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
 import { TOPICS } from "../db/live.ts";
 import { pendingConversations } from "../conversations/store.ts";
@@ -45,6 +45,7 @@ import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
 import { mainFixDue } from "../mainfix/index.ts";
 import { statusApprovalOf } from "../prstatus/approval.ts";
 import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
+import { waitsForHaiku } from "../priority/index.ts";
 import { classifyRun } from "../data/triage/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { DEADLINE_ERROR, enqueue, JobError, now } from "./jobs.ts";
@@ -157,9 +158,9 @@ export type PlanCtx = {
   pass?: PlanPass;
 };
 
-/** Only the repos in scope (pipeline on, narrowed by the pilot) are planned for; a job for another repo is never proposed. */
+/** Only the repos in scope (pipeline on, or with started work) are planned for; a job for another repo is never proposed. */
 export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => {
-  // The outside-author holds first: the facts below read them through the pilot condition (src/outside.ts).
+  // The outside-author holds first: the facts below read them through the scope condition (src/outside.ts).
   const wake: number[] = [];
   try {
     const outside = await refreshOutsideHolds(db);
@@ -309,7 +310,7 @@ async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy
   return best && { id: best.id, endedAt: best.ended_at!, state: best.state, items: best.items, acted: best.acted, lease_skips: best.lease_skips, lease_skip_keys: best.lease_skip_keys };
 }
 
-/** A job that changed nothing: it handled no items and made no other progress (a batch advanced, a PR opened, a decision asked). */
+/** A job that changed nothing: it handled no items and made no other progress (a batch advanced, a PR opened). */
 const wasIdle = (j: { items: number | null; acted: number | null }): boolean => !j.items && !j.acted;
 
 // ---- fingerprints ----------------------------------------------------------------
@@ -385,11 +386,13 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Items without a priority at their current text hash; the scores of the others are refreshed by the same job.
+    // Items without a priority at their current text hash; the scores of the others are refreshed by the same job. Jev rates without a Task
+    // Runner; an item Jev was unsure of waits for one that takes Haiku's call.
     name: "priority",
     detect: async (db, ctx) => {
       const jev = await jevUsable(db);
-      return (await servable(db, ctx, "prioritize", "prioritize", () => jev)).length ? [{ step: "prioritize", params: {} }] : [];
+      const haiku = jev ? await waitsForHaiku(db, await plannedItems(db, "prioritize", { plans: await plansOf(db, ctx) })) : null;
+      return (await servable(db, ctx, "prioritize", "prioritize", (p) => !!haiku && !haiku.has(`${p.facts.repo}#${p.facts.number}`))).length ? [{ step: "prioritize", params: {} }] : [];
     },
   },
   {
@@ -405,16 +408,12 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
   },
   {
-    // Before Decide: items held as duplicates wait out the later stages.
+    // Scans (local vectors) need no model; a pair check needs a Task Runner, also for its Jev half.
     name: "dupes",
-    detect: async (db, ctx) => {
-      const plans = await plansOf(db, ctx);
-      // Scans (local vectors), group questions and answers need no model; a pair check needs a Task Runner, also for its Jev half.
-      return (await servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan || !!p.action.params?.group)).length || (await plannedItems(db, "dupe-answer", { plans })).length ? [{ step: "dupes", params: {} }] : [];
-    },
+    detect: async (db, ctx) => ((await servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan)).length ? [{ step: "dupes", params: {} }] : []),
   },
   {
-    // Each duplicate group is compared once its pairs are checked; the comparison asks the group decision.
+    // Each duplicate group is compared once its pairs are checked.
     name: "dupes-compare",
     // A set settled by rule (a closed member, a lone member) needs no model; the others need a Task Runner.
     detect: async (db, ctx) => ((await servable(db, ctx, "dupes-compare", "dupes-compare", (p) => p.facts.inCompareSet === "rule")).length ? [{ step: "dupes-compare", params: {} }] : []),
@@ -627,7 +626,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "referee",
     detect: async (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
-      if (ctx.run) for (const at of await loadRefereeFailureTimes(db, ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString())) ctx.wake?.push(Date.parse(at) + RECOMMEND_RETRY_MS);
+      if (ctx.run) for (const at of await loadRefereeFailureTimes(db, ctx.run, new Date(Date.now() - REFEREE_RETRY_MS).toISOString())) ctx.wake?.push(Date.parse(at) + REFEREE_RETRY_MS);
       return ctx.run && (await servable(db, ctx, "referee", "referee")).length ? [{ step: "referee", params: {} }] : [];
     },
   },
@@ -750,7 +749,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // A red default branch in a repo approved for it: flaky failures are rerun once, infrastructure failures become a decision, code failures are recorded.
+    // A red default branch in a repo approved for it: flaky failures are rerun once, code failures are recorded.
     name: "main-fix",
     perRepo: true,
     // A rerun waits for the next reading of the head or a time limit; the clock moves with no change in the data.
@@ -1001,7 +1000,6 @@ export async function stageLimits(db: Db): Promise<StageLimit[]> {
   });
 }
 
-/** `judgementModel`, `judgementModels` and `pilot` are retired fields: they stay empty until the web code drops them. */
 export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside" | "blockers">> {
   const [live, marks] = await db.together(() => Promise.all([loadLiveConfig(db), loadLaneState(db, ["mark"])]));
   const limits = await stageLimits(db);
@@ -1299,7 +1297,7 @@ export async function stageStatus(db: Db): Promise<Record<string, string>> {
 
 /** The plan actions whose items a lane's job works on, in the order the lane's own selection lists them. Lanes without items are absent. */
 export const LANE_KINDS: Record<string, ActionKind[]> = {
-  classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes", "dupe-answer"], "dupes-compare": ["dupes-compare"],
+  classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes"], "dupes-compare": ["dupes-compare"],
   review: ["review"], labels: ["label"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
   implement: ["implement"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
   "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"],
@@ -1310,7 +1308,7 @@ export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversatio
 
 export type LaneItem = {
   repo: string; number: number; kind: "pr" | "issue"; action: string; bucket: string | null;
-  fast: boolean; rank: number | null; inFlight: boolean;
+  rank: number | null; inFlight: boolean;
   /** The next job of the lane covers this item's repo. */
   next: boolean;
   /** Why the guard would refuse the item's write, or why no job of the lane will take its repo now (no Task Runner takes it), or null. */
@@ -1346,7 +1344,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? await waits(f.repo);
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
-      fast: false, rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
+      rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
     });
   };
   for (const k of kinds) {

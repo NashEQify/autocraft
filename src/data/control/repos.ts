@@ -5,8 +5,8 @@ import * as kx from "../../db/kx.ts";
 import { addAudit } from "./audit.ts";
 import type { TrackedRepo } from "./types.ts";
 
-/** A refused pipeline-scope or pilot change; `status` is the HTTP status the dashboard answers with. */
-export class PilotError extends Error {
+/** A refused change of a repo's Pipeline switch; `status` is the HTTP status the dashboard answers with. */
+export class PipelineFlagError extends Error {
   status = 400;
 }
 
@@ -47,7 +47,7 @@ export async function removeTrackedRepo(db: Db, name: string, by: string): Promi
   });
 }
 
-/** Compare-and-set (`WHERE pipeline <> :on`), one `repo-pipeline` audit row per changed repo; throws `PilotError("<repo> is not tracked")` for an untracked name. */
+/** Compare-and-set (`WHERE pipeline <> :on`), one `repo-pipeline` audit row per changed repo; throws `PipelineFlagError("<repo> is not tracked")` for an untracked name. */
 export async function setPipelineFlags(db: Db, rows: { repo: string; on: boolean }[], by: string): Promise<{ changed: string[] }> {
   const want = new Map(rows.map((r) => [r.repo, r.on]));
   if (!want.size) return { changed: [] };
@@ -55,7 +55,7 @@ export async function setPipelineFlags(db: Db, rows: { repo: string; on: boolean
   return await db.write(async () => {
     const names = [...want.keys()];
     const known = new Set((await q.all(q.k.selectFrom("main.tracked_repos").select("name").where(kx.inList(db, "name", names)))).map((r) => r.name));
-    for (const n of names) if (!NAME.test(n) || !known.has(n)) throw new PilotError(`${n} is not tracked`);
+    for (const n of names) if (!NAME.test(n) || !known.has(n)) throw new PipelineFlagError(`${n} is not tracked`);
     const changed = new Set<string>();
     for (const on of [true, false]) {
       const group = names.filter((n) => want.get(n) === on);

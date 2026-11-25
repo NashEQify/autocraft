@@ -8,7 +8,7 @@ import { readAppSecrets } from "./github/install-token.ts";
 import { AppReadError, readEnv } from "./github/read.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
-import { addTrackedRepo, loadTrackedRepos, PilotError, removeTrackedRepo, setPipelineFlags } from "./data/control/index.ts";
+import { addTrackedRepo, loadTrackedRepos, PipelineFlagError, removeTrackedRepo, setPipelineFlags } from "./data/control/index.ts";
 import { loadFilingReposNamed } from "./data/discord/index.ts";
 import { countItemsByRepo, ensureRepo, loadRepos, purgeRepoMirror, resetRepoSync } from "./data/mirror/index.ts";
 export { SHADOWED_TABLES } from "./db/scoped.ts";
@@ -154,7 +154,7 @@ const sub: Record<string, (args: string[]) => Promise<void | Promise<void>>> = {
       const on = a[1] === "on";
       console.log((await setPipelineFlags(await openDb(), [{ repo: name, on }], "cli")).changed.length ? `${name}: pipeline ${a[1]}` : `${name}: pipeline was already ${a[1]}`);
     } catch (e) {
-      if (!(e instanceof PilotError)) throw e;
+      if (!(e instanceof PipelineFlagError)) throw e;
       console.error(e.message);
       process.exit(1);
     }
