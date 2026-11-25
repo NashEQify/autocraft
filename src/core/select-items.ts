@@ -15,6 +15,7 @@ import { loadDueRefs } from "../data/planner/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import type { ItemPlanned, PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
+import { byScore } from "./work-score.ts";
 import type { Db } from "../db/index.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
@@ -45,7 +46,7 @@ const byRef: Cmp = (a, b) => (a.facts.repo < b.facts.repo ? -1 : a.facts.repo > 
 const then = (...c: Cmp[]): Cmp => (a, b) => { for (const f of c) { const r = f(a, b); if (r) return r; } return 0; };
 const str = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
 /** Highest score first, items without one last. */
-const score: Cmp = (a, b) => (a.facts.score === null ? 1 : 0) - (b.facts.score === null ? 1 : 0) || (b.facts.score ?? 0) - (a.facts.score ?? 0);
+const score: Cmp = (a, b) => byScore(a.facts.score, b.facts.score);
 const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind === "pr" ? 1 : 0);
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */

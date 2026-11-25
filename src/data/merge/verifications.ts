@@ -86,14 +86,15 @@ export async function loadLatestVerification(db: Db, refs: { repo: string; numbe
 
 /**
  * Whether a verification needs a collection run (its PR head moved or closed, its tasks ended, or it is `planned` while a task
- * started) and whether a screenshot run does; with the repos that have a screenshot run in flight. One statement.
+ * started) and whether a screenshot run does; with the repos that have a screenshot run in flight. A verification that was started is
+ * collected whatever became of its PR's scope; a screenshot run, whose comparison is a model call, only for a PR in scope. One statement.
  */
 export async function loadVerifyDue(db: Db): Promise<VerifyDue> {
   const q = queryDb(db);
   const k = q.k as any;
   const moved = (table: "verifications" | "screenshot_runs", a: string) => k.selectFrom(`${table} as ${a}`).select((eb: any) => eb.lit(1).as("one"))
     .where(`${a}.state`, "in", ["planned", "running"])
-    .where((eb: any) => inScopeExpr(db, eb, `${a}.repo`, `${a}.number`))
+    .$if(table === "screenshot_runs", (s: any) => s.where((eb: any) => inScopeExpr(db, eb, `${a}.repo`, `${a}.number`)))
     .where((eb: any) => eb.or([
       eb.not(openItem(eb, `${a}.repo`, `${a}.number`)),
       eb(itemHead(eb, `${a}.repo`, `${a}.number`), "is distinct from", eb.ref(`${a}.head_sha`)),
@@ -110,16 +111,15 @@ export async function loadVerifyDue(db: Db): Promise<VerifyDue> {
   return { verifications: r.verification !== null, screenshots: r.screenshots !== null, shotRepos: kx.parseJsonRows<{ repo: string }>(r.shot_repos).map((x) => x.repo) };
 }
 
-/** Rows `planned` or `running` of PRs in scope with the item's state and head; the tasks come in a second wave. */
+/** Rows `planned` or `running` with the item's state, head and whether it is in scope; the tasks come in a second wave. */
 export async function loadPendingVerifications(db: Db): Promise<PendingVerification[]> {
   const q = queryDb(db);
   const rows = await q.all((q.k as any).selectFrom("verifications as v")
-    .select((eb: any) => [...cols, openItem(eb, "v.repo", "v.number").as("is_open"), itemHead(eb, "v.repo", "v.number").as("item_head")])
+    .select((eb: any) => [...cols, openItem(eb, "v.repo", "v.number").as("is_open"), itemHead(eb, "v.repo", "v.number").as("item_head"), inScopeExpr(db, eb, "v.repo", "v.number").as("in_scope")])
     .where("v.state", "in", ["planned", "running"])
-    .where((eb: any) => inScopeExpr(db, eb, "v.repo", "v.number"))
-    .orderBy("v.created_at").orderBy("v.number")) as (Row & { is_open: unknown; item_head: string | null })[];
+    .orderBy("v.created_at").orderBy("v.number")) as (Row & { is_open: unknown; item_head: string | null; in_scope: unknown })[];
   const tasks = await tasksOf(db, rows);
-  return rows.map((r) => ({ ...viewOf(r, tasks), itemState: r.is_open ? "OPEN" as const : "CLOSED" as const, currentHead: r.item_head, inScope: true, headTask: r.head_task_id, baseTask: r.base_task_id }));
+  return rows.map((r) => ({ ...viewOf(r, tasks), itemState: r.is_open ? "OPEN" as const : "CLOSED" as const, currentHead: r.item_head, inScope: !!Number(r.in_scope), headTask: r.head_task_id, baseTask: r.base_task_id }));
 }
 
 const stageRows = (rows: (StageRow | undefined)[]): StageEventRow[] => rows.filter((s): s is StageRow => !!s).map((s) => ({ ...s, stage: s.stage as StageEventRow["stage"] }));

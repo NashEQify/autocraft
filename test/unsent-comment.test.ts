@@ -26,7 +26,7 @@ const T0 = Date.parse("2026-11-10T12:00:00Z");
 const HEAD = "a".repeat(40);
 const MIN = 60_000;
 
-test("a conflict ask whose token mint failed is asked again after the backoff, not before; one whose request went out is final", async () => {
+test("a conflict ask whose token mint failed is asked again after the backoff, not before; one whose request went out is final; a quiet pull request is not asked", async () => {
   mock.timers.enable({ apis: ["Date"], now: T0 });
   try {
     const db = await connectDb(join(dir, "t.db"));
@@ -59,6 +59,14 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
       prQuery: "query", scrub: (s: string) => s, handled: { n: 0 }, by: CLI_BY,
     } as unknown as ConflictRun;
     const c = { repo: "app", number: 1, head: HEAD, base: "main", title: "Fix a thing", reason: "right", attempt: 1, pushable: false } as ConflictCandidate;
+
+    await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "app", state: "done", started_by: "op", started_at: iso(T0) }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 50, scan_id: 1, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp", created_at: iso(T0), updated_at: iso(T0), fix_pr: 1 }));
+    assert.deepEqual([await plannedAsk(), (await plan()).waitCode], [false, "conflict-person"]);
+    await askConflict(db, x, c);
+    assert.deepEqual(await rows(), []);
+    assert.ok(log.some((l) => l.includes("quiet")), log.join("\n"));
+    await db.run(db.k.updateTable("security_findings").set({ state: "dismissed" }));
 
     assert.equal(await plannedAsk(), true);
     await askConflict(db, x, c);

@@ -156,6 +156,7 @@ export async function askConflict(db: Db, x: ConflictRun, c: ConflictCandidate):
     if (pr.baseRefName && pr.baseRefName !== c.base) { x.log(`  ${ref}: skipped: the base branch is now ${pr.baseRefName}`); return; }
     if (pr.mergeable !== "CONFLICTING") { x.log(`  ${ref}: skipped: GitHub no longer reports a conflict`); return; }
     if (!BASE_NAME.test(c.base)) { x.log(`  ${ref}: skipped: unusable base branch name`); return; }
+    if ((await loadQuiet(db, [`${x.repo}#${c.number}`])).size > 0) { x.log(`  ${ref}: not asked: nothing is posted about a quiet pull request`); return; }
     const g = await guard(db, { repo: x.repo, number: c.number }, { kind: "conflict", bucket: "ask", head: c.head }, x.by);
     if ("refused" in g) { x.log(`  ${ref}: skipped: ${g.refused}`); return; }
     const cm = await ghAskComment(x.gw, x.d.exec, "conflict-comment", g, { by: "fixed" }, conflictAskText(c.base), { run: x.runId, head: c.head });

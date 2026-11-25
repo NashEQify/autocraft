@@ -23,6 +23,7 @@ import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf } from "./rules.ts";
+import { workScore } from "./work-score.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { landedOpen } from "./decide.ts";
@@ -117,9 +118,6 @@ export function assignmentIn(pipelineLogin: string | null, assigned: { assignee:
     ours: assigned !== undefined && (pipelineLogin === null || assigned.assignee === pipelineLogin),
   };
 }
-
-/** The work score of a live workflow (higher first): weight, then the older workflow. */
-export const weightScore = (w: { id: number; weight: number } | null): number | null => (w ? 1e15 + w.weight * 1e12 - w.id : null);
 
 /** Our own integration PR of a batch. */
 function integrationOf(d: PrPassData, ref: string): boolean {
@@ -294,7 +292,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     author: i.author, authorIsPipeline: isOwn(i.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
     inScope, ...(outsideHold ? { outsideHold } : {}), integration, batchPr: d.merge.batchPrs.has(ref),
     heldBacklog: !wfFact && d.workflow.ended.get(ref) === "backlog", quiet: d.quiet.has(ref), mergeHeld: d.workflow.holds.has(ref),
-    score: weightScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
+    score: workScore(wfFact) ?? d.ranks.get(ref)?.score ?? null, repoFacts: rf,
     review: null, post: { postable: false, posted: null },
     checksHere: false, checksOpen: false, ci: "unknown", mergeable: i.mergeable ?? "UNKNOWN", unknown: null, runs: null,
     lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false, verification: null, verifyUnavailable: null,
@@ -381,6 +379,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const handed = wfRow && (wfRow.approvedBy !== null || wfRow.entry === "merge") ? operator?.legs.find((l) => l.state === "queued" && l.head === qh && l.workflow_id === wfRow.id) : undefined;
   base.handOver = handed !== undefined;
   base.mergeWaiting = mergeWaits(d.mergeActions.get(ref), wfRow, qh);
+  if (c.identity === "app" && mergeWaits(d.mergeActions.get(ref), wfRow, qh, ["waiting-permission"])) base.mergeLacksAccess = true;
   // A hold or close review that the leg went on past is one the person answered after (src/preapproval accepted): it counts as a take.
   const wentOn = !mx && (latest!.verdict === "hold" || latest!.verdict === "close") && !!wfRow
     && !!operator?.legs.some((l) => (l.state === "ci" || l.state === "queued") && l.head === qh && l.workflow_id === wfRow.id && l.updated_at > latest!.at);
@@ -449,6 +448,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note } : null;
   // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
   base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
+  const shots = state === "OPEN" ? d.merge.regressions.get(`${ref}@${qh}`) : undefined;
+  if (shots && (!wfFact || shots.at > wfFact.since)) base.screenshots = { summary: shots.summary };
   if (!base.verification || base.verification.state === "stale") {
     base.verifyUnavailable = !pub ? PRIVATE_REASON : rf.noCi && cachedRust(repo, qh) === false ? NOT_RUST_REASON : null;
   }
@@ -468,7 +469,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     }
   }
   if (base.mergeable === "CONFLICTING" && i.base_ref) {
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved }, now);
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
     base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   }

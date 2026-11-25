@@ -7,7 +7,6 @@ import { hiddenRepos } from "../control/fragments.ts";
 import { applyLocal } from "../mirror/index.ts";
 import { addStageEvents } from "../planner/index.ts";
 import { loadItemAreas } from "../triage/index.ts";
-import { holdMerges } from "../workflow/index.ts";
 import { batchViews, headOf, holdsMembers, publishDelayMs, refOf, short, toBatchView } from "./read.ts";
 import { ACTIVE_BATCH, MAX_BATCH, START_BATCH } from "./types.ts";
 import type { BatchByTask, BatchDue, BatchEnd, BatchLanded, BatchListRow, BatchPageView, BatchRun, BatchState, BatchUpdate, BatchView, HeadRef, HiddenRepos, NewBatch } from "./types.ts";
@@ -201,24 +200,19 @@ export async function updateBatches(db: Db, rows: BatchUpdate[]): Promise<number
   return (await db.write(async () => await applyUpdates(db, rows))).map((c) => c.id);
 }
 
-/** Ends batches in one `db.write`: the batch rows, stage events, audit rows and merge holds. */
+/** Ends batches in one `db.write`: the batch rows, stage events and audit rows. */
 export async function endBatches(db: Db, rows: BatchEnd[]): Promise<void> {
   if (rows.length === 0) return;
   await db.write(async () => {
     const at = new Date().toISOString();
     // A control that already ended the batch wins over a supersede or fail; a merge that landed meanwhile always records.
     const changed = await applyUpdates(db, rows.map((r) => ({ id: r.id, at, set: { state: r.state, summary: r.summary }, ...(r.state === "merged" ? {} : { onlyIf: ACTIVE_BATCH }) })));
-    const done = new Map(changed.map((c) => [c.id, c]));
+    const done = new Set(changed.map((c) => c.id));
     const ended = rows.filter((r) => done.has(r.id));
     const stages = ended.flatMap((r) => r.stage ?? []);
     if (stages.length) await addStageEvents(db, stages);
     const audits = ended.flatMap((r) => r.audit ?? []).map((a) => ({ login: a.actor, action: a.action, target: a.target, at: a.at, details: a.details }));
     if (audits.length) await addAudit(db, audits);
-    const holds = ended.flatMap((r) => (r.heldRefs ?? []).map((ref) => {
-      const i = ref.lastIndexOf("#");
-      return { repo: ref.slice(0, i), number: Number(ref.slice(i + 1)), by: r.by, details: { batch: done.get(r.id)!.branch } };
-    }));
-    if (holds.length) await holdMerges(db, holds);
   });
 }
 

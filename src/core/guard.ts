@@ -60,6 +60,7 @@ const make = <K extends ActionKind>(ref: Ref, a: Want<K>, head: string, as: Iden
 /** Why a PR cannot be in an integration batch at its head, whoever approved it; a merge on its own waits for the same. */
 export function memberRefusal(f: PrFacts): string | null {
   if (f.draft) return "it is a draft";
+  if (f.screenshots) return "its screenshots show a regression nobody has answered yet";
   if (f.mergeWaiting) return "its merge waits for the sign-in or access of the person who approved it";
   return ownImplementation(f)?.state === "revising" ? "its implementation session is revising it" : null;
 }

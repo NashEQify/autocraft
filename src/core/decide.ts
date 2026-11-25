@@ -99,6 +99,7 @@ export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
   if (open && refusalStuck(f)) reasons.push(`the merge was refused: ${excerpt(f.lastMerge!.reason!)}`);
   const stuckUnknown = open ? unknownStuck(f) : null;
   if (stuckUnknown) reasons.push(stuckUnknown);
+  if (open && f.screenshots) reasons.push(`the screenshots show a regression: ${excerpt(f.screenshots.summary ?? "no detail")}`);
   // The leg of a PR approved for merge handed it to the merge queue at this head (handOver names the approval). The approval says the change is wanted, so an unsure review does not undo it, not even one made after the hand-over.
   const handed = f.handOver;
 
@@ -144,7 +145,7 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: boolean): QueueSta
   if (!mx && f.review!.verdict === "take-fix") return "needs-fix-up";
   // A started PR merges on its approval, as its approver once the merge is handed over: the rule merges only what nobody started.
   // A merge entry's blocking pre-merge review stops it.
-  if (unmergeable(f).length) e.path = null;
+  if (unmergeable(f).length || f.screenshots) e.path = null;
   else if (mx) e.path = e.handed ? "operator" : e.premerge === "defect" || e.premerge === "unsure" || e.premerge === "failed" ? null : "maintainer";
   else if (!e.reasons.length) e.path = workflowOf(f) && !e.handed ? "maintainer" : "rule";
   else if (e.handed) e.path = "operator";
@@ -228,6 +229,9 @@ const WAITS: Partial<Record<QueueState, Wait>> = {
   "verify-failed": person("verification-failed", "a person: verification failed"), "verify-error": person("verification-failed", "a person: verification errored"),
   "changes-requested": person("changes-requested", "the maintainer's review"), refused: system("refusal-retry", "a change in CI or mergeable state"),
 };
+
+/** What the leg of an approved merge carries past a person's answer, which its hand-over makes good: until then it is no question. */
+const HANDED_ON: ReadonlySet<QueueState> = new Set(["batch-failed", "verify-failed", "verify-error"]);
 
 /** The workflow's merge is approved and its leg works on it, or the next workflow pass starts the leg (or asks), and the PR is not handed over yet. */
 const legWorks = (f: PrFacts): boolean => f.may.workflow?.state === "running" && f.may.workflow.approvedBy !== null && !f.handOver;
@@ -449,13 +453,17 @@ export type ConflictPath = "merge" | "tomorrow" | "contributor" | "person";
 /** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
 export function conflictPath(f: PrFacts | null): ConflictPath | null {
   if (f?.mergeable !== "CONFLICTING") return null;
-  const r = f.review, c = f.conflict;
+  const r = f.review;
   if (!mergeEntry(f) && !(r && (r.verdict === "take" || r.verdict === "take-fix") && r.head === f.head && !r.stale)) return null;
+  return settlesConflict(f);
+}
+/** Who settles the conflict of a PR that is wanted, whatever says so. */
+export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "conflict" | "pushable">): ConflictPath {
   if (!c?.baseOk) return "person";
   switch (c.bucket) {
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
     case "merge": case "unapproved": case "done": return "merge";
-    case "linting": return f.pushable ? "merge" : "person";
+    case "linting": return pushable ? "merge" : "person";
     case "capped": return "tomorrow";
     case "ask": case "ask-retry": case "asked": return "contributor";
     default: return "person";
@@ -470,7 +478,7 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (unapprovedStop(f)) return ANSWER;
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped") return system("conflict-cap", "conflict merge cap for today reached; next merge tomorrow");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") return unsentWait("the comment asking the contributor to resolve the conflict", f.conflict.until);
-  if (f.mergeable === "CONFLICTING" && f.conflict && ["ask", "asked", "held"].includes(f.conflict.bucket)) return f.conflict.bucket === "held" ? (f.repoFacts.commentApproved ? RESOLVE : COMMENT_OFF) : contributor("conflict-contributor", "the contributor to resolve the conflict");
+  if (f.mergeable === "CONFLICTING" && f.conflict && ["ask", "asked", "held"].includes(f.conflict.bucket)) return f.conflict.bucket === "held" ? (f.repoFacts.commentApproved || f.quiet ? RESOLVE : COMMENT_OFF) : contributor("conflict-contributor", "the contributor to resolve the conflict");
   if (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "unapproved" && fixAllowed(f)) return PUSH_OFF;
   if (f.mergeable === "CONFLICTING" && f.conflict) {
     if (f.inActiveBatch) return BATCH;
@@ -513,7 +521,7 @@ const unreviewedWait = (f: PrFacts): Wait | null => {
 };
 
 /** Actions that work the PR towards merge (a push, a base merge, a review of a new head, a pre-merge review, the merge), as against comment-only asks. */
-const worksOn = (a: Action): boolean => {
+export const worksOn = (a: Action): boolean => {
   const b = a.params?.bucket;
   switch (a.kind) {
     // A contributor's push during our work leaves a new head to review: the PR is still ours to carry on.
@@ -770,10 +778,13 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (st === "needs-decision" && (!w || w.approved || w.entry === "merge")) {
       if (f.baseOffDefault) return person("base-off-default", "a person: its base is not the default branch, and AutoCraft merges only into that");
       if (e?.noCi) return person("no-ci", "a person: the repo has no CI, and AutoCraft merges only on green CI");
+      if (f.screenshots) return person("screenshots", `a person: the screenshots show a regression${f.screenshots.summary ? ` (${excerpt(f.screenshots.summary)})` : ""}`);
     }
+    if ((HANDED_ON.has(st) || (st === "refused" && refusalStuck(f))) && legWorks(f)) return LEG;
     // The leg carries a merge its person approved past what keeps the PR off the rule; a merge state that stays unknown stops the leg too.
     if (st === "needs-decision" && legWorks(f)) return stuckState() ?? LEG;
     if (st === "waiting-premerge" && !workflowOf(f) && !mergeAllowed(f)) return person("repo-approval", "merge approval for the repo");
+    if (f.mergeWaiting && f.mergeLacksAccess && e && eligible(f, e)) return person("actor-gone", `a maintainer of ${f.repo} to approve the merge again: ${f.may.workflow?.approvedBy ?? f.may.workflow?.startedBy ?? "its approver"} has no write access there`);
     if (f.mergeWaiting && e && eligible(f, e)) return person("sign-in", "the sign-in or access of the person who approved the merge");
     if (st === "refused" && refusalStuck(f)) return person("merge-refused", `a person: the merge was refused (${excerpt(f.lastMerge!.reason!)})`);
     // A started PR nobody approved gets no CI fix, and its red CI may be the default branch's: nobody is asked about it until that is green.

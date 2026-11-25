@@ -123,6 +123,12 @@ both("verification rows: head filter, latest per ref, due check and pending list
   await q.run((q.k as any).updateTable("items").set({ state: "CLOSED" }).where("number", "=", 1));
   const closed = (await loadPendingVerifications(db)).find((p) => p.number === 1)!;
   assert.equal(closed.itemState, "CLOSED");
+  assert.ok(closed.inScope);
+  // Started and then out of scope: the verification is collected, the screenshot run is not.
+  await q.run((q.k as any).updateTable("item_workflows").set({ state: "stopped" }));
+  assert.deepEqual((await loadPendingVerifications(db)).map((p) => p.inScope), [false, false]);
+  const out = await loadVerifyDue(db);
+  assert.deepEqual([out.verifications, out.screenshots, out.shotRepos], [true, false, []]);
   return null;
 });
 

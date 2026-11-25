@@ -44,6 +44,10 @@ export type Recommendation = {
   again?: "review" | "fixup";
   /** The PR conflicts with its base branch, and this one has to resolve it: a yes approves the merge, and nothing is fixed or merged before. */
   waits?: "contributor" | "person";
+  /** A yes runs no step of its own: the work goes on in the name of the person who says it, or AutoCraft looks again at what they settled on GitHub. */
+  goes?: "on" | "look";
+  /** What the question is about, which may clear without an answer: the question closes then and the item goes on. `lane`: the merge itself was refused for its approver's access. */
+  cause?: { code: "actor-gone"; lane?: true } | { code: "base-off-default" | "no-ci" | "mergeable-stuck" | "ci-approval-failed" };
   /** A yes answers this question of the implementation with this option, as the person (a stuck implementation's Try again). */
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
@@ -61,6 +65,9 @@ export const sameQuestion = (a: QuestionRef | null | undefined, b: QuestionRef |
 
 /** States in which an item has come back to a person: its recommendation is open, whether its steps are done or a blocker stopped it. */
 export const ASKING_STATES = ["recommending", "blocked"] as const satisfies readonly WorkflowState[];
+
+/** The item asks for another person in place of its approver, whose approval does not count any more (ask.ts). */
+export const asksForApprover = (wf: Pick<ItemWorkflow, "state" | "blockerParams">): boolean => wf.state === "blocked" && wf.blockerParams?.code === "actor-gone";
 
 /** The recommendation that waits for an answer, which every surface shows; null when none is open. */
 export const openRecommendation = (wf: Pick<ItemWorkflow, "state" | "rec"> | null): Recommendation | null =>

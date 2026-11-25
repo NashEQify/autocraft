@@ -80,7 +80,7 @@ test("each merge, batched or not, goes by its own approval and pushes, also wher
     { "app#1": null, "app#2": "push", "app#3": null, "app#4": "implementation", "app#5": "rule" });
   assert.deepEqual((await selectPostmerge(db, "app", Date.parse(day(6)))).map((m) => m.number), [2, 4, 5]);
   const lane = LANES.find((l) => l.name === "postmerge")!;
-  assert.ok(lane.anyTracked);
+  assert.equal(lane.scope, "cleanup");
   assert.deepEqual((await lane.detect(db, await planCtx(db))).map((c) => c.params.repo), ["app"]);
   // The reviewed ones are done; their merges outside the scope count from the setting only.
   await savePostmerge(db, [2, 4].map((number) => ({ repo: "app", number, merge_sha: "m", at: day(6), model: "opus", run_id: "r", findings: [], error: null })));

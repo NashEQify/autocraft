@@ -152,7 +152,7 @@ export type PublicStatusRow = {
   repo: string; number: number; kind: "pr" | "issue"; title: string; state: string; stage: string | null; planState: string | null; needsPerson: boolean;
   url: string | null; reviewed: boolean; /** The plan's cached view, unparsed. */ view: string | null; hidden: boolean;
 };
-export type QueueMember = { repo: string; number: number; held: boolean; batched: boolean; weight: number | null; score: number | null };
+export type QueueMember = { repo: string; number: number; held: boolean; batched: boolean; /** The work score of a started PR. */ work: number | null; /** The work rank. */ score: number | null };
 export type PublicStatsFacts = {
   open: { repo: string; kind: "pr" | "issue"; n: number }[]; merged: { repo: string; number: number; ours: boolean; mergedAt: string; openedAt: string | null }[];
   reviews: { repo: string; n: number }[]; queues: { repo: string; n: number }[];

@@ -53,7 +53,8 @@ import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { loadSteps, type Params, type StepDef } from "./steps.ts";
-import { scopeRepos } from "./scope.ts";
+import { repoInScope, type RepoScope, type ScopeFor } from "../core/scope.ts";
+import { loadRepoScopes } from "../data/workflow/index.ts";
 import { refreshOutsideHolds } from "../outside.ts";
 import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadStepApprovals, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
@@ -113,6 +114,8 @@ export type Candidate = {
   poll?: boolean;
   /** Another job that must also be startable now, e.g. the review that follows a checks job. */
   gate?: { step: string; params: Params; poll?: boolean };
+  /** What its repo must be in scope for, where that is not the lane's. */
+  scope?: ScopeFor;
 };
 /** A pipeline stage in order. `detect` lists the jobs that have work, best first. */
 export type Lane = {
@@ -121,8 +124,8 @@ export type Lane = {
   steps?: string[];
   /** Its jobs are per repo: the lane's jobs are judged one repo at a time. */
   perRepo?: boolean;
-  /** Its jobs may run for tracked repos outside the pipeline scope (the PR status comment's last edits); `detect` decides which. */
-  anyTracked?: boolean;
+  /** What a repo must be in scope for to get its jobs (`work` when omitted); `detect` decides which of those have any. */
+  scope?: ScopeFor;
   /** The change topics the lane's input lives in (default: INPUT_TOPICS). A job that handled nothing is not queued again while these and `extra` are unchanged. */
   topics?: string[];
   /** Input that no topic reports, e.g. the room under a daily limit. */
@@ -138,7 +141,9 @@ export type Lane = {
 
 /** What every lane's detect shares, resolved once per planner pass. */
 export type PlanCtx = {
-  run: string | null; tracked: string[];
+  run: string | null;
+  /** The repos in scope for work. */
+  tracked: string[];
   /** The Plans of the pass: facts loaded and decided once. Lanes read them; a lane run without them (a test) loads them on first use. */
   plans?: PlanSet;
   /** Times (ms) at which something the lanes wait for becomes due; the planner wakes at the earliest. */
@@ -149,10 +154,8 @@ export type PlanCtx = {
   untaken?: UntakenTest;
   /** The planner marks and round-robin cursors (lane_state), as the pass read them. */
   marks?: Map<string, string>;
-  /** The repos in scope (scopeRepos) as the pass read them. */
-  scope?: Set<string>;
-  /** Every tracked repo, in scope or not. */
-  names?: string[];
+  /** What decides the scope of every tracked repo, as the pass read it. */
+  scopes?: Map<string, RepoScope>;
   /** The topic counters the pass read with the change log, so a change after them is new input to the next pass. */
   seqs?: Record<string, number>;
   /** The planner pass's candidates of each lane, by lane name: the Next lists reuse what the pass detected. */
@@ -161,7 +164,12 @@ export type PlanCtx = {
   pass?: PlanPass;
 };
 
-/** Only the repos in scope (pipeline on, or with started work) are planned for; a job for another repo is never proposed. */
+/** The tracked repos in scope for `what`, in name order; a context a test made without scopes has its `tracked` for everything. */
+const reposFor = (ctx: PlanCtx, what: ScopeFor): string[] => (ctx.scopes ? [...ctx.scopes].filter(([, r]) => repoInScope(r, what)).map(([name]) => name) : ctx.tracked);
+
+const workRepos = (scopes: Map<string, RepoScope>): string[] => [...scopes].filter(([, r]) => repoInScope(r, "work")).map(([name]) => name);
+
+/** Only the repos in scope are planned for; a job for another repo is never proposed. */
 export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<string>): Promise<PlanCtx> => {
   // The outside-author holds first: the facts below read them through the scope condition (src/outside.ts).
   const wake: number[] = [];
@@ -173,16 +181,16 @@ export const planCtx = async (db: Db, incremental = false, own?: ReadonlySet<str
   }
   if (incremental) {
     // The pass reads the settings, the change log and every load in one transaction, so a write in between is either all seen or left for the next pass.
-    let scope = new Set<string>(), names: string[] = [], seqs: Record<string, number> = {};
-    const first = async (): Promise<void> => { [scope, names, seqs] = await Promise.all([scopeRepos(db), trackedNames(db), db.seqs(), rereadSettingsSnapshot(db)]); };
+    let scopes = new Map<string, RepoScope>(), seqs: Record<string, number> = {};
+    const first = async (): Promise<void> => { [scopes, seqs] = await Promise.all([loadRepoScopes(db), db.seqs(), rereadSettingsSnapshot(db)]); };
     const pass = await planPass(db, { now: Date.now(), first, fullEveryMs: PLAN_FULL_EVERY_MS });
     wakeAtRefresh(pass.plans, wake);
-    return { run: pass.plans.run, tracked: names.filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope, names, seqs };
+    return { run: pass.plans.run, tracked: workRepos(scopes), plans: pass.plans, pass, wake, notes: {}, scopes, seqs };
   }
-  const [scope, names, seqs] = await db.together(() => Promise.all([scopeRepos(db), trackedNames(db), db.seqs()]));
+  const [scopes, seqs] = await db.together(() => Promise.all([loadRepoScopes(db), db.seqs()]));
   const plans = await loadPlanSet(db);
   wakeAtRefresh(plans, wake);
-  return { run: plans.run, tracked: names.filter((r) => scope.has(r)), plans, wake, notes: {}, scope, names, seqs };
+  return { run: plans.run, tracked: workRepos(scopes), plans, wake, notes: {}, scopes, seqs };
 };
 
 /**
@@ -385,7 +393,7 @@ export const bestScore = (scores: (number | null | undefined)[]): number | null 
  */
 export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<string, number | null>): T[] {
   const shared = lanes.filter((l) => tops.has(l.name));
-  const sorted = [...shared].sort((a, b) => (tops.get(b.name) ?? -1) - (tops.get(a.name) ?? -1));
+  const sorted = [...shared].sort((a, b) => (tops.get(b.name) ?? -Infinity) - (tops.get(a.name) ?? -Infinity) || 0);
   let k = 0;
   return lanes.map((l) => (tops.has(l.name) ? sorted[k++]! : l));
 }
@@ -535,7 +543,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       for (const repo of flightFirst(plans, [...new Set([...due, ...batches])].sort())) {
         const poll = batches.has(repo);
         if (poll && await later("merge", repo)) continue;
-        out.push({ step: "merge", params: { repo }, ...(poll ? { poll } : {}) });
+        // A batch its repo left behind is closed wherever the repo is tracked.
+        out.push({ step: "merge", params: { repo }, ...(poll ? { poll, scope: "cleanup" as const } : {}) });
       }
       // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state.
       const waiting = (await filterSeq([...new Set(queue.filter((e) => e.state === "waiting-ci").map((e) => e.repo))], async (repo) => !due.has(repo) && !batches.has(repo) && !await later("checks", repo))).sort();
@@ -552,6 +561,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // The closes people asked for, queued card presses and held follow-up issues.
     name: "act",
     perRepo: true,
+    scope: "cards",
     // Queued card presses: the drain runs when the first press fits under the daily limit, so the room (and the limit) is part of the input.
     extra: async (db) => {
       const [h, { sig: held }, limit] = await db.together(() => Promise.all([queueHead(db), heldDue(db), actLimit(db)]));
@@ -564,8 +574,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         const c = p.facts.close, b = best.get(p.facts.repo);
         if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
-      const first = { weight: Infinity, at: "" };
-      const [approved, head, wakes, held] = await db.together(() => Promise.all([loadStepApprovals(db, ctx.tracked, ["comment"]), queueHead(db), filingWakes(db), heldDue(db)]));
+      const first = { weight: Infinity, at: "" }, repos = reposFor(ctx, "cards");
+      const [approved, head, wakes, held] = await db.together(() => Promise.all([loadStepApprovals(db, repos, ["comment"]), queueHead(db), filingWakes(db), heldDue(db)]));
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
       else if (head && approved.has(head.repo)) best.set(head.repo, first);
@@ -576,9 +586,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
         else if (approved.has(repo)) best.set(repo, first);
       }
-      const served = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
+      const served = new Map(await mapSeq(repos, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
       const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
-      return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => {
+      return repos.filter((repo) => best.has(repo)).sort((a, b) => {
         const x = best.get(a)!, y = best.get(b)!;
         return (x.weight === y.weight ? 0 : x.weight > y.weight ? -1 : 1) || cmp(served.get(a)!, served.get(b)!) || cmp(x.at, y.at) || a.localeCompare(b);
       }).map((repo) => ({ step: "act", params: { repo } }));
@@ -722,11 +732,12 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // The planner decides which items left the path to merge; this lane only carries out the unassign actions.
+    // The planner decides which items left the path to merge; this lane only carries out the unassign actions, in every tracked repo: an item leaves the scope with its repo.
     name: "unassign",
     perRepo: true,
+    scope: "cleanup",
     detect: async (db, ctx) => {
-      const plans = await plansOf(db, ctx), repos = new Set(ctx.tracked);
+      const plans = await plansOf(db, ctx), repos = new Set(reposFor(ctx, "cleanup"));
       const due = [...await planned(db, "unassign", { plans }), ...await plannedItems(db, "unassign", { plans })];
       return [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort().map((repo) => ({ step: "unassign", params: { repo } }));
     },
@@ -736,12 +747,12 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Every tracked repo, not only those in scope: comments already posted get their last Merged or Closed edit after the repo's Pipeline is switched off.
     name: "pr-status",
     perRepo: true,
-    anyTracked: true,
+    scope: "cleanup",
     // A PR's failure backoff ends with the clock, not with a change in the data.
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      const [tracked, approved] = await db.together(() => Promise.all([ctx.names ?? trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
+      const [tracked, approved] = await db.together(() => Promise.all([ctx.scopes ? reposFor(ctx, "cleanup") : trackedNames(db), loadStepApprovals(db, "all", ["prstatus"])]));
       const repos = tracked.filter((repo) => approved.has(repo));
       const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
       for (const at of retries.values()) ctx.wake?.push(at);
@@ -775,18 +786,19 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Opus reviews what the pipeline's merges landed, also where the Pipeline switch is off; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
-    anyTracked: true,
+    scope: "cleanup",
     detect: async (db, ctx) => {
       const due = new Set(await postmergeRepos(db, await plansOf(db, ctx), Date.now(), ctx.run));
-      return (ctx.names ?? ctx.tracked).filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
+      return reposFor(ctx, "cleanup").filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "postmerge", params: { repo } }));
     },
   },
   {
     // The defects of those reviews become issues in repos approved for comments. A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
     name: "postmerge-file",
     perRepo: true,
-    anyTracked: true,
-    detect: async (db, { tracked: scoped, names: tracked = scoped, wake }) => {
+    scope: "cleanup",
+    detect: async (db, ctx) => {
+      const tracked = reposFor(ctx, "cleanup"), { wake } = ctx;
       const [defects, stuck, approved] = await db.together(() => Promise.all([pendingDefects(db), stuckFilings(db, { now: Date.now() }), loadStepApprovals(db, tracked, ["comment"])]));
       wake?.push(...stuck.wakes);
       const pending = new Set([...defects.map((d) => d.repo), ...stuck.due.map((x) => x.row.repo)]);
@@ -1088,7 +1100,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   ctx.detected = new Map();
   ctx.untaken = untaken;
   const loadMs = performance.now() - t0;
-  const scope = ctx.scope ?? await scopeRepos(db);
+  const inScope = new Map<ScopeFor, Set<string>>();
+  const scopeOf = (what: ScopeFor): Set<string> => { let s = inScope.get(what); if (!s) inScope.set(what, (s = new Set(reposFor(ctx, what)))); return s; };
   const seqs = ctx.seqs ?? await db.seqs();
   const status: Record<string, string> = {};
   // The queued and running jobs, read with the pass's other job reads.
@@ -1175,7 +1188,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
       for (const c of candidates) {
-        const outside = lane.anyTracked ? undefined : [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
+        const scope = scopeOf(c.scope ?? lane.scope ?? "work");
+        const outside = [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
         if (outside) { note(outside.step, "outside the pipeline scope"); continue; }
         if (c.gate && !await gate(c.gate.step, c.gate.params, lane, c.gate.poll)) continue;
         const g = await gate(c.step, c.params, lane, c.poll);
@@ -1407,12 +1421,13 @@ export type LaneItem = {
  * its candidates, and within a repo the order the planner's own selection (planned, plannedItems) gives. Items of
  * other repos follow. The dashboard's Next page reads this, so it cannot drift from what the autopilot picks.
  */
-export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "perRepo" | "detect" | "steps">): Promise<LaneItem[]> {
+export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "perRepo" | "scope" | "detect" | "steps">): Promise<LaneItem[]> {
   const kinds = LANE_KINDS[lane.name];
   if (!kinds) return [];
   const plans = await plansOf(db, ctx);
   const seen = new Set<string>(), all: LaneItem[] = [];
   // A repo whose jobs of every step of the lane wait for a Task Runner: the planner proposes none for it.
+  const scope = new Set(reposFor(ctx, lane.scope ?? "work"));
   const untaken = (ctx.untaken ??= await untakenTest(db)), noRunner = new Map<string, string | null>();
   // Why the repo's jobs wait (the first step's reason), or null when some step of the lane has a taker.
   const waits = async (repo: string): Promise<string | null> => {
@@ -1428,7 +1443,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     if (seen.has(ref)) return;
     seen.add(ref);
     const may = mayRun({ facts: f, action: a }, "pipeline"), refused = may.ok || may.why.code === "pipeline-off" ? null : may.why;
-    const outside = !ctx.tracked.includes(f.repo);
+    const outside = !scope.has(f.repo);
     const blocked = outside ? "outside the pipeline scope" : refused?.text ?? (may.ok ? await waits(f.repo) : null);
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
@@ -1479,18 +1494,6 @@ export async function storedLaneItems(db: Db): Promise<StoredLaneItems> {
   const out: StoredLaneItems = {};
   for (const [lane, r] of await loadLanes(db)) out[lane] = { total: r.total, items: r.items as LaneItem[] };
   return out;
-}
-
-/**
- * Why no Act job will run for `repo` now, or null: the pipeline is off or draining, off for the repo, or Act's daily limit is 0. Act writes
- * no commit, so no push breaker stops it.
- * A reached daily limit is not a block: queued presses wait for it. Presses that cannot be carried out are refused with this reason instead of queued.
- */
-export async function actBlockedReason(db: Db, repo: string): Promise<string | null> {
-  if (!await isEnabled(db)) return await isDraining(db) ? "the pipeline is draining" : "the pipeline is off";
-  if (!(await scopeRepos(db)).has(repo)) return `the pipeline is off for ${repo}`;
-  if ((await limitRow(db, "act")).perDay === 0) return "the daily limit of Act is 0";
-  return null;
 }
 
 export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "limit" | "backoff"; why: string | null };

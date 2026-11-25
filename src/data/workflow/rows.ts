@@ -8,6 +8,7 @@ import { canActExpr, writeCheckedAt } from "../access/fragments.ts";
 import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
+import { weightOfScore } from "../../core/work-score.ts";
 import { goOnAt, isGoOn, linkRows, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
@@ -411,7 +412,7 @@ export async function recordEvents(db: Db, rows: WorkflowEvent[]): Promise<void>
 }
 
 /**
- * `1e15 + weight * 1e12 - workflow.id` for every item of `keys` with a live workflow and for the PR a live implement workflow works on
+ * The work score (src/core/work-score.ts) for every item of `keys` with a live workflow and for the PR a live implement workflow works on
  * (the maximum when both apply). One statement.
  */
 export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKey, number>> {
@@ -431,8 +432,7 @@ export async function loadWorkScores(db: Db, keys: KeySource): Promise<Map<RefKe
 
 /** The weight behind each item's work score (loadWorkScores): its live workflow's, or that of the issue its PR implements. One statement. */
 export async function loadWorkWeights(db: Db, keys: KeySource): Promise<Map<RefKey, number>> {
-  // Workflow ids stay below the score's weight step of 1e12.
-  return new Map([...await loadWorkScores(db, keys)].map(([key, s]) => [key, Math.ceil((s - 1e15) / 1e12)]));
+  return new Map([...await loadWorkScores(db, keys)].map(([key, s]) => [key, weightOfScore(s)]));
 }
 
 /** Open items with a live workflow ordered by weight then id, with `row_number()` and `count(*) OVER ()` over the whole queue; `repos` narrows the result, not the positions. */
