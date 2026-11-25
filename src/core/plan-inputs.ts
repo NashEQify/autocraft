@@ -6,6 +6,7 @@
 // SQL fragments name the written row `r` (`r.repo`); the triggers put `new` or `old` in its place. Subqueries must not use the
 // alias `r` themselves.
 import { BOOKKEEPING_SETTINGS } from "../live.ts";
+import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { pgExpr, pgJsonArray } from "./pg-expr.ts";
 
 /**
@@ -85,9 +86,26 @@ const itemsFullUpdate = (no: string): string => `${changed(["kind", "author", "a
       OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)}))
       OR (CASE WHEN ${changed(DUPE_COLUMNS)} THEN ${inDupeSet("new")} ELSE ${no} END)`;
 
-/** Settings rows the runner, sync and planner write for their own use (src/live.ts), less `classify_run`, which picks the run every item's labels come from; and the planner's shadow switch, which no fact reads. */
-export const PLAN_IGNORED_SETTINGS = [...BOOKKEEPING_SETTINGS.filter((k) => k !== "classify_run"), "plan_shadow"];
-const PLAN_IGNORED_SETTING_LIKE = ["%\\_points\\_last\\_run", "pipeline\\_fp:%"];
+/**
+ * Settings rows the runner, sync and planner write for their own use (src/live.ts), less `classify_run`, which picks the run every
+ * item's labels come from; the planner's shadow switch; and the app installation sweep's time. No fact reads these.
+ */
+export const PLAN_IGNORED_SETTINGS = [...BOOKKEEPING_SETTINGS.filter((k) => k !== "classify_run"), "plan_shadow", "app_install_sweep_at"];
+// Leader and standby status rows (src/db/leader.ts) are rewritten every few seconds and warm sizes after every warm build;
+// no fact loader reads them. The build feature switches are read (featureOn), so they stay inputs.
+const PLAN_IGNORED_SETTING_LIKE = ["%\\_points\\_last\\_run", "pipeline\\_fp:%", "leader:%", "warm\\_bytes:%"];
+
+/**
+ * A repo_permissions UPDATE that moves facts: a new login, repo or permission, or a checked_at refresh of a row that was no longer
+ * fresh. Settlers read a write permission as fresh while checked_at is younger than PERM_READ_TTL (src/settlers.ts), and the
+ * pipeline and dashboard sessions refresh it before then (src/preapproval/permissions.ts), so a refresh of a fresh row changes no
+ * fact. The threshold is a minute stricter than PERM_READ_TTL, for clock skew between the database and the planner.
+ */
+const FRESH_S = Math.round(PERM_READ_TTL / 1000) - 60;
+const permissionMoved = (fresh: string): string => `${changed(["login", "repo", "permission"])} OR NOT (old.checked_at > ${fresh})`;
+const PERMISSION_FULL_UPDATE = permissionMoved(`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${FRESH_S} seconds')`);
+const PERMISSION_FULL_UPDATE_PG = permissionMoved(`to_char(now() AT TIME ZONE 'UTC' - interval '${FRESH_S} seconds', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`)
+  .replace(/ IS NOT /g, " IS DISTINCT FROM ");
 
 export const PLAN_INPUTS: PlanInput[] = [
   // ---- item-keyed ----
@@ -270,11 +288,18 @@ export const PLAN_INPUTS: PlanInput[] = [
   { table: "tracked_repos", class: "global", why: "Tracked repos and their pipeline switch (scope of every item)." },
   { table: "repos", class: "global", why: "Visibility and default branch of a repo (every PR there).", columns: ["name", "visibility", "default_branch", "owner"] },
   { table: "access", class: "global", why: "Operator and maintainer roles: who settles a decision, whose comments count." },
-  { table: "repo_permissions", class: "global", why: "Maintainers' write permission per repo: who settles decisions there." },
+  {
+    table: "repo_permissions", class: "global", why: "Maintainers' write permission per repo: who settles decisions there.",
+    fullUpdate: PERMISSION_FULL_UPDATE, pg: { fullUpdate: PERMISSION_FULL_UPDATE_PG },
+  },
   { table: "author_ids", class: "global", why: "Author logins bound to account ids: tiers of every PR of the author." },
   { table: "whitelist_overrides", class: "global", why: "Operator tier overrides of an author." },
   { table: "stage_trips", class: "global", why: "Tripped breakers, per stage and repo (a fact of every item of the repo, like main_ci); trips are rare, so a full pass costs little." },
-  { table: "main_ci", class: "global", why: "Default-branch CI per repo (red main)." },
+  {
+    table: "main_ci", class: "global", why: "Default-branch CI per repo (red main).",
+    // Not `checks`: the full list moves with every check of a running head, and only the dashboard reads it.
+    columns: ["repo", "head_sha", "branch", "state", "failing", "committed_at", "headline", "first_seen_at", "state_changed_at"],
+  },
   { table: "main_fixes", class: "global", why: "Fixes of a red default branch: the repo's main CI state and its own fix PR." },
   { table: "own_commits", class: "global", why: "Commits the pipeline pushed: whether a PR's head is its own work, through any push chain." },
   { table: "owner_statements", class: "global", why: "Owner statements that stored reviews of any PR name as conflicts." },
