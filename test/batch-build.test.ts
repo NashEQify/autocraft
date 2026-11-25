@@ -151,7 +151,7 @@ describe("a maintainer's Merge answer in a batch", () => {
     assert.deepEqual(reads, ["maint"]);
     assert.deepEqual(s.merged, []);
     assert.equal((await w.rows("SELECT 1 FROM merge_holds WHERE repo = 'app' AND number = 3")).length, 1);
-    assert.match(String((await w.db.get(w.db.k.selectFrom("merge_batches").select("summary").where("id", "=", 1)))!.summary), /app#3 left the batch: maint no longer settles decisions on app/);
+    assert.match(String((await w.db.get(w.db.k.selectFrom("merge_batches").select("summary").where("id", "=", 1)))!.summary), /app#3 left the batch: maint no longer may act on app/);
     assert.ok(!(await members()).some((m) => !m.startsWith("superseded") && m.endsWith(":3")), (await members()).join());
   });
 });

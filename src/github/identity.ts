@@ -26,6 +26,13 @@ export async function githubIdentity(db: Db): Promise<GithubIdentity> {
   return value === "app" ? "app" : "box";
 }
 
+/**
+ * Why `actor` may not act on `repo` in the maintainer workflow (start, answer, approve a merge, stop), or null: an AutoCraft login with
+ * the operator or maintainer role, live write access, and the app identity, so merges and closes run as the person.
+ */
+export const actRefusal = async (db: Db, actor: { login: string | null; canWrite(repo: string): Promise<boolean> }, repo: string): Promise<access.ActRefusal | null> =>
+  await access.canAct(db, actor, repo, { identity: await githubIdentity(db) });
+
 /** Returns false when nothing changed. A change ends every dashboard session, so everyone signs in again under the new mode. */
 export async function setGithubIdentity(db: Db, by: string, value: unknown): Promise<boolean> {
   if (value !== "box" && value !== "app") throw new Error("the GitHub identity must be box or app");

@@ -82,7 +82,7 @@ describe("over HTTP", async () => {
     await addLogin(db, "cli", "boss", "operator", null);
     const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: file, AUTOCRAFT_DEV_PERMS: perms });
     const limiter = new RateLimiter(60, 3600_000);
-    const s = await startServer({ config, db, provider: new FakeProvider(perms), feedbackLimiter: limiter, routes: apiRoutes({ limiter }) });
+    const s = await startServer({ config, db, provider: new FakeProvider(perms), routes: apiRoutes() });
     base = s.url;
     close = s.close;
   });

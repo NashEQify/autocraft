@@ -7,7 +7,7 @@
 //
 // The webhook keeps only the fields of github_commands (the parsed result, never the comment's text), and nothing of it reaches a
 // prompt. The runner carries the command out: the commenter must have an AutoCraft login with the GitHub id bound to it, the
-// comment must still exist with the same command in it, and then the act rule applies (src/settlers.ts actRefusal), with the write
+// comment must still exist with the same command in it, and then the act rule applies (actRefusal in src/github/identity.ts), with the write
 // permission read from GitHub through the app now. A viewer gets no answer. A commenter without a bound AutoCraft login gets at
 // most one "link your account" answer a week, and only when GitHub reports write access on the repo, so a stranger cannot make the
 // app write. Answers go through write.ts.
@@ -24,9 +24,8 @@ import type { Querier } from "../mirror.ts";
 import { LOGIN } from "../access.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission, type AppPermission } from "../remote/permission.ts";
-import { actRefusal } from "../settlers.ts";
 import { AppError, call, GITHUB_API } from "./app.ts";
-import { appSlug } from "./identity.ts";
+import { actRefusal, appSlug } from "./identity.ts";
 import { commentNames } from "./slugs.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError, type Writer } from "./write.ts";

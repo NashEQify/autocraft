@@ -192,7 +192,7 @@ describe("user-local remote calls", async () => {
 
   test("the session tools count what the login may claim, and show a lease only to its holder", async () => {
     const env = (login: string, run = true): McpEnv => ({
-      db, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0,
+      db, baseUrl: null, canAnswer: false, expensive: () => 0,
       user: async () => ({ login, role: "maintainer" }) as unknown as User,
       ...(run && { run: { canWrite } }),
     });

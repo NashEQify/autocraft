@@ -36,7 +36,7 @@ import type { Querier } from "../mirror.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { appPermission } from "../remote/permission.ts";
 import { loadQuiet } from "../data/security/index.ts";
-import { settleRefusal } from "../settlers.ts";
+import { actRefusal } from "../github/identity.ts";
 import { fetchScript } from "../worker/rust.ts";
 import { BRANCH_MAX_MS, BRANCH_POLL_MS, LOCK_MAX_MS, RETRY_MS, repinsDue, type RepinRow } from "./due.ts";
 import { lockRefusal, repinManifest, safePath, type PrRef } from "./manifest.ts";
@@ -109,18 +109,24 @@ async function stopTask(db: Db, id: number | null): Promise<void> {
   try { await cancelTask(db, id, AUDIT_LOGIN); } catch { /* already ended, or gone */ }
 }
 
+/** Why `login` may not do `what` on `repo` by the act rule (actRefusal), or null. `canWrite`: the person's write access on `repo`, read by the caller. */
+async function actRefusalText(db: Db, login: string, canWrite: boolean, repo: string, what: string): Promise<string | null> {
+  const no = await actRefusal(db, { login, canWrite: async (r) => r === repo && canWrite }, repo);
+  return no === null ? null : `only an operator, or a maintainer with write access where the app acts for them, ${what}`;
+}
+
 /** A refusal worded for the answer on GitHub. */
 const refused = (why: string): HttpError => new HttpError(409, why);
 
 /**
  * Sets (or with `ref` null, drops) the autorepin of a pull request for the commenter of a command. Who may is the rule of
- * every write a person starts (settleRefusal in src/settlers.ts). Returns what the answer says; throws an HttpError with the
+ * every write a person starts (actRefusal). Returns what the answer says; throws an HttpError with the
  * reason when refused. `at` orders the commands of a pull request: a command older than an `off` or than the command that set
  * the row sets nothing.
  */
-export async function requestRepin(db: Db, o: { login: string; githubId: number; role: string; canWrite: boolean; /** The caller applied its own rule of who may act (the maintainer workflow's, src/settlers.ts actRefusal). */ authorized?: boolean; repo: string; number: number; pr: boolean; ref: PrRef | null; /** Reads the `via` branch when the command is accepted; without it, or when the read fails, the branch is not checked. */ querier?: Querier; /** `via <branch>`, validated by the parser (parseBranch). */ branch?: string | null; /** When the command was given (the comment's time). */ at?: Date }): Promise<string> {
+export async function requestRepin(db: Db, o: { login: string; githubId: number; role: string; canWrite: boolean; /** The caller applied its own rule of who may act (the maintainer workflow's actRefusal). */ authorized?: boolean; repo: string; number: number; pr: boolean; ref: PrRef | null; /** Reads the `via` branch when the command is accepted; without it, or when the read fails, the branch is not checked. */ querier?: Querier; /** `via <branch>`, validated by the parser (parseBranch). */ branch?: string | null; /** When the command was given (the comment's time). */ at?: Date }): Promise<string> {
   if (!o.pr) throw refused("autorepin is for pull requests");
-  const refusal = o.authorized ? null : await settleRefusal(db, { login: o.login, role: o.role, canWrite: async (r) => r === o.repo && o.canWrite }, [o.repo], `sets autorepin on ${o.repo}`);
+  const refusal = o.authorized ? null : await actRefusalText(db, o.login, o.canWrite, o.repo, `sets autorepin on ${o.repo}`);
   if (refusal) throw refused(refusal);
   const at = (o.at ?? new Date()).toISOString();
   const ref = o.ref;
@@ -324,7 +330,7 @@ async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
   const access = await boundAccess(db, r);
   if (!access) throw failed(`${r.login} no longer has an AutoCraft login bound to the GitHub account that asked`);
   if (access.role !== "operator" && (await loadQuiet(db, [`${r.repo}#${r.number}`])).size > 0) throw failed("the pull request is quiet until its fix is published");
-  const refusal = await settleRefusal(db, { login: r.login, role: access.role, canWrite: async (x) => x === r.repo && p === "ok" }, [r.repo], `repins on ${r.repo}`);
+  const refusal = await actRefusalText(db, r.login, p === "ok", r.repo, `repins on ${r.repo}`);
   if (refusal) throw failed(refusal);
   const g = await guardRepo(db, r.repo, "push", { operator: r.login }, undefined, r.login);
   if ("refused" in g) throw failed(g.refused);

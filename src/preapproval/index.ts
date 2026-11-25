@@ -12,7 +12,6 @@
 //   merged / cancelled / failed end it. A stop ends the leg failed; the workflow then stops at a blocker with its recommendation.
 // Every transition is a pure reaction to rows other steps write (fixups, opus_reviews, pr_checks, items, merges), evaluated by
 // advancePreapprovals on each runner tick: no timer and no wait of its own; the one time comparison (the start of the mirror's last sync against the push) is made when the tick runs anyway. Merging itself is never called from here.
-import { settleMemo, settlesNow } from "../settlers.ts";
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
 import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
@@ -29,7 +28,7 @@ import { markReviewsStale, staleReviews } from "../review/discussion.ts";
 import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { operatorTriesLeft, queuedOperatorFix } from "./state.ts";
-import { refreshSettlers, type RefreshDeps } from "./permissions.ts";
+import { refreshSettlers, settlesNow, type RefreshDeps } from "./permissions.ts";
 import { addAudit, listAudit, listPushOutcomes, loadAuditActions, loadStepApprovals, withConfig, type StepApproval } from "../data/control/index.ts";
 import { loadChecks, loadItems, loadRepos, type PrChecksView } from "../data/mirror/index.ts";
 import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type MergeFacts } from "../data/merge/index.ts";
@@ -100,10 +99,10 @@ async function move(db: Db, p: Row, to: LegState, o: { head?: string | null; rea
 }
 
 /**
- * An operator, or a maintainer who still settles on the repo (src/settlers.ts): their approval counts. `held` is the pass's
+ * An operator, or a maintainer who still settles on the repo (settlesNow in ./permissions.ts): their approval counts. `held` is the pass's
  * `refreshSettlers` result: a maintainer's write permission the pipeline is reading again still counts until GitHub answers.
  */
-const isOperator = async (db: Db, login: string | null, repo: string, held?: ReadonlySet<string>): Promise<boolean> => await settlesNow(db, login, [repo], { ...settleMemo(), held });
+const isOperator = async (db: Db, login: string | null, repo: string, held?: ReadonlySet<string>): Promise<boolean> => await settlesNow(db, login, repo, held);
 
 /** The PR's newest merge attempt at `head` merged it. */
 const mergedAt = (m: MergeFacts, repo: string, n: number, head: string | null): boolean => !!head && m.attempts.get(`${refOf(repo, n)}@${head}`)?.outcome === "merged";
@@ -318,7 +317,7 @@ type Hand = { done: true } | { gone: true } | { wait: true } | { stop: string };
 
 /** Moves the row from ci to queued: the merge queue merges it as the workflow's approver from here. Idempotent. */
 async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>, pf: PassFacts, unsure = false): Promise<Hand> {
-  if (!await isOperator(db, p.by, p.repo, held)) return { stop: `${p.by} no longer settles decisions on ${p.repo}` };
+  if (!await isOperator(db, p.by, p.repo, held)) return { stop: `${p.by} no longer may act on ${p.repo}` };
   // A hand-over waits for a running verification and never goes on over a failed one.
   const v = pf.merge.verifications.get(`${refOf(p.repo, p.number)}@${head}`);
   if (v && (v.state === "planned" || v.state === "running")) return { wait: true };
@@ -428,7 +427,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended", held: Readonly
   if (it.state !== "OPEN") return cancel("the PR was closed");
 
   // The fix-up and the review that follows run on the maker's authority; the queued state re-checks the approval below.
-  if (p.state !== "queued" && !await isOperator(db, p.by, p.repo, held)) return cancel(`${p.by} no longer settles decisions on ${p.repo}`);
+  if (p.state !== "queued" && !await isOperator(db, p.by, p.repo, held)) return cancel(`${p.by} no longer may act on ${p.repo}`);
 
   if (p.state === "fixup") {
     const fx = p.fix_id !== null ? pf.fixResults.get(p.fix_id) : undefined;
@@ -536,7 +535,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended", held: Readonly
 
   // queued: the merge queue owns it now; only an approver who may no longer act ends it here.
   const by = leg?.approvedBy ?? p.by;
-  if (!await isOperator(db, by, p.repo, held)) await cancel(`${by} no longer settles decisions on ${p.repo}, so the approval no longer counts`);
+  if (!await isOperator(db, by, p.repo, held)) await cancel(`${by} no longer may act on ${p.repo}, so the approval no longer counts`);
 }
 
 /** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
@@ -546,8 +545,8 @@ async function endStaleRequests(db: Db, wake: Wake): Promise<void> {
   const [all, live] = await db.together(() => Promise.all([loadFixupRequests(db, { anyMaker: true, nowMs: now }), loadFixupRequests(db, { nowMs: now })]));
   const liveIds = new Set(live.map((o) => o.id));
   const gone = all.filter((o) => o.preapproval_id === null && !liveIds.has(o.id));
-  const ended = new Set(await endFixupRequests(db, gone.map((o) => ({ id: o.id, reason: "the requester no longer settles here" }))));
-  await sayAll(db, gone.filter((o) => ended.has(o.id)).map((o) => ({ repo: o.repo, number: o.number, text: `The queued fix-up of ${short(o.from_head)} was dropped: ${o.by} no longer settles decisions on ${o.repo}.` })));
+  const ended = new Set(await endFixupRequests(db, gone.map((o) => ({ id: o.id, reason: "the requester may no longer act here" }))));
+  await sayAll(db, gone.filter((o) => ended.has(o.id)).map((o) => ({ repo: o.repo, number: o.number, text: `The queued fix-up of ${short(o.from_head)} was dropped: ${o.by} no longer may act on ${o.repo}.` })));
   const ends: { id: number; reason: string; repo: string; number: number; head: string }[] = [];
   const results = await loadOperatorFixResults(db, live.map((o) => o.id));
   for (const o of live) {
@@ -689,7 +688,7 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
 export async function retryPreapproval(db: Db, by: string, repo: string, n: number): Promise<Preapproval> {
   const p = (await loadLegs(db, [{ repo, number: n }], { latestOnly: true })).get(refOf(repo, n))?.at(-1);
   if (!p || p.state !== "failed") throw new Error(`${repo}#${n} has no failed pre-approved merge`);
-  if (!await isOperator(db, by, repo)) throw new Error(`${by} does not settle decisions on ${repo}`);
+  if (!await isOperator(db, by, repo)) throw new Error(`${by} may not act on ${repo}`);
   await runPipelineStep(db, { repo, number: n, step: { kind: "fixup", instructions: p.instructions, merge: true }, by });
   return (await preapprovalOf(db, repo, n))!;
 }

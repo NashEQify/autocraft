@@ -83,7 +83,7 @@ before(async () => {
   await scopeToTracked(db);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
   const feedbackLimiter = new RateLimiter(60, 3600_000);
-  const s = await startServer({ config, db, provider: new FakeProvider(permsFile), feedbackLimiter, routes: apiRoutes({ limiter: feedbackLimiter }) });
+  const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });
   base = s.url;
   close = s.close;
 });

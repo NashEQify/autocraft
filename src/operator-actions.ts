@@ -6,7 +6,7 @@ import { loadPrMirror } from "./data/mirror/index.ts";
 import { loadReviewsAt, dropHoldReviews } from "./data/review/index.ts";
 import { loadFailedBatchOf, markVerificationsStale, supersedeFailedBatch, verificationOf } from "./data/merge/index.ts";
 import { addAudit } from "./data/control/index.ts";
-import { headOf } from "./review/candidates.ts";
+import { headOf } from "./core/rules.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
 
@@ -94,23 +94,16 @@ export async function batchAgain(db: Db, by: string, repo: string, n: number): P
 
 export const commands = {
   item: {
-    summary: "item batch-again REPO NUMBER --by LOGIN: release a PR held by a failed integration batch | item backlog REPO NUMBER --by LOGIN: put an open item on the Backlog as LOGIN, who must settle on the repo",
+    summary: "item batch-again REPO NUMBER --by LOGIN: release a PR held by a failed integration batch",
     async run(args: string[]): Promise<void> {
       const [sub, repo, num] = args;
       const by = args[args.indexOf("--by") + 1];
-      if ((sub !== "batch-again" && sub !== "backlog") || !repo || !/^\d+$/.test(num ?? "") || !args.includes("--by") || !by) {
-        console.error("usage: autocraft-server item batch-again|backlog <repo> <number> --by <login>");
+      if (sub !== "batch-again" || !repo || !/^\d+$/.test(num ?? "") || !args.includes("--by") || !by) {
+        console.error("usage: autocraft-server item batch-again <repo> <number> --by <login>");
         process.exit(2);
       }
       const db = await openDb();
       try {
-        if (sub === "backlog") {
-          const [{ settlesNow }, { backlogItem }] = await Promise.all([import("./settlers.ts"), import("./dash/api/decisions.ts")]);
-          if (!await settlesNow(db, by, [repo])) throw new ActionError(403, `${by} does not settle decisions on ${repo}`);
-          const d = await backlogItem(db, repo, Number(num), by, "cli");
-          console.log(`${repo}#${num}: on the Backlog (decision ${d.id})`);
-          return;
-        }
         await batchAgain(db, by, repo, Number(num));
         console.log(`${repo}#${num}: released from its failed batch`);
       } catch (e) {

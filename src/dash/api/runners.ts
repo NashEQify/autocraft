@@ -1,11 +1,9 @@
 // The signed-in user's Task Runners (session routes): their list, approving or denying a runner's device login
 // (src/remote/device-login.ts), setting a runner's scopes, and removing one. Maintainers and operators approve and deny;
-// anyone lists, sets the scopes of and removes their own. Answering is granted on the rule of answering connector tokens
-// (mcp.ts): only while answering is available, by an operator or by a maintainer where maintainers settle decisions.
+// anyone lists, sets the scopes of and removes their own. Sending commands is granted on the rule of command connector tokens
+// (mcp.ts): by an operator or a maintainer.
 // Removing deletes the credential: a lease it holds goes back to the queue at its next heartbeat (liveLease).
-import { maintainerWritesOn } from "../../settlers.ts";
 import { audit } from "../audit.ts";
-import { answering } from "../mcp/index.ts";
 import { revokeToken, setRunnerScopes, type Scopes } from "../mcp/tokens.ts";
 import { HttpError, RateLimiter, share } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -47,22 +45,21 @@ async function byCode<T>(req: Req, raw: unknown, find: (code: string) => Promise
 }
 
 /** Whether the signed-in user may let a runner answer. */
-const mayGrantAnswer = async (db: Db, req: Req): Promise<boolean> =>
-  answering.enabled && (req.user.role === "operator" || (req.user.role === "maintainer" && await maintainerWritesOn(db)));
+const mayGrantAnswer = (req: Req): boolean => req.user.role === "operator" || req.user.role === "maintainer";
 
 /** The `agent` and `answer` ticks of a request body, checked; `hadAnswer`: the runner answers already, so keeping it grants nothing. */
 async function scopesOf(db: Db, req: Req, b: Record<string, unknown>, hadAnswer = false): Promise<Scopes> {
   if (typeof b.agent !== "boolean" || typeof b.answer !== "boolean") throw new HttpError(400, "agent and answer must be true or false");
   if (b.agent && req.user.role === "viewer") throw new HttpError(403, "viewers cannot give a Task Runner agent access");
-  if (b.answer && !hadAnswer && !await mayGrantAnswer(db, req)) {
-    throw new HttpError(403, answering.enabled ? "only operators, and maintainers where they may settle decisions, let a Task Runner answer decisions" : "answering from an agent is not available yet");
+  if (b.answer && !hadAnswer && !mayGrantAnswer(req)) {
+    throw new HttpError(403, "only operators and maintainers let a Task Runner send commands");
   }
   return { agent: b.agent, answer: b.answer };
 }
 
 export async function list(db: Db, req: Req): Promise<RunnersReply> {
   const now = Date.now();
-  const [helpers, answering] = await db.together(() => Promise.all([loadHelpers(db, [req.user.login], now), mayGrantAnswer(db, req)]));
+  const [helpers, answering] = await db.together(() => Promise.all([loadHelpers(db, [req.user.login], now), Promise.resolve(mayGrantAnswer(req))]));
   return {
     runners: (helpers.get(req.user.login.toLowerCase()) ?? []).map(({ canAgent, canAnswer, cooledUntil, cooledReason, ...h }) => ({
       ...h, harness: h.harness as HelperInfo["harness"], usage: h.usage as HelperInfo["usage"], ...(cooledUntil ? { readiness: "cooled-off" as const, until: cooledUntil, reason: cooledReason } : {}), agent: canAgent, answer: canAnswer,

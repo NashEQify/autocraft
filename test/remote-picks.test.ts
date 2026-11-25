@@ -249,7 +249,7 @@ describe("picks and Manual only", async () => {
     const a = await q();
     await pickCall(db, user("bob"), a);
     const b = await q();
-    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0, userLocal: true });
+    const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, canAnswer: false, expensive: () => 0, userLocal: true });
     const rpc = async (login: string, role: Role, method: string, params?: Record<string, unknown>) => (await handleMcp(env(login, role), { jsonrpc: "2.0", id: 1, method, ...(params && { params }) }))!.result as any;
     const names = async (login: string, role: Role) => (await rpc(login, role, "tools/list")).tools.map((t: { name: string }) => t.name).filter((n: string) => n.includes("model_call"));
     assert.deepEqual(await names("eve", "viewer"), ["list_model_calls"]);

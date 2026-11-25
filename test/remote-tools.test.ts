@@ -75,7 +75,7 @@ describe("per-lease tools of remote calls", async () => {
     await submitCall(db, leases.get("ended")!.secret, { ok: false, error: "x", durationMs: 1 });
     const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
     const limiter = new RateLimiter(60, 3600_000);
-    const s = await startServer({ config, db, provider: new FakeProvider(permsFile), feedbackLimiter: limiter, routes: apiRoutes({ limiter }) });
+    const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });
     base = s.url;
     close = s.close;
   });

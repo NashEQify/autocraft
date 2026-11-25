@@ -21,7 +21,7 @@ afterEach(() => current?.close());
 
 /** `who.role` is read on every call, as the server reads the access list: a test changes it to demote the login under a live session. */
 const envOf = (w: World, role: Role, login = role === "operator" ? OPERATOR : "maint", who = { role }, canAnswer = true): McpEnv => ({
-  db: w.db, baseUrl: null, limiter: new RateLimiter(60, 3600_000), canAnswer, expensive: () => 0,
+  db: w.db, baseUrl: null, canAnswer, expensive: () => 0,
   user: async () => ({ login, role: who.role, canWrite: async () => true, canRead: async () => true }),
 });
 

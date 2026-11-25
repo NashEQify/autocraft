@@ -1,6 +1,5 @@
 // The dashboard's access list. The Access API and the CLI both write through
 // these functions, so every change ends the login's sessions and is audited.
-import { MAINTAINER_WRITES_KEY, maintainerWritesOn, setMaintainerWrites } from "./settlers.ts";
 import { audit } from "./dash/audit.ts";
 import type { Role } from "./dash/types.ts";
 import * as access from "./data/access/index.ts";
@@ -59,7 +58,7 @@ export async function setRole(db: Db, by: string, login: string, role: Role, opt
 
 export const operatorCount = access.countOperators;
 
-const USAGE = "usage: autocraft-server access list | add <login> [--operator|--maintainer] [--note TEXT] | remove <login> | role <login> operator|maintainer|viewer | maintainer-writes [on|off]";
+const USAGE = "usage: autocraft-server access list | add <login> [--operator|--maintainer] [--note TEXT] | remove <login> | role <login> operator|maintainer|viewer";
 
 async function run(args: string[]): Promise<void> {
   const [sub, login, ...rest] = args;
@@ -88,18 +87,6 @@ async function run(args: string[]): Promise<void> {
         console.log(`added ${login} as ${role}`);
         return;
       }
-      case "maintainer-writes": {
-        // Maintainers with write access settle decisions on repos that use the app's identity (src/settlers.ts).
-        if (login === undefined) {
-          console.log(`maintainer-writes: ${await maintainerWritesOn(db) ? "on" : "off"}`);
-          return;
-        }
-        if (login !== "on" && login !== "off") break;
-        const changed = await setMaintainerWrites(db, login === "on");
-        if (changed) await audit(db, "cli", "maintainer-writes", MAINTAINER_WRITES_KEY, { value: login });
-        console.log(changed ? `maintainer-writes: ${login}` : `maintainer-writes was already ${login}`);
-        return;
-      }
       case "remove":
         if (!login) break;
         await removeLogin(db, "cli", login);
@@ -124,5 +111,5 @@ async function run(args: string[]): Promise<void> {
 }
 
 export const commands = {
-  access: { summary: "dashboard access list: list | add <login> [--operator|--maintainer] [--note] | remove <login> | role <login> operator|maintainer|viewer | maintainer-writes [on|off]", run },
+  access: { summary: "dashboard access list: list | add <login> [--operator|--maintainer] [--note] | remove <login> | role <login> operator|maintainer|viewer", run },
 };
