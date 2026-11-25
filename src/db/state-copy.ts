@@ -5,7 +5,8 @@
 // Runs on SQLite from connect() (src/db.ts) and on Postgres from migratePg (src/db/pg-triggers.ts). The work is split into
 // units of one transaction each; a backfill of a large table runs one unit per id range, so no transaction holds row locks
 // on many rows. Every unit is idempotent (inserts skip present keys, updates fill only empty columns), so a run cut short
-// is completed by the next one; STATE_COPY_DONE, written last, makes later runs do nothing.
+// is completed by the next one; STATE_COPY_DONE, written last with the time the copy started, makes later runs do nothing.
+// What older processes write to the old places after the copy is carried over at the switch (src/db/switch-over.ts).
 import type { DatabaseSync } from "node:sqlite";
 import type { Migration, PgClient } from "./pg-migrate.ts";
 
@@ -15,12 +16,12 @@ export const STATE_COPY_DONE = "state_copy_done";
 export const ACTIVE_LEG_STATES = ["fixup", "review", "ci", "queued"] as const;
 export const ACTIVE_LEG_INDEX = "preapprovals_active";
 
-type Value = string | number | null;
+export type Value = string | number | null;
 type Row = Record<string, unknown>;
 type Stmt = { sql: string; params: Value[] };
 
 /** A copy or backfill. With `range`, one unit runs per span of `size` ids of `range.col`, else one unit runs. */
-interface Task {
+export interface Task {
   label: string;
   /** The table the unit writes, named in the Postgres lock-wait log. */
   table: string;
@@ -80,18 +81,23 @@ const UNKNOWN = /^mergeable_unknown:(.+)#([0-9]+)$/;
 
 type ReviewMarks = { stale_at: string | null; rerun_day: string | null; rerun_count: number; fail_head: string | null; fail_count: number; fail_at: string | null };
 
-/** The inserts that copy the settings state rows into their tables, and the stage_limits resets. */
-function settingsWrites(p: string, rows: Row[], now: string): Stmt[] {
+/** A state table's rows as the settings rows hold them, in the order of `cols`. */
+export type StateRows = { table: string; cols: string[]; rows: Value[][] };
+/** Everything the settings rows hold of the state tables; `resets` are the daily-limit resets [step, time]. */
+export type SettingsState = { tables: Record<StateTable, StateRows>; resets: [string, string][] };
+export type StateTable = "sync_state" | "repo_step_approvals" | "lane_state" | "dupe_drops" | "review_state" | "merge_state" | "merge_repo_state" | "build_state" | "classify_state" | "liveness_state";
+
+/** The state rows the settings rows `rows` hold; a time they do not carry is `now`. */
+export function settingsState(rows: readonly Row[], now: string): SettingsState {
   const kv = new Map<string, string>();
   for (const r of rows) if (typeof r.key === "string" && typeof r.value === "string") kv.set(r.key, r.value);
-  const out: Stmt[] = [];
 
   const sync: [string, Value][] = [
     ...Object.entries(SYNC_TEXT).flatMap(([col, key]): [string, Value][] => (kv.has(key) ? [[col, kv.get(key)!]] : [])),
     ...Object.entries(SYNC_INT).flatMap(([col, key]): [string, Value][] => (int(kv.get(key)) !== null ? [[col, int(kv.get(key))]] : [])),
   ];
-  if (sync.length) out.push(...insert(p, "sync_state", ["id", ...sync.map(([c]) => c)], [[1, ...sync.map(([, v]) => v)]]));
 
+  const resets: [string, string][] = [];
   const approvals: Value[][] = [];
   const lanes: Value[][] = [];
   const drops: Value[][] = [];
@@ -120,7 +126,7 @@ function settingsWrites(p: string, rows: Row[], now: string): Stmt[] {
     } else if (key.startsWith("limit_reset_at:")) {
       const step = key.slice("limit_reset_at:".length);
       lanes.push(["reset", step, "", value, null, now]);
-      out.push(stmt(`UPDATE ${p}stage_limits SET reset_at = ? WHERE step = ? AND reset_at IS NULL`, value, step));
+      resets.push([step, value]);
     } else if (key in LANE_CURSORS) lanes.push(["cursor", LANE_CURSORS[key]!, "", value, null, now]);
     else if (key in LANE_MARKS) lanes.push(["mark", LANE_MARKS[key]!, "", value, null, now]);
     else if (key.startsWith("dupe_drop:")) {
@@ -146,41 +152,46 @@ function settingsWrites(p: string, rows: Row[], now: string): Stmt[] {
     } else if (BUILD_KEYS.has(key) || BUILD_PREFIXES.some((x) => key.startsWith(x))) build.push([key, value, now]);
   }
 
-  out.push(...insert(p, "repo_step_approvals", ["repo", "step", "by", "at"], approvals));
-  out.push(...insert(p, "lane_state", ["kind", "step", "repo", "value", "job_id", "at"], lanes));
-  out.push(...insert(p, "dupe_drops", ["repo", "key", "hash", "at"], drops));
-  out.push(...insert(p, "review_state", ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],
-    [...reviews.values()].map(({ repo, number, m }) => [repo, number, m.stale_at, m.rerun_day, m.rerun_count, m.fail_head, m.fail_count, m.fail_at])));
-  out.push(...insert(p, "merge_state", ["repo", "number", "head", "since", "reads", "rereads", "stuck"], unknown));
-  out.push(...insert(p, "merge_repo_state", ["repo", "batch_size", "updated_at"], sizes));
-  out.push(...insert(p, "build_state", ["key", "value", "updated_at"], build));
-  if (kv.has("classify_run")) out.push(...insert(p, "classify_state", ["kind", "repo", "number", "value", "at"], [["current_run", "", 0, kv.get("classify_run")!, now]]));
-  if (kv.has("liveness_at") || kv.has("liveness_open")) {
-    out.push(...insert(p, "liveness_state", ["id", "checked_at", "open"], [[1, kv.get("liveness_at") ?? null, int(kv.get("liveness_open"))]]));
-  }
-  return out;
+  const of = <T extends StateTable>(table: T, cols: string[], list: Value[][]): StateRows => ({ table, cols, rows: list });
+  return {
+    resets,
+    tables: {
+      sync_state: of("sync_state", ["id", ...sync.map(([c]) => c)], sync.length ? [[1, ...sync.map(([, v]) => v)]] : []),
+      repo_step_approvals: of("repo_step_approvals", ["repo", "step", "by", "at"], approvals),
+      lane_state: of("lane_state", ["kind", "step", "repo", "value", "job_id", "at"], lanes),
+      dupe_drops: of("dupe_drops", ["repo", "key", "hash", "at"], drops),
+      review_state: of("review_state", ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],
+        [...reviews.values()].map(({ repo, number, m }) => [repo, number, m.stale_at, m.rerun_day, m.rerun_count, m.fail_head, m.fail_count, m.fail_at])),
+      merge_state: of("merge_state", ["repo", "number", "head", "since", "reads", "rereads", "stuck"], unknown),
+      merge_repo_state: of("merge_repo_state", ["repo", "batch_size", "updated_at"], sizes),
+      build_state: of("build_state", ["key", "value", "updated_at"], build),
+      classify_state: of("classify_state", ["kind", "repo", "number", "value", "at"], kv.has("classify_run") ? [["current_run", "", 0, kv.get("classify_run")!, now]] : []),
+      liveness_state: of("liveness_state", ["id", "checked_at", "open"],
+        kv.has("liveness_at") || kv.has("liveness_open") ? [[1, kv.get("liveness_at") ?? null, int(kv.get("liveness_open"))]] : []),
+    },
+  };
 }
 
-function tasks(p: string, now: string): Task[] {
+/** The inserts that copy the settings state rows into their tables, and the stage_limits resets. */
+function settingsWrites(p: string, rows: Row[], now: string): Stmt[] {
+  const s = settingsState(rows, now);
+  return [
+    ...s.resets.map(([step, at]) => stmt(`UPDATE ${p}stage_limits SET reset_at = ? WHERE step = ? AND reset_at IS NULL`, at, step)),
+    ...Object.values(s.tables).flatMap((t) => insert(p, t.table, t.cols, t.rows)),
+  ];
+}
+
+/** The backfills that fill only what is empty; the switch runs them again for rows older processes wrote after the copy. */
+export function backfills(p: string): Record<"agentRuns" | "callItems" | "batchPrs" | "batchForks" | "helpers" | "alerts" | "groups" | "groupItems", Task> {
   const first = (col: string) => `(SELECT i.${col} FROM ${p}agent_run_items i WHERE i.run_id = agent_runs.id ORDER BY i.repo, i.number LIMIT 1)`;
   const token = (col: string) => `(SELECT t.${col} FROM ${p}mcp_tokens t WHERE t.id = remote_helpers.token_id)`;
-  return [
-    {
-      label: "settings", table: "settings",
-      read: () => stmt(`SELECT key, value FROM ${p}settings WHERE value IS NOT NULL`),
-      writes: (rows) => settingsWrites(p, rows, now),
-    },
-    {
-      label: "classify_state", table: "classify_state",
-      writes: () => [stmt(`INSERT INTO ${p}classify_state (kind, repo, number, value, at)
-        SELECT 'jev_failed', repo, number, jev_failed_hash, CAST(? AS TEXT) FROM ${p}items WHERE jev_failed_hash IS NOT NULL ON CONFLICT DO NOTHING`, now)],
-    },
-    {
+  return {
+    agentRuns: {
       label: "agent_runs first item", table: "agent_runs", range: { table: "agent_runs", col: "id", size: 2000 },
       writes: (_, lo, hi) => [stmt(`UPDATE ${p}agent_runs SET first_repo = ${first("repo")}, first_number = ${first("number")}
         WHERE id >= ? AND id < ? AND first_repo IS NULL AND EXISTS (SELECT 1 FROM ${p}agent_run_items i WHERE i.run_id = agent_runs.id)`, lo, hi)],
     },
-    {
+    callItems: {
       label: "remote_call_items", table: "remote_call_items",
       read: () => stmt(`SELECT id, items FROM ${p}remote_calls WHERE state IN ('queued', 'leased')`),
       writes: (rows) => insert(p, "remote_call_items", ["call_id", "pos", "repo", "number"], rows.flatMap((r) => {
@@ -192,12 +203,12 @@ function tasks(p: string, now: string): Task[] {
         });
       })),
     },
-    {
+    batchPrs: {
       label: "merge_batch_prs repo", table: "merge_batch_prs", range: { table: "merge_batch_prs", col: "batch_id", size: 5000 },
       writes: (_, lo, hi) => [stmt(`UPDATE ${p}merge_batch_prs SET repo = (SELECT b.repo FROM ${p}merge_batches b WHERE b.id = merge_batch_prs.batch_id)
         WHERE batch_id >= ? AND batch_id < ? AND repo IS NULL`, lo, hi)],
     },
-    {
+    batchForks: {
       // Batches pushed before the fork was stored: the push's audit row names it (the newest one wins).
       label: "merge_batches fork", table: "merge_batches", range: { table: "merge_batches", col: "id", size: 2000 },
       read: (lo, hi) => stmt(`SELECT b.id AS id, a.details AS details FROM ${p}merge_batches b
@@ -212,40 +223,58 @@ function tasks(p: string, now: string): Task[] {
         return [...forks].map(([id, fork]) => stmt(`UPDATE ${p}merge_batches SET fork = ? WHERE id = ? AND fork IS NULL`, fork, id));
       },
     },
-    {
+    helpers: {
       label: "remote_helpers runner columns", table: "remote_helpers",
       writes: () => [stmt(`UPDATE ${p}remote_helpers SET idle_claim_at = ${token("idle_claim_at")}, idle_tiers = ${token("idle_tiers")},
           idle_repos = ${token("idle_repos")}, machine = ${token("machine")}
         WHERE idle_claim_at IS NULL AND idle_tiers IS NULL AND idle_repos IS NULL AND machine IS NULL
           AND EXISTS (SELECT 1 FROM ${p}mcp_tokens t WHERE t.id = remote_helpers.token_id)`)],
     },
-    {
+    alerts: {
       label: "discord_alert_msgs workflow key", table: "discord_alert_msgs",
       read: () => stmt(`SELECT decision_id, user_hash FROM ${p}discord_alert_msgs WHERE workflow_id IS NULL AND substr(decision_id, 1, 3) = 'wf:'`),
       writes: (rows) => rows.flatMap((r) => {
         const m = typeof r.decision_id === "string" ? /^wf:([0-9]{1,15}):(.+)$/.exec(r.decision_id) : null;
-        return m ? [stmt(`UPDATE ${p}discord_alert_msgs SET workflow_id = ?, rec_at = ? WHERE decision_id = ? AND user_hash = ?`, Number(m[1]), m[2]!, r.decision_id as string, r.user_hash as string)] : [];
+        return m ? [stmt(`UPDATE ${p}discord_alert_msgs SET workflow_id = ?, rec_at = ? WHERE decision_id = ? AND user_hash = ?
+          AND NOT EXISTS (SELECT 1 FROM ${p}discord_alert_msgs o WHERE o.user_hash = ? AND o.workflow_id = ? AND o.rec_at = ?)`,
+          Number(m[1]), m[2]!, r.decision_id as string, r.user_hash as string, r.user_hash as string, Number(m[1]), m[2]!)] : [];
       }),
     },
-    {
+    groups: {
       label: "dupe_groups id", table: "dupe_groups", range: { table: "dupe_groups", col: "rowid", size: 5000 },
       writes: (_, lo, hi) => [stmt(`UPDATE ${p}dupe_groups SET id = decision_id WHERE rowid >= ? AND rowid < ? AND id IS NULL`, lo, hi)],
     },
-    {
+    groupItems: {
       label: "dupe_group_items group id", table: "dupe_group_items", range: { table: "dupe_group_items", col: "rowid", size: 5000 },
       writes: (_, lo, hi) => [stmt(`UPDATE ${p}dupe_group_items SET group_id = decision_id WHERE rowid >= ? AND rowid < ? AND group_id IS NULL`, lo, hi)],
     },
+  };
+}
+
+function tasks(p: string, now: string): Task[] {
+  return [
+    {
+      label: "settings", table: "settings",
+      read: () => stmt(`SELECT key, value FROM ${p}settings WHERE value IS NOT NULL`),
+      writes: (rows) => settingsWrites(p, rows, now),
+    },
+    {
+      label: "classify_state", table: "classify_state",
+      writes: () => [stmt(`INSERT INTO ${p}classify_state (kind, repo, number, value, at)
+        SELECT 'jev_failed', repo, number, jev_failed_hash, CAST(? AS TEXT) FROM ${p}items WHERE jev_failed_hash IS NOT NULL ON CONFLICT DO NOTHING`, now)],
+    },
+    ...Object.values(backfills(p)),
     {
       label: "done", table: "settings",
-      writes: () => [stmt(`INSERT INTO ${p}settings (key, value) VALUES (?, '1') ON CONFLICT (key) DO NOTHING`, STATE_COPY_DONE)],
+      writes: () => [stmt(`INSERT INTO ${p}settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING`, STATE_COPY_DONE, now)],
     },
   ];
 }
 
-const boundsSql = (t: Task, p: string): string => `SELECT min(${t.range!.col}) AS lo, max(${t.range!.col}) AS hi FROM ${p}${t.range!.table}`;
+export const boundsSql = (t: Task, p: string): string => `SELECT min(${t.range!.col}) AS lo, max(${t.range!.col}) AS hi FROM ${p}${t.range!.table}`;
 
 /** The [lo, hi) id spans a task's units cover: one unit without a range, none for an empty table. */
-function spans(t: Task, bounds: Row | undefined): [number, number][] {
+export function spans(t: Task, bounds: Row | undefined): [number, number][] {
   if (!t.range) return [[0, 0]];
   if (bounds?.lo === null || bounds?.lo === undefined) return [];
   const out: [number, number][] = [];

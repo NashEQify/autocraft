@@ -10,7 +10,7 @@ import { scopeToTracked } from "../repos.ts";
 import { linkRepeatedFindings } from "../security/scan.ts";
 import { autoFixConfirmed } from "../security/actions.ts";
 import { execJob } from "./exec.ts";
-import { isDraining, isEnabled, LimitError, pipelineState, resetLimitCount, setEnabled, setLimit } from "./autopilot.ts";
+import { DEFAULT_PER_DAY, isDraining, isEnabled, LimitError, pipelineState, resetLimitCount, setEnabled, setLimit } from "./autopilot.ts";
 import { enqueue, JobError, listJobs, requestCancel } from "./jobs.ts";
 import { MIN_INTERVAL_KEY, reviewMinInterval, setReviewMinInterval } from "../review/gate.ts";
 import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.ts";
@@ -24,6 +24,7 @@ import { startDiscord } from "../discord/index.ts";
 import { closeDb, openDb, setDbRole } from "../db/open.ts";
 import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
 import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
+import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
 import { keepSnapshot } from "../itemtools/keeper.ts";
@@ -95,6 +96,9 @@ async function serve(): Promise<void> {
   if (lease.epoch) setFence({ role: "runner", epoch: lease.epoch });
   leading = true;
 
+  // The switch may take a while: the probes answer meanwhile. What fails here stops the runner, and the next start completes it.
+  standbyProbes ??= startHealthServer(workerListen, async () => false, state).catch((e: Error) => (console.error(`runner: startup probes not started: ${e.message}`), null));
+  await switchOver(db, { perDay: DEFAULT_PER_DAY, log: (l) => console.log(`runner: ${l}`) });
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);

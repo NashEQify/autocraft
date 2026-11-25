@@ -2295,7 +2295,8 @@ CREATE TABLE IF NOT EXISTS item_workflows (
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');
 CREATE INDEX IF NOT EXISTS item_workflows_item ON item_workflows(repo, number, id);
 -- What people did to an item's workflow, with the parsed command (never the raw text): started, approved, answered,
--- ambiguous, blocked, stopped, weighted. workflow_id is null for an ambiguous answer on an item with no workflow.
+-- ambiguous, blocked, stopped, weighted; and, archived, the answers and actions of the decision system before it. workflow_id is
+-- null for an ambiguous answer on an item with no workflow and for an archived row.
 CREATE TABLE IF NOT EXISTS workflow_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workflow_id INTEGER,
@@ -2310,6 +2311,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 CREATE INDEX IF NOT EXISTS workflow_events_item ON workflow_events(repo, number, id);
 CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, at);
+-- An archived row (src/db/switch-over.ts) names the decision or action it records in parsed: {"kind": "archived", "legacy": "decision:<id>"}.
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_events_archived ON workflow_events(repo, number, parsed) WHERE kind = 'archived';
 -- The last "link your account" reply to a GitHub commenter with no AutoCraft login; one a week per login. Bookkeeping: no live topic.
 CREATE TABLE IF NOT EXISTS github_link_nudges (
   login TEXT PRIMARY KEY COLLATE NOCASE,
