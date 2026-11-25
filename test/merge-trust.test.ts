@@ -71,6 +71,8 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
   for (const c of all) { await c.push(w, c.n, `sha${c.n}`, `sha${c.n}b`); await w.synced(c.n, `sha${c.n}b`); await w.verified(c.n); }
   await tick(w);
   const plans = new Map((await w.plan()).prs.map((p) => [p.facts.number, p.plan]));
+  const heads = all.map((c) => ({ number: c.n, head: `sha${c.n}b` }));
+  const early = await mergeVerdicts(w.db, "app", heads);
   for (const c of all) {
     const label = `${c.name}, ${c.state}, ${c.entry}`;
     const wf = (await liveWorkflow(w.db, "app", c.n))!, leg = await legOf(w, c.n);
@@ -81,7 +83,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
     const kinds = plans.get(c.n)!.actions.map((a) => a.kind);
     assert.ok(kinds.includes(unreviewed ? "premerge" : c.name === "clean base merge" ? "carry" : "review"), `${label}: ${kinds.join()}`);
     assert.ok(!kinds.includes("merge"), label);
-    const may = (await mergeVerdicts(w.db, "app", [{ number: c.n, head: `sha${c.n}b` }])).get(c.n)!;
+    const may = early.get(c.n)!;
     assert.ok(!may.ok && /hand it over/.test(may.why), `${label}: ${JSON.stringify(may)}`);
   }
 
@@ -91,7 +93,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
     await w.premerge(c.n, "clean");
   }
   await tick(w);
-  const verdicts = await mergeVerdicts(w.db, "app", all.map((c) => ({ number: c.n, head: `sha${c.n}b` })));
+  const verdicts = await mergeVerdicts(w.db, "app", heads);
   for (const c of all) {
     assert.equal((await legOf(w, c.n)).state, "queued", `${c.name}, ${c.state}, ${c.entry}`);
     assert.deepEqual(verdicts.get(c.n), { ok: true, as: "person", by: OPERATOR }, `${c.name}, ${c.state}, ${c.entry}`);

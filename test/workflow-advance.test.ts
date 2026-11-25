@@ -4,67 +4,28 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 import { computeChecks } from "../src/health-checks.ts";
 import { Runner } from "../src/runner/runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
-import { addOwnCommits, setStepApproval } from "../src/data/control/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
-import { runCommand, type Actor } from "../src/workflow/apply.ts";
+import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
-import { eventsOf, liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
+import { liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { SNAPSHOT_CACHE_MS } from "../src/data/runners/snapshot-cache.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
-import type { Blocker, Surface } from "../src/workflow/types.ts";
+import type { Blocker } from "../src/workflow/types.ts";
 import { mergeVerdicts } from "../src/merge/approval.ts";
 import { T0, T1, untilQuiet, world, type World } from "./world-db.ts";
-import { setFeature } from "../src/build/features.ts";
-import { textHash } from "../src/core/open-prs.ts";
-import { implementStep } from "../src/core/decide-item.ts";
-import { loadItemFact } from "../src/core/issue-facts.ts";
 import { currentAttempt, writeStep } from "../src/implement/attempt.ts";
 import { openQuestion } from "../src/implement/questions.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
-import { recordPlan } from "../src/implement/plan.ts";
 import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
-import type { PlanReply } from "../src/implement/types.ts";
-
-let current: World | undefined;
-afterEach(() => current?.close());
-
-const MAINT = "mira";
-const actor: Actor = { login: MAINT, canWrite: async () => true };
-/** A time after the command that started the item: what the pipeline records after it. */
-const later = (): string => new Date(Date.now() + 5_000).toISOString();
-
-/** The repo "app" on the maintainer workflow, the app identity, a maintainer with write access, and PR 1 started at Review with the merge approved. */
-async function approvedReview(): Promise<World> {
-  const w = current = await (await world()).repo();
-  const db = w.db;
-  await setStepApproval(db, [{ repo: "app", step: "merge", on: true }], MAINT);
-  await db.run(db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
-  await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
-  await db.run(db.k.insertInto("main.access").values({ login: MAINT, role: "maintainer" }));
-  await db.run(db.k.insertInto("main.repo_permissions").values({ login: MAINT, repo: "app", permission: "write", checked_at: new Date().toISOString() }));
-  await w.pr(1, { label: "feature" });
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("review and merge"), items: [{ repo: "app", number: 1 }] });
-  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
-  return w;
-}
-
-const review = async (w: World, o: { head: string; verdict: string; sure?: boolean; fixes?: object[]; outside?: number; at?: string }) =>
-  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
-    repo: "app", number: 1, head_oid: o.head, run_id: "rv", at: o.at ?? later(), model: "m", mode: "full", verdict: o.verdict, sure: o.sure === false ? 0 : 1, reason: "r",
-    fixes: o.fixes?.length ? JSON.stringify(o.fixes) : null, workflow: o.outside ? JSON.stringify({ outside_purpose: { lines: o.outside, note: "reformats a module" }, recommendation: null }) : null,
-  }));
-const fixup = async (w: World, o: { state: string; files?: string[]; patch?: string; from?: string; to?: string }) =>
-  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: o.from ?? "sha1", to_head: o.to ?? null, state: o.state, reason: null, files: JSON.stringify(o.files ?? []), attempt: 1, created_at: later(), source: "review", patch: o.patch ?? null }));
-const legState = async (w: World): Promise<string | undefined> =>
-  (await w.db.get(w.db.k.selectFrom("main.preapprovals").select("state").where("number", "=", 1).orderBy("id", "desc").limit(1)))?.state;
+import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, review, review8, say } from "./workflow-advance-world.ts";
 
 test("each blocker stops an approved item and keeps its approval", async () => {
   const bigPatch = Array.from({ length: 450 }, (_, i) => `+line ${i}`).join("\n");
@@ -180,7 +141,7 @@ test("a failed verification or a lasting refusal after the hand-over asks once, 
 });
 
 test("an answer that runs nothing leaves the PR alone until someone starts it; an issue's workflow that ended as its PR merged leaves its other PRs as they were", async () => {
-  const w = current = await (await (await world()).repo()).acting();
+  const w = keep(await (await (await world()).repo()).acting());
   const db = w.db;
   for (const n of [1, 2]) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
   const merges = async (n: number): Promise<boolean> => (await w.prPlan(n)).actions.some((a) => a.kind === "merge") && (await mergeVerdicts(db, "app", [{ number: n, head: `sha${n}` }])).get(n)!.ok;
@@ -312,400 +273,6 @@ test("a recommendation's fix numbers follow the stored fixes, not the model's li
   assert.deepEqual([r.fixes.map((f) => f.file), r.workflow?.recommendation?.fix], [["src/c.rs", "src/a.rs", "src/b.rs"], [3]], "the claim's fix goes first, so the model's 2 is the stored 3");
 });
 
-test("a plain approval does not accept a hold review nobody was shown", async () => {
-  const w = await approvedReview();
-  const db = w.db;
-  await w.pr(2, { label: "feature" });
-  await runCommand(db, actor, "dashboard", { parsed: parse("review"), items: [{ repo: "app", number: 2 }] });
-  await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: later(), model: "m", mode: "full", verdict: "hold", sure: 1, reason: "r" }));
-  await runCommand(db, actor, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 2 }], at: new Date(Date.now() + 10_000).toISOString() });
-  await advanceWorkflows(db);
-  assert.equal((await liveWorkflow(db, "app", 2))!.blocker, "major-finding");
-});
-
-/** PR 2, started at Review and not approved, with its question at sha2: a take's "Merge it.", or a close. */
-async function askedReview(verdict = "take"): Promise<World> {
-  const w = await approvedReview();
-  await w.pr(2, { label: "feature" });
-  assert.equal((await answer(w, "review")).outcome, "run");
-  await review2(w, "sha2", verdict);
-  await advanceWorkflows(w.db);
-  const wf = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([wf.state, wf.recHead], ["recommending", "sha2"]);
-  return w;
-}
-/** PR 2's review at the head, with its verification and a clean pre-merge review: nothing but the merge is left. */
-const review2 = async (w: World, head: string, verdict = "take") => {
-  await (await w.verified(2)).premerge(2, "clean");
-  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 2, head_oid: head, run_id: "rv", at: later(), model: "m", mode: "full", verdict, sure: 1, reason: "r" }));
-};
-const answer = async (w: World, text: string, via: Surface = "dashboard", number = 2) => (await runCommand(w.db, actor, via, via === "github"
-  ? { parsed: parse(text), items: [{ repo: "app", number }], head: String((await w.rows(`SELECT head_oid FROM items WHERE number = ${number}`))[0]!.head_oid) }
-  : { parsed: parse(via === "discord" ? `${text}: app#${number}` : text), items: via === "discord" ? [] : [{ repo: "app", number }] })).items[0]!;
-const ownPush = async (w: World, from: string, to: string, number = 2) => {
-  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number, from_head: from, to_head: to, state: "pushed", files: "[]", attempt: 1, created_at: later(), source: "review" }));
-  await w.synced(number, to);
-};
-const ANSWERS: [Surface, string][] = [["dashboard", "yes"], ["agent", "approve"], ["discord", "merge"], ["github", "yes"]];
-
-test("an answer is for the head its question showed: after an author push it approves nothing, and the question is asked again at the new head", async () => {
-  for (const [via, text] of ANSWERS) {
-    const w = await askedReview();
-    await w.synced(2, "theirs");
-    const early = await answer(w, text, via);
-    assert.equal(early.outcome, "refused", via);
-    assert.match(early.line, /author pushed commits/, via);
-    await advanceWorkflows(w.db);
-    assert.equal((await liveWorkflow(w.db, "app", 2))!.rec, null, "no question stands on the old head");
-    assert.notEqual((await answer(w, "yes", via)).outcome, "run", "a late yes answers nothing");
-
-    await review2(w, "theirs");
-    await advanceWorkflows(w.db);
-    const asked = (await liveWorkflow(w.db, "app", 2))!;
-    assert.deepEqual([asked.state, asked.recHead, asked.approvedBy], ["recommending", "theirs", null], via);
-    assert.match(asked.rec!.text, /author pushed/);
-    await advanceWorkflows(w.db);
-    assert.equal((await liveWorkflow(w.db, "app", 2))!.recAt, asked.recAt, "asked once at that head");
-
-    assert.equal((await answer(w, text, via)).outcome, "run", via);
-    const on = (await liveWorkflow(w.db, "app", 2))!;
-    assert.deepEqual([on.approvedBy, on.baseHead, on.state], [MAINT, "theirs", "running"], via);
-    w.close();
-  }
-});
-
-test("our own push leaves the question as it is, and an answer accepts it; not once it lies on the author's commits", async () => {
-  for (const [via, text] of ANSWERS) {
-    const w = await askedReview();
-    const asked = (await liveWorkflow(w.db, "app", 2))!;
-    await ownPush(w, "sha2", "ours");
-    await advanceWorkflows(w.db);
-    const now = (await liveWorkflow(w.db, "app", 2))!;
-    assert.deepEqual([now.state, now.recHead, now.recAt, now.rec], [asked.state, asked.recHead, asked.recAt, asked.rec], via);
-    if (via === "dashboard") {
-      await ownPush(w, "theirs", "ours on theirs");
-      assert.equal((await answer(w, text, via)).outcome, "refused");
-      await w.synced(2, "ours");
-    }
-    const o = await answer(w, text, via);
-    assert.equal(o.outcome, "run", o.line);
-    const on = (await liveWorkflow(w.db, "app", 2))!;
-    assert.deepEqual([on.approvedBy, on.baseHead], [MAINT, "ours"], via);
-    w.close();
-  }
-});
-
-test("after an author push a yes to a recommended close closes nothing; the word close does", async () => {
-  const w = await askedReview("close");
-  await w.synced(2, "theirs");
-  assert.equal((await answer(w, "yes")).outcome, "refused");
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.state, "recommending");
-  assert.equal((await answer(w, "close")).outcome, "run");
-  assert.equal(await liveWorkflow(w.db, "app", 2), null);
-});
-
-test("a blocked item asks again at each head the author pushes, once, and goes on from the one a person answered at", async () => {
-  for (const entry of ["merge", "review and merge"]) {
-    const w = await approvedReview();
-    const db = w.db;
-    await w.pr(2, { label: "feature" });
-    assert.equal((await answer(w, entry)).outcome, "run");
-    if (entry === "merge") await w.synced(2, "theirs1");
-    else await review2(w, "sha2", "hold");
-    await advanceWorkflows(db);
-    const first = (await liveWorkflow(db, "app", 2))!;
-    assert.deepEqual([first.state, first.blocker], ["blocked", entry === "merge" ? "author-commits" : "major-finding"]);
-
-    await w.synced(2, "theirs2");
-    assert.equal((await answer(w, "yes")).outcome, "refused", entry);
-    for (let i = 0; i < 2; i++) await advanceWorkflows(db);
-    const again = (await liveWorkflow(db, "app", 2))!;
-    assert.deepEqual([again.state, again.blocker, again.recHead, again.approvedBy], ["blocked", "author-commits", "theirs2", MAINT], entry);
-    assert.match(again.rec!.text, /author pushed/);
-    assert.equal((await eventsOf(db, "app", 2)).filter((e) => e.kind === "blocked").length, 2, "one question per head");
-
-    await new Promise((r) => setTimeout(r, 5));
-    assert.equal((await answer(w, "yes")).outcome, "run", entry);
-    const on = (await liveWorkflow(db, "app", 2))!;
-    assert.deepEqual([on.state, on.baseHead], ["running", "theirs2"], entry);
-    w.close();
-  }
-});
-
-/** PR 2 in the merge queue, stopped at commits its author pushed (head "theirs"). */
-async function authorPushed(): Promise<World> {
-  const w = await approvedReview();
-  await w.pr(2, { label: "feature" });
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await w.synced(2, "theirs");
-  await advanceWorkflows(w.db);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "author-commits");
-  await pause();
-  return w;
-}
-const pause = () => new Promise((r) => setTimeout(r, 5));
-const ticks = (w: World) => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 3);
-const leg2 = async (w: World) => (await w.rows("SELECT state, head, from_head FROM preapprovals WHERE number = 2 ORDER BY id DESC"))[0]!;
-const planned2 = async (w: World) => (await w.prPlan(2)).actions.map((a) => a.kind);
-/** A CI fix of ours that lands now. */
-const pushNow = async (w: World, from: string, to: string, lines = 10) => {
-  const at = new Date().toISOString();
-  await w.db.run(w.db.k.insertInto("main.own_pushes").values({ repo: "app", number: 2, action: "cifix-push", from_oid: from, to_oid: to, lines, at, landed_at: at }));
-  await w.synced(2, to);
-  await pause();
-};
-const reviewNow = async (w: World, head: string, verdict: string) => {
-  await review2(w, head, verdict);
-  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }).where("number", "=", 2).where("head_oid", "=", head));
-  await w.db.run(w.db.k.deleteFrom("main.review_state").where("number", "=", 2));
-  await pause();
-};
-
-test("a yes to the author's commits on a merge entry has a model review them first; the word merge approves them as they are", async () => {
-  for (const verdict of ["take", "hold"]) {
-    const w = await authorPushed();
-    assert.equal((await answer(w, "yes")).outcome, "run");
-    await ticks(w);
-    assert.deepEqual([(await leg2(w)).state, (await leg2(w)).head], ["review", "theirs"]);
-    assert.ok((await planned2(w)).includes("review"));
-    await reviewNow(w, "theirs", verdict);
-    await ticks(w);
-    if (verdict === "hold") {
-      const wf = (await liveWorkflow(w.db, "app", 2))!;
-      assert.deepEqual([wf.state, wf.blocker], ["blocked", "major-finding"], "the review stops it like any reviewed PR");
-      await pause();
-      assert.equal((await answer(w, "merge")).outcome, "run");
-      await ticks(w);
-    }
-    assert.deepEqual([(await leg2(w)).state, (await liveWorkflow(w.db, "app", 2))!.state], ["queued", "running"], verdict);
-    assert.ok((await planned2(w)).includes("merge"), verdict);
-    w.close();
-  }
-  const w = await authorPushed();
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await ticks(w);
-  assert.ok(!(await planned2(w)).includes("review"));
-  await (await w.verified(2)).premerge(2, "clean");
-  await ticks(w);
-  assert.equal((await leg2(w)).state, "queued");
-});
-
-test("a merge entry is reviewed again when a person asks for it, whatever an older review said", async () => {
-  const w = await approvedReview();
-  await w.pr(2, { label: "feature" });
-  await reviewNow(w, "sha2", "hold");
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await ticks(w);
-  assert.equal((await leg2(w)).state, "queued", "a merge entry needs no review");
-  await pause();
-  assert.equal((await answer(w, "review")).outcome, "run");
-  await ticks(w);
-  assert.deepEqual([(await planned2(w)).includes("review"), (await planned2(w)).includes("merge")], [true, false]);
-  // The review that was asked for.
-  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }).where("number", "=", 2));
-  await w.db.run(w.db.k.deleteFrom("main.review_state").where("number", "=", 2));
-  await pause();
-  await ticks(w);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "major-finding");
-});
-
-test("what came between a question and its answer was not seen: our push owes its review, a hold stops again, a large fix asks", async () => {
-  // A merge entry: the word merge goes on past the author's commits, not past our push on them.
-  let w = await authorPushed();
-  await pushNow(w, "theirs", "ours");
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await ticks(w);
-  assert.deepEqual([(await leg2(w)).state, (await leg2(w)).from_head], ["review", "theirs"]);
-  assert.ok((await planned2(w)).includes("review"));
-  w.close();
-
-  // So too when its review was made before the answer.
-  w = await authorPushed();
-  await pushNow(w, "theirs", "ours");
-  await reviewNow(w, "ours", "hold");
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await ticks(w);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "major-finding");
-  w.close();
-
-  // A reviewed PR: the hold the person answered was at another head.
-  w = await approvedReview();
-  await w.pr(2, { label: "feature" });
-  assert.equal((await answer(w, "review and merge")).outcome, "run");
-  await pause();
-  await reviewNow(w, "sha2", "hold");
-  await advanceWorkflows(w.db);
-  const first = (await liveWorkflow(w.db, "app", 2))!;
-  assert.equal(first.blocker, "major-finding");
-  await pause();
-  await pushNow(w, "sha2", "ours");
-  await reviewNow(w, "ours", "hold");
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await advancePreapprovals(w.db);
-  assert.notEqual((await leg2(w)).state, "ci", "the leg goes past no review the person was not shown");
-  await ticks(w);
-  const again = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([again.blocker, again.recHead], ["major-finding", "ours"]);
-  await pause();
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await ticks(w);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.state, "running");
-  w.close();
-
-  // A large fix: also when the answer is what approves the merge, and the time shown for it is the answer's.
-  w = await askedReview();
-  await pause();
-  await pushNow(w, "sha2", "ours", 500);
-  const before = new Date().toISOString();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await ticks(w);
-  const wf = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([wf.blocker, wf.approvedBy], ["large-fix", MAINT]);
-  assert.ok(wf.approvedAt! >= before);
-  await pause();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await ticks(w);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.state, "running", "asked once");
-});
-
-test("the merge leg a question ended is no reason to ask again after an answer that starts none", async () => {
-  const w = await approvedReview();
-  await w.pr(2, { label: "feature" });
-  assert.equal((await answer(w, "review and merge")).outcome, "run");
-  await pause();
-  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
-    repo: "app", number: 2, head_oid: "sha2", run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "take-fix", sure: 1, reason: "r",
-    fixes: JSON.stringify([{ file: "src/lib.rs", change: "check the bound", title: "bound check", major: true }]), workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Fix 1, then come back.", fix: [1], merge: false, close: false } }),
-  }));
-  await pause();
-  await advanceWorkflows(w.db);
-  const asked = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([asked.blocker, asked.rec!.merges, (await leg2(w)).state], ["major-finding", false, "cancelled"]);
-  await pause();
-  const o = await answer(w, "yes");
-  assert.equal(o.outcome, "run", o.line);
-  await advanceWorkflows(w.db);
-  const on = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([on.state, on.blocker], ["running", null]);
-});
-
-test("no answer ends the review a push of ours owes a merge entry: past a large fix, a failing step, or the author's commits on top", async () => {
-  const started = async () => {
-    const w = await approvedReview();
-    await w.pr(2, { label: "feature" });
-    assert.equal((await answer(w, "merge")).outcome, "run");
-    await pause();
-    return w;
-  };
-  const owes = async (w: World, what: string) => {
-    await (await w.verified(2)).premerge(2, "clean");
-    await ticks(w);
-    assert.deepEqual([(await leg2(w)).state, (await planned2(w)).includes("review"), (await planned2(w)).includes("merge")], ["review", true, false], what);
-    const head = String((await leg2(w)).head);
-    await w.db.run(w.db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 2, head_oid: head, run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r" }));
-    await w.db.run(w.db.k.deleteFrom("main.review_state").where("number", "=", 2));
-    await pause();
-    await ticks(w);
-    assert.deepEqual([(await leg2(w)).state, (await planned2(w)).includes("merge")], ["queued", true], what);
-    w.close();
-  };
-
-  let w = await started();
-  await pushNow(w, "sha2", "ours", 600);
-  await advanceWorkflows(w.db);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "large-fix");
-  await pause();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await owes(w, "large fix");
-
-  w = await started();
-  await pushNow(w, "sha2", "ours");
-  for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 2, head: "ours", kind: "patch", state: "failed", attempt: n, created_at: new Date().toISOString() }));
-  await pause();
-  await advanceWorkflows(w.db);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "failed-twice");
-  await pause();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await owes(w, "failing step");
-
-  w = await started();
-  await pushNow(w, "sha2", "ours");
-  await w.synced(2, "theirs");
-  await advanceWorkflows(w.db);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "author-commits");
-  await pause();
-  assert.equal((await answer(w, "merge")).outcome, "run");
-  await owes(w, "under the author's commits");
-});
-
-test("a head the author restores is the approved one: the merge goes on and nobody is asked", async () => {
-  const w = await approvedReview();
-  await w.synced(1, "theirs");
-  await advanceWorkflows(w.db);
-  assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.blocker, await legState(w)], ["author-commits", "cancelled"]);
-  await w.synced(1, "sha1");
-  await advanceWorkflows(w.db);
-  const wf = (await liveWorkflow(w.db, "app", 1))!;
-  assert.deepEqual([wf.state, wf.rec, wf.baseHead, wf.approvedBy, await legState(w)], ["running", null, "sha1", MAINT, "review"]);
-});
-
-test("an answer to a question that was asked anew since is refused and shows the new one; a surface that does not say which it showed answers the open one", async () => {
-  for (const via of ["dashboard", "agent", "discord", "github"] as const) {
-    for (const text of ["yes", "merge"]) {
-      const w = await authorPushed();
-      const first = (await liveWorkflow(w.db, "app", 2))!;
-      await w.synced(2, "theirs2");
-      await advanceWorkflows(w.db);
-      const second = (await liveWorkflow(w.db, "app", 2))!;
-      assert.equal(second.recHead, "theirs2");
-      const send = async (asked: string | null) => (await runCommand(w.db, actor, via, { parsed: parse(text), items: [{ repo: "app", number: 2 }], ...(via === "github" ? { head: "theirs2" } : {}), asked: () => asked })).items[0]!;
-      const late = await send(first.recAt);
-      assert.equal(late.outcome, "refused", via);
-      assert.match(late.line, /A new question follows\. Recommendation: The author pushed/, via);
-      assert.deepEqual([(await liveWorkflow(w.db, "app", 2))!.baseHead, late.question], [first.baseHead, { workflowId: second.id, recAt: second.recAt }]);
-      assert.equal((await send(text === "yes" ? second.recAt : null)).outcome, "run", via);
-      assert.equal((await liveWorkflow(w.db, "app", 2))!.baseHead, "theirs2");
-      w.close();
-    }
-  }
-});
-
-/** The repo "app" on the maintainer workflow with a maintainer who may act, issue 7 started with `implement`, and its first attempt. */
-async function implementIssue(): Promise<World> {
-  const w = current = await (await (await world()).repo()).issue(7);
-  const db = w.db;
-  await db.run(db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
-  await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
-  await db.run(db.k.insertInto("main.access").values({ login: MAINT, role: "maintainer" }));
-  await db.run(db.k.insertInto("main.repo_permissions").values({ login: MAINT, repo: "app", permission: "write", checked_at: new Date().toISOString() }));
-  await setFeature(db, "implement", true, MAINT, "app");
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("implement"), items: [{ repo: "app", number: 7 }] });
-  assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
-  const it = (await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", "app").where("number", "=", 7)))!;
-  await startAttempt(db, { repo: "app", number: 7, queuedBy: MAINT, textHash: textHash(it.title ?? "", it.body ?? "") });
-  return w;
-}
-
-/** A plan call's reply that asks the maintainers one question with two options, "Per document" recommended. */
-const ASKS: PlanReply = {
-  ready: false, kind: "feature", summary: "Remember the export folder.", plan: "The dialog keeps no folder.", acceptance: [], verification: { tests: [], app: null }, size: "S", risks: [],
-  questions: [{ audience: "maintainer", text: "Remember the folder globally or per document?", options: [{ label: "Globally", hint: "One folder." }, { label: "Per document", hint: "Stored with the file." }], recommended: "Per document" }],
-  workflow: { parts: [], recommendation: "Go with 2, per document, then implement it." },
-};
-/** The issue's implementation asks `reply`'s questions, and the pass after it. */
-async function asked(reply: PlanReply): Promise<World> {
-  const w = await implementIssue();
-  await recordPlan(w.db, (await currentAttempt(w.db, "app", 7))!.impl, { callId: null, reply }, { commentsApproved: true, postComment: async () => null, log: () => {} });
-  await advanceWorkflows(w.db);
-  return w;
-}
-const say = async (w: World, text: string) => (await runCommand(w.db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 7 }] })).items[0]!;
-const nextStep = async (w: World) => implementStep((await loadItemFact(w.db, "app", 7))!);
-const labelOf = async (w: World): Promise<string | undefined> => {
-  const { question, answer } = openQuestion((await currentAttempt(w.db, "app", 7))!.rounds);
-  return (question!.result as { options: { key: string; label: string }[] }).options.find((o) => o.key === answer?.option)?.label;
-};
-
 test("an implement question comes back as one recommendation, and a yes answers it so the implementation plans again", async () => {
   const w = await asked(ASKS);
   const wf = (await liveWorkflow(w.db, "app", 7))!;
@@ -788,24 +355,6 @@ test("an answer on an implement issue queues a fix-up of the named part on its i
   assert.equal(fx[0]!.number, 8);
   assert.match(fx[0]!.instructions ?? "", /folder per document/);
 });
-
-/** A ready plan whose one part changes src/a.rs. */
-const PLANNED: PlanReply = { ...ASKS, ready: true, questions: [], workflow: { parts: [{ title: "Keep the folder", files: ["src/a.rs"] }], recommendation: null } };
-/** The issue's attempt opened PR 8 at sha8 (our own commit), having changed `files`. */
-async function implementationOpened(files: string[], approved: boolean): Promise<World> {
-  const w = await implementIssue();
-  if (approved) await say(w, "merge");
-  await w.pr(8, { author: "craft-bot" });
-  await addOwnCommits(w.db, [{ repo: "app", sha: "sha8", action: "implement-push" }]);
-  await writeStep(w.db, (await currentAttempt(w.db, "app", 7))!.impl, {
-    to: "pr-opened", patch: { plan: PLANNED, diffStat: files.map((f) => ` ${f} | +300 -1`).join("\n"), branch: "fix-8", prNumber: 8, prUrl: "https://example.invalid/8" },
-  });
-  return w;
-}
-const review8 = async (w: World, verdict: string, workflow?: object) => await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
-  repo: "app", number: 8, head_oid: "sha8", run_id: "rv", at: later(), model: "m", mode: "full", verdict, sure: 1, reason: "r", workflow: workflow ? JSON.stringify(workflow) : null,
-}));
-const leg8 = async (w: World) => (await w.rows("SELECT state FROM preapprovals WHERE number = 8 ORDER BY id DESC"))[0]?.state;
 
 test("an approved implementation that changed files its plan does not name comes back before it merges, once", async () => {
   const w = await implementationOpened(["src/a.rs", "src/zzz.rs", "Cargo.lock"], true);
