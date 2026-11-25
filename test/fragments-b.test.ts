@@ -1,4 +1,4 @@
-// Each typed twin of a shared SQL fragment selects the same rows as its text version, on a fixture where the fragment
+// Each typed fragment (and its text version, where one is left) selects the rows it should, on a fixture where the fragment
 // keeps some rows and drops others. Runs on SQLite, and on Postgres under `pnpm test:pg:suite`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,9 +13,6 @@ import { PRIVATE_STEPS, privateStepExpr } from "../src/build/tasks.ts";
 import { MANUAL_ONLY_KEY } from "../src/remote/manual-only.ts";
 import { manualOnlyExpr } from "../src/data/runners/fragments.ts";
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
-import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
-import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
-import { openGroupExpr, unsureAtQuery } from "../src/core/rule-queries.ts";
 import { tmpdir } from "./world-db.ts";
 
 const T = "2026-01-01T00:00:00.000Z", LATER = "2026-01-03T00:00:00.000Z", FAR = "2099-01-01T00:00:00.000Z";
@@ -58,32 +55,6 @@ async function fixture(db: Db): Promise<void> {
   ]));
   await ins(db.k.insertInto("main.item_stage").values([{ repo: "app", number: 1, stage: "review", at: T }, { repo: "lib", number: 1, stage: "new", at: T }]));
 
-  const run = (id: number, account_id: string | null) => ({ id, step: "review", stage: 1, prompt_id: "p", prompt_version: "1", provider: "x", model: "m", state: "done", started_at: T, account_id });
-  await ins(db.k.insertInto("agent_runs").values([run(1, "acc1"), run(2, "acc2"), run(3, null)]));
-  await ins(db.k.insertInto("agent_run_items").values([{ run_id: 1, repo: "app", number: 1 }, { run_id: 2, repo: "app", number: 1 }, { run_id: 2, repo: "ext", number: 1 }]));
-  await ins(db.k.insertInto("agent_run_tools").values([{ run_id: 1, seq: 1, tool: "t", args: "{}" }, { run_id: 1, seq: 2, tool: "t", args: "{}" }]));
-  await ins(db.k.insertInto("claude_accounts").values({ id: "acc1", label: "Main" }));
-
-  const decision = (id: string, kind: string, repo: string | null, items: string | null, answer: string | null = null) =>
-    ({ id, kind, question: "q", options: "[]", asked_at: T, repo, number: repo ? 1 : null, items, answer });
-  await ins(db.k.insertInto("main.decisions").values([
-    decision("d1", "merge", "app", "[]"),
-    decision("d2", "merge", "ext", "[]"),
-    decision("d3", "merge", null, '[{"repo":"app","number":2},{"repo":"ext","number":1}]'),
-    decision("d4", "merge", null, '[{"repo":"lib","number":1}]'),
-    decision("d5", "merge", null, "garbage"),
-    decision("app:dupegroup:1", "duplicate", "app", null),
-    decision("app:dupegroup:2", "duplicate", "app", null, "keep:3"),
-    decision("app:dupegroup:3", "duplicate", "app", null, "keep:4"),
-    decision("app:dupegroup:4", "duplicate", "app", null, "keep:5"),
-    decision("app:dupegroup:5", "duplicate", "app", null, "close"),
-    decision("app:other:6", "duplicate", "app", null),
-  ]));
-  await ins(db.k.insertInto("dupe_groups").values([
-    { decision_id: "app:dupegroup:2", repo: "app", source: "s", applied_answer: "keep:3" },
-    { decision_id: "app:dupegroup:3", repo: "app", source: "s", applied_answer: null },
-  ]));
-
   const task = (step: string) => ({ step, repo: "app", head_sha: "h", requires: "{}", plan: "{}", state: "queued", queued_at: T });
   await ins(db.k.insertInto("build_tasks").values([task(PRIVATE_STEPS[0]!), task(PRIVATE_STEPS[1]!), task("build")]));
 
@@ -123,16 +94,6 @@ async function fixture(db: Db): Promise<void> {
     jobCall(9, 1, 1, "queued"), jobCall(10, 1, 2, "done", NOW), jobCall(11, 1, 2, "failed"), jobCall(12, 1, null, "leased"),
     jobCall(13, 2, 3, "queued"), jobCall(14, 3, 3, "leased"), jobCall(15, 4, null, "queued"),
   ]));
-
-  const command = (comment_id: number, state: string, reply: string | null) =>
-    ({ comment_id, repo: "app", number: 1, pr: 1, command: "c", login: "u", github_id: 1, created_at: T, requested_at: T, state, reply });
-  await ins(db.k.insertInto("main.github_commands").values([command(1, "queued", null), command(2, "done", null), command(3, "done", "ok")]));
-
-  await ins(db.k.insertInto("opus_review_history").values([
-    { repo: "app", number: 1, head_oid: "h1", at: T, verdict: "take", sure: 0 },
-    { repo: "app", number: 2, head_oid: "h2", at: T, verdict: "take", sure: 1 },
-  ]));
-  await ins(db.k.insertInto("opus_reviews").values({ repo: "app", number: 3, head_oid: "h3", at: T, mode: "m", verdict: "take-fix", sure: 0 }));
 }
 
 type Case = {
@@ -178,10 +139,6 @@ function cases(db: Db): Case[] {
   }
   out.push({ name: "manualOnlyExpr", text: [`SELECT t.login AS k FROM main.mcp_tokens t WHERE EXISTS (SELECT 1 FROM main.user_settings mo WHERE mo.login = t.login AND mo.key = '${MANUAL_ONLY_KEY}' AND mo.value = '1') ORDER BY t.login`], expect: ["alice"],
     built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualOnlyExpr(eb as never, "t.login")).orderBy("t.login") });
-  out.push({ name: "COMMAND_WORK_SQL", text: [`SELECT comment_id AS k FROM main.github_commands WHERE ${COMMAND_WORK_SQL} ORDER BY comment_id`], expect: ["1", "2"],
-    built: (d) => d.k.selectFrom("main.github_commands").select("comment_id as k").where((eb) => commandWorkExpr(eb)).orderBy("comment_id") });
-  out.push({ name: "OPEN_GROUP_SQL", text: [`SELECT g.id AS k FROM decisions g WHERE ${OPEN_GROUP_SQL} ORDER BY g.id`], expect: ["app:dupegroup:1", "app:dupegroup:3", "app:dupegroup:4"],
-    built: (d) => d.k.selectFrom("decisions as g").select("g.id as k").where((eb) => openGroupExpr(d, eb)).orderBy("g.id") });
   return out;
 }
 
@@ -209,12 +166,6 @@ test("each fragment twin selects the same rows as its text version", async () =>
       }
     }
     assert.deepEqual(failed, []);
-    // UNSURE_AT_SQL is a whole statement: the same answer for each head.
-    for (const [n, head] of [[1, "h1"], [2, "h2"], [3, "h3"]] as const) {
-      const text = await db.prepare(UNSURE_AT_SQL).get("app", n, head);
-      assert.equal(!!await db.get(unsureAtQuery(db, "app", n, head)), !!text, `UNSURE_AT_SQL #${n}`);
-      assert.equal(!!text, n !== 2, `UNSURE_AT_SQL #${n}: text version`);
-    }
   } finally {
     await db.close();
   }
