@@ -9,7 +9,7 @@ import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
-import { assignmentIn, ownPrSet, queuerIn, refreshTimes, weightScore, type FactsOf } from "./facts.ts";
+import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, weightScore, workflowFactOf, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
@@ -87,8 +87,8 @@ function needsOf(d: ItemPassData, opts: { repo?: string; refs?: ReadonlySet<stri
     if (a || i.embed_hash === null || (storedClassHash(i) === null && (j || h))) out.texts.push({ repo: i.repo, number: i.number });
     if (a && a.attempt.prNumber !== null) out.prs.push({ repo: i.repo, number: a.attempt.prNumber });
     if (a?.attempt.state === "asked") out.asked.push({ ref: { repo: i.repo, number: i.number }, since: askedSince(a) });
-    const q = i.kind === "issue" ? queuedOf(d, ref) : null;
-    if (q) for (const login of q.actors) out.logins.push({ login, repo: i.repo });
+    const w = workflowFactOf(d, ref);
+    if (w) for (const login of d.workflow.actors.get(w.id) ?? []) out.logins.push({ login, repo: i.repo });
   }
   return out;
 }
@@ -158,12 +158,14 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const embedHash = r.embed_hash ?? hashOfText(text!.title, text!.body);
     const approvals = d.control.approvals.get(r.repo) ?? {};
     const wf = d.workflow.live.get(ref) ?? null;
-    const work = wf ?? d.workflow.ofPr.get(ref) ?? null;
+    const work = workflowFactOf(d, ref);
     const outsideHold = d.outsideHolds.get(ref);
     const a = r.kind === "issue" ? d.implement.byIssue.get(ref) : undefined;
     const q = r.kind === "issue" ? queuedOf(d, ref) : null;
     const attemptPr = a && a.attempt.prNumber !== null ? d.prs.get(`${r.repo}#${a.attempt.prNumber}`) : undefined;
-    const queuer = queuerIn(q?.actors, r.repo, { act: d.act, identity: cfg.githubIdentity, now, soon: (at) => refresh.soon(ref, at) });
+    const acts = { act: d.act, identity: cfg.githubIdentity, now, soon: (at: number | undefined) => refresh.soon(ref, at) };
+    const queuer = queuerIn(q?.actors, r.repo, acts);
+    const standing = standingIn(work, d.workflow.actors, r.repo, acts);
     const live = d.implement.liveByRepo.get(r.repo);
     const refreshAt = refresh.at(ref);
     return {
@@ -174,7 +176,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       held: !work && d.workflow.ended.get(ref) === "backlog" ? "backlog" : null,
       score: weightScore(work) ?? t.score,
       repoFacts: { labelsApproved: !!approvals.labels, commentApproved: !!approvals.comment, fixIssueApproved: !!approvals.fixissue },
-      workflow: wf, endedWorkflow: wf ? null : d.workflow.ended.get(ref) ?? null,
+      workflow: wf, standing, endedWorkflow: wf ? null : d.workflow.ended.get(ref) ?? null,
       run,
       classification: {
         status: settled.status, label: settled.label, flags: settled.flags, jevLabel: settled.jevLabel, haikuLabel: settled.haikuLabel,

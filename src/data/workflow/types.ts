@@ -25,7 +25,7 @@ export type OperatorWork = { requests: (FixupRequest & { maker_checked_at?: stri
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;
   ofPr: Map<RefKey, WorkflowFact>;
-  /** Who each live implement workflow acts for, newest first (workflowActors), by its id. */
+  /** Who each live workflow acts for, newest first (workflowActors), by its id. */
   actors: Map<number, string[]>;
   ended: Map<RefKey, EndedWorkflow>;
   holds: Set<RefKey>;

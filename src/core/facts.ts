@@ -1,7 +1,7 @@
 // Facts: everything the review-to-merge rules read about open PRs, built for a whole pass or a slice of it from the module loads of
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
-import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey } from "../data/access/index.ts";
+import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey, type Standing } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixUsedIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
@@ -12,7 +12,6 @@ import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { refereeClosed, settle } from "../classify/settled.ts";
 import { MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
 import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/changes-requested.ts";
-import { effectiveCiWith } from "../optional-checks.ts";
 import { parseFixes } from "../fixup/candidates.ts";
 import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
 import { findingsOf } from "../premerge/store.ts";
@@ -27,8 +26,10 @@ import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidate
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, PIPELINE_LOGIN_KEY, RULE_SIZES, mergeDecisionId, pipelineWrites, sizeOf } from "./rules.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
-import { reviewOwed } from "./evidence.ts";
+import { ciAt, reviewOwed, type CiState } from "./evidence.ts";
+import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
+import type { WorkflowFact } from "../data/workflow/types.ts";
 import { keptFixes, settlerOf, verdictKept } from "../workflow/work.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
@@ -71,16 +72,26 @@ export function refreshTimes(now: number): { soon: (ref: string, at: number | un
   };
 }
 
-/** Who an implementation runs for (settlerOf), from the pass's access rows; a confirmed write permission stops counting with the clock alone, told to `soon`. */
-export function queuerIn(
-  actors: readonly string[] | undefined, repo: string, o: { act: Map<PermKey, ActFacts>; identity: ActIdentity; now: number; soon: (at: number | undefined) => void },
-): { queuedBy: string | null; standing: "yes" | "no" | "unknown"; boxIdentity?: boolean } {
-  const s = settlerOf(actors ?? [], (login) => {
-    const a = o.act.get(permKey(login, repo));
-    if (a?.perm) o.soon(Date.parse(a.perm.checkedAt) + HOLD_MAX);
-    return standing(a, o.identity, o.now);
-  });
+type StandingIn = { act: Map<PermKey, ActFacts>; identity: ActIdentity; now: number; soon: (at: number | undefined) => void };
+
+/** Whether a login counts on the repo, from the pass's access rows; a confirmed write permission stops counting with the clock alone, told to `soon`. */
+const standsIn = (repo: string, o: StandingIn) => (login: string): Standing => {
+  const a = o.act.get(permKey(login, repo));
+  if (a?.perm) o.soon(Date.parse(a.perm.checkedAt) + HOLD_MAX);
+  return standing(a, o.identity, o.now);
+};
+
+/** Who an implementation runs for (settlerOf). */
+export function queuerIn(actors: readonly string[] | undefined, repo: string, o: StandingIn): { queuedBy: string | null; standing: Standing; boxIdentity?: boolean } {
+  const s = settlerOf(actors ?? [], standsIn(repo, o));
   return { queuedBy: s?.by ?? null, standing: s?.standing ?? "no", ...(o.identity !== "app" ? { boxIdentity: true } : {}) };
+}
+
+/** Who the live workflow's merge and its other work act for, and whether they count (standingFor). */
+export function standingIn(w: WorkflowFact | null, actors: ReadonlyMap<number, string[]>, repo: string, o: StandingIn): NonNullable<PrFacts["standing"]> {
+  const acting = w && { entry: w.entry, startedBy: w.startedBy, approvedBy: w.approvedBy, actors: actors.get(w.id) ?? [] };
+  const of = standsIn(repo, o), box = { boxIdentity: o.identity !== "app" };
+  return { merge: standingFor(acting, "merge", of, box), work: standingFor(acting, "work", of, box) };
 }
 
 /** The PR's current head: checks fetched after the mirror's last update win over the mirror. */
@@ -97,7 +108,7 @@ export function draftOf(i: { is_draft: number | null; updated_at: string | null 
 }
 
 /** The live workflow of the PR, or of the issue whose implementation PR it is. */
-const workflowFactOf = (d: PrPassData, ref: string) => d.workflow.live.get(ref) ?? d.workflow.ofPr.get(ref) ?? null;
+export const workflowFactOf = (d: Pick<PrPassData, "workflow">, ref: string): WorkflowFact | null => d.workflow.live.get(ref) ?? d.workflow.ofPr.get(ref) ?? null;
 
 /** An item's assignment from its last successful assign and its mirrored `assignees` (JSON). Without a recorded account, the audit's own assignee stands for it. */
 export function assignmentIn(pipelineLogin: string | null, assigned: { assignee: string | null } | undefined, assignees: string | null): AssignFacts {
@@ -180,7 +191,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     const cfg = config(db);
     const ctx: Ctx = {
       now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, identity: cfg.githubIdentity,
-      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])) }, now),
+      holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs }, now),
     };
     const out: PrFacts[] = [];
     for (const ref of rowsOf(d).all) {
@@ -236,7 +247,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const pub = repoRow?.visibility === "public";
   const defaultBranch = repoRow?.default_branch ?? null;
   const optional = cfg.repo(repo).optionalChecks;
-  const ciOf = (overall: string | null | undefined): string => effectiveCiWith(optional, overall ?? "none", ch?.checks ?? null);
+  const ciOf = (at: string): CiState => ciAt(ch, at, { optional, approvedRuns: d.merge.runs.get(`${ref}@${at}`)?.approved.length ?? 0 });
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
@@ -280,9 +291,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
       fixupBy: (head ? operator?.requests.findLast((r) => r.from_head === head)?.by : undefined) ?? null },
   };
   base.inFlight = state === "OPEN" && !integration && isOwn(i.author) && c.ownPrs.has(ref);
+  const acts = { act: d.act, identity: c.identity, now, soon: (at: number | undefined) => refresh.soon(ref, at) };
   base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads,
-    ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, { act: d.act, identity: c.identity, now, soon: (at) => refresh.soon(ref, at) }) } : null;
+    ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, acts) } : null;
   base.workflow = wfFact;
+  base.standing = standingIn(wfFact, d.workflow.actors, repo, acts);
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
     // The batch tip's run approvals count only while the batch is open and every member keeps its take review, or its approval for merge with a clean pre-merge review, at its batched head.
@@ -387,7 +400,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const pubText = src ? src.public : !hasPublic ? { ok: true } : parsePublic({ summary: latest!.public_summary ?? "", points: [] });
   base.post = { postable: (hasPublic || !!p?.review_id) && !!pubText, posted: p ? { head: p.head, at: p.posted_at, opusAt: p.opus_at } : null };
   const cifixOf = (cfHead: string): NonNullable<PrFacts["cifix"]> => ({ ...cifixAt(patch.cifixes, cfHead, now, d.tasks), checksAt: ch?.fetched_at ?? null });
-  const redNow = !!ch && ch.head_oid === head && ciOf(ch.overall) === "failure";
+  const redNow = !!head && ciOf(head) === "failure";
   // A non-take review at an earlier head while the review gate waits on red CI at the new head: the CI fix cannot start, so the contributor is asked (src/core/decide.ts unreviewedRed).
   if (!take && state === "OPEN" && head && head !== qh && base.reviewHold?.kind === "ci" && base.reviewHold.red && redNow) {
     base.ci = "failure";
@@ -400,7 +413,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const checksHere = ch?.head_oid === qh;
   base.checksHere = checksHere;
   base.checksOpen = checksHere && ch!.state === "OPEN" && !ch!.is_draft;
-  base.ci = checksHere ? ((wait?.approved.length ?? 0) > 0 ? "pending" : ciOf(ch!.overall)) : "unknown";
+  base.ci = ciOf(qh);
   base.runs = runsOf(wait, rf.ciApproved);
   // Our push to this head turned its required checks red: the CI fix works on it now, without waiting for a review of the new head.
   // A head that our own push or the review's CI gate (red CI at a new head, reviewed earlier) left red is repaired against that head.

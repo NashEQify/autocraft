@@ -77,7 +77,7 @@ export type PrPassData = {
   statements: Map<number, Statement>;
   /** An operator's latest Retry of a refused merge, by the retry target of the queue head (`mergeDecisionId`). */
   retries: Map<string, string>;
-  /** Role and cached permission of the people the live implementations of the PRs run for. */
+  /** Role and cached permission of the people the PRs' live workflows act for. */
   act: Map<PermKey, ActFacts>;
   /** Repos whose default branch is red. */
   mainRed: Set<string>;
@@ -220,7 +220,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   const blockers = new Set<string>();
   for (const [key, r] of review.latest) if (mirror.get(key)?.item.state === "OPEN") for (const b of r.blocked_by) blockers.add(b);
   const authors = rows.scoped.flatMap((key) => { const i = mirror.get(key)!.item; return i.author ? [{ login: i.author, id: i.author_id ?? null }] : []; });
-  const actors = [...workflow.ofPr].flatMap(([key, w]) => (workflow.actors.get(w.id) ?? []).map((login) => ({ login, repo: asRef(key).repo })));
+  const actors = [...workflow.live, ...workflow.ofPr].flatMap(([key, w]) => (workflow.actors.get(w.id) ?? []).map((login) => ({ login, repo: asRef(key).repo })));
   const [tasks, ownCommits, stacked, retries, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
     loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs), loadStackedHeads(db, [...new Set([...mirror.values()].map((m) => m.item.repo))]),
     retryTargets.length ? loadAuditMax(db, "retry", retryTargets) : Promise.resolve(new Map<string, string>()),

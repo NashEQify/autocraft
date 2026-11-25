@@ -6,7 +6,8 @@
 // (src/dash/api/admin.ts).
 import { jobItem } from "../runner/job-items.ts";
 import { MAX_FAILURES } from "../core/rules.ts";
-import { effectiveCi } from "../optional-checks.ts";
+import { ciAt } from "../core/evidence.ts";
+import { optionalChecks } from "../optional-checks.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -56,18 +57,17 @@ export async function markReread(db: Db, repo: string, number: number, head: str
   await markRereads(db, [{ repo, number, head }], at);
 }
 
-/** `overall` as CI reads for the PR's head, with failures of the repo's optional checks left out (effectiveOverall): "pending" while runs wait for approval or the ones we approved have not finished, since the check rollup does not list them. */
+/** `overall` as CI reads for the PR's head (ciAt), and "pending" while runs wait for approval there, since the check rollup does not list them. */
 export async function overallAt(db: Db, repo: string, number: number, head: string, overall: string): Promise<string> {
   const ref = [{ repo, number }];
-  const [checks, runs] = await db.together(() => Promise.all([
-    overall === "failure" ? loadChecks(db, ref) : Promise.resolve(null),
-    loadRunApprovals(db, ref),
+  const failed = overall === "failure";
+  const [checks, optional, runs] = await db.together(() => Promise.all([
+    failed ? loadChecks(db, ref) : null, failed ? optionalChecks(db, repo) : [], loadRunApprovals(db, ref),
   ]));
-  const row = checks?.get(`${repo}#${number}`);
-  const eff = overall === "failure" ? await effectiveCi(db, repo, overall, row?.head_oid === head ? row.checks : undefined) : overall;
   const r = runs.get(headOf(repo, number, head));
-  if (!r) return eff;
-  return r.reread || r.runs.length || r.approved.length ? "pending" : eff;
+  if (r && (r.reread || r.runs.length)) return "pending";
+  const row = checks?.get(`${repo}#${number}`);
+  return ciAt({ head_oid: head, overall, checks: row?.head_oid === head ? row.checks : null }, head, { optional, approvedRuns: r?.approved.length ?? 0 });
 }
 
 export type Candidate = { number: number; head: string; runs: WaitingRun[]; reread: boolean; failed: Record<string, number>; crossRepo: boolean };

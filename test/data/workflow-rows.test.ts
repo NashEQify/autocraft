@@ -71,9 +71,11 @@ both("loadWorkflowFacts: live and implementation-PR workflows, latest ended stat
   const ids = await startWorkflows(db, [wf("o/a", 1, { entry: "implement", kind: "issue", weight: 8, startedBy: "ann" }), wf("o/a", 5, { entry: "merge" }), wf("o/a", 6), wf("o/a", 7)]);
   await saveWorkflows(db, [{ id: ids.get("o/a#6")!, patch: { state: "stopped" } }, { id: ids.get("o/a#7")!, patch: { state: "closed" } }]);
   await startWorkflows(db, [wf("o/a", 7)]);
+  await recordEvents(db, [{ workflowId: ids.get("o/a#5")!, repo: "o/a", number: 5, login: "cy", kind: "answered", at: "2026-02-01T00:00:00.000Z" }]);
   await q.run(k.insertInto("main.implementations").values({ repo: "o/a", number: 1, queued_by: "ann", state: "pr-open", attempt: 1, text_hash: "h", pr_number: 11, created_at: AT, updated_at: AT }));
   await q.run(k.insertInto("main.merge_holds").values({ repo: "o/a", number: 5, held_by: "ann", held_at: AT }));
-  // ann may act on o/a (staff with a write permission read just now); bob may not.
+  // ann may act on o/a (staff with a write permission read just now, and the app identity); bob may not.
+  await q.run(k.insertInto("main.settings").values({ key: "github_identity", value: "app" }));
   await q.run(k.insertInto("main.access").values([{ login: "ann", role: "operator" }, { login: "bob", role: "viewer" }]));
   await q.run(k.insertInto("main.repo_permissions").values([{ login: "ann", repo: "o/a", permission: "write", checked_at: new Date().toISOString() }, { login: "bob", repo: "o/a", permission: "write", checked_at: new Date().toISOString() }]));
   await q.run(k.insertInto("main.operator_fixups").values([
@@ -88,6 +90,7 @@ both("loadWorkflowFacts: live and implementation-PR workflows, latest ended stat
   assert.equal(f.ofPr.get("o/a#11")!.id, ids.get("o/a#1"));
   assert.ok(!f.live.has("o/a#11"));
   assert.equal(f.live.get("o/a#5")!.approved, false);
+  assert.deepEqual([f.actors.get(ids.get("o/a#1")!), f.actors.get(ids.get("o/a#5")!)], [["ann"], ["cy", "ann"]], "whoever answered last acts for the workflow, of any entry");
   assert.equal(f.ended.get("o/a#6"), "stopped");
   assert.ok(!f.ended.has("o/a#7"), "an item that started again has a live workflow, not an ended one");
   assert.ok(f.live.has("o/a#7"));
@@ -123,7 +126,9 @@ both("scores, queue positions, started refs and the acting pairs follow the live
   const work = await loadStartedWork(db);
   assert.equal(work.live.length, 5);
   assert.deepEqual(work.prs.map((p) => p.pr), [4]);
+  await recordEvents(db, [{ workflowId: ids.get("o/b#9")!, repo: "o/b", number: 9, login: "cy", kind: "answered" }]);
   const pairs = await loadActingPairs(db);
+  assert.ok(pairs.some((p) => p.login === "cy" && p.repo === "o/b"), "who answered a workflow of any entry");
   assert.ok(pairs.some((p) => p.login === "cat" && p.repo === "o/b") && pairs.some((p) => p.login === "bob" && p.repo === "o/a"));
   assert.equal(new Set(pairs.map((p) => `${p.login}@${p.repo}`)).size, pairs.length, "pairs are distinct");
   assert.equal(ids.size, 4);
