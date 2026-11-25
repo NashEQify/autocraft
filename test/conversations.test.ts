@@ -200,7 +200,10 @@ describe("Do it", () => {
     const rec = JSON.stringify({ text: "Fix both.", parts: { fix: [1, 2], drop: [] }, merges: false });
     await db.run(db.k.insertInto("item_workflows").values({ repo: "app", number: 2, kind: "pr", entry: "review", weight: 5, state: "recommending", started_by: "mira", started_at: T0, started_via: "github", plan, rec, rec_at: T0, rec_head: "sha2", updated_at: T0 } as never));
     const id = await propose(db, 2, [{ kind: "command", text: "drop 2" }]);
+    const shown = async () => await conv.cardView(db, (await cardOf(db, id))!);
+    assert.deepEqual([(await shown()).command, (await shown()).refusal], ["drop 2", undefined]);
     await db.run(db.k.updateTable("item_workflows").set({ rec_at: "2026-01-02T00:00:00Z" }));
+    assert.match((await shown()).refusal ?? "", /plan changed/);
     await assert.rejects(() => doCard(db, id, "mira", { canWrite: async () => true }), /plan changed/);
     assert.equal(await stateOf(db, id), "proposed");
   });
