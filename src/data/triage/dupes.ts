@@ -190,6 +190,21 @@ export async function saveDupeGroups(db: Db, repo: string, groups: DupeGroupPut[
   });
 }
 
+/** The stored groups with their members, the highest id first (the one `loadDupeSignals` prefers). */
+export async function loadDupeGroups(db: Db, o: { repo?: string } = {}): Promise<DupeGroupPut[]> {
+  const q = queryDb(db), k = q.k as any;
+  const rows = await q.all(k.selectFrom("dupe_group_items as gi").innerJoin("dupe_groups as g", "g.id", "gi.group_id")
+    .select(["g.id", "g.repo", "g.source", "gi.number", "gi.kind", "gi.role", "gi.target", "gi.detail"]).$if(!!o.repo, (b: any) => b.where("g.repo", "=", o.repo!))
+    .orderBy("g.id", "desc").orderBy("gi.number")) as (Omit<DupeGroupPut, "items"> & DupeGroupPut["items"][number])[];
+  const out = new Map<string, DupeGroupPut>();
+  for (const r of rows) {
+    const g = out.get(r.id) ?? { id: r.id, repo: r.repo, source: r.source, items: [] };
+    out.set(r.id, g);
+    g.items.push({ number: Number(r.number), kind: r.kind, role: r.role, target: r.target === null ? null : Number(r.target), detail: r.detail });
+  }
+  return [...out.values()];
+}
+
 /** The item's group id, role, target and the reason of the newest comparison that covers it. */
 export async function loadDupeSignals(db: Db, keys: KeySource): Promise<Map<RefKey, DupeSignal>> {
   if (Array.isArray(keys) && !keys.length) return new Map();

@@ -184,14 +184,27 @@ const MAX_AGE_MS = 5000;
 /** Runs `fn` with the reads of a job's snapshot taken from the table, for the checks that guard a GitHub write (a planner pass keeps its reading). */
 export const freshSettings = <T>(fn: () => Promise<T>): Promise<T> => pass.getStore()?.watch ? pass.exit(fn) : fn();
 
+/**
+ * The snapshot's map, read again first when it is watching and due; undefined outside a snapshot on `db` and for `live` keys.
+ * A read due is shared by the contexts that wait for it, except inside a transaction: a transaction that waited for a read
+ * queued behind its own connection would never end. It reads on its own connection and leaves the shared read due.
+ */
 const snapshotOf = async (db: Db, ...keys: string[]): Promise<Map<string, string | null> | undefined> => {
   const s = pass.getStore();
   if (s?.db !== db || keys.some((k) => s.live.has(k))) return undefined;
   if (s.watch && Date.now() - s.at > MAX_AGE_MS) s.dirty = true;
+  const read = (): Promise<SettingsSnapshot> => db.fresh(() => readSettingsSnapshot(db));
+  if (db.inTransaction()) {
+    if (s.dirty) {
+      s.map = await read();
+      s.dirty = true;
+    }
+    return s.map;
+  }
   while (s.dirty || s.reread) {
     if (!s.reread) {
       s.dirty = false;
-      s.reread = readSettingsSnapshot(db).then((m) => { s.map = m; s.at = Date.now(); }).finally(() => { s.reread = undefined; });
+      s.reread = read().then((m) => { s.map = m; s.at = Date.now(); }, (e) => { s.dirty = true; throw e; }).finally(() => { s.reread = undefined; });
     }
     await s.reread;
   }
@@ -208,11 +221,14 @@ export interface SnapshotOptions {
 /**
  * Runs `fn` with the settings reads on `db` served from one reading of the table. The snapshot belongs to the async context
  * of `fn`: work that runs meanwhile outside it (other requests, timers) reads the table. Inside, writeSetting/deleteSetting
- * keep it current. Other contexts and connections (the runner thread, the dashboard) keep writing: the pass sees settings as
+ * keep it current; a snapshot already open on `db` serves it, read again first when due. Other contexts and connections (the runner thread, the dashboard) keep writing: the pass sees settings as
  * they were at its start (except the `live` keys), and applyProposals re-checks limits and blocks with fresh reads.
  */
 export async function withSettingsSnapshot<T>(db: Db, fn: () => Promise<T>, read?: Promise<SettingsSnapshot>, opts: SnapshotOptions = {}): Promise<T> {
-  if (pass.getStore()?.db === db) return await fn();
+  if (pass.getStore()?.db === db) {
+    await snapshotOf(db);
+    return await fn();
+  }
   return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)), live: new Set(opts.live), watch: !!opts.watchWrites, dirty: false, at: Date.now() }, fn);
 }
 
@@ -288,13 +304,22 @@ export async function withConfig<T>(db: Db, fn: () => Promise<T>, o?: { live?: r
 
 /**
  * Sync accessor on the async-context snapshot: typed instance properties and `.repo(repo)` for repo-scope keys. Values are
- * those of the snapshot's last reading (a watching snapshot's re-read happens in the next awaited read); live keys are
- * read through `loadLiveConfig`. Throws outside a snapshot.
+ * those of the snapshot's last reading: current at the start of a `withConfig` block, not after a long wait inside one, where
+ * a job takes `readConfig`. Live keys are read through `loadLiveConfig`. Throws outside a snapshot.
  */
 export function config(db: Db): Config {
   const s = pass.getStore();
   if (s?.db !== db) throw new Error("config: no settings snapshot on this handle (wrap the unit of work in withConfig)");
   return makeConfig((k) => s.map.get(k) ?? undefined);
+}
+
+/**
+ * `keys` from the unit of work's snapshot, read again first when it is due, so a switch changed by another process reaches a
+ * running job within MAX_AGE_MS; outside a snapshot, from the table in one read. `keys` are stored keys (repo keys as `<name>:<repo>`).
+ */
+export async function readConfig(db: Db, keys: readonly string[]): Promise<Config> {
+  const map = await snapshotOf(db, ...keys);
+  return map ? makeConfig((k) => map.get(k) ?? undefined) : await freshConfig(db, keys);
 }
 
 /** All settings rows, tracked repos, step approvals, active trips and limits. */

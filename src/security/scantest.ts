@@ -4,10 +4,10 @@
 // state or severity except a note on one whose test passed; only a person decides what that means.
 import { createHash } from "node:crypto";
 import { freshConfig, withConfig } from "../data/control/index.ts";
-import { cancelTasks, cloneTasks, loadConfidentialReadyAt, loadTasks, TERMINAL } from "../data/build/index.ts";
+import { cancelTasks, loadConfidentialReadyAt, loadTasks, TERMINAL } from "../data/build/index.ts";
 import * as sec from "../data/security/index.ts";
 import { BuildError } from "../build/envs.ts";
-import { createTask } from "../build/tasks.ts";
+import { cloneTasks, createTask } from "../build/tasks.ts";
 import { tasksFor } from "../build/fix-tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { patchFor, patchProblem, regressionPath } from "../verify/plan.ts";

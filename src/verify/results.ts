@@ -4,7 +4,8 @@
 import { leaseItem } from "../runner/leases.ts";
 import type { TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { BuildError } from "../build/envs.ts";
-import { cancelTasks, cloneTasks, loadLogTails, loadQueuedWarmBuilds, loadRetriesOf, loadTasks, QueueFullError, TERMINAL, type TaskRecord } from "../data/build/index.ts";
+import { cloneTasks } from "../build/tasks.ts";
+import { cancelTasks, loadLogTails, loadQueuedWarmBuilds, loadRetriesOf, loadTasks, TERMINAL, type TaskRecord } from "../data/build/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
 import { listVerifications as listMergeVerifications, loadPendingVerifications, loadVerifications, loadVerifyDue, restartVerifications, settleVerifications, type StageRow, type VerificationState, type VerificationView } from "../data/merge/index.ts";
@@ -205,7 +206,7 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
           await jobItem(db, v.repo, v.number, `${verdict.reason}; queued the tasks again`, log);
           return;
         } catch (e) {
-          if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e;
+          if (!(e instanceof BuildError)) throw e;
           verdict.reason = `${verdict.reason}; tasks not queued again: ${e.message}`;
         }
       }

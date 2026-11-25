@@ -138,7 +138,7 @@ export type SizePatch = { repo: string; memory?: StepMemory; memorySource?: "ope
 /** What the warm gates read per repo: the default-branch head, whether a finished warm build at it counts, open warm tasks (queued, claimed or running), those claimed or running, the newest warm claim, and the task a forced rebuild queued. */
 export type WarmFacts = { head: string | null; attempted: boolean; open: number; active: number; newestClaimedAt: string | null; forcedTask: number | null };
 /** A warm build to queue: the plan is the producer's (it depends on the writer environment), `version` and `rev` are the AutoCraft version and producer revision it is queued under. */
-export type WarmQueueRow = { repo: string; head: string; image: string; plan: TaskStep[]; version: string; rev: number; force: boolean };
+export type WarmQueueRow = { repo: string; head: string; image: string; plan: TaskStep[]; version: string; rev: number; force: boolean; jobId: number | null };
 export type StoredCaches = { version: 1; readAt: number | null; nodes: unknown[]; placement: unknown; placementNote: string | null; mirror: { allowlist: string[] | null; error: string | null; readAt: number } | null };
 export type UpdateSpec = { sha: string; ssh: string; keyFile: string; gitDir: string };
 export type WorkerUpdate = { pending: UpdateSpec | null; failures: { count: number; error: string } | null };

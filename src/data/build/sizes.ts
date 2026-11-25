@@ -268,7 +268,7 @@ export async function queueWarmTasks(db: Db, rows: WarmQueueRow[]): Promise<Map<
   const q = queryDb(db);
   await db.write(async () => {
     const tasks: NewTask[] = uniq.map((r) => ({
-      step: WARM_STEP, repo: r.repo, headSha: r.head, baseSha: r.head, requires: { os: "linux", toolchains: [...WARM_TOOLCHAINS] }, priority: WARM_PRIORITY,
+      jobId: r.jobId, step: WARM_STEP, repo: r.repo, headSha: r.head, baseSha: r.head, requires: { os: "linux", toolchains: [...WARM_TOOLCHAINS] }, priority: WARM_PRIORITY,
       plan: r.plan, warm: { key: warmKeyOfRepo(r.repo), role: "build" }, warmImage: r.image, warmVersion: r.version, warmRev: r.rev,
     }));
     const ids = await createTasks(db, tasks);

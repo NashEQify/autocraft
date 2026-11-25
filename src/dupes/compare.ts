@@ -25,10 +25,10 @@ import {
   GROUP_DIFF_CHARS, GROUP_MAX, prsRef, 
   type CompareIssue, type CompareIssues, type ComparePr, type ComparePrs,
 } from "./group.ts";
-import { dueSets, groupPlans, ruleOutcome, type KindSet } from "./plan.ts";
+import { dueSets, groupPlans, ruleOutcome, waitingGroups, type KindSet } from "./plan.ts";
 import { loadItems, type ItemOf } from "../data/mirror/index.ts";
 import { loadLatestReviews } from "../data/review/index.ts";
-import { loadDupeState, markComparisonsStale, saveComparisons, saveDrops, saveDupeGroups, type ComparisonPut } from "../data/triage/index.ts";
+import { loadDupeGroups, loadDupeState, markComparisonsStale, saveComparisons, saveDrops, saveDupeGroups, type ComparisonPut } from "../data/triage/index.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -317,9 +317,10 @@ export async function runDupeCompare(db: Db, params: CompareParams = {}, log: (l
     params.onHandled?.(++handled);
   }), poolRoom(db, (i) => [calls[i]!.repo], (i) => setRefs(calls[i]!), { promptId: ISSUE_PROMPT.id }));
   // The groups with all their comparisons current, and the role of each member: the signal the other stages read.
-  const after = await loadDupeState(db, { repo: params.repo });
+  const [after, stored] = await db.together(() => Promise.all([loadDupeState(db, { repo: params.repo }), loadDupeGroups(db, { repo: params.repo })]));
   const plans = groupPlans(after);
-  for (const repo of params.repo ? [params.repo] : new Set(after.edges.map((e) => e.repo))) await saveDupeGroups(db, repo, plans.filter((g) => g.repo === repo));
+  const groups = [...plans, ...waitingGroups(after, stored)];
+  for (const repo of new Set([...after.edges, ...stored].map((e) => e.repo))) await saveDupeGroups(db, repo, groups.filter((g) => g.repo === repo));
   log(`dupe-compare: ${s.compared} compared by a model, ${s.byRule} by rule, ${s.closedWins} won by a closed member, ${s.single} single, ${s.dropped} dropped; ${plans.length} groups`);
   return s;
 }

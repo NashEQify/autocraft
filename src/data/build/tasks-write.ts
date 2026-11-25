@@ -37,15 +37,15 @@ export async function createTasks(db: Db, rows: NewTask[]): Promise<number[]> {
   });
 }
 
-/** Queues a copy of each task (same step, commits, requirements, plan, patch and warm role); returns the new id per source id. 3 statements. */
-export async function cloneTasks(db: Db, ids: number[]): Promise<Map<number, number>> {
+/** Queues a copy of each task (same step, commits, requirements, plan, patch and warm role) as a task of job `jobId`; returns the new id per source id. 3 statements. */
+export async function cloneTasks(db: Db, ids: number[], jobId: number | null): Promise<Map<number, number>> {
   const sources = [...new Set(ids)];
   if (sources.length === 0) return new Map();
   return await db.write(async () => {
     const rows = await loadCloneSources(db, sources);
     const missing = sources.find((id) => !rows.has(id));
     if (missing !== undefined) throw new Error(`no task ${missing}`);
-    const made = await createTasks(db, sources.map((id) => rows.get(id)!));
+    const made = await createTasks(db, sources.map((id) => ({ ...rows.get(id)!, jobId })));
     return new Map(sources.map((id, i) => [id, made[i]!]));
   });
 }

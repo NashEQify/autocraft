@@ -1,7 +1,7 @@
 // The PRs that get our own build (pr-builds feature): open, non-draft PRs of a public repo whose head has no build yet.
 // Scope per repo (settings `pr_builds_scope:<repo>`): "outside" (default) builds only outside authors' PRs, "all" every PR.
 import { loadHolds, isOutsideAuthor, loadInsiders } from "../data/intake/index.ts";
-import { config, saveSettings, withConfig } from "../data/control/index.ts";
+import { config, readConfig, saveSettings, withConfig } from "../data/control/index.ts";
 import { loadPrBuildStates } from "../data/merge/index.ts";
 import { listItems, loadRepos, openItemKeys } from "../data/mirror/index.ts";
 import { cachedRust, type RustCheck } from "../verify/candidates.ts";
@@ -12,7 +12,7 @@ export const DEFAULT_PER_DAY = 10;
 export const DAY_MS = 24 * 3600_000;
 
 export async function scopeOf(db: Db, repo: string): Promise<PrBuildScope> {
-  return await withConfig(db, async () => config(db).repo(repo).prBuildsScope);
+  return (await readConfig(db, [`pr_builds_scope:${repo}`])).repo(repo).prBuildsScope;
 }
 
 export async function setScope(db: Db, repo: string, scope: PrBuildScope, by = "system"): Promise<void> {
@@ -21,7 +21,7 @@ export async function setScope(db: Db, repo: string, scope: PrBuildScope, by = "
 
 /** Builds a repo may start in 24 hours; 0 starts none. */
 export async function perDayOf(db: Db): Promise<number> {
-  return await withConfig(db, async () => config(db).prBuildsPerDay);
+  return (await readConfig(db, ["pr_builds_per_day"])).prBuildsPerDay;
 }
 
 export async function setPerDay(db: Db, n: number, by = "system"): Promise<void> {

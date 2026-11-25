@@ -4,9 +4,9 @@ import type { Querier } from "../mirror.ts";
 import { overallAt, type Suite } from "../merge/ci-approval.ts";
 import type { Db } from "../db/index.ts";
 import { resolvePushes } from "../data/control/index.ts";
-import { noteMergeable, recordRuns } from "../data/merge/index.ts";
+import { recordRuns } from "../data/merge/index.ts";
+import { noteMergeable } from "../merge/mergeable.ts";
 import { listItems, loadChecks, saveChecks as saveCheckRows, SAVE_CHECKS_ROWS } from "../data/mirror/index.ts";
-import { loadReviewsAt } from "../data/review/index.ts";
 
 /** PRs per query: 100 check contexts each keeps a query well under GitHub's node limit. */
 export const CHECKS_PER_QUERY = 40;
@@ -118,9 +118,7 @@ export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISO
   })), at);
   await recordRuns(db, rows, at);
   await resolvePushes(db, rows.map((r) => ({ repo: r.repo, number: r.number, head_oid: r.head_oid, checks: JSON.stringify(r.checks) })), at);
-  const reviews = await loadReviewsAt(db, rows.map((r) => ({ repo: r.repo, number: r.number, head: r.head_oid })));
-  const taken = new Set([...reviews].filter(([, r]) => r.verdict === "take" || r.verdict === "take-fix").map(([k]) => k));
-  await noteMergeable(db, rows, at, taken);
+  await noteMergeable(db, rows, at);
 }
 
 /** Fetches and stores the checks of the given PRs (all open PRs of the repo when none are given). */

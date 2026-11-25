@@ -1,5 +1,5 @@
 // Instance thresholds of the maintainer workflow's blockers 5 and 6.
-import { config, freshConfig, saveSettings, type Config } from "../data/control/index.ts";
+import { readConfig, saveSettings, type Config } from "../data/control/index.ts";
 import type { Db } from "../db/index.ts";
 
 /** A fix-up or implementation diff with more changed lines than this is a large fix (blocker 5). */
@@ -8,14 +8,7 @@ export const LARGE_FIX_DEFAULT = 400;
 /** A change outside the PR's purpose blocks (blocker 6) when the review counts at least this many changed lines outside it. */
 export const OUTSIDE_PURPOSE_KEY = "blocker_outside_purpose_min";
 export const OUTSIDE_PURPOSE_DEFAULT = 20;
-/** The unit of work's settings snapshot, else the two threshold rows read now. */
-async function thresholdConfig(db: Db): Promise<Config> {
-  try {
-    return config(db);
-  } catch {
-    return await freshConfig(db, [LARGE_FIX_KEY, OUTSIDE_PURPOSE_KEY]);
-  }
-}
+const thresholdConfig = (db: Db): Promise<Config> => readConfig(db, [LARGE_FIX_KEY, OUTSIDE_PURPOSE_KEY]);
 
 export async function largeFixLines(db: Db): Promise<number> {
   return (await thresholdConfig(db)).blockerLargeFixLines;

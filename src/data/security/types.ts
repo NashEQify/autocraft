@@ -55,10 +55,12 @@ export type FindingMove = { repo: string; number: number; from: StoredFindingSta
 export type NewArea = { idx: number; name: string; paths: string; entry_points: string; risk: number; why: string | null };
 export type NewScanCall = { scanId: number; kind: string; areaIdx?: number | null; finding?: number | null; resumed?: boolean };
 export type NewFinding = Omit<Selectable<DB["security_findings"]>, "created_at" | "updated_at"> & { created_at?: string; updated_at?: string };
+/** A finding a scan job stores; its number is given when it is stored. `repeats`: the index in the stored list of the finding it repeats (with no `duplicate_of`). */
+export type NewScanFinding = Omit<NewFinding, "number" | "repo"> & { repeats?: number };
 /** The columns of a finding the scan's verify call needs. */
 export type UnverifiedRow = Pick<FindingRow, "number" | "title" | "severity" | "urgent" | "category" | "refs" | "reach" | "impact">;
 export type ScanRunData = {
-  scan: ScanRow; areas: AreaRow[]; known: Pick<FindingRow, "repo" | "number" | "state" | "fingerprint" | "title" | "refs" | "category">[]; nextNumber: number;
+  scan: ScanRow; areas: AreaRow[]; known: Pick<FindingRow, "repo" | "number" | "state" | "fingerprint" | "title" | "refs" | "category">[];
   callCosts: { kind: string; costUsd: number }[];
   /** Per area (by index) that has findings of this scan: whether it has any and its `unverified` ones, by number. */
   leftover: { areaIdx: number; findings: number; unverified: UnverifiedRow[] }[];

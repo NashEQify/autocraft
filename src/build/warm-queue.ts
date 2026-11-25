@@ -17,10 +17,11 @@ import {
   loadEnvs, loadTrimmedPublish, loadWarmBytes, loadWarmFacts, QueueFullError, queueWarmTasks, recordTrimmedPublish, releaseWarmGc, saveWarmBytes, takeWarmGc, warmClaimGate, warmGate, WARM_PRIORITY,
 } from "../data/build/index.ts";
 import type { WarmFacts } from "../data/build/index.ts";
-import { addAudit, loadTrackedRepos, saveSettings } from "../data/control/index.ts";
+import { addAudit, loadTrackedRepos, readConfig, saveSettings } from "../data/control/index.ts";
 import { loadLatestMainHeads } from "../data/mirror/index.ts";
 import { BuildError, envSettings } from "./envs.ts";
-import { baseScope, settingsConfig } from "./scope.ts";
+import { currentJobId } from "../agents/call.ts";
+import { baseScope } from "./scope.ts";
 import { toolchainImage, type KubeSettings } from "./pods.ts";
 
 export { recordTrimmedPublish, WARM_PRIORITY };
@@ -34,7 +35,7 @@ export const WARM_EXCLUDED_KEY = "warm_repos_excluded";
 const CONFIG_KEYS = [WARM_REPOS_KEY, WARM_EXCLUDED_KEY, WARM_INTERVAL_KEY];
 
 /** The repos an operator added to the warm producer, sorted. */
-export const warmRepos = async (db: Db): Promise<string[]> => (await settingsConfig(db, CONFIG_KEYS)).warmRepos;
+export const warmRepos = async (db: Db): Promise<string[]> => (await readConfig(db, CONFIG_KEYS)).warmRepos;
 
 export type WarmCoverage = {
   /** Since when every pipeline repo is covered (the first trimmed publish), or null while only added repos are. */
@@ -45,7 +46,7 @@ export type WarmCoverage = {
 };
 
 export async function warmCoverage(db: Db): Promise<WarmCoverage> {
-  const [c, tracked, trimmed] = await Promise.all([settingsConfig(db, CONFIG_KEYS), loadTrackedRepos(db), loadTrimmedPublish(db)]);
+  const [c, tracked, trimmed] = await Promise.all([readConfig(db, CONFIG_KEYS), loadTrackedRepos(db), loadTrimmedPublish(db)]);
   const added = c.warmRepos, excluded = c.warmReposExcluded;
   const allSince = trimmed ? trimmed.at : null;
   const repos = [...baseScope(tracked.values())].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
@@ -59,7 +60,7 @@ export async function warmCoverage(db: Db): Promise<WarmCoverage> {
  */
 export async function changeWarmRepos(db: Db, action: "add" | "remove" | "exclude", repo: string, by: string): Promise<WarmCoverage> {
   if (!/^[\w.-]+(\/[\w.-]+)?$/.test(repo)) throw new BuildError(400, "a repo is written as it is tracked, e.g. owner/name");
-  const c = await settingsConfig(db, CONFIG_KEYS);
+  const c = await readConfig(db, CONFIG_KEYS);
   const lists: [string, string[], boolean][] = [[WARM_REPOS_KEY, c.warmRepos, action === "add"], [WARM_EXCLUDED_KEY, c.warmReposExcluded, action === "exclude"]];
   const changes = lists.flatMap(([key, was, has]) => {
     const now = (has ? [...new Set([...was, repo])] : was.filter((r) => r !== repo)).sort();
@@ -69,7 +70,7 @@ export async function changeWarmRepos(db: Db, action: "add" | "remove" | "exclud
   return await warmCoverage(db);
 }
 
-export const warmMinInterval = async (db: Db): Promise<number> => (await settingsConfig(db, CONFIG_KEYS)).warmMinIntervalMinutes;
+export const warmMinInterval = async (db: Db): Promise<number> => (await readConfig(db, CONFIG_KEYS)).warmMinIntervalMinutes;
 
 export async function setWarmMinInterval(db: Db, input: string, by: string): Promise<number> {
   const n = /^[0-9]+$/.test(input) ? Number(input) : NaN;
@@ -108,7 +109,7 @@ async function queueWarmFor(db: Db, repos: string[], s: KubeSettings, force: boo
   const facts = await loadWarm(db, repos, image);
   const rows = repos.flatMap((repo) => {
     const f = facts.get(repo);
-    return f && warmGate(f, Date.now(), force) === "queue" ? [{ repo, head: f.head!, image, plan: warmPlan({ mirror: !!s.crateMirror }), version: autocraftVersion(), rev: WARM_PRODUCER_REV, force }] : [];
+    return f && warmGate(f, Date.now(), force) === "queue" ? [{ repo, head: f.head!, image, plan: warmPlan({ mirror: !!s.crateMirror }), version: autocraftVersion(), rev: WARM_PRODUCER_REV, force, jobId: currentJobId() }] : [];
   });
   try {
     return await queueWarmTasks(db, rows);

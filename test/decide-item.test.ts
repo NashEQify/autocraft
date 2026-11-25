@@ -41,6 +41,8 @@ const rows: Row[] = [
   { name: "labels disagree, Sonnet has not answered", facts: disagree(), expect: { state: "referee-due", actions: ["referee"], next: "Referee: waiting for Sonnet" } },
   { name: "labels disagree, Sonnet was unsure: Opus is due", facts: disagree({ classification: { referee: { sure: false, final: false } } }), expect: { state: "referee-due", actions: ["referee"], next: "Referee: waiting for Opus" } },
   { name: "Sonnet sure: settled with its label", facts: { classification: { status: "settled", label: "infra", referee: { sure: true, final: false }, jevLabel: "bugfix", haikuLabel: "infra", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } }, labels: { existing: ["infra"] } }, expect: { state: "classified", actions: [] } },
+  { name: "both labels are scope labels: no referee and no label", facts: disagree({ classification: { jevLabel: "missing feature", haikuLabel: "small extra" } }), expect: { state: "classified", actions: [], next: "Triage by a person" } },
+  { name: "one scope label is refereed", facts: disagree({ classification: { jevLabel: "missing feature" } }), expect: { state: "referee-due", actions: ["referee"], next: "Referee: waiting for Sonnet" } },
   { name: "a draft is not refereed", facts: { ...disagree(), draft: true }, expect: { state: "referee-due", actions: [], wait: "the label referee" } },
   { name: "a held item is not refereed", facts: { ...disagree(), held: "backlog" }, expect: { state: "held-backlog", actions: [] } },
 

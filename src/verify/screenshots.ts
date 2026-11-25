@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { absolute } from "../build/artifacts.ts";
 import { BuildError } from "../build/envs.ts";
-import { QueueFullError, TERMINAL, cloneTasks, loadRetriesOf } from "../data/build/index.ts";
+import { cloneTasks } from "../build/tasks.ts";
+import { TERMINAL, loadRetriesOf } from "../data/build/index.ts";
 import { addScreenshotRuns, loadPendingScreenshotRuns, loadScreenshotRuns, settleScreenshotRuns, type PendingShotRun, type ScreenshotSettle } from "../data/merge/index.ts";
 import * as mirror from "../data/mirror/index.ts";
 import { addStageEvents } from "../data/planner/index.ts";
@@ -118,7 +119,7 @@ export async function maybeScreenshot(db: Db, c: Cand, deps: Env, log: (line: st
     await stage(db, c, "screenshot-planned", `${p.steps.length} steps: ${p.reason}`, log);
     return true;
   } catch (e) {
-    if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e;
+    if (!(e instanceof BuildError)) throw e;
     log(`  ${ref}: screenshots: tasks not queued: ${e.message}`);
     await insertRun(db, c, { state: "error", reason: `tasks not queued: ${e.message}`.slice(0, 300), baseSha: base });
     return false;
@@ -234,7 +235,7 @@ async function collectOne(db: Db, r: PendingShotRun, ctx: Ctx, deps: Pick<Collec
         });
         await jobItem(db, r.repo, r.number, "screenshot render failed in the build environment; queued the tasks again", log);
         return true;
-      } catch (e) { if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e; }
+      } catch (e) { if (!(e instanceof BuildError)) throw e; }
     }
   }
   for (const [role, , o] of outcomes) {

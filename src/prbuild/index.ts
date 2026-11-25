@@ -4,8 +4,9 @@
 // lacks CI's gate inputs and toolchain targets, so such failures are often false.
 import { BuildError } from "../build/envs.ts";
 import { featureOn } from "../build/features.ts";
-import { warmKeyOf } from "../build/tasks.ts";
-import { QueueFullError, TERMINAL, cancelTasks, cloneTasks, loadTasks } from "../data/build/index.ts";
+import { cloneTasks, warmKeyOf } from "../build/tasks.ts";
+import { currentJobId } from "../agents/call.ts";
+import { QueueFullError, TERMINAL, cancelTasks, loadTasks } from "../data/build/index.ts";
 import { loadLateDisagreements, loadPendingPrBuilds, queuePrBuilds, restartPrBuilds, savePrBuildErrors, settlePrBuilds, type NewPrBuild } from "../data/merge/index.ts";
 import { config, withConfig } from "../data/control/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
@@ -89,7 +90,7 @@ export async function collectPrBuilds(db: Db, repo: string, log: (line: string) 
           await jobItem(db, p.repo, p.number, `pr-build: ${out.reason}; queued again`, log);
           continue;
         } catch (e) {
-          if (!(e instanceof BuildError) && !(e instanceof QueueFullError)) throw e;
+          if (!(e instanceof BuildError)) throw e;
         }
       }
       const sha7 = p.headSha.slice(0, 7);
@@ -154,7 +155,7 @@ export async function runPrBuilds(db: Db, repo: string, log: (line: string) => v
       const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
       if (!release) continue;
       releases.push(release);
-      rows.push({ repo, number: c.number, head: c.head, base, scope, plan, warm: { key: warmKeyOf(repo), role: "use" } });
+      rows.push({ repo, number: c.number, head: c.head, base, scope, plan, warm: { key: warmKeyOf(repo), role: "use" }, jobId: currentJobId() });
     }
     await savePrBuildErrors(db, errors);
     if (rows.length && await featureOn(db, "pr-builds", repo)) {
