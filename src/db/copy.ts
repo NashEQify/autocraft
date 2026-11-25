@@ -29,10 +29,10 @@ import { HAND_TRIGGERS } from "./pg-schema.ts";
 export const RUNTIME_TABLES = new Set(["change_seq", "item_changes", "plan_full", "plan_full_causes", "plan_shadow_diffs", "plan_pass_stats", "plan_bulk", "review_blockers", "live_flush"]);
 
 /**
- * Rows a copy leaves where they are and a comparison leaves out: the schema stamp belongs to each database's own
- * migration (SQLite and Postgres stamps differ), so the target keeps or writes its own.
+ * Rows a copy leaves where they are and a comparison leaves out: the schema stamp and the Postgres schema generation
+ * belong to each database's own migration (SQLite and Postgres stamps differ), so the target keeps or writes its own.
  */
-const ROW_FILTER: Record<string, string> = { settings: "key <> 'schema_stamp'" };
+const ROW_FILTER: Record<string, string> = { settings: "key NOT IN ('schema_stamp', 'schema_generation')" };
 
 /**
  * Columns that Postgres stores as bytea and SQLite rows may hold as plain text from before texts were gzipped
