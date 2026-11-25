@@ -36,7 +36,7 @@ async function startWork(w: World, kind: "pr" | "issue"): Promise<number> {
   }
   await w.issue(7);
   await run("implement and merge", 7);
-  const im = await startAttempt(db, { repo: "app", number: 7, queuedBy: APPROVER, textHash: "h" });
+  const im = (await startAttempt(db, { repo: "app", number: 7, queuedBy: APPROVER, textHash: "h" }))!;
   await w.pr(1, { label: "feature", author: "craft-bot" });
   await recordSteps(db, [{ id: im.id, to: "pr-opened", patch: { branch: "fix-1", prNumber: 1, prUrl: "https://example.invalid/1" } }]);
   await advanceWorkflows(db);

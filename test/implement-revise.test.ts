@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SCRATCH } from "./scratch.ts";
 import { world } from "./world-db.ts";
+import { insertWorkflow } from "../src/workflow/store.ts";
 import { setFeature } from "../src/build/features.ts";
 import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { DIFF_FLAGS } from "../src/implement/diff.ts";
@@ -88,7 +89,7 @@ test("a revision after a base merge keeps main's change, also in the revision af
 
   const w = await (await (await world()).repo()).issue(5, { title: "Crash on start" });
   const db = w.db;
-  await db.run(db.k.insertInto("fast_track").values({ repo: "app", number: 5, added_by: "op", added_at: "2026-01-01T00:00:00.000Z" }));
+  await insertWorkflow(db, { repo: "app", number: 5, kind: "issue", entry: "implement", state: "running", startedBy: "op", startedAt: "2026-01-01T00:00:00.000Z", startedVia: "dashboard" });
   await setFeature(db, "implement", true, "op", "app");
   const started = await startImplementation(db, { repo: "app", number: 5, queuedBy: "op", textHash: "h", baseSha: base });
   await setImplementationState(db, started.id, "opening", { plan: { kind: "bugfix", summary: "Return 1.", plan: "1. Return 1." } as Implementation["plan"] });
