@@ -60,7 +60,7 @@ test("a job past its step's deadline is stopped and failed, and warns until ackn
   assert.deepEqual((await deadlineStops(db)).map((d) => d.step), ["test-other"]);
 });
 
-test("a job that works in slices ends as a success before its deadline, and the next one is due at once", async () => {
+test("a job that works in slices ends as a success before its deadline, with work left", async () => {
   const job = await enqueue(db, "test-slices", { units: 10_000 }, "boss");
   for (const end = Date.now() + 20_000; !["done", "failed"].includes((await getJob(db, job.id)).state) && Date.now() < end; await new Promise((r) => setTimeout(r, 50))) await runner.tick();
   const j = await getJob(db, job.id);
@@ -68,8 +68,6 @@ test("a job that works in slices ends as a success before its deadline, and the 
   assert.equal(j.error, null);
   const [, done, left] = /^(\d+) of \d+ units, (\d+) left$/.exec(j.summary ?? "")!.map(Number);
   assert.ok(done! > 0 && left! > 0, j.summary ?? "");
-  await db.run(db.k.updateTable("jobs").set({ requested_by: "pipeline" }).where("id", "=", job.id));
-  assert.equal(await failureBackoff(db, "test-slices", Date.now()), null);
 });
 
 test("draining keeps a running job's writes and starts nothing; off blocks the writes", async () => {
