@@ -1,6 +1,7 @@
 // The switch to the maintainer workflow, once: what older processes wrote after the state copy is carried over, people's answers,
-// the open questions and the results of the decision system become `archived` workflow events, every tracked repo runs the
-// maintainer workflow, and each open fast-track row and each pre-approved merge in progress becomes a started workflow.
+// the open questions and the results of the decision system become `archived` workflow events, an implementation that waits for a
+// maintainer keeps its question in its own rounds, every tracked repo runs the maintainer workflow, and each open fast-track row and
+// each pre-approved merge in progress becomes a started workflow.
 //
 // When. The runner runs it after it won its lease and before it starts work (src/runner/index.ts), on both engines. By then
 // the older runner and its jobs are fenced, so their last writes are in place; older dashboards may serve for some minutes
@@ -26,6 +27,8 @@
 //   duplicate group ids, a Task Runner's machine: filled where empty.
 // - discord_filed, plan_pass_stats and every other table: one place for both, nothing to carry.
 import type { ReviewWorkflow } from "../data/review/types.ts";
+import { LIMIT_IMPLEMENT, type QuestionOption } from "../implement/questions.ts";
+import { MAX_ATTEMPTS_PER_TEXT, STUCK_CAUSES, STUCK_OPTIONS } from "../implement/stuck.ts";
 import { afterSteps, atBlocker, type ReviewView } from "../workflow/recommend.ts";
 import { WEIGHT_NORMAL, type Parsed, type PlanPart } from "../workflow/types.ts";
 import type { Db, Statement } from "./index.ts";
@@ -57,6 +60,8 @@ export interface SwitchReport {
   legs: { item: string; by: string; head: string; workflow: number }[];
   /** Those the pre-approval pass ends. */
   legsSkipped: { item: string; why: string }[];
+  /** Implementations that wait for a maintainer, whose question was carried into their rounds. */
+  questions: string[];
   /** Answers nothing had acted on yet. */
   unapplied: string[];
   repos: number;
@@ -83,7 +88,7 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   const since = marker?.at ?? (copied !== null && /^\d{4}-/.test(copied) ? copied : now);
   const r: SwitchReport = {
     at: now, archived: { answered: 0, withdrawn: 0, actions: 0, withoutItem: 0 }, carried: {}, legsEnded: 0, recommending: [], legs: [], legsSkipped: [],
-    unapplied: [], repos: 0, fastTrack: [], fastTrackSkipped: [], backlog: 0,
+    questions: [], unapplied: [], repos: 0, fastTrack: [], fastTrackSkipped: [], backlog: 0,
   };
   await carryState(db, r, { now, since, keepAfter: marker ? null : since, perDay: o.perDay });
   await carryColumns(db, r, since);
@@ -91,6 +96,7 @@ export async function switchOver(db: Db, o: SwitchOptions = {}): Promise<SwitchR
   await archiveActions(db, r);
   await db.write(async () => {
     await endAskedLegs(db, r, now);
+    await carryQuestions(db, r, now);
     r.repos = (await run(db, q(db).updateTable("main.tracked_repos").set({ workflow: "new" }).where("workflow", "<>", "new"))).changes;
     await startWorkflows(db, r, now);
     r.unapplied = (await all(db, q(db).selectFrom("main.decisions").select("id").where("answer", "is not", null).where("answer", "not in", [WITHDRAWN, BACKLOG]).where("applied_at", "is", null).orderBy("id").limit(LISTED)))
@@ -115,6 +121,7 @@ export function reportLines(r: SwitchReport): string[] {
     ...(r.recommending.length ? [`  waiting with a recommendation: ${r.recommending.join(", ")}`] : []),
     ...r.legs.map((l) => `  pre-approved merge: ${l.item} goes on at ${l.head.slice(0, 7)}, approved by ${l.by} (workflow ${l.workflow})`),
     ...r.legsSkipped.map((l) => `  pre-approved merge: ${l.item} ends: ${l.why}`),
+    ...(r.questions.length ? [`  implementations that wait for a maintainer: ${r.questions.join(", ")}`] : []),
     ...(r.unapplied.length ? [`  answers nothing had acted on: ${r.unapplied.join(", ")}`] : []),
   ];
 }
@@ -424,6 +431,70 @@ async function endAskedLegs(db: Db, r: SwitchReport, now: string): Promise<void>
   }
   // updated_at stays: it says when the leg stopped, and a stop older than the workflow's last answer is no new one.
   r.legsEnded = (await run(db, q(db).updateTable("main.preapprovals").set({ state: "cancelled" }).where("state", "=", "asked"))).changes;
+}
+
+// ---- questions of implementations ----------------------------------------------------------------------------------
+
+/** Options of the decision system that are commands of their own, or words. */
+const NOT_OPTIONS = new Set([BACKLOG, "answer", "close", "close-issue", "close-pr"]);
+
+/**
+ * An attempt that is stuck, or that asked the maintainers, shows its question through its newest `question` round. An older release kept
+ * the options, the recommended one and the answer in a decision, and wrote no round for a stuck attempt: the round gets them here, and an
+ * answer nothing had acted on yet becomes the attempt's answer.
+ */
+async function carryQuestions(db: Db, r: SwitchReport, now: string): Promise<void> {
+  const attempts = await all(db, q(db).selectFrom("main.implementations as im").leftJoin("main.decisions as d", "d.id", "im.decision_id")
+    .select(["im.id", "im.repo", "im.number", "im.state", "im.text_hash", "im.pr_number", "im.reason", "d.id as decision", "d.question", "d.options", "d.recommended", "d.facts", "d.answer", "d.answer_note", "d.answered_by", "d.answered_at", "d.applied_at"])
+    .where("im.state", "in", ["asked", "stuck"]).orderBy("im.id"));
+  for (const a of attempts) {
+    const rounds = await all(db, q(db).selectFrom("main.implementation_rounds").select(["id", "kind", "result", "at"]).where("implementation_id", "=", a.id).orderBy("id"));
+    const questions = rounds.filter((x) => x.kind === "question").map((x) => ({ id: Number(x.id), at: x.at as string, result: (parse(x.result) ?? {}) as Row }));
+    const last = questions.at(-1);
+    const kept = ((parse(a.options) ?? []) as Row[]).filter((o) => typeof o?.key === "string" && typeof o.label === "string" && !NOT_OPTIONS.has(o.key));
+    let options = kept.map((o): QuestionOption => ({ key: o.key, label: o.label, hint: typeof o.hint === "string" ? o.hint : "" }));
+    let round: { id: number; at: string };
+    if (a.state === "stuck") {
+      // The stuck question of this release, with nothing but answers after it.
+      if (last?.result.stuck === true && !rounds.some((x) => Number(x.id) > last.id && x.kind !== "answer" && x.kind !== "guidance")) continue;
+      if (a.decision === null) options = await stuckOptions(db, a);
+      const reason = (a.reason as string | null) ?? "the reason was not recorded";
+      const cause = Object.entries(STUCK_CAUSES).find(([, line]) => reason.startsWith(line))?.[0];
+      const result = {
+        audience: "maintainer", text: `The implementation is stuck: ${reason}.`, options, recommended: options.some((o) => o.key === STUCK_OPTIONS.tryAgain.key) ? STUCK_OPTIONS.tryAgain.key : null,
+        stuck: true, ...(cause && { cause }), facts: (parse(a.facts) ?? []) as unknown[],
+      };
+      const [added] = await all(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "question", call_id: null, result: JSON.stringify(result), at: now }).returning("id"));
+      round = { id: Number(added!.id), at: "" };
+    } else {
+      if (!last || last.result.audience !== "maintainer" || last.result.options !== undefined || a.decision === null) continue;
+      const limit = /:implement-limit-\d+$/.test(a.decision);
+      const named = limit ? LIMIT_IMPLEMENT.key : a.recommended;
+      // The decision's options belong to its first question, which is the newest round's here; the other one changes places with it.
+      const first = questions.find((x) => x.result.decisionId === a.decision) ?? last;
+      if (first !== last) await setResult(db, first.id, { ...first.result, text: last.result.text });
+      await setResult(db, last.id, { ...last.result, text: a.question, options, recommended: options.some((o) => o.key === named) ? named : null, ...(limit && { limit: true }) });
+      round = last;
+    }
+    r.questions.push(`${key(a as never)} ${a.state}`);
+    const answered = a.answer !== null && !PIPELINE_ANSWERS.includes(a.answer) && a.applied_at === null && (a.answered_at ?? "") > round.at;
+    const option = options.find((o) => o.key === a.answer)?.key;
+    const words = (a.answer_note as string | null)?.trim() || undefined;
+    if (!answered || (option === undefined && !(a.answer === "answer" && words))) continue;
+    const answer = { by: a.answered_by, via: "cli", at: a.answered_at, question: round.id, ...(option !== undefined && { option }), ...(words && { text: words }) };
+    await run(db, q(db).insertInto("main.implementation_rounds").values({ implementation_id: a.id, kind: "answer", call_id: null, result: JSON.stringify(answer), at: a.answered_at }));
+  }
+}
+
+const setResult = async (db: Db, id: number, result: Row): Promise<void> =>
+  void await run(db, q(db).updateTable("main.implementation_rounds").set({ result: JSON.stringify(result) }).where("id", "=", id));
+
+/** What a stuck attempt without its decision may do: its revision again, or a new attempt while the issue text has tries left. */
+async function stuckOptions(db: Db, a: Row): Promise<QuestionOption[]> {
+  if (a.pr_number !== null) return [STUCK_OPTIONS.reviseAgain];
+  const tries = Number((await get(db, q(db).selectFrom("main.implementations").select((eb: any) => eb.fn.countAll().as("n"))
+    .where("repo", "=", a.repo).where("number", "=", a.number).where("text_hash", "=", a.text_hash)))?.n ?? 0);
+  return tries < MAX_ATTEMPTS_PER_TEXT ? [STUCK_OPTIONS.tryAgain] : [];
 }
 
 // ---- starts and backlog --------------------------------------------------------------------------------------------------

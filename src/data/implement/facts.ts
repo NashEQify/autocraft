@@ -29,7 +29,7 @@ const endedLast = (eb: any, state: string) => eb.case().when(state, "in", ENDED.
  * The latest attempt per issue and per PR, question and answer state, revise heads and per-text attempt counts. Keys may be
  * issue refs or PR refs; the loader matches either. 3 statements in one `together` wave.
  * The rounds (questions, answers, guidance, revisions) are read for attempts not ended only; an ended attempt carries none.
- * `textCounts` is filled only for issues that have a failed or stuck attempt, the case that asks for it.
+ * `textCounts` is filled only for issues with more than one attempt.
  */
 export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: string[]; withPlans?: boolean } = {}): Promise<ImplementFacts> {
   const out: ImplementFacts = { byIssue: new Map(), byPr: new Map(), liveByRepo: new Map() };
@@ -50,7 +50,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       .select((eb: any) => [
         ...LITE_COLS.map((c) => `t.${c}`), ...(o.withPlans ? ["t.plan_json", "t.plan_md", "t.report_json"] : []), "t.rn", "t.a", "t.b",
         eb.case().when(eb.and([eb("t.rn", "=", eb.lit(1)), eb("t.a", "=", eb.lit(1)), eb.exists(eb.selectFrom("main.implementations as y").select(eb.lit(1).as("one"))
-          .whereRef("y.repo", "=", "t.repo").whereRef("y.number", "=", "t.number").where("y.state", "in", ["failed", "stuck"]))]))
+          .whereRef("y.repo", "=", "t.repo").whereRef("y.number", "=", "t.number").whereRef("y.id", "<>", "t.id"))]))
           .then(kx.jsonRows(db, eb.selectFrom("main.implementations as x").select(["x.text_hash as h", eb.fn.countAll().as("n")]).whereRef("x.repo", "=", "t.repo").whereRef("x.number", "=", "t.number").groupBy("x.text_hash")))
           .else(eb.lit(null)).end().as("counts"),
       ])
@@ -74,7 +74,8 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
   for (const r of attempts) {
     if (Number(r.a) === 1 && r.pr_number !== null) {
       const key = refKey(r.repo, Number(r.number));
-      (prAttempts.get(key) ?? prAttempts.set(key, []).get(key)!).push({ id: Number(r.id), prNumber: Number(r.pr_number), state: r.state as ImplementationState, createdAt: r.created_at, diffStat: r.diff_stat });
+      const planned = plannedOf(r);
+      (prAttempts.get(key) ?? prAttempts.set(key, []).get(key)!).push({ id: Number(r.id), prNumber: Number(r.pr_number), state: r.state as ImplementationState, createdAt: r.created_at, diffStat: r.diff_stat, ...(planned && { plan: planned.plan }) });
     }
     if (Number(r.b) === 1) {
       // Rows are in id order: the newest attempt that opened a PR is the one kept.

@@ -17,6 +17,16 @@ export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
  */
 export const notArchived = (eb: kx.AnyEb, kind: string): Expression<SqlBool> => eb(kind, "<>", kx.literal("archived"));
 
+/** Attempt states that no longer work a PR (src/implement/types.ts ENDED_STATES). */
+const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
+
+/**
+ * The attempt `i` is one the implement workflow `w` of its issue works on: the current one, or one that ended in it. An attempt that ended
+ * before the workflow started belongs to an earlier one, and its PR (reopened, say) is no work of this one.
+ */
+export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> =>
+  eb.or([eb(`${i}.state`, "not in", ENDED_ATTEMPTS), eb(`${i}.updated_at`, ">=", eb.ref(`${w}.started_at`))]);
+
 /** The item has a live workflow, or is the PR of a live implement workflow. */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
@@ -24,7 +34,7 @@ export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Alia
     .where((w) => w.or([
       w("pw.number", "=", n),
       w.and([w("pw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as pwi").select(one(eb))
-        .where("pwi.repo", "=", w.ref("pw.repo")).where("pwi.number", "=", w.ref("pw.number")).where("pwi.pr_number", "=", n))]),
+        .where("pwi.repo", "=", w.ref("pw.repo")).where("pwi.number", "=", w.ref("pw.number")).where("pwi.pr_number", "=", n).where((x) => attemptOf(x, "pwi", "pw")))]),
     ])));
 }
 
@@ -56,7 +66,7 @@ export function boundToExpr(db: Db, eb: kx.AnyEb, refs: readonly { repo: string;
       .where((w) => w.or([kx.ciEq(db, "bw.started_by", login), kx.ciEq(db, "bw.approved_by", login)]))
       .where((w) => w.or([
         w("bw.number", "=", ref.number),
-        w.and([w("bw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as bi").select(one(eb)).where("bi.repo", "=", kx.ref<string>("bw.repo")).where("bi.number", "=", kx.ref<number>("bw.number")).where("bi.pr_number", "=", ref.number))]),
+        w.and([w("bw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as bi").select(one(eb)).where("bi.repo", "=", kx.ref<string>("bw.repo")).where("bi.number", "=", kx.ref<number>("bw.number")).where("bi.pr_number", "=", ref.number).where((x) => attemptOf(x, "bi", "bw")))]),
       ])));
   })) as AliasableExpression<SqlBool>;
 }

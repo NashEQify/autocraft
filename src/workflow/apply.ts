@@ -12,8 +12,9 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, recordEvents, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, listWorkflows, loadActions, loadPrWorkflows, recordEvents, retryActions, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
+import { ACTION_WAITS } from "../core/may.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -22,9 +23,10 @@ import { claimLevels } from "../remote/level.ts";
 import { actRefusal } from "../github/identity.ts";
 import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
-import { isLive, resolve, type Run } from "./resolve.ts";
-import { confirmLine, listText, replyLine, stepsFor, utcClock, type Clock } from "./status.ts";
+import { isLive, resolve, type Resolved, type Run } from "./resolve.ts";
+import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
+import { candidatePr } from "./work.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
 export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; githubId?: number | null };
@@ -74,20 +76,26 @@ function trackedRepo(tracked: ReadonlySet<string>, written: string): string | nu
 }
 
 type ItemNow = { kind: ItemKind; state: string; head: string | null };
-/** What a command batch reads once for all its items: the tracked repos, the items and their live workflows. */
-/** `again`: items the list names more than once; each later run reads the workflow the earlier one left. */
-type Batch = { tracked: Set<string>; items: Map<string, ItemNow>; live: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]>; again: Set<string> };
+/**
+ * What a command batch reads once for all its items: the tracked repos, the items, their live workflows and, for a PR, the live workflow
+ * that works on it (the PR's own, or its issue's). `again`: items the list names more than once; each later run reads the workflow the
+ * earlier one left.
+ */
+type Batch = { tracked: Set<string>; items: Map<string, ItemNow>; live: Map<string, ItemWorkflow>; works: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]>; again: Set<string> };
 
 async function loadBatch(db: Db, written: readonly ItemRef[]): Promise<Batch> {
   const tracked = new Set((await loadTrackedRepos(db)).keys());
   const refs = written.flatMap((x) => { const repo = trackedRepo(tracked, x.repo); return repo ? [{ repo, number: x.number }] : []; });
-  const [items, live, closing] = refs.length
-    ? await db.together(() => Promise.all([loadItems(db, refs, "pr"), listWorkflows(db, { live: true, refs }), loadActions(db, { refs, kinds: CLOSE_KINDS, states: OPEN_ACTIONS })]))
-    : [new Map(), [], new Map()] as const;
+  const [items, live, works, closing] = refs.length
+    ? await db.together(() => Promise.all([
+      loadItems(db, refs, "pr"), listWorkflows(db, { live: true, refs }), loadPrWorkflows(db, refs), loadActions(db, { refs, kinds: CLOSE_KINDS, states: OPEN_ACTIONS }),
+    ]))
+    : [new Map(), [], new Map(), new Map()] as const;
   return {
     tracked,
     items: new Map([...items].map(([k, it]) => [k, { kind: it.kind as ItemKind, state: it.state, head: it.head_oid }])),
     live: new Map(live.map((w) => [`${w.repo}#${w.number}`, w])),
+    works: new Map(works),
     closing: new Map(closing),
     again: new Set(refs.map((x) => `${x.repo}#${x.number}`).filter((k, i, all) => all.indexOf(k) !== i)),
   };
@@ -114,7 +122,47 @@ export async function runCommand(db: Db, actor: Actor, via: Surface, input: Comm
   return { items, lines };
 }
 
+/** The workflow changed between the read the command was resolved on and its write. */
+class Moved extends Error {}
+/** How often a command is resolved again on a workflow that changed under it. */
+const MOVED_TRIES = 3;
+
+/** Runs the command on one item; when the workflow changed meanwhile (the advance pass, another person), on what it is now. */
 async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, target: ItemRef, at: string, batch: Batch): Promise<ItemOutcome> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await tryOne(db, actor, via, input, target, at, batch);
+    } catch (e) {
+      if (!(e instanceof Moved)) throw e;
+      const repo = trackedRepo(batch.tracked, target.repo)!;
+      const key = `${repo}#${target.number}`;
+      const was = batch.live.get(key) ?? null;
+      const now = (await listWorkflows(db, { live: true, refs: [{ repo, number: target.number }] }))[0];
+      if (now) batch.live.set(key, now); else batch.live.delete(key);
+      // A yes answers the recommendation the person read, not one that took its place.
+      const other = input.parsed.kind === "yes" && JSON.stringify(now?.rec ?? null) !== JSON.stringify(was?.rec ?? null);
+      if (other || tries === MOVED_TRIES) {
+        return { repo, number: target.number, outcome: "refused", line: t("The work on {ref} changed a moment ago. Send the command again.", { ref: refText(repo, target.number) }), workflowId: now?.id ?? null };
+      }
+    }
+  }
+}
+
+/** Where the work of an item runs, when the live workflow of another item covers it, and how it stands. */
+function worksElsewhere(ref: string, w: ItemWorkflow, clock: Clock = utcClock): string {
+  const on = refText(w.repo, w.number);
+  return [
+    t("{ref} is part of the work on {on} ({who}): {state}.", { ref, on, who: attributionLines(w, null, clock).join("; "), state: stateLine(w, currentStep(workflowSteps(w, "other")), clock) }),
+    recommendationLine(w.rec), t("Send the command on {on}.", { on }),
+  ].filter((x) => x !== null).join(" ");
+}
+
+/** The PR's command is for a workflow of its own: a start, or words only a started item takes. */
+const needsWorkflow = (r: Resolved): boolean => (r.kind === "run" ? r.run.start !== null
+  : r.kind === "refused" ? r.refusal.why === "nothing-running"
+  : r.ambiguity.why === "nothing-to-answer" || r.ambiguity.why === "no-plan" || r.ambiguity.why === "weight-unstarted");
+
+async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, target: ItemRef, at: string, batch: Batch): Promise<ItemOutcome> {
   const repo = trackedRepo(batch.tracked, target.repo);
   const out = (outcome: ItemOutcome["outcome"], line: string, workflowId: number | null = null): ItemOutcome =>
     ({ repo: repo ?? target.repo, number: target.number, outcome, line, workflowId });
@@ -134,7 +182,13 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   // A list may name the item twice: the first run's workflow is the one the second sees.
   const wf = batch.live.get(key) ?? null;
   const closing = batch.closing.get(key)?.at(-1) ?? null;
-  const r = resolve(input.parsed, { kind, workflow: wf, closing: closing !== null });
+  // A merge of the sender's that waits for their own sign-in or access: approving it again tries it again.
+  const waiting = wf?.approvedBy?.toLowerCase() === login.toLowerCase() ? await waitingMerges(db, wf, login) : [];
+  const r = resolve(input.parsed, { kind, workflow: wf, closing: closing !== null, mergeWaits: waiting.length > 0 });
+  // One workflow works on a PR at a time: the PR of a live implement workflow takes its commands on the issue.
+  const covers = kind === "pr" && wf === null ? batch.works.get(key)
+    : r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number, startedAt: at }) : undefined;
+  if (covers && needsWorkflow(r)) return out("refused", worksElsewhere(ref, covers, input.clock), covers.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string) =>
     ({ workflowId, repo, number: target.number, login, via, kind, parsed: input.parsed, line, at });
   if (r.kind === "ambiguous") {
@@ -147,7 +201,7 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const c: fx.Ctx = { db, by: login, via, at, item: { repo, number: target.number, kind, head }, ...(input.exec ? { exec: input.exec } : {}) };
   try {
     const closeAs = r.run.close ? await closeAsOf(c, r.run.close, batch, input.visible) : null;
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs });
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, waiting });
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "");
     const id = await db.write(async () => {
@@ -176,7 +230,7 @@ function eventKind(r: Run): WorkflowEventKind {
   if (r.start) return "started";
   // An answer to the open recommendation is an answer also when it approves the merge: it accepts what the recommendation showed.
   if (r.answers) return "answered";
-  if (r.approve) return "approved";
+  if (r.approve || r.retryMerge) return "approved";
   if (r.weight !== null && !r.again && !r.fix.length && !r.drop.length) return "weighted";
   return "set";
 }
@@ -196,7 +250,7 @@ async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?:
 type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
 /** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null }): Promise<Done> {
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; waiting: WorkflowAction[] }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
@@ -277,8 +331,11 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   return {
     failed: [],
     commit: async () => {
-      if (!(await listWorkflows(db, { ids: [live.id], live: true })).length) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+      const now = (await listWorkflows(db, { ids: [live.id], live: true }))[0];
+      if (!now) throw new fx.EffectError(t("The work on {ref} ended a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+      if (now.state !== live.state || now.updatedAt !== live.updatedAt) throw new Moved();
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
+      if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
       await work?.(live.id);
@@ -297,13 +354,24 @@ async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promis
   await recordAnswers(c.db, [{ id: q.implementation, question: q.round, by: c.by, via: c.via, option }], c.at);
 }
 
+/** The workflow's merges as `login` that wait for their sign-in or access, on whatever PR they are. */
+async function waitingMerges(db: Db, w: ItemWorkflow, login: string): Promise<WorkflowAction[]> {
+  return [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ACTION_WAITS })).values()].flat().filter((a) => a.by.toLowerCase() === login.toLowerCase());
+}
+
+/** The PR's own live workflow, when an implement start of its issue would go on with that PR. */
+async function prWorkflow(db: Db, w: Pick<ItemWorkflow, "repo" | "number" | "startedAt">): Promise<ItemWorkflow | undefined> {
+  const pr = await implementationPr(db, w);
+  return pr ? (await listWorkflows(db, { live: true, refs: [{ repo: pr.repo, number: pr.number }] }))[0] : undefined;
+}
+
 /** The open implementation PR of an implement workflow, with its head; null while the issue has none. */
-async function implementationPr(db: Db, w: ItemWorkflow): Promise<fx.Target | null> {
+async function implementationPr(db: Db, w: Pick<ItemWorkflow, "repo" | "number" | "startedAt">): Promise<fx.Target | null> {
   const a = (await loadImplementFacts(db, [{ repo: w.repo, number: w.number }])).byIssue.get(`${w.repo}#${w.number}`);
-  const pr = a?.attempt.prNumber ?? a?.prAttempts.find((p) => p.createdAt >= w.startedAt)?.prNumber ?? null;
-  if (pr === null) return null;
-  const it = (await loadItems(db, [{ repo: w.repo, number: pr }], "pr")).get(`${w.repo}#${pr}`);
-  return it?.state === "OPEN" ? { repo: w.repo, number: pr, kind: "pr", head: it.head_oid } : null;
+  const candidate = candidatePr(a, w);
+  if (candidate === null) return null;
+  const it = (await loadItems(db, [{ repo: w.repo, number: candidate }], "pr")).get(`${w.repo}#${candidate}`);
+  return it?.state === "OPEN" ? { repo: w.repo, number: candidate, kind: "pr", head: it.head_oid } : null;
 }
 
 // ---- controls ------------------------------------------------------------------------------------------------------------

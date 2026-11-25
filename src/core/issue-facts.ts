@@ -19,6 +19,7 @@ import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts
 import { openPrsByRepo, textHash, type OpenPr } from "./open-prs.ts";
 import { inStep, loadItemPass, loadPassBase, type EndWave, type ItemPassData, type ItemPassNeeds, type PassBase, type SharedDupes } from "./pass-load.ts";
 import type { ItemFacts } from "./plan.ts";
+import { overBefore } from "../workflow/work.ts";
 import type { Db } from "../db/index.ts";
 
 export type { ItemFacts } from "./plan.ts";
@@ -162,6 +163,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const outsideHold = d.outsideHolds.get(ref);
     const a = r.kind === "issue" ? d.implement.byIssue.get(ref) : undefined;
     const q = r.kind === "issue" ? queuedOf(d, ref) : null;
+    const attemptPr = a && a.attempt.prNumber !== null ? d.prs.get(`${r.repo}#${a.attempt.prNumber}`) : undefined;
     const act = q ? d.act.get(permKey(q.by, r.repo)) : undefined;
     const live = d.implement.liveByRepo.get(r.repo);
     // A confirmed write permission stops counting with the clock alone.
@@ -196,9 +198,10 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
             c.author !== null && (c.created_at ?? "") > askedSince(a) && !own.has(plainLogin(c.author)) && !isBotLogin(c.author)),
           decisionAnswered: (a.attempt.state === "stuck" || a.attempt.state === "asked") && a.answer !== null,
           asked: a.attempt.state === "asked" ? a.question?.audience ?? "author" : null,
-          requeuedAfterEnd: ENDED_STATES.has(a.attempt.state) && q !== null && q.at > a.attempt.updatedAt,
+          // An attempt whose PR was over before the queueing is recorded as ended after it.
+          requeuedAfterEnd: ENDED_STATES.has(a.attempt.state) && q !== null && (q.at > a.attempt.updatedAt || overBefore(attemptPr, q.at)),
           // The PR we just opened counts as open until a sync mirrors it.
-          prOpen: a.attempt.prNumber !== null && (d.prs.get(`${r.repo}#${a.attempt.prNumber}`)?.state ?? "OPEN") === "OPEN",
+          prOpen: a.attempt.prNumber !== null && (attemptPr?.state ?? "OPEN") === "OPEN",
         } : null,
         liveInRepo: (live?.size ?? 0) - (live?.has(ref) ? 1 : 0),
       },

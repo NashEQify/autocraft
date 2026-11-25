@@ -68,7 +68,7 @@ async function textTries(db: Db, impl: Implementation): Promise<{ hash: string; 
   const [facts, items] = await db.together(() => Promise.all([loadImplementFacts(db, [impl]), loadItems(db, [impl], "text")]));
   const it = items.get(ref);
   const hash = it ? textHash(it.title ?? "", it.body ?? "") : impl.textHash;
-  // The loader counts per text only for an issue with a failed or stuck attempt; before the first, the open attempt is the one try.
+  // The loader counts per text for an issue with several attempts; an only attempt is the one try.
   const counts = facts.byIssue.get(ref)?.textCounts ?? {};
   const tries = Object.keys(counts).length ? counts[hash] ?? 0 : impl.textHash === hash ? 1 : 0;
   return { hash, tries };

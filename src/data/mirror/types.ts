@@ -18,7 +18,7 @@ type ItemRowAll = Selectable<DB["items"]>;
 type Pick2<K extends keyof ItemRowAll> = Pick<ItemRowAll, K>;
 export type ItemRef = Pick2<"repo" | "number" | "kind" | "state">;
 export type ItemCard = ItemRef & Pick2<"title" | "url" | "author" | "author_type" | "labels" | "assignees" | "comments_count" | "is_draft" | "created_at" | "updated_at" | "closed_at" | "merged_at" | "merged_by" | "state_reason">;
-export type ItemPr = ItemRef & Pick2<"author" | "author_id" | "author_type" | "assignees" | "is_draft" | "updated_at" | "additions" | "deletions" | "head_oid" | "head_ref" | "head_repo" | "base_ref" | "mergeable" | "maintainer_can_modify" | "review_decision" | "ci_state" | "closing_issues" | "merged_at">;
+export type ItemPr = ItemRef & Pick2<"author" | "author_id" | "author_type" | "assignees" | "is_draft" | "updated_at" | "additions" | "deletions" | "head_oid" | "head_ref" | "head_repo" | "base_ref" | "mergeable" | "maintainer_can_modify" | "review_decision" | "ci_state" | "closing_issues" | "closed_at" | "merged_at">;
 export type ItemText = ItemCard & Pick2<"body" | "author_id" | "author_association" | "additions" | "deletions" | "changed_files" | "closing_issues" | "text_refs" | "head_oid" | "embed_hash" | "class_hash" | "class_scheme">;
 /** Every column of `items` (no `fts`). */
 export type ItemFull = Omit<ItemRowAll, "jev_failed_hash">;

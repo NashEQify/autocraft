@@ -5,13 +5,14 @@
 // recommendation (question.ts). The runner runs it on each tick its inputs changed, before the pre-approval pass.
 //
 // A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. The
-// pass loads every workflow's facts at once and writes what changed in one write at its end.
+// pass loads every workflow's facts at once and writes what changed in one write at its end. A workflow a person changed
+// meanwhile (stopped, answered, approved) keeps what they did: the pass's write leaves it out and the next pass looks at it again.
 import { loadPushOutcomeEdges, withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge, loadReviewRows, type ReviewRow } from "../data/review/index.ts";
-import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, recordEvents, saveWorkflows, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
+import { adoptLegs, listWorkflows, loadGoOnAt, loadLegs, loadRepins, moveWorkflows, recordEvents, type Preapproval, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { decidePr, MAINTAINER_ANSWER_WAIT } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
@@ -27,6 +28,7 @@ import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
 import { listText, stepsFor, type StepName } from "./status.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "./types.ts";
+import { candidatePr, workOf } from "./work.ts";
 
 const ACTOR = "pipeline";
 const ACTIVE_LEG = ["fixup", "review", "ci", "queued"];
@@ -40,10 +42,9 @@ export type Moved = { id: number; repo: string; number: number; to: ItemWorkflow
 /** Lockfiles a fix-up may touch as a side effect of its change: never "beyond what was agreed". */
 const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
 
-type Target = { number: number };
 /** What the pass loaded for every live workflow, keyed `repo#number` (of the item, or of its PR). */
 type Pass = {
-  items: Map<string, { state: string; head_oid: string | null }>;
+  items: Map<string, { state: string; head_oid: string | null; closed_at: string | null }>;
   implement: ImplementFacts;
   goOn: Map<number, string>;
   legs: Map<string, Preapproval[]>;
@@ -55,8 +56,8 @@ type Pass = {
   facts: Map<string, PrFacts>;
   thresholds: BlockerFacts["thresholds"];
 };
-/** The writes the pass collects, written once at its end. */
-type Writes = { workflows: { id: number; patch: WorkflowPatch; at: string }[]; events: WorkflowEvent[]; adopt: { id: number; workflowId: number }[] };
+/** The writes the pass collects, written once at its end; `was`: the row as the pass read it. */
+type Writes = { workflows: { id: number; patch: WorkflowPatch; at: string; was: { state: ItemWorkflow["state"]; updatedAt: string } }[]; events: (WorkflowEvent & { workflowId: number })[]; adopt: { id: number; workflowId: number }[] };
 
 const key = (repo: string, n: number): string => `${repo}#${n}`;
 
@@ -119,7 +120,8 @@ async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, re
       await preapproveMerge(db, { repo, number: pr, by: w.approvedBy!, via: "workflow", head, workflowId: w.id });
     } catch (e) {
       // A refusal by rule (not reviewable, merging not approved) needs a person; anything else is tried again on the next pass.
-      if (e instanceof PreapprovalRefused) return e.message;
+      // A leg that became active meanwhile is adopted, or waited for, on the next pass.
+      if (e instanceof PreapprovalRefused) return e.active ? null : e.message;
       throw e;
     }
   } else if (active.workflow_id === null) writes.adopt.push({ id: active.id, workflowId: w.id });
@@ -139,16 +141,6 @@ function implHead(pass: Pass, w: ItemWorkflow, ref: string, head: string): "ours
   return f.head !== head ? "later" : f.may.ownHead ? "ours" : "theirs";
 }
 
-/** The PR a workflow works on: its own item, or an implement workflow's implementation PR; null while an issue has none. */
-function prOf(pass: Pass, w: ItemWorkflow): Target | null {
-  if (w.kind === "pr") return { number: w.number };
-  const a = pass.implement.byIssue.get(key(w.repo, w.number));
-  if (a?.attempt.prNumber != null) return { number: a.attempt.prNumber };
-  // The attempt may have ended with its PR: the latest one of this workflow that opened a PR.
-  const ended = a?.prAttempts.find((p) => p.createdAt >= w.startedAt);
-  return ended ? { number: ended.prNumber } : null;
-}
-
 /**
  * One pass over the live workflows. Writes only what changed, in one write at the end; returns the workflows that moved to
  * another state.
@@ -161,9 +153,10 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const [implement, goOn, thresholds] = await db.together(() => Promise.all([
       loadImplementFacts(db, issues, { withPlans: true }), loadGoOnAt(db, live), blockerThresholds(db),
     ]));
-    const pre: Pick<Pass, "implement"> = { implement };
-    const targets = new Map(live.map((w) => [w.id, prOf(pre as Pass, w)]));
-    const prRefs = [...new Map(live.flatMap((w) => { const t = targets.get(w.id); return t ? [[key(w.repo, t.number), { repo: w.repo, number: t.number }] as const] : []; })).values()];
+    const prRefs = [...new Map(live.flatMap((w) => {
+      const number = w.kind === "pr" ? w.number : candidatePr(implement.byIssue.get(key(w.repo, w.number)), w);
+      return number === null ? [] : [[key(w.repo, number), { repo: w.repo, number }] as const];
+    })).values()];
     const itemRefs = [...new Map([...live.map((w) => ({ repo: w.repo, number: w.number })), ...prRefs].map((r) => [key(r.repo, r.number), r])).values()];
     const [items, legs, reviews, patches, fixes, outcomes, repins] = await db.together(() => Promise.all([
       loadItems(db, itemRefs, "pr"), loadLegs(db, prRefs), loadReviewRows(db, prRefs), loadPatchFacts(db, prRefs), loadLatestFixPushes(db, prRefs),
@@ -182,20 +175,20 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const moved: Moved[] = [];
     for (const w of live) {
       try {
-        const to = await advanceOne(db, pass, writes, w, targets.get(w.id) ?? null);
+        const to = await advanceOne(db, pass, writes, w);
         if (to) moved.push({ id: w.id, repo: w.repo, number: w.number, to });
       } catch (e) {
         log(`workflow ${w.repo}#${w.number}: ${(e as Error).message}`);
       }
     }
-    if (writes.workflows.length || writes.events.length || writes.adopt.length) {
-      await db.write(async () => {
-        await saveWorkflows(db, writes.workflows);
-        await recordEvents(db, writes.events);
-        await adoptLegs(db, writes.adopt);
-      });
-    }
-    return moved;
+    if (!writes.workflows.length && !writes.adopt.length) return moved;
+    const written = await db.write(async () => {
+      const ids = await moveWorkflows(db, writes.workflows);
+      await recordEvents(db, writes.events.filter((e) => ids.has(e.workflowId)));
+      await adoptLegs(db, writes.adopt);
+      return ids;
+    });
+    return moved.filter((m) => written.has(m.id));
   });
 }
 
@@ -216,11 +209,10 @@ const statFiles = (stat: string | null): string[] =>
  * planned part of the plan it was built from names; null when the plan named no files or the attempt recorded no diff.
  */
 function implementationBeyond(pass: Pass, w: ItemWorkflow, pr: number): string[] | null {
-  const a = pass.implement.byIssue.get(key(w.repo, w.number));
-  const opened = pass.implement.byPr.get(key(w.repo, pr));
-  const parts = implementParts([], (opened?.planned?.plan ?? null) as PlanReply | null) ?? [];
+  const opened = pass.implement.byIssue.get(key(w.repo, w.number))?.prAttempts.find((p) => p.prNumber === pr);
+  const parts = implementParts([], opened?.plan ?? null) ?? [];
   const plannedFiles = new Set(parts.flatMap((p) => p.files ?? []));
-  const files = statFiles(a?.prAttempts.find((p) => p.id === opened?.attemptId)?.diffStat ?? null).filter((f) => !LOCKFILE.test(f));
+  const files = statFiles(opened?.diffStat ?? null).filter((f) => !LOCKFILE.test(f));
   if (!plannedFiles.size || !files.length) return null;
   return files.filter((f) => !plannedFiles.has(f));
 }
@@ -231,8 +223,14 @@ const stepIn = (w: ItemWorkflow, ...names: StepName[]): StepName => {
   return names.find((n) => steps.includes(n)) ?? steps[0]!;
 };
 
-async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, target: Target | null): Promise<ItemWorkflow["state"] | null> {
+async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow): Promise<ItemWorkflow["state"] | null> {
   const at = new Date().toISOString();
+  // The PR the workflow works on: its own item, or an implement workflow's implementation PR; null while an issue has none.
+  const attempts = w0.kind === "issue" ? pass.implement.byIssue.get(key(w0.repo, w0.number)) : undefined;
+  const candidate = candidatePr(attempts, w0);
+  const work = workOf(attempts, w0, candidate === null ? null : pass.items.get(key(w0.repo, candidate)));
+  const attempt = work.attempt;
+  const target = w0.kind === "pr" ? w0.number : work.pr;
   let w = w0;
   /** The step the pass found the workflow at; written with the pass's other changes, or alone when only it changed. */
   let step: StepName | null = null;
@@ -244,7 +242,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
   const write = (patch: WorkflowPatch, event?: "blocked"): ItemWorkflow["state"] | null => {
     const next = patch.state ?? w.state;
     const s = stepTo(patch);
-    writes.workflows.push({ id: w.id, patch: { ...patch, ...(s !== null && s !== w0.step ? { step: s } : {}) }, at });
+    writes.workflows.push({ id: w.id, patch: { ...patch, ...(s !== null && s !== w0.step ? { step: s } : {}) }, at, was: { state: w0.state, updatedAt: w0.updatedAt } });
     if (event) writes.events.push({ workflowId: w.id, repo: w.repo, number: w.number, login: ACTOR, via: "cli", kind: event, line: patch.rec?.text ?? null, at });
     return next !== w0.state ? next : null;
   };
@@ -254,7 +252,6 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
     return Object.keys(patch).length || (s !== null && s !== w0.step) ? write(patch) : null;
   };
   const self = pass.items.get(key(w.repo, w.number));
-  const attempt = w.kind === "issue" ? pass.implement.byIssue.get(key(w.repo, w.number)) : undefined;
   const base: WorkflowPatch = {};
   // A recommendation that stands for an implementation's question goes once the question is answered or set aside elsewhere (a
   // comment on the issue, an edited issue, a later round): the workflow runs on.
@@ -274,20 +271,19 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
       ? write({ ...asked, state: "blocked", blocker: "failed-twice", blockerParams: { step: "implement" } }, "blocked")
       : write({ ...asked, state: "recommending", blocker: null, blockerParams: null }) };
   };
-  if (!target) {
+  if (target === null) {
     // An issue with no PR yet: it ends when the issue closes, comes back with its implementation's question, and shows a ready plan's parts.
     if (self && self.state !== "OPEN") return write({ state: "closed", rec: null, blocker: null, blockerParams: null });
     step = stepIn(w, "implement");
     if (w.state === "blocked" || w.state === "recommending") return settle(base);
-    const a = attempt;
-    if (!a) return settle(base);
+    if (!attempt) return settle(base);
     const asked = comeBack(base, null);
     if (asked) return asked.to;
     // A ready plan's parts; an answered question's options are no plan any more.
-    const parts = implementParts(w.plan, (a.planned?.plan ?? null) as PlanReply | null) ?? (w.plan.some((p) => p.option !== undefined) ? [] : null);
+    const parts = implementParts(w.plan, (attempt.planned?.plan ?? null) as PlanReply | null) ?? (w.plan.some((p) => p.option !== undefined) ? [] : null);
     return settle({ ...base, ...(parts && !sameJson(parts, w.plan) ? { plan: parts } : {}) });
   }
-  const ref = key(w.repo, target.number);
+  const ref = key(w.repo, target);
   const pr = pass.items.get(ref);
   if (!pr) return settle(base);
   if (pr.state === "MERGED") return write({ state: "done", rec: null, blocker: null, blockerParams: null });
@@ -338,7 +334,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
   if (w.kind === "issue") {
     const shown = w.baseHead !== null && (w.baseHead === head || ownChain(pass, ref, w.baseHead, head));
     if (shown) { if (w.baseHead !== head) patch.baseHead = head; }
-    else beyond = implementationBeyond(pass, w, target.number);
+    else beyond = implementationBeyond(pass, w, target);
   }
   const approved = w.approvedBy !== null;
   const fresh = review && review.at > since ? review : null;
@@ -356,10 +352,13 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
   if (found) {
     // The merge leg stops before it can merge. One an integration batch holds goes through (cancelling it would undo the batch
     // under its running CI); a queued leg outside a batch is cancelled like any other.
-    if (leg === "queued" && await inActiveBatch(db, w.repo, target.number)) return settle(patch);
+    if (leg === "queued" && await inActiveBatch(db, w.repo, target)) return settle(patch);
     if (leg) {
+      // A person who changed the workflow meanwhile decides about the leg (a start after a stop has a new one).
+      const now = (await listWorkflows(db, { ids: [w0.id] }))[0];
+      if (now?.state !== w0.state || now.updatedAt !== w0.updatedAt) return null;
       try {
-        await cancelPreapproval(db, ACTOR, w.repo, target.number, undefined, "workflow");
+        await cancelPreapproval(db, ACTOR, w.repo, target, undefined, "workflow");
       } catch {
         // A merge of the repo is running, or the leg changed a moment ago: the next pass looks again.
         return settle(patch);
@@ -368,7 +367,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
     // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
     let blockPlan = plan;
     if (typeof found.params.reason === "string" && PREMERGE_STOP.test(found.params.reason)) {
-      const extra = await premergeParts(db, w.repo, target.number, head, plan);
+      const extra = await premergeParts(db, w.repo, target, head, plan);
       blockPlan = [...plan, ...extra];
       found.params.premerge = extra.map((p) => p.n);
     }
@@ -388,7 +387,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow, 
       return write({ ...patch, state: "recommending", rec, recAt: at, recHead: head });
     }
   } else if (impl !== "later") {
-    const refused = await ensureLeg(db, pass, writes, w, w.repo, target.number, head);
+    const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head);
     if (refused) {
       const stop: Found = { blocker: "other", params: { reason: refused } };
       return write({ ...patch, state: "blocked", blocker: stop.blocker, blockerParams: stop.params, rec: atBlocker(stop, view, plan), recAt: at, recHead: head }, "blocked");

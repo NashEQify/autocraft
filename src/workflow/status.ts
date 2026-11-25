@@ -204,7 +204,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   else if (r.again === "fixup") did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
   const weight = weightLabel(r.weight);
-  if (!did.length && !r.start && !r.approve && !r.answers) {
+  if (!did.length && !r.start && !r.approve && !r.retryMerge && !r.answers) {
     // A weight alone.
     const shown = r.weight === null ? null : weightWord(r.weight)?.startsWith("weight ") ? String(r.weight) : weight;
     return t("Weight {weight} {by}.", { weight: shown ?? t("normal"), by: who });
@@ -212,7 +212,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   const end = r.start === "merge"
     ? t("updating from main, then merging in the next batch when CI is green")
     : r.merges
-      ? did.length || r.answers ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
+      ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
       : t("coming back with a recommendation");
   const what = cap(did.length ? t("{done}, then {end}", { done: did.join(", "), end }) : end);
   return t("{what}{weight} {by}. Reply stop to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
