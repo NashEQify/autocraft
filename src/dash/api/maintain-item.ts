@@ -9,7 +9,7 @@ import { activeTripRows, mayResumeTrip } from "../../push-outcomes.ts";
 import { tripKey } from "../../core/push-outcome.ts";
 import { INTERNAL_FINDING_STATES } from "../../security/store.ts";
 import { isQuiet } from "../../security/quiet.ts";
-import { attributionLines, blockerLabel, listText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
+import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { eventsOf, isLive, repoWorkflow, workflowHistory, type StoredEvent } from "../../workflow/store.ts";
 import type { ItemWorkflow } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -75,7 +75,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
     blocker: wf.state === "blocked" && wf.blocker ? (reason ? `${blockerLabel(wf.blocker)}: ${reason}` : blockerLabel(wf.blocker)) : null,
     steps: steps?.map((s) => ({ label: stepLabel(s), state: s.state })) ?? null,
     parts: wf.plan.map((p) => ({ n: p.n, title: veiled ? "" : p.title, source: p.source, file: veiled ? null : p.file ?? null, major: p.major === true, state: p.state })),
-    rec: open && !veiled ? wf.rec!.text : null,
+    rec: open && !veiled ? recommendationText(wf.rec!) : null,
     unclear: last?.kind === "ambiguous" ? { by: last.login, at: last.at, line: last.line ?? "" } : null,
     confirm: accepted?.line ?? null,
   };

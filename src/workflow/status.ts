@@ -119,9 +119,31 @@ export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcCl
   }
 }
 
+const AFTER_CHECKS = (): string => t("after the pre-merge check and green CI");
+
+/**
+ * What a bare yes runs for this recommendation, built from its stored fields in the order `accept` (resolve.ts) applies them;
+ * null when a yes runs nothing (the recommendation's text says what answers it instead).
+ */
+export function yesClause(rec: Recommendation): string | null {
+  const fix = rec.parts.fix;
+  if (rec.close && !fix.length) return t("Reply yes to close it.");
+  if (rec.answer && !fix.length) {
+    const what = rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
+    return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
+  }
+  const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
+  if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
+  return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
+}
+
+/** A recommendation's sentence and what a yes runs; the sentence alone, with a request for words, when a yes runs nothing. */
+export const recommendationText = (rec: Recommendation): string =>
+  `${rec.text} ${yesClause(rec) ?? t("Reply yes, or write what to do instead.")}`;
+
 /** The open recommendation and how to answer it, or null when none is open. */
 export const recommendationLine = (rec: Recommendation | null): string | null =>
-  rec ? t("Recommendation: {text} Reply yes, or write what to do instead.", { text: rec.text }) : null;
+  rec ? t("Recommendation: {text}", { text: recommendationText(rec) }) : null;
 
 /** Who started, approved, answered and stopped the item; `answered` is the latest answer, from the item's events. */
 export function attributionLines(wf: ItemWorkflow, answered?: { by: string; at: string } | null, clock: Clock = utcClock): string[] {

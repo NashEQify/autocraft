@@ -8,7 +8,7 @@ import { t } from "../../i18n/index.ts";
 import { listHelpers } from "../../remote/helpers.ts";
 import { inferenceMode } from "../../remote/mode.ts";
 import { readyRunners } from "../../remote/queue-view.ts";
-import { stateLine, weightLabel } from "../../workflow/status.ts";
+import { recommendationText, stateLine, weightLabel } from "../../workflow/status.ts";
 import { liveWorkflows, repoWorkflows } from "../../workflow/store.ts";
 import type { ItemWorkflow, WorkflowEventKind } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -58,7 +58,7 @@ async function rowsOf(db: Db, wfs: ItemWorkflow[]): Promise<MaintainRow[]> {
     const open = w.state === "recommending" && w.rec !== null;
     return {
       repo: w.repo, number: w.number, kind: w.kind, title: it?.title ?? `${w.repo}#${w.number}`, author: it?.author ?? null, entry: w.entry,
-      line: isUnclear ? t("Waiting for a clear answer") : open ? w.rec!.text : stateLine(w),
+      line: isUnclear ? t("Waiting for a clear answer") : open ? recommendationText(w.rec!) : stateLine(w),
       waits: open || isUnclear, blocked: w.state === "blocked", weight: weightLabel(w.weight),
       startedBy: w.startedBy, approvedBy: w.approvedBy, stoppedBy: w.stoppedBy, updatedAt: w.updatedAt,
     };
@@ -316,7 +316,7 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
 function wfLine(wf: ItemWorkflow | null, unclear: boolean): string | null {
   if (unclear) return t("Waiting for a clear answer");
   if (!wf) return null;
-  return wf.state === "recommending" && wf.rec !== null ? wf.rec.text : stateLine(wf);
+  return wf.state === "recommending" && wf.rec !== null ? recommendationText(wf.rec) : stateLine(wf);
 }
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;

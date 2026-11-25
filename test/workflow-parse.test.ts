@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { parse, parseComment } from "../src/workflow/parse.ts";
 import { resolve, type ItemState } from "../src/workflow/resolve.ts";
+import { recommendationLine } from "../src/workflow/status.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "../src/workflow/types.ts";
 
 const SLUG = "autocraft-bot";
@@ -102,5 +103,19 @@ describe("workflow commands", () => {
     assert.equal(run("urgent", pr()).kind, "ambiguous");
     const r = run("urgent", pr(started()));
     assert.ok(r.kind === "run" && r.run.weight === 10 && !r.run.approve && r.run.start === null);
+  });
+
+  test("the recommendation line names what a bare yes runs", () => {
+    const rec = (over: Partial<Recommendation>): Recommendation => ({ text: "Looks fine.", parts: { fix: [], drop: [] }, merges: false, ...over });
+    assert.match(recommendationLine(rec({ merges: true }))!, /yes to merge it/);
+    assert.match(recommendationLine(rec({ merges: true, parts: { fix: [1, 2], drop: [] } }))!, /yes to fix 1 and 2, then merge/);
+    const noMerge = recommendationLine(rec({ parts: { fix: [1], drop: [] } }))!;
+    assert.match(noMerge, /yes to fix 1; it comes back to you/);
+    assert.doesNotMatch(noMerge, /merge/);
+    assert.match(recommendationLine(rec({ close: true }))!, /yes to close it/);
+    assert.match(recommendationLine(rec({}))!, /write what to do instead/);
+    // The clause matches what the resolver runs for a bare yes.
+    const r = run("yes", pr(started({ state: "recommending", rec: rec({ merges: true }) })));
+    assert.ok(r.kind === "run" && r.run.merges);
   });
 });
