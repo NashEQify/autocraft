@@ -1,7 +1,7 @@
 // Maintainer text to workflow actions: the parser and the resolver decide what runs, and anything unclear runs nothing.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { parse, parseComment } from "../src/workflow/parse.ts";
+import { describe as describe_, parse, parseComment } from "../src/workflow/parse.ts";
 import { resolve, type ItemState } from "../src/workflow/resolve.ts";
 import { recommendationLine, replyLine } from "../src/workflow/status.ts";
 import type { ItemWorkflow, PlanPart, Recommendation } from "../src/workflow/types.ts";
@@ -111,6 +111,29 @@ describe("workflow commands", () => {
     const rec: Recommendation = { text: "Fix both problems, then merge?", parts: { fix: [1, 2], drop: [] }, merges: true };
     const r = run("LGTM, thanks!", pr(started({ state: "recommending", rec, plan: [part(1, "a"), part(2, "b")] })));
     assert.ok(r.kind === "run" && r.run.approve && r.run.answers && r.run.fix.join() === "1,2");
+  });
+
+  test("a close names its reason; the item it duplicates is no item of the command", () => {
+    const of = (text: string, repo?: string) => { const p = parse(text, { slug: SLUG, ...(repo && { repo }) }); return p.kind === "commands" ? [describe_(p.parts, p.items)] : p.kind; };
+    for (const [text, want] of [
+      ["close", "close"], ["close it as completed", "close as completed"], ["close not planned", "close as not planned"], ["@autocraft-bot close this as not planned.", "close as not planned"],
+      ["close duplicate of #12", "close as duplicate of #12"], ["close as a duplicate of storytold/deckcraft#3", "close as duplicate of storytold/deckcraft#3"],
+      ["close as duplicate of https://github.com/storytold/deckcraft/issues/3", "close as duplicate of storytold/deckcraft#3"],
+      ["close photocraft#15 as duplicate of #12", "close as duplicate of #12: photocraft#15"], ["close as duplicate of #12: #15 #16", "close as duplicate of #12: photocraft#15 photocraft#16"],
+    ] as const) {
+      assert.deepEqual(of(text, "photocraft"), [want], text);
+      assert.deepEqual(of(want, "photocraft"), [want], "the canonical text reads back as itself");
+    }
+    for (const text of ["close as duplicate", "close as duplicate of the other one", "close as wontfix", "don't close as completed", "close as completed and not planned", "close as duplicate of #0"]) assert.equal(of(text, "photocraft"), "ambiguous", text);
+    const r = run("close as not planned, merge", pr());
+    assert.equal(r.kind === "ambiguous" && r.ambiguity.why, "conflict");
+    const dup = run("close as duplicate of #12", { kind: "issue", workflow: null });
+    assert.deepEqual(dup.kind === "run" && [dup.run.end, dup.run.close], ["close", { as: "duplicate", of: { repo: null, number: 12 } }]);
+  });
+
+  test("a stop needs something running, or a close that is still to be made", () => {
+    assert.equal(run("stop", pr()).kind, "refused");
+    assert.equal(run("stop", { ...pr(), closing: true }).kind, "run");
   });
 
   test("a weight word alone needs a started item", () => {

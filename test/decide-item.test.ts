@@ -22,7 +22,7 @@ type ImplementRow = NonNullable<ReturnType<typeof itemFacts>["implement"]["row"]
 const attempt = (state: string, o: Partial<ImplementRow> = {}): ImplementRow => ({ state, attempt: 1, textChanged: false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false, ...o });
 /** An issue queued by a settler, in a repo with Implement on. */
 const queued = (o: Over = {}): Over => ({ ...o, implement: { queuedBy: "maint", settles: true, featureOn: true, row: null, liveInRepo: 0, ...(o?.implement ?? {}) } });
-const closed = (o: Partial<{ decisionId: string; kind: "scope" | "close" | "duplicate" | "merge"; security: boolean; action: string | null }> = {}) => ({ decisionId: "d1", kind: "close" as const, security: false, action: null, ...o });
+const close = () => ({ id: 1, by: "mira", weight: 5, at: `${T}T08:00:00.000Z` });
 const hoursAgo = (h: number) => new Date(NOW - h * 3600_000).toISOString();
 
 const rows: Row[] = [
@@ -98,21 +98,12 @@ const rows: Row[] = [
   { name: "an unsettled item is not labelled", facts: { classification: { status: "waiting", label: null, jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } }, labels: { existing: [] } }, expect: { state: "waiting-haiku", actions: [] } },
 
   // ---- act
-  { name: "an answered close decision is acted on", facts: { answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "scope, duplicate and merge closes are acted on too", facts: { answeredClose: [closed({ kind: "scope" }), closed({ decisionId: "d2", kind: "duplicate" })] }, expect: { state: "classified", actions: ["act", "act"] } },
-  { name: "a done action row is final", facts: { answeredClose: [closed({ action: "done" })] }, expect: { state: "classified", actions: [] } },
-  { name: "a skipped action row is final", facts: { answeredClose: [closed({ action: "skipped" })] }, expect: { state: "classified", actions: [] } },
-  { name: "an item already closed on GitHub keeps its unapplied answered close (the Act step records it as already closed)", facts: { open: false, answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a closed item gets nothing else: no classify, embed, prioritize or label", facts: { open: false, priorityHash: null, embeddedHash: null, classification: { status: "unclassified", label: null, jev: null }, answeredClose: [closed()] }, expect: { state: "unclassified", actions: ["act"] } },
-  { name: "a closed item whose answered close is final has nothing due", facts: { open: false, embeddedHash: null, answeredClose: [closed({ action: "skipped" })] }, expect: { state: "classified", actions: [] } },
-  { name: "a failed action row is tried again", facts: { answeredClose: [closed({ action: "failed" })] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "an out-of-scope item is not acted on", facts: { inScope: false, answeredClose: [closed()] }, expect: { state: "classified", actions: [] } },
-  { name: "a security scan's close applies outside the pilot", facts: { inScope: false, answeredClose: [closed({ security: true })] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a Backlog hold stops the close", facts: { held: "backlog", answeredClose: [closed({ security: true })] }, expect: { state: "held-backlog", actions: [] } },
-  { name: "comment approval is a fact: gates() applies it, not decideItem", facts: { repoFacts: { commentApproved: false }, answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
-  { name: "a PR the final review says close is asked about", facts: { kind: "pr", closeReview: { head: "h1", atHead: true, asked: false } }, expect: { state: "classified", actions: ["act"] } },
-  { name: "the Close? decision exists: not asked again", facts: { kind: "pr", closeReview: { head: "h1", atHead: true, asked: true } }, expect: { state: "classified", actions: [] } },
-  { name: "the review is of an older head: not asked", facts: { kind: "pr", closeReview: { head: "h0", atHead: false, asked: false } }, expect: { state: "classified", actions: [] } },
+  { name: "a person's close is carried out", facts: { close: close() }, expect: { state: "classified", actions: ["act"] } },
+  { name: "a closed item gets nothing but its close: no classify, embed, prioritize or label", facts: { open: false, priorityHash: null, embeddedHash: null, classification: { status: "unclassified", label: null, jev: null }, close: close() }, expect: { state: "unclassified", actions: ["act"] } },
+  { name: "a closed item without one has nothing due", facts: { open: false, embeddedHash: null }, expect: { state: "classified", actions: [] } },
+  { name: "a Backlog hold stops the close", facts: { held: "backlog", close: close() }, expect: { state: "held-backlog", actions: [] } },
+  { name: "a close applies outside the scope, also to an item whose workflow it ended", facts: { inScope: false, repoFacts: { workflow: "new" }, endedWorkflow: "closed", close: close() }, expect: { state: "classified", actions: ["act"] } },
+  { name: "comment approval is a fact: gates() applies it, not decideItem", facts: { repoFacts: { commentApproved: false }, close: close() }, expect: { state: "classified", actions: ["act"] } },
 
   // ---- implement
   { name: "a settled bugfix issue nobody queued is left for a person", facts: { fix: { impact: "P2" } }, expect: { state: "classified", actions: [], wait: "an open request for a person to pick up", next: "Triage by a person" } },
@@ -147,7 +138,6 @@ const rows: Row[] = [
   // ---- a repo on the maintainer workflow
   { name: "workflow repo: a needs-decision item gets no scope question", facts: { ...needsDecision, repoFacts: { workflow: "new" } }, expect: { state: "classified", actions: [] } },
   { name: "workflow repo: an open decision is not prepared", facts: { repoFacts: { workflow: "new" }, scope: { recommend: { failures: 0, failedAt: null } } }, expect: { state: "classified", actions: [] } },
-  { name: "workflow repo: a Close answer that ended the workflow is carried out outside the scope", facts: { inScope: false, repoFacts: { workflow: "new" }, endedWorkflow: "closed", answeredClose: [closed()] }, expect: { state: "classified", actions: ["act"] } },
 ];
 
 for (const r of rows) {

@@ -1,7 +1,7 @@
 // What an approved workflow's merge leg waits for when nothing can move it on: the merge, made as the approver, waiting for them
 // to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, with no Task Runner that may take it, or only
-// the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). The status comment, the item page and
-// the agent show it as the state line.
+// the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
+// close from being made. The status comment, the item page and the agent show it as the state line.
 import { loadImplementFacts } from "../data/implement/index.ts";
 import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
 import { loadActions, loadLegs } from "../data/workflow/index.ts";
@@ -17,12 +17,25 @@ async function legPr(db: Db, wf: Pick<ItemWorkflow, "repo" | "number" | "kind">)
   return a?.attempt.prNumber ?? a?.prAttempts[0]?.prNumber ?? null;
 }
 
+/** What became of a close that is not made: it waits for its person, for the Act step, or it did not run. Null once it is made. */
+async function closeWait(db: Db, wf: Pick<ItemWorkflow, "id">): Promise<string | null> {
+  const a = [...(await loadActions(db, { workflowIds: [wf.id], kinds: ["close", "comment-close"] })).values()].flat().at(-1);
+  switch (a?.state) {
+    case "pending": return t("Closing as {login}", { login: a.by });
+    case "waiting-token": return t("Waiting for {login} to sign in to AutoCraft, so the close runs as them", { login: a.by });
+    case "waiting-permission": return t("Not closed: {login} has no write access here", { login: a.by });
+    case "failed": case "skipped": case "stopped": return t("Not closed: {why}", { why: a.reason ?? a.state });
+    default: return null;
+  }
+}
+
 /**
  * The state line of a workflow whose merge leg waits for its approver's sign-in, or for a pre-merge check that no Task Runner can
  * take, or that only the own runners of the people whose work it is take while none of them can claim (offline, held for its
- * usage, cooling off); else null.
+ * usage, cooling off), or whose close is not made; else null.
  */
 export async function legWait(db: Db, wf: Pick<ItemWorkflow, "id" | "repo" | "number" | "kind" | "state">, nowMs: number = Date.now()): Promise<string | null> {
+  if (wf.state === "closed") return await closeWait(db, wf);
   if (wf.state !== "running" && wf.state !== "waiting") return null;
   const pr = await legPr(db, wf);
   if (pr === null) return null;

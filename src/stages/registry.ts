@@ -422,13 +422,13 @@ export const STAGES: StageDef[] = [
   },
   {
     id: "act", title: "Act", order: 12, runStage: 6, docSection: "Act", mode: "steps",
-    description: "Makes the comments and closes that follow an operator's answer, from fixed templates.",
+    description: "Carries out the closes people command, as them, with a short comment from a fixed template.",
     steps: [{ name: "act", maxMin: 10, label: "Act", limit: null, seeded: 20 }],
     lanes: [{ name: "act", steps: ["act"], order: 12 }],
-    reads: ["Operator answers", "Close? decisions"],
+    reads: ["Close commands"],
     sets: ["Comments and closes on GitHub"],
     states: [
-      { id: "todo", label: "To comment and close", waitsOn: "runner", tone: "neutral", hint: "Answered close: out of scope, Close this PR or duplicate", link: "anyState" },
+      { id: "todo", label: "To comment and close", waitsOn: "runner", tone: "neutral", hint: "A maintainer told AutoCraft to close it", link: "anyState" },
       { id: "failed", label: "Failed, retried", waitsOn: "runner", tone: "bad", hint: "The next run tries again", link: "anyState" },
       { id: "unapproved", label: "Repo not approved for commenting", waitsOn: "person", tone: "warn", hint: "An operator approves commenting per repo on the Repos page", gate: true, link: "anyState" },
       { id: "done", label: "Done in the last 24 h", waitsOn: "nothing", tone: "merged", link: null },

@@ -7,7 +7,7 @@ import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
 import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { withdrawItemCalls } from "../data/runners/index.ts";
-import { endFixupRequests, holdMerges, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegs, releaseMerges } from "../data/workflow/index.ts";
+import { endFixupRequests, holdMerges, listWorkflowLegs, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
@@ -143,7 +143,7 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
 /**
  * Stops everything that runs or waits for the item: its pre-approved merge (out of its batch first), queued fix-ups, its place in
  * an integration batch, queued model calls made for it alone, the implementation attempt of an issue that has no PR yet, and the
- * merge legs of the workflow's implementation PRs. Leased calls finish; nothing acts on their result once the workflow stopped.
+ * merge legs of the workflow's implementation PRs, and a close nobody made yet. Leased calls finish; nothing acts on their result once the workflow stopped.
  * Every part runs; the ones that could not stop are returned.
  */
 export async function stopAll(c: Ctx): Promise<string[]> {
@@ -154,6 +154,7 @@ export async function stopAll(c: Ctx): Promise<string[]> {
     try { await fn(); } catch (e) { failed.push(effectText((e as Error).message)); }
   };
   const one = [{ repo: item.repo, number: item.number }];
+  await stopCloses(c);
   if (item.kind === "pr") {
     const [active, requests, holds] = await db.together(() => Promise.all([
       activePreapproval(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), loadHolds(db, { refs: one }),
@@ -181,6 +182,13 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   return failed;
 }
 
+/** Takes back the item's closes that are still to be made: queued, or waiting for their person's sign-in or access. */
+export async function stopCloses(c: Ctx): Promise<void> {
+  const open = ["pending", "waiting-token", "waiting-permission"] as const;
+  const rows = [...(await loadActions(c.db, { refs: [{ repo: c.item.repo, number: c.item.number }], kinds: ["close", "comment-close"], states: open })).values()].flat();
+  await saveActions(c.db, rows.map((a) => ({ id: a.id, state: "stopped", reason: `stopped by ${c.by}`, at: c.at })), { from: open });
+}
+
 /** The Backlog: open, nothing planned. Stops what runs; the workflow row's state is the backlog. */
 export async function backlog(c: Ctx): Promise<string[]> {
   return await stopAll(c);
@@ -191,12 +199,12 @@ export async function backlog(c: Ctx): Promise<string[]> {
  * the user lane). A PR's action names its current head, so a push after the command stops the close. Stops what runs first, so no
  * fix-up pushes to an item about to close.
  */
-export async function close(c: Ctx): Promise<string[]> {
+export async function close(c: Ctx, closeAs: CloseAs | null = null): Promise<string[]> {
   const { db, by, item, at } = c;
   if (c.workflowId === undefined) throw new EffectError(t("{ref} has no started workflow to close.", { ref: ref(item) }));
   if (item.kind === "pr" && !item.head) throw new EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: ref(item) }));
   const failed = await stopAll(c);
-  await queueLaneActions(db, [{ workflowId: c.workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at }]);
+  await queueLaneActions(db, [{ workflowId: c.workflowId, repo: item.repo, number: item.number, kind: "comment-close", by, head: item.kind === "pr" ? item.head : null, at, closeAs }]);
   return failed;
 }
 

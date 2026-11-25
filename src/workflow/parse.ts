@@ -7,10 +7,11 @@
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
+//   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
 //   yes / lgtm / go                  runs the open recommendation
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
-import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
+import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
 import { commandOf, weightWord, YES_TRAILERS, YES_WORDS } from "./vocab.ts";
 
 export type ParseOptions = {
@@ -28,11 +29,29 @@ const mentionRe = (names: readonly string[]): RegExp => new RegExp(`^@(?:${names
 const isWeightWord = (w: string): w is WeightWord => Object.hasOwn(WEIGHT_WORDS, w);
 const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
 
+/** A close's reason as a command writes it: `as not planned`, `as duplicate of photocraft#12`. */
+export const closeText = (r: CloseReason): string =>
+  r.as === "duplicate" ? `as duplicate of ${r.of.repo ?? ""}#${r.of.number}` : r.as === "not-planned" ? "as not planned" : "as completed";
+
+const CLOSE_RE = /^close\s+(?:as\s+)?(?:(completed)|(not[-\s]planned)|(?:a\s+)?duplicate\s+of\s+(\S+))$/i;
+
+/** The reason after `close`, or null for anything else. */
+function readClose(seg: string): CloseReason | null {
+  const m = CLOSE_RE.exec(seg);
+  if (!m) return null;
+  if (m[1]) return { as: "completed" };
+  if (m[2]) return { as: "not-planned" };
+  const short = /^#(\d+)$/.exec(m[3]!);
+  const ref = short ? { repo: null, number: Number(short[1]) } : refOf(m[3]!);
+  return ref && Number.isSafeInteger(ref.number) && ref.number > 0 ? { as: "duplicate", of: { repo: ref.repo, number: ref.number } } : null;
+}
+
 /** The canonical text of parts and items, as an ambiguous reply quotes what was understood: `fix 1, merge, urgent: photocraft#12`. */
 export function describe(parts: readonly CommandPart[], items: readonly ItemRef[] = []): string {
   const words = parts.map((p) => {
     if ("part" in p) return `${p.word} ${p.part}`;
     if ("weight" in p) return weightWord(p.weight) ?? `weight ${p.weight}`;
+    if (p.word === "close") return p.reason ? `close ${closeText(p.reason)}` : "close";
     return p.args ? `${p.word} ${p.args}` : p.word;
   }).join(", ");
   const refs = items.map((i) => `${i.repo}#${i.number}`).join(" ");
@@ -159,6 +178,8 @@ function readWords(src: string): Read {
       else unknown.push(seg);
       continue;
     }
+    const reason = readClose(seg);
+    if (reason) { push({ word: "close", reason }); continue; }
     const named = /^(drop|fix)\s+(.+)$/i.exec(seg);
     if (named && !/^fix\s+up(?:\s|$)/i.test(seg)) {
       const word = named[1]!.toLowerCase() as "drop" | "fix";
@@ -238,14 +259,15 @@ const addItems = (into: ItemRef[], more: readonly ItemRef[]): ItemRef[] => {
 
 /**
  * Items written inline, taken out of the text: `[owner/]repo#n` and GitHub links anywhere, and `#n` when a repo is known (the last
- * one written before it, else `repo`). A `#n` after `drop` or `fix` stays a plan part, and the argument of autorepin stays its own.
+ * one written before it, else `repo`). A `#n` after `drop` or `fix` stays a plan part, and the arguments of autorepin and of a close
+ * as a duplicate stay their own.
  */
 function pullItems(text: string, repo: string | undefined): { text: string; items: ItemRef[]; last: string | null } {
   const items: ItemRef[] = [];
   let last = repo ?? null;
   const out = text.replace(/(^|[\s,;(])(https?:\/\/[^\s,;]+|(?:[\w.-]+\/)?[\w.-]*#\d+)(?=$|[\s,;)!?]|\.(?:\s|$))/g, (m, pre: string, raw: string, at: number) => {
     const before = text.slice(0, at + pre.length);
-    if (/auto[-\s]?repin\s*$/i.test(before)) return m;
+    if (/auto[-\s]?repin\s*$/i.test(before) || /\bduplicate\s+of\s*$/i.test(before)) return m;
     const tok = raw.replace(/[.)!?]+$/, "");
     let ref = refOf(tok);
     if (!ref && /^#\d+$/.test(tok)) {

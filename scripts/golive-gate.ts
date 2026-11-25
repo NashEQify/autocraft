@@ -9,7 +9,6 @@ import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { runAct } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { clearDispute, openDispute } from "../src/answers/hold.ts";
-import { writeEffect } from "../src/act/index.ts";
 import { doCard } from "../src/conversations/act.ts";
 import { decisionStamp } from "../src/decide/choices-parse.ts";
 import { ConversationError } from "../src/conversations/store.ts";
@@ -25,6 +24,8 @@ import { loadTrackedRepos } from "../src/data/control/index.ts";
 import { MAINTAINER_WRITES_KEY, canSettleCached } from "../src/settlers.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+
+const writeEffect = (_kind: string, _option: string): string | null => null;
 
 const args = process.argv.slice(2);
 const src = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--decisions");

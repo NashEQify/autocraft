@@ -82,19 +82,22 @@ describe("cards", () => {
     assert.equal((await parseReply(db, "app", 1, "Hi\n```actions\nnot json\n```"))!.notes.length, 1);
   });
 
-  test("the steps of earlier replies map to commands; a duplicate names the original in the comment", async () => {
+  test("the steps of earlier replies map to commands; a duplicate close names the original", async () => {
     const db = await fresh();
     const of = async (n: number, card: unknown) => kinds((await parseReply(db, "app", n, block([card])))!.cards);
     assert.deepEqual(await of(2, R([{ kind: "fixup", instructions: "Rename it.", merge: true }])), ["fix-up, merge"]);
     assert.deepEqual(await of(2, R([], { settle: { kind: "answer", option: "merge" } })), ["merge"]);
     assert.deepEqual(await of(1, R([], { settle: { kind: "backlog" } })), ["backlog"]);
-    assert.deepEqual(await of(1, R([{ kind: "close", reason: "completed" }])), ["close"]);
+    assert.deepEqual(await of(1, R([{ kind: "close", reason: "completed" }])), ["close as completed"]);
     assert.deepEqual(await of(1, R([{ kind: "review" }])), [], "an issue has no review");
     assert.deepEqual(await of(1, R([{ kind: "assign", login: "someone" }])), ["assign"]);
     const dup = (await parseReply(db, "app", 1, block([R([{ kind: "comment" }, { kind: "duplicate", of: 3 }], { text: "Thanks." })])))!.cards;
-    assert.deepEqual(kinds(dup), ["comment", "close"]);
-    assert.match(dup[0]!.text!, /^Thanks\.\n\nDuplicate of #3/);
+    assert.deepEqual(kinds(dup), ["comment", "close as duplicate of #3"]);
+    assert.equal(dup[0]!.text, "Thanks.", "the close posts the line that names the original");
     assert.equal(headline(dup[1]!.params), "Close as duplicate of #3");
+    assert.deepEqual(await of(1, R([{ kind: "command", text: "close as duplicate of #3" }])), ["close as duplicate of #3"]);
+    assert.deepEqual(await of(1, R([{ kind: "command", text: "close as duplicate of #99" }])), [], "not in the mirror");
+    assert.deepEqual(await of(1, R([{ kind: "command", text: "close as duplicate of #1" }])), [], "itself");
   });
 
   test("an issue is held for the merge only by a command that merges", async () => {
@@ -122,13 +125,14 @@ describe("cards", () => {
   test("the steps that apply follow the item, and a message repeats them when they changed", async () => {
     const db = await fresh();
     const steps = async (n: number) => applicableSteps(await loadCardFacts(db, "app", n));
-    assert.ok((await steps(2)).includes("open_issue") && !(await steps(3)).includes("open_issue"));
+    assert.ok((await steps(2)).includes("request_reviewers") && !(await steps(3)).includes("request_reviewers"));
+    assert.ok((await steps(3)).includes("transfer") && !(await steps(2)).includes("transfer"));
     await ensureConversation(db, "app", 3, "op");
     await addMessage(db, "app", 3, { login: "op", kind: "operator" }, "Same steps", undefined, false);
     assert.ok(!(await turnsOf(db, "app", 3)).at(-1)!.block.includes("<steps>"));
     await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 3));
     await addMessage(db, "app", 3, { login: "op", kind: "operator" }, "Now?", undefined, false);
-    assert.ok((await turnsOf(db, "app", 3)).at(-1)!.block.includes("<steps>[]"));
+    assert.ok((await turnsOf(db, "app", 3)).at(-1)!.block.includes('"reopen"'));
     assert.ok((await turnsOf(db, "app", 3)).at(-2)!.body.includes("(state)"), "the change comes before the message");
   });
 });
@@ -204,11 +208,49 @@ describe("Do it", () => {
     assert.equal(await stateOf(db, id), "proposed");
   });
 
-  test("an action without a registered command, and a card of the retired decision system, refuse and run nothing", async () => {
+  test("the GitHub actions without a command run through the writer as the presser", async () => {
     const db = await fresh();
-    const id = await propose(db, 1, [{ kind: "assign", login: "someone" }]);
-    await assert.rejects(() => doCard(db, id, "op"), /no command to assign someone/);
-    assert.equal(await stateOf(db, id), "proposed");
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "lib", added_by: "op", added_at: T0, pipeline: 1 }));
+    await setCommentApproval(db, "op", "lib", true);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: 4, kind: "issue", state: "CLOSED", title: "Issue 4", author: "someone", created_at: T0, updated_at: T0, labels: "[]" }));
+    await db.run(db.k.insertInto("repo_permissions").values({ login: "rev", repo: "app", permission: "write", checked_at: T0 } as never));
+    const sent: [string, Record<string, unknown>][] = [];
+    let permission = "WRITE";
+    const querier = { query: async (q: string, v: Record<string, unknown>) => {
+      const m = /(addAssignees|reopenIssue|transferIssue|requestReviews)/.exec(q);
+      if (m) { sent.push([m[1]!, v]); return m[1] === "transferIssue" ? { transferIssue: { issue: { url: "https://x.test/lib/9", number: 9 } } } : {}; }
+      if (q.includes("collaborators")) return { repository: { collaborators: { edges: [{ permission, node: { login: v.login } }] } } };
+      if (q.includes("issueOrPullRequest")) return { repository: { issueOrPullRequest: v.n === 2 ? { __typename: "PullRequest", id: "P_2", state: "OPEN", headRefOid: "sha2" } : { __typename: "Issue", id: `I_${v.n}`, state: v.n === 4 ? "CLOSED" : "OPEN" } } };
+      if (q.includes("user(login")) return { user: { id: `U_${v.login}`, login: v.login } };
+      if (q.includes("repository(")) return { repository: { id: `R_${v.name}` } };
+      throw new Error(`unexpected query ${q}`);
+    } };
+    const gh: string[][] = [];
+    const exec = async (_cmd: string, args: readonly string[]) => { gh.push([...args]); return { code: 0, stdout: "https://github.com/storytold/lib/issues/12\n", stderr: "" }; };
+    const press = async (n: number, steps: unknown[]) => (await doCard(db, await propose(db, n, steps), "op", { querier: querier as never, exec: exec as never })).card;
+    const ok = async (n: number, step: unknown) => { const c = await press(n, [step]); assert.equal(c.state, "done", c.error ?? ""); return c; };
+    await ok(1, { kind: "assign", login: "someone" });
+    await ok(2, { kind: "request_reviewers", logins: ["rev"] });
+    await ok(4, { kind: "reopen" });
+    assert.equal((await ok(3, { kind: "transfer", to: "lib" })).result_url, "https://x.test/lib/9");
+    const opened = await ok(1, { kind: "open_issue", repo: "lib", title: "Split out", body: "The second half." });
+    assert.match(opened.result ?? "", /Opened lib#12/);
+    assert.deepEqual(sent.map(([m, v]) => [m, v.id, v.user ?? v.users ?? v.repo ?? null]), [
+      ["addAssignees", "I_1", "U_someone"], ["requestReviews", "P_2", ["U_rev"]], ["reopenIssue", "I_4", null], ["transferIssue", "I_3", "R_lib"],
+    ]);
+    assert.ok(gh.length > 0);
+    const audited = await db.all(db.k.selectFrom("audit").select(["login", "action"]).where("action", "in", ["assign", "act-request-reviewers", "act-reopen", "act-transfer", "act-open-issue"]));
+    assert.equal(audited.length, 5);
+    assert.ok(audited.every((a) => a.login === "op"));
+    // GitHub's answer now decides, not the cached permission; a repo not approved for comments refuses the press.
+    permission = "READ";
+    assert.match((await press(2, [{ kind: "request_reviewers", logins: ["rev"] }])).error ?? "", /does not have write access/);
+    await setCommentApproval(db, "op", "lib", false);
+    await assert.rejects(() => press(1, [{ kind: "open_issue", repo: "lib", title: "Another", body: "More." }]), /Comments in lib are not approved/);
+  });
+
+  test("a card of the retired decision system refuses and runs nothing", async () => {
+    const db = await fresh();
     const old = Number((await db.get(db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: 1, kind: "answer", params: JSON.stringify({ kind: "answer", decision: "app#1:scope", option: "take" }), description: "answer" }).returning("id")))!.id);
     await assert.rejects(() => doCard(db, old, "op"), /retired decision system/);
     assert.equal((await conv.cardView(db, (await cardOf(db, old))!, { login: "op", role: "operator" })).canSettle, false);
@@ -384,7 +426,8 @@ describe("card headline", () => {
     const of = (c: import("../src/conversations/cards.ts").Command) => headline({ kind: "command", command: c });
     assert.equal(of({ text: "close" }), "Close issue");
     assert.equal(of({ text: "close", pr: true }), "Close PR");
-    assert.equal(of({ text: "close", duplicateOf: 12 }), "Close as duplicate of #12");
+    assert.equal(of({ text: "close as duplicate of #12" }), "Close as duplicate of #12");
+    assert.equal(of({ text: "close as not planned" }), "Close issue as not planned");
     assert.equal(of({ text: "fix 1, drop 2, merge" }), "fix 1, drop 2, merge");
     assert.equal(of({ word: "transfer", to: "storytold/x" }), "Move issue to storytold/x");
   });

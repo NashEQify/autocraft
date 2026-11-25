@@ -2823,6 +2823,7 @@ CREATE TABLE IF NOT EXISTS workflow_actions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   done_at TEXT,
+  close_as TEXT,                      -- a close: completed | not-planned | duplicate <repo>#<n>; null: no reason given
   UNIQUE (workflow_id, kind, repo, number)
 );
 CREATE INDEX IF NOT EXISTS workflow_actions_state ON workflow_actions(state, created_at);

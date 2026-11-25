@@ -119,8 +119,8 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "stages", class: "item", why: "One item's labeled note.", when: "r.stage = 'labeled'" },
     { table: "verifications", class: "item", why: "Verification runs of one PR." },
     {
-      table: "workflow_actions", class: "item", why: "A merge that waits for its approver's sign-in or access.",
-      when: "r.kind = 'merge'", columns: ["repo", "number", "workflow_id", "state", "head"],
+      table: "workflow_actions", class: "item", why: "A merge that waits for its approver's sign-in or access, and a person's close to carry out.",
+      columns: ["repo", "number", "workflow_id", "kind", "state", "head"],
     },
     {
       table: "audit", class: "item", why: "Assign and unassign of an item, whose target names it.",

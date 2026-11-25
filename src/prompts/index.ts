@@ -981,19 +981,22 @@ const ACTIONS_FORMAT = `Actions. When you propose something the maintainer can r
 Our code turns each step into a button of its own, in order; a button does nothing until a person with write access presses it, and then runs as that person. Steps, each at most once except label and unlabel:
 - {"kind": "comment"}: post "text" on the item, at most ${COMMENT_MAX} characters. Write one or two short factual lines for the contributor: no offers, no maintainer tone, no mention of AI or of this conversation, no @mentions, no URLs unless needed.
 - {"kind": "label", "label": "<name>"} or {"kind": "unlabel", "label": "<name>"}: add or remove one of the labels the pipeline manages: bugfix, performance, missing feature, small extra, plugin candidate, infra, security, needs decision.
-- {"kind": "open_issue", "repo": "<tracked repository name, without the owner>", "title": "<at most ${ISSUE_TITLE_MAX} characters>", "body": "<at most ${COMMENT_MAX} characters>"}: only with a command that merges; our code opens the issue once the PR merged. Write it like a comment. Draft one only for a defect or missing part you can name.
+- {"kind": "open_issue", "repo": "<tracked repository name, without the owner>", "title": "<at most ${ISSUE_TITLE_MAX} characters>", "body": "<at most ${COMMENT_MAX} characters>"}: open a new issue in this repository or another tracked one; with a command that merges, our code opens it once the PR merged. Write it like a comment. Draft one only for a defect or missing part you can name.
+- {"kind": "assign", "login": "<login>"}: assign the item's author or a person with write access to the repository.
+- {"kind": "request_reviewers", "logins": ["<login>", ...]}: pull requests only; one to three people with write access, never the PR's author.
+- {"kind": "reopen"}: first step only, on a closed item (not a merged PR).
 - {"kind": "command", "text": "<command>"}: one command to AutoCraft, in the words maintainers use. Words combine with commas ("fix-up, merge"; "fix 1, drop 2, merge"; "implement, high"). The words:
 ${COMMANDS.map((c) => `  - ${c.usage}: ${c.does}`).join("\n")}
   - ${WEIGHT_HELP.filter((w) => !w.word.startsWith("(")).map((w) => w.word).join(", ")}: how early the item's work runs.
   Parts are named by the numbers in the item block's workflow. A fix-up takes no instructions of its own: it makes the fixes of the review.
-- {"kind": "duplicate", "of": <number of another item in the same repository>}: close the item as a duplicate; the comment that names the original is written for you. Last step, instead of a command.
-Rules. Use only the steps listed under steps in the item block; a later <steps> line in a turn replaces that list. One command per resolution. A command that does not apply to the item as it is now is dropped. A comment goes with close when the author should know why. Propose a command only when the maintainer asked for it or it clearly follows; put what else you would consider in the text. Our code checks every step and drops invalid ones. Do not repeat a card that was already proposed or run unless the maintainer asks.`;
+- {"kind": "transfer", "to": "<another tracked repository name, without the owner>"}: issues only; moves the issue to that repository. Last step, not with a command that ends the item.
+Rules. Use only the steps listed under steps in the item block; a later <steps> line in a turn replaces that list. One command per resolution. A command that does not apply to the item as it is now is dropped. A close posts a short comment of its own, which names the original of a duplicate; add a comment step when the author should know why. Propose a command only when the maintainer asked for it or it clearly follows; put what else you would consider in the text. Our code checks every step and drops invalid ones. Do not repeat a card that was already proposed or run unless the maintainer asks.`;
 
 const CONVERSATION: ClaudePrompt = {
   id: "conversation.turn",
   stage: "Decide",
   runner: "claude",
-  purpose: "Answers an operator's or a maintainer's message in the conversation about one item (a maintainer's on that maintainer's own Task Runner), with text and, optionally, action cards (a command to AutoCraft, a comment, a label) that a person with write access can run. Maintainers and viewers can read the conversation.",
+  purpose: "Answers an operator's or a maintainer's message in the conversation about one item (a maintainer's on that maintainer's own Task Runner), with text and, optionally, action cards (a command to AutoCraft, a comment, a label, or another GitHub action) that a person with write access can run. Maintainers and viewers can read the conversation.",
   models: ["opus"],
   effort: "high",
   placeholders: {
@@ -1026,7 +1029,7 @@ The conversation so far, oldest first. The last turn is the message to answer.
 
 {{turns}}`,
   output: "Plain text followed by an optional fenced actions block holding a JSON array of resolutions.",
-  validation: `${CLAUDE_RESULT} The text before the fenced block is the reply; it must not be empty. Of the actions block, a resolution is dropped with a note when a step fails its check: a comment needs text of at most ${COMMENT_MAX} characters, cleaned as the Act comments are; a label must be in the managed set and fit the item's labels; a duplicate must name another item of the mirror; a command must read as registry words (src/workflow/parse.ts) without a list of items and must run on the item's workflow as it is now; public text must not mention the reference folder or its documentation, and none goes on a quiet pull request. Each step that passes becomes a card: a command, a comment or a label, at most 8 per reply.`,
+  validation: `${CLAUDE_RESULT} The text before the fenced block is the reply; it must not be empty. Of the actions block, a resolution is dropped with a note when a step fails its check: a comment needs text of at most ${COMMENT_MAX} characters, cleaned as the Act comments are; a label must be in the managed set and fit the item's labels; a close as a duplicate must name another item of the mirror or of a tracked repository; people to assign or to ask for a review must be known to write to the repository (or, to assign, be the author); an issue opens in, or moves to, a tracked repository; a command must read as registry words (src/workflow/parse.ts) without a list of items and must run on the item's workflow as it is now; public text must not mention the reference folder or its documentation, and none goes on a quiet pull request. Each step that passes becomes a card: a command, a comment, a label or one of the other actions, at most 8 per reply.`,
   limits: { perCall: 1, attempts: 2, timeoutSeconds: 1800 },
   extra: [
     { label: "Prompt order", value: "The fixed text above, then the stored item block, then the earlier turns as stored, then the new message last, so that each turn reuses the cached start of the one before. Nothing that changes (times, counts, live state) comes before the newest turn; a changed pull request head or item text is added as a system turn." },

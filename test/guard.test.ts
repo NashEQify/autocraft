@@ -109,23 +109,6 @@ test("the merge command gets the reviewed head, and the built-in command refuses
   assert.deepEqual(r, { merged: false, reason: "REFUSED o/r#1: head is other00, not the reviewed sha1" });
 });
 
-/** Item 1 with an operator's close answer to a scope decision. */
-async function closeAnswered(): Promise<Db> {
-  const db = await fresh([{ n: 1 }]);
-  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "scope", repo: "app", number: 1, items: JSON.stringify([{ repo: "app", number: 1 }]), question: "q", options: "[]", facts: "[]", asked_at: T, answer: "close", answered_by: "op", answered_at: T }));
-  return db;
-}
-const CLOSE = { kind: "act", bucket: "scope", decisionId: "d1" } as const;
-
-test("an item write needs the comment approval and an answer that still closes the item", async () => {
-  const db = await closeAnswered();
-  assert.match(why(await guardItem(db, ref, CLOSE, OP)), /Comments in app are not approved/);
-  await setCommentApproval(db, "op", "app", true);
-  assert.ok(ok(await guardItem(db, ref, CLOSE, OP)));
-  await db.run(db.k.updateTable("decisions").set({ answer: "hold" }).where("id", "=", "d1"));
-  assert.match(why(await guardItem(db, ref, CLOSE, OP)), /plan no longer has act:scope/);
-});
-
 test("a repo write needs the repo's approval and, for the pipeline, the global switch", async () => {
   const db = await fresh([{ n: 1 }]);
   assert.match(why(await guardRepo(db, "app", "comment", OP)), /Comments in app are not approved/);

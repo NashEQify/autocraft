@@ -139,14 +139,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
   }
 
   const backlog = f.held === "backlog";
-  // act: answers that close the item (in scope, or asked by a security scan; not held by Backlog; no final action row yet)
-  // and Close? questions for PRs the final review says close (asked once per head). Selecting applies nothing; the repo's comment approval is applied by gates().
-  for (const t of f.answeredClose) {
-    // A Close answer that ended an item's workflow (`closed`) is carried out whatever the item's scope.
-    if ((f.inScope || t.security || t.group || (f.repoFacts.workflow === "new" && f.endedWorkflow === "closed")) && !backlog && !t.waiting && (t.action === null || t.action === "failed")) actions.push(act("act", null, { bucket: t.kind, decisionId: t.decisionId, security: t.security, ...(t.group ? { group: true } : {}) }));
-  }
-  // Not in a repo on the maintainer workflow, which asks no Close? question: the close review is a blocker of the item's workflow.
-  if (live && !backlog && !newRepo && f.kind === "pr" && f.closeReview && f.closeReview.atHead && !f.closeReview.asked) actions.push(act("act", f.closeReview.head, { bucket: "close", ask: true }));
+  // act: a person's close, whatever the item's scope (a Backlog answer takes it back). Selecting applies nothing; the repo's comment approval is applied by gates().
+  if (f.close && !backlog) actions.push(act("act", null, { bucket: "close", id: f.close.id, by: f.close.by }));
   // implement: a queued issue's next step (implementStep); the repo's fix-issue approval and the breaker are applied by gates().
   const fix = f.fix, step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
@@ -160,8 +154,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
     actions.push(...unassignActions(f.assignment, f.open, !f.inScope || !!f.held || !running));
   }
 
-  // A closed item is here for its unapplied answered close only.
-  if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act" && !a.params?.ask));
+  // A closed item is here for its close only.
+  if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act"));
   const base = actions.some(isWork) ? null : !f.inScope ? "not in scope" : state === "classified" && pluginPr(f) ? PLUGIN_WAIT : WAITS[state] ?? null;
   // An issue with nothing else due waits on the PR that closes it, or on a person when its fix attempt was skipped or failed.
   let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : f.inScope && (state === "held-duplicate" || state === "scope-open") ? "person" : "system";

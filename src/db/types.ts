@@ -2438,6 +2438,7 @@ export interface WorkflowActions {
   created_at: string;
   updated_at: string;
   done_at: string | null;
+  close_as: string | null;
 }
 
 export interface WorkflowEvents {
@@ -3144,7 +3145,7 @@ export const COLUMNS = {
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
-  workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at"],
+  workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at", "close_as"],
   workflow_events: ["id", "workflow_id", "repo", "number", "login", "via", "kind", "parsed", "line", "at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "for_login", "created_at", "updated_at", "ended_at"],

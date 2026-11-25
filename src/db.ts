@@ -346,6 +346,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // The workflow a held follow-up issue belongs to and its merge approval when it was held (src/data/conversations/held.ts).
   ["held_followups", "workflow_id", "INTEGER"],
   ["held_followups", "approved_at", "TEXT"],
+  // How a person's close ends the item: completed | not-planned | duplicate <repo>#<n>; null: no reason given (src/act/index.ts).
+  ["workflow_actions", "close_as", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

@@ -11,7 +11,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { adoptLegs, countEventsSince, listWorkflows, recordEvents, saveWorkflows, startWorkflows, type WorkflowPatch } from "../data/workflow/index.ts";
+import { adoptLegs, countEventsSince, listWorkflows, loadActions, recordEvents, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import type { Db } from "../db/index.ts";
@@ -23,7 +23,7 @@ import * as fx from "./effects.ts";
 import { isOpenQuestion } from "./question.ts";
 import { isLive, resolve, type Run } from "./resolve.ts";
 import { confirmLine, listText, replyLine, stepsFor, utcClock, type Clock } from "./status.ts";
-import { WEIGHT_NORMAL, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
+import { WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
 export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; githubId?: number | null };
@@ -45,6 +45,10 @@ export type CommandInput = {
 
 export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null };
 export type CommandResult = { items: ItemOutcome[]; lines: string[] };
+
+/** The actions that close an item as the person, and their states before they end. */
+const CLOSE_KINDS = ["close", "comment-close"] as const;
+const OPEN_ACTIONS = ["pending", "waiting-token", "waiting-permission"] as const;
 
 /** Items a person may send per hour on each surface; the CLI runs on the box and has none. */
 export const COMMAND_LIMITS: Record<Surface, number> = { dashboard: 200, agent: 200, discord: 60, github: 30, cli: Number.POSITIVE_INFINITY };
@@ -71,18 +75,19 @@ function trackedRepo(tracked: ReadonlySet<string>, written: string): string | nu
 type ItemNow = { kind: ItemKind; state: string; head: string | null };
 /** What a command batch reads once for all its items: the tracked repos, the items and their live workflows. */
 /** `again`: items the list names more than once; each later run reads the workflow the earlier one left. */
-type Batch = { tracked: Set<string>; items: Map<string, ItemNow>; live: Map<string, ItemWorkflow>; again: Set<string> };
+type Batch = { tracked: Set<string>; items: Map<string, ItemNow>; live: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]>; again: Set<string> };
 
 async function loadBatch(db: Db, written: readonly ItemRef[]): Promise<Batch> {
   const tracked = new Set((await loadTrackedRepos(db)).keys());
   const refs = written.flatMap((x) => { const repo = trackedRepo(tracked, x.repo); return repo ? [{ repo, number: x.number }] : []; });
-  const [items, live] = refs.length
-    ? await db.together(() => Promise.all([loadItems(db, refs, "pr"), listWorkflows(db, { live: true, refs })]))
-    : [new Map(), []] as const;
+  const [items, live, closing] = refs.length
+    ? await db.together(() => Promise.all([loadItems(db, refs, "pr"), listWorkflows(db, { live: true, refs }), loadActions(db, { refs, kinds: CLOSE_KINDS, states: OPEN_ACTIONS })]))
+    : [new Map(), [], new Map()] as const;
   return {
     tracked,
     items: new Map([...items].map(([k, it]) => [k, { kind: it.kind as ItemKind, state: it.state, head: it.head_oid }])),
     live: new Map(live.map((w) => [`${w.repo}#${w.number}`, w])),
+    closing: new Map(closing),
     again: new Set(refs.map((x) => `${x.repo}#${x.number}`).filter((k, i, all) => all.indexOf(k) !== i)),
   };
 }
@@ -127,7 +132,8 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 
   // A list may name the item twice: the first run's workflow is the one the second sees.
   const wf = batch.live.get(key) ?? null;
-  const r = resolve(input.parsed, { kind, workflow: wf });
+  const closing = batch.closing.get(key)?.at(-1) ?? null;
+  const r = resolve(input.parsed, { kind, workflow: wf, closing: closing !== null });
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string) =>
     ({ workflowId, repo, number: target.number, login, via, kind, parsed: input.parsed, line, at });
   if (r.kind === "ambiguous") {
@@ -139,7 +145,8 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 
   const c: fx.Ctx = { db, by: login, via, at, item: { repo, number: target.number, kind, head }, ...(input.exec ? { exec: input.exec } : {}) };
   try {
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor);
+    const closeAs = r.run.close ? await closeAsOf(c, r.run.close, batch, input.visible) : null;
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs });
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "");
     const id = await db.write(async () => {
@@ -148,7 +155,9 @@ async function runOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
       return id;
     });
     if (batch.again.has(key)) {
-      const live = await listWorkflows(db, { live: true, refs: [{ repo, number: target.number }] });
+      const refs = [{ repo, number: target.number }];
+      const [live, acts] = await db.together(() => Promise.all([listWorkflows(db, { live: true, refs }), loadActions(db, { refs, kinds: CLOSE_KINDS, states: OPEN_ACTIONS })]));
+      batch.closing.set(key, acts.get(key) ?? []);
       if (live[0]) batch.live.set(key, live[0]); else batch.live.delete(key);
     }
     return out("run", line, id);
@@ -171,11 +180,22 @@ function eventKind(r: Run): WorkflowEventKind {
   return "set";
 }
 
+/** The close's reason as the action stores it; a duplicate must be another item AutoCraft has read, in a repo the sender sees. */
+async function closeAsOf(c: fx.Ctx, reason: CloseReason, batch: Batch, visible?: CommandInput["visible"]): Promise<CloseAs> {
+  if (reason.as !== "duplicate") return reason.as;
+  const { repo: written, number } = reason.of;
+  const repo = written === null ? c.item.repo : trackedRepo(batch.tracked, written);
+  if (!repo || (visible && !await visible(repo))) throw new fx.EffectError(t("{repo} is not a repository AutoCraft tracks.", { repo: written ?? c.item.repo }));
+  if (repo === c.item.repo && number === c.item.number) throw new fx.EffectError(t("an item can't be a duplicate of itself."));
+  if (!(await loadItems(c.db, [{ repo, number }], "ref")).has(`${repo}#${number}`)) throw new fx.EffectError(t("{ref} is not an item AutoCraft has read.", { ref: refText(repo, number) }));
+  return `duplicate ${repo}#${number}`;
+}
+
 /** `commit` writes the workflow row (started, changed or ended) and returns its id; it runs in the write that records the event. */
 type Done = { commit: () => Promise<number | null>; failed: string[]; note?: string };
 
 /** Runs the resolved command on the machinery, then returns the write of the workflow row. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor): Promise<Done> {
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
@@ -183,8 +203,10 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     if (r.end === "close" && item.kind === "pr" && !item.head) throw new fx.EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: refText(item.repo, item.number) }));
     const state = r.end === "stop" ? "stopped" : r.end === "close" ? "closed" : "backlog";
     const end: WorkflowPatch = { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null };
+    // A stop of a close that is still to be made ends the workflow that close belongs to.
+    const stopped = wf === null && r.end === "stop" ? o.closing?.workflow_id ?? null : null;
     // An item nobody started gets a row that records the close or the backlog, ended at once.
-    const id = wf?.id ?? await db.write(async () => {
+    const id = wf?.id ?? stopped ?? await db.write(async () => {
       const id = (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
         .get(`${item.repo}#${item.number}`);
       if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
@@ -192,8 +214,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       return id;
     });
     const cw: fx.Ctx = { ...c, workflowId: id };
-    const failed = r.end === "stop" ? await fx.stopAll(cw) : r.end === "close" ? await fx.close(cw) : await fx.backlog(cw);
-    return { failed, commit: async () => { if (wf) await saveWorkflows(db, [{ id, patch: end, at }]); return id; } };
+    const failed = r.end === "stop" ? await fx.stopAll(cw) : r.end === "close" ? await fx.close(cw, o.closeAs) : await fx.backlog(cw);
+    return { failed, commit: async () => { if (wf || stopped !== null) await saveWorkflows(db, [{ id, patch: end, at }]); return id; } };
   }
   if (r.autorepin !== null) {
     const githubId = actor.githubId ?? (await loadAccess(db, [by])).get(by.toLowerCase())?.github_id ?? null;
@@ -203,6 +225,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 
   if (r.start) {
     const entry = r.start;
+    // Work started on the item takes back a close nobody carried out yet.
+    if (o.closing) await fx.stopCloses(c);
     const weight = r.weight ?? WEIGHT_NORMAL;
     const { preapproval } = await fx.start(c, entry, r.approve);
     return {

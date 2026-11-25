@@ -105,9 +105,9 @@ export function listText(ns: readonly (number | string)[]): string {
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on (waits.ts legWait). */
+/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts legWait). */
 export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null): string {
-  if (wait && (wf.state === "running" || wf.state === "waiting")) return wait;
+  if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed")) return wait;
   switch (wf.state) {
     case "running": return current ? t("Running: {step}", { step: stepLabel(current) }) : t("Running");
     case "waiting": return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");
@@ -184,7 +184,11 @@ function byText(how: Run["how"], login: string, time: string): string {
 export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcClock): string {
   const who = byText(r.how, by, clock(at));
   if (r.end === "stop") return t("Stopped {by}. Nothing more runs.", { by: who });
-  if (r.end === "close") return t("Closing {by}.", { by: who });
+  if (r.end === "close") {
+    if (!r.close) return t("Closing {by}.", { by: who });
+    if (r.close.as === "duplicate") return t("Closing as a duplicate of {ref} {by}.", { ref: `${r.close.of.repo ?? ""}#${r.close.of.number}`, by: who });
+    return r.close.as === "completed" ? t("Closing as completed {by}.", { by: who }) : t("Closing as not planned {by}.", { by: who });
+  }
   if (r.end === "backlog") return t("In the backlog: open, no work planned {by}. Any command starts it again.", { by: who });
   if (r.autorepin !== null) {
     return r.autorepin.toLowerCase() === "off"
@@ -224,7 +228,7 @@ const MEANING_WORDS = /(?<![\w-])(?:don't|dont|do not|not|no|never|wait|hold|lat
 
 /** The one start-or-approve command a leftover text names, or null when it names none, several, or is hedged. */
 function singleCommand(rest: string): string | null {
-  if (MEANING_WORDS.test(rest)) return null;
+  if (MEANING_WORDS.test(rest) || /(?<![\w-])duplicate(?![\w-])/i.test(rest)) return null;
   const found = COMMANDS.filter((c) => !c.answer && c.word !== "autorepin" && [c.word, ...c.aliases].some((w) => new RegExp(`(?<![\\w-])${w.replace(/[- ]/g, "[-\\s]?")}(?![\\w-])`, "i").test(rest)));
   return found.length === 1 ? found[0]!.word : null;
 }

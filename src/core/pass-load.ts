@@ -21,7 +21,7 @@ import { loadStageFacts, type StageFacts } from "../data/planner/index.ts";
 import { loadReviewFacts, type ReviewFacts } from "../data/review/index.ts";
 import { listQuietPrs } from "../data/security/index.ts";
 import { loadRanks, loadTriageFacts, type RankRow, type TriageFactsResult } from "../data/triage/index.ts";
-import { listWorkflows, loadActions, loadInScope, loadWorkflowFacts, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
+import { listWorkflows, loadActions, loadActionsDue, loadInScope, loadWorkflowFacts, type DueAction, type WorkflowAction, type WorkflowPassFacts } from "../data/workflow/index.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 import { ACTION_WAITS } from "./may.ts";
 import { mergeDecisionId } from "./rules.ts";
@@ -162,6 +162,8 @@ export type ItemPassData = {
   assignments: Map<string, { assignee: string | null; run: string | null }>;
   repos: Map<string, RepoRow>;
   openPrs: OpenPrRow[];
+  /** The closes people commanded that are due, by item. */
+  closes: Map<RefKey, DueAction>;
   /** Second wave: the text of the items `needs` named. */
   texts: Map<RefKey, ItemOf<"text">>;
   /** Second wave: mirror state of the PRs `needs` named. */
@@ -183,17 +185,18 @@ export type ItemPassNeeds = { texts: Ref[]; prs: Ref[]; asked: { ref: Ref; since
 export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; run: string | null; model: string; repo?: string; needs: (d: ItemPassData) => ItemPassNeeds }): Promise<ItemPassData> {
   return await db.read(async () => {
     const repos = o.repo ? [o.repo] : undefined;
-    const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, ownLogins, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs] =
+    const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, ownLogins, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs, due] =
       await db.together(() => Promise.all([
         loadControl(db), loadItemsWithHashes(db, keys), loadTriageFacts(db, keys, { model: o.model, run: o.run, nowMs: o.now }), loadOutsideHolds(db, keys),
         loadStageFacts(db, keys), loadWorkflowFacts(db, keys, { nowMs: o.now }), loadImplementFacts(db, keys),
         loadInScope(db, keys),
         loadOwnLogins(db), listQuietPrs(db, o.repo ? { repo: o.repo } : {}), loadMainFixPrs(db, repos), loadOwnIntegration(db, repos),
         loadAssignments(db, o.repo ? { repo: o.repo } : {}), loadRepos(db, { all: true }), loadOpenPrLinks(db, repos),
+        loadActionsDue(db, { kinds: ["close", "comment-close"], ...(repos && { repos }) }),
       ]));
     const data: ItemPassData = {
       now: o.now, run: o.run, control, items, triage, outsideHolds, stages, workflow, implement, inScope: scoped,
-      ownLogins, quiet, mainFixPrs, batchPrs, assignments, repos: repoRows, openPrs,
+      ownLogins, quiet, mainFixPrs, batchPrs, assignments, repos: repoRows, openPrs, closes: new Map(due.map((a) => [refKey(a.repo, a.number), a])),
       texts: new Map(), prs: new Map(), comments: new Map(), act: new Map(),
     };
     const n = o.needs(data);

@@ -39,7 +39,6 @@ import { prBuildDue, reposWithQueuedBuilds } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
-import { compareKeys, targetKeys } from "../act/order.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
 import { premergeCandidates } from "../premerge/review.ts";
 import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
@@ -523,7 +522,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Comments and closes after operator answers, and Close? decisions for reviewed PRs.
+    // The closes people asked for, queued card presses and held follow-up issues.
     name: "act",
     perRepo: true,
     // Queued card presses: the drain runs when the first press fits under the daily limit, so the room (and the limit) is part of the input.
@@ -533,28 +532,30 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       return [h ? `queue:${h.fits ? 1 : 0}:${await actLimit(db) ?? "n"}` : "", held ? `${held}:${await actLimit(db) ?? "n"}` : ""].filter(Boolean).join("|");
     },
     detect: async (db, ctx) => {
-      // Repos in the order of their best target: item priority level, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest answer.
-      const best = new Map<string, { band: number; at: string }>();
-      const targets = allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) })).flatMap((p) => (typeof p.action.params?.decisionId === "string" ? [{ decisionId: p.action.params.decisionId, repo: p.facts.repo, number: p.facts.number }] : []));
-      const keys = await targetKeys(db, targets);
-      for (const t of targets) {
-        const k = keys.get(t.decisionId);
-        if (k && (!best.has(t.repo) || compareKeys(k, best.get(t.repo)) < 0)) best.set(t.repo, k);
+      // Repos in the order of their best close: workflow weight, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest command.
+      const best = new Map<string, { weight: number; at: string }>();
+      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) {
+        const c = p.facts.close, b = best.get(p.facts.repo);
+        if (c && (!b || c.weight > b.weight || (c.weight === b.weight && c.at < b.at))) best.set(p.facts.repo, { weight: c.weight, at: c.at });
       }
-      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) if (!best.has(p.facts.repo)) best.set(p.facts.repo, { band: 0, at: "" });
+      const first = { weight: Infinity, at: "" };
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
       const head = await queueHead(db);
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-      else if (head && ctx.tracked.includes(head.repo) && await commentApprovalOf(db, head.repo)) best.set(head.repo, { band: 5, at: "" });
+      else if (head && ctx.tracked.includes(head.repo) && await commentApprovalOf(db, head.repo)) best.set(head.repo, first);
       // Follow-up issues held until a PR merged: filed by the job of the PR's repo once it merged, dropped once it closed or its merge path ended.
       // A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
       ctx.wake?.push(...await filingWakes(db));
       for (const [repo, fits] of (await heldDue(db)).repos) {
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-        else if (ctx.tracked.includes(repo) && await commentApprovalOf(db, repo)) best.set(repo, { band: 5, at: "" });
+        else if (ctx.tracked.includes(repo) && await commentApprovalOf(db, repo)) best.set(repo, first);
       }
       const served = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
-      return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => best.get(b)!.band - best.get(a)!.band || (served.get(a)! < served.get(b)! ? -1 : served.get(a)! > served.get(b)! ? 1 : 0) || compareKeys(best.get(a), best.get(b)) || a.localeCompare(b)).map((repo) => ({ step: "act", params: { repo } }));
+      const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
+      return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => {
+        const x = best.get(a)!, y = best.get(b)!;
+        return (x.weight === y.weight ? 0 : x.weight > y.weight ? -1 : 1) || cmp(served.get(a)!, served.get(b)!) || cmp(x.at, y.at) || a.localeCompare(b);
+      }).map((repo) => ({ step: "act", params: { repo } }));
     },
   },
   {

@@ -29,8 +29,8 @@ export type GuardedFiling = { readonly [guarded]: true; readonly scope: "filing"
 /** What an item or repo write accepts. A PR grant is left out: no caller writes with one, and a merge or CI grant must not type-check there. */
 export type Grant = GuardedItem | GuardedRepo;
 export type Refused = { refused: string };
-/** An item action to guard: the Plan must hold the kind with the bucket, decision and source given. */
-export type ItemWant = Want & { decisionId?: string; source?: string };
+/** An item action to guard: the Plan must hold the kind with the bucket, person action and source given. */
+export type ItemWant = Want & { id?: number; source?: string };
 /** The action to guard: `head` is the head the caller reviewed or worked on. `batch`: a member of a merge batch, which is in its batch state, not ready. */
 export type Ask<K extends ActionKind = ActionKind> = Want<K> & { head: string; batch?: boolean; /** Fix-up: the Plan action's source (review, premerge or carry). */ source?: string; /** The answered decision this merge or push carries out: the answering operator is the identity. */ decisionId?: string };
 export type Ref = { repo: string; number: number };
@@ -118,8 +118,7 @@ export async function guardBatchMerge(db: Db, batch: Ref & { head: string }, mem
   return make(batch, { kind: "merge" }, batch.head);
 }
 
-/** Lets an issue or PR write of the item steps through while decideItem still has the action for the item. No GitHub read: the caller reads what it needs. */
-export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDecision?: string): Promise<GuardedItem | Refused> {
+export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, login?: string): Promise<GuardedItem | Refused> {
   const name = `${ref.repo}#${ref.number}`;
   const f = await loadItemFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
@@ -128,13 +127,13 @@ export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDe
   const plan = decideItem(f);
   const holds = plan.actions.some((x) => x.kind === action.kind
     && (action.bucket === undefined || x.params?.bucket === action.bucket)
-    && (action.decisionId === undefined || x.params?.decisionId === action.decisionId)
+    && (action.id === undefined || x.params?.id === action.id)
     && (action.source === undefined || x.params?.source === action.source));
   if (!holds) {
     const now = plan.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none";
     return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, actions: ${now})` };
   }
-  return { scope: "item", action, repo: ref.repo, number: ref.number, as: await identityOfDecision(db, asDecision ?? action.decisionId) } as unknown as GuardedItem;
+  return { scope: "item", action, repo: ref.repo, number: ref.number, as: login ? `user:${login}` : "app" } as unknown as GuardedItem;
 }
 
 /** The approvals of a repo and the global switch, read now (never from a settings snapshot). */

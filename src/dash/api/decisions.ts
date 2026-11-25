@@ -13,7 +13,6 @@ import { NOTE_MAX } from "../../conversations/types.ts";
 import { conversationOf, insertTurn, systemBlock } from "../../conversations/store.ts";
 import { blocksFacts, blocksIndex } from "../../review/blockers.ts";
 import { BACKLOG, BACKLOG_KIND, BACKLOG_QUESTION, backlogDecisionId, HANDLED, isBacklog, snoozedExpr, replaceProposedCards, WITHDRAWN_OPTION, backlogOpen, exceptionsOf, factsOf, getDecision, isBatch, itemsOf, KINDS, optionsOf, reposOf, type DecisionRow, type Exception } from "../../decisions.ts";
-import { commentPreview, writeEffect } from "../../act/index.ts";
 import { optionTextsMany, optionTextsOf, textsFor, textsHash } from "../../dupes/texts.ts";
 import { audit } from "../audit.ts";
 import { mayRunRepo } from "../repo-access.ts";
@@ -51,6 +50,10 @@ import type { DB } from "../../db/types.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Eb } from "../../db/kx.ts";
+
+// No decision answer writes to GitHub.
+const writeEffect = (_kind: string, _option: string): string | null => null;
+const commentPreview = (_d: unknown): string | null => null;
 
 // Decision answers are retired (R1 deletes these routes): their lane holds, Act tries and execution state are inert.
 type Held = { reason: string; approval: boolean };

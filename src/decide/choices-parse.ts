@@ -2,7 +2,6 @@
 // compose and validateCard. What fails is dropped with a note; what survives is what `writeChoices` and `mergeChoices` store.
 import { ownerOf, splitSlug } from "../owners.ts";
 import { REFERENCE_LEAK } from "../review/opus-parse.ts";
-import { writeEffect } from "../act/index.ts";
 import { cleanReason } from "../act/templates.ts";
 import { KEEP_IN_CORE } from "../core/rules.ts";
 import { backlogHeldExpr, notOwnIntegrationExpr } from "../dupes/held.ts";
@@ -24,6 +23,9 @@ import { cardsToDrafts } from "./choices-convert.ts";
 import { PREPARE_REASON_MAX } from "./prepare-types.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+
+// No decision answer writes to GitHub.
+const writeEffect = (_kind: string, _option: string): string | null => null;
 
 /** A validated `choices` block: what a prepare writes whole and a conversation turn merges. */
 export interface ParsedChoices {

@@ -335,7 +335,7 @@ export const STEPS: StepDef[] = [
   {
     name: "act",
     title: "Comment and close",
-    description: "Posts one short comment and closes the items an operator answered Out of scope or Close, and asks a \"Close this PR?\" decision for each PR whose review says close. Skips an item that already closed or whose PR head moved. Also carries out queued card presses and opens the follow-up issues cards held until their PR merged. Calls no model.",
+    description: "Posts one short comment on each item a maintainer told AutoCraft to close and closes it as that maintainer. Skips an item that already closed or whose PR head moved; waits for a maintainer who has to sign in. Also carries out queued card presses and opens the follow-up issues cards held until their PR merged. Calls no model.",
     stage: runStage("act"),
     requires: "operator",
     params: [
@@ -348,9 +348,9 @@ export const STEPS: StepDef[] = [
       const refused = await checkCommentApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runAct(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.acted(r.done.length + r.skipped.length + r.failed.length + r.asked.length + (r.cards ?? 0) + (r.held ?? 0));
-      const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed, ${r.asked.length} decisions asked${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
-      // A failed target ends the job as failed, so the registered failure backoff spaces its next tries (a target stops after ACT_MAX_ATTEMPTS).
+      ctx.acted(r.done.length + r.skipped.length + r.failed.length + (r.cards ?? 0) + (r.held ?? 0));
+      const line = `${r.repo}: ${r.done.length} closed, ${r.skipped.length} skipped, ${r.failed.length} failed${r.cards ? `, ${r.cards} queued presses carried out` : ""}${r.held ? `, ${r.held} held follow-up issues filed or dropped` : ""}`;
+      // A failed close ends the job as failed, so the registered failure backoff spaces its next tries (a close stops after ACT_MAX_ATTEMPTS).
       if (r.failed.length) throw new Error(`${line}; ${r.failed[0]!.ref}: ${r.failed[0]!.reason}`);
       // Starts with the pacing message, so the failure backoff skips it like any paced job and the next pass runs it again.
       if (r.paced) throw new Error(`${r.paced}; ${line}`);

@@ -1,33 +1,24 @@
 // Card presses at the daily GitHub write limit: they queue instead of failing, drain in order through the Act
-// step against the one shared count, are carried out only for a presser who may still settle, and stop being retried after three failures.
+// step against the one shared count, and are carried out only for a presser who may still act. (The step's closes: act-closes.test.ts.)
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { runAct } from "../src/act/index.ts";
 import { queuedCards } from "../src/conversations/queue.ts";
 import { actUsedToday } from "../src/conversations/usage.ts";
 import { doCard, liveWrite } from "../src/conversations/act.ts";
-import { applyAnswer, undo } from "../src/dash/api/decisions.ts";
-import { ask, getDecision } from "../src/decisions.ts";
-import type { Req } from "../src/dash/types.ts";
 import { excluded } from "../src/db/kx.ts";
 import { T1, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
 
-/** The world's GitHub with every item an issue, recording comments and closes; `failClose` makes the close of those issues fail. */
-const deps = (w: World, o: { posted?: string[]; closed?: string[]; failClose?: number[]; failComment?: number[]; serverError?: number[]; permission?: string } = {}) => {
+/** The world's GitHub with every item an issue, recording comments. */
+const deps = (w: World, o: { posted?: string[]; permission?: string } = {}) => {
   const base = w.gh.actDeps();
   return { ...base, querier: { ...base.querier, query: async (q: string, v: object) => {
     const id = String((v as { id?: string }).id ?? "");
     if (q.includes("collaborators")) return { repository: { collaborators: { edges: [{ permission: o.permission ?? "WRITE", node: { login: String((v as { login: string }).login) } }] } } };
-    if (q.includes("addComment") && o.serverError?.some((n) => id === `P${n}`)) throw new Error("HTTP 502 Bad Gateway");
-    if (q.includes("addComment") && o.failComment?.some((n) => id === `P${n}`)) throw new Error("GitHub refused the comment");
     if (q.includes("addComment")) { o.posted?.push(id); return { addComment: { commentEdge: { node: { url: `https://x.test/${id}` } } } }; }
-    if (q.includes("closeIssue")) {
-      if (o.failClose?.some((n) => id === `P${n}`)) throw new Error("GitHub refused the close");
-      o.closed?.push(id);
-    }
     const r = await base.querier.query(q, v) as { repository?: { issueOrPullRequest?: Record<string, unknown> } };
     const x = r.repository?.issueOrPullRequest;
     if (x) { x.__typename = "Issue"; delete x.headRefOid; }
@@ -43,10 +34,6 @@ const commentCard = async (w: World, n: number) =>
   Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "comment", params: JSON.stringify({ kind: "comment" }), text: "Hello.", description: "comment" }).returning("id")))!.id);
 const state = async (w: World, id: number) => (await w.db.get(w.db.k.selectFrom("conversation_cards").select(["state", "error"]).where("id", "=", id)))!;
 const run = (w: World, d: ReturnType<typeof deps>, params: { limit?: number; onHandled?: (n: number) => void } = {}) => runAct(w.db, { repo: "app", dryRun: false, ...params }, () => {}, d);
-const askClose = async (w: World, n: number) => {
-  await ask(w.db, [{ id: `app#${n}:scope`, kind: "scope", repo: "app", number: n, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
-  await w.answerDecision(`app#${n}:scope`, "close");
-};
 
 describe("card presses at the daily limit", () => {
   test("a press with no room queues behind the earlier ones and the Act step carries it out in order, counted once", async () => {
@@ -107,34 +94,7 @@ describe("card presses at the daily limit", () => {
   });
 });
 
-describe("Act failures", () => {
-  test("a target that fails three times stops without blocking the others, and Undo plus a new answer runs it again", async () => {
-    current = await (await (await (await world()).repo()).issue(5)).issue(6);
-    const w = current;
-    for (const n of [5, 6]) await askClose(w, n);
-    const closed: string[] = [];
-    const d = deps(w, { closed, failComment: [5] });
-    const first = await run(w, d);
-    assert.deepEqual(closed, ["P6"], "the failing target does not stop the next one");
-    assert.equal(first.failed.length, 1);
-    for (let i = 0; i < 2; i++) await run(w, d);
-    const row = async () => (await w.db.all(w.db.k.selectFrom("actions").select(["state", "attempts", "reason"]).where("number", "=", 5)))[0];
-    assert.equal((await row()).state, "stopped");
-    assert.match((await row()).reason!, /stopped after 3 failed tries/);
-    const n = closed.length;
-    await run(w, d);
-    assert.equal(closed.length, n, "a stopped target is not tried again");
-    // Undo and answer again: the target is planned once more and closes.
-    const req = { params: { id: "app#5:scope" }, query: new URLSearchParams(), json: {}, user: { login: "op", role: "operator", canWrite: async () => true } } as unknown as Req;
-    await undo(w.db, req);
-    await applyAnswer(w.db, (await getDecision(w.db, "app#5:scope"))!, "op", { answer: "close" }, "dashboard");
-    const ok = deps(w, { closed });
-    await run(w, ok);
-    assert.ok(closed.includes("P5"));
-  });
-});
-
-describe("blocked repos, GitHub errors and permission reads", () => {
+describe("blocked repos and permission reads", () => {
   test("a queued press whose repo became blocked fails with the reason and blocks nobody", async () => {
     current = await (await (await (await world()).repo()).issue(1)).issue(2);
     const w = current;
@@ -150,20 +110,6 @@ describe("blocked repos, GitHub errors and permission reads", () => {
     await run(w, d);
     assert.equal((await state(w, a)).state, "failed");
     assert.match((await state(w, a)).error ?? "", /Act cannot run for app now: the pipeline is off for app/);
-  });
-
-  test("a GitHub server error stops the run without counting a try", async () => {
-    current = await (await (await (await world()).repo()).issue(5)).issue(6);
-    const w = current;
-    for (const n of [5, 6]) await askClose(w, n);
-    const closed: string[] = [];
-    const first = await run(w, deps(w, { closed, serverError: [5] }));
-    assert.equal(first.failed.length, 1);
-    assert.deepEqual(closed, [], "the run stopped at the first target");
-    const attempts = (await w.db.all(w.db.k.selectFrom("actions").select("attempts").where("number", "=", 5)))[0]?.attempts ?? 0;
-    assert.equal(attempts, 0);
-    await run(w, deps(w, { closed }));
-    assert.deepEqual(closed.sort(), ["P5", "P6"]);
   });
 
   test("a partial permission read is transient; only an empty list or a lower permission is no", async () => {

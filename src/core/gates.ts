@@ -30,8 +30,7 @@ export function gateRepo(a: RepoApprovals, need: RepoNeed, by: By, repo: string)
 /** The approval an action's GitHub write needs, or null for an action that writes nothing there. */
 export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null {
   switch (a.kind) {
-    // Item actions. Closing and commenting need the comment approval: an answered close always comments first (a
-    // security-scan question is in scope for it whatever the pilot says; decideItem already covers that).
+    // Item actions. Closing and commenting need the comment approval: a person's close always comments first.
     case "label": return "labels";
     case "act": return "comment";
     case "implement": return "fix-issue";

@@ -74,6 +74,8 @@ export type RepinPatch = Partial<Pick<RepinRow, "state" | "sha" | "head" | "task
 export type ActionKind = "close" | "comment-close" | "merge";
 export type ActionState = "pending" | "waiting-token" | "waiting-permission" | "done" | "failed" | "stopped" | "skipped";
 export type WorkflowAction = Omit<Selectable<DB["workflow_actions"]>, "kind" | "state"> & { kind: ActionKind; state: ActionState };
-export type NewAction = { workflowId: number; repo: string; number: number; kind: ActionKind; by: string; head: string | null; state?: ActionState; at?: string };
+/** How a close ends the item, as `workflow_actions.close_as` stores it. */
+export type CloseAs = "completed" | "not-planned" | `duplicate ${string}#${number}`;
+export type NewAction = { workflowId: number; repo: string; number: number; kind: ActionKind; by: string; head: string | null; state?: ActionState; at?: string; closeAs?: CloseAs | null };
 export type DueAction = WorkflowAction & { weight: number; itemState: string | null; itemHead: string | null };
 export type Surface2 = Surface;
