@@ -9,12 +9,11 @@ import { runTiered } from "../agents/step.ts";
 import { PRIORITY, type JevImpact } from "../agents/steps.ts";
 import { type Item, refOf } from "../classify/parse.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
-import { reachOfOpenItems } from "./reach.ts";
-import { reachScore, settleImpact, type Impact } from "./score.ts";
+import { savePriorities, rescoreReach, type PriorityRow } from "../data/triage/index.ts";
+import { settleImpact, type Impact } from "./score.ts";
 import { itemsOf, plannedItems } from "../core/select-items.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import { batches, excluded } from "../db/kx.ts";
 
 const JEV_CHUNK = 40;
 const now = () => new Date().toISOString();
@@ -30,42 +29,17 @@ async function dueItems(db: Db): Promise<Due[]> {
 
 type Verdict = { jev: { impact: Impact; p: number } | null; haiku: { impact: Impact; reason: string } | null };
 
-/** Stores the settled verdicts of `items` (those without a valid answer are skipped): one statement per BATCH_ROWS rows. Returns the refs saved. */
+/** Stores the settled verdicts of `items` (those without a valid answer are skipped). Returns the refs saved. */
 async function save(db: Db, items: readonly Due[], verdicts: ReadonlyMap<string, Verdict>): Promise<Set<string>> {
-  const rows = items.flatMap((item) => {
+  const rows = items.flatMap((item): PriorityRow[] => {
     const v = verdicts.get(refOf(item))!;
     const s = settleImpact(v.jev, v.haiku?.impact ?? null);
     if (!s) return [];
     const reason = s.model === "haiku" ? v.haiku!.reason : v.jev ? `${v.jev.impact} ${v.jev.p.toFixed(2)}` : "";
-    return [{ ref: refOf(item), row: { repo: item.repo, number: item.number, text_hash: item.hash, impact: s.impact, jev_impact: v.jev?.impact ?? null, jev_p: v.jev?.p ?? null,
-      haiku_impact: v.haiku?.impact ?? null, score: 0, model: s.model, reason, at: now() } }];
+    return [{ repo: item.repo, number: item.number, textHash: item.hash, impact: s.impact, jevImpact: v.jev?.impact ?? null, jevP: v.jev?.p ?? null,
+      haikuImpact: v.haiku?.impact ?? null, score: 0, model: s.model, reason, at: now() }];
   });
-  for (const chunk of batches(rows)) {
-    await db.run(db.k.insertInto("item_priority").values(chunk.map((r) => r.row))
-      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["text_hash", "impact", "jev_impact", "jev_p", "haiku_impact", "model", "reason", "at"]))));
-  }
-  return new Set(rows.map((r) => r.ref));
-}
-
-/**
- * Recomputes the reach of every open item with a priority row from the current reach signals.
- * Returns the number of rows whose reach changed.
- */
-export async function rescore(db: Db, nowMs: number = Date.now()): Promise<number> {
-  const reach = await reachOfOpenItems(db, nowMs);
-  const rows = await db.all(db.k.selectFrom("item_priority as p")
-    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
-    .select(["p.repo", "p.number", "p.score"]).where("i.state", "=", "OPEN"));
-  let changed = 0;
-  await db.write(async () => {
-    for (const r of rows) {
-      const rc = reach.get(`${r.repo}#${r.number}`);
-      if (!rc) continue;
-      const score = reachScore(rc);
-      if (score !== r.score) { await db.run(db.k.updateTable("item_priority").set({ score }).where("repo", "=", r.repo).where("number", "=", r.number)); changed++; }
-    }
-  });
-  return changed;
+  return new Set(await savePriorities(db, rows));
 }
 
 export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => Promise<boolean>; log?: (line: string) => void };
@@ -102,7 +76,7 @@ export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<Pr
     await rateChunk(db, todo.slice(i, i + JEV_CHUNK), res, log);
     opts.onSent?.(res.sent);
   }
-  res.rescored = await rescore(db);
+  res.rescored = await rescoreReach(db);
   if (res.haikuAlone) log(`Jev unavailable: Haiku rated ${res.haikuAlone} items`);
   return res;
 }
@@ -117,7 +91,7 @@ export async function prioritizeAnswered(db: Db, items: readonly Due[], given: R
   const res: PrioritizeResult = { due: todo.length, sent: 0, jev: 0, haiku: 0, saved: 0, rescored: 0, haikuAlone: 0 };
   for (let i = 0; i < todo.length && !await opts.cancelled?.(); i += JEV_CHUNK) await rateChunk(db, todo.slice(i, i + JEV_CHUNK), res, opts.log ?? (() => {}), given);
   // New rows get their reach now, as a prioritize pass gives its own.
-  if (res.saved) res.rescored = await rescore(db);
+  if (res.saved) res.rescored = await rescoreReach(db);
   return res;
 }
 

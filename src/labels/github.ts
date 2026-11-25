@@ -10,6 +10,8 @@ import { plannedItems } from "../core/select-items.ts";
 import { ALL_LABELS, type LabelDef } from "./set.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf } from "../owners.ts";
+import { applyLocal } from "../data/mirror/index.ts";
+import { addStageEvents } from "../data/planner/index.ts";
 import type { Db } from "../db/index.ts";
 
 export const BATCH = 10;          // mutations per request
@@ -100,10 +102,8 @@ export async function applyLabels(db: Db, client: Querier, repo: string, o: Appl
     const ids = await nodeIds(client, repo, chunk.map((r) => r.number), wait);
     const live = (r: Todo) => ids.get(r.number);
     const gone = chunk.filter((r) => live(r)?.id && live(r)!.state && live(r)!.state !== "OPEN");
-    for (const r of gone) {
-      await db.run(db.k.updateTable("main.items").set({ state: live(r)!.state! }).where("repo", "=", repo).where("number", "=", r.number).where("state", "=", "OPEN"));
-      log(`${repo}#${r.number}: skipped, now ${live(r)!.state} on GitHub`);
-    }
+    await applyLocal(db, gone.map((r) => ({ kind: "state" as const, repo, number: r.number, state: live(r)!.state as "CLOSED" | "MERGED" })));
+    for (const r of gone) log(`${repo}#${r.number}: skipped, now ${live(r)!.state} on GitHub`);
     res.skipped += gone.length;
     const writable = chunk.filter((r) => live(r)?.id && !gone.includes(r));
     for (const r of chunk) if (!live(r)?.id) res.failed.push(r.number);
@@ -128,11 +128,7 @@ export async function applyLabels(db: Db, client: Querier, repo: string, o: Appl
     const ok = guarded.filter((r) => done.includes(r.number));
     if (ok.length) {
       const at = new Date().toISOString();
-      await db.write(async () => {
-      for (const r of ok) {
-        await db.run(db.k.insertInto("main.stages").values({ repo, number: r.number, stage: "labeled", at, actor: "labels", note: `added: ${r.add.join(", ")}` }));
-      }
-      });
+      await addStageEvents(db, ok.map((r) => ({ repo, number: r.number, stage: "labeled", at, actor: "labels", note: `added: ${r.add.join(", ")}` })));
       for (const r of ok) await jobItem(db, repo, r.number, `labelled ${r.add.join(", ")}`, log);
       res.labeled += ok.length;
       o.onLabeled?.(res.labeled);
