@@ -1,7 +1,4 @@
 [
-  "src/act/dupe-groups.ts",
-  "src/act/index.ts",
-  "src/act/order.ts",
   "src/agents/accounts.ts",
   "src/agents/box.ts",
   "src/agents/manage.ts",
