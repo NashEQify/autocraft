@@ -54,7 +54,7 @@ export type StepContext = {
    * through a backlog stops at its next unit boundary and returns what is left as a success; the leftover items make the next job due.
    * Always false for a run without a runner deadline (a command-line run).
    */
-  timeUp(): boolean;
+  timeUp(): Promise<boolean>;
 };
 
 export type StepDef = {
