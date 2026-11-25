@@ -50,8 +50,8 @@ const STEPS: [string, (db: Db) => Promise<unknown>][] = [
   ["env", (db) => db.prepare("INSERT INTO build_envs (id, label, kind, slots, key_hash, created_at) VALUES ('e1', 'E', 'remote', 1, 'k', ?)").run(T)],
   ["env poll", (db) => db.prepare("UPDATE build_envs SET last_seen_at = ? WHERE id = 'e1'").run(T)],
   ["transaction", (db) => db.write(async () => {
-    await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
-    await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 12, 'op', ?)").run(T);
+    await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 11, 1, '{}', ?)").run(T);
+    await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 12, 1, '{}', ?)").run(T);
     await db.run(db.k.updateTable("items").set({ title: "again" }).where("number", "=", 1));
   })],
   ["bulk", (db) => bulkWrites(db, "test", async () => {

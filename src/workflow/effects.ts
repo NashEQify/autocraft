@@ -1,6 +1,6 @@
 // What a maintainer's command does to the machinery that already works: the review-again mark, operator fix-ups, pre-approved
 // merges (the merge leg, owned through preapprovals.workflow_id), the close made as the person (a `workflow_actions` row the
-// action executor carries out), autorepin and the stop of every queued step. A start, an answer and a close check first and return
+// action executor carries out), autorepin and the end of every queued step. A start, an answer and a close check first and return
 // what they write; the command core (apply.ts) writes that in one transaction with the workflow row, so no check reads state the
 // command itself creates and a refusal leaves nothing behind. Nothing here touches item_workflows.
 import { endWorkspace } from "../build/workspaces.ts";
@@ -9,7 +9,7 @@ import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mirror/index.ts";
 import { withdrawItemCalls } from "../data/runners/index.ts";
-import { adoptLegs, endFixupRequests, holdMerges, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadHolds, loadLegs, releaseMerges, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
+import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
 import { queueLaneActions } from "../github/user-lane.ts";
@@ -59,8 +59,8 @@ export function effectText(message: string): string {
 }
 
 export type Target = { repo: string; number: number; kind: ItemKind; head: string | null };
-/** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a stop ends. */
-export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number; /** The head of the question it answers, when pushes of ours lead from it to the item's. */ shown?: string };
+/** `workflowId`: the item's live workflow, whose merge legs (possibly on another item: an issue's implementation PR) a hold ends. `keepBatch`: the caller ends the batch the PR is in, and its merge leg. */
+export type Ctx = { db: Db; by: string; via: Surface; at: string; item: Target; exec?: Exec; workflowId?: number; keepBatch?: boolean; /** The head of the question it answers, when pushes of ours lead from it to the item's. */ shown?: string };
 
 const ref = (t: { repo: string; number: number }): string => `${t.repo}#${t.number}`;
 
@@ -198,17 +198,35 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   };
 }
 
-// ---- stop, backlog, close ------------------------------------------------------------------------------------------------
+// ---- hold, backlog, close ------------------------------------------------------------------------------------------------
+
+/** The fix-ups asked for on the PR that were not made yet. */
+export const askedFixes = async (db: Db, pr: { repo: string; number: number }): Promise<{ instructions: string; head: string }[]> =>
+  (await loadFixupRequests(db, { open: true, refs: [pr], anyMaker: true })).filter((r) => r.state === "queued").map((r) => ({ instructions: r.instructions, head: r.from_head }));
+
+/**
+ * Asks again, as the person, for the fix-ups a hold ended: the ones asked for at the PR's head. A push since then was one of them, or the
+ * author's. With `merges`, a fix-up carries the merge unless a merge leg works already.
+ */
+export async function askFixes(c: Ctx, fixes: readonly { instructions: string; head: string }[], merges: boolean): Promise<Write> {
+  const { db, by, item } = c;
+  const left = item.kind === "pr" ? fixes.filter((f) => f.head === item.head) : [];
+  const last = left.at(-1);
+  if (!last) return nothing;
+  const f = await loadPrFact(db, item.repo, item.number);
+  const merge = merges && (await activeLeg(db, item)) === null;
+  return writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: last.instructions, merge, afterBase: conflictPath(f) !== null })));
+}
 
 /**
  * Stops everything that runs or waits for the item: its pre-approved merge (out of its batch first), queued fix-ups, its place in
  * an integration batch, queued model calls made for it alone, the implementation attempt of an issue that has no PR yet, and the
- * merge legs of the workflow's implementation PRs, and a close nobody made yet. Leased calls finish; nothing acts on their result once the workflow stopped.
- * Every part runs; the ones that could not stop are returned.
+ * merge legs of the workflow's implementation PRs, and a close nobody made yet. Leased calls finish; nothing acts on their result once the workflow ended.
+ * The caller has ended the workflow's row, so the queue takes none of it up again. Every part runs; the ones that could not stop are returned.
  */
 export async function stopAll(c: Ctx): Promise<string[]> {
   const { db, by, item, at } = c;
-  const why = `stopped by ${by}`;
+  const why = `ended by ${by}`;
   const failed: string[] = [];
   const attempt = async (fn: () => Promise<unknown>) => {
     try { await fn(); } catch (e) { failed.push(effectText((e as Error).message)); }
@@ -216,17 +234,12 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   const one = [{ repo: item.repo, number: item.number }];
   await stopCloses(c);
   if (item.kind === "pr") {
-    const [active, requests, holds] = await db.together(() => Promise.all([
-      activeLeg(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), loadHolds(db, { refs: one }),
+    const [active, requests, batched] = await db.together(() => Promise.all([
+      activeLeg(db, item), loadFixupRequests(db, { open: true, refs: one, anyMaker: true }), inActiveBatch(db, item.repo, item.number),
     ]));
-    if (active !== null) await attempt(() => cancelPreapproval(db, by, item.repo, item.number, c.exec, c.via));
+    if (active !== null && !(batched && c.keepBatch)) await attempt(() => endLeg(c, item));
     await endFixupRequests(db, requests.filter((r) => r.state === "queued").map((r) => ({ id: r.id, reason: why })));
-    if (await inActiveBatch(db, item.repo, item.number)) {
-      await attempt(async () => {
-        await removeFromBatch(db, by, item.repo, item.number, c.exec);
-        if (!holds.has(ref(item))) await releaseMerges(db, one, by);
-      });
-    }
+    if (batched && !c.keepBatch && await inActiveBatch(db, item.repo, item.number)) await attempt(() => removeFromBatch(db, by, item.repo, item.number, c.exec));
   } else {
     for (const w of await cancelUnopened(db, [{ ...one[0]!, reason: why }], by, at)) {
       if (w.workspaceId !== null) await endWorkspace(db, w.workspaceId);
@@ -235,11 +248,20 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   // The workflow's merge legs on other items: an issue's implementation PRs.
   if (c.workflowId !== undefined && item.kind === "issue") {
     for (const p of await listWorkflowLegs(db, [c.workflowId])) {
-      await attempt(() => cancelPreapproval(db, by, p.repo, p.number, c.exec, c.via));
+      await attempt(() => endLeg(c, p));
     }
   }
   await withdrawItemCalls(db, ref(item), why);
   return failed;
+}
+
+/** Cancels the PR's merge leg, out of its batch first. The pre-approval pass may have ended it a moment ago, with its workflow. */
+export async function endLeg(c: Ctx, pr: { repo: string; number: number }): Promise<void> {
+  try {
+    await cancelPreapproval(c.db, c.by, pr.repo, pr.number, c.exec, c.via);
+  } catch (e) {
+    if (!/has no pre-approved merge in progress$|changed a moment ago$/.test((e as Error).message) || await activeLeg(c.db, { ...pr, kind: "pr", head: null }) !== null) throw e;
+  }
 }
 
 /** Takes back the closes of the item, and those its workflow made of other items, that are still to be made: queued, or waiting for their person's sign-in or access. */
@@ -250,7 +272,7 @@ export async function stopCloses(c: Ctx): Promise<void> {
     loadActions(c.db, { refs: [{ repo: c.item.repo, number: c.item.number }], ...of }), ...(c.workflowId === undefined ? [] : [loadActions(c.db, { workflowIds: [c.workflowId], ...of })]),
   ]));
   const rows = maps.flatMap((m) => [...m.values()].flat());
-  await saveActions(c.db, rows.map((a) => ({ id: a.id, state: "stopped", reason: `stopped by ${c.by}`, at: c.at })), { from: open });
+  await saveActions(c.db, rows.map((a) => ({ id: a.id, state: "stopped", reason: `ended by ${c.by}`, at: c.at })), { from: open });
 }
 
 /**
@@ -281,12 +303,6 @@ export async function autorepin(c: Ctx, args: string, githubId: number | null): 
 
 // ---- controls ------------------------------------------------------------------------------------------------------------
 
-/** Keeps an approved PR out of the next merge until it is released. Returns false when it was already held. */
-export async function hold(c: Ctx): Promise<boolean> {
-  if (c.item.kind !== "pr") throw new EffectError(t("{ref} is not a pull request.", { ref: ref(c.item) }));
-  return (await step(() => holdMerges(c.db, [{ repo: c.item.repo, number: c.item.number, by: c.by, details: { via: c.via } }]))).length > 0;
-}
-export const release = async (c: Ctx): Promise<boolean> => (await step(() => releaseMerges(c.db, [{ repo: c.item.repo, number: c.item.number }], c.by))).length > 0;
 export const releaseHeldItem = async (c: Ctx): Promise<void> => { await step(() => releaseHeld(c.db, c.by, [{ repo: c.item.repo, number: c.item.number }])); };
 export const resumeBreaker = (db: Db, by: string, key: string): Promise<void> => step(() => resumeStage(db, key, by));
 /** The repo's Automatic switch: whether AutoCraft works its items without a person picking them (the per-repo Pipeline switch). */

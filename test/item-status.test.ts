@@ -24,13 +24,14 @@ describe("item status", () => {
     assert.equal(phaseOf(input({ itemState: "classified", inPipeline: false })), "Pipeline off", "an issue in a repo with the pipeline off");
     assert.equal(phaseOf(input({ gh: "MERGED", inPipeline: false })), "Merged");
     assert.deepEqual(statusOf(input({ state: "out-of-scope", wait: "not in scope", next: "Classify" })), { phase: "Pipeline off", waiting: null, next: null });
+    assert.deepEqual(statusOf(input({ state: "out-of-scope", inPipeline: false, held: true, wait: "x" })), { phase: "Held", waiting: null, next: null }, "a held item");
     assert.equal(phaseOf(input({ state: "opus-close" })), "Out of scope");
     assert.equal(phaseOf(input({ state: "ci-failed" })), "Fixing");
     assert.equal(phaseOf(input({ state: "waiting-verify" })), "Verifying");
     assert.equal(phaseOf(input({ state: "waiting-ci" })), "In queue");
     // Typed waits decide the phase, not the wording.
     assert.equal(phaseOf(input({ state: "needs-fix-up", wait: "push approval for the repo", waitKind: "person" })), "Waiting for a person");
-    assert.equal(phaseOf(input({ state: "waiting-ci", wait: "merge held by an operator", waitKind: "person" })), "Waiting for a person");
+    assert.equal(phaseOf(input({ state: "waiting-ci", wait: "merge approval for the repo", waitKind: "person" })), "Waiting for a person");
     assert.equal(phaseOf(input({ state: "needs-fix-up", wait: "the contributor's fixes", waitKind: "contributor" })), "Held");
     assert.equal(phaseOf(input({ state: "needs-fix-up", wait: "the review's fixes to be applied", waitKind: "system" })), "Fixing");
     assert.equal(phaseOf(input({ state: "waiting-ci", wait: "an answer-like CI wording", waitKind: "system" })), "In queue", "a typed system wait ignores the wording");

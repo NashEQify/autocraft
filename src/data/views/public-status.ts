@@ -50,14 +50,13 @@ export async function loadPublicItems(db: Db, refs: { repo: string; number: numb
   return out;
 }
 
-/** The queue's rows of one repo (or of several): open PRs in a queue plan state, not merge-held and not waiting on a person. */
+/** The queue's rows of one repo (or of several): open PRs in a queue plan state, not waiting on a person. */
 function queuedPrs(db: Db, repos: string[], withHidden: boolean) {
   const q = queryDb(db);
   return q.k.selectFrom("main.item_plans as p")
     .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
     .where(kx.inList(db, "p.repo", repos)).where("p.kind", "=", "pr").where(kx.inList(db, "p.state", PUBLIC_QUEUED))
     .where((eb) => eb(kx.jsonText(db, "p.view", "$.gh"), "=", "OPEN"))
-    .where((eb) => eb(eb.fn.coalesce(kx.jsonBool(db, "p.view", "$.queue.held"), eb.lit(0)), "=", 0))
     .where((eb) => eb.not(needsPerson(eb, "p.repo", "p.number")))
     .$if(!withHidden, (b) => b.where((eb) => eb.not(hidden(db, eb, "p.repo", "p.number", "i.labels"))));
 }
@@ -86,7 +85,7 @@ export async function loadPublicStatusRows(db: Db, refs: readonly { repo: string
       planState: r.plan, view: r.view, needsPerson: !!r.needs, hidden: !!r.hidden,
     })),
     queue: members.map((m) => ({
-      repo: m.repo, number: m.number, held: false, batched: BATCHED.includes(m.state), work: work.get(`${m.repo}#${m.number}`) ?? null, score: scores.get(`${m.repo}#${m.number}`) ?? null,
+      repo: m.repo, number: m.number, batched: BATCHED.includes(m.state), work: work.get(`${m.repo}#${m.number}`) ?? null, score: scores.get(`${m.repo}#${m.number}`) ?? null,
     })),
   };
 }

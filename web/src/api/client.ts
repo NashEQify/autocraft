@@ -444,7 +444,7 @@ export interface Api {
     stopBatch(id: number): Promise<void>;
   };
   /** A registered workflow control (src/workflow/apply.ts `runControl`): hold or release a merge. The reply is the line every surface shows. */
-  controls: { run(input: { control: "hold-merge" | "release-merge"; repo: RepoName; number: number } | { control: "resume-breaker"; key: string }): Promise<{ ok: boolean; line: string }> };
+  controls: { run(input: { control: "resume-breaker"; key: string }): Promise<{ ok: boolean; line: string }> };
 }
 
 export const ApiContext = createContext<Api | null>(null);

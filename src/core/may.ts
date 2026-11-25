@@ -43,7 +43,7 @@ const ENDS_WITH_RECOMMENDATION = "Nobody approved this yet; the workflow ends wi
 
 /** Workflow ends by which a person took the item out of the pipeline: nothing merges it until someone starts it again. */
 const ENDED_WHY: Partial<Record<EndedWorkflow, string>> = {
-  stopped: "Someone stopped the work on this; it merges once someone starts it again.",
+  stopped: "Someone holds this; it merges once someone resumes it or starts it again.",
   backlog: "Someone sent this to the backlog; it merges once someone starts it again.",
   closed: "The work on this ended with a close; it merges once someone starts it again.",
   done: "The work on this ended with an answer that did not merge it; it merges once someone starts it again.",

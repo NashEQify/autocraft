@@ -23,7 +23,7 @@ async function actorsOf(db: Db, refs: Ref[]): Promise<Map<string, Actor[]>> {
   const [live, identity] = await db.together(() => Promise.all([listWorkflows(db, { live: true, refs }), githubIdentity(db)]));
   const first = new Map(live.toReversed().map((w) => [refOf(w), w]));
   const flows = [...first.values()].filter((w) => w.entry === "implement");
-  const answers = await loadAnswers(db, flows.map((w) => w.id));
+  const answers = await loadAnswers(db, flows.map((w) => w.id), { resumes: true });
   const logins = new Map(flows.map((w) => [refOf(w), workflowActors(w, answers.get(w.id))]));
   const at = await standings(db, flows.flatMap((w) => logins.get(refOf(w))!.map((login) => ({ login, repo: w.repo }))), { identity });
   return new Map(refs.map((r) => [refOf(r), (logins.get(refOf(r)) ?? []).map((login) => ({ login, standing: at.get(permKey(login, r.repo))! }))]));

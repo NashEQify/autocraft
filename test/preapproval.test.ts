@@ -224,7 +224,6 @@ describe("pre-approved merge", () => {
     await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 5, number: 18, head_oid: "sha18b", position: 1 }));
     assert.equal((await cancelPreapproval(w.db, OPERATOR, "app", 18)).state, "cancelled");
     assert.equal((await w.db.get(w.db.k.selectFrom("merge_batches").select("state").where("id", "=", 5)))!.state, "superseded");
-    assert.equal((await w.db.all(w.db.k.selectFrom("merge_holds").select((eb) => eb.lit(1).as("one")).where("number", "=", 18))).length, 0);
   });
 
   test("a sure take review does not let the queue merge or ask while the pre-approval waits", async () => {
@@ -427,7 +426,7 @@ describe("pre-approved merge", () => {
     assert.equal(operatorCommentText(["x"], r.changes), "Fixes included:\n1. Renamed a to b.\n2. Fixed the doc.");
   });
 
-  test("a cancel whose batch removal fails leaves no hold the removal set", async () => {
+  test("a cancel whose batch removal fails leaves the approval and the batch as they were", async () => {
     const w = await (await take(await fresh(), 19)).review(19, { verdict: "take-fix" });
     await inCi(w, 19);
     await w.premerge(19, "clean");
@@ -436,7 +435,7 @@ describe("pre-approved merge", () => {
     await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 6, number: 19, head_oid: "sha19b", position: 1 }));
     const failing = async () => ({ code: 1, stdout: "", stderr: "boom" });
     await assert.rejects(cancelPreapproval(w.db, OPERATOR, "app", 19, failing));
-    assert.equal((await w.db.all(w.db.k.selectFrom("merge_holds").select((eb) => eb.lit(1).as("one")).where("number", "=", 19))).length, 0);
+    assert.equal((await w.db.get(w.db.k.selectFrom("merge_batches").select("state").where("id", "=", 6)))!.state, "open");
     assert.equal((await preapprovalOf(w.db, "app", 19))?.state, "queued");
   });
 });

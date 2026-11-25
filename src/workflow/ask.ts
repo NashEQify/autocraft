@@ -9,7 +9,7 @@ import { afterSteps, droppedOf, onConflict, planned, textFor, type Conflict, typ
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
 /** `blocker` and `params` are what an approved item stops at (`params.code`: the wait); one not approved comes back with `rec` alone. */
-export type Question = { blocker: Blocker; params: Record<string, unknown>; rec: Recommendation };
+export type Question = { blocker: Blocker; params: Record<string, unknown>; rec: Recommendation; /** When what it is about happened, where that may be after the pass began. */ showed?: string };
 
 type Asked = { approved: boolean; review: ReviewView | null; parts: readonly PlanPart[]; conflict: Conflict | null };
 
@@ -117,9 +117,9 @@ export function itemQuestion(f: ItemFacts, o: Pick<Asked, "approved" | "parts">)
   if (!step || !("wait" in step)) return null;
   const { code, who, text: wait } = step.wait;
   if (!needsQuestion(code, who) || code === "implement-question" || code === "implement-stuck") return null;
-  const ended = code === "implement-ended";
+  const ended = code === "implement-ended", showed = ended ? f.implement.row?.endedAt : undefined;
   return {
-    blocker: "other", params: { code, reason: wait },
+    blocker: "other", params: { code, reason: wait }, ...(showed !== undefined ? { showed } : {}),
     rec: {
       text: ended ? t("The implementation ended without a merged pull request: implement it again.") : waitText(wait),
       parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: ended ? "on" : "look",

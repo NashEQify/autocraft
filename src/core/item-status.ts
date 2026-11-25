@@ -56,12 +56,14 @@ export type StatusInput = {
   inPipeline?: boolean;
   /** Held for model work because its author is outside the team (src/outside.ts). */
   outside?: OutsideHoldInfo;
+  /** Someone holds it: nothing runs until it is resumed. */
+  held?: boolean;
 };
 
 export function phaseOf(i: StatusInput): ItemPhase {
   if (i.gh === "MERGED" || i.state === "merged") return "Merged";
   if (i.gh === "CLOSED" || i.state === "closed") return "Closed";
-  if (i.outside) return "Held";
+  if (i.held || i.outside) return "Held";
   if (i.inPipeline === false || i.state === "out-of-scope") return "Pipeline off";
   if (i.itemState && TRIAGE_OVERRIDES.includes(i.itemState)) return ITEM_PHASE[i.itemState];
   if (i.waitKind === "person") return "Waiting for a person";
@@ -78,6 +80,7 @@ export function phaseOf(i: StatusInput): ItemPhase {
 /** The status without its `since`. */
 export function statusOf(i: StatusInput): Omit<ItemStatus, "since"> {
   const phase = phaseOf(i);
+  if (i.held) return { phase, waiting: null, next: null };
   if (i.outside) return { phase, waiting: i.wait, next: "Model work starts when the window frees or an operator releases it", outside: i.outside };
   // Outside the pipeline nothing waits and nothing comes next; "Needs a person" only repeats the phase.
   if (phase === "Pipeline off") return { phase, waiting: null, next: null };

@@ -59,7 +59,7 @@ test("a wait has a code exactly when the plan waits, and no text of decide or de
   for (const [text, codes] of at.texts) for (const code of codes) assert.ok(code === waitCodeOf(text) || SAME_WORDS[text]?.includes(code), `INVARIANT_SEED=${seed}: "${text}" as ${code}`);
   for (const [text, code] of NAMED) assert.equal(waitCodeOf(text), code, text);
   // Started items whose wait is left to the person who set it, or to GitHub, are asked nothing.
-  assert.deepEqual((["answer", "merge-refused", "hold", "repo-approval", "breaker", "box-identity", "changes-requested", "sign-in"] as const).map((c) => needsQuestion(c, "person")), [true, true, false, false, false, false, false, false]);
+  assert.deepEqual((["answer", "merge-refused", "repo-approval", "breaker", "box-identity", "changes-requested", "sign-in"] as const).map((c) => needsQuestion(c, "person")), [true, true, false, false, false, false, false]);
   assert.equal(needsQuestion("merge-refused", "system"), false);
 });
 

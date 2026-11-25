@@ -86,7 +86,7 @@ export type BatchListRow = BatchView & { areas: string[] };
 export type { HiddenRepos };
 export type BatchByTask = { id: number; repo: string; branch: string; commitSha: string; baseSha: string; fork: string | null; members: number[] };
 export type BatchDue = { repo: string; id: number; memberRefs: RefKey[] };
-export type BatchEnd = { id: number; by: string; state: "superseded" | "merged" | "failed"; summary: string | null; stage?: StageRow[]; audit?: AuditRow[] };
+export type BatchEnd = { id: number; state: "superseded" | "merged" | "failed"; summary: string | null; stage?: StageRow[]; audit?: AuditRow[] };
 export type BatchUpdate = { id: number; at: string; set: BatchPatch; onlyIf?: BatchState[]; size?: "grow" | "shrink" };
 export type BatchLanded = { batchId: number; runId: string; at: string; mergeSha: string; members: { number: number; head: string; path: string; ci: string | null; mergeable: string | null }[]; by: string };
 

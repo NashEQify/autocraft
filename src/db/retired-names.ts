@@ -8,7 +8,7 @@ export const RETIRED_TABLES: readonly string[] = [
   "actions", "decision_choices", "decision_claims", "decision_comments", "decision_items", "decision_opinions", "decision_prepares",
   "dupe_group_texts", "dupe_group_posts", "dupe_group_fails", "dupe_carries", "fast_track", "fix_attempts",
   "claude_account_status", "claude_account_tokens", "account_usage_samples", "claude_accounts",
-  "flow_summary", "opus_carried_fixes", "model_waits", "conversation_includes", "decisions",
+  "flow_summary", "opus_carried_fixes", "model_waits", "conversation_includes", "merge_holds", "decisions",
 ];
 
 export const RETIRED_COLUMNS: readonly (readonly [table: string, column: string])[] = [

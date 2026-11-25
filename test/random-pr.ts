@@ -54,7 +54,7 @@ export type PrRows = {
   workflow: WorkflowRow | null;
   /** Without a live workflow: how the latest ended, and whether that was the PR's own or its issue's. */
   ended: EndedWorkflow | null; endedOwn: boolean;
-  legs: Leg[]; request: { from: string; by: string; id: number } | null; mergeHeld: boolean; mergeWaits: boolean;
+  legs: Leg[]; request: { from: string; by: string; id: number } | null; mergeWaits: boolean;
   implementation: { state: ImplementationState; revised: boolean; /** Whether the person its workflow runs for may act on the repo. */ standing?: "yes" | "no" | "unknown" } | null;
   review: { head: string; verdict: "take" | "take-fix" | "hold" | "close"; sure: boolean; fixes: number; stale: boolean; capped: boolean; blockedBy: "open" | "asked" | "settled" | null } | null;
   gate: "failed" | "failing" | "requested" | "cap" | "interval" | null; carried: boolean; posted: boolean;
@@ -176,7 +176,7 @@ export function randomPrRows(x: Rnd): PrRows {
     commits, pushedOff: x.bool(0.03), ghState: x.pick(["OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "MERGED", "CLOSED"] as const), draft: x.bool(0.05), gone: x.bool(0.01), ours, mainFix,
     tier: x.pick(["whitelisted", "whitelisted", "allow", "not", "deny"] as const), lines: x.pick([20, 20, 120, 900]), label: x.pick(["bugfix", "bugfix", "bugfix", "infra", "performance", null]), labelUnsure: x.bool(0.05), needsDecision: x.bool(0.05),
     duplicates: !workflow && x.bool(0.1), ruledOut: x.bool(0.05), integration: !workflow && x.bool(0.02), quiet: x.bool(0.03),
-    workflow, ended, endedOwn: ended !== null && !(impl && x.bool(0.7)), legs, request, mergeHeld: x.bool(0.05), mergeWaits: x.bool(0.06),
+    workflow, ended, endedOwn: ended !== null && !(impl && x.bool(0.7)), legs, request, mergeWaits: x.bool(0.06),
     implementation: impl ? { state: x.pick(["pr-opened", "pr-opened", "pr-opened", "revising", "stuck", "closed", "cancelled"] as const), revised: x.bool(0.3), standing: x.pick(["yes", "yes", "yes", "no", "unknown"] as const) } : null,
     review, gate: x.pick([null, null, null, null, null, null, "failed", "failing", "requested", "cap", "interval"] as const), carried: x.bool(0.3), posted: x.bool(0.7),
     checks, mergeable, unknownStuck: x.bool(0.3), pushable: ours || x.bool(0.7), runs: x.bool(0.1) ? { waiting: 1 + x.int(2), approvable: x.int(2) } : null, brokeByUs: lastBy !== "author" && x.bool(0.3),
@@ -200,7 +200,7 @@ export function greenRows(over: Partial<PrRows> = {}): PrRows {
     approvals: { merge: true, push: true, comment: true, ci: true, fixissue: true }, pipelineOn: true, pipelineRepo: true, outsideHold: false, tripped: {}, noCi: false, mainRed: false, implementOn: true, publicRepo: true,
     commits: [{ sha: "c0", by: "author" }], pushedOff: false, ghState: "OPEN", draft: false, gone: false, ours: false, mainFix: false, tier: "whitelisted", lines: 20, label: "bugfix", labelUnsure: false, needsDecision: false,
     duplicates: false, ruledOut: false, integration: false, quiet: false, workflow: startedAs("fixup"), ended: null, endedOwn: false,
-    legs: [{ state: "queued", head: "c0", fromHead: "c0", workflow: 7, updatedAt: at("10:20"), fixId: null }], request: null, mergeHeld: false, mergeWaits: false, implementation: null,
+    legs: [{ state: "queued", head: "c0", fromHead: "c0", workflow: 7, updatedAt: at("10:20"), fixId: null }], request: null, mergeWaits: false, implementation: null,
     review: reviewed("take"), gate: null, carried: false, posted: true, checks: { head: "c0", overall: "success", approvedRuns: false }, mergeable: "MERGEABLE", unknownStuck: false, pushable: true, runs: null, brokeByUs: false,
     attempt: null, runsApprovedAfterMerge: false, verification: { state: "passed", finishedAt: at("10:10") }, premerge: { findings: true, tries: 1, at: at("10:15"), unsure: false, defects: 0, fixable: true, safe: true },
     patches: { fixups: [], cifixes: [], conflicts: [], pushes: [] }, tasks: new Map(), batch: null, changesRequested: false, baseOffDefault: false, baseOk: true, sensitive: [], diffPending: false, conflictsWithStatement: false,
@@ -260,7 +260,7 @@ export function factsOf(w: PrRows): PrFacts {
     repo: "app", number: 1, now: NOW, ...(owed ? { reviewOwed: true } : {}), ...(w.pushedOff && open && !w.integration ? { pushedOff: true } : {}), assignment: { login: OURS, assignees: [w.assignedToUs ? OURS : AUTHOR], ours: w.assignedToUs },
     pipelineOn: w.pipelineOn, tripped: w.tripped, ghState: w.ghState, head, draft: w.draft || w.gone, ...(w.gone ? { gone: true as const } : {}), author: w.ours ? OURS : AUTHOR, authorIsPipeline: w.ours, tier: "not", lines: w.lines, size: sizeOf(w.lines),
     label: null, needsDecisionFlag: false, inScope: w.integration ? w.pipelineRepo : inScope, ...(w.outsideHold ? { outsideHold: { reason: "limit", author: AUTHOR, kind: "pr", limit: 5 } as const } : {}),
-    integration: w.integration, batchPr: w.integration, heldBacklog, quiet: w.quiet, mergeHeld: w.mergeHeld, score: 1,
+    integration: w.integration, batchPr: w.integration, heldBacklog, quiet: w.quiet, score: 1,
     repoFacts: { commentApproved: w.approvals.comment, ciApproved: w.approvals.ci, noCi: w.noCi, mainRed: w.mainRed, implementOn: w.implementOn },
     review: null, post: { postable: false, posted: null }, checksHere: false, checksOpen: false, ci: "unknown", mergeable: w.mergeable, unknown: null, runs: null, lastMerge: null, runsApprovedAfterMerge: false,
     verifyOverride: false, verification: null, verifyUnavailable: null, handOver: false, mergeWaiting: false, premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [],

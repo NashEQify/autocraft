@@ -308,8 +308,8 @@ test("an implementation that ended without a pull request is asked about, and a 
   await say(w, "implement", MAINT, 7);
   await pause();
   await startAttempt(w.db, { repo: "app", number: 7, textHash: textHash("Panic when the slice is empty", "first() indexes element 0."), queuedBy: MAINT });
-  await w.db.run(w.db.k.updateTable("main.implementations").set({ state: "failed", updated_at: new Date().toISOString() }));
-  await pause();
+  // It ended while the pass that asks was reading: after the pass began.
+  await w.db.run(w.db.k.updateTable("main.implementations").set({ state: "failed", updated_at: new Date(Date.now() + 1000).toISOString() }));
   await settle(w);
   const x = await wf(w, 7);
   assert.deepEqual([x.state, x.rec?.goes], ["recommending", "on"]);

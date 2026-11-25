@@ -7,7 +7,7 @@
 // A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. While an item waits for its
 // answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end, a stop at a blocker at once with the end
-// of its merge leg (block.ts). A workflow a person changed meanwhile (stopped, answered, approved) keeps what they did: the pass's write
+// of its merge leg (block.ts). A workflow a person changed meanwhile (held, answered, approved) keeps what they did: the pass's write
 // leaves it out and the next pass looks at it again.
 import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
@@ -133,13 +133,17 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
   return { fix: { lines, files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
 }
 
+/** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */
+const HOLD_ENDS = ["person", "workflow-ended"];
+
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
 
-/** The merge leg of the workflow that ended after `since` (and none active), with its reason. */
+/** The merge leg of the workflow that ended after `since` (and none active), with its reason. One a hold ended says nothing once someone resumed the item. */
 function endedLeg(pass: Pass, w: ItemWorkflow, since: string): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
+  if (HOLD_ENDS.includes(r.reason_code ?? "") && w.approvedAt !== null && r.updated_at <= w.approvedAt) return null;
   return { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
 }
 
@@ -375,7 +379,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   /** Closes the question whose cause went: the item goes on with the plan and the approval it had. */
   const closeQuestion = async (why: string): Promise<void> => {
     const gone = w.rec?.cause?.code === "actor-gone" && w.approvedBy !== null && target !== null;
-    const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat() : [];
+    const waiting = gone ? [...(await loadActions(db, { workflowIds: [w.id], kinds: ["merge"], states: ["waiting-permission"] })).values()].flat().filter((a) => a.by.toLowerCase() === w.approvedBy!.toLowerCase()) : [];
     retried = waiting.length > 0;
     writes.closed.push({ w, line: t("The question closed without an answer: {why} {rec}", { why, rec: w.rec!.text }), at, retry: waiting.map((a) => a.id) });
     const on = { state: "running", rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null } as const satisfies WorkflowPatch;
@@ -384,7 +388,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   };
   /** Comes back with the question: an approved item stops at it, one not approved shows its recommendation. */
   const comeWith = async (q: Question, patch: WorkflowPatch, head: string | null): Promise<ItemWorkflow["state"] | null> => {
-    const asked: WorkflowPatch = { ...patch, rec: head !== null ? ask(q.rec, head) : q.rec, recAt: pass.at, recHead: head };
+    // What the question is about may have happened while the pass was reading.
+    const recAt = q.showed !== undefined && q.showed > pass.at ? q.showed : pass.at;
+    const asked: WorkflowPatch = { ...patch, rec: head !== null ? ask(q.rec, head) : q.rec, recAt, recHead: head };
     return w.approvedBy !== null ? await block({ ...asked, blocker: q.blocker, blockerParams: q.params }, patch) : write({ ...asked, state: "recommending", blocker: null, blockerParams: null });
   };
   if (target === null) {

@@ -116,7 +116,6 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "item_priority", class: "item", why: "One item's priority row." },
     { table: "item_rank", class: "item", why: "One item's rank score." },
     { table: "item_stage", class: "item", why: "One item's stage row." },
-    { table: "merge_holds", class: "item", why: "An operator's merge hold on one PR." },
     {
       table: "screenshot_runs", class: "item", why: "The screenshots at one PR head: a clear regression keeps it from merging until a person answers.", columns: ["head_sha", "held", "comparison", "finished_at"],
       noTopic: "Written by the collect job (job-ends).",

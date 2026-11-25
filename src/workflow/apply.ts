@@ -12,7 +12,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { countEventsSince, dropWorkflows, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
@@ -30,7 +30,7 @@ import { premergeParts } from "./premerge.ts";
 import { atBlocker } from "./recommend.ts";
 import { isLive, premergeStopped, resolve, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
-import { asksForApprover, WEIGHT_NORMAL, type CloseReason, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
+import { asksForApprover, heldWork, openRecommendation, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
 /** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
@@ -52,6 +52,8 @@ export type CommandInput = {
    * had read it by; null or undefined when the surface cannot tell.
    */
   asked?: (o: { ref: string; workflow: ItemWorkflow }) => string | null | undefined;
+  /** The caller ends the batch the items are in, and their merge legs. */
+  keepBatch?: boolean;
   /** The app's mention name, for replies that tell the sender what to write back. */
   mention?: string;
 };
@@ -86,25 +88,41 @@ function trackedRepo(tracked: ReadonlySet<string>, written: string): string | nu
 }
 
 type ItemNow = { kind: ItemKind; state: string; head: string | null };
-/** Items' live workflows, the live workflow of another item (the issue it implements) that works on each PR, and the closes still to be made. */
-type Work = { live: Map<string, ItemWorkflow>; works: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]> };
+/**
+ * Items' live workflows, the live workflow of another item (the issue it implements) that works on each PR, the held workflow of each item
+ * that has no live one (for a PR, its own or the one of its issue, whichever is newer), and the closes still to be made.
+ */
+type Work = { live: Map<string, ItemWorkflow>; works: Map<string, ItemWorkflow>; held: Map<string, ItemWorkflow>; closing: Map<string, WorkflowAction[]> };
 /** What a command batch reads once for all its items. `many`: a list; a run may change the work on an item later in it, which is read again. */
 type Batch = Work & { tracked: Set<string>; items: Map<string, ItemNow>; many: boolean };
 
 async function loadWork(db: Db, refs: { repo: string; number: number }[]): Promise<Work> {
-  if (!refs.length) return { live: new Map(), works: new Map(), closing: new Map() };
+  if (!refs.length) return { live: new Map(), works: new Map(), held: new Map(), closing: new Map() };
   const open = { kinds: CLOSE_KINDS, states: OPEN_ACTIONS };
-  const [history, works, closes] = await db.together(() => Promise.all([loadWorkflowHistory(db, refs), loadPrWorkflows(db, refs, { others: true }), loadActions(db, { refs, ...open })]));
-  const live = new Map<string, ItemWorkflow>(), closing = new Map<string, WorkflowAction[]>(closes), closed = new Map<number, string>();
+  const [history, works, closes, links] = await db.together(() => Promise.all([
+    loadWorkflowHistory(db, refs), loadPrWorkflows(db, refs, { others: true }), loadActions(db, { refs, ...open }), loadLinks(db, { prs: refs }, { ended: true }),
+  ]));
+  const live = new Map<string, ItemWorkflow>(), held = new Map<string, ItemWorkflow>(), closing = new Map<string, WorkflowAction[]>(closes), closed = new Map<number, string>();
   for (const [key, all] of history) {
     const running = all.findLast((w) => isLive(w)), last = all.at(-1);
     if (running) live.set(key, running);
     else if (last?.state === "closed" && last.kind === "issue" && !closing.has(key)) closed.set(last.id, key);
   }
+  // How the newest work on each item ended: its own, or its issue's.
+  const latest = new Map<string, number>();
+  for (const l of links) if (!live.has(`${l.repo}#${l.pr}`) && !works.has(`${l.repo}#${l.pr}`)) latest.set(`${l.repo}#${l.pr}`, l.workflowId);
+  const ofIssue = latest.size ? new Map((await listWorkflows(db, { ids: [...latest.values()] })).map((w) => [w.id, w])) : new Map<number, ItemWorkflow>();
+  for (const { repo, number } of refs) {
+    const key = `${repo}#${number}`;
+    if (live.has(key) || works.has(key)) continue;
+    const own = history.get(key)?.at(-1), other = ofIssue.get(latest.get(key) ?? -1);
+    const last = own && (!other || own.id > other.id) ? own : other;
+    if (last?.state === "stopped") held.set(key, last);
+  }
   // An issue whose work ended with a close of its implementation PR.
   const ofIssues = closed.size ? [...(await loadActions(db, { workflowIds: [...closed.keys()], ...open })).values()].flat() : [];
   for (const a of ofIssues) closing.set(closed.get(a.workflow_id)!, [a]);
-  return { live, works: new Map(works), closing };
+  return { live, works: new Map(works), held, closing };
 }
 
 async function loadBatch(db: Db, written: readonly ItemRef[]): Promise<Batch> {
@@ -124,6 +142,7 @@ async function refresh(db: Db, batch: Batch, repo: string, number: number): Prom
   const put = <T>(m: Map<string, T>, v: T | undefined): void => void (v === undefined ? m.delete(key) : m.set(key, v));
   put(batch.live, now.live.get(key));
   put(batch.works, now.works.get(key));
+  put(batch.held, now.held.get(key));
   put(batch.closing, now.closing.get(key));
 }
 
@@ -203,7 +222,8 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   const out = (outcome: ItemOutcome["outcome"], line: string, workflowId: number | null = null): ItemOutcome =>
     ({ repo: repo ?? target.repo, number: target.number, outcome, line, workflowId });
   if (!repo || (input.visible && !await input.visible(repo))) return out("refused", t("{repo} is not a repository AutoCraft tracks.", { repo: target.repo }));
-  const no = await actRefusal(db, actor, repo);
+  // The CLI runs on the box, as nobody's login.
+  const no = via === "cli" ? null : await actRefusal(db, actor, repo);
   if (no) return out("refused", refusalLine(no, actor.login, repo));
   const login = actor.login!;
   const ref = refText(repo, target.number);
@@ -216,23 +236,26 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   if (input.head !== undefined && it.head !== input.head) return out("refused", t("{ref} changed after the command was written. Send it again.", { ref }));
 
   // One workflow works on a PR at a time. The PR of a live implement workflow starts nothing of its own; every other command on it
-  // (stop, an answer, the approval, the weight, a close) acts on the issue's workflow, as if it were written there.
+  // (hold, resume, an answer, the approval, the weight, a close) acts on the issue's workflow, as if it were written there.
   const own = batch.live.get(key) ?? null;
   const issue = kind === "pr" ? batch.works.get(key) ?? null : null;
   const covered = own === null && !says(input.parsed, "autorepin") ? issue : null;
   if (covered && startsWork(input.parsed)) return out("refused", worksElsewhere(ref, covered, input.clock), covered.id);
   const work = covered ?? own;
+  const held = work ? null : batch.held.get(key) ?? null;
   // An approval whose maker may no longer act on the repo, or that the item asks to have made again, approves nothing: whoever goes on with the merge approves it anew.
   const lapsed = !!work?.approvedBy && (asksForApprover(work) || (work.approvedBy.toLowerCase() !== login.toLowerCase() && await settlesNow(db, work.approvedBy, repo) === "no"));
   const wf = work && lapsed ? { ...work, approvedBy: null, approvedAt: null, approvedVia: null } : work;
   const said: fx.Target = { repo, number: target.number, kind, head };
-  const on: fx.Target = covered ? { repo, number: covered.number, kind: covered.kind, head: null } : said;
-  const reply = (line: string): string => (covered ? t("{ref}: {line}", { ref: refText(on.repo, on.number), line }) : line);
-  const noted = (line: string): string => (covered ? t("{line} Sent on {ref}.", { line, ref }) : line);
+  // A resume of a PR its issue's work holds resumes that work.
+  const of = covered ?? (held && held.number !== target.number && (input.parsed.kind === "yes" || says(input.parsed, "resume")) ? held : null);
+  const on: fx.Target = of ? { repo, number: of.number, kind: of.kind, head: null } : said;
+  const reply = (line: string): string => (of ? t("{ref}: {line}", { ref: refText(on.repo, on.number), line }) : line);
+  const noted = (line: string): string => (of ? t("{line} Sent on {ref}.", { line, ref }) : line);
   const closing = batch.closing.get(key)?.at(-1) ?? null;
   // A merge of the sender's that waits for their own sign-in or access: approving it again tries it again.
   const waiting = wf?.approvedBy?.toLowerCase() === login.toLowerCase() ? await waitingMerges(db, wf, login) : [];
-  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, closing: closing !== null, mergeWaits: waiting.length > 0 });
+  const r = resolve(input.parsed, { kind: on.kind, workflow: wf, held, closing: closing !== null, mergeWaits: waiting.length > 0 });
   const started = r.kind === "run" && r.run.start === "implement" ? await prWorkflow(db, { repo, number: target.number }) : undefined;
   if (started) return out("refused", worksElsewhere(ref, started, input.clock), started.id);
   const event = (kind: WorkflowEventKind, workflowId: number | null, line: string, item: { repo: string; number: number } = on) =>
@@ -249,6 +272,10 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const why = t("The question changed after you read it. A new question follows. {question}", { question: recommendationLine(wf!.rec) ?? "" });
     return { ...out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why })), wf!.id), question: { workflowId: wf!.id, recAt: wf!.recAt! } };
   }
+  const read0 = r.kind === "run" && r.run.resume && input.parsed.kind === "yes" ? input.asked?.({ ref: key, workflow: held! }) : null;
+  if (read0 && held!.stoppedAt && Date.parse(held!.stoppedAt) > Date.parse(read0)) {
+    return out("refused", reply(t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: t("{login} held it after you read it. Reply resume to go on.", { login: held!.stoppedBy ?? "" }) })), held!.id);
+  }
   if (r.kind === "refused" && r.refusal.why === "premerge-defects") {
     const now = await askToFix(db, wf!, on);
     const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: [replyLine(r, input.clock, input.mention), premergeStopped(now)?.length ? t("Fix them first?") : null, recommendationLine(now.rec)].filter((x) => x !== null).join(" ") });
@@ -256,17 +283,17 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   }
   if (r.kind === "refused") return out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null);
 
-  const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}) };
+  const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
     const too = r.run.end !== null ? await endsToo(db, r.run.end, on, wf, own === null ? null : issue) : [];
-    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts, says: says(input.parsed, "merge") });
+    const done = await carryOut(c, r.run, isLive(wf) ? wf : null, actor, { closing, closeAs, close, waiting, too, said, accepts, says: says(input.parsed, "merge"), held });
     const more = too.flatMap((x) => (x.workflow ? [x] : []));
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock, done.waits) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
-      + (more.length ? ` ${t("The work on {refs} stopped too.", { refs: listText(more.map((x) => refText(x.item.repo, x.item.number))) })}` : "")
+      + (more.length ? ` ${t("The work on {refs} is held too.", { refs: listText(more.map((x) => refText(x.item.repo, x.item.number))) })}` : "")
       + (close !== on ? ` ${t("{ref} closes; {on} stays open and its work ends.", { ref, on: refText(on.repo, on.number) })}` : "");
     const id = await db.write(async () => {
       const id = await done.commit();
@@ -284,19 +311,20 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 type Ends = { item: fx.Target; workflow: ItemWorkflow | null };
 
 /**
- * What else ends when the work on `on` (its live workflow `wf`) ends. With an implement workflow, what runs on its PR; a stop halts everything, so
+ * What else ends when the work on `on` (its live workflow `wf`) ends. With an implement workflow, what runs on its PR; a hold halts everything, so
  * it also ends a workflow the PR has of its own, and, written on that PR, the one of its issue (`issue`).
  */
-async function endsToo(db: Db, end: "backlog" | "close" | "stop", on: fx.Target, wf: ItemWorkflow | null, issue: ItemWorkflow | null): Promise<Ends[]> {
-  if (on.kind === "pr") return end === "stop" && issue ? [{ item: { repo: issue.repo, number: issue.number, kind: issue.kind, head: null }, workflow: issue }] : [];
+async function endsToo(db: Db, end: "backlog" | "close" | "hold", on: fx.Target, wf: ItemWorkflow | null, issue: ItemWorkflow | null): Promise<Ends[]> {
+  if (on.kind === "pr") return end === "hold" && issue ? [{ item: { repo: issue.repo, number: issue.number, kind: issue.kind, head: null }, workflow: issue }] : [];
   const pr = wf ? await implementationPr(db, wf) : null;
   if (!pr) return [];
   const own = (await listWorkflows(db, { live: true, refs: [{ repo: pr.repo, number: pr.number }] }))[0] ?? null;
-  return end === "stop" || own === null ? [{ item: pr, workflow: own }] : [];
+  return end === "hold" || own === null ? [{ item: pr, workflow: own }] : [];
 }
 
 function eventKind(r: Run): WorkflowEventKind {
-  if (r.end === "stop") return "stopped";
+  if (r.end === "hold") return "stopped";
+  if (r.resume) return "resumed";
   if (r.end === "close") return "closed";
   if (r.end === "backlog") return "backlog";
   if (r.autorepin !== null) return "set";
@@ -329,8 +357,8 @@ const ownSince = async (db: Db, pr: fx.Target, from: string, to: string): Promis
 const PUSHED_SINCE = (): string => t("The author pushed commits after the question was asked. A new question follows.");
 const CHANGED = (): string => t("The pull request changed after the command was written. Send it again.");
 
-/** Checks the resolved command on the machinery (an end also stops what runs), then returns its write. */
-async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target; accepts: boolean; says: boolean }): Promise<Done> {
+/** Checks the resolved command on the machinery (an end also writes the row and stops what runs), then returns its write. */
+async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor, o: { closing: WorkflowAction | null; closeAs: CloseAs | null; close: fx.Target; waiting: WorkflowAction[]; too: Ends[]; said: fx.Target; accepts: boolean; says: boolean; held: ItemWorkflow | null }): Promise<Done> {
   const { db, by, at, via, item } = c;
   const wfId = wf?.id ?? null;
   const unchanged = async (): Promise<number | null> => wfId;
@@ -346,30 +374,49 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   }
   if (r.end !== null) {
     if (r.end === "close" && o.close.kind === "pr" && !o.close.head) throw new fx.EffectError(t("AutoCraft has not read the head commit of {ref} yet.", { ref: refText(o.close.repo, o.close.number) }));
-    const state = r.end === "stop" ? "stopped" : r.end === "close" ? "closed" : "backlog";
-    const end: WorkflowPatch = { state, ...(state === "stopped" ? { stoppedBy: by, stoppedAt: at } : {}), rec: null, blocker: null, blockerParams: null };
-    // A stop of a close that is still to be made ends the workflow that close belongs to.
-    const stopped = wf === null && r.end === "stop" ? o.closing?.workflow_id ?? null : null;
-    const known = wf?.id ?? stopped;
-    const failed = await fx.stopAll({ ...c, ...(known !== null ? { workflowId: known } : {}) });
+    // A hold of a close that is still to be made ends the workflow that close belongs to.
+    const known = wf?.id ?? (r.end === "hold" ? o.closing?.workflow_id ?? null : null);
+    const ends = o.too.flatMap((x) => (x.workflow ? [x.workflow] : []));
+    const prOf = (w: ItemWorkflow): { repo: string; number: number } | null =>
+      (w.kind === "pr" ? w : (r.end === "hold" ? [item, ...o.too.map((x) => x.item)] : []).find((x) => x.kind === "pr") ?? null);
+    const fixes = new Map<number, HeldWork["fixes"]>();
+    if (r.end === "hold") {
+      for (const w of wf ? [wf, ...ends] : ends) {
+        const pr = prOf(w);
+        if (pr) fixes.set(w.id, await fx.askedFixes(db, pr));
+      }
+    }
+    // The row ends first, so nothing takes the item up again while its batch and its steps end. A close holds the item until it is queued.
+    const ended = (w: ItemWorkflow | null): WorkflowPatch => (r.end === "backlog"
+      ? { state: "backlog", rec: null, blocker: null, blockerParams: null }
+      : holdPatch(w, by, at, w ? fixes.get(w.id) : undefined));
+    const closedRow = wf === null && known !== null ? (await listWorkflows(db, { ids: [known] }))[0] ?? null : null;
+    const id = await db.write(async () => {
+      // An item nobody started gets a row that records the hold, the close or the backlog, ended at once.
+      const id = known ?? (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
+        .get(`${item.repo}#${item.number}`);
+      if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
+      // A workflow that ended since it was read (another person's hold) keeps its end.
+      const live = new Set((await listWorkflows(db, { ids: [...(wf ? [wf.id] : []), ...ends.map((x) => x.id)], live: true })).map((x) => x.id));
+      if (wf && !live.has(wf.id)) throw new Moved();
+      await saveWorkflows(db, [{ id, patch: ended(wf ?? (closedRow && closedRow.step !== null ? { ...closedRow, rec: null, blocker: null } : null)), at }, ...ends.filter((x) => live.has(x.id)).map((x) => ({ id: x.id, patch: ended(x), at }))]);
+      return id;
+    });
+    const failed = await fx.stopAll({ ...c, workflowId: id });
     for (const x of o.too) failed.push(...await fx.stopAll({ ...c, item: x.item, ...(x.workflow ? { workflowId: x.workflow.id } : {}) }));
-    const ends = o.too.flatMap((x) => (x.workflow ? [x.workflow.id] : []));
     return {
       failed,
       commit: async () => {
-        // An item nobody started gets a row that records the close or the backlog, ended at once.
-        const id = known ?? (await startWorkflows(db, [{ repo: item.repo, number: item.number, kind: item.kind, entry: item.kind === "pr" ? "review" : "implement", weight: r.weight ?? WEIGHT_NORMAL, startedBy: by, startedVia: via, baseHead: item.head, at }]))
-          .get(`${item.repo}#${item.number}`);
-        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(item.repo, item.number) }));
-        // A workflow that ended since it was read (another person's stop) keeps its end.
-        const live = new Set((await listWorkflows(db, { ids: [...(wf ? [wf.id] : []), ...ends], live: true })).map((x) => x.id));
-        if (wf && !live.has(wf.id)) throw new Moved();
-        await saveWorkflows(db, [{ id, patch: end, at }, ...ends.filter((x) => live.has(x)).map((x) => ({ id: x, patch: end, at }))]);
-        if (r.end === "close") await fx.queueClose(c, id, o.close, o.closeAs);
+        if (r.end !== "close") return id;
+        const mine = (await listWorkflows(db, { ids: [id, ...ends.map((x) => x.id)], states: ["stopped"] })).filter((x) => x.stoppedAt === at && x.stoppedBy === by);
+        if (!mine.some((x) => x.id === id)) throw new Moved();
+        await saveWorkflows(db, mine.map((x) => ({ id: x.id, patch: { state: "closed" as const, stoppedBy: null, stoppedAt: null, blockerParams: null }, at })));
+        await fx.queueClose(c, id, o.close, o.closeAs);
         return id;
       },
     };
   }
+  if (r.resume) return await resume(c, r, o.held!);
   if (r.autorepin !== null) {
     const githubId = actor.githubId ?? (await loadAccess(db, [by])).get(by.toLowerCase())?.github_id ?? null;
     await fx.autorepin(c, r.autorepin, githubId === null ? null : Number(githubId));
@@ -448,6 +495,63 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 }
 
 /**
+ * Goes on with the held workflow as it was, as the person: its steps, or its open question again. An approved one merges as them, and they
+ * accept no commits by it: the advance pass asks about the author's. An item nobody started has nothing to go back to, so its row goes. An
+ * issue without an implementation PR, whose attempt the hold ended, starts again with the plan and the approval it had.
+ */
+async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
+  const { db, by, via, at } = c;
+  const work = heldWork(held);
+  const ref = refText(held.repo, held.number);
+  const approved = held.approvedBy !== null && via !== "cli" ? { approvedBy: by, approvedVia: via } : { approvedBy: held.approvedBy, approvedVia: held.approvedVia };
+  const pr = held.kind === "issue" ? await implementationPr(db, held) : c.item;
+  const asHeld = async (): Promise<void> => {
+    const [now] = await listWorkflows(db, { ids: [held.id], states: ["stopped"] });
+    if (!now || !sameWorkflow(now, held) || (await listWorkflows(db, { live: true, refs: [held] })).length) throw new Moved();
+  };
+  if (work.unstarted) return { failed: [], commit: async () => { await asHeld(); await dropWorkflows(db, [held.id]); return null; } };
+  if (held.kind === "issue" && held.entry === "implement" && !pr) {
+    return {
+      failed: [],
+      commit: async () => {
+        await asHeld();
+        const id = (await startWorkflows(db, [{
+          repo: held.repo, number: held.number, kind: held.kind, entry: held.entry, weight: r.weight ?? held.weight, startedBy: by, startedVia: via, baseHead: held.baseHead,
+          plan: held.plan.filter((p) => p.option === undefined), step: stepsFor(held.entry, approved.approvedBy !== null)[0]!, at, ...(approved.approvedBy ? approved : {}),
+        }])).get(`${held.repo}#${held.number}`);
+        if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref }));
+        return id;
+      },
+    };
+  }
+  const fixes = await fx.askFixes({ ...c, ...(pr ? { item: pr } : {}), workflowId: held.id }, work.fixes ?? [], approved.approvedBy !== null && !work.rec);
+  return {
+    failed: [],
+    commit: async () => {
+      await asHeld();
+      await saveWorkflows(db, [{
+        id: held.id, at,
+        patch: {
+          state: work.rec ? (work.blocker ? "blocked" : "recommending") : "running", rec: work.rec ?? null, blocker: work.blocker ?? null, blockerParams: work.params ?? null,
+          stoppedBy: null, stoppedAt: null, ...(approved.approvedBy ? { ...approved, approvedAt: at } : {}), ...(r.weight !== null ? { weight: r.weight } : {}),
+        },
+      }]);
+      await fixes(held.id);
+      return held.id;
+    },
+  };
+}
+
+/** The row of a workflow that is held, with what a resume goes back to; `w`: null for an item nobody started. */
+function holdPatch(w: ItemWorkflow | null, by: string, at: string, fixes: HeldWork["fixes"]): WorkflowPatch {
+  const held: HeldWork = w === null ? { unstarted: true } : {
+    ...(openRecommendation(w) ? { rec: w.rec!, ...(w.blocker ? { blocker: w.blocker, ...(w.blockerParams ? { params: w.blockerParams } : {}) } : {}) } : {}),
+    ...(fixes?.length ? { fixes } : {}),
+  };
+  return { state: "stopped", stoppedBy: by, stoppedAt: at, rec: null, blocker: null, blockerParams: { held } };
+}
+
+/**
  * Records the picked option as the person's answer to the implementation's question; refused when that question is no longer the
  * attempt's open one (answered meanwhile, or a newer attempt or round).
  */
@@ -496,7 +600,7 @@ async function openPr(db: Db, repo: string, number: number | null): Promise<fx.T
 
 /** A registered control and what it acts on. Task Runner settings belong to the person and have their own page. */
 export type ControlInput =
-  | { control: "hold-merge" | "release-merge" | "release-outside"; item: ItemRef }
+  | { control: "release-outside"; item: ItemRef }
   | { control: "resume-breaker"; key: string }
   | { control: "set-automatic"; repo: string; on: boolean };
 
@@ -528,10 +632,7 @@ export async function runControl(db: Db, actor: Actor, via: Surface, input: Cont
       const ref = refText(repo, input.item.number);
       const it = (await loadItems(db, [{ repo, number: input.item.number }], "pr")).get(`${repo}#${input.item.number}`);
       if (!it) return { ok: false, line: t("{ref} is not an item AutoCraft has read.", { ref }) };
-      if (input.control === "hold-merge" && it.state !== "OPEN") return { ok: false, line: t("Nothing changed: {why}", { why: t("{ref} is not open.", { ref }) }) };
       const c: fx.Ctx = { db, by: login, via, at, item: { repo, number: input.item.number, kind: it.kind as ItemKind, head: it.head_oid } };
-      if (input.control === "hold-merge") return await controlStep(() => fx.hold(c), t("{ref} is held out of the next merge (by {login}).", { ref, login }));
-      if (input.control === "release-merge") return await controlStep(() => fx.release(c), t("{ref} can merge again (by {login}).", { ref, login }));
       return await controlStep(() => fx.releaseHeldItem(c), t("{ref} is released from its author's hold (by {login}).", { ref, login }));
     }
   }

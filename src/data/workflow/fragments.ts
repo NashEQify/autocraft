@@ -204,10 +204,6 @@ export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): 
   ]);
 }
 
-/** The PR has a merge hold. */
-export const mergeHeldExpr = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.merge_holds as mh").select(one(eb)).where("mh.repo", "=", kx.exprOf(eb, repo)).where("mh.number", "=", kx.exprOf(eb, number)));
-
 /** A live workflow that came back to a person. */
 export const needsPerson = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as np").select(one(eb)).where("np.repo", "=", kx.exprOf(eb, repo)).where("np.number", "=", kx.exprOf(eb, number)).where("np.state", "in", ASKING_STATES));

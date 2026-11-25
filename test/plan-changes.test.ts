@@ -163,7 +163,7 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
   assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
-  await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
+  await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 11, 1, '{}', ?)").run(T);
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#11"], false]);
   seq = c.cursor;

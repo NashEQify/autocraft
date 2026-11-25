@@ -70,7 +70,7 @@ both("events: oldest first, newest n per item, latest kind, go-on time, answers 
   assert.equal((await loadAnswers(db, [w1])).get(w1)!.at, "2026-01-01T05:00:00.000Z", "who answered last goes by when they answered");
 });
 
-both("loadWorkflowFacts: live and implementation-PR workflows, latest ended state, holds and operator work", async ({ db }) => {
+both("loadWorkflowFacts: live and implementation-PR workflows, latest ended state and operator work", async ({ db }) => {
   const q = queryDb(db);
   const k = q.k as any;
   await q.run(k.insertInto("main.tracked_repos").values({ name: "o/a" }));
@@ -79,7 +79,6 @@ both("loadWorkflowFacts: live and implementation-PR workflows, latest ended stat
   await startWorkflows(db, [wf("o/a", 7)]);
   await recordEvents(db, [{ workflowId: ids.get("o/a#5")!, repo: "o/a", number: 5, login: "cy", kind: "answered", at: "2026-02-01T00:00:00.000Z" }]);
   await q.run(k.insertInto("main.implementations").values({ repo: "o/a", number: 1, queued_by: "ann", state: "pr-open", attempt: 1, text_hash: "h", pr_number: 11, created_at: AT, updated_at: AT }));
-  await q.run(k.insertInto("main.merge_holds").values({ repo: "o/a", number: 5, held_by: "ann", held_at: AT }));
   // ann may act on o/a (staff with a write permission read just now, and the app identity); bob may not.
   await q.run(k.insertInto("main.settings").values({ key: "github_identity", value: "app" }));
   await q.run(k.insertInto("main.access").values([{ login: "ann", role: "operator" }, { login: "bob", role: "viewer" }]));
@@ -100,7 +99,6 @@ both("loadWorkflowFacts: live and implementation-PR workflows, latest ended stat
   assert.equal(f.ended.get("o/a#6"), "stopped");
   assert.ok(!f.ended.has("o/a#7"), "an item that started again has a live workflow, not an ended one");
   assert.ok(f.live.has("o/a#7"));
-  assert.ok(f.holds.has("o/a#5") && !f.holds.has("o/a#6"));
   assert.deepEqual(f.operator.get("o/a#5")!.requests.map((r) => r.instructions), ["x"], "a request counts only while its maker may act");
   assert.equal(f.operator.get("o/a#5")!.legs.length, 1);
   // Only the keys asked for.

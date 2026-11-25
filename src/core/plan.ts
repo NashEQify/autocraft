@@ -211,8 +211,6 @@ export type PrFacts = {
   heldBacklog: boolean;
   /** The quiet pull request of a security fix that is not yet public: nothing is posted about it on GitHub. */
   quiet?: boolean;
-  /** An operator holds its merge. */
-  mergeHeld: boolean;
   /** The score of its live workflow (weight, then age), else the rank score; null when unranked. Lanes order by it, highest first, then by number. */
   score: number | null;
   repoFacts: {
@@ -468,6 +466,8 @@ export type ItemFacts = {
       decisionAnswered: boolean;
       /** An ended attempt, and the issue was queued again after it ended (its live implement workflow is newer). */
       requeuedAfterEnd: boolean;
+      /** When an ended attempt ended. */
+      endedAt?: string;
       /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (the workflow's recommendation); null in other states. */
       asked: "author" | "maintainer" | null;
       /** The attempt's PR is open. */

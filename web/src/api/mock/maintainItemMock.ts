@@ -1,5 +1,6 @@
 // The new item page's mock read: a few started items in repos on the maintainer workflow, and a command box that answers yes,
-// stop and weight words, and says what it understood for anything else.
+// hold, resume and weight words, and says what it understood for anything else.
+import { heldItems } from "./heldMock";
 import type { Api } from "../client";
 import type { MaintainEvent, MaintainItem, MaintainItemStatus, User } from "../types";
 import { MAINTAINER_WRITES } from "./adminMock";
@@ -30,10 +31,10 @@ const SEEDS: Record<string, Seed> = {
       ],
       asked: ago(30), rec: "Merge parts 1 and 3, and move the Hungarian dictionary (2) to an optional download in a follow-up issue?",
       unclear: null,
-      confirm: `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply stop to halt.`,
+      confirm: `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply hold to halt.`,
     },
     events: [
-      ev(1, 190, "kiri-n", "github", "started", `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply stop to halt.`),
+      ev(1, 190, "kiri-n", "github", "started", `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply hold to halt.`),
     ],
     duplicates: [{ repo: "designcraft", number: 1302, kind: "issue", state: "open", title: "Hungarian spellchecking", canonical: true }],
     security: [{ number: 31, title: "Dictionary loader follows symlinks outside the assets folder", severity: "medium", state: "landing" }],
@@ -48,9 +49,9 @@ const SEEDS: Record<string, Seed> = {
         { n: 2, title: "Missing test for a 90° rotation", source: "review", file: "crates/crop/tests/it/main.rs", major: false, state: "planned" },
       ],
       rec: null, asked: null, unclear: null,
-      confirm: `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply stop to halt.`,
+      confirm: `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply hold to halt.`,
     },
-    events: [ev(2, 80, "ochre-fox", "discord", "started", `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply stop to halt.`)],
+    events: [ev(2, 80, "ochre-fox", "discord", "started", `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply hold to halt.`)],
     breakers: [{ key: "cifix:photocraft", reason: "2 of the last 10 CI-fix pushes broke CI on photocraft", since: ago(35), canResume: false }],
   },
   "vectorcraft#1388": {
@@ -62,9 +63,9 @@ const SEEDS: Record<string, Seed> = {
       parts: [],
       asked: ago(30), rec: "Go on with the merge after this stop: the merge was refused: the branch protection of main asks for a second approving review, and the only reviewer with write access… Reply yes to merge it (after the pre-merge check and green CI).",
       unclear: null,
-      confirm: `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply stop to halt.`,
+      confirm: `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply hold to halt.`,
     },
-    events: [ev(5, 60, "ochre-fox", "github", "started", `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply stop to halt.`)],
+    events: [ev(5, 60, "ochre-fox", "github", "started", `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply hold to halt.`)],
   },
   "craft-libs#517": {
     status: {
@@ -74,10 +75,10 @@ const SEEDS: Record<string, Seed> = {
       parts: [{ n: 1, title: "Lazy-load the font cache", source: "change", file: "crates/fonts/src/cache.rs", major: false, state: "planned" }, { n: 2, title: "Drop the splash delay", source: "change", file: "crates/app/src/main.rs", major: false, state: "planned" }],
       asked: ago(30), rec: "Merge both changes as they are?",
       unclear: { by: "kiri-n", at: ago(20), line: "I understood “merge” but not “after the release”. Nothing runs until the instruction is clear." },
-      confirm: `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply stop to halt.`,
+      confirm: `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply hold to halt.`,
     },
     events: [
-      ev(3, 150, "kiri-n", "dashboard", "started", `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply stop to halt.`),
+      ev(3, 150, "kiri-n", "dashboard", "started", `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply hold to halt.`),
       ev(4, 20, "kiri-n", "github", "ambiguous", "I understood “merge” but not “after the release”. Nothing runs until the instruction is clear."),
     ],
     outside: { reason: "limit", author: "wren-lat", canRelease: false },
@@ -114,14 +115,23 @@ export function createMaintainItemMock(me: User, changed: () => void): Pick<Api,
         const s = state.get(ref) ?? { status: null, events: [] };
         const word = text.trim().toLowerCase();
         const by = `(${me.login}, ${hhmm(new Date(NOW).toISOString())})`;
-        if (word === "stop") {
-          if (s.status) s.status = { ...s.status, headline: `Stopped by ${me.login}, ${hhmm(new Date(NOW).toISOString())}`, live: false, steps: null, rec: null, unclear: null, confirm: `Stopped (stopped by ${me.login}). Nothing more runs.` };
-          const line = `Stopped ${by.replace("(", "(stopped by ")}. Nothing more runs.`;
+        if (/^(hold|stop|pause|wait)$/.test(word)) {
+          const headline = `Held by ${me.login}, ${hhmm(new Date(NOW).toISOString())}`;
+          const line = `On hold ${by.replace("(", "(held by ")}. AutoCraft keeps off it. Reply resume to go on.`;
+          if (s.status) s.status = { ...s.status, headline, live: false, held: true, steps: null, rec: null, unclear: null, confirm: line };
+          heldItems.set(ref, { title: ref, kind: "pr", line: headline });
           say(ref, s, "stopped", line);
           return { ok: true, lines: [line] };
         }
+        if (/^(resume|continue)$/.test(word)) {
+          const line = `Going on where it was held, then merging when CI is green ${by.replace("(", "(resumed by ")}. Reply hold to halt.`;
+          if (s.status) s.status = { ...s.status, headline: "Running", live: true, held: false, confirm: line };
+          heldItems.delete(ref);
+          say(ref, s, "resumed", line);
+          return { ok: true, lines: [line] };
+        }
         if (/^(yes|y|approve|lgtm|go)$/.test(word) && s.status?.rec) {
-          const line = `Fixing what the review found, then merging when CI is green (answered by ${me.login}). Reply stop to halt.`;
+          const line = `Fixing what the review found, then merging when CI is green (answered by ${me.login}). Reply hold to halt.`;
           s.status = { ...s.status, headline: "Running: fix-up", rec: null, asked: null, unclear: null, approved: true, confirm: line };
           say(ref, s, "answered", line);
           return { ok: true, lines: [line] };

@@ -21,6 +21,7 @@ import { pgScopeViews, SCOPED_SCHEMA } from "./scoped.ts";
 import { splitStageTripsPg, TRIP_SPLIT_VERSION } from "./trip-split.ts";
 import { featuresRepoOnlyPg, FEATURES_REPO_ONLY_VERSION } from "./feature-repo-only.ts";
 import { retireFixAttemptsPg } from "./fix-retire.ts";
+import { holdsToItemsPg, HOLDS_TO_ITEMS_VERSION } from "./holds-to-items.ts";
 import { PG_SCHEMA_GENERATION } from "./pg-generation.ts";
 import { builtAfterCopy, copyStatePg, oneActiveLegPg } from "./state-copy.ts";
 
@@ -178,7 +179,7 @@ export function pgColumns(rows: { t: string; c: string }[]): Map<string, string[
 /** The schema stamp a migrated Postgres database stores in settings: the schema file's stamp and the trigger and view generators. */
 export function pgStamp(): string {
   return createHash("sha256").update(pgSchemaStamp()).update(pgTriggerSql()).update(JSON.stringify(pgScopeViews("app"))).update(PIN_SEARCH_PATH)
-    .update(JSON.stringify(BOOKKEEPING_COLUMNS)).update(`trip-split ${TRIP_SPLIT_VERSION}`).update(`features-repo-only ${FEATURES_REPO_ONLY_VERSION}`).digest("hex").slice(0, 16);
+    .update(JSON.stringify(BOOKKEEPING_COLUMNS)).update(`trip-split ${TRIP_SPLIT_VERSION}`).update(`features-repo-only ${FEATURES_REPO_ONLY_VERSION}`).update(`holds-to-items ${HOLDS_TO_ITEMS_VERSION}`).digest("hex").slice(0, 16);
 }
 
 export type { PgClient };
@@ -252,6 +253,7 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     await m.step({ label: "stage trips", run: () => splitStageTripsPg(client) });
     await m.step({ label: "fix attempts", run: () => retireFixAttemptsPg(client) });
     await m.step({ label: "features", run: () => featuresRepoOnlyPg(client) });
+    await m.step({ label: "holds", run: () => holdsToItemsPg(client) });
     await copyStatePg(client, m);
     await m.ddl(schema.filter(builtAfterCopy).join("\n"), "after the copy");
     await m.step({ label: "stamp", run: async () => void (await client.query(`INSERT INTO settings (key, value) VALUES ('schema_stamp', $1), ('schema_generation', $2)

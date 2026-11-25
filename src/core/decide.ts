@@ -282,7 +282,6 @@ function waitOf(why: Refusal): Wait {
     case "ended": return person(why.code, "a maintainer to start it again");
     case "duplicate": return person(why.code, "a maintainer to start it or the item it duplicates");
     case "request-unnamed": return person(why.code, "a maintainer to ask for the fix-up again");
-    case "hold": return person(why.code, "a maintainer to resume it");
     case "scope": return system(why.code, "not in scope");
     case "pipeline-off": return person(why.code, "the pipeline to be on");
     case "other": return why;

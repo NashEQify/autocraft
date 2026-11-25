@@ -21,7 +21,7 @@ export type ItemFlags = { question: boolean; started: boolean };
 
 /** Plan states a person parks on purpose, or that wait for one to pick the item: nothing is due and nobody is asked. */
 const PARKED_STATES: ReadonlySet<string> = new Set(["backlog", "held-backlog", "draft", "out-of-scope", "not-started"]);
-const PARKED_WAITS: ReadonlySet<WaitCode> = new Set(["hold", "repo-approval", "ended", "open-request"]);
+const PARKED_WAITS: ReadonlySet<WaitCode> = new Set(["repo-approval", "ended", "open-request"]);
 /** Waits on a pipeline step that has no action due: nothing is working on them. */
 const INTERNAL_WAITS: ReadonlySet<WaitCode> = new Set(["triage"]);
 

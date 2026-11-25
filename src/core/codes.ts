@@ -6,7 +6,7 @@ export type Who = "person" | "contributor" | "system";
 /** Why an action that is due may not run. */
 export type RefusalCode =
   | "pipeline-off" | "scope" | "ended" | "duplicate" | "blocked" | "not-approved" | "unaccepted-head" | "not-handed-over"
-  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "hold" | "other";
+  | "actor-gone" | "actor-unknown" | "box-identity" | "request-unnamed" | "repo-approval" | "breaker" | "other";
 
 /** What an item waits on when nothing of it is due. */
 export type WaitCode = RefusalCode
@@ -37,7 +37,7 @@ export const refusalWho = (code: RefusalCode): Who => (code === "not-handed-over
  * blocks a review) their question is another item's.
  */
 const NO_QUESTION: ReadonlySet<WaitCode> = new Set([
-  "hold", "repo-approval", "changes-requested", "sign-in", "open-pr", "conflict-person", "review-hold", "box-identity", "pipeline-off", "breaker",
+  "repo-approval", "changes-requested", "sign-in", "open-pr", "conflict-person", "review-hold", "box-identity", "pipeline-off", "breaker",
 ]);
 
 /** Whether a started item with this wait has to have a question open. */
@@ -64,9 +64,7 @@ const WAIT_TEXT: Readonly<Record<string, WaitCode>> = {
   "a maintainer to start it again": "ended",
   "a maintainer to start it or the item it duplicates": "duplicate",
   "a maintainer to ask for the fix-up again": "request-unnamed",
-  "a maintainer to resume it": "hold",
   "the pipeline to be on": "pipeline-off",
-  "merge held by an operator": "hold",
   "CI or GitHub's mergeable state": "ci",
   "CI on the latest commit to finish": "ci",
   "CI on the latest commit to pass": "ci",

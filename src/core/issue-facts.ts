@@ -200,7 +200,9 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
           decisionAnswered: (a.attempt.state === "stuck" || a.attempt.state === "asked") && a.answer !== null,
           asked: a.attempt.state === "asked" ? a.question?.audience ?? "author" : null,
           // An attempt whose PR was over before the queueing is recorded as ended after it.
-          requeuedAfterEnd: ENDED_STATES.has(a.attempt.state) && q !== null && (q.at > a.attempt.updatedAt || overBefore(attemptPr, q.at)),
+          // A question that showed the end is as old as the end, or newer (comeWith).
+          requeuedAfterEnd: ENDED_STATES.has(a.attempt.state) && q !== null && (q.at >= a.attempt.updatedAt || overBefore(attemptPr, q.at)),
+          ...(ENDED_STATES.has(a.attempt.state) ? { endedAt: a.attempt.updatedAt } : {}),
           // The PR we just opened counts as open until a sync mirrors it.
           prOpen: a.attempt.prNumber !== null && (attemptPr?.state ?? "OPEN") === "OPEN",
         } : null,

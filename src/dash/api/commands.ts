@@ -28,7 +28,7 @@ function textOf(req: Req): string {
   return text;
 }
 
-const actorOf = (req: Req) => ({ login: req.user.login, canWrite: (repo: string) => req.user.canWrite(repo) });
+export const actorOf = (req: Req) => ({ login: req.user.login, canWrite: (repo: string) => req.user.canWrite(repo) });
 
 async function visibleFn(db: Db, req: Req): Promise<(repo: string) => Promise<boolean>> {
   const repos = new Set(await allVisibleRepos(db, req));
@@ -74,7 +74,7 @@ export async function control(db: Db, req: Req): Promise<{ ok: boolean; line: st
   const b = obj(req.json);
   let input: ControlInput;
   switch (b.control) {
-    case "hold-merge": case "release-merge": case "release-outside": {
+    case "release-outside": {
       const item = itemOf({ repo: b.repo, number: b.number });
       await needVisible(db, req, item.repo.split("/").pop()!);
       input = { control: b.control, item };
@@ -90,7 +90,7 @@ export async function control(db: Db, req: Req): Promise<{ ok: boolean; line: st
       input = { control: "set-automatic", repo: b.repo, on: b.on };
       break;
     default:
-      throw new HttpError(400, "control must be hold-merge, release-merge, release-outside, resume-breaker or set-automatic");
+      throw new HttpError(400, "control must be release-outside, resume-breaker or set-automatic");
   }
   return await runControl(db, actorOf(req), "dashboard", input);
 }

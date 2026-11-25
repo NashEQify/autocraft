@@ -32,7 +32,7 @@ import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
-import { releaseMerge, removeFromBatch } from "../merge/controls.ts";
+import { removeFromBatch } from "../merge/controls.ts";
 import type { Exec } from "../fixup/git.ts";
 import { staleReviews } from "../review/discussion.ts";
 import { reviewHold } from "../review/gate.ts";
@@ -52,7 +52,7 @@ import { permKey, standings, type Standing } from "../data/access/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { addTurns } from "../data/conversations/index.ts";
 import {
-  addFixupRequests, addLegs, adoptLegs, endFixupRequests, listWorkflows, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadWorkflowFacts, moveFixupRequests, moveLegs,
+  addFixupRequests, addLegs, adoptLegs, endFixupRequests, listWorkflows, loadFixupRequests, loadLegPass, loadLegs, loadWorkflowFacts, moveFixupRequests, moveLegs,
   type LegContext, type LegMove, type LegPass, type LegRow, type LegState, type WorkflowFact,
 } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
@@ -791,7 +791,7 @@ export const inActiveBatch = async (db: Db, repo: string, n: number): Promise<bo
 
 /**
  * A person cancels the PR's pre-approved merge before the merge queue has merged it. A queued PR in an integration batch is first
- * removed from the batch (the operator control: the batch PR is closed; the hold it sets is released) unless the merge is running.
+ * removed from the batch (the batch PR is closed) unless the merge is running.
  * Throws when there is none or the queue is past stopping it.
  */
 export async function cancelPreapproval(db: Db, by: string, repo: string, n: number, run?: Exec, via?: string): Promise<Preapproval> {
@@ -802,17 +802,11 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
   };
   if (p.state === "queued" && await inActiveBatch(db, repo, n)) {
     if (await mergeRunning(db, repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
-    // The removal holds the PR's merge; a hold that was there before stays, the one the removal set is released again after the row
-    // is cancelled (so the queue never sees an unheld PR with a live approval), also when the removal or the cancel fails.
-    const heldBefore = (await loadHolds(db, { refs: [{ repo, number: n }] })).has(refOf(repo, n));
-    try {
-      const r = await removeFromBatch(db, by, repo, n, run);
-      const id = await loadBatchByBranch(db, repo, r.batch);
-      if (id !== undefined && (await getBatch(db, id))?.state === "merged") throw new Error("the PR is already merged: its batch merged");
-      await finish();
-    } finally {
-      if (!heldBefore) await releaseMerge(db, by, repo, n);
-    }
+    const r = await removeFromBatch(db, by, repo, n, run);
+    const id = await loadBatchByBranch(db, repo, r.batch);
+    if (id !== undefined && (await getBatch(db, id))?.state === "merged") throw new Error("the PR is already merged: its batch merged");
+    // A merge run that took the PR into a new batch meanwhile makes this throw (pastCancel): the cancel is asked for again.
+    await finish();
   } else await finish();
   return (await preapprovalOf(db, repo, n))!;
 }
