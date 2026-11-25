@@ -15,11 +15,11 @@ import { isQueueState } from "../core/plan.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { Client, GithubError, type Querier } from "../mirror.ts";
 import { prInfo } from "../merge/index.ts";
-import { postSource } from "./post-source.ts";
+import { postSourcesOf } from "./post-source.ts";
+import { loadPosts, saveReviewPosts } from "../data/review/index.ts";
 import { reviewBody, recommendation } from "./post-template.ts";
 import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
 
 const ACTOR = "review-post";
@@ -46,19 +46,21 @@ export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now
  * held duplicates and items outside the pilot.
  */
 export async function postCandidates(db: Db, repo: string): Promise<PostCandidate[]> {
-  const posted = (number: number) => db.get(db.k.selectFrom("review_posts").select(["review_id", "posted_as"]).where("repo", "=", repo).where("number", "=", number));
   // A review is edited only by the lane that posted it: a NULL `posted_as` is a row from before it was recorded, written by the box account.
   const lane = (as: string | null | undefined): "legacy" | "app" => (as && as !== "legacy" ? "app" : "legacy");
   const nowLane = await githubIdentity(db) === "app" ? "app" : "legacy";
   const out: PostCandidate[] = [];
-  for (const { facts: f, plan, action } of await planned(db, "post-review", { repo })) {
+  const rows = await planned(db, "post-review", { repo });
+  const refs = rows.map((p) => ({ repo, number: p.facts.number }));
+  const [posts, source] = await Promise.all([loadPosts(db, refs), postSourcesOf(db, refs.map((r) => `${r.repo}#${r.number}`))]);
+  for (const { facts: f, plan, action } of rows) {
     const head = action.head!;
-    const o = await postSource(db, repo, f.number, head);
+    const o = await source(repo, f.number, head);
     if (!o) continue;
     // A newer review with no public text still edits an earlier post, so the verdict line stays current.
     const pub = o.public;
     if (!pub) continue;
-    const prev = await posted(f.number);
+    const prev = posts.get(`${repo}#${f.number}`);
     const editId = prev && lane(prev.posted_as) === nowLane ? prev.review_id ?? null : null;
     out.push({
       repo, number: f.number, head_oid: head, editId, opusAt: o.at, model: o.model,
@@ -115,7 +117,7 @@ export async function runReviewPost(db: Db, params: PostParams, log: (line: stri
       if (c.editId) {
         try {
           await editReview(w, d.querier, g, c.editId, REVIEW_NOTE(c), c.body);
-          await db.run(db.k.updateTable("review_posts").set({ head_oid: c.head_oid, edited_at: at, opus_at: c.opusAt, posted_as: as }).where("repo", "=", repo).where("number", "=", c.number));
+          await saveReviewPosts(db, [{ kind: "edited", repo, number: c.number, head: c.head_oid, edited_at: at, opus_at: c.opusAt, posted_as: as }]);
           s.edited.push(refOf(c));
           edited = true;
         } catch (e) {
@@ -127,8 +129,7 @@ export async function runReviewPost(db: Db, params: PostParams, log: (line: stri
         const id = await postReview(w, d.querier, g, live.id, REVIEW_NOTE(c), c.body);
         if (!id) throw new Error("GitHub returned no review");
         // Every column is written: a fresh post clears the edit time of the review it replaces.
-        await db.run(db.k.insertInto("review_posts").values({ repo, number: c.number, review_id: id, head_oid: c.head_oid, posted_at: at, edited_at: null, opus_at: c.opusAt, posted_as: as })
-          .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["review_id", "head_oid", "posted_at", "edited_at", "opus_at", "posted_as"]))));
+        await saveReviewPosts(db, [{ kind: "posted", repo, number: c.number, review_id: id, head: c.head_oid, posted_at: at, edited_at: null, opus_at: c.opusAt, posted_as: as }]);
         s.posted.push(refOf(c));
       }
       await jobItem(db, c.repo, c.number, `${edited ? "edited" : "posted"} review at ${c.head_oid.slice(0, 7)}`, log);

@@ -1,15 +1,13 @@
 // The related items and earlier reviews of a PR that the post-merge, review and pre-merge prompts show.
 import type { PostmergeReviewRow, RelatedItem } from "./parse.ts";
 import type { Db } from "../db/index.ts";
-import * as kx from "../db/kx.ts";
+import { loadItems, searchItems } from "../data/mirror/index.ts";
+import { loadReviewHistory } from "../data/review/index.ts";
 
 /** Our earlier Opus reviews of the PR, oldest first. */
 export async function reviewHistory(db: Db, repo: string, number: number): Promise<PostmergeReviewRow[]> {
-  const list = <T>(s: string | null): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
-  return (await db.all(db.k.selectFrom("opus_review_history").select(["head_oid", "at", "verdict", "sure", "reason", "risks", "fixes"])
-    .where("repo", "=", repo).where("number", "=", number).where("verdict", "is not", null).orderBy("at").orderBy(kx.rowid("opus_review_history"))
-    .$narrowType<{ verdict: string }>()))
-    .map((r) => ({ head: r.head_oid, verdict: r.verdict, sure: r.sure === 1, reason: r.reason ?? "", risks: list<string>(r.risks), fixes: list(r.fixes), at: r.at }));
+  const rows = (await loadReviewHistory(db, [{ repo, number }])).get(`${repo}#${number}`) ?? [];
+  return rows.map((r) => ({ head: r.head, verdict: r.verdict, sure: r.sure, reason: r.reason ?? "", risks: r.risks, fixes: r.fixes as PostmergeReviewRow["fixes"], at: r.at }));
 }
 
 const REVIEW_REASON_CHARS = 600, REVIEW_NOTE_CHARS = 300, REVIEW_NOTES = 8, REVIEW_FIXES = 10;
@@ -34,13 +32,14 @@ export const RELATED_CLOSED_DAYS = 30;
 export async function relatedOpen(db: Db, repo: string, number: number, files: string[], at = Date.now()): Promise<RelatedItem[]> {
   const needles = [`#${number}`, ...files.slice(0, 30)];
   const since = new Date(at - RELATED_CLOSED_DAYS * 86400_000).toISOString();
-  const rows = await db.all(db.k.selectFrom("items as i").select(["i.number", "i.kind", "i.state", "i.title", "i.body"]).where("i.repo", "=", repo)
-    .where((eb) => eb.or([eb("i.state", "=", "OPEN"), eb(eb.fn.coalesce("i.closed_at", "i.merged_at", "i.updated_at"), ">=", since)]))
-    .where("i.number", "<>", number)
-    .where((eb) => eb.or(needles.flatMap((n) => { const like = eb.val(`%${kx.likeEscape(n)}%`); return [kx.like(db, "i.title", like, "\\"), kx.like(db, "i.body", like, "\\")]; })))
-    .orderBy("i.number").limit(60).$narrowType<{ kind: "issue" | "pr" }>());
+  // The text index finds the candidates; the checks below decide, as the exact-text test always did.
+  const hits = await db.together(() => Promise.all(needles.map((n) => searchItems(db, `"${n.replace(/"/g, " ")}"`, { repos: [repo], limit: 200 }))));
+  const refs = [...new Set(hits.flat().map((h) => h.ref))].map((ref) => ({ repo, number: Number(ref.slice(ref.lastIndexOf("#") + 1)) })).filter((r) => r.number !== number);
+  const rows = [...(await loadItems(db, refs, "text")).values()]
+    .filter((i) => i.state === "OPEN" || (i.closed_at ?? i.merged_at ?? i.updated_at ?? "") >= since)
+    .sort((x, y) => x.number - y.number).slice(0, 60);
   const byNumber = new RegExp(String.raw`(?<![\w/])#${number}(?!\d)`);
   return rows
     .filter((r) => { const text = `${r.title ?? ""}\n${r.body ?? ""}`; return byNumber.test(text) || files.some((f) => text.includes(f)); })
-    .slice(0, 40).map((r) => ({ number: r.number, kind: r.kind, state: r.state === "OPEN" ? "open" as const : "closed" as const, title: (r.title ?? "").slice(0, 160) }));
+    .slice(0, 40).map((r) => ({ number: r.number, kind: r.kind as RelatedItem["kind"], state: r.state === "OPEN" ? "open" as const : "closed" as const, title: (r.title ?? "").slice(0, 160) }));
 }
