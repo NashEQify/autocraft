@@ -455,6 +455,17 @@ test("the word merge on a merge entry's red CI is refused and the question stays
   assert.deepEqual([o.outcome, (await wf(w)).recAt], ["refused", asked.recAt], o.line);
 });
 
+test("a quiet pull request whose fixes nobody can make or be asked for comes back, also where its merge is not approved", async () => {
+  const w = await started("fix-up", { review: false });
+  await w.review(1, { verdict: "take-fix", fixes: [{ file: "src/a.rs", change: "rename a" }] });
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ maintainer_can_modify: 0 }));
+  const f = { ...(await w.plan()).prs.find((p) => p.facts.number === 1)!.facts, quiet: true };
+  assert.equal(f.fixup?.fixes, 1);
+  const q = questionFor(f, decidePr(f), { approved: false, review: { verdict: "take-fix", sure: true, rec: null }, parts: [{ n: 1, title: "rename a", source: "review", state: "planned" }], conflict: null });
+  assert.deepEqual([q?.rec.parts, q?.rec.merges], [{ fix: [], drop: [1] }, true]);
+});
+
 test("fixes nobody can make are asked about once: a yes or the word merge drops them, names them and merges, approved before or not", async () => {
   const cases: Record<string, (w: World) => Promise<unknown>> = {
     protected: (w) => w.review(1, { verdict: "take-fix", fixes: [{ file: ".git/config", change: "drop the hook path" }, { file: "../deny.toml", change: "allow the licence" }] }),

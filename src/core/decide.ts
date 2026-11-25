@@ -569,7 +569,7 @@ function fixupWait(f: PrFacts, fx: { bucket: FixupBucket; done: boolean } | null
   switch (fx?.bucket) {
     case "asked": return AUTHOR_FIXES;
     case "ask-retry": return unsentWait("the comment asking the contributor for the fixes", unsentUntil(f.fixup?.unsent));
-    case "cannot-push": return f.fixup?.recorded.includes("comment-failed") || f.fixup?.unsent === "final" ? person("ask-failed", "a person: the ask comment failed") : f.repoFacts.commentApproved ? AUTHOR_FIXES : COMMENT_OFF;
+    case "cannot-push": return f.fixup?.recorded.includes("comment-failed") || f.fixup?.unsent === "final" ? person("ask-failed", "a person: the ask comment failed") : f.quiet ? ANSWER : f.repoFacts.commentApproved ? AUTHOR_FIXES : COMMENT_OFF;
     case "hold": return fx.done ? system("fix-running", "the new review of our pushed fix-up") : COMMENT_OFF;
     case "unapproved": return PUSH_OFF;
     case "ask": case "fix": return null;
