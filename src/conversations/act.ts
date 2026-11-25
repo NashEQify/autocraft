@@ -1,10 +1,12 @@
 // Runs one conversation card once, as the person who pressed it: a command goes through the workflow's runCommand (the same core as
-// GitHub, Discord, the agent and the command box), a comment or a label through src/github/write.ts with the presser's login on the
-// audit row. Cards never run on their own.
+// GitHub, Discord, the agent and the command box); a comment, a label and the GitHub actions without a command (reopen, transfer,
+// assign, request reviewers, open an issue) through src/github/write.ts with the presser's login on the audit row. Cards never run
+// on their own.
 import { createHash } from "node:crypto";
 import { guardRepo } from "../core/guard.ts";
 import { githubIdentity } from "../github/identity.ts";
-import { readLive } from "../act/index.ts";
+import { readLive } from "../act/live.ts";
+import { lostAccess } from "../act/still.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { addAudit, loadActBlocked } from "../data/control/index.ts";
 import { addHeld, failCards, loadActRoom, loadCards, loadQueue, markCard, sweepRunningCards as sweepCards, type CardRow } from "../data/conversations/index.ts";
@@ -13,14 +15,13 @@ import { addStageEvents } from "../data/planner/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import { cardWriteCount, needOf, queuedAhead, roomFor, type QueueArgs } from "./queue.ts";
-import { settlesNow } from "../settlers.ts";
-import { addLabels, commentOn, removeLabel, type Note, type Writer } from "../github/write.ts";
-import type { Exec } from "../fixup/git.ts";
+import { addLabels, assignTo, commentOn, createIssue, IssueError, removeLabel, reopenItem, requestReviewers, transferIssue, type Note, type Writer } from "../github/write.ts";
+import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import type { CardEdit } from "../../web/src/api/types.ts";
 import { repoLabels } from "../labels/github.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { actionRefusal, cardRepos, dependsOnCode, followupsOf, isRegistry, itemLabels, otherTypeLabel, postsText, readParams, type CardParams, type FollowUp, type RegistryCommand } from "./cards.ts";
+import { cardRepos, dependsOnCode, followupsOf, isRegistry, itemLabels, otherTypeLabel, postsText, readParams, type CardParams, type FollowUp, type OtherAction, type RegistryCommand } from "./cards.ts";
 import { ConversationError, insertTurn, prChanged, seenHead, systemBlock, type StoreDeps } from "./store.ts";
 import { COMMENT_MAX, ISSUE_TITLE_MAX, NOTE_MAX } from "./types.ts";
 import { ownerOf, slugOf } from "../owners.ts";
@@ -37,7 +38,7 @@ export const RUNNING_STALE_MS = 10 * 60_000;
 /** `canWrite` is the presser's live write access to a repo; the shell has none to check. */
 export type ActDeps = StoreDeps & {
   querier?: Querier;
-  /** Runs `gh` for what a command starts. */
+  /** Runs `gh` for an issue the card opens and for what a command starts. */
   exec?: Exec;
   canWrite?: (repo: string) => Promise<boolean>;
   /** Where the press came from (default: the dashboard). */
@@ -133,7 +134,7 @@ async function liveOpen(q: Querier, repo: string, n: number) {
   return live;
 }
 
-type Ctx = { db: Db; c: CardRow; by: string; q: Querier; at: string; w: Writer; item: Item | undefined; source: { source: string; card: number } };
+type Ctx = { db: Db; c: CardRow; by: string; q: Querier; exec: Exec; at: string; w: Writer; item: Item | undefined; source: { source: string; card: number } };
 
 async function postComment({ db, c, by, q, w, source }: Ctx): Promise<Outcome> {
   const g = await actGrant(db, c.repo, by);
@@ -160,6 +161,82 @@ async function setLabel({ db, c, by, q, at, w, item, source }: Ctx, label: strin
   if (!done.includes(c.number)) throw new Error("GitHub did not add the label");
   await addStageEvents(db, [{ repo: c.repo, number: c.number, stage: "labeled", at, actor: by, note: `added: ${label}` }]);
   return { result: `Label "${label}" added`, url: null };
+}
+
+const USER_ID = `query($login: String!) { user(login: $login) { id login } }`;
+const REPO_ID = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id } }`;
+
+async function userOf(q: Querier, login: string): Promise<{ id: string; login: string }> {
+  const d = await q.query(USER_ID, { login }) as { user?: { id: string; login: string } | null };
+  if (!d.user) throw new Error(`GitHub has no user ${login}`);
+  return d.user;
+}
+
+/** Fails unless GitHub says now that the login can write to the repo. */
+async function needLiveWrite(q: Querier, repo: string, login: string): Promise<void> {
+  const p = await liveWrite(q, repo, login);
+  if (p === "no") throw new Error(`${login} does not have write access to ${repo}`);
+  if (p === "transient") throw new Error(`could not read ${login}'s access to ${repo} from GitHub`);
+}
+
+const sameLogin = (a: string | null | undefined, b: string): boolean => a?.toLowerCase() === b.toLowerCase();
+
+/** A GitHub action with no registered command. */
+async function action(ctx: Ctx, a: OtherAction): Promise<Outcome> {
+  const { db, c, by, q, w, item, source } = ctx;
+  const target = { repo: c.repo, number: c.number };
+  switch (a.word) {
+    case "reopen": {
+      const g = await actGrant(db, c.repo, by);
+      const live = await readLive(q, c.repo, c.number);
+      if (!live) throw new Error("GitHub returned no such item");
+      if (live.state === "OPEN") throw new Error("already open on GitHub");
+      if (live.state !== "CLOSED") throw new Error(`${live.state.toLowerCase()} on GitHub: it cannot be reopened`);
+      await reopenItem(w, g, q, { ...target, id: live.id, pr: live.type === "PullRequest" }, source);
+      return { result: "Reopened", url: null };
+    }
+    case "open_issue": {
+      const g = await actGrant(db, a.repo, by);
+      try {
+        const made = await createIssue(w, g, ctx.exec, { repo: a.repo, target: ref(c.repo, c.number), title: a.title, body: a.body, action: "act-open-issue" }, CARD_NOTE, source);
+        return { result: `Opened ${ref(a.repo, made.number)}`, url: made.url };
+      } catch (e) {
+        if (e instanceof IssueError && !e.clear) throw new Error(`${e.message}; the issue may exist in ${a.repo}, check before running again`);
+        throw e;
+      }
+    }
+    case "transfer": {
+      const g = await actGrant(db, c.repo, by);
+      const gTo = await actGrant(db, a.to, by);
+      const live = await liveOpen(q, c.repo, c.number);
+      if (live.type !== "Issue") throw new Error("only an issue can be moved to another repository");
+      if (ownerOf(a.to).toLowerCase() !== ownerOf(c.repo).toLowerCase()) throw new Error("an issue moves only between repositories of one owner");
+      const to = await q.query(REPO_ID, { owner: ownerOf(a.to), name: a.to }) as { repository?: { id: string } | null };
+      if (!to.repository) throw new Error(`GitHub has no repository ${a.to}`);
+      const url = await transferIssue(w, g, gTo, q, { ...target, id: live.id }, { repo: a.to, id: to.repository.id }, source);
+      return { result: `Moved to ${a.to}`, url: url || null };
+    }
+    case "assign": {
+      const g = await actGrant(db, c.repo, by);
+      const live = await liveOpen(q, c.repo, c.number);
+      if (!sameLogin(item?.author, a.login)) await needLiveWrite(q, c.repo, a.login);
+      await assignTo(w, g, q, { ...target, id: live.id }, await userOf(q, a.login), source);
+      return { result: `Assigned ${a.login}`, url: null };
+    }
+    case "request_reviewers": {
+      const g = await actGrant(db, c.repo, by);
+      const live = await liveOpen(q, c.repo, c.number);
+      if (live.type !== "PullRequest") throw new Error("reviewers can be requested on a PR only");
+      const users: { id: string; login: string }[] = [];
+      for (const l of a.logins) {
+        if (sameLogin(item?.author, l)) throw new Error(`${l} is the PR's author`);
+        await needLiveWrite(q, c.repo, l);
+        users.push(await userOf(q, l));
+      }
+      await requestReviewers(w, g, q, { ...target, id: live.id }, users, source);
+      return { result: `Asked ${a.logins.join(", ")} for a review`, url: null };
+    }
+  }
 }
 
 /** The Act approval of `repo` for the presser's write. Room under the daily limit was taken before it (doCard). */
@@ -207,7 +284,7 @@ export async function liveWrite(q: Querier, repo: string, login: string): Promis
 
 /** A press from the queue is carried out as its presser if they still may: their role and write access are read again now. */
 async function presserStill(db: Db, by: string, repos: string[], deps: ActDeps): Promise<void> {
-  if (!await settlesNow(db, by, repos)) throw new ConversationError(409, `${by} no longer has write access`);
+  if (await lostAccess(db, by, repos, { now: nowOf(deps).getTime() })) throw new ConversationError(409, `${by} no longer has write access`);
   if (await githubIdentity(db) === "app") return;
   const q = deps.querier ?? new Client(1000);
   for (const r of repos) {
@@ -233,7 +310,6 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   ]));
   const item = items.get(key);
   const cmd = params.kind === "command" ? params.command : null;
-  if (cmd && !isRegistry(cmd)) throw new ConversationError(409, actionRefusal(cmd));
   if (dependsOnCode(params) && item && prChanged(item, c.seen)) throw new ConversationError(409, "the PR changed since this was proposed");
   if (cmd?.parts && (live.at(-1)?.recAt ?? null) !== cmd.parts.recAt) throw new ConversationError(409, "the plan changed since this was proposed");
   const note = deps.note?.trim() || undefined;
@@ -243,8 +319,8 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   const now = nowOf(deps), at = now.toISOString();
   const needW = cardWriteCount(params);
   if (draining && needW > 0) await presserStill(db, by, cardRepos(c.repo, params), deps);
-  for (const f of followupsOf(params)) {
-    const g = await guardRepo(db, f.repo, "comment", { operator: by }, undefined, by);
+  for (const repo of cardRepos(c.repo, params).filter((r) => r !== c.repo)) {
+    const g = await guardRepo(db, repo, "comment", { operator: by }, undefined, by);
     if ("refused" in g) throw new ConversationError(409, g.refused);
   }
   let claimed: "busy" | "lost" | { queued: boolean };
@@ -277,8 +353,8 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
 
   let out: Outcome | null = null, error: string | null = null;
   try {
-    const ctx: Ctx = { db, c, by, q: deps.querier ?? new Client(1000), at, w: { db, login: by }, item, source: { source: "conversation", card: c.id } };
-    out = cmd ? await command(db, c, cmd, by, at, deps) : params.kind === "label" ? await setLabel(ctx, params.label, params.remove) : await postComment(ctx);
+    const ctx: Ctx = { db, c, by, q: deps.querier ?? new Client(1000), exec: deps.exec ?? defaultExec, at, w: { db, login: by }, item, source: { source: "conversation", card: c.id } };
+    out = cmd ? isRegistry(cmd) ? await command(db, c, cmd, by, at, deps) : await action(ctx, cmd) : params.kind === "label" ? await setLabel(ctx, params.label, params.remove) : await postComment(ctx);
   } catch (e) {
     if (e instanceof NotRun) {
       await markCard(db, id, ["running"], { state: "proposed", acted_by: null, acted_at: null });
@@ -319,6 +395,9 @@ async function finish(db: Db, c: CardRow, params: CardParams, by: string, r: { o
   });
 }
 
+/** The card runs on a closed item too: a reopen, or a new issue. */
+const onClosed = (p: CardParams): boolean => p.kind === "command" && !isRegistry(p.command) && (p.command.word === "reopen" || p.command.word === "open_issue");
+
 /** Ends a queued card that cannot run, with the reason. */
 async function failQueued(db: Db, c: CardRow, error: string, deps: StoreDeps): Promise<void> {
   const at = nowOf(deps).toISOString();
@@ -346,14 +425,15 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
       await failQueued(db, c, oneLine(`the queued press cannot be read: ${(e as Error).message}`), deps);
       continue;
     }
-    if (!readParams(c.kind, c.params)) { await failQueued(db, c, RETIRED, deps); continue; }
+    const params = readParams(c.kind, c.params);
+    if (!params) { await failQueued(db, c, RETIRED, deps); continue; }
     const need = needOf(c), key = ref(c.repo, c.number);
     const [blocked, room, items] = await db.together(() => Promise.all([loadActBlocked(db, [c.repo]), loadActRoom(db, nowOf(deps)), loadItems(db, [{ repo: c.repo, number: c.number }], "ref")]));
     const block = blocked.get(c.repo);
     if (block) { await failQueued(db, c, `Act cannot run for ${c.repo} now: ${block}`, deps); continue; }
     if (!roomFor(room, need) || (o.writes !== undefined && used + need > o.writes)) break;
     const item = items.get(key);
-    if (item && item.state !== "OPEN") { await failQueued(db, c, `the item is already ${item.state.toLowerCase()}`, deps); continue; }
+    if (item && item.state !== "OPEN" && !onClosed(params)) { await failQueued(db, c, `the item is already ${item.state.toLowerCase()}`, deps); continue; }
     try {
       const r = await doCard(db, c.id, c.acted_by, { ...deps, drain: true, note: args.note, noteStaysOut: args.noteStaysOut, role: args.role, canWrite: undefined });
       if (r.ran) { ran++; used += need; }

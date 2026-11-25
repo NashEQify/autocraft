@@ -1,6 +1,6 @@
 // Action cards: what Opus may propose, checked by our code, and the plain lines a person reads. A card is a registered command
-// (src/workflow/vocab.ts) that a press runs as the presser, a comment, or a label. Opus writes resolutions of steps; each step becomes
-// the card that carries it out. Descriptions are built here from the parameters; the model never writes them.
+// (src/workflow/vocab.ts) that a press runs as the presser, a comment, a label, or a GitHub action that has no command. Opus writes
+// resolutions of steps; each step becomes the card that carries it out. Descriptions are built here from the parameters; the model never writes them.
 import { ownerOf, splitSlug } from "../owners.ts";
 import { REFERENCE_LEAK } from "../review/opus-parse.ts";
 import { ALL_LABELS, isTypeLabel, sameLabel } from "../labels/set.ts";
@@ -11,10 +11,9 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import type { NewCard as StoredCard } from "../data/conversations/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
-import { duplicateComment } from "../act/templates.ts";
-import { describe as describeParts, parse } from "../workflow/parse.ts";
+import { closeText, describe as describeParts, parse } from "../workflow/parse.ts";
 import { resolve } from "../workflow/resolve.ts";
-import type { ItemWorkflow } from "../workflow/types.ts";
+import type { CloseReason, ItemWorkflow } from "../workflow/types.ts";
 import { COMMENT_MAX, ISSUE_TITLE_MAX } from "./types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -31,12 +30,10 @@ export type RegistryCommand = {
   parts?: { recAt: string | null };
   /** The item is a pull request (the wording of a close). */
   pr?: boolean;
-  /** The item a close names as the original, shown on the card. */
-  duplicateOf?: number;
   followups?: FollowUp[];
 };
 
-/** Actions with no registered command: the card shows them and a press refuses (actionRefusal). */
+/** GitHub actions with no registered command: a press makes the write as the presser (act.ts). */
 export type OtherAction =
   | { word: "reopen" }
   | { word: "open_issue"; repo: string; title: string; body: string }
@@ -53,12 +50,14 @@ export type NewCard = { params: CardParams; text: string | null; description: st
 
 export const isRegistry = (c: Command): c is RegistryCommand => "text" in c;
 
-/** Why a press of an action without a registered command runs nothing. */
-export const actionRefusal = (c: OtherAction): string =>
-  `AutoCraft has no command to ${actionVerb[c.word]}; do it on GitHub`;
-const actionVerb: Record<OtherAction["word"], string> = {
-  reopen: "reopen an item", open_issue: "open an issue", transfer: "move an issue", assign: "assign someone", request_reviewers: "request reviewers",
-};
+/** The close a command text is, with its reason; null for any other command. */
+function closeOf(text: string): { reason: CloseReason | null } | null {
+  const p = parse(text);
+  const part = p.kind === "commands" ? p.parts.find((x) => x.word === "close") : undefined;
+  return part?.word === "close" ? { reason: part.reason ?? null } : null;
+}
+/** " as not planned", or nothing without a reason. */
+const closeSuffix = (r: CloseReason | null): string => (r ? ` ${closeText(r)}` : "");
 
 /** The card as a reply writes it, for the turn Opus reads back. */
 export function replyForm(c: NewCard): unknown {
@@ -102,7 +101,8 @@ const WORDS: Record<string, [line: string, button: string]> = {
 /** One plain line for a command. */
 export function commandLine(c: Command): string {
   if (isRegistry(c)) {
-    if (c.text === "close") return c.duplicateOf !== undefined ? `Close as a duplicate of #${c.duplicateOf}` : c.pr ? "Close the PR" : "Close the issue";
+    const close = closeOf(c.text);
+    if (close) return `Close the ${c.pr ? "PR" : "issue"}${closeSuffix(close.reason)}`;
     return WORDS[c.text]?.[0] ?? `Run "${c.text}"`;
   }
   switch (c.word) {
@@ -127,7 +127,8 @@ export function buttonLabel(p: CardParams): string {
   if (p.kind === "label") return p.remove ? "Remove label" : "Add label";
   const c = p.command;
   if (isRegistry(c)) {
-    if (c.text === "close") return c.duplicateOf !== undefined ? "Close as duplicate" : c.pr ? "Close PR" : "Close issue";
+    const close = closeOf(c.text);
+    if (close) return close.reason?.as === "duplicate" ? "Close as duplicate" : `Close ${c.pr ? "PR" : "issue"}${closeSuffix(close.reason)}`;
     return WORDS[c.text]?.[1] ?? c.text;
   }
   switch (c.word) {
@@ -143,7 +144,10 @@ export function buttonLabel(p: CardParams): string {
 export function headline(p: CardParams): string {
   if (p.kind !== "command") return buttonLabel(p);
   const c = p.command;
-  if (isRegistry(c)) return c.text === "close" && c.duplicateOf !== undefined ? `Close as duplicate of #${c.duplicateOf}` : buttonLabel(p);
+  if (isRegistry(c)) {
+    const close = closeOf(c.text);
+    return close?.reason?.as === "duplicate" ? `Close${closeSuffix(close.reason)}` : buttonLabel(p);
+  }
   if (c.word === "transfer") return `Move issue to ${c.to}`;
   if (c.word === "open_issue") return `Open issue in ${c.repo}`;
   return buttonLabel(p);
@@ -152,7 +156,7 @@ export function headline(p: CardParams): string {
 /** The GitHub write the command leads to after the press, or null. */
 export function cardEffect(p: CardParams): string | null {
   if (p.kind !== "command" || !isRegistry(p.command)) return null;
-  if (p.command.text === "close") return p.command.pr ? "closes the PR on GitHub" : "closes the issue on GitHub";
+  if (closeOf(p.command.text)) return p.command.pr ? "closes the PR on GitHub" : "closes the issue on GitHub";
   return p.command.merges ? "merges the PR on GitHub once the review and CI pass" : null;
 }
 
@@ -297,6 +301,15 @@ export function registryCommand(f: CardFacts, raw: unknown): Checked<RegistryCom
   const text = describeParts(p.parts);
   if (!isOpen(f)) return { note: `dropped a resolution: ${f.repo}#${f.n} is not open` };
   if (resolve(p, { kind: isPr(f) ? "pr" : "issue", workflow: f.workflow }).kind !== "run") return { note: `dropped a resolution: the command "${text}" does not apply to the item now` };
+  const close = p.parts.find((x) => x.word === "close");
+  if (close?.word === "close" && close.reason?.as === "duplicate") {
+    const { repo, number } = close.reason.of;
+    const of = bareRepo(repo);
+    if (of === null || of === f.repo) {
+      if (number === f.n) return { note: "dropped a resolution whose duplicate names no other item number" };
+      if (!f.known.has(number)) return { note: `dropped a resolution: ${f.repo}#${number} is not in the mirror` };
+    } else if (typeof of !== "string" || !f.tracked.has(of)) return { note: `dropped a resolution: "${repo}" is not a tracked repository` };
+  }
   const merges = p.parts.some((x) => x.word === "merge"), parts = p.parts.some((x) => "part" in x);
   return { value: { text, ...(merges && { merges }), ...(parts && { parts: { recAt: f.workflow?.recAt ?? null } }), ...(isPr(f) && { pr: true }) } };
 }
@@ -318,19 +331,22 @@ export function otherTypeLabel(have: readonly string[], label: string, removing:
 
 /** The step kinds that can pass the checks for the item as it is now (the item block's `steps`). */
 export function applicableSteps(f: Pick<CardFacts, "item" | "quiet">): string[] {
+  if (f.item?.state === "CLOSED") return ["reopen", "open_issue"];
   if (f.item?.state !== "OPEN") return [];
   const out = ["comment", "label"];
   if (f.item.labels.some((l) => ALL_LABELS.some((x) => sameLabel(x.name, l)))) out.push("unlabel");
-  out.push("command", "duplicate");
-  if (f.item.kind === "pr") out.push("open_issue");
-  return f.quiet ? out.filter((k) => k !== "comment" && k !== "open_issue") : out;
+  out.push("assign");
+  if (f.item.kind === "pr") out.push("request_reviewers");
+  out.push("open_issue", "command");
+  if (f.item.kind !== "pr") out.push("transfer");
+  return f.quiet ? out.filter((k) => k !== "comment" && k !== "open_issue" && k !== "transfer") : out;
 }
 
 const MAX_STEPS = 8;
 
 type LabelStep = { kind: "label"; label: string; remove: boolean };
 /** A step that names a command, before its text is checked. */
-type CommandStep = { command: string; duplicateOf?: number };
+type CommandStep = { command: string };
 
 /** One step as the model wrote it, checked; an open_issue step is a FollowUp until the resolution shows whether it merges. */
 function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly string[], drop: ReadonlySet<string>): Checked<OtherAction | CommandStep | { kind: "comment" } | LabelStep | FollowUp> {
@@ -348,12 +364,11 @@ function checkStep(f: CardFacts, st: Record<string, unknown>, removing: readonly
       if (other) return { note: `dropped a resolution: the item already has the type label "${other}" and an item has one type label` };
       return { value: { kind: "label", label: l.value, remove } };
     }
-    case "close": return { value: { command: "close" } };
+    case "close": return { value: { command: st.reason === "completed" ? "close as completed" : st.reason === "not_planned" ? "close as not planned" : "close" } };
     case "duplicate": {
       const of = st.of;
       if (!Number.isInteger(of) || of === f.n) return { note: "dropped a resolution whose duplicate step names no other item number" };
-      if (!f.known.has(of as number)) return { note: `dropped a resolution: ${f.repo}#${of as number} is not in the mirror` };
-      return { value: { command: "close", duplicateOf: of as number } };
+      return { value: { command: `close as duplicate of #${of as number}` } };
     }
     case "command":
       if (typeof st.text !== "string") return { note: "dropped a resolution whose command step has no text" };
@@ -409,7 +424,7 @@ const isFollowUp = (v: object): v is FollowUp => "title" in v && "body" in v && 
  * One resolution as the model wrote it, checked against the item, as the cards that carry out its steps (comments and labels first,
  * then the command or action), or why it is dropped. Rules: at most one step of each kind except label and unlabel; one command (review,
  * fixup, close and duplicate steps name one); close, duplicate and transfer end the item and come last; reopen comes first and not with an
- * ending step. A duplicate names the original in the comment. An open_issue step of a resolution whose command merges is held until the
+ * ending step. An open_issue step of a resolution whose command merges is held until the
  * merge. A settlement of `merge` or `backlog` becomes that command; any other is dropped with a note.
  */
 export function validateResolution(f: CardFacts, c: Record<string, unknown>, drop: ReadonlySet<string>, notes: string[]): Checked<NewCard[]> {
@@ -456,13 +471,9 @@ export function validateResolution(f: CardFacts, c: Record<string, unknown>, dro
   if (words !== null) {
     const r = registryCommand(f, words);
     if ("note" in r) return r;
-    commands.push({ ...r.value, ...(step?.duplicateOf !== undefined && { duplicateOf: step.duplicateOf }), ...(r.value.merges && issues.length && { followups: issues }) });
+    commands.push({ ...r.value, ...(r.value.merges && issues.length && { followups: issues }) });
   }
   if (!commands.some((x) => isRegistry(x) && x.merges)) commands.push(...issues.map((i): Command => ({ word: "open_issue", ...i })));
-  if (step?.duplicateOf !== undefined && !f.quiet) {
-    const line = duplicateComment({ repo: f.repo, original: `${f.repo}#${step.duplicateOf}`, closed: f.known.get(step.duplicateOf) !== "OPEN" });
-    text = text === null ? line : `${text}\n\n${line}`;
-  }
   const params: CardParams[] = [
     ...(text !== null ? [{ kind: "comment" } as const] : []),
     ...labels.map((l): CardParams => ({ kind: "label", label: l.label, remove: l.remove })),
@@ -512,6 +523,10 @@ function namesOf(list: unknown[]): { numbers: number[]; logins: string[] } {
     for (const st of steps as Record<string, unknown>[]) {
       if (!st || typeof st !== "object") continue;
       if (st.kind === "duplicate" && typeof st.of === "number") numbers.push(st.of);
+      if (st.kind === "command" && typeof st.text === "string" && st.text.length <= COMMAND_MAX) {
+        const r = closeOf(st.text)?.reason;
+        if (r?.as === "duplicate") numbers.push(r.of.number);
+      }
       if (st.kind === "assign" && typeof st.login === "string") logins.push(st.login);
       if (st.kind === "request_reviewers" && Array.isArray(st.logins)) logins.push(...st.logins.filter((x): x is string => typeof x === "string"));
     }

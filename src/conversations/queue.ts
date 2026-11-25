@@ -3,7 +3,7 @@
 // queued cards in order (item priority level, then the time of the press) once room returns, which is 00:00 UTC or an operator's
 // raise of the limit. Waiting for room is the registered "Daily limit" wait (src/stages/registry.ts); no timer runs.
 // Card writes and Act's closes share one count (src/conversations/usage.ts), held to the Act limit.
-import { readParams, type CardParams } from "./cards.ts";
+import { isRegistry, readParams, type CardParams } from "./cards.ts";
 import { loadActRoom, loadQueue, type ActRoom } from "../data/conversations/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -11,12 +11,12 @@ import type { Db } from "../db/index.ts";
 export type QueueArgs = { note?: string; noteStaysOut?: boolean; role?: string };
 
 /**
- * The GitHub writes a card makes when pressed: one for a comment or a label. A command writes nothing here: it runs through the
- * workflow, whose steps and person actions keep their own counts; an issue a merging command holds is counted when it is filed
- * (src/conversations/held.ts).
+ * The GitHub writes a card makes when pressed: one for a comment, a label or an action without a command. A command writes nothing
+ * here: it runs through the workflow, whose steps and person actions keep their own counts; an issue a merging command holds is
+ * counted when it is filed (src/conversations/held.ts).
  */
 export function cardWriteCount(params: CardParams | null): number {
-  return params?.kind === "comment" || params?.kind === "label" ? 1 : 0;
+  return params && (params.kind !== "command" || !isRegistry(params.command)) ? 1 : 0;
 }
 
 /** Writes the queued card still makes. */
