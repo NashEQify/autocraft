@@ -38,7 +38,7 @@ import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question }
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
-import { codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { checkedOtherHead, codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
@@ -164,7 +164,7 @@ function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | 
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
   if (w.kind === "pr" && PUSH_ENDS.includes(codeOf({ reason: r.reason ?? r.state, code: r.reason_code as StopCode | null }))) return null;
-  const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
+  const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null, head: r.head };
   if (HOLD_ENDS.includes(codeOf(ended)) && resumed !== null && r.updated_at <= resumed) return null;
   return ended;
 }
@@ -560,7 +560,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
   // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
   // Nor does a leg the pre-merge review's defects ended, once a fix-up round repairs them at the head.
-  const ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head))) ? null : stopped;
+  let ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head))) ? null : stopped;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
     const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
@@ -590,6 +590,9 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       return settle(patch);
     }
   }
+  // A leg a check of an earlier head stopped says nothing about a head the workflow accepted since (a review round took in the author's
+  // commits, or our pushes followed): a new leg checks this one.
+  if (ended && !authorPush && checkedOtherHead(ended, head)) ended = null;
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.
