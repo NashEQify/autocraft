@@ -194,7 +194,7 @@ export const account = async (db: Db, req: Req): Promise<DiscordAccount> => {
   return { linked: at !== null, at, configured: discordKeys() !== null };
 };
 
-/** A single-use code, valid for 10 minutes, that links a Discord account to the signed-in login when typed into the bot's `/autocraft link`. */
+/** A single-use code, valid for 10 minutes, that links a Discord account to the signed-in login when typed into the bot's `/autocraft account action:link`. */
 export async function linkCode(db: Db, req: Req): Promise<DiscordLinkCode> {
   const keys = discordKeys();
   if (!keys) throw new HttpError(503, "Discord is not set up on this server");
