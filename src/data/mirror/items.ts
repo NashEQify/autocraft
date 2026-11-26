@@ -176,3 +176,12 @@ export async function loadItemsWithHashes(db: Db, keys: KeySource): Promise<Map<
   for (const rows of parts) for (const r of rows as (ItemOf<"card"> & ItemHashes)[]) out.set(refKey(r.repo, r.number), r);
   return out;
 }
+
+/** The `limit` most recently updated items of the repos, newest first. */
+export async function loadRecentRefs(db: Db, repos: readonly string[], limit: number): Promise<{ repo: string; number: number }[]> {
+  if (!repos.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.items as i").select(["i.repo", "i.number"]).where(kx.inList(db, "i.repo", repos))
+    .orderBy("i.updated_at", "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(limit), { label: "mirror.loadRecentRefs" });
+  return rows.map((r) => ({ repo: r.repo, number: Number(r.number) }));
+}

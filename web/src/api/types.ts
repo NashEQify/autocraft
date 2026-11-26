@@ -1770,9 +1770,6 @@ export interface QueuePage {
 
 // ---- conversations with Opus (src/dash/api/conversations.ts) ----
 
-/** A proposed comment card's text as a person edited it. */
-export type CardEdit = { text: string };
-
 /** "replaced": a later Opus reply proposed a new set; the card can no longer run. */
 export type ConversationCardState = "proposed" | "queued" | "running" | "done" | "failed" | "dismissed" | "replaced";
 
@@ -1896,12 +1893,14 @@ export type AreaStep = "propose" | "suggest" | "rescan";
 
 // ---- Item trace ----------------------------------------------------------------
 
-export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation";
+export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation" | "discord";
 export type TraceActor = { type: "person" | "step" | "model"; name: string };
 /** Ids needed to fetch an event's details: runs and tasks have their own endpoints; the rest use the trace detail endpoint. */
 export type TraceRef = {
   runId?: number; /** A review's model calls, oldest first (a fix turn or repeat adds one). */ runIds?: number[]; jobId?: number; taskId?: number; checkId?: number; auditRowid?: number;
   reviewId?: string; commentId?: string; head?: string; toHead?: string;
+  /** A Discord mention: the link that opens the message in Discord. */
+  url?: string;
   /** The integration batch the event belongs to (merge, hold and batch writes). */
   batchId?: number;
 };
@@ -2707,7 +2706,47 @@ export interface MaintainRow {
   approvedBy: string | null;
   stoppedBy: string | null;
   updatedAt: string;
+  /** Set once the item is merged or closed. */
+  state?: "merged" | "closed";
+  /** The conversation's last message; `question`: an open question addressed to the reader. */
+  last?: { by: string; text: string; question: boolean };
 }
+
+/** Where a person's message to AutoCraft was written. */
+export type ChatVia = "dashboard" | "github" | "discord" | "agent" | "cli";
+export interface ChatFinding { n: number; title: string; file: string | null; major: boolean }
+/** One Discord mention of the item: the link opens the message in Discord; `channel` is null for a channel the bot cannot name. */
+export interface ChatDiscordLink { url: string; at: string; channel: string | null }
+/** One picture of a screenshot run: a build task's artifact, served at /api/tasks/:taskId/artifacts/:name. */
+export interface ChatShot { label: string; taskId: number; name: string }
+/**
+ * One entry of an item conversation, oldest first. `work` is something AutoCraft did; `github` stands for GitHub activity not addressed
+ * to AutoCraft between two other entries (`count` events in all; `lines` and `eventIds` keep the last 5); `discord` for mentions of the
+ * item on Discord, folded the same way. On a quiet pull request a viewer gets who and when, without bodies, findings or outcomes.
+ */
+export type ChatEntry =
+  | { t: "said"; id: string; at: string; login: string; via: ChatVia; body: string; url: string | null; /** Waiting for Opus's answer. */ pending?: boolean; /** Why the message got no answer, or what a command answered when no reply entry carries it; one line per answer line. */ refusal?: string | null; /** Who withdrew the message before Opus answered. */ withdrawnBy?: string; /** The reader may withdraw it while it waits: an operator, or the maintainer who wrote it. */ canWithdraw?: boolean }
+  | { t: "reply"; id: string; at: string; body: string; findings: ChatFinding[]; ask: { to: string[]; question: string } | null }
+  | { t: "work"; id: string; at: string; state: "done" | "running" | "failed"; title: string; model: string | null; seconds: number | null; costUsd: number | null; outcome: string | null; detail: [string, string][]; eventId: string | null; /** A screenshot run's pictures, base then head per screen. */ shots?: ChatShot[] }
+  | { t: "github"; id: string; at: string; lines: string[]; count?: number; eventIds?: string[] }
+  | { t: "discord"; id: string; at: string; links: ChatDiscordLink[] };
+export interface ItemConversation {
+  id: string;
+  title: string;
+  /** The item the conversation is about. */
+  item: { repo: RepoName; number: number } | null;
+  entries: ChatEntry[];
+  /** The open question: who it asks. */
+  open: { to: string[]; question: string } | null;
+  canReply: boolean;
+  /** AutoCraft is working: the running step's line. */
+  working: string | null;
+}
+/** Where AutoCraft is with an item, for the item header. */
+export type ItemChatState = "running" | "waiting" | "held" | "done" | "idle";
+/** `status` is the one line the item header shows; `next` is what follows (null when nothing does). `stamp` as for `ItemTrace`. */
+export interface ItemChat { repo: RepoName; number: number; stamp: string; status: string; state: ItemChatState; next: string | null; conversations: ItemConversation[] }
+export type ItemChatUnchanged = { unchanged: true; stamp: string };
 
 /** The reader's Task Runner line: their own runners (fresh status = online) and other users' ready runners that take shared work. */
 export interface MaintainRunnerLine {
@@ -2734,10 +2773,11 @@ export interface MaintainRepo {
 }
 
 export interface MaintainHome {
-  needs: MaintainRow[];
+  /** The reader's items (up to 8, newest conversation entry first); `mineTotal` counts them all. */
   mine: MaintainRow[];
-  waiting: MaintainRow[];
-  running: MaintainRow[];
+  mineTotal: number;
+  /** Viewers only: the newest updated items in the repos they can see. */
+  recent: MaintainRow[];
   runner: MaintainRunnerLine | null;
   attention: HomeProblem[];
 }
@@ -2765,15 +2805,15 @@ export interface MaintainStats {
 // ---- the Items page (GET /api/maintain/items) ----
 
 /**
- * Which list an item is in: `needs` (an open recommendation or an unclear last answer), `started` (a live workflow), `automatic`
+ * Which list an item is in: `started` (a live workflow, or an unclear last answer), `automatic`
  * (AutoCraft works it without anyone picking it: review, fix, verify or merge queue), `rest` (open, nothing running), `backlog`
  * (open, nothing planned) and `done` (merged or closed).
  */
-export type MaintainItemGroup = "needs" | "started" | "automatic" | "rest" | "backlog" | "done";
+export type MaintainItemGroup = "started" | "automatic" | "rest" | "backlog" | "done";
 /** `merged`: the pull requests AutoCraft merged (its merge step or a merged batch), newest merge first. */
 export type MaintainItemsShow = "open" | "backlog" | "closed" | "merged";
 /** `security` and `stuck` are for operators and maintainers. */
-export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates";
+export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates" | "mine";
 
 export interface MaintainItemRow {
   repo: RepoName;
@@ -2820,10 +2860,74 @@ export interface MaintainItemsQuery {
   limit?: number;
 }
 
-/** Rows in group order (needs, started, automatic, rest; or backlog; or done), each group cut at the query's limit; `counts` has every match. */
+/** Rows in group order (started, automatic, rest; or backlog; or done), each group cut at the query's limit; `counts` has every match. */
 export interface MaintainItems {
   rows: MaintainItemRow[];
   counts: Record<MaintainItemGroup, number>;
+}
+
+/** AutoCraft's part in an item, in one word: working on it, waiting for a person, held, in the Backlog, done, or never started. */
+/** `stopped`: only the automatic merge rule started it and it stopped; it asks nobody until a maintainer takes it over. */
+export type BrowseAutocraft = "running" | "waiting" | "stopped" | "held" | "backlog" | "done" | "none";
+
+/** One row of the Items browser. */
+export interface BrowseRow {
+  repo: RepoName;
+  number: number;
+  kind: ItemKind;
+  state: ItemState;
+  draft: boolean;
+  title: string;
+  author: string | null;
+  /** The author is not an owner, member or collaborator of the repo. */
+  outside: boolean;
+  /** GitHub label names. */
+  labels: string[];
+  priority: PriorityLevel | null;
+  /** A pull request's size by changed lines; issues have none. */
+  size: "S" | "M" | "L" | "XL" | null;
+  /** Classification by its short name (bug, feature, perf, extra, plugin, infra). */
+  classified: string | null;
+  area: string | null;
+  comments: number;
+  reactions: number;
+  /** Mentions in watched Discord channels. */
+  discord: number;
+  /** A PR's first closing issue, or the lowest-numbered open or merged PR that closes an issue. */
+  linked: number | null;
+  ci: "green" | "red" | "pending" | null;
+  autocraft: BrowseAutocraft;
+  /** The open question of its workflow is addressed to the reader. */
+  asksYou: boolean;
+  approved: boolean;
+  duplicate: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrowseQuery {
+  /** The search text with its qualifiers (src/core/item-query.ts). */
+  q: string;
+  offset?: number;
+  limit?: number;
+  /** Only these items (`repo#number`), in this order: the hits of a search by meaning. */
+  refs?: string[];
+  /** Also count every preset and list the quick-filter values. */
+  presets?: boolean;
+}
+
+export interface BrowseResult {
+  rows: BrowseRow[];
+  /** Matches of the query, whatever the page cuts. */
+  total: number;
+  offset: number;
+  limit: number;
+  /** Qualifiers that were not applied: unknown, a bad value, or not allowed for the reader. */
+  unknown: string[];
+  /** Matches per preset id, when asked. */
+  presets: Record<string, number> | null;
+  /** Labels, authors and areas of the open items of the repos shown, most used first, when asked. */
+  facets: { labels: string[]; authors: string[]; areas: string[] } | null;
 }
 
 /** What a command did to each item, and the lines to show the sender (confirmation, ambiguity or refusal). */
@@ -2858,6 +2962,8 @@ export interface MaintainItemStatus {
   rec: string | null;
   /** When the open question was asked, sent back with an answer; null when none is open. */
   asked: string | null;
+  /** Who the open question goes to: the item's starter and approver. Empty when none is open, and for an item only the automatic merge rule started, which asks nobody. */
+  to: string[];
   /** The last answer was unclear: who wrote it and what AutoCraft replied. */
   unclear: { by: string; at: string; line: string } | null;
   /** The confirmation line of the last accepted command. */

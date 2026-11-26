@@ -57,7 +57,7 @@ const OBJECTS: [string, string[]][] = [
   ["/api/classifiers", ["runs", "run", "overall", "confusion"]],
   ["/api/build/summary", ["queued", "running", "slots", "free", "online"]],
   ["/api/repos/all", ["name", "tracked", "openPrs", "openIssues", "pipeline", "merging", "pushing", "commenting"]],
-  ["/api/maintain/home", keys<MaintainHome>()("needs", "mine", "waiting", "running")],
+  ["/api/maintain/home", keys<MaintainHome>()("mine", "mineTotal", "recent", "runner", "attention")],
   ["/api/search?q=PR", ["repo", "number", "kind", "title", "state"]],
 ];
 

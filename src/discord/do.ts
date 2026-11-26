@@ -13,11 +13,15 @@ import type { DiscordKeys } from "./keys.ts";
 import { t } from "../i18n/index.ts";
 import { slugOf } from "../owners.ts";
 import { writeAccess, type PermissionFn } from "../remote/permission.ts";
+import { saying } from "../workflow/said.ts";
 
 /** "all", "both", "all of them" at the end: every context item, which is what a command naming no item acts on anyway. */
 const ALL_TAIL = /[\s,]+(?:all(?:\s+of\s+(?:them|these|those))?|them\s+all|both(?:\s+of\s+them)?|everything)\s*[.!]*\s*$/i;
 
 export type DoText = {
+  /** The text as the person wrote it: what the item's chat shows. */
+  written: string;
+  /** The text the parser read: `written` without a trailing "all". */
   text: string;
   parsed: Parsed;
   /** Items the text names. */
@@ -46,23 +50,30 @@ export function prepareDo(raw: string, context: readonly ItemRef[] = []): DoText
     const p = cut !== text ? parse(cut, opts) : null;
     if (p && p.kind !== "ambiguous") { text = cut; parsed = p; }
   }
-  return { text, parsed, named, context: [...context], ...(repo ? { repo } : {}), ...(all ? { all: true as const } : {}) };
+  return { written: raw.trim(), text, parsed, named, context: [...context], ...(repo ? { repo } : {}), ...(all ? { all: true as const } : {}) };
 }
 
 /** The items the command acts on: those it names, else its context items. */
 export const targetsOf = (d: DoText): ItemRef[] =>
   d.parsed.kind !== "ambiguous" && d.parsed.items?.length ? d.parsed.items : d.named.length ? d.named : d.context;
 
-/** Runs the text as the sender's linked login, through the command core. */
-export async function runDo(db: Db, keys: DiscordKeys, d: DoText, sender: { userId: string; login: string }, read?: ReadDeps, permission?: PermissionFn): Promise<CommandResult> {
+/**
+ * Runs the text as the sender's linked login, through the command core. The text is a message in the chat of each item it is about
+ * (src/workflow/said.ts); `messageId` is the Discord message or interaction it came in, whose hash keeps the item's chat from also
+ * showing that message as a mention.
+ */
+export async function runDo(db: Db, keys: DiscordKeys, d: DoText, sender: { userId: string; login: string; messageId: string }, read?: ReadDeps, permission?: PermissionFn): Promise<CommandResult> {
   const { login } = sender;
   const userHash = keys.hash("author", sender.userId);
   const shown = await loadShownQuestions(db, userHash);
   // Text that names items is read as a list, as `/autocraft do` reads it; otherwise the context items are the message's own.
   const byName = d.named.length > 0 || !d.context.length;
-  const result = await runText(db, { login, ...writeAccess(db, login, permission) }, "discord",
+  const own = (byName ? d.named : d.context).slice(0, READ_OWN_MAX);
+  const write = writeAccess(db, login, permission);
+  const said = { login, via: "discord" as const, text: d.written, items: [...own, ...(d.parsed.kind !== "ambiguous" ? d.parsed.items ?? [] : [])], by: { canWrite: write.canWrite }, payload: { msgHash: keys.hash("message", sender.messageId) } };
+  const result = await saying(db, said, () => runText(db, { login, ...write }, "discord",
     { parsed: d.parsed, items: byName ? [] : d.context, asked: ({ workflow }) => shown.get(workflow.id) },
-    { text: d.text, own: (byName ? d.named : d.context).slice(0, READ_OWN_MAX), named: byName, ...(d.repo ? { parse: { repo: d.repo } } : {}), ...(read ? { deps: read } : {}) });
+    { text: d.text, own, named: byName, ...(d.repo ? { parse: { repo: d.repo } } : {}), ...(read ? { deps: read } : {}) }));
   // An item picked out of the conversation is named in the reply, which for one item the command core leaves out.
   const one = result.items.length === 1 ? result.items[0]! : null;
   if (d.picked && one && result.lines.length === 1 && !result.lines[0]!.includes(`#${one.number}`)) result.lines[0] = t("{ref}: {line}", { ref: `${slugOf(one.repo.split("/").pop()!)}#${one.number}`, line: result.lines[0]! });

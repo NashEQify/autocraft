@@ -24,10 +24,13 @@ import { t } from "../../i18n/index.ts";
 import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runText } from "../../workflow/read.ts";
-import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
+import { saying } from "../../workflow/said.ts";
+import { attributionLines, listText, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
+import { openQuestion } from "../../workflow/asked.ts";
 import { eventsOf } from "../../workflow/store.ts";
 import { legWait, notPostedLine } from "../../workflow/waits.ts";
-import { home } from "../api/maintain.ts";
+import { askedRows, home } from "../api/maintain.ts";
+import type { MaintainRow } from "../../../web/src/api/types.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -60,7 +63,7 @@ const INSTRUCTIONS = `AutoCraft's MCP Connector. AutoCraft runs a maintainer wor
 
 How to help:
 1. Find work: my_items lists your user's items and the ones waiting for an answer, list_repos gives an overview, list_fixups lists pull requests whose review fixes the pipeline could not apply, list_merge_queue shows the merge queue.
-2. Read one: get_item gives an item's state, the open recommendation and how to answer it.
+2. Read one: get_item gives an item's state, the open recommendation, who it asks and how to answer it.
 3. Work it with your user on their machine: check out the code, build, run, compare with the reference app, read the discussion. Explain what you find and let the user decide.
 4. Report back: the result of a fix-up belongs on GitHub (a suggestion or commit on the pull request), made by your user.
 
@@ -172,13 +175,13 @@ const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 export const WORKFLOW_READ_TOOLS = [
   {
     name: "get_item",
-    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and holds it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
+    description: "One item's workflow as every surface shows it: where it stands, the open question (its recommendation, how to answer it, and who it asks: the item's starter and approver), who started, approved and holds it, the plan's parts and the latest commands sent. An item only the automatic merge rule started asks nobody: its state says why it stopped and what AutoCraft would do, and a yes runs that and takes the item over. Only for repositories switched to AutoCraft commands.",
     inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
     annotations: { readOnlyHint: true },
   },
   {
     name: "my_items",
-    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or held, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
+    description: "Your user's items, as Home lists them. mine: the newest of the items they started, approved, held, resumed, answered or wrote about in the item's chat (open ones, and done ones for 7 days), newest chat entry first, with mineTotal; askedOfYou: every item whose open question is addressed to them (they started or approved it). Each row has its state line, weight, who started and approved it, and the chat's last message (last.question: the question is addressed to your user). Viewers get recent: the newest updated items of the repositories they can see.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true },
   },
@@ -200,7 +203,7 @@ export const WORKFLOW_COMMAND_TOOLS = [
       properties: {
         item: { type: "string", description: ITEM_HELP },
         text: { type: "string", maxLength: 4000, description: "The command in words, e.g. \"fix-up and merge\", \"urgent\", \"yes\", \"drop 2\". Send only what your user chose." },
-        asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
+        asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.open.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
       },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -321,16 +324,19 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   }
   const [wait, notPosted] = wf ? await Promise.all([legWait(env.db, wf), notPostedLine(env.db, wf)]) : [null, null];
   const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);
+  const open = openQuestion(wf);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
       ...(on ? { item: on } : {}),
-      state: stateLine(wf, undefined, undefined, wait), ...(notPosted ? { notPosted } : {}), recommendation: recommendationLine(wf.rec), ...(wf.rec && wf.recAt ? { asked: wf.recAt } : {}), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
+      state: stateLine(wf, undefined, undefined, wait), ...(notPosted ? { notPosted } : {}),
+      open: open ? { to: open.to, recommendation: recommendationLine(open.rec), ...(wf.recAt ? { asked: wf.recAt } : {}) } : null,
+      weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = (wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`)
+  const header = (open ? `${ref} waits for an answer from ${listText(open.to)}. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.open.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`)
     + (notPosted ? ` ${notPosted}.` : "");
   return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
@@ -338,12 +344,16 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
 async function myItems(env: McpEnv, raw: unknown): Promise<ToolResult> {
   args(raw, {});
   const user = await env.user(false);
-  const h = await home(env.db, reqOf(user));
-  const row = (x: { repo: string; number: number; title: string; line: string; weight: string | null; startedBy: string | null; approvedBy: string | null }) =>
-    ({ item: `${x.repo}#${x.number}`, title: x.title, state: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy });
-  const data = { waitingForYou: h.needs.map(row), yours: h.mine.map(row), waiting: h.waiting.map(row), running: h.running.map(row) };
-  const n = data.waitingForYou.length;
-  return show(`${n} item${n === 1 ? "" : "s"} waiting for your user's answer.`, "my items", data);
+  const req = reqOf(user);
+  const [h, askedOfMe] = await Promise.all([home(env.db, req), askedRows(env.db, req)]);
+  // Home's rows (GET /api/maintain/home), with the fields an agent uses.
+  const row = (x: MaintainRow) => ({
+    repo: x.repo, number: x.number, kind: x.kind, title: x.title, line: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy,
+    updatedAt: x.updatedAt, ...(x.state && { state: x.state }), ...(x.last && { last: x.last }),
+  });
+  const data = { mine: h.mine.map(row), mineTotal: h.mineTotal, askedOfYou: askedOfMe.map(row), ...(user.role === "viewer" ? { recent: h.recent.map(row) } : {}) };
+  const n = data.askedOfYou.length;
+  return show(`${n} item${n === 1 ? "" : "s"} waiting for your user's answer; ${data.mine.length} of their ${data.mineTotal} items, newest first.`, "my items", data);
 }
 
 function helpText(): ToolResult {
@@ -361,9 +371,9 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
+  const done = await saying(env.db, { login: user.login, via: "agent", text: a.text as string, items: [{ repo: r.repo, number: r.number }], by: { canWrite: (repo) => user.canWrite(repo), role: user.role, visible: async (repo) => repos.has(repo) } }, () => runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
-  }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } });
+  }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } }));
   const text = done.lines.join("\n");
   return { text: /has no write access to/.test(text) ? text + PERMISSION_HINT : text };
 }

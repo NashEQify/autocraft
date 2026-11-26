@@ -115,7 +115,7 @@ export async function settle(db: Db, keys: DiscordKeys, d: DoText, c: Conversati
       });
       if (lines.length) return { kind: "ask", line: lines.join("\n") };
     }
-    if (one.length) return { kind: "run", d: { ...prepareDo(written(d.text, one), d.context), picked: true } };
+    if (one.length) return { kind: "run", d: { ...prepareDo(written(d.text, one), d.context), written: d.written, picked: true } };
     return { kind: "run", d };
   }
   return await focus(db, keys, d, c);

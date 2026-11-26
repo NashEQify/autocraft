@@ -59,7 +59,7 @@ export const TOPICS: string[] = [
   "outside", "plans", "jobs", "limits", "usage", "agents", "envs", "build-features", "pr-builds", "nightly", "workspaces", "tasks", "actions",
   "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "discord-verify", "downloads", "security", "postmerge", "access", "settings",
   "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "remote-room", "remote-calls", "plan-inputs", "job-ends", "task-ends", "github", "auto-stops",
-  "statement-sources",
+  "statement-sources", "chat",
 ];
 
 /** Topics that read tables other topics already watch: their triggers have names of their own. */

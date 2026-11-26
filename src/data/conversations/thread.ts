@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { withdrawTurnCalls } from "../runners/index.ts";
+import { ensureMainConversations } from "../chat/messages.ts";
 import { CARD_COLS, loadQueue } from "./cards.ts";
 import type { CardRow, ConversationRow, GuidanceTurn, NewConversation, NewCard, NewTurn, PendingTurn, PostMessage, RefKey, Thread, ThreadTurn, TurnDigest, TurnEvent, TurnKind, TurnRow, TurnTail } from "./types.ts";
 
@@ -175,8 +176,10 @@ const seenOf = (c: { item_sig: string } | undefined): string | null => {
 async function insertRows(db: Db, rows: Row[]): Promise<number[]> {
   const q = queryDb(db);
   const ids: number[] = [];
+  // Each turn names its item's main conversation in the chat.
+  const convs = await ensureMainConversations(db, rows.map((r) => ({ repo: r.repo, number: r.number, by: r.login, at: r.at })));
   for (const part of kx.batches(rows)) {
-    const got = await q.all(q.k.insertInto("main.conversation_turns").values(part.map((r) => ({ repo: r.repo, number: r.number, kind: r.kind, login: r.login, at: r.at, body: r.body, block: r.block, status: r.status, error: null, notes: r.notes, seq: r.seq }))).returning("id"));
+    const got = await q.all(q.k.insertInto("main.conversation_turns").values(part.map((r) => ({ repo: r.repo, number: r.number, kind: r.kind, login: r.login, at: r.at, body: r.body, block: r.block, status: r.status, error: null, notes: r.notes, seq: r.seq, conversation_id: convs.get(keyOf(r.repo, r.number)) ?? null }))).returning("id"));
     ids.push(...got.map((g) => Number(g.id)).sort((a, b) => a - b));
   }
   const opus = [...new Set(rows.filter((r) => r.kind === "opus").map((r) => keyOf(r.repo, r.number)))];
@@ -190,7 +193,7 @@ async function insertRows(db: Db, rows: Row[]): Promise<number[]> {
  * Appends turns to their items as `appendTurn` did, in input order: a message with status `pending` waits (no seq; one per item, else 409);
  * while a run is answering a message, other turns are held without a seq; every other turn takes the next seq. An `opus` turn replaces the
  * item's proposed cards, so only the last `opus` turn of an item in the batch keeps its cards proposed. A turn marked `onlyIfThread` is
- * skipped (its id is null) when the item has no conversation. At most 5 statements whatever the number of turns.
+ * skipped (its id is null) when the item has no conversation. At most 7 statements whatever the number of turns (2 for the chat conversations).
  */
 export async function addTurns(db: Db, turns: NewTurn[], deps?: { now?: () => Date }): Promise<(number | null)[]> {
   if (!turns.length) return [];
@@ -367,4 +370,12 @@ export async function withdrawTurn(db: Db, ref: RefKey, by: { login: string; ope
     if (seq !== null) await unhold(db, repo, number, seq + 1);
     await withdrawTurnCalls(db, { ref, forLogin: wait.login, reason: why });
   });
+}
+
+/** How many questions `login` put to Opus (operator and maintainer turns) after `since`. */
+export async function countAskedTurns(db: Db, login: string, since: string): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.conversation_turns").select((eb) => eb.fn.countAll().as("n"))
+    .where("login", "=", login).where("kind", "in", ["operator", "maintainer"]).where("at", ">", since));
+  return Number(r?.n ?? 0);
 }

@@ -1,7 +1,7 @@
 // Mention rows: which tracked items a Discord message refers to. A row holds the item (plain, for counting) and the
 // message's guild, channel, id and time sealed with the key file. No text and no author id is kept; an author is
 // kept only as a keyed hash that serves a deletion request.
-import type { DiscordKeys } from "./keys.ts";
+import type { DiscordKeys, MessageRef } from "./keys.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { messageText, parseRefs, type ItemKey, type TextMessage, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
@@ -136,12 +136,15 @@ export async function linksOf(db: Db, keys: DiscordKeys | null, repo: string, nu
   return mentionLinks(keys, (await dc.loadMentionsOfItems(db, [`${repo}#${number}`])).get(`${repo}#${number}`) ?? []);
 }
 
+/** The link that opens a message in Discord. */
+export const messageUrl = (v: Pick<MessageRef, "guildId" | "channelId" | "messageId">): string => `https://discord.com/channels/${v.guildId}/${v.channelId}/${v.messageId}`;
+
 /** The message links of stored mention rows, newest first; rows the key cannot open are left out. */
 export function mentionLinks(keys: DiscordKeys | null, rows: readonly { sealed: string; msgHash: string }[]): DiscordLink[] {
   if (!keys) return [];
   return rows.flatMap((r) => {
     const v = keys.open(r.sealed, r.msgHash);
-    return v ? [{ url: `https://discord.com/channels/${v.guildId}/${v.channelId}/${v.messageId}`, at: v.at }] : [];
+    return v ? [{ url: messageUrl(v), at: v.at }] : [];
   }).sort((a, b) => b.at.localeCompare(a.at));
 }
 

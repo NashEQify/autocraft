@@ -34,10 +34,10 @@ import * as discord from "./discord.ts";
 import * as agents from "./agents.ts";
 import * as build from "./build.ts";
 import * as workspaces from "./workspaces.ts";
-import * as conv from "./conversations.ts";
 import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
 import * as maintain from "./maintain.ts";
+import * as itemsBrowse from "./items-browse.ts";
 import * as maintainItem from "./maintain-item.ts";
 import * as runners from "./runners.ts";
 import * as modelQueue from "./model-queue.ts";
@@ -55,6 +55,7 @@ import * as items from "./items.ts";
 import { activity } from "./activity.ts";
 import { downloads } from "./downloads.ts";
 import { itemPage } from "./item-page.ts";
+import { itemChat, postChat, postChatWithdraw } from "./item-chat.ts";
 import { trace as itemTrace, traceDetail as itemTraceDetail } from "./trace.ts";
 import { mergedAsApproved, postmergeOf } from "./postmerge.ts";
 import * as nightly from "./nightly.ts";
@@ -382,13 +383,15 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/mcp/tokens", mcp.create),
     post("/api/mcp/tokens/revoke", mcp.revoke),
     scoped(get("/api/maintain/home", maintain.home)),
+    get("/api/maintain/asked", maintain.asked),
     get("/api/maintain/queue", maintain.queueMeta),
     scoped(get("/api/maintain/stats", maintain.stats)),
-    // The Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
+    // The Items page: three lists of the open items, the Backlog or the closed items, with filters and search.
     scoped(get("/api/maintain/items", maintain.items)),
+    // The Items browser: one page of the items matching a search with qualifiers, presets and quick-filter values.
+    scoped(get("/api/maintain/browse", itemsBrowse.browse)),
     get("/api/maintain/items/:repo/:n", maintainItem.item),
     get("/api/maintain/repos", maintain.repos),
-    get("/api/maintain/waiting", maintain.waiting),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),
@@ -402,17 +405,14 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/model-queue/:id/unpick", modelQueue.unpick),
     get("/api/items/:repo/:n", itemCore),
     get("/api/items/:repo/:n/page", itemPage),
+    get("/api/items/:repo/:n/chat", itemChat),
+    post("/api/items/:repo/:n/chat", postChat),
+    post("/api/items/:repo/:n/chat/withdraw", postChatWithdraw),
     get("/api/items/:repo/:n/peek", items.peek),
     scoped(get("/api/activity", activity)),
     get("/api/downloads", downloads),
     get("/api/items/:repo/:n/trace", itemTrace),
     get("/api/items/:repo/:n/trace/event", itemTraceDetail),
-    get("/api/conversations/:repo/:n", conv.getConversation),
-    { method: "POST", pattern: "/api/conversations/:repo/:n/messages", handler: ok(async (db, req) => conv.postMessage(db, req)) },
-    { method: "POST", pattern: "/api/conversations/:repo/:n/withdraw", handler: ok(async (db, req) => conv.postWithdraw(db, req)) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/edit", handler: ok(conv.editCardText) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/do", handler: ok(async (db, req) => conv.doIt(db, req)) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/dismiss", handler: ok(conv.dismiss) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/cancel", handler: ok(operator.cancelItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/retry", handler: ok(operator.retryItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/review-again", handler: ok(operator.reviewItemAgain) },

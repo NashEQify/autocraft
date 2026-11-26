@@ -113,11 +113,3 @@ test("the list of merged pull requests is AutoCraft's merges, newest merge first
   assert.equal(list.counts.done, 3);
   assert.deepEqual((await call<MaintainItems>(db, "GET", "/api/maintain/items?show=merged")).rows.map((r) => r.number), [11, 12, 10]);
 });
-
-test("the project picker counts the items that wait for an answer", async () => {
-  const db = await fresh();
-  const wf = (number: number, state: string, rec: string | null) => db.run(db.k.insertInto("item_workflows").values({ repo: "app", number, kind: "pr", entry: "review", state, rec, started_by: "op", started_at: T(1), started_via: "dashboard", updated_at: T(1) } as never));
-  await wf(7, "recommending", JSON.stringify({ text: "Merge?" }));
-  await wf(8, "running", null);
-  assert.deepEqual(await call(db, "GET", "/api/maintain/waiting"), { app: 1 });
-});
