@@ -9,6 +9,7 @@ import { VectorIndex } from "../embed/vectors.ts";
 import { guildPerms, type Overwrite, type Role } from "./perms.ts";
 import { Gateway } from "./gateway.ts";
 import { Interactions } from "./interactions.ts";
+import { AtCommands } from "./at-commands.ts";
 import { Pings } from "./pings.ts";
 import { Signals, dropSignalTexts } from "./signals.ts";
 import { deleteRepliesOf } from "./replies.ts";
@@ -25,6 +26,7 @@ import { dropIssueTexts, installIssueNew } from "./issue-new.ts";
 import { installPanel, postPanel } from "./panel.ts";
 import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from "./keys.ts";
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus } from "./store.ts";
+import { forgetFollowsOf } from "./threads.ts";
 import { listChannelBriefs, markWatched, removeChannelTree, saveCategories, saveChannels, setViewable, type CategoryRow, type ChannelReport } from "../data/discord/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -134,7 +136,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   installAccountCommands(interactions, { db, keys });
   installPanel(interactions, db, installIssueNew(interactions, { db, keys, search, log }));
   installAlerts(db, keys, rest, interactions, signal, log);
-  const pings = new Pings({ db, keys, rest, search, log });
+  const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log }) });
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });
   // A crash during a call can leave the question in a recorded prompt.
@@ -145,7 +147,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
     onState: async (state, detail) => await setStatus(db, state, detail),
     onDispatch: dispatcher(db, keys, interactions, pings, signals, reactor),
   });
-  log("runner: Discord mention counting, pings and search started");
+  log("runner: Discord mention counting, pings, commands and search started");
   void gw.run(signal).catch((e: Error) => log(`runner: Discord stopped: ${e.message}`));
 }
 
@@ -194,10 +196,11 @@ async function discord(args: string[]): Promise<void> {
       console.log(`deleted ${n} mention ${n === 1 ? "row" : "rows"} and ${replies} ${replies === 1 ? "reply" : "replies"}`);
     } else {
       const n = await forgetAuthor(db, keys, id);
+      const follows = await forgetFollowsOf(db, keys, id);
       const links = await forgetLink(db, keys, id);
       const signedIn = await forgetReporter(db, keys.hash("author", id));
-      await audit(db, "cli", "discord-forget", "user", { rows: n, links, signedIn });
-      console.log(`deleted ${n} mention ${n === 1 ? "row" : "rows"} and ${links} ${links === 1 ? "link" : "links"}${signedIn ? " and the GitHub sign-in" : ""}`);
+      await audit(db, "cli", "discord-forget", "user", { rows: n, follows, links, signedIn });
+      console.log(`deleted ${n} mention ${n === 1 ? "row" : "rows"}, ${follows} thread ${follows === 1 ? "row" : "rows"} and ${links} ${links === 1 ? "link" : "links"}${signedIn ? " and the GitHub sign-in" : ""}`);
     }
   } else if (sub === "channels") {
     for (const c of await listChannelBriefs(db))

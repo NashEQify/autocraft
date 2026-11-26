@@ -2540,6 +2540,25 @@ CREATE TABLE IF NOT EXISTS discord_replies (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discord_replies_quoted ON discord_replies (quoted_hash) WHERE quoted_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS discord_replies_channel ON discord_replies (channel_hash);
+-- What the bot's threads and command replies follow (src/discord/threads.ts): one row per target and item. `target_hash` is the keyed
+-- hash of the thread's channel id (`kind` thread), or of the bot's reply when it could not start a thread (`kind` reply); `channel_hash`
+-- the keyed hash of the channel the command was sent in. `sealed` holds the guild, the thread's or channel's id, the message id (the
+-- thread's first message, or the bot's reply) and a keyed hash of the sender. `command` is the command as the parser writes it,
+-- `login` the AutoCraft login it ran as, `at` the last command that added the item. No message text.
+CREATE TABLE IF NOT EXISTS discord_follows (
+  target_hash TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  channel_hash TEXT NOT NULL,
+  sealed TEXT NOT NULL,
+  command TEXT NOT NULL,
+  login TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (target_hash, repo, number)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS discord_follows_item ON discord_follows (repo, number);
+CREATE INDEX IF NOT EXISTS discord_follows_channel ON discord_follows (channel_hash);
 
 -- Discord accounts linked to dashboard logins (src/discord/links.ts). `user_hash` is a keyed hash of the Discord user id; the id
 -- itself is never stored. `discord_link_codes` holds the keyed hash of each unused link code (one per login) until it is used or expires.

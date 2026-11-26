@@ -104,6 +104,11 @@ export class RestClient implements DiscordRest {
     }
   }
 
+  /** Starts a public thread on a message; the thread's id is its channel id. It archives after a day without messages. */
+  async startThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> {
+    return (await this.#queue("POST", `/channels/${channelId}/messages/${messageId}/threads`, { name: name.slice(0, 100), auto_archive_duration: 1440 }, true)) as { id: string };
+  }
+
   /** Adds the bot's own reaction (a unicode emoji) to a message. */
   async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     await this.#queue("PUT", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`, undefined, true);

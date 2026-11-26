@@ -1,7 +1,9 @@
 // Answers @-mentions of the bot in watched channels with one public reply: the issues closest to the question. The
 // question is the quoted message, or the ping's own text without mentions. The question is searched and dropped; the
 // only record of a reply is a keyed hash of the ping and of the quoted message with the sealed id of our reply, kept so
-// the reply can be deleted when either message is deleted. See docs/pipeline.md.
+// the reply can be deleted when either message is deleted. A message addressed to the bot whose text is a command goes to the
+// command handler instead (at-commands.ts). See docs/pipeline.md.
+import type { AtCommands } from "./at-commands.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { deleteRepliesOf } from "./replies.ts";
 import { deliver, renderMatches } from "./reply.ts";
@@ -26,7 +28,7 @@ const PING_MATCHES = 3;
 const MENTION = /<@[!&]?\d+>/g;
 const strip = (s: string): string => s.replace(MENTION, " ").replace(/\s+/g, " ").trim();
 
-export type PingDeps = { db: Db; keys: DiscordKeys; rest: DiscordRest; search: Search; log: (line: string) => void };
+export type PingDeps = { db: Db; keys: DiscordKeys; rest: DiscordRest; search: Search; log: (line: string) => void; commands?: AtCommands };
 
 export class Pings {
   #d: PingDeps;
@@ -56,7 +58,11 @@ export class Pings {
       if (x.role) this.#role(x.role as Role);
     } else if (type === "MESSAGE_CREATE") {
       const m = d as PingMessage;
-      if (await this.#isPing(m)) this.#run(() => this.#ping(m));
+      const to = await this.#addressed(m);
+      if (!to) return;
+      const command = this.#d.commands ? await this.#d.commands.take(m, { botId: this.#botId!, mentioned: to.mentioned }) : null;
+      if (command) this.#run(command);
+      else if (to.ping) this.#run(() => this.#ping(m));
     } else if (type === "MESSAGE_DELETE") {
       if (typeof x.id === "string") this.#run(() => this.#deleted([x.id as string]));
     } else if (type === "MESSAGE_DELETE_BULK") {
@@ -74,18 +80,20 @@ export class Pings {
   }
 
   /**
-   * A person's new message that names the bot in its text (`<@id>`, `<@!id>` or the bot's role), in a watched channel.
-   * Discord also lists the author of a replied-to message in `mentions`, so that list does not count, and a reply to one of
-   * the bot's own messages is not a ping. Bots, webhooks, edits and system messages are not pings.
+   * A person's new message in a watched channel that names the bot in its text (`<@id>`, `<@!id>` or the bot's role), or replies
+   * to one of the bot's messages; null for any other. Discord also lists the author of a replied-to message in `mentions`, so that
+   * list does not count. `ping`: it may be a ping, which a reply to one of the bot's own messages never is. Bots, webhooks, edits
+   * and system messages are neither.
    */
-  async #isPing(m: PingMessage): Promise<boolean> {
-    if (!this.#botId || typeof m.id !== "string" || typeof m.channel_id !== "string") return false;
-    if (!m.author?.id || m.author.bot || m.webhook_id) return false;
-    if (m.type !== undefined && m.type !== 0 && m.type !== 19) return false;
-    if (m.referenced_message?.author?.id === this.#botId) return false;
+  async #addressed(m: PingMessage): Promise<{ mentioned: boolean; ping: boolean } | null> {
+    if (!this.#botId || typeof m.id !== "string" || typeof m.channel_id !== "string") return null;
+    if (!m.author?.id || m.author.bot || m.webhook_id) return null;
+    if (m.type !== undefined && m.type !== 0 && m.type !== 19) return null;
+    const toBot = m.referenced_message?.author?.id === this.#botId;
     const text = m.content ?? "";
-    if (!(text.includes(`<@${this.#botId}>`) || text.includes(`<@!${this.#botId}>`) || [...this.#roles].some((r) => text.includes(`<@&${r}>`)))) return false;
-    return await isWatched(this.#d.db, m.channel_id);
+    const mentioned = text.includes(`<@${this.#botId}>`) || text.includes(`<@!${this.#botId}>`) || [...this.#roles].some((r) => text.includes(`<@&${r}>`));
+    if (!mentioned && !toBot) return null;
+    return await isWatched(this.#d.db, m.channel_id) ? { mentioned, ping: mentioned && !toBot } : null;
   }
 
   async #ping(m: PingMessage): Promise<void> {

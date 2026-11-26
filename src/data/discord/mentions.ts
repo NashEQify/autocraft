@@ -95,18 +95,19 @@ export async function removeMentionsOfMessages(db: Db, msgHashes: string[]): Pro
   return n;
 }
 
-/** Deletes replies and mentions of the channel hashes in one transaction. */
-export async function forgetChannels(db: Db, channelHashes: string[]): Promise<{ replies: number; mentions: number }> {
+/** Deletes replies, mentions and follows of the channel hashes (a thread's follows by the thread too) in one transaction. */
+export async function forgetChannels(db: Db, channelHashes: string[]): Promise<{ replies: number; mentions: number; follows: number }> {
   const hashes = [...new Set(channelHashes)];
-  if (!hashes.length) return { replies: 0, mentions: 0 };
+  if (!hashes.length) return { replies: 0, mentions: 0, follows: 0 };
   const q = queryDb(db);
   return await db.write(async () => {
-    let replies = 0, mentions = 0;
+    let replies = 0, mentions = 0, follows = 0;
     for (const part of kx.chunks(hashes)) {
       replies += Number((await q.run(q.k.deleteFrom("main.discord_replies").where(kx.inList(db, "channel_hash", part)))).changes);
       mentions += Number((await q.run(q.k.deleteFrom("main.discord_mentions").where(kx.inList(db, "channel_hash", part)))).changes);
+      follows += Number((await q.run(q.k.deleteFrom("main.discord_follows").where((eb) => eb.or([kx.inList(db, "target_hash", part), kx.inList(db, "channel_hash", part)])))).changes);
     }
-    return { replies, mentions };
+    return { replies, mentions, follows };
   });
 }
 
