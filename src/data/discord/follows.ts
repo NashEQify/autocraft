@@ -2,7 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
-import type { FollowRow, Ref } from "./types.ts";
+import type { FollowPost, FollowRow, Ref } from "./types.ts";
 
 const COLS = ["target_hash", "repo", "number", "kind", "channel_hash", "sealed", "command", "login", "at"] as const;
 type Row = { target_hash: string; repo: string; number: number; kind: string; channel_hash: string; sealed: string; command: string; login: string; at: string };
@@ -79,4 +79,45 @@ export async function removeSealedFollows(db: Db, rows: { targetHash: string; se
     n += Number((await q.run(q.k.deleteFrom("main.discord_follows").where(kx.tupleIn(db, ["target_hash", "sealed"], part, ["text", "text"])))).changes);
   }
   return n;
+}
+
+/** Every follow row; the table holds what commands named in the last FOLLOW_KEEP_DAYS (src/discord/threads.ts). */
+export async function loadAllFollows(db: Db): Promise<FollowRow[]> {
+  const q = queryDb(db);
+  return (await q.all(q.k.selectFrom("main.discord_follows").select(COLS), { label: "discord.loadAllFollows" })).map(rowOf);
+}
+
+const POST_COLS = ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "sealed", "at"] as const;
+
+/** What the bot last posted about each followed (target, item), by `target\0repo\0number`. */
+export async function loadFollowPosts(db: Db): Promise<Map<string, FollowPost>> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.discord_follow_posts").select(POST_COLS), { label: "discord.loadFollowPosts" });
+  return new Map(rows.map((r) => {
+    const p: FollowPost = { targetHash: r.target_hash, repo: r.repo, number: Number(r.number), statusHash: r.status_hash, resultKey: r.result_key, resultHash: r.result_hash, sealed: r.sealed, at: r.at };
+    return [followPostKey(p), p];
+  }));
+}
+
+export const followPostKey = (p: { targetHash: string; repo: string; number: number }): string => `${p.targetHash}\0${p.repo}\0${p.number}`;
+
+/** Upserts whole rows by (target, item). */
+export async function saveFollowPosts(db: Db, rows: FollowPost[]): Promise<void> {
+  if (!rows.length) return;
+  const q = queryDb(db);
+  await db.write(async () => {
+    for (const part of kx.batches(rows)) {
+      await q.run(q.k.insertInto("main.discord_follow_posts").values(part.map((p) => ({
+        target_hash: p.targetHash, repo: p.repo, number: p.number, status_hash: p.statusHash, result_key: p.resultKey, result_hash: p.resultHash, sealed: p.sealed, at: p.at,
+      }))).onConflict((oc) => oc.columns(["target_hash", "repo", "number"]).doUpdateSet(kx.excluded(["status_hash", "result_key", "result_hash", "sealed", "at"]))));
+    }
+  });
+}
+
+/** Deletes the rows whose (target, item) nobody follows any more. */
+export async function pruneFollowPosts(db: Db): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.run(q.k.deleteFrom("main.discord_follow_posts").where((eb) => eb.not(eb.exists(eb.selectFrom("main.discord_follows as f").select(eb.lit(1).as("one"))
+    .whereRef("f.target_hash", "=", "main.discord_follow_posts.target_hash").whereRef("f.repo", "=", "main.discord_follow_posts.repo").whereRef("f.number", "=", "main.discord_follow_posts.number")))));
+  return Number(r.changes);
 }

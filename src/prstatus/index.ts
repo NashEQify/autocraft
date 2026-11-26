@@ -29,7 +29,7 @@ import { freshConfig } from "../data/control/index.ts";
 import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
-import { heldWork, type ItemWorkflow } from "../workflow/types.ts";
+import { heldWork, type ItemWorkflow, type PlanPart } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
 
 export const ACTOR = "pr-status";
@@ -80,6 +80,10 @@ function progressOf(f: StatusFacts, wf: ItemWorkflow): Progress {
   }
 }
 
+/** One numbered part as the status comment lists it: `- **2** title (dropped)`. */
+export const partLine = (p: Pick<PlanPart, "n" | "title" | "state">): string => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
+  : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`;
+
 /**
  * The paragraphs of the status comment of a started item, before the links. A quiet PR's carry no parts, no recommendation and
  * no blocker reason: an item waiting for an answer there only says it waits for a maintainer.
@@ -97,10 +101,7 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
     if (f.batch) out.push(t("Checked in merge batch #{pr}", { pr: f.batch.pr }));
     else if (s.queue) out.push(s.queue.position <= QUEUE_EXACT ? queueLine(s.queue.position) : t("{n} or more items ahead", { n: QUEUE_EXACT }));
   }
-  if (!quiet && wf.plan.length) {
-    out.push([t("Parts:"), ...wf.plan.map((p) => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
-      : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`)].join("\n"));
-  }
+  if (!quiet && wf.plan.length) out.push([t("Parts:"), ...wf.plan.map(partLine)].join("\n"));
   const rec = !quiet && !ended ? recommendationLine(wf.rec) : null;
   if (rec) out.push(rec);
   return out;

@@ -2559,6 +2559,21 @@ CREATE TABLE IF NOT EXISTS discord_follows (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discord_follows_item ON discord_follows (repo, number);
 CREATE INDEX IF NOT EXISTS discord_follows_channel ON discord_follows (channel_hash);
+-- What the bot last posted about each item a target follows (src/discord/results.ts), so a restart posts nothing twice. `status_hash` is a
+-- hash of the status line last posted; `result_key` the workflow id and recommendation time of the result last posted, `result_hash`
+-- a hash of its text; `sealed` the result message's id sealed with the target and item (keys.ts), '' when none. No message text. A row
+-- goes once its (target, item) row in `discord_follows` is gone.
+CREATE TABLE IF NOT EXISTS discord_follow_posts (
+  target_hash TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  status_hash TEXT NOT NULL,
+  result_key TEXT NOT NULL DEFAULT '',
+  result_hash TEXT NOT NULL DEFAULT '',
+  sealed TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL,
+  PRIMARY KEY (target_hash, repo, number)
+) WITHOUT ROWID;
 
 -- Discord accounts linked to dashboard logins (src/discord/links.ts). `user_hash` is a keyed hash of the Discord user id; the id
 -- itself is never stored. `discord_link_codes` holds the keyed hash of each unused link code (one per login) until it is used or expires.
