@@ -10,8 +10,9 @@ import { loadTrackedRepos, readConfig, saveSettings } from "../data/control/inde
 import { loadRepos } from "../data/mirror/index.ts";
 import { SHARED_NAME } from "./command.ts";
 import { checkoutHeld, touchCheckout } from "./checkout.ts";
-import { checkoutForCommit, sandboxAvailable } from "./index.ts";
+import { checkoutForCommit } from "./index.ts";
 import { envVar } from "../env.ts";
+import { limiter } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -69,6 +70,8 @@ const mtimeOf = (dir: string): number => { try { return statSync(dir).mtimeMs; }
 export class WorkspaceCache {
   private repos = new Map<string, State>();
   private superseded: { dir: string; at: number; mtime: number }[] = [];
+  /** Head lookups, fetches and builds of two repositories at a time, so a first call does not start one per repository. */
+  private readonly lane = limiter(2);
 
   private async refresh(repo: string, branch: string, s: State, d: WorkspaceDeps, log: (l: string) => void): Promise<void> {
     try {
@@ -103,7 +106,7 @@ export class WorkspaceCache {
     const s = this.repos.get(repo) ?? {};
     this.repos.set(repo, s);
     if (s.dir && s.checkedAt !== undefined && d.now() - s.checkedAt < d.headTtlMs && existsSync(s.dir)) { touchCheckout(s.dir); return s.dir; }
-    const job = (s.job ??= this.refresh(repo, branch, s, d, log));
+    const job = (s.job ??= this.lane(() => this.refresh(repo, branch, s, d, log)));
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([job, new Promise<void>((r) => { timer = setTimeout(r, d.boundMs); })]);
     clearTimeout(timer);
@@ -126,9 +129,9 @@ export async function workspaceCheckouts(db: Db, log: (line: string) => void = c
   return out;
 }
 
-/** The workspace for a call, or none when tool mode is unavailable. */
+/** The workspace for a call, or none when AUTOCRAFT_WORKSPACE=off. */
 export async function defaultWorkspace(db: Db): Promise<{ name: string; dir: string }[]> {
-  if (!sandboxAvailable() || envVar("WORKSPACE") === "off") return [];
+  if (envVar("WORKSPACE") === "off") return [];
   try { return await workspaceCheckouts(db); } catch { return []; }
 }
 

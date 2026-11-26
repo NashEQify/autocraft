@@ -91,6 +91,8 @@ export interface AgentRuns {
   user_login: string | null;
   harness: string | null;
   reported_model: string | null;
+  call_id: number | null;
+  refusal: string | null;
   first_repo: string | null;
   first_number: number | null;
 }
@@ -3006,7 +3008,7 @@ export const COLUMNS = {
   agent_run_items: ["run_id", "repo", "number"],
   agent_run_texts: ["run_id", "prompt", "output"],
   agent_run_tools: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"],
-  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "first_repo", "first_number"],
+  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "call_id", "refusal", "first_repo", "first_number"],
   app_allowed_owners: ["login", "account_id", "added_by", "added_at"],
   area_lists: ["repo", "version", "areas", "at", "by", "note"],
   area_proposals: ["id", "repo", "kind", "areas", "created_at", "created_by", "state", "decided_by", "decided_at"],

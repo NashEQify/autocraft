@@ -49,6 +49,8 @@ import type {
   ItemTraceUnchanged,
   ItemPageUnchanged,
   AgentRunFilter,
+  RefusalBreakdown,
+  RefusalWindow,
   AgentRunPage,
   JevStatus,
   Rates,
@@ -382,6 +384,8 @@ export interface Api {
   agents: {
     list(filter: AgentRunFilter): Promise<AgentRunPage>;
     get(id: number): Promise<AgentRunDetail>;
+    /** Operators and maintainers. */
+    refusals(window: RefusalWindow): Promise<RefusalBreakdown>;
   };
   /** Build environments (workers that run untrusted code) and their tasks. Everyone reads; operators write. A worker key is returned once. */
   envs: {

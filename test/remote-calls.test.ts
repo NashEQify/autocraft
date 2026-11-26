@@ -23,6 +23,7 @@ import { remoteRoom } from "../src/remote/room.ts";
 import { setAcceptedModels } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
+import { checkoutForPr } from "../src/sandbox/index.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
@@ -48,11 +49,11 @@ describe("user-local remote calls", async () => {
   const claim = (): Claim => ({ requestId: `test-claim-${String(++claims).padStart(4, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } });
   const canWrite = async () => true;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const leaseFor = async (login: string) => {
+  const leaseFor = async (login: string, extra: Partial<Claim> = {}) => {
     for (let i = 0; i < 200; i++) {
       // A call queued before the claim and not leased by it: nothing for this login. One queued while the claim ran is tried again.
       const queued = !!await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"));
-      const r = await claimCall(db, callers[login]!, claim(), canWrite);
+      const r = await claimCall(db, callers[login]!, { ...claim(), ...extra }, canWrite);
       if (r.lease) return r.lease;
       if (queued) return null;
       await sleep(5);
@@ -384,11 +385,47 @@ describe("user-local remote calls", async () => {
     }
   });
 
+  test("a review on a server with no local sandbox (AUTOCRAFT_NO_SANDBOX=1, no claude) still gets its checkout as a mount and tool mode", async () => {
+    const restore = setWorkspace(async () => []);
+    const saved = { no: process.env.AUTOCRAFT_NO_SANDBOX, bin: process.env.AUTOCRAFT_CLAUDE_BIN };
+    process.env.AUTOCRAFT_NO_SANDBOX = "1";
+    process.env.AUTOCRAFT_CLAUDE_BIN = join(dir, "no-claude");
+    const sha = "d".repeat(40);
+    mkdirSync(join(SCRATCH, "checkouts", "photocraft", sha), { recursive: true });
+    try {
+      const checkout = await checkoutForPr("photocraft", 1287, sha);
+      assert.ok(checkout, "the existing checkout is used");
+      const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db, { checkout, itemTools: null });
+      await idle("bob");
+      const lease = (await leaseFor("bob"))!;
+      const b = (await bundleOf(db, lease.secret))!;
+      assert.ok(b.mounts.some((m) => m.path === "/repo"), "the checkout is mounted");
+      assert.ok(b.maxTurns !== null && b.maxTurns > 0);
+      const args = b.hints.claude!.args;
+      assert.ok(args[args.indexOf("--tools") + 1]!.includes("Read"), "file tools are given");
+      await done(lease.secret, JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } }));
+      await ask;
+    } finally {
+      process.env.AUTOCRAFT_NO_SANDBOX = saved.no;
+      process.env.AUTOCRAFT_CLAUDE_BIN = saved.bin;
+      if (saved.no === undefined) delete process.env.AUTOCRAFT_NO_SANDBOX;
+      if (saved.bin === undefined) delete process.env.AUTOCRAFT_CLAUDE_BIN;
+      restore();
+    }
+  });
+
   test("a failed reply sends the call back to the queue with its next attempt, for another user's helper; the old secret answers 410", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const first = (await leaseFor("bob"))!;
     assert.equal(await heartbeat(db, first.secret, { phase: "running" }), true);
-    assert.deepEqual(await submitCall(db, first.secret, { ok: false, error: "harness crashed", durationMs: 5 }), { accepted: true });
+    const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", first.id)))!.run_id!;
+    const failure = { ok: false, error: "model error the run stopped (exit 1)", stopReason: "max_tokens", subtype: "error_during_execution", usage: { inputTokens: 900, outputTokens: 128000 }, durationMs: 5 };
+    assert.deepEqual(await submitCall(db, first.secret, failure), { accepted: true });
+    // The attempt's run records why it stopped and what it used.
+    const run = (await db.get(db.k.selectFrom("agent_runs").select(["state", "error", "output_tokens"]).where("id", "=", runId)))!;
+    assert.equal(run.state, "failed");
+    assert.match(run.error ?? "", /stop_reason max_tokens.*subtype error_during_execution.*128000 output tokens.*the run stopped/);
+    assert.equal(Number(run.output_tokens), 128000);
     assert.deepEqual({ ...await db.get(db.k.selectFrom("remote_calls").select(["state", "attempt", "released_by", "started_at"]).where("id", "=", first.id)) }, { state: "queued", attempt: 2, released_by: "bob", started_at: null });
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false });
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "not offered to the user whose helper failed it");
@@ -398,6 +435,21 @@ describe("user-local remote calls", async () => {
     assert.equal(second.id, first.id);
     await done(second.secret, "second try");
     assert.equal((await ask)?.text, "second try");
+  });
+
+  test("an Opus review gets its task budget when a Task Runner whose Claude Code takes the flag leases it, and not from the queued call or for an older one", async () => {
+    const REVIEW = JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } });
+    for (const [version, budget] of [["2.1.323", true], ["2.1", false]] as const) {
+      const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
+      const lease = (await leaseFor("bob", { harnessVersion: version }))!;
+      const queued = (await db.get(db.k.selectFrom("remote_calls").select("bundle").orderBy("id", "desc").limit(1)))!;
+      assert.equal(queued.bundle.includes("--task-budget"), false, "a server of an earlier version leasing the queued call hands on no flag");
+      const args = (await bundleOf(db, lease.secret))!.hints.claude!.args;
+      const i = args.indexOf("--task-budget");
+      assert.equal(i >= 0 ? args[i + 1] : null, budget ? "80000" : null, `Claude Code ${version}`);
+      await done(lease.secret, REVIEW);
+      await ask;
+    }
   });
 
   test("gating calls go first, the fast lane takes only gating and small calls, and Max calls at once stops new leases but lets a session finish", async () => {

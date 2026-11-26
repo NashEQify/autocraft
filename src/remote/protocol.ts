@@ -265,7 +265,7 @@ export type TaskBundle = {
   resume?: { parentCallId: number };
   /** Exact arguments for adapters that can use them; an adapter without hints builds its own from the fields above. */
   hints: {
-    /** `claude` arguments as the server would run them (src/prompts `claudeArgs`), for the fixed sandbox paths or below the claim's `root`. The model name is replaced by the claim's model for the tier. */
+    /** `claude` arguments as the server would run them (src/prompts `claudeArgs`), for the fixed sandbox paths or below the claim's `root`, with the prompt's `--task-budget` added at lease time only when the claim's Claude Code is at least the first that takes it. The model name is replaced by the claim's model for the tier. */
     claude?: { args: string[]; /** The `--agents` file content when the call has the explorer. */ agents?: string };
   };
 };
@@ -286,7 +286,8 @@ export type SubmitTool = { name: string; /** The input as JSON, at most 4000 cha
 
 export type Submit =
   | { ok: true; text: string; /** The full model id the harness reported (e.g. from the CLI's result); matched by family against the claim's model for the tier. */ model: string; usage: Usage; /** Per model id, subagents (the explorer) included; `usage` is the whole call when this is absent. */ modelUsage?: Record<string, Usage>; /** The harness's cost for the whole call at list price, when it reports one (the Claude CLI's `total_cost_usd`). */ costUsd?: number; turns?: number; /** The harness session id, kept by the helper for follow-ups. */ sessionId?: string; /** Tool uses in order, subagents included. */ tools?: SubmitTool[]; durationMs: number }
-  | { ok: false; error: string; usage?: Usage; durationMs: number; /** The model's safety filter declined the request: the server runs the call once more on another Task Runner or a lower tier, without using an attempt. */ refused?: boolean };
+  | { ok: false; /** What went wrong, with the harness's own refusal or error text. */ error: string; /** The tokens the run used before it stopped. */ usage?: Usage; durationMs: number; /** The model's safety filter declined the request: the server runs the call once more on another Task Runner or a lower tier, without using an attempt. */ refused?: boolean;
+      /** Why the harness's last model turn stopped, as it reports it (Claude: the result's `stop_reason`, such as refusal or max_tokens); helpers from 1.4.3. */ stopReason?: string; /** The harness's kind of result (Claude: the result's `subtype`, such as error_max_turns or error_during_execution); helpers from 1.4.3. */ subtype?: string };
 
 export type SubmitReply = { accepted: boolean; reason?: string };
 
