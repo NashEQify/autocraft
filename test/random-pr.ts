@@ -307,7 +307,7 @@ export function factsOf(w: PrRows): PrFacts {
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(w.patches.pushes, qh) : [qh];
   if (!mx) {
-    f.review = { head: qh, at: qAt, verdict: verdict!, unsure: take && !r!.sure, reason: "because", fixes: r!.fixes, stale: r!.stale, staleActionable: r!.stale && !r!.capped };
+    f.review = { head: qh, at: qAt, verdict: verdict!, unsure: take && !r!.sure, reason: "because", fixes: r!.fixes, followUps: 0, stale: r!.stale, staleActionable: r!.stale && !r!.capped };
     const last = w.commits.at(-1)!;
     if (w.carried && head !== qh && take && reached(w, qh, head) && (last.by === "fixup" || last.by === "conflict") && !r!.stale) f.carriable = true;
   }

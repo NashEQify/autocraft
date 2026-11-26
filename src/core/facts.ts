@@ -410,6 +410,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const unsure = take && (!latest!.sure || chain.some((h) => d.review.unsureHeads.has(`${ref}@${h}`)));
     base.review = {
       head: qh, at: qAt, verdict: verdict!, unsure, reason: latest!.reason ?? "", fixes: fixes.length,
+      followUps: approved ? (latest!.verdict === "take-fix" ? followUpFixes(latest!.fixes, wfFact?.dropped).length : 0) + (holdGoesOn(latest!.verdict, latest!.workflow?.hold, approved) ? 1 : 0) : 0,
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
     // A stale review does not carry: it has not read the discussion as it is now.
@@ -477,12 +478,15 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   }
   if (state !== "OPEN") return base;
 
+  const filed = d.review.premergeFollowups.get(ref);
+  if (filed?.length) {
+    const headsOf = (source: string) => filed.filter((x) => x.source === source).map((x) => x.head_oid);
+    base.followUps = { heads: headsOf("premerge"), reviewHeads: headsOf("review"), issue: filed.findLast((x) => x.issue_number !== null)?.issue_number ?? null };
+  }
   if (pmRow) {
     const all = findingsOf(pmRow), approved = !!wfFact?.approved;
     const defects = stoppingDefects(all, approved), followUps = approved ? followUpDefects(all).length : 0;
     base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
-    const filed = d.review.premergeFollowups.get(ref);
-    if (filed?.length) base.followUps = { heads: filed.map((x) => x.head_oid), issue: filed.findLast((x) => x.issue_number !== null)?.issue_number ?? null };
     if (defects.length) {
       const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved) : null; };
       base.premergeFixUsed = premergeFixUsedIn(patch.fixups, premergeStalledIn(patch.fixups, qh, defectsAt));

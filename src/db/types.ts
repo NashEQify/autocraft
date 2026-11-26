@@ -1902,6 +1902,7 @@ export interface Preapprovals {
 export interface PremergeFollowups {
   repo: string;
   number: number;
+  source: string;
   head_oid: string;
   issue_number: number | null;
   url: string | null;
@@ -3279,7 +3280,7 @@ export const COLUMNS = {
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
-  premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
+  premerge_followups: ["repo", "number", "source", "head_oid", "issue_number", "url", "state", "at", "note"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],

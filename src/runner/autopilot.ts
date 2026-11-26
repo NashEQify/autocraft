@@ -785,7 +785,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // The defects that do not stop the merge of a PR approved for merge become its follow-up issue, before it merges.
+    // What the reviews of a PR approved for merge found that does not stop it becomes its follow-up issue, before it merges.
     name: "premerge-followups",
     perRepo: true,
     detect: async (db, ctx) => {

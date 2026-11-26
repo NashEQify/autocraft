@@ -5,7 +5,7 @@ import { runPremergeFollowups } from "../src/premerge/followups.ts";
 import { appLane } from "./acting.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import type { World } from "./world-db.ts";
-import { mergesAsPerson, review, run, settle, unstarted } from "./workflow-start-world.ts";
+import { mergesAsPerson, review, reviewed, run, settle, unstarted } from "./workflow-start-world.ts";
 
 const NOT_BLOCKING = { class: null, why: "The empty list fails the same way on the base branch." } as const;
 const kinds = async (w: World) => (await w.prPlan(1)).actions.map((a) => (a.kind === "fixup" ? `fixup:${a.params?.source}` : a.kind));
@@ -65,5 +65,38 @@ test("a later head of ours with the same follow-up posts nothing, and its merge 
   assert.deepEqual([s.repeated, made.length], [["app#1"], posts]);
   await settle(w);
   await mergesAsPerson(w, "sha2");
+  w.close();
+});
+
+/** A review-and-merge start whose review is an unsure take-fix with one major fix of the class given. */
+async function reviewedTakeFix(blocking: { class: "regression" | null; why: string }): Promise<World> {
+  const w = await unstarted(false);
+  await run(w, "review and merge");
+  await settle(w);
+  const fixes = [{ file: "src/lib.rs", change: "rename a to b", title: "Clearer name", major: true, blocking }];
+  await reviewed(w, 1, { verdict: "take-fix", sure: false, fixes });
+  await settle(w);
+  return w;
+}
+
+test("on an approved PR, a review whose fixes all do not block runs no fix-up and stops nothing: the fixes are filed and the PR merges", async () => {
+  const w = await reviewedTakeFix({ class: null, why: "The old name works the same as on the base branch." });
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  const due = await kinds(w);
+  assert.ok(due.includes("followups") && !due.includes("fixup:review") && !due.includes("merge"), due.join(", "));
+  const bodies: string[] = [];
+  const exec = async (_c: string, args: string[], o?: { input?: string }) => { bodies.push(o?.input ?? ""); return { code: 0, stdout: args[1] === "create" ? "https://github.com/storytold/app/issues/77\n" : "", stderr: "" }; };
+  const s = await runPremergeFollowups(w.db, { repo: "app" }, () => {}, { exec, now: () => new Date(), lane: appLane(w.gh.querier) });
+  assert.deepEqual(s.filed, ["app#1"]);
+  assert.match(bodies.join("\n"), /Clearer name/);
+  await settle(w);
+  await mergesAsPerson(w);
+  w.close();
+});
+
+test("on an approved PR, a blocking review fix runs the fix-up and files nothing", async () => {
+  const w = await reviewedTakeFix({ class: "regression", why: "Callers of the old name stop building." });
+  const due = await kinds(w);
+  assert.ok(due.includes("fixup:review") && !due.includes("followups"), due.join(", "));
   w.close();
 });

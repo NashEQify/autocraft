@@ -716,13 +716,13 @@ export const STEPS: StepDef[] = [
       const { runPremerge } = await import("../premerge/review.ts");
       const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
-      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
+      return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} blocking defects, ${r.notBlocking} not blocking), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
     },
   },
   {
     name: "premerge-followups",
     title: "File follow-ups of approved merges",
-    description: "For each pull request a maintainer approved for merge whose pre-merge review found defects that do not stop the merge, opens one follow-up issue that lists them (where, what goes wrong, why it does not block) and links the pull request; a later head's follow-ups are a comment on that issue. The merge waits for the try. Writes to GitHub in repos approved for comments, or as the approver's work.",
+    description: "For each pull request a maintainer approved for merge whose review found fixes or a hold that do not block the merge (they are not made), or whose pre-merge review found defects that do not stop it, opens one follow-up issue that lists them (where, what to change or what goes wrong, why it does not block) and links the pull request; later follow-ups are a comment on that issue. The merge waits for the try. Writes to GitHub in repos approved for comments, or as the approver's work.",
     stage: runStage("premerge-followups"),
     requires: "operator",
     params: [

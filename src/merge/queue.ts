@@ -5,7 +5,7 @@ import { decidePr, mergeEntry, queueEntry } from "../core/decide.ts";
 import { loadPass, loadPrFacts } from "../core/facts.ts";
 import { isQueueState, QUEUE_STATES, type MergePath, type PrFacts, type QueueState } from "../core/plan.ts";
 import { claimsOf, findingsOf, type PremergeFinding } from "../premerge/store.ts";
-import { stoppingDefects } from "../premerge/types.ts";
+import { followUpDefects, stoppingDefects } from "../premerge/types.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge } from "../data/review/index.ts";
 import type { PremergeRow } from "../data/review/types.ts";
@@ -52,7 +52,7 @@ export type QueueEntry = {
   /** The PR is one AutoCraft opened to fix main CI (branch prefix MAIN_FIX_BRANCH_PREFIX); it merges alone, also while main is red. */
   mainFix?: boolean;
   /** The pre-merge review of the head, read for open PRs the rule would otherwise merge; null when not read (outside the rule, or an operator's Merge answer). fix: every defect has a fix and a fix-up may apply them; defect: a defect to decide on; failed: three tries failed; retry: a try failed, more are left. */
-  premerge: { state: "none" | "clean" | "fix" | "defect" | "unsure" | "failed" | "retry"; defects: PremergeFinding[]; /** Claims of the description the review could not settle (unknown impact, or unverified). */ unknownClaims: Claim[]; minor: number; error: string | null } | null;
+  premerge: { state: "none" | "clean" | "fix" | "defect" | "unsure" | "failed" | "retry"; defects: PremergeFinding[]; /** Claims of the description the review could not settle (unknown impact, or unverified). */ unknownClaims: Claim[]; /** On a PR approved for merge, the defects that do not stop it: filed as follow-ups. */ followUps: PremergeFinding[]; minor: number; error: string | null } | null;
 };
 
 /** True when the PR may be merged now (ready, approved, or retried after a refusal). */
@@ -83,8 +83,9 @@ function entryOf(f: PrFacts, plan: ReturnType<typeof decidePr>, title: string, p
   let premerge: QueueEntry["premerge"] = null;
   if (x.premerge) {
     const all = findingsOf(premergeRow);
-    const defects = stoppingDefects(all, !!f.workflow?.approved);
-    premerge = { state: x.premerge, defects, unknownClaims: claimsOf(premergeRow).filter((c) => c.impact === "unknown"), minor: all.length - defects.length, error: premergeRow?.error ?? null };
+    const approved = !!f.workflow?.approved;
+    const defects = stoppingDefects(all, approved), followUps = approved ? followUpDefects(all) : [];
+    premerge = { state: x.premerge, defects, unknownClaims: claimsOf(premergeRow).filter((c) => c.impact === "unknown"), followUps, minor: all.length - defects.length - followUps.length, error: premergeRow?.error ?? null };
   }
   return {
     repo: f.repo, number: f.number, title, author: f.author, tier: f.tier, head, size: f.size, label: f.label,

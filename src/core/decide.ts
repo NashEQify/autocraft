@@ -87,6 +87,15 @@ const unmergeable = (f: PrFacts): string[] => [
 const fixing = (f: PrFacts): boolean => ["fix", "running"].includes(premergeFix(f));
 
 /**
+ * The latest review of a PR approved for merge has fixes, or a hold, that do not block it (src/core/review-blocking.ts): they are not made, and
+ * are filed in its follow-up issue, once per reviewed head. A stale review is read again first.
+ */
+export const reviewFollowUpsDue = (f: PrFacts): boolean => {
+  const r = f.review;
+  return !!workflowOf(f)?.approved && !!r && r.followUps > 0 && !r.stale && !f.followUps?.reviewHeads.includes(r.head);
+};
+
+/**
  * The pre-merge review at the head of a PR approved for merge found defects that do not stop it, and none that do: the PR goes on to merge,
  * and those defects are filed in its follow-up issue (a later head's comment on it), once per head.
  */
@@ -723,7 +732,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   }
 
   // File the follow-ups of a PR approved for merge: the defects of its pre-merge review at the head that do not stop the merge, once per head.
-  if (!held && followUpsDue(f)) actions.push(act("followups", f.head));
+  if (!held && followUpsDue(f)) actions.push(act("followups", f.head, { source: "premerge" }));
+  // And the review's fixes and hold that do not block it, at the reviewed head.
+  if (!held && reviewFollowUpsDue(f)) actions.push(act("followups", f.review!.head, { source: "review" }));
 
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
   const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale;
@@ -786,7 +797,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   if (e) {
     if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
     // The follow-ups of an approved PR are filed before it merges; a filing the pipeline's own job may not run (refused, or the pipeline off) holds nothing back.
-    const filingFirst = followUpsDue(f) && mayRun({ facts: f, action: act("followups", f.head) }, "pipeline").ok;
+    const filingFirst = (followUpsDue(f) || reviewFollowUpsDue(f)) && mayRun({ facts: f, action: act("followups", f.head) }, "pipeline").ok;
     if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && filingFirst) filingHeld = true;
     else if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting) {
       const singleOnly = f.verification?.state === VERIFY_UNAVAILABLE || f.verifyOverride || f.mainFix;
