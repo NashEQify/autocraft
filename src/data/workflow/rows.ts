@@ -13,6 +13,7 @@ import { weightOfScore } from "../../core/work-score.ts";
 import { goOnAt, isGoOn, linkRows, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
+import { loadChatBefore, patchTalks, recordWorkflowMessages, retitleConversations } from "../chat/workflow.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
@@ -344,6 +345,7 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
     }
     const ids = rows.filter((w) => w.entry === "implement").flatMap((w) => out.get(refKey(w.repo, w.number)) ?? []);
     await linkWorkflows(db, { ids });
+    await retitleConversations(db, rows.filter((w) => out.has(refKey(w.repo, w.number))));
   });
   return out;
 }
@@ -382,15 +384,22 @@ function patchGroups(rows: { id: number; patch: WorkflowPatch; at?: string }[]):
 /** The columns of a patch that are not text. */
 const BIGINT: readonly string[] = ["id", "weight", "legacy_preapproval_id"];
 
-/** Batched update, one statement per distinct patch column set; each row's `version` goes up by one. Returns the rows changed. */
+/**
+ * Batched update, one statement per distinct patch column set; each row's `version` goes up by one. A row that comes back with a new
+ * recommendation, or ends done or closed, gets AutoCraft's message in its item's chat in the same write (src/data/chat/workflow.ts).
+ * Returns the rows changed.
+ */
 export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
   if (rows.length === 0) return 0;
   return await db.write(async () => {
+    const talking = rows.filter((r) => patchTalks(r.patch)).map((r) => r.id);
+    const before = talking.length ? await loadChatBefore(db, talking) : null;
     let changed = 0;
     for (const group of patchGroups(rows)) {
       const set = Object.fromEntries(Object.keys(group[0]!).filter((c) => c !== "id").map((c) => [c, BIGINT.includes(c) ? "bigint" as const : "text" as const]));
       changed += await patchRows(db, "main.item_workflows", { id: "bigint" }, set, group, { also: (eb) => ({ version: eb("main.item_workflows.version", "+", 1) }) });
     }
+    if (before) await recordWorkflowMessages(db, before);
     return changed;
   });
 }

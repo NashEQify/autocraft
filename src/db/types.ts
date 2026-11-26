@@ -291,6 +291,31 @@ export interface ChangeSeq {
   at: string | null;
 }
 
+export interface ChatConversations {
+  id: Generated<number>;
+  repo: string | null;
+  number: number | null;
+  is_main: Generated<number>;
+  title: string;
+  created_at: string;
+  created_by: string;
+}
+
+export interface ChatMessages {
+  id: Generated<number>;
+  conversation_id: number;
+  author: string;
+  via: string;
+  kind: string;
+  body: string;
+  payload: string | null;
+  workflow_event_id: number | null;
+  turn_id: number | null;
+  workflow_id: number | null;
+  github_comment_id: number | null;
+  at: string;
+}
+
 export interface CiFixes {
   repo: string;
   number: number;
@@ -458,6 +483,7 @@ export interface ConversationTurns {
   claim: string | null;
   claimed_at: string | null;
   progress: string | null;
+  conversation_id: number | null;
 }
 
 export interface Conversations {
@@ -2570,6 +2596,8 @@ export interface DB {
   build_task_logs: BuildTaskLogs;
   build_tasks: BuildTasks;
   change_seq: ChangeSeq;
+  chat_conversations: ChatConversations;
+  chat_messages: ChatMessages;
   ci_fixes: CiFixes;
   ci_run_approvals: CiRunApprovals;
   classifications: Classifications;
@@ -2777,6 +2805,8 @@ export interface DB {
   "main.build_task_logs": BuildTaskLogs;
   "main.build_tasks": BuildTasks;
   "main.change_seq": ChangeSeq;
+  "main.chat_conversations": ChatConversations;
+  "main.chat_messages": ChatMessages;
   "main.ci_fixes": CiFixes;
   "main.ci_run_approvals": CiRunApprovals;
   "main.classifications": Classifications;
@@ -2988,6 +3018,8 @@ export const COLUMNS = {
   build_task_logs: ["task_id", "seq", "step", "chunk"],
   build_tasks: ["id", "job_id", "step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "state", "env_id", "attempts", "queued_at", "claimed_at", "started_at", "ended_at", "heartbeat_at", "cancel_requested_at", "results", "summary", "log_bytes", "artifact_bytes", "patch", "warm_key", "warm_role", "sandbox_env", "warm_image", "warm_version", "warm_rev"],
   change_seq: ["topic", "seq", "at"],
+  chat_conversations: ["id", "repo", "number", "is_main", "title", "created_at", "created_by"],
+  chat_messages: ["id", "conversation_id", "author", "via", "kind", "body", "payload", "workflow_event_id", "turn_id", "workflow_id", "github_comment_id", "at"],
   ci_fixes: ["repo", "number", "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "runs", "created_at", "session", "patch", "lint_task", "lint_round", "lint_state"],
   ci_run_approvals: ["repo", "number", "head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"],
   classifications: ["repo", "number", "classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"],
@@ -2999,7 +3031,7 @@ export const COLUMNS = {
   conflict_merges: ["repo", "number", "from_head", "to_head", "base_sha", "state", "reason", "files", "attempt", "created_at", "session", "patch", "lint_task", "lint_round", "own_diff", "own_delta"],
   conversation_cards: ["id", "turn_id", "repo", "number", "kind", "params", "text", "description", "state", "result", "result_url", "error", "acted_by", "acted_at", "edited_by", "edited_at", "seen", "choice_id", "queued_at", "queue_args", "dispute_by", "dispute_reason", "dispute_at"],
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
-  conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress"],
+  conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress", "conversation_id"],
   conversations: ["repo", "number", "item_block", "item_sig", "created_at", "created_by"],
   db_stats: ["scope", "minute", "statements", "round_trips", "ms", "calls"],
   decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at", "asked_by"],
