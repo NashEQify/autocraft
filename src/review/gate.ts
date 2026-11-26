@@ -1,6 +1,6 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
-import { ciAt } from "../core/evidence.ts";
+import { authorRound, ciAt, type OwnPush } from "../core/evidence.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
@@ -13,7 +13,8 @@ import { loadReviewRunCounts } from "../data/inference/index.ts";
 import { loadRunApprovals } from "../data/merge/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadReviewFacts, recordReviewFailures, type ReviewFacts } from "../data/review/index.ts";
-import { loadLegs } from "../data/workflow/index.ts";
+import { loadLegs, loadWorkflowFacts, type WorkflowFact } from "../data/workflow/index.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
 
 /** Opus review calls of one PR per UTC day, new heads, re-runs and failed calls together (a reply-fix turn is part of its review). */
 export const MAX_REVIEWS_PER_DAY = MAX_RERUNS_PER_DAY;
@@ -71,18 +72,26 @@ export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
   edges: ReadonlyMap<string, readonly PushEdge[]>;
   /** The run approvals at each head, by "repo#number@head". */
   approvals: ReadonlyMap<string, { approved: readonly number[] }>;
+  /** Whether the PR ("repo#number") waits at `head` for the review round of its author's new commits (roundWaits). */
+  authorRound?: (ref: string, head: string) => boolean;
 };
+
+/** A running workflow of the PR itself, approved for merge, whose author pushed past the head it accepted (core/evidence.ts authorRound). */
+export const roundWaits = (w: (Pick<WorkflowFact, "approved" | "baseHead" | "own" | "state">) | null | undefined, pushes: readonly OwnPush[], head: string): boolean =>
+  !!w && w.own && w.state === "running" && authorRound(w, pushes, head) !== null;
 
 export type HoldCheck = (repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>;
 
 /** The hold check of `refs` ("repo#number"; every PR without them), with what it reads loaded once. */
 export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<HoldCheck> {
   const keys: KeySource = refs ? [...refs].map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) })) : { mode: "full" };
-  const [facts, inputs, interval, optional, edges, approvals] = await db.together(() => Promise.all([
+  const [facts, inputs, interval, optional, edges, approvals, workflows, pushes] = await db.together(() => Promise.all([
     loadReviewFacts(db, keys, { now: nowMs }), loadHoldInputs(db, keys, nowMs), reviewMinInterval(db), optionalChecksOf(db), loadPushEdges(db, keys), loadRunApprovals(db, keys),
+    loadWorkflowFacts(db, keys, { nowMs }), loadOwnPushes(db, keys),
   ]));
   const reads = await loadBlockerReads(db, [...facts.latest.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
-  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges, approvals }, nowMs);
+  const authorRound = (ref: string, head: string): boolean => roundWaits(workflows.live.get(ref), pushes.get(ref) ?? [], head);
+  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges, approvals, authorRound }, nowMs);
 }
 
 /**
@@ -119,7 +128,8 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
       } else if (at + delay > nowMs) return { kind: "failed", wait: `the review after ${n} failed ${n === 1 ? "try" : "tries"} at this commit, from ${new Date(at + delay).toISOString().slice(11, 16)}`, until: at + delay };
     }
     // A person's pre-approved merge waits for the review of the head the pipeline pushed for it: that is their request for it, as a review-again press would be.
-    if (preapproved.has(`${ref}@${head}`)) return null;
+    // So does the review round of the author's new commits on a PR approved for merge.
+    if (preapproved.has(`${ref}@${head}`) || d.authorRound?.(ref, head)) return null;
     if (last) {
       // reviewRequestedSince() with the stale marks read once.
       if (staleSince(repo, number, last.at) || await maintainerSince(states.get(ref), last.seen_at ?? last.at, last.disc_hash)) return null;

@@ -96,7 +96,7 @@ export const COMMANDS: readonly CommandDef[] = [
   {
     word: "resume", usage: "resume", aliases: ["continue", "carry on", "unpause"], entry: null,
     short: tk("Go on with a held item."),
-    does: tk("Goes on with a held item where it was, with its merge approval, now in your name. yes does the same. If the author pushed commits meanwhile, AutoCraft asks first. An item nobody started goes back to how it was."),
+    does: tk("Goes on with a held item where it was, with its merge approval, now in your name. yes does the same. If the author pushed commits meanwhile, AutoCraft reviews them first. An item nobody started goes back to how it was."),
     back: tk("As the plan said before the hold."),
     example: "resume",
   },

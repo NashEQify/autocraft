@@ -14,6 +14,8 @@ export type WorkflowFact = {
   /** Up to when a person has seen the item and chose to go on with it: its start, or when the question they answered was asked. */
   since: string;
   reviewAskedAt: string | null;
+  /** The PR head the workflow last accepted (`base_head`); for an issue, the implementation head its files were shown at. */
+  baseHead: string | null;
   /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
   dropped?: string[];
 };

@@ -131,7 +131,7 @@ export const afterPush = (rec: Recommendation): Recommendation => ({ ...rec, tex
  * - a failing step runs again (the fix-up of the planned parts, a new review for a failing CI fix; a stuck implementation comes back through question.ts);
  * - findings of the pre-merge review (`params.premerge`: their plan parts) are fixed first, never merged as they are;
  * - a major finding or a change outside the purpose takes the review's own recommendation when it gave one;
- * - the author's commits on a PR that merges without a review (`mergeEntry`) are reviewed; on any other they are anyway;
+ * - the author's commits that the review round found beyond what was approved are kept; where the round had no review, they are reviewed;
  * - for the rest, what the blocker was about is accepted as it is.
  */
 export function atBlocker(found: Found, review: ReviewView | null, plan: readonly PlanPart[], mergeEntry = false): Recommendation {
@@ -144,7 +144,15 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
-    case "author-commits": return go(t("Review the new commits, then merge."), { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
+    case "author-commits": {
+      // The review round found the author's new commits beyond what was approved (advance.ts): its public finding, and a yes keeps them.
+      if (p.round === "out-of-scope") {
+        const finding = typeof p.finding === "string" && p.finding.trim() ? asSentence(clipText(p.finding, FINDING_CHARS)) : null;
+        const said = finding ? t("The review finds the author's new commits go beyond what was approved: {finding}", { finding }) : t("The review finds the author's new commits go beyond what was approved.");
+        return go(`${said} ${t("Keep them, then merge.")}`);
+      }
+      return go(t("Review the new commits, then merge."), { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
+    }
     case "failed-twice": {
       if (p.step === "fix-up") {
         const fix = planned(plan);
@@ -168,6 +176,8 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       return go(t("Merge it as it is."));
     }
     case "other": {
+      // The review of the author's new commits failed for good: a yes asks for it again.
+      if (p.round === "review-failed") return go(t("Review the author's new commits again, then merge."), { newCommits: true, again: "review" });
       return afterStop(String(p.reason ?? ""), go);
     }
   }

@@ -179,5 +179,14 @@ export function acceptedHeads(
   return heads.filter((h) => h !== null);
 }
 
+/**
+ * The head a person accepted when someone else's commits lead from it to `head`, on a PR approved for merge: the author's new commits,
+ * which Opus reviews before the merge goes on (the review round, src/workflow/advance.ts). Null when the head is the accepted one or our own pushes on top of it.
+ */
+export function authorRound(w: { approved: boolean; baseHead: string | null } | null | undefined, pushes: readonly OwnPush[], head: string | null): string | null {
+  if (!w?.approved || w.baseHead == null || head === null || chainsOwn(pushes, w.baseHead, head)) return null;
+  return w.baseHead;
+}
+
 /** Whether `head` is one of `heads` or our own pushes on top of one. */
 export const isAccepted = (heads: readonly string[], pushes: readonly OwnPush[], head: string): boolean => heads.some((h) => chainsOwn(pushes, h, head));

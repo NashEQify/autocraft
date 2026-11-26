@@ -15,8 +15,9 @@ import { notDue, planNow } from "../core/select.ts";
 import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
 import type { DiscussionEntry } from "./parse.ts";
-import { reviewAfterBaseMerge } from "./own-diff.ts";
-import { MAX_DIFF_CHARS, cachedDiff, cachedDiffBase, codeDiff, ghDelta, ghDiff, type DeltaFetcher, type DiffFetcher } from "./diff.ts";
+import { changedHunks, reviewAfterBaseMerge, sameOwnDiff } from "./own-diff.ts";
+import { MAX_DIFF_CHARS, cachedDiff, cachedDiffBase, cachedDiffText, codeDiff, ghDelta, ghDiff, type DeltaFetcher, type DiffFetcher } from "./diff.ts";
+import { CARRIED } from "./carry.ts";
 import { selectOpusCandidates, type OpusCandidate } from "./opus-candidates.ts";
 import { carriedOutcome, rawReason, type EarlierOpus, type OpusPr, type OpusReview, type UnappliedFix } from "./opus-parse.ts";
 import { ourCommitsSince } from "./ours.ts";
@@ -31,7 +32,9 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
-import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
+import { loadReviewRows, loadReviewTexts, saveReviews, type ReviewRow } from "../data/review/index.ts";
+import { loadOwnPushes } from "../data/views/own-pushes.ts";
+import { authorRound } from "../core/evidence.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
@@ -135,6 +138,53 @@ async function reviewedBase(db: Db, c: { repo: string; number: number; head_oid:
   return cachedDiffBase(c.repo, c.number, c.head_oid) ?? (await loadItems(db, [{ repo: c.repo, number: c.number }], "pr")).get(refOf(c))?.base_ref ?? null;
 }
 
+/**
+ * The review round of the author's new commits (src/workflow/advance.ts): the head the approver accepted, when someone else's commits lead
+ * from it to the candidate's head; null otherwise. `wf`: the PR's live workflow.
+ */
+async function roundOf(db: Db, c: { repo: string; number: number; head_oid: string }, wf: ItemWorkflow | undefined): Promise<string | null> {
+  if (wf?.kind !== "pr" || wf.number !== c.number || wf.approvedBy === null) return null;
+  const pushes = (await loadOwnPushes(db, [{ repo: c.repo, number: c.number }])).get(refOf(c)) ?? [];
+  return authorRound({ approved: true, baseHead: wf.baseHead }, pushes, c.head_oid);
+}
+
+/** A review recorded at a head without a model call: what it says, the head it was carried from, and the discussion mark of that review. */
+export type RoundCarry = { review: OpusReview; from: string; baseRef: string | null; snap: Snapshot };
+
+/**
+ * The review the round's head takes over without a model call: the author's push left the PR's own diff as the latest earlier review read it
+ * (a merge of the base branch, a rebase), so that sure take or take-fix carries to the head with its fixes, as over our own merge of the base
+ * branch (carry.ts). Null when it does not carry: no round, no such review, a review stale for new discussion (`stale`: "repo#n@head"), another
+ * base branch, the earlier head's diff not cached, or the head's diff not readable.
+ */
+export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, "fetchDiff">, stale: ReadonlySet<string>): Promise<RoundCarry | null> {
+  const { repo, number } = c, ref = refOf(c);
+  const [workflows, stored, items, repos] = await db.together(() => Promise.all([
+    loadPrWorkflows(db, [{ repo, number }]), loadReviewRows(db, [{ repo, number }]), loadItems(db, [{ repo, number }], "pr"), loadRepos(db, { names: [repo] }),
+  ]));
+  const wf = workflows.get(ref);
+  if (!wf || (stored.get(ref) ?? []).some((r) => r.head === c.head_oid) || !await roundOf(db, c, wf)) return null;
+  // A PR a person sent to merge without a review carries only a review made after they did.
+  const since = wf.entry === "merge" ? (await loadGoOnAt(db, [wf])).get(wf.id)!.since : null;
+  const e = earlierRows(stored, c)[0];
+  if (!e || (since !== null && e.at <= since) || !e.sure || (e.verdict !== "take" && e.verdict !== "take-fix") || stale.has(`${ref}@${e.head}`)) return null;
+  const baseRef = e.base_ref ?? repos.get(repo)?.default_branch ?? null, liveBase = items.get(ref)?.base_ref ?? null;
+  if (baseRef && liveBase && baseRef !== liveBase) return null;
+  const was = cachedDiffText(repo, number, e.head);
+  if (was === null) return null;
+  const d = await cachedDiff(db, repo, number, c.head_oid, deps.fetchDiff, liveBase);
+  if (!d.ok || (d.base && baseRef && d.base !== baseRef) || !sameOwnDiff(was, d.text)) return null;
+  const texts = (await loadReviewTexts(db, [{ repo, number, head: e.head }])).get(`${ref}@${e.head}`);
+  return {
+    review: {
+      ref, verdict: e.verdict, sure: true, fixes: e.fixes as OpusReview["fixes"], risks: e.risks, conflicts: e.conflicts as unknown as OpusReview["conflicts"], claims: [], blocked_by: [], public: null,
+      summary: texts?.summary ?? null, why: texts?.why ?? null,
+      reason: `carried from ${e.head.slice(0, 7)}: the author's push left the PR's own diff unchanged`,
+    },
+    from: e.head, baseRef, snap: { seen: e.seen_at ?? e.at, hash: e.disc_hash },
+  };
+}
+
 /** `base`: the earlier head a delta was read from; `baseRef`: the base branch the whole PR diff was read against. */
 export type PreparedOpus =
   | { kind: "no-diff"; error: string }
@@ -196,7 +246,12 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const earlier = prior && (priorBase === null || baseRef === null || priorBase === baseRef) ? prior : null;
   // A merge commit of ours carries the base branch's changes since the earlier head, so a delta of the heads would show unrelated changes: the delta is taken between the PR's own diffs.
   const merged = (await loadOwnDeltas(db, [{ ref, toHead: c.head_oid }])).get(`${ref}@${c.head_oid}`);
-  if (earlier && !merged) {
+  // So does an author's merge of the base branch: in the review round the delta is what the PR's own diff gained and lost, where the earlier head's diff is cached.
+  const accepted = await roundOf(db, c, wf);
+  const was = accepted && earlier && !merged ? cachedDiffText(repo, c.number, earlier.head) : null;
+  const own = was !== null ? codeDiff(changedHunks(was, d.text), deps.maxChars) : null;
+  if (own?.text && !own.testsOmitted.length) { mode = "delta"; diff = own.text; base = earlier!.head; }
+  else if (earlier && !merged) {
     const delta = await deps.fetchDelta(repo, earlier.head, c.head_oid);
     // A delta whose test files do not all fit is not used: the full diff shows them.
     const dd = delta.ok ? codeDiff(delta.text, deps.maxChars) : null;
@@ -223,7 +278,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const input: OpusPr = {
     ref: refOf(c), title: c.title, body: c.body, author_association: c.author_association, size: c.size, lines_changed: c.lines_changed,
     ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
-    mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}), ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
+    mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}), ...(accepted ? { author_commits: { approved_head: accepted } } : {}),
+    ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
     related_open: await relatedOpen(db, repo, c.number, cd.files),
     statements: await relatedStatements(db, repo, c.number), ...scope,
   };
@@ -239,6 +295,18 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
   const capped = [...allStale].filter((k) => !uncapped.has(k));
   if (capped.length) log(`opus-review ${repo}: ${capped.join(", ")} not reviewed again: already ${MAX_RERUNS_PER_DAY} re-reviews today after new discussion`);
   const summary: OpusSummary = { runId, repo, candidates: cands.length, reviewed: 0, dropped: 0, verdicts: {}, missing: [], skipped: [], off: [] };
+  if (!params.dryRun) {
+    // An author's push that left the PR's own diff as reviewed, in the review round, keeps that review: no model call and no Task Runner.
+    const carried = new Set<number>();
+    for (const c of cands) {
+      const k = await roundCarry(db, c, deps, allStale);
+      if (!k) continue;
+      await saveOpus(db, runId, c, { mode: CARRIED, base: k.from, baseRef: k.baseRef, model: CARRIED, review: k.review, snap: k.snap });
+      await jobItem(db, c.repo, c.number, `carried review: ${k.review.reason}`, log);
+      carried.add(c.number);
+    }
+    cands = cands.filter((c) => !carried.has(c.number));
+  }
   cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
   if (params.dryRun || !cands.length) {
     log(`opus-review ${repo}: ${summary.candidates} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);

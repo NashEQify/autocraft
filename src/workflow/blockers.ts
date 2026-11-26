@@ -9,7 +9,7 @@ import type { Blocker, Entry } from "./types.ts";
 export type BlockerFacts = {
   entry: Entry;
   approved: boolean;
-  /** A push that is not ours moved the PR's head off the head the workflow last accepted (`base_head`). */
+  /** A push that is not ours moved the PR's head off the head the workflow last accepted (`base_head`). A PR's own workflow sends it to the review round instead (advance.ts), so it comes here as a blocker only for an issue's implementation PR. */
   authorPush: { from: string | null; to: string } | null;
   /** The review at the current head, when it was made after `since`. `majors`: numbers of the parts it marks major. */
   review: { verdict: string; sure: boolean; majors: number[]; outsideLines: number } | null;

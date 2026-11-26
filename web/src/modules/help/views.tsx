@@ -306,6 +306,7 @@ function After() {
           ))}
         </ol>
         <p className="text-sm">{t("At a blocker the approval stays. A yes resumes the plan.")}</p>
+        <p className="text-sm">{t("New commits from the author after the approval are reviewed first, and the approval stays. Fixes, answers to review or CI, a merge of the base branch and small adjustments go on to the merge; the item comes back only when the review finds the commits beyond what was approved. A merge of the base branch that leaves the pull request's own changes as they were keeps the earlier review.")}</p>
         <p className="text-sm">{t("After the merge, a model reviews the change if AutoCraft changed code after the approval, wrote the pull request after it, or merged it automatically.")}</p>
       </Part>
       <Part title={t("Messages AutoCraft can't read")}>
@@ -326,7 +327,7 @@ function After() {
             {t("On their own,")} <Code>stop</Code>, <Code>pause</Code>, <Code>wait</Code>, <Code>hold on</Code>, <Code>not yet</Code> {t("mean the same. In a longer message that asks for something else they run nothing.")}
           </li>
           <li>
-            <Code>resume</Code>, <Code>continue</Code>, <Code>yes</Code> {t("on a held item go on with its plan, merge approval included, in the name of whoever wrote it. If the author pushed commits meanwhile, AutoCraft asks first.")}
+            <Code>resume</Code>, <Code>continue</Code>, <Code>yes</Code> {t("on a held item go on with its plan, merge approval included, in the name of whoever wrote it. If the author pushed commits meanwhile, AutoCraft reviews them first.")}
           </li>
           <li>{t("Any other command starts the item again as usual.")}</li>
         </ul>

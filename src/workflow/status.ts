@@ -8,7 +8,7 @@ import { asksNobody } from "./asked.ts";
 import { heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 
-export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend";
+export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend" | "review new commits";
 export type StepState = "done" | "running" | "waiting" | "stopped" | "next";
 export type Step = {
   name: StepName;
@@ -32,6 +32,15 @@ const ENTRY_STEPS: Record<Entry, StepName[]> = {
 export const stepsFor = (entry: Entry, approved: boolean): StepName[] =>
   entry === "merge" ? ENTRY_STEPS.merge : [...ENTRY_STEPS[entry], approved ? "merge" : "recommend"];
 
+/** The review round of the author's commits on an approved PR (src/workflow/advance.ts): recorded as the step, it runs right before the merge. */
+export const ROUND_STEP: StepName = "review new commits";
+
+/** The workflow's steps by name: stepsFor, with the review round before the merge while the advance pass records it. */
+export function stepNamesOf(wf: Pick<ItemWorkflow, "entry" | "approvedBy" | "step">): StepName[] {
+  const names = stepsFor(wf.entry, wf.approvedBy !== null);
+  return wf.step === ROUND_STEP ? [...names.slice(0, -1), ROUND_STEP, names[names.length - 1]!] : names;
+}
+
 /** Steps with states: those before `at` done, `at` in state `now`, the rest next. */
 export const stepsAt = (names: StepName[], at: number, now: StepState = "running", notes: Record<number, string> = {}): Step[] =>
   names.map((name, i) => ({ name, ...(notes[i] ? { note: notes[i] } : {}), state: i < at ? "done" : i === at ? now : "next" }));
@@ -46,6 +55,7 @@ const STEP_LABEL: Record<StepName, string> = {
   batch: tk("batch"),
   merge: tk("merge"),
   recommend: tk("come back with a recommendation"),
+  "review new commits": tk("review the author's new commits"),
 };
 const STATE_LABEL: Record<StepState, string> = { done: tk("done"), running: tk("running"), waiting: tk("waiting"), stopped: tk("stopped"), next: tk("next") };
 
@@ -63,7 +73,7 @@ export const recordedStep = (wf: Pick<ItemWorkflow, "step">, names: readonly Ste
  * those before it are done. A row with no recorded step yet reads it from where the machinery is.
  */
 export function workflowSteps(wf: Pick<ItemWorkflow, "entry" | "kind" | "state" | "approvedBy" | "plan" | "step">, progress: Progress): Step[] {
-  const names = stepsFor(wf.entry, wf.approvedBy !== null);
+  const names = stepNamesOf(wf);
   if (progress === "merged" || wf.state === "done" || wf.state === "closed") return stepsAt(names, names.length);
   const idx = (n: StepName): number => names.indexOf(n);
   const last = names.length - 1;
@@ -90,7 +100,7 @@ export const currentStep = (steps: readonly Step[]): Step | undefined => steps.f
 
 const BLOCKER_LABEL: Record<Blocker, string> = {
   "major-finding": tk("a major finding in the review"),
-  "author-commits": tk("new commits from the author"),
+  "author-commits": tk("new commits from the author beyond what was approved"),
   "failed-twice": tk("a step failed twice"),
   "beyond-agreed": tk("work beyond what was agreed"),
   "large-fix": tk("a large fix"),

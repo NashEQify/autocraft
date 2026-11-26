@@ -56,7 +56,7 @@ const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFac
   const dropped = w.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
   return {
     id: w.id, entry: w.entry, approved: w.approvedBy !== null, approvedBy: w.approvedBy, startedBy: w.startedBy, startedAt: w.startedAt, weight: w.weight, state: w.state, own,
-    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt, reviewAskedAt: w.reviewAskedAt,
+    since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt, reviewAskedAt: w.reviewAskedAt, baseHead: w.baseHead,
     ...(dropped.length ? { dropped } : {}),
   };
 };

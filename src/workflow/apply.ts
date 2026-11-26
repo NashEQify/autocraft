@@ -533,9 +533,10 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
     const pr = live.kind === "issue" && !r.pick ? await issuePr(live) : null;
     if (pr?.head) patch.acceptedHead = pr.head;
   }
-  // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts).
+  // A PR that merges without a review is reviewed once a person asks for it. The word merge approves the author's commits without that (resolve.ts);
+  // commits the review round has read keep its review, whose fixes still count.
   if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
-  else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits") patch.reviewAskedAt = null;
+  else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits" && live.blockerParams?.round !== "out-of-scope") patch.reviewAskedAt = null;
   if (runs) patch.state = r.again !== null || r.merges || r.pick || r.goesOn ? "running" : r.answers ? "done" : live.state;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
@@ -557,7 +558,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
 
 /**
  * Goes on with the held workflow as it was, as the person: its steps, or its open question again. An approved one merges as them, and they
- * accept no commits by it: the advance pass asks about the author's, and the approval keeps its time, which says up to when the code was accepted.
+ * accept no commits by it: the advance pass reviews the author's, and the approval keeps its time, which says up to when the code was accepted.
  * An item nobody started has nothing to go back to, so its row goes. An issue that never had an implementation PR, whose attempt the hold ended,
  * starts again with the plan and the approval it had; one whose PR merged or closed meanwhile ends with the advance pass.
  */

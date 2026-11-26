@@ -32,6 +32,9 @@ export function ownDiffKey(diff: string): string {
 /** True when the diff touches a binary file, whose content the added and removed lines do not show. */
 export const hasBinary = (diff: string): boolean => /^(Binary files |GIT binary patch)/m.test(diff);
 
+/** Two diffs of one PR make the same change: the same added and removed lines, and no binary file whose content they cannot show. */
+export const sameOwnDiff = (before: string, after: string): boolean => !hasBinary(before) && !hasBinary(after) && ownDiffKey(before) === ownDiffKey(after);
+
 /**
  * What the PR's diff changed from `before` to `after`, as diff text: the hunks of `after` that are not in `before` (with their file headers, which also
  * shows a mode or rename change), then a section of the PR's earlier hunks that `after` no longer has. Empty when nothing changed.
