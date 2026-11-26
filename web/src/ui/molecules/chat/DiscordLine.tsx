@@ -31,7 +31,7 @@ export function DiscordLine({ e }: { e: Discord }) {
   const list = `chat-discord-${e.id}`;
   return (
     <li className="flex flex-col items-center">
-      <button type="button" aria-expanded={open} aria-controls={list} onClick={() => setOpen((o) => !o)} className={LINE}>
+      <button type="button" aria-expanded={open} aria-controls={open ? list : undefined} onClick={() => setOpen((o) => !o)} className={LINE}>
         <DiscordLogoIcon aria-hidden />
         {t("{n} mentions on Discord", { n: e.links.length })}
         <span aria-hidden>·</span>

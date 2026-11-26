@@ -154,10 +154,11 @@ function ItemPage({ m, login }: { m: MaintainItem; login: string }) {
 
   const conv = chat.data?.conversations[0];
   const send = async (text: string) => {
-    if (!conv) return;
+    if (!conv) return [];
     const r = await api.itemChat.send(m.repo, m.number, conv.id, text);
     chat.keep(r.chat);
     chat.refetch();
+    return r.lines;
   };
   const withdraw = async () => {
     chat.keep(await api.itemChat.withdraw(m.repo, m.number));

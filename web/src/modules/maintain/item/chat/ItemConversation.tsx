@@ -6,7 +6,7 @@ import { ArrowDownIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../../src/i18n/index.ts";
 import type { ChatEntry, ItemConversation as Conversation } from "../../../../api/types";
 import { AutoCraftMessage, AutoCraftTurn } from "../../../../ui/molecules/chat/AutoCraftMessage";
-import { ChatBubble } from "../../../../ui/molecules/chat/ChatBubble";
+import { ChatBubble, clipName, VEILED } from "../../../../ui/molecules/chat/ChatBubble";
 import { ChatComposer } from "../../../../ui/molecules/chat/ChatComposer";
 import { DiscordLine } from "../../../../ui/molecules/chat/DiscordLine";
 import { GithubLine } from "../../../../ui/molecules/chat/GithubLine";
@@ -39,10 +39,34 @@ function blocks(entries: ChatEntry[]): Block[] {
 const NEAR_BOTTOM = 48;
 const plain = (s: string) => s.replace(/[*_`]/g, "");
 
+/** The first words of an AutoCraft turn, for its accessible name. */
+function turnText(items: (Reply | Work)[]): string {
+  const first = items[0]!;
+  if (first.t === "work") return first.title;
+  return clipName(plain(first.body) || first.ask?.question || VEILED());
+}
+
+/** What a command just answered, until the conversation carries it: the lines and the entries that were there before it was sent. */
+type Answer = { lines: string[]; before: Set<string> };
+
+/**
+ * Where the answer lines go: under the message they answer (the first new message since the send), or under the composer while
+ * the conversation does not show that message yet. Nothing once AutoCraft's own entries answer it (a refusal on the message, or a
+ * reply after it).
+ */
+function placeAnswer(entries: ChatEntry[], a: Answer | null): { id: string | null; lines: string[] } | null {
+  if (!a?.lines.length) return null;
+  const i = entries.findIndex((e) => e.t === "said" && !a.before.has(e.id));
+  if (i < 0) return { id: null, lines: a.lines };
+  const sent = entries[i] as Said;
+  if (sent.refusal || entries.slice(i + 1).some((e) => e.t === "reply")) return null;
+  return { id: sent.id, lines: a.lines };
+}
+
 interface Props {
   c: Conversation;
-  /** Posts the reader's text to the conversation; rejects with the reason it failed. */
-  onSend: (text: string) => Promise<void>;
+  /** Posts the reader's text to the conversation and resolves to the lines the command answered with; rejects with the reason it failed. */
+  onSend: (text: string) => Promise<string[]>;
   onEvent: (id: string) => void;
   onGithub: () => void;
   /** Why the reader cannot reply, shown in the disabled box; used when `c.canReply` is false. */
@@ -60,6 +84,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
   const seen = useRef<Set<string> | null>(null);
   const [newBelow, setNewBelow] = useState(false);
   const [announce, setAnnounce] = useState("");
+  const [answer, setAnswer] = useState<Answer | null>(null);
   const last = c.entries[c.entries.length - 1];
   const openReply = c.open ? [...c.entries].reverse().find((e): e is Reply => e.t === "reply" && !!e.ask) : undefined;
 
@@ -75,7 +100,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
     if (seen.current === null) toBottom();
     else if (atBottom.current) toBottom();
     else setNewBelow(true);
-  }, [c.entries.length, last?.id, c.working, toBottom]);
+  }, [c.entries.length, last?.id, c.working, answer, toBottom]);
 
   // Fonts and Markdown settle after the first paint; keep the end in view for that moment only, so expanding a row does not move the view.
   useEffect(() => {
@@ -101,9 +126,12 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
   }, [c.entries]);
 
   const send = async (text: string) => {
-    await onSend(text);
+    const before = new Set(c.entries.map((e) => e.id));
+    setAnswer(null);
+    const lines = await onSend(text);
     atBottom.current = true;
-    setAnnounce(t("Message sent"));
+    setAnswer({ lines, before });
+    setAnnounce(lines.length ? `AutoCraft: ${lines.join(" ")}` : t("Message sent"));
   };
 
   const withdraw = onWithdraw && (async () => {
@@ -118,6 +146,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
   const running = last?.t === "work" && last.state === "running";
   const bs = blocks(c.entries);
   const lastBlock = bs[bs.length - 1];
+  const placed = placeAnswer(c.entries, answer);
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
@@ -133,20 +162,20 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
         <ol ref={listEl} role="log" aria-live="off" aria-label={t("Conversation with AutoCraft, oldest first")} className="mx-auto flex w-full max-w-[784px] flex-col gap-6 px-4 pb-6 pt-6 md:px-8">
           {bs.map((b) =>
             b.k === "said" ? (
-              <ChatBubble key={b.e.id} e={b.e} {...(b.e.canWithdraw && withdraw ? { onWithdraw: withdraw } : {})} />
+              <ChatBubble key={b.e.id} e={b.e} {...(placed?.id === b.e.id ? { answer: placed.lines } : {})} {...(b.e.canWithdraw && withdraw ? { onWithdraw: withdraw } : {})} />
             ) : b.k === "github" ? (
               <GithubLine key={b.e.id} e={b.e} onGithub={onGithub} />
             ) : b.k === "discord" ? (
               <DiscordLine key={b.e.id} e={b.e} />
             ) : (
-              <AutoCraftTurn key={b.items[0]!.id} at={b.at}>
+              <AutoCraftTurn key={b.items[0]!.id} at={b.at} text={turnText(b.items)}>
                 {b.items.map((e) => (e.t === "reply" ? <AutoCraftMessage key={e.id} e={e} open={e === openReply} /> : <WorkRow key={e.id} e={e} onEvent={onEvent} />))}
                 {b === lastBlock && c.working && !running && <WorkingLine line={c.working} />}
               </AutoCraftTurn>
             ),
           )}
           {c.working && !running && lastBlock?.k !== "turn" && (
-            <AutoCraftTurn at={last?.at ?? new Date().toISOString()}>
+            <AutoCraftTurn at={last?.at ?? new Date().toISOString()} text={c.working}>
               <WorkingLine line={c.working} />
             </AutoCraftTurn>
           )}
@@ -166,6 +195,15 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
       <div aria-live="polite" className="sr-only">
         {announce}
       </div>
+      {placed && placed.id === null && (
+        <div className="mx-auto flex w-full max-w-[784px] flex-col gap-0.5 px-4 pb-2 text-sm text-bad md:px-8">
+          {placed.lines.map((l, i) => (
+            <p key={i} className="[overflow-wrap:anywhere]">
+              AutoCraft: {l}
+            </p>
+          ))}
+        </div>
+      )}
       {notice}
       <ChatComposer open={!!c.open} blocked={c.canReply ? null : (blockedReason ?? t("You can reply when you have write access to this repository"))} onSend={send} />
     </div>

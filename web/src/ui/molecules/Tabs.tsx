@@ -4,6 +4,7 @@ import { cn } from "../cn";
 /**
  * Underlined tabs (WAI-ARIA tabs pattern): the selected tab is the only one in the tab order; arrow keys, Home and End move
  * between tabs and select them. `idBase` names the tabs `${idBase}-tab-${value}` and their panels `${idBase}-panel-${value}`.
+ * Callers render only the selected tab's panel, so only the selected tab points at its panel with `aria-controls`.
  */
 export function Tabs<T extends string>({ value, options, onChange, label, idBase, className }: {
   value: T;
@@ -33,7 +34,7 @@ export function Tabs<T extends string>({ value, options, onChange, label, idBase
             id={`${idBase}-tab-${o.value}`}
             role="tab"
             aria-selected={on}
-            aria-controls={`${idBase}-panel-${o.value}`}
+            aria-controls={on ? `${idBase}-panel-${o.value}` : undefined}
             tabIndex={on ? 0 : -1}
             onClick={() => onChange(o.value)}
             onKeyDown={(e) => move(e, i)}

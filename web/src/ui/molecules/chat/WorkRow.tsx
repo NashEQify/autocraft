@@ -30,7 +30,7 @@ export function WorkRow({ e, onEvent }: { e: Work; onEvent: (id: string) => void
       <button
         type="button"
         aria-expanded={open}
-        aria-controls={body}
+        aria-controls={open ? body : undefined}
         onClick={() => setOpen((o) => !o)}
         className="-mx-2 flex w-[calc(100%+1rem)] items-start gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-ink/[0.05] max-md:min-h-11 max-md:items-center"
       >

@@ -10,14 +10,15 @@ const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(str
 
 type Work = { state?: "done" | "running" | "failed"; title: string; model?: string; seconds?: number; costUsd?: number; outcome?: string; detail?: [string, string][]; kind: TraceKind; run?: number; tokens?: [number, number]; tools?: number; shots?: ChatShot[] };
 type Beat =
-  | { b: "said"; min: number; login: string; via: ChatVia; body: string; pending?: boolean; refusal?: string }
+  | { b: "said"; min: number; login: string; via: ChatVia; body: string; pending?: boolean; refusal?: string; withdrawnBy?: string }
   | { b: "reply"; min: number; body: string; findings?: ChatFinding[]; ask?: { to: string[]; question: string } }
   | ({ b: "work"; min: number } & Work)
   | { b: "gh"; min: number; actor: string; summary: string; body?: string }
   | { b: "discord"; min: number; channel: string | null }
   | { b: "plan"; min: number; summary: string; fields: Record<string, unknown> };
 
-interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; beats: Beat[] }
+/** `quiet`: a quiet security pull request, which viewers see veiled (who and when only). */
+interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; quiet?: boolean; beats: Beat[] }
 
 const SAID_ON: Record<ChatVia, string> = { dashboard: "the dashboard", github: "GitHub", discord: "Discord", agent: "an agent", cli: "the command line" };
 
@@ -69,6 +70,7 @@ const PR_455: Story = {
   state: "waiting",
   next: "fix the hidden-group case, then merge",
   working: null,
+  quiet: true,
   beats: [
     { b: "gh", min: 2 * 1440, actor: "sable-ui", summary: "Opened the pull request" },
     { b: "gh", min: 2 * 1440 - 11, actor: "github-actions", summary: "CI passed on 2c9e4f1 (6 checks)" },
@@ -84,6 +86,7 @@ const PR_455: Story = {
       ask: { to: ["kiri-n"], question: "Fix the hidden-group case, then merge?" } },
     { b: "discord", min: 150, channel: "designcraft-reviews" },
     { b: "gh", min: 120, actor: "sable-ui", summary: "Commented", body: "The SnapSource → SnapTarget rename was asked for in #430, that's why it's in here." },
+    { b: "said", min: 52, login: "ochre-fox", via: "dashboard", body: "Does the rename touch the plugin API?", withdrawnBy: "ochre-fox" },
     { b: "said", min: 44, login: "ochre-fox", via: "dashboard", body: "Is the rename needed for this fix, or can it go in a separate PR?" },
     { b: "work", min: 43, kind: "model-call", run: 7202, title: "Answered from the review", model: "Opus", seconds: 18, costUsd: 0.03, tokens: [14_100, 420], tools: 0 },
     { b: "reply", min: 43, body: "The fix doesn't need it: only `targets.rs` and its test change behaviour. The rename touches 14 files and was asked for in designcraft#430, so I'd keep it in this PR.", ask: { to: ["kiri-n", "ochre-fox"], question: "Fix the hidden-group case, then merge, rename included?" } },
@@ -133,6 +136,14 @@ export const CHAT_ITEMS = new Set(Object.keys(STORIES));
 const discordUrl = (i: number) => `https://discord.com/channels/1/2/${1000 + i}`;
 const traceId = (ref: string, i: number, w?: Work) => (w?.run ? `run:${w.run}` : `${ref}:${i}`);
 
+/** A viewer's copy of a quiet pull request's entry: who and when stay; words, findings, models and outcomes go. */
+function veil(e: ChatEntry): ChatEntry {
+  if (e.t === "said") return { ...e, body: "", ...(e.refusal ? { refusal: "" } : {}) };
+  if (e.t === "reply") return { ...e, body: "", findings: [], ask: e.ask ? { ...e.ask, question: "" } : null };
+  if (e.t === "work") return { t: "work", id: e.id, at: e.at, state: e.state, title: "AutoCraft work", model: null, seconds: e.seconds, costUsd: null, outcome: null, detail: [], eventId: e.eventId };
+  return e;
+}
+
 /** The chat read of one story: GitHub activity between two chat entries folds into one line. */
 function chatOf(ref: string, s: Story, me: User): ItemConversation {
   const entries: ChatEntry[] = [];
@@ -154,14 +165,15 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
       return;
     }
     if (x.b === "said") entries.push({ t: "said", id, at: at(x.min), login: x.login, via: x.via, body: x.body, url: x.via === "github" ? `https://github.com/storytold/${ref.replace("#", "/pull/")}` : null,
-      ...(x.pending ? { pending: true, ...(me.role === "operator" || x.login === me.login ? { canWithdraw: true } : {}) } : {}), ...(x.refusal ? { refusal: x.refusal } : {}) });
+      ...(x.pending ? { pending: true, ...(me.role === "operator" || x.login === me.login ? { canWithdraw: true } : {}) } : {}), ...(x.refusal ? { refusal: x.refusal } : {}), ...(x.withdrawnBy ? { withdrawnBy: x.withdrawnBy } : {}) });
     else if (x.b === "reply") entries.push({ t: "reply", id, at: at(x.min), body: x.body, findings: x.findings ?? [], ask: x.ask ?? null });
     else entries.push({ t: "work", id, at: at(x.min), state: x.state ?? "done", title: x.title, model: x.model ?? null, seconds: x.seconds ?? null, costUsd: x.costUsd ?? null, outcome: x.outcome ?? null, detail: x.detail ?? [], eventId: traceId(ref, i, x), ...(x.shots ? { shots: x.shots } : {}) });
   });
   const lastReply = [...entries].reverse().find((e) => e.t === "reply" || e.t === "said");
   const open = lastReply?.t === "reply" && lastReply.ask ? lastReply.ask : null;
   const [repo, num] = ref.split("#");
-  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries, open, canReply: me.role !== "viewer", working: s.working };
+  const veiled = s.quiet && me.role === "viewer";
+  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries: veiled ? entries.map(veil) : entries, open: veiled && open ? { ...open, question: "" } : open, canReply: me.role !== "viewer", working: s.working };
 }
 
 /** Every beat of a story as trace events, for the Events tab. */
@@ -254,6 +266,10 @@ export function createChatMock(me: User, changed: () => void): Pick<Api, "itemCh
           s.next = "merge when CI is green";
           s.working = "Fixing the hidden-group case";
           line = `Fixing the hidden-group case, then merging (answered by ${me.login}).`;
+        } else if (word === "merge" && open) {
+          // A refusal no workflow event carries: only the lines answer it.
+          changed();
+          return wait({ chat: read(repo, number), lines: [`Not merging ${ref}: CI failed on the last commit (clippy). Fix it first?`] }, 400);
         } else if (/^(hold|stop|pause|wait)$/.test(word)) {
           s.beats.push({ b: "reply", min: 0, body: `On hold (held by ${me.login}). I keep off it until someone replies **resume**.` });
           s.status = `Held by ${me.login}`;
@@ -274,7 +290,7 @@ export function createChatMock(me: User, changed: () => void): Pick<Api, "itemCh
         if (!beat) throw new Error("No message waits for Opus.");
         if (me.role !== "operator" && beat.login !== me.login) throw new Error("Only an operator, or the person who wrote it, withdraws a message.");
         beat.pending = false;
-        beat.refusal = `Withdrawn by ${me.login}.`;
+        beat.withdrawnBy = me.login;
         changed();
         return wait(read(repo, number), 300);
       },
