@@ -24,7 +24,7 @@ export function Tabs<T extends string>({ value, options, onChange, label, idBase
     refs.current[to]?.focus();
   };
   return (
-    <div role="tablist" aria-label={label} className={cn("flex gap-1 overflow-x-auto border-b border-line scrollbar-none", className)}>
+    <div role="tablist" aria-label={label} className={cn("flex gap-1 max-md:gap-0 overflow-x-auto border-b border-line scrollbar-none", className)}>
       {options.map((o, i) => {
         const on = o.value === value;
         return (
@@ -39,7 +39,7 @@ export function Tabs<T extends string>({ value, options, onChange, label, idBase
             onClick={() => onChange(o.value)}
             onKeyDown={(e) => move(e, i)}
             className={cn(
-              "-mb-px inline-flex h-10 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-sm max-md:h-11",
+              "-mb-px inline-flex h-10 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-sm max-md:px-2 max-md:h-11",
               on ? "border-accent font-semibold text-ink" : "border-transparent text-ink/70 hover:text-ink",
             )}
           >

@@ -10,7 +10,7 @@ import { ChatBubble, clipName, VEILED } from "../../../../ui/molecules/chat/Chat
 import { ChatComposer } from "../../../../ui/molecules/chat/ChatComposer";
 import { DiscordLine } from "../../../../ui/molecules/chat/DiscordLine";
 import { GithubLine } from "../../../../ui/molecules/chat/GithubLine";
-import { WorkRow } from "../../../../ui/molecules/chat/WorkRow";
+import { FOLD_FROM, WorkGroup, WorkRow } from "../../../../ui/molecules/chat/WorkRow";
 import { WorkingLine } from "../../../../ui/molecules/chat/WorkingLine";
 
 type Said = Extract<ChatEntry, { t: "said" }>;
@@ -18,6 +18,20 @@ type Reply = Extract<ChatEntry, { t: "reply" }>;
 type Work = Extract<ChatEntry, { t: "work" }>;
 type Github = Extract<ChatEntry, { t: "github" }>;
 type Discord = Extract<ChatEntry, { t: "discord" }>;
+
+/** An AutoCraft turn's items, with each run of FOLD_FROM or more work rows of one kind gathered into one group. */
+function folded(items: (Reply | Work)[]): (Reply | Work | Work[])[] {
+  const out: (Reply | Work | Work[])[] = [];
+  for (let i = 0; i < items.length; ) {
+    const e = items[i]!;
+    let j = i + 1;
+    if (e.t === "work") while (j < items.length && items[j]!.t === "work" && (items[j] as Work).title === e.title) j++;
+    if (e.t === "work" && j - i >= FOLD_FROM) out.push(items.slice(i, j) as Work[]);
+    else out.push(...items.slice(i, j));
+    i = j;
+  }
+  return out;
+}
 
 type Block = { k: "said"; e: Said } | { k: "github"; e: Github } | { k: "discord"; e: Discord } | { k: "turn"; at: string; items: (Reply | Work)[] };
 
@@ -169,7 +183,9 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
               <DiscordLine key={b.e.id} e={b.e} />
             ) : (
               <AutoCraftTurn key={b.items[0]!.id} at={b.at} text={turnText(b.items)}>
-                {b.items.map((e) => (e.t === "reply" ? <AutoCraftMessage key={e.id} e={e} open={e === openReply} /> : <WorkRow key={e.id} e={e} onEvent={onEvent} />))}
+                {folded(b.items).map((e) =>
+                  Array.isArray(e) ? <WorkGroup key={e[0]!.id} items={e} onEvent={onEvent} /> : e.t === "reply" ? <AutoCraftMessage key={e.id} e={e} open={e === openReply} /> : <WorkRow key={e.id} e={e} onEvent={onEvent} />,
+                )}
                 {b === lastBlock && c.working && !running && <WorkingLine line={c.working} />}
               </AutoCraftTurn>
             ),

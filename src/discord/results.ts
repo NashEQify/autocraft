@@ -31,6 +31,7 @@ import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import { partLine, statusLine, workflowHead, type StatusFacts } from "../prstatus/index.ts";
 import { commentStatuses } from "../public/status.ts";
+import { openQuestion } from "../workflow/asked.ts";
 import { recommendationLine } from "../workflow/status.ts";
 import { ASKING_STATES, shownWorkflow, type ItemRef, type ItemWorkflow, type WorkflowState } from "../workflow/types.ts";
 import { legWaits, notPostedLines } from "../workflow/waits.ts";
@@ -126,13 +127,15 @@ export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<str
     // A review the thread's result points to, held back from GitHub: the thread says so and why.
     const notPosted = wf && !extras.quiet.has(key) ? unposted.get(wf.id) : undefined;
     const line = notPosted ? `${head}\n${notPosted}` : head;
-    const asking = !!wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) && status.step !== "Merged" && status.step !== "Closed";
+    // A row only the automatic merge rule started asks nobody: its status line says why it stopped and what AutoCraft would do.
+    const open = wf && status.step !== "Merged" && status.step !== "Closed" ? openQuestion(wf) : null;
+    const asking = !!wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) && !!open;
     out.set(key, {
       ref, key, url: at.commentId ? `${status.url}#issuecomment-${at.commentId}` : status.url, status: line, detail,
       result: asking && detail === "full" ? {
         key: `${wf!.id}|${wf!.recAt ?? ""}|${wf!.state}`,
         parts: wf!.plan.map((p) => ({ n: p.n, title: plain(p.title), state: p.state, ...(p.major ? { major: true } : {}) })),
-        rec: recommendationLine(wf!.rec),
+        rec: recommendationLine(open!.rec),
       } : null,
     });
   }

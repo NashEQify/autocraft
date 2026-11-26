@@ -83,7 +83,10 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
   const events = shape({ ...c, veiled: false }, eventsFrom({ ...c, veiled: false }, rows), null);
   const thread = threads.get(c.ref);
   const header = headerOf(c, rows);
-  const head = headerFor(c, wf, rows, b.leg, wait, header.now.state === null ? t("Not planned yet") : header.now.text);
+  const planned = headerFor(c, wf, rows, b.leg, wait, header.now.state === null ? t("Not planned yet") : header.now.text);
+  // A merged or closed item shows how it ended, not a planning or running state.
+  const it = rows.detail.item;
+  const head = it?.merged_at ? { ...planned, status: t("Merged"), state: "done" as const, next: null } : it?.closed_at ? { ...planned, status: t("Closed"), state: "done" as const, next: null } : planned;
   const mainId = b.convs[0]?.id ?? null;
   const conversations = (b.convs.length ? b.convs : [null]).map((row): ItemConversation => {
     const main = row === null || row.id === mainId;

@@ -275,12 +275,14 @@ function Header({ m, d, status, state, next, onDuplicates, toggle }: { m: Mainta
             <ArrowLeftIcon aria-hidden className="text-[16px]" />
           </Link>
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-1">
-            <span className="code truncate text-sm text-ink/70">
-              {d.repo}#{d.number}
+            <span className="flex max-w-full min-w-0 items-center gap-2.5">
+              <span className="code min-w-0 truncate text-sm text-ink/70" title={`${d.repo}#${d.number}`}>
+                {d.repo}#{d.number}
+              </span>
+              <Badge tone={tone} icon={<KindIcon aria-hidden weight="bold" />}>
+                {t(kindLabel)}
+              </Badge>
             </span>
-            <Badge tone={tone} icon={<KindIcon aria-hidden weight="bold" />}>
-              {t(kindLabel)}
-            </Badge>
             {weight && <Badge tone={weight === "urgent" ? "bad" : weight === "low" ? "neutral" : "warn"}>{weight}</Badge>}
             {m.duplicates.length > 0 && (
               <button type="button" onClick={onDuplicates} className={HIT}>

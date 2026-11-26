@@ -65,3 +65,39 @@ export function WorkRow({ e, onEvent }: { e: Work; onEvent: (id: string) => void
     </li>
   );
 }
+
+/** Consecutive work rows of one kind (same title) from this many on fold into one row. */
+export const FOLD_FROM = 3;
+
+/** A run of work rows of one kind as one row, "Title ×n"; it opens to the rows themselves, each still reachable. */
+export function WorkGroup({ items, onEvent }: { items: Work[]; onEvent: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const state = items.some((e) => e.state === "failed") ? "failed" : items.some((e) => e.state === "running") ? "running" : "done";
+  const [Icon, tone, word] = LOOK[state];
+  const failed = items.filter((e) => e.state === "failed").length;
+  const body = `chat-work-group-${items[0]!.id}`;
+  return (
+    <li className="rounded-md">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? body : undefined}
+        onClick={() => setOpen((o) => !o)}
+        className="-mx-2 flex w-[calc(100%+1rem)] items-start gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-ink/[0.05] max-md:min-h-11 max-md:items-center"
+      >
+        <Icon aria-hidden weight={state === "running" ? "bold" : "fill"} className={cn("mt-[3px] shrink-0 max-md:mt-0", tone)} />
+        <span className="min-w-0 flex-1">
+          <span className="font-medium">{items[0]!.title} ×{items.length}</span>
+          <span className="sr-only">, {word}</span>
+          {failed > 0 && <span className="text-ink/70"> · {t("{n} failed", { n: failed })}</span>}
+        </span>
+        <CaretRightIcon aria-hidden className={cn("mt-[3px] shrink-0 text-ink/60 transition-transform duration-fast max-md:mt-0", open && "rotate-90")} />
+      </button>
+      {open && (
+        <ul id={body} className="mb-1 ml-[7px] mt-0.5 flex flex-col gap-1 border-l-2 border-line py-1 pl-[17px]">
+          {items.map((e) => <WorkRow key={e.id} e={e} onEvent={onEvent} />)}
+        </ul>
+      )}
+    </li>
+  );
+}

@@ -112,7 +112,7 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
   if (!quiet && wf.plan.length) out.push([t("Parts:"), ...wf.plan.map(partLine)].join("\n"));
   const open = ended ? null : openQuestion(wf);
   if (open && !quiet) out.push(recommendationLine(open.rec)!);
-  if (open) out.push(t("Asks {logins}", { logins: listText(open.to) }));
+  if (open && !quiet) out.push(t("Asks {logins}", { logins: listText(open.to) }));
   return out;
 }
 
