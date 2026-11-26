@@ -2653,6 +2653,10 @@ export interface MaintainRow {
   approvedBy: string | null;
   stoppedBy: string | null;
   updatedAt: string;
+  /** Set once the item is merged or closed. */
+  state?: "merged" | "closed";
+  /** The conversation's last message; `question`: an open question addressed to the reader. */
+  last?: { by: string; text: string; question: boolean };
 }
 
 /** The reader's Task Runner line: their own runners (fresh status = online) and other users' ready runners that take shared work. */
@@ -2680,10 +2684,11 @@ export interface MaintainRepo {
 }
 
 export interface MaintainHome {
-  needs: MaintainRow[];
+  /** The reader's items (up to 8, newest conversation entry first); `mineTotal` counts them all. */
   mine: MaintainRow[];
-  waiting: MaintainRow[];
-  running: MaintainRow[];
+  mineTotal: number;
+  /** Viewers only: the newest updated items in the repos they can see. */
+  recent: MaintainRow[];
   runner: MaintainRunnerLine | null;
   attention: HomeProblem[];
 }

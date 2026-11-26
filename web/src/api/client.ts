@@ -187,7 +187,8 @@ export interface Api {
     /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
     repos(): Promise<MaintainRepo[]>;
     /** Per visible repo, the started items that wait for an answer; repos with none are left out. */
-    waiting(): Promise<Record<RepoName, number>>;
+    /** Open questions addressed to the reader. */
+    asked(): Promise<{ count: number }>;
     /** A registered workflow control (resume a breaker, switch Automatic); answers with the line every surface shows. */
     control(input: { control: "resume-breaker"; key: string } | { control: "set-automatic"; repo: RepoName; on: boolean }): Promise<{ ok: boolean; line: string }>;
   };

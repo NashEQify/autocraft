@@ -9,7 +9,6 @@ import { modules } from "../registry";
 import { can } from "../registry/permissions";
 import type { Permission, RouteDef } from "../registry/types";
 import { useQuery } from "../api/client";
-import { useNavProject } from "../api/scope";
 import type { User } from "../api/types";
 import { LiveDot, MainCiDots, NoRoute, RouteView, ShortcutSheet, UserMenu } from "./parts";
 import { redirectRoutes } from "./redirects";
@@ -85,11 +84,10 @@ function useRail(user: User, routes: RouteDef[]) {
 }
 type Rail = ReturnType<typeof useRail>;
 
-/** What waits for the reader's answer, for the Home entry: the Home page's own read, of the project the badge follows. */
+/** Open questions addressed to the reader, for the Home entry. */
 function useNeedsCount(): number | undefined {
-  const project = useNavProject();
-  const { data } = useQuery("maintain-home", (a) => a.maintain.home(), { project });
-  return data?.needs.length || undefined;
+  const { data } = useQuery("maintain-asked", (a) => a.maintain.asked(), { project: null });
+  return data?.count || undefined;
 }
 
 function RailLink({ p, open, tall, count }: { p: Page; open: boolean; tall?: boolean; count?: number }) {

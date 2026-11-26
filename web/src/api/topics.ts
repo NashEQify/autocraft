@@ -28,7 +28,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["item-page:", [...new Set<Topic>([...TRACE, "discord", "ranks"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
-  ["maintain-waiting", ["workflows", "repos"]],
+  ["maintain-asked", ["workflows", "workflow-events"]],
   ["maintain-queue", ["workflows", "items", "repos"]],
   // The item page: the workflow row and its events, signals, findings, holds and breakers.
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
