@@ -2377,6 +2377,12 @@ export interface SyncState {
   author_ids_backfilled_at: string | null;
   author_ids_error: string | null;
   app_install_sweep_at: string | null;
+  webhook_at: string | null;
+  webhook_started_at: string | null;
+  polled_at: string | null;
+  poll_missed_at: string | null;
+  poll_missed: string | null;
+  deliveries_checked_at: string | null;
 }
 
 export interface TokenUsage {
@@ -3187,7 +3193,7 @@ export const COLUMNS = {
   sync_repo_errors: ["repo", "kind", "message", "moved_to", "since", "at"],
   sync_requests: ["repo", "number", "event", "requested_at"],
   sync_runs: ["started_at", "ended_at", "mode", "items", "error"],
-  sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at"],
+  sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at", "webhook_at", "webhook_started_at", "polled_at", "poll_missed_at", "poll_missed", "deliveries_checked_at"],
   token_usage: ["run_id", "agent", "stage", "model", "repo", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"],
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
   user_settings: ["login", "key", "value", "updated_at"],

@@ -34,14 +34,15 @@ export type StageDef = {
 export const STAGES: StageDef[] = [
   {
     id: "synced", title: "Synced", order: 1, runStage: 1, docSection: "Sync", mode: "auto",
-    description: "Mirrors every issue, PR and comment of the tracked repos into the local database each minute, reads the CI state of each default branch every 2 minutes, and makes a vector of each item's title and body for similar-item search.",
+    description: "Mirrors every issue, PR and comment of the tracked repos into the local database, from GitHub App webhooks within seconds and from a backstop poll, reads the CI state of each default branch every 2 minutes, and makes a vector of each item's title and body for similar-item search.",
     steps: [{ name: "embed", maxMin: 60, label: "Embed", limit: null }, { name: "main-ci", maxMin: 10 }],
     lanes: [{ name: "embed", steps: ["embed"], order: 3 }],
     models: [{ model: "local", use: "Embeds each item's title and body" }],
     promptIds: [], promptStage: "Synced",
     waits: [
-      { name: "Sync", why: "Poll of GitHub", howLong: "1 minute; the search catch-up runs hourly", showsAs: "Syncs list", kind: "external" },
+      { name: "Sync", why: "Poll of GitHub, the backstop to the webhooks: a sync run (every minute) polls only when one is due", howLong: "15 minutes while webhooks arrive; every minute while webhooks are not set up or no delivery has arrived yet, and for 30 minutes after a poll found changes no webhook brought; at once after the webhook receiver restarted or GitHub's delivery list shows a failed delivery. The search catch-up runs hourly", showsAs: "Syncs list (mode webhooks: no poll was due)", kind: "external" },
       { name: "Webhook re-read", why: "A GitHub App webhook names an item that changed; the runner reads that item again from GitHub", howLong: "Drained every 5 seconds while requests are queued; the poll stays the backup", showsAs: "Item page, On GitHub: updated time", kind: "external" },
+      { name: "Webhook delivery check", why: "GitHub's list of the app's webhook deliveries, read by each sync run: a delivery that failed (no answer, a server error) is asked for again, up to three attempts, and makes that run poll", howLong: "1 minute", showsAs: "Audit log (webhook-redeliver)", kind: "external" },
       { name: "Main CI poll", why: "GitHub's check state of each default branch head; read by the sync run, with the pipeline on or off", howLong: "2 minutes", showsAs: "Main CI page and the top bar", kind: "external" },
       { name: "Release poll", why: "GitHub release download counts and star counts of the tracked repos, read by the sync run; the increases feed the Downloads report", howLong: "15 minutes", showsAs: "Downloads page", kind: "external" },
       { name: "GitHub App installation sweep", why: "While the allowed owners list (GitHub App settings) has accounts, the app's installations on other accounts are removed; the installation webhook removes them at once and this sweep catches what it missed. Read by the sync run, with the pipeline on or off", howLong: "10 minutes", showsAs: "Audit log (app-install-removed) and a header warning for 24 hours", kind: "external" },

@@ -2808,7 +2808,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
   full_points_last_run INTEGER,
   author_ids_backfilled_at TEXT,
   author_ids_error TEXT,              -- `<time> <message>` of the last failed account-id pass
-  app_install_sweep_at TEXT
+  app_install_sweep_at TEXT,
+  webhook_at TEXT,                    -- the newest verified GitHub App webhook delivery
+  webhook_started_at TEXT,            -- start of the newest webhook receiver process that has taken a delivery
+  polled_at TEXT,                     -- start of the last finished org-wide poll
+  poll_missed_at TEXT,                -- start of the last poll that found changes no webhook had brought
+  poll_missed TEXT,                   -- that poll's count and first items: `<n> <repo#number> ...`
+  deliveries_checked_at TEXT          -- GitHub's list of the app's webhook deliveries was checked up to here
 );
 
 -- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.
