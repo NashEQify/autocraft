@@ -12,7 +12,15 @@ import type { Db } from "../db/index.ts";
 import { appJwt, callPage, GITHUB_API } from "./app.ts";
 import { redeliverWebhook } from "./write.ts";
 
-export type Delivery = { id: number; guid: string; delivered_at: string; status_code: number; event: string };
+/** `id` is the exact decimal text: GitHub delivery ids exceed 2^53, which a JS number rounds. */
+export type Delivery = { id: string; guid: string; delivered_at: string; status_code: number; event: string };
+/** Parses a deliveries list body, keeping each delivery's `id` as its exact source text. */
+export function parseDeliveries(text: string): unknown {
+  // The lib typings lack the reviver's third argument (Node 24: `context.source`, the number's literal text).
+  const reviver = (key: string, value: unknown, context?: { source?: string }): unknown =>
+    key === "id" && typeof value === "number" && context?.source ? context.source : value;
+  return JSON.parse(text, reviver as (key: string, value: unknown) => unknown);
+}
 /** One page of the list; `next` is the next page's cursor, null on the last page. */
 export type DeliveryPage = { deliveries: Delivery[]; next: string | null };
 
@@ -57,7 +65,7 @@ export type DeliveryDeps = {
 export async function checkDeliveries(db: Db, app: AppSecrets, now = Date.now(), deps: DeliveryDeps = {}): Promise<DeliveryCheck> {
   const log = deps.log ?? console.log;
   const list = deps.list ?? (async (cursor: string | null): Promise<DeliveryPage> => {
-    const r = await callPage(GITHUB_API, cursor ?? `/app/hook/deliveries?per_page=${PAGE}`, appJwt(app));
+    const r = await callPage(GITHUB_API, cursor ?? `/app/hook/deliveries?per_page=${PAGE}`, appJwt(app), parseDeliveries);
     return { deliveries: Array.isArray(r.body) ? (r.body as Delivery[]) : [], next: r.next };
   });
   const redeliver = deps.redeliver ?? ((d: Delivery) => redeliverWebhook({ db, login: "webhook-check" }, { app, id: d.id, guid: d.guid, event: d.event }));
