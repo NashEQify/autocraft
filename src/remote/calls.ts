@@ -295,7 +295,9 @@ function claimOrderAll(q: ReturnType<typeof orderedOf>, reads: OrderReads, calle
   const fits = (r: Cand): boolean => live(r) && !released(r) && tiers.has(r.tier) && (!repos || r.repos.every((x) => repos.has(x)));
   const fast = (r: Cand): boolean => !fastLane || fastLaneFits(r);
   const sessions = new Set(sessionIds);
-  const allFollowUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && fits(r));
+  // A follow-up goes with the session that holds its parent, by no repo choice: the parent already passed the caller's rules
+  // (a started item's call bypasses My repos, and its fix turn must too).
+  const allFollowUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && live(r) && !released(r) && tiers.has(r.tier));
   // Calls bound to the caller (a maintainer's own conversation turn) next, oldest first: like picks, they go by no repo, task or item choice.
   const own = q.ordered.filter((r) => r.forLogin === login && live(r) && !released(r) && tiers.has(r.tier) && fast(r));
   if (bound === "only") return [...allFollowUps.filter((r) => r.forLogin === login && !r.boundSlot), ...own.filter((r) => !r.boundSlot)];
