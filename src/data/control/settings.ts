@@ -124,7 +124,7 @@ export const STATE_SETTINGS = [
   "liveness_at", "liveness_open", "runner_heartbeat", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "pipeline_planned_at",
   "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_review_cursor", "pipeline_verify_cursor", "review_stale", "review_rerun", "review_fail", "mergeable_unknown",
   "author_ids_error", "author_ids_backfilled", "jev_unavailable", "security_poll_at", "diff_facts_built", "leader:runner:endpoint", "app_install_sweep_at", "tracking_started_at",
-  "sync_rate_remaining", "sync_rate_reset_at", "choices_converted",
+  "sync_rate_remaining", "sync_rate_reset_at", "choices_converted", "discord_role_channel", "discord_role_id", "discord_role_panel",
 ] as const;
 
 /** The typed instance properties of `config(db)`. */
