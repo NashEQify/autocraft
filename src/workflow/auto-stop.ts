@@ -13,8 +13,8 @@
 //
 // One live rule row per PR. A row nobody answered ends as `superseded` when the author pushes (advance.ts), and the rule takes the PR
 // back: a later stop may start a new row. At the same head each pass reads it again as the rule reads the PR without it
-// (recheckRuleRow): a stop that went, or a PR the rule no longer takes, ends it as `superseded` too, and a stop that changed comes back
-// with its new recommendation. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
+// (recheckRuleRow): a PR the rule no longer takes, or one it would now merge, ends it as `superseded` too; a stop that changed comes back
+// with its new recommendation; a wait that clears by itself (red CI, a conflict, a review due again) leaves it as it is. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
 import type { WaitCode } from "../core/codes.ts";
 import { conflictPath, decidePr, onAutoPath } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
@@ -111,12 +111,16 @@ const said = (r: Recommendation | null, plan: readonly PlanPart[]): string =>
 
 /**
  * A rule row nobody answered, read again at the head its question was made at (`f`: the PR's facts there, its own row in them), as the
- * rule reads the PR without it: "superseded" when the stop went or the rule no longer takes the PR, which takes the PR back; the stop
- * when it changed (its review, its pre-merge findings, the rule's reasons); null while it stands as it is. Pure.
+ * rule reads the PR without it. "superseded" when the rule no longer takes the PR, or no longer stops it (the reasons it stopped on went,
+ * and it would merge by the rule), which takes the PR back; the stop when it changed (its review, its pre-merge findings, the rule's
+ * reasons); null while it stands, also while the PR waits on something else for now (red CI, a conflict, a review due again, pending
+ * checks), which goes on under the open question. Pure.
  */
 export function recheckRuleRow(w: Pick<ItemWorkflow, "rec" | "plan">, f: PrFacts, reviews: readonly ReviewRow[], premerge: PremergeRow | null): AutoStop | "superseded" | null {
   const g = withoutRow(f);
-  const stop = autoStop(g, decidePr(g), reviews, premerge);
-  if (!stop) return "superseded";
-  return said(stop.rec, stop.plan) === said(w.rec, w.plan) ? null : stop;
+  if (!onAutoPath(g)) return "superseded";
+  const p = decidePr(g);
+  const stop = autoStop(g, p, reviews, premerge);
+  if (stop) return said(stop.rec, stop.plan) === said(w.rec, w.plan) ? null : stop;
+  return p.path === "rule" ? "superseded" : null;
 }

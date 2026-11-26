@@ -139,6 +139,14 @@ test("the rule's stop at a pre-merge defect fixes it before any merge, and once 
   assert.equal(wf.state, "recommending");
   assert.ok(fix.length && wf.plan.some((p) => fix.includes(p.n) && p.major), `a yes fixes the defect first: ${wf.rec?.text}`);
 
+  const ci = async (overall: "failure" | "success") => w.db.prepare("UPDATE pr_checks SET overall = ?, checks = ? WHERE repo = 'app' AND number = 1")
+    .run(overall, overall === "failure" ? JSON.stringify([{ name: "build", state: "failure" }]) : "[]");
+  await ci("failure");
+  await advanceWorkflows(w.db);
+  const red = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([red.id, red.state, red.rec?.text], [wf.id, "recommending", wf.rec?.text], "red CI at the same head leaves the question as it is");
+
+  await ci("success");
   await w.premerge(1, "clean");
   await advanceWorkflows(w.db);
   assert.deepEqual(await states(w), ["superseded"], "the stop went at the head it was made at");
