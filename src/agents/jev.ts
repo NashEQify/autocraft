@@ -19,6 +19,8 @@ export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
 /** How long after the last account failure the next pass tries Jev again. */
 export const JEV_RETRY_MS = 60 * 60_000;
+/** The same for a model the API does not serve: provider glitches end within minutes, and a retired model costs one failed call per try. */
+export const JEV_MODEL_RETRY_MS = 10 * 60_000;
 
 /** Consecutive Jev runs recorded as an unreadable answer that count as an outage. */
 export const JEV_UNREADABLE_LIMIT = 20;
@@ -77,7 +79,7 @@ export async function jevUsable(db: Db, nowMs: number = Date.now()): Promise<boo
   const o = await jevOutage(db);
   if (!o) return true;
   if (o.kind === "missing") return jevInstalled();
-  if (o.kind === "account" || o.kind === "format" || o.kind === "model") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
+  if (o.kind === "account" || o.kind === "format" || o.kind === "model") return nowMs - Date.parse(o.at) >= (o.kind === "model" ? JEV_MODEL_RETRY_MS : JEV_RETRY_MS);
   return true;
 }
 
