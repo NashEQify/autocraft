@@ -6,18 +6,18 @@ import type { CategoryRow, ChannelBrief, ChannelReport, ChannelRow, StatusRow } 
 
 const lastBy = <T>(rows: readonly T[], key: (r: T) => string): T[] => [...new Map(rows.map((r) => [key(r), r] as const)).values()];
 
-/** Watched channels (a channel is watched when it or its parent is); absent otherwise. 1 statement per 10,000 ids. */
-export async function loadWatchedChannels(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string }>> {
+/** Watched channels (a channel is watched when it or its parent is), with the parent of a thread or forum post; absent otherwise. 1 statement per 10,000 ids. */
+export async function loadWatchedChannels(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string; parentId: string | null }>> {
   const q = queryDb(db);
-  const out = new Map<string, { guildId: string }>();
+  const out = new Map<string, { guildId: string; parentId: string | null }>();
   for (const ids of kx.chunks([...new Set(channelIds)])) {
-    const rows = await q.all(q.k.selectFrom("main.discord_channels as c").select(["c.channel_id", "c.guild_id"])
+    const rows = await q.all(q.k.selectFrom("main.discord_channels as c").select(["c.channel_id", "c.guild_id", "c.parent_id"])
       .where(kx.inList(db, "c.channel_id", ids))
       .where((eb) => eb.or([
         eb("c.watched", "=", 1),
         eb.exists(eb.selectFrom("main.discord_channels as p").select(eb.lit(1).as("one")).whereRef("p.channel_id", "=", "c.parent_id").where("p.watched", "=", 1)),
       ])), { label: "discord.loadWatchedChannels" });
-    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id });
+    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id, parentId: r.parent_id });
   }
   return out;
 }
@@ -78,6 +78,17 @@ export async function loadChannelDefaults(db: Db, channelIds: string[]): Promise
       .select((eb) => ["c.channel_id as channelId", eb.fn.coalesce("c.default_repo", "p.default_repo").as("defaultRepo")])
       .where(kx.inList(db, "c.channel_id", ids)), { label: "discord.loadChannelDefaults" });
     for (const r of rows) out.set(r.channelId, { defaultRepo: r.defaultRepo });
+  }
+  return out;
+}
+
+/** The guild and name of each channel the bot has reported. */
+export async function loadChannelGuilds(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string; name: string | null }>> {
+  const q = queryDb(db);
+  const out = new Map<string, { guildId: string; name: string | null }>();
+  for (const ids of kx.chunks([...new Set(channelIds)])) {
+    const rows = await q.all(q.k.selectFrom("main.discord_channels").select(["channel_id", "guild_id", "name"]).where(kx.inList(db, "channel_id", ids)), { label: "discord.loadChannelGuilds" });
+    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id, name: r.name });
   }
   return out;
 }

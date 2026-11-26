@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.4.2";
+export const HELPER_VERSION = "1.5.1";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -146,6 +146,7 @@ const capacity = { slots: 1, busy: 0 };
  * @property {Mount[]} mounts
  * @property {string[]} mcpServers
  * @property {boolean} keepSession  keep the harness session after the call, for follow-up turns
+ * @property {boolean} [transcript]  the server stores the full session: send it with the submit
  * @property {{ parentCallId: number }} [resume]
  * @property {{ claude?: { args: string[], agents?: string } }} hints
  */
@@ -173,8 +174,8 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
 /** @typedef {{ inputTokens: number, outputTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number }} Usage */
 /** @typedef {{ name: string, args: string, resultBytes: number | null, isError: boolean, startedAt?: string, endedAt?: string }} SubmitTool */
 /**
- * @typedef {{ ok: true, text: string, model: string, usage: Usage, modelUsage?: Record<string, Usage>, costUsd?: number, turns?: number, sessionId?: string, tools?: SubmitTool[], durationMs: number }
- *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean }} Submit
+ * @typedef {{ ok: true, text: string, model: string, usage: Usage, modelUsage?: Record<string, Usage>, costUsd?: number, turns?: number, sessionId?: string, tools?: SubmitTool[], transcript?: string, durationMs: number }
+ *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean, stopReason?: string, subtype?: string, transcript?: string }} Submit
  */
 /** @typedef {{ accepted: boolean, reason?: string }} SubmitReply */
 /** @typedef {{ reason: string }} Release */
@@ -210,6 +211,8 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
  * @property {string} [sessionId]
  * @property {string} [error]
  * @property {boolean} [refused]  the model's safety filter declined the request
+ * @property {string} [stopReason]  a failed run: the harness's last stop reason (Claude: the result's `stop_reason`, such as refusal or max_tokens)
+ * @property {string} [subtype]  a failed run: the harness's kind of result (Claude: the result's `subtype`, such as error_max_turns)
  */
 /**
  * @typedef {object} Adapter
@@ -411,6 +414,11 @@ function events(stdout) {
   }
 }
 
+/** How much of a failed run's own text (the refusal or error the harness printed) a failure report carries. */
+const FAILURE_TEXT_MAX = 1500;
+/** A stop reason or result subtype as the harness wrote it: a short snake_case word, or nothing. @param {unknown} v @returns {v is string} */
+const stopWord = (v) => typeof v === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(v);
+
 /** The CLI's text for a request the model's safety filter declined (as src/remote/calls.ts SAFETY_REFUSAL). */
 const SAFETY_REFUSAL = /safeguards flagged this message|appears to violate our usage policy/i;
 
@@ -458,11 +466,12 @@ export function parseClaudeOutput(stdout, model) {
   const base = { model: reported, usage, ...(per.length > 0 && { modelUsage }), ...(typeof result?.total_cost_usd === "number" && { costUsd: result.total_cost_usd }),
     ...(typeof result?.num_turns === "number" && { turns: result.num_turns }), ...(sessionId && { sessionId }) };
   if (!result) return { ok: false, text: "", ...base, error: evs.length ? "no result" : "unreadable output" };
-  if (result.subtype === "error_max_turns") return { ok: false, text: "", ...base, error: "turn limit: the model used every turn the prompt allows without an answer" };
+  const stop = { ...(stopWord(result.stop_reason) && { stopReason: result.stop_reason }), ...(stopWord(result.subtype) && { subtype: result.subtype }) };
+  if (result.subtype === "error_max_turns") return { ok: false, text: "", ...base, ...stop, error: "turn limit: the model used every turn the prompt allows without an answer" };
   if (result.is_error || typeof result.result !== "string") {
     const said = typeof result.result === "string" ? result.result : "";
     const refused = result.stop_reason === "refusal" || SAFETY_REFUSAL.test(said);
-    return { ok: false, text: "", ...base, error: `model error ${said}`.trim().slice(0, 400), ...(refused && { refused: true }) };
+    return { ok: false, text: "", ...base, ...stop, error: `model error ${said}`.trim().slice(0, FAILURE_TEXT_MAX), ...(refused && { refused: true }) };
   }
   return { ok: true, text: result.result, ...base };
 }
@@ -3072,10 +3081,10 @@ async function runLease(cfg, id, opt = {}) {
   const lost = () => end("lost", `lost: ${lease.title}: the lease was withdrawn`);
   /** @param {string} what @param {unknown} e */
   const undelivered = (what, e) => (e instanceof Gone ? lost() : end("lost", `lost: ${lease.title}: ${what} did not reach the server: ${msg(e)}`));
-  /** @param {string} error @param {Usage} [usage] @param {boolean} [refused] */
-  const fail = async (error, usage, refused) => {
+  /** @param {string} error @param {Usage} [usage] @param {boolean} [refused] @param {{ stopReason?: string, subtype?: string }} [stop] the harness's stop reason and result subtype @param {string} [transcript] */
+  const fail = async (error, usage, refused, stop, transcript) => {
     /** @type {Submit} */
-    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started, ...(refused && { refused: true }) };
+    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started, ...(refused && { refused: true }), ...(stop?.stopReason && { stopReason: stop.stopReason }), ...(stop?.subtype && { subtype: stop.subtype }), ...(transcript && { transcript }) };
     try { await call(ROUTES.submit, body); } catch (e) { return undelivered(`the failure (${error})`, e); }
     noteError(`${lease.title}: ${error}`, "call");
     return end("failed", `failed: ${lease.title}: ${error}`);
@@ -3150,7 +3159,8 @@ async function runLease(cfg, id, opt = {}) {
     if ("fail" in out) return await fail(out.fail, out.usage);
     const { r, reply, tools } = out;
     if (r.gone) return lost();
-    if (r.timedOut) return await fail(`timed out after ${b.timeoutSeconds} s`, reply.usage);
+    const transcript = b.transcript && r.events ? transcriptOf(r.events) : undefined;
+    if (r.timedOut) return await fail(`timed out after ${b.timeoutSeconds} s`, reply.usage, false, reply, transcript);
     if (r.stopped) return await giveBack("stopped on the helper");
     if (!reply.ok) {
       // The provider's usage limit: the call goes back without using an attempt, and the helper parks until the reset.
@@ -3161,11 +3171,11 @@ async function runLease(cfg, id, opt = {}) {
         try { await checkReady(cfg); } catch { /* reported with the next check */ }
         return await giveBack(`the provider refused the run for its usage limit: ${refusal.line}`);
       }
-      return await fail(`${reply.error ?? "no result"} (exit ${r.code}) ${r.stderr.trim().slice(-300)}`.trim(), reply.usage, reply.refused);
+      return await fail(`${reply.error ?? "no result"} (exit ${r.code}) ${r.stderr.trim().slice(-300)}`.trim(), reply.usage, reply.refused, reply, transcript);
     }
     const usage = reply.usage ?? { inputTokens: 0, outputTokens: 0 };
     /** @type {Submit} */
-    const body = { ok: true, text: reply.text, model: reply.model, usage, ...(reply.modelUsage && { modelUsage: reply.modelUsage }), ...(reply.costUsd !== undefined && { costUsd: reply.costUsd }), ...(reply.turns !== undefined && { turns: reply.turns }), ...(reply.sessionId && { sessionId: reply.sessionId }), ...(tools.length > 0 && { tools }), durationMs: Date.now() - started };
+    const body = { ok: true, text: reply.text, model: reply.model, usage, ...(reply.modelUsage && { modelUsage: reply.modelUsage }), ...(reply.costUsd !== undefined && { costUsd: reply.costUsd }), ...(reply.turns !== undefined && { turns: reply.turns }), ...(reply.sessionId && { sessionId: reply.sessionId }), ...(tools.length > 0 && { tools }), ...(transcript && { transcript }), durationMs: Date.now() - started };
     /** @type {SubmitReply} */
     let s;
     // A finished reply is never turned into a failure: the same body is retried until the server answers it (accepted, 410
@@ -3279,6 +3289,33 @@ async function execute(b, x) {
 
 /** Bytes of the harness's plain-text output (lines that are no event) kept for the error line. */
 const STDOUT_TAIL = 4000;
+/** Characters of event lines kept for the transcript: the start of the session up to the first, its end up to the second. */
+const EVENTS_HEAD = 24 * 1024 * 1024;
+const EVENTS_TAIL = 24 * 1024 * 1024;
+/** The server's limit on a submitted transcript (src/remote/protocol.ts TRANSCRIPT_MAX). */
+const TRANSCRIPT_MAX = 16 * 1024 * 1024;
+
+/** @typedef {{ head: string[], tail: string[], omitted: number }} Events  the harness's event lines as transcript lines, `{"at","event"}` */
+
+/**
+ * The submit's transcript: the event lines as gzip JSONL, base64, with known secrets redacted. A session too large for
+ * TRANSCRIPT_MAX keeps its start and end, with a line counting the events left out between them.
+ * @param {Events} ev @returns {string | undefined}
+ */
+export function transcriptOf(ev) {
+  let head = ev.head, tail = ev.tail, omitted = ev.omitted;
+  for (let i = 0; i < 6; i++) {
+    if (head.length + tail.length === 0) return undefined;
+    const mark = omitted > 0 ? [JSON.stringify({ at: new Date().toISOString(), omitted })] : [];
+    const b64 = gzipSync(redact([...head, ...mark, ...tail].join("\n"))).toString("base64");
+    if (b64.length <= TRANSCRIPT_MAX) return b64;
+    const keep = Math.floor((head.length + tail.length) * (TRANSCRIPT_MAX / b64.length) * 0.8 / 2);
+    const h = Math.min(head.length, keep), t = Math.min(tail.length, keep);
+    omitted += head.length - h + tail.length - t;
+    head = head.slice(0, h); tail = t > 0 ? tail.slice(-t) : [];
+  }
+  return undefined;
+}
 
 /**
  * Runs the sandboxed harness: stdin in, stopped at the bundle's timeout, when the lease is gone or when `signal` aborts.
@@ -3304,6 +3341,16 @@ function harness(c, b, beat, signal, adapter, root) {
     const kept = [];
     /** @type {string[]} the arrival time of each kept line */
     const stamps = [];
+    /** @type {Events} */
+    const events = { head: [], tail: [], omitted: 0 };
+    let headChars = 0, tailChars = 0;
+    /** One event line for the transcript, the slot's root taken off. @param {string} l @param {string} at */
+    const record = (l, at) => {
+      const line = `{"at":"${at}","event":${root ? l.split(root).join("") : l}}`;
+      if (events.tail.length === 0 && headChars + line.length <= EVENTS_HEAD) { events.head.push(line); headChars += line.length; return; }
+      events.tail.push(line); tailChars += line.length;
+      while (tailChars > EVENTS_TAIL && events.tail.length > 1) { tailChars -= /** @type {string} */ (events.tail.shift()).length; events.omitted++; }
+    };
     /** @type {string | undefined} */
     let unexpected;
     /** @param {NodeJS.Signals} sig */
@@ -3311,6 +3358,7 @@ function harness(c, b, beat, signal, adapter, root) {
     const kill = () => { signalRun("SIGTERM"); setTimeout(() => signalRun("SIGKILL"), 5000).unref(); };
     /** @param {string} l @param {string} at */
     const keep = (l, at) => {
+      if (b.transcript && l.startsWith("{") && l.trimEnd().endsWith("}")) record(l.trimEnd(), at);
       const k = adapter.compact(l);
       if (k !== null) { kept.push(k); stamps.push(at); }
       else if (!l.startsWith("{") && l.trim()) tail = `${tail}${l}\n`.slice(-STDOUT_TAIL);
@@ -3344,7 +3392,7 @@ function harness(c, b, beat, signal, adapter, root) {
       if (group) rmSync(groupFile, { force: true });
       if (partial) keep(partial, new Date().toISOString());
       const text = tail ? `${stderr}${stderr && !stderr.endsWith("\n") ? "\n" : ""}stdout: ${tail}` : stderr;
-      resolve({ code, stdout: kept.join("\n"), stamps, stderr: redact(text), gone, timedOut, stopped, unexpected });
+      resolve({ code, stdout: kept.join("\n"), stamps, events, stderr: redact(text), gone, timedOut, stopped, unexpected });
     };
     p.on("error", (e) => { stderr += String(e); done(-1); });
     p.on("close", done);
@@ -4896,8 +4944,8 @@ export const CLI_COMMANDS = [
   { path: ["calls", "pick"], tool: "pick_model_call", args: ["id"], usage: "<id>", summary: "reserve a call for your own Task Runners", why: pickWhy },
   { path: ["calls", "unpick"], tool: "unpick_model_call", args: ["id"], usage: "<id>", summary: "end a pick", why: pickWhy },
   { path: ["calls", "mine"], tool: "my_work", usage: "", summary: "today's calls on your machine, and your Task Runners", why: () => "needs one of your Task Runners reporting in, while the server is in the user-local inference mode" },
-  { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once and interactive slots", why: () => "only maintainers and operators have settings" },
-  { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
+  { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once, interactive slots and manual only", why: () => "only maintainers and operators have settings" },
+  { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N] [--manual-only on|off]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
   { path: ["do"], tool: "command", args: ["item", "text"], usage: "<item> \"<command>\"", summary: "send AutoCraft a command on an item, as on GitHub: \"fix-up and merge\", \"yes\", \"stop\"", why: commandWhy },
   { path: ["item"], tool: "get_item", args: ["item"], usage: "<item>", summary: "an item's workflow: state, open recommendation, who started and approved it" },
   { path: ["items"], tool: "my_items", usage: "", summary: "items waiting for your answer, and the ones you started or approved" },
@@ -5083,8 +5131,8 @@ export function parseToolArgs(tool, argv, cmd) {
         if (spec.minimum !== undefined && out < spec.minimum) throw bad(`${v} is below the minimum ${spec.minimum}`);
         if (spec.maximum !== undefined && out > spec.maximum) throw bad(`${v} is above the maximum ${spec.maximum}`);
       } else if (st === "boolean") {
-        if (!/^(true|false)$/.test(v)) throw bad(`${JSON.stringify(v)} is not true or false`);
-        out = v === "true";
+        if (!/^(true|false|on|off)$/.test(v)) throw bad(`${JSON.stringify(v)} is not on or off`);
+        out = v === "true" || v === "on";
       } else if (st === "object" || st === "array") {
         try { out = JSON.parse(v); } catch { throw bad("not valid JSON"); }
       }
@@ -5098,6 +5146,18 @@ export function parseToolArgs(tool, argv, cmd) {
     }
     return one(p, raw);
   };
+  // A boolean flag may take a separate on/off value; such a word is the flag's value only while there are more bare words than
+  // positional arguments, so `<cmd> --flag on` sets the flag and a positional on/off after a boolean flag stays positional.
+  const slots = cmd ? (cmd.args?.length ?? 0) : positionalOf(tool.inputSchema) ? 1 : 0;
+  let spare = -slots;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") { spare += argv.length - i - 1; break; }
+    if (a === "--json") continue;
+    if (!a.startsWith("--")) { spare++; continue; }
+    const k = a.includes("=") ? undefined : byFlag.get(toolKey(a.slice(2)));
+    if (k && typeOf(props[k]) !== "boolean") i++;
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--") { positional.push(...argv.slice(i + 1)); break; }
@@ -5114,7 +5174,7 @@ export function parseToolArgs(tool, argv, cmd) {
     if (!key) throw new UsageError(`unknown option ${a.slice(0, eq < 0 ? undefined : eq)} for ${name}; valid: ${valid()}`);
     const t = typeOf(props[key]);
     if (t === "boolean") {
-      if (inline === undefined && /^(true|false)$/.test(argv[i + 1] ?? "")) inline = argv[++i];
+      if (inline === undefined && spare > 0 && /^(true|false|on|off)$/.test(argv[i + 1] ?? "")) { inline = argv[++i]; spare--; }
       args[key] = inline === undefined ? true : typed(key, inline);
       continue;
     }

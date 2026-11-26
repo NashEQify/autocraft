@@ -240,6 +240,7 @@ export function createHttpApi(): Api {
       setContact: (contact) => put("/api/admin/discord/contact", { contact }),
       setReact: (on) => put("/api/admin/discord/react", { on }),
       setReactEmoji: (emoji) => put("/api/admin/discord/react", { emoji }),
+      setRolePanel: (panel) => put("/api/admin/discord/role-panel", panel ?? { off: true }),
       removeLink: (id) => post("/api/admin/discord/unlink", { id }),
       addFilingRepo: (repo) => post("/api/admin/discord/filing-repos/add", { repo }),
       removeFilingRepo: (repo) => post("/api/admin/discord/filing-repos/remove", { repo }),
@@ -308,6 +309,14 @@ export function createHttpApi(): Api {
     agents: {
       list: (f) => get(`/api/agents${qs(f)}`),
       get: (id) => get(`/api/agents/${id}`),
+      refusals: (window) => get(`/api/agents/refusals${qs({ window })}`),
+      transcript: (runId, id) => get(`/api/agents/${runId}/transcripts/${id}`),
+    },
+    transcriptStore: {
+      status: () => get("/api/admin/transcript-store"),
+      save: (input) => put("/api/admin/transcript-store", input),
+      clear: () => del("/api/admin/transcript-store"),
+      test: (input) => post("/api/admin/transcript-store/test", input ?? {}),
     },
     rates: (window) => get(`/api/rates${qs({ window })}`),
     prompts: () => get("/api/prompts"),

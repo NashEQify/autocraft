@@ -12,6 +12,7 @@ export * from "./helpers.ts";
 export * from "./passages.ts";
 export * from "./picks.ts";
 export * from "./runner-snapshot.ts";
+export { cachedSnapshot, dropSnapshotCache } from "./snapshot-cache.ts";
 export * from "./types.ts";
 export * from "./user-settings.ts";
 export * from "./views.ts";

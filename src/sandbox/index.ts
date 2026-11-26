@@ -27,15 +27,20 @@ export function resolveClaudeBin(): string | null {
   return null;
 }
 
-/** Whether tool mode can run on this machine: bubblewrap and the claude binary are present. */
+/**
+ * Whether this process can run a sandboxed local Claude call: bubblewrap and the claude binary are present and
+ * AUTOCRAFT_NO_SANDBOX=1 does not say it never does. Model calls run on Task Runners, whose helpers sandbox them on their
+ * own machines, so the checkouts and tool mode of those calls do not depend on this.
+ */
 export function sandboxAvailable(): boolean {
   return envVar("NO_SANDBOX") !== "1" && existsSync("/usr/bin/bwrap") && resolveClaudeBin() !== null;
 }
 
 /**
  * A checkout of the head commit of `repo#number` (instruction files left out) for a sandboxed call, or null
- * (with the reason logged) when tool mode is unavailable, the head moved, or
- * the tree is too large; the caller then asks without tools.
+ * (with the reason logged) when the repo name is not a plain one, the head moved, the fetch failed or the tree is too
+ * large; the caller then asks without tools. It needs only the cached clone, not a local sandbox: the call runs on a
+ * Task Runner, which gets the checkout as a mount.
  */
 export async function checkoutForPr(repo: string, number: number, sha: string, log: (line: string) => void = () => {}): Promise<string | null> {
   return checkoutOf(repo, sha, `${repo}#${number}`, log, async (g) => {
@@ -50,7 +55,7 @@ export async function checkoutForCommit(repo: string, branch: string, sha: strin
 }
 
 async function checkoutOf(repo: string, sha: string, label: string, log: (line: string) => void, fetch: (g: Git) => Promise<string | null>): Promise<string | null> {
-  if (!sandboxAvailable() || !SHARED_NAME.test(repo)) return null;
+  if (!SHARED_NAME.test(repo)) return null;
   try {
     const dest = join(checkoutRoot(), repo, sha);
     pruneCheckouts(checkoutRoot(), MAX_AGE_MS);

@@ -18,6 +18,10 @@ export type StatusRow = { state: string; detail: string | null; at: string };
 export type MentionRow = { msgHash: string; channelHash: string; repo: string; number: number; sealed: string; signal: boolean };
 export type MentionChange = { msgHash: string; channelHash: string; remove: Ref[]; add: { repo: string; number: number; sealed: string }[] };
 export type ReplyRow = { pingHash: string; quotedHash: string | null; sealed: string };
+/** One (target, item) row of what a thread or command reply follows; `sealed` stays opaque to the module. */
+export type FollowRow = { targetHash: string; repo: string; number: number; kind: "thread" | "reply"; channelHash: string; sealed: string; command: string; login: string; at: string };
+/** What the bot last posted about one followed (target, item): hashes of the status line, result and link, the result's key, and its message id sealed. */
+export type FollowPost = { targetHash: string; repo: string; number: number; statusHash: string; resultKey: string; resultHash: string; linkHash: string; sealed: string; at: string };
 
 export type Alerter = { userHash: string; sealed: string; createdAt: string; login: string };
 export type SentAlert = { userHash: string; workflowId: number; recAt: string; sentAt: string };

@@ -13,6 +13,9 @@ import { setJevEnabled } from "../src/agents/jev.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
+import { setManualOnly } from "../src/remote/manual-only.ts";
+import { enqueueCall } from "../src/remote/calls.ts";
+import { CALLER_STALE_MS } from "../src/remote/room.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
@@ -38,6 +41,38 @@ test("a pool skips a unit nobody may take and runs the later ones", async () => 
   const t = await runTiered(db, PRIORITY, photo);
   assert.deepEqual([...t.skipped], ["photocraft#7"]);
   assert.equal(t.alone.size + t.haiku.size, 0, "a skipped item is not one Haiku decided alone");
+});
+
+test("a pool waiting for room wakes when a Task Runner's user changes a setting, and not before", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
+  const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  const room = poolRoom(db, () => ["deckcraft"], () => [{ repo: "deckcraft", number: 1 }]);
+  await room.room(0);
+  const stop = new AbortController();
+  let woke = false;
+  const wait = room.changed(5, stop.signal).then(() => { woke = true; });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(woke, false, "nothing that moves the room changed");
+  const at = Date.now();
+  await setManualOnly(db, "olga", true);
+  await wait;
+  stop.abort();
+  assert.ok(Date.now() - at < 1_000, "the setting is seen at the next poll of the counters");
+});
+
+test("a pool with its most jobs running waits for one to end, past the moment its last reading said the room rises", { timeout: 20_000 }, async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
+  const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  // A queued call whose caller goes stale in a moment: the reading says the room rises then.
+  const call = await enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 600, maxTurns: 10, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } as never, items: [{ repo: "deckcraft", number: 9 }], level: 0, maxAttempts: 2 });
+  await db.run(db.k.updateTable("remote_calls").set({ seen_at: Date.now() - CALLER_STALE_MS + 30 }).where("id", "=", call));
+  const ended: number[] = [];
+  await pool([0, 1].map((i) => () => new Promise<void>((r) => setTimeout(() => { ended.push(i); r(); }, 200))), poolRoom(db, () => ["deckcraft"], (i) => [{ repo: "deckcraft", number: i + 1 }]), { max: 1, pollMs: 5 });
+  assert.deepEqual(ended, [0, 1]);
 });
 
 test("batches hold one repo's items in the order of their first item", async () => {

@@ -52,17 +52,24 @@ The image sets every path (`/data/...`, `/config/...`). A deployment sets only t
 | `AUTOCRAFT_RUNNER_REPLICAS` | no | `1` | Copies of the runner and periodic containers the deployment runs; set it alike on both. With `1` a database outage never kills running jobs; with `2` or more a leader that has not renewed its lease for 8 seconds stops its jobs so a standby can take it once it expires (10 seconds) (operations.md, Two replicas). |
 | `AUTOCRAFT_WORKER_ENDPOINTSLICE` | no | off | With two runner replicas in Kubernetes: the EndpointSlice of the worker API's selector-less Service, which the leading runner writes its address into; needs `AUTOCRAFT_POD_IP` and `AUTOCRAFT_POD_NAME` from the downward API (operations.md, Two replicas). |
 | `AUTOCRAFT_HEALTH_LISTEN` | no | off | `host:port` of a runner listener that serves only `/healthz` and `/readyz`. |
-| `AUTOCRAFT_NO_SANDBOX` | no | off | `1` runs without bubblewrap, so without tool mode. Use it only if the cluster cannot allow the runner settings below. |
+| `AUTOCRAFT_NO_SANDBOX` | no | off | `1` says this process never runs a local sandboxed Claude call. Model calls run on Task Runners, which get the checkout as a mount and sandbox the call themselves, so they keep their tools whatever this is set to. |
 | `AUTOCRAFT_REVIEW_BOTS` | no | `coderabbitai,dependabot,renovate` | Logins of review bots whose comments never make a review stale. Set it alike for dashboard, runner and periodic. |
 | `AUTOCRAFT_GITHUB_APP_NAME` | no | `AutoCraft` | Name suggested on the GitHub App registration form. |
 | `AUTOCRAFT_IMAGE_TOKEN_FILE` | no | `gh auth token` | File holding the token the dashboard's image proxy uses for GitHub images. |
 | `AUTOCRAFT_DISCORD_TOKEN_FILE` | no | off | File holding a Discord bot token (mode 600). Setting it on the runner turns on Discord mention counting; it needs the key file too. |
 | `AUTOCRAFT_DISCORD_KEY_FILE` | with the token file | none | File of at least 32 random characters (mode 600) that encrypts stored message references. Set it on the dashboard as well to show message links. |
+| `AUTOCRAFT_DISCORD_CLIENT_ID` | for `/verify` | off | The Discord application's client id. With it, the client secret file, the key file and the GitHub App, the dashboard serves the public contributor verification under `/verify`. Dashboard only. |
+| `AUTOCRAFT_DISCORD_CLIENT_SECRET_FILE` | with the client id | none | File holding the Discord application's OAuth2 client secret (mode 600). Dashboard only. |
 | `AUTOCRAFT_ATTACH_S3_ENDPOINT` | no | off | S3-compatible endpoint of the screenshot bucket (`https://<account>.r2.cloudflarestorage.com` for Cloudflare R2). With all five `AUTOCRAFT_ATTACH_*` variables set on the runner, the Discord bug form takes up to 3 screenshots and Submit for me copies them into the issue; with any missing the form has no upload field. |
 | `AUTOCRAFT_ATTACH_BUCKET` | with the endpoint | none | Bucket name. Objects go to `discord/<yyyy>/<mm>/<random>.<ext>`. |
 | `AUTOCRAFT_ATTACH_ACCESS_KEY_ID` | with the endpoint | none | Access key id of an API token that may write objects to the bucket. |
 | `AUTOCRAFT_ATTACH_SECRET_ACCESS_KEY` | with the endpoint | none | Its secret access key. Keep it in a Secret. |
 | `AUTOCRAFT_ATTACH_PUBLIC_URL` | with the endpoint | none | Public read origin of the bucket, `https://files.example.com`, no trailing slash. Issue bodies link `<this>/<object key>`. |
+| `AUTOCRAFT_TRANSCRIPT_S3_ENDPOINT` | no | transcripts off | S3-compatible endpoint of the private transcript bucket (`https://<account>.r2.cloudflarestorage.com` for Cloudflare R2). With all four `AUTOCRAFT_TRANSCRIPT_*` bucket variables set on the dashboard, each model call's full transcript is stored there as gzip JSONL; Admin > Storage can set a bucket instead, which wins over these. Without a bucket, Task Runners send no transcripts and none are stored, unless an operator picks the local directory (`<data dir>/transcripts`, single replica only) in Admin > Storage. Never make the bucket public: the dashboard reads it for operators and maintainers. |
+| `AUTOCRAFT_TRANSCRIPT_BUCKET` | with the endpoint | none | Bucket name. Objects go to `<prefix>calls/<yyyy>/<mm>/run-<run>-call-<call>-<attempt>-<random>.jsonl.gz`. |
+| `AUTOCRAFT_TRANSCRIPT_ACCESS_KEY_ID` | with the endpoint | none | Access key id of an API token that may read, write and delete objects in that bucket only. |
+| `AUTOCRAFT_TRANSCRIPT_SECRET_ACCESS_KEY` | with the endpoint | none | Its secret access key. Keep it in a Secret. |
+| `AUTOCRAFT_TRANSCRIPT_PREFIX` | no | none | Key prefix inside the bucket, ending in `/`, for instances that share one bucket. |
 | `AUTOCRAFT_MERGE_CMD` | no | built-in `safe-merge` | External merge command; it must accept `--head <sha>`. |
 
 Never set `AUTOCRAFT_DEV_AUTH`: it signs in as any login and is allowed only on a loopback address.
@@ -104,7 +111,7 @@ Tool-using Claude calls run in `bwrap`. Under default container settings it fail
 - container `securityContext.seccompProfile.type: Unconfined`
 - not privileged, no added capabilities (`drop: ["ALL"]`)
 
-`procMount: Unmasked` works only on pods with `hostUsers: false` and on clusters that support it (a feature gate in older releases). These settings were tested with rootless Docker (`--security-opt seccomp=unconfined --security-opt systempaths=unconfined`) and not on a cluster. Test on the real cluster before relying on them: start the runner, then check inside its container that `bwrap --unshare-all --ro-bind / / true` and a Claude call succeed in the runner container. A profile that confines the container (for example AppArmor) and denies user namespaces may need to be relaxed as well. If the cluster refuses these settings, the fallback is `AUTOCRAFT_NO_SANDBOX=1`, which disables tool mode.
+`procMount: Unmasked` works only on pods with `hostUsers: false` and on clusters that support it (a feature gate in older releases). These settings were tested with rootless Docker (`--security-opt seccomp=unconfined --security-opt systempaths=unconfined`) and not on a cluster. Test on the real cluster before relying on them: start the runner, then check inside its container that `bwrap --unshare-all --ro-bind / / true` and a Claude call succeed in the runner container. A profile that confines the container (for example AppArmor) and denies user namespaces may need to be relaxed as well. If the cluster refuses these settings, the fallback is `AUTOCRAFT_NO_SANDBOX=1`; calls on Task Runners keep their tools.
 
 ## Outside access
 

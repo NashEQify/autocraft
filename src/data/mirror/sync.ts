@@ -16,7 +16,8 @@ const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d+Z$/
 const EMPTY_STATE: SyncState = {
   id: 1, org_high_water: null, full_sync_cursor: null, search_catchup_at: null, repos_refreshed_at: null, main_ci_polled_at: null, releases_polled_at: null,
   releases_offset: null, rate_remaining: null, rate_reset_at: null, points_last_run: null, full_points_last_run: null, author_ids_backfilled_at: null,
-  author_ids_error: null, app_install_sweep_at: null,
+  author_ids_error: null, app_install_sweep_at: null, webhook_at: null, webhook_started_at: null, polled_at: null, poll_missed_at: null, poll_missed: null,
+  deliveries_checked_at: null,
 };
 
 /** The one `sync_state` row; every field null before the first write. */

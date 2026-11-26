@@ -261,14 +261,16 @@ export class Alerts {
   }
 }
 
-/** `/autocraft alerts on|off`. */
+/** `/autocraft account action:alerts state:on|off`. */
 export function installAlertCommands(ix: Interactions, alerts: Alerts): void {
   const { db, keys, rest } = alerts.deps;
-  ix.command("autocraft alerts", null, async (call: Call) => {
+  ix.command("autocraft account alerts", null, async (call: Call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
-    if (!login) return void (await call.edit({ content: "Link your account first with /autocraft link." }));
-    if (call.option("state") === "off") {
+    if (!login) return void (await call.edit({ content: "Link your account first with /autocraft account action:link." }));
+    const state = call.option("state");
+    if (state !== "on" && state !== "off") return void (await call.edit({ content: "Alerts need the option state: on or off." }));
+    if (state === "off") {
       await setAlerts(db, keys, call.userId, null);
       return void (await call.edit({ content: "Alerts are off." }));
     }

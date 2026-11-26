@@ -10,7 +10,7 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { weightOfScore } from "../../core/work-score.ts";
-import { goOnAt, isGoOn, linkRows, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, workScore } from "./fragments.ts";
+import { goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
 import { loadChatBefore, patchTalks, recordWorkflowMessages, retitleConversations } from "../chat/workflow.ts";
@@ -119,8 +119,9 @@ export async function loadWorkflowFacts(db: Db, keys: KeySource, o: { nowMs?: nu
   /** A column of the newest answer or resume of a workflow. */
   const lastAnswer = (alias: string, col: string) => k.selectFrom(`main.workflow_events as ${alias}`).select(`${alias}.${col}`).whereRef(`${alias}.workflow_id`, "=", "w.id")
     .where(`${alias}.kind`, "in", SAID_EVENTS).orderBy(`${alias}.id`, "desc").limit(1);
-  const liveQ = k.selectFrom("main.item_workflows as w")
-    .leftJoin(linkRows(db, LIVE_STATES).as("l"), "l.wid", "w.id")
+  // live_links: shared with the duplicate members read of the same wave (withLiveLinks).
+  const liveQ = withLiveLinks(db, k).selectFrom("main.item_workflows as w")
+    .leftJoin(`${LIVE_LINKS} as l`, "l.wid", "w.id")
     .selectAll("w")
     .select((eb: any) => [
       "l.pr as pr",

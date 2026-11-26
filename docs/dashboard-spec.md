@@ -145,6 +145,7 @@ An agent run is one model call: one `claude -p` call or one Jev batch request, m
 
 - **Running now**: every active run, refreshed every 5 s while the tab is visible. Each shows step and stage, model, account label (Jev has no account), the items it works on as `repo#n` links with "+N more", elapsed time and tokens so far.
 - **Recent runs**: newest first, filtered on the server by step, account, state and repo, and read by keyset cursor ("Load more"); the page never shows a total. A run opens a detail panel (a bottom sheet on phones) with the rendered prompt (collapsible; its registry id and version link to the Prompts page), the output, the error, token counts and a link to the job. Prompt and output are kept for ten years; after that the panel says "Prompt text removed after ten years".
+- **Refused** (operators and maintainers; `?refused=1&window=24h|7d|30d`, 7 days by default): the runs a model's safety filter declined, whether the call's retry on another Task Runner or tier then succeeded or not. Above the list, the refused runs of the range are counted per prompt, repo (a run's first item), model as the harness reported it and Task Runner user, each with how many had no other Task Runner or tier to take the call, so a cause they share stands out. Each row shows what the retry came to (its state, linking to the retry's run, or "Not retried"); the detail panel says the same and shows the refusal text in the error. Refusals recorded before runs kept their remote call show no retry run.
 
 ### Build environments (`/envs`, `/envs/<task>`)
 

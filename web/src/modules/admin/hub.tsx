@@ -24,6 +24,7 @@ const DiscordView = lazyView(() => import("./discordViews"), "DiscordView");
 const GithubAppView = lazyView(() => import("./githubAppViews"), "GithubAppView");
 const InferenceView = lazyView(() => import("../inference/views"), "InferenceView");
 const NightlyView = lazyView(() => import("../nightly/views"), "NightlyView");
+const StorageView = lazyView(() => import("./storageViews"), "StorageView");
 
 interface AdminPage {
   id: string;
@@ -158,6 +159,7 @@ const PAGES: AdminPage[] = [
   { id: "sweeps", label: tk("Sweeps"), view: (p) => <NightlyView {...p} /> },
   { id: "settings", label: tk("Instance settings"), view: (p) => <SettingsView {...p} /> },
   { id: "inference", label: tk("Inference"), view: (p) => <InferenceView {...p} /> },
+  { id: "storage", label: tk("Storage"), view: (p) => <StorageView {...p} /> },
   { id: "github-app", label: tk("GitHub App"), view: (p) => <GithubAppView {...p} /> },
   { id: "discord", label: tk("Discord"), view: (p) => <DiscordView {...p} /> },
   { id: "limits", label: tk("Limits"), view: (p) => <LimitsView {...p} /> },

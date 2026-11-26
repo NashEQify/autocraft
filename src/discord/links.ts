@@ -1,5 +1,5 @@
 // Links between a Discord account and a dashboard login. The Discord user id is never stored: a link holds its keyed hash.
-// A signed-in dashboard user asks for a short single-use code and types it into the bot in Discord (`/autocraft link`), so
+// A signed-in dashboard user asks for a short single-use code and types it into the bot in Discord (`/autocraft account action:link`), so
 // the link is always made by the person who controls both accounts. Codes are stored as keyed hashes and expire.
 import { randomInt } from "node:crypto";
 import type { DiscordKeys } from "./keys.ts";
@@ -30,6 +30,15 @@ export const redeemLinkCode = async (db: Db, keys: DiscordKeys, code: string, di
 /** The dashboard login linked to a Discord user, or null. */
 export const loginOf = async (db: Db, keys: DiscordKeys, discordUserId: string): Promise<string | null> =>
   (await access.loginsOfLinks(db, [userHash(keys, discordUserId)])).get(userHash(keys, discordUserId)) ?? null;
+
+/**
+ * GitHub actors need an AutoCraft login as well as write access to run commands: the Discord account's link must have been made
+ * with a dashboard code (a link from the /verify pages proves only the GitHub account), and the login must have an access row.
+ */
+export async function mayCommand(db: Db, keys: DiscordKeys, discordUserId: string, login: string): Promise<boolean> {
+  const [code, rows] = await Promise.all([access.hasCodeLink(db, userHash(keys, discordUserId)), access.loadAccess(db, [login])]);
+  return code && rows.has(login.toLowerCase());
+}
 
 /** Removes every link of a login; returns how many. */
 export const unlinkLogin = async (db: Db, login: string): Promise<number> => await access.unlinkLogins(db, [login]);

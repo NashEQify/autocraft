@@ -31,7 +31,7 @@ import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type St
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, listText, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import { openQuestion } from "../workflow/asked.ts";
-import { heldWork, type ItemWorkflow } from "../workflow/types.ts";
+import { heldWork, type ItemWorkflow, type PlanPart } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
 
 export const ACTOR = "pr-status";
@@ -82,27 +82,33 @@ function progressOf(f: StatusFacts, wf: ItemWorkflow): Progress {
   }
 }
 
+/** One numbered part as the status comment lists it: `- **2** title (dropped)`. */
+export const partLine = (p: Pick<PlanPart, "n" | "title" | "state">): string => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
+  : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`;
+
+/** The first line of a started item's status comment: where it stands. `wait: false` leaves out what a running item waits for (waits.ts legWait). */
+export function workflowHead(f: StatusFacts & { workflow: WorkflowFacts }, o: { wait?: boolean } = {}): string {
+  const { wf, quiet, wait } = f.workflow, s = f.status;
+  if (s.step === "Merged") return f.batch ? t("Merged with merge batch #{pr}", { pr: f.batch.pr }) : t("Merged");
+  if (s.step === "Closed") return t("Closed");
+  if (quiet && (wf.state === "recommending" || wf.state === "blocked")) return t("Waiting for a maintainer decision");
+  return stateLine(wf, currentStep(workflowSteps(wf, progressOf(f, wf))), undefined, o.wait === false ? null : wait ?? null);
+}
+
 /**
  * The paragraphs of the status comment of a started item, before the links. A quiet PR's carry no parts, no recommendation and
  * no blocker reason: an item waiting for an answer there only says it waits for a maintainer.
  */
 export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): string[] {
-  const { wf, answered, quiet, wait } = f.workflow, s = f.status;
+  const { wf, answered, quiet } = f.workflow, s = f.status;
   const steps = workflowSteps(wf, progressOf(f, wf));
   const ended = s.step === "Merged" || s.step === "Closed";
-  const waits = wf.state === "recommending" || wf.state === "blocked";
-  const head = s.step === "Merged" ? (f.batch ? t("Merged with merge batch #{pr}", { pr: f.batch.pr }) : t("Merged"))
-    : s.step === "Closed" ? t("Closed")
-      : quiet && waits ? t("Waiting for a maintainer decision") : stateLine(wf, currentStep(steps), undefined, wait ?? null);
-  const out = [`**${head}**`, attributionLines(wf, answered).join("\n"), ...(wf.state === "stopped" && heldWork(wf).unstarted ? [] : [stepLines(steps).join("\n")])];
+  const out = [`**${workflowHead(f)}**`, attributionLines(wf, answered).join("\n"), ...(wf.state === "stopped" && heldWork(wf).unstarted ? [] : [stepLines(steps).join("\n")])];
   if (s.step === "In the merge queue") {
     if (f.batch) out.push(t("Checked in merge batch #{pr}", { pr: f.batch.pr }));
     else if (s.queue) out.push(s.queue.position <= QUEUE_EXACT ? queueLine(s.queue.position) : t("{n} or more items ahead", { n: QUEUE_EXACT }));
   }
-  if (!quiet && wf.plan.length) {
-    out.push([t("Parts:"), ...wf.plan.map((p) => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
-      : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`)].join("\n"));
-  }
+  if (!quiet && wf.plan.length) out.push([t("Parts:"), ...wf.plan.map(partLine)].join("\n"));
   const open = ended ? null : openQuestion(wf);
   if (open && !quiet) out.push(recommendationLine(open.rec)!);
   if (open) out.push(t("Asks {logins}", { logins: listText(open.to) }));

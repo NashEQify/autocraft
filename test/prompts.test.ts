@@ -55,9 +55,13 @@ describe("prompt registry", () => {
       return { promptId: id, system: parts.system, stdin: parts.stdin, args: claudeArgs(id, model, false, undefined, parts.system) };
     });
     const got = (id: string) => runner.calls.filter((c) => c.promptId === id).map((c) => ({ promptId: c.promptId, system: c.system, stdin: c.stdin, args: c.hints.claude?.args }));
-    assert.deepEqual(got("classify.haiku"), want("classify.haiku", "haiku"));
+    // Haiku batches and Jev calls run concurrently, so they reach the runner in any order; the referee runs its first call alone.
+    const byText = <T>(text: (x: T) => string) => (xs: T[]): T[] => [...xs].sort((a, b) => text(a).localeCompare(text(b)));
+    const byStdin = byText((c: { stdin: string }) => c.stdin);
+    assert.deepEqual(byStdin(got("classify.haiku")), byStdin(want("classify.haiku", "haiku")));
     assert.deepEqual(got("referee.sonnet"), want("referee.sonnet", "sonnet"));
-    assert.deepEqual(jev, SAMPLE_ITEMS.map((i) => ({ cmd: "jev", args: JEV_ARGS, input: renderJev("classify.jev", i) })));
+    const byInput = byText((c: Call) => c.input);
+    assert.deepEqual(byInput(jev), byInput(SAMPLE_ITEMS.map((i) => ({ cmd: "jev", args: JEV_ARGS, input: renderJev("classify.jev", i) }))));
     const n = await db.all(db.k.selectFrom("classifications").select((eb) => ["classifier", eb.fn.countAll<number>().as("n")]).where("run_id", "=", "t").groupBy("classifier").orderBy("classifier"));
     assert.deepEqual(n.map((r) => ({ ...r })), [{ classifier: "haiku", n: 2 }, { classifier: "jev", n: 2 }, { classifier: "sonnet", n: 2 }]);
   });

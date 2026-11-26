@@ -5,7 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { filtered, runFirst, runVisible } from "./fragments.ts";
-import type { ItemRun, JobCall, PromptSpend, Ref, ReviewRunKeys, RunDetail, RunFilter, RunRow, RunVisibility, ToolView } from "./types.ts";
+import type { ItemRun, JobCall, PromptSpend, Ref, RefusalCount, ReviewRunKeys, RunDetail, RunFilter, RunRow, RunVisibility, ToolView } from "./types.ts";
 import { MAX_ITEM_REFS } from "./types.ts";
 
 type Raw = {
@@ -13,11 +13,12 @@ type Raw = {
   items: string; item_count: number; first_repo: string | null; first_number: number | null; state: string; started_at: string; ended_at: string | null;
   input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null;
   cost_usd: number | null; summary: string | null; error: string | null; progress: string | null; user_login: string | null; harness: string | null; reported_model: string | null;
+  call_id: number | null; refusal: string | null;
 };
 
 const RUN_COLS = [
   "id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "items", "item_count", "state", "started_at", "ended_at",
-  "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "summary", "error", "progress", "user_login", "harness", "reported_model",
+  "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "summary", "error", "progress", "user_login", "harness", "reported_model", "call_id", "refusal",
 ] as const;
 
 /** The select list of a `RunRow` over `agent_runs` aliased `alias`. */
@@ -39,6 +40,7 @@ const toRun = (r: Raw): RunRow => ({
   state: r.state as RunRow["state"], startedAt: r.started_at, endedAt: r.ended_at,
   tokens: { input: numOrNull(r.input_tokens), output: numOrNull(r.output_tokens), cacheRead: numOrNull(r.cache_read_tokens), cacheWrite: numOrNull(r.cache_write_tokens) },
   costUsd: numOrNull(r.cost_usd), summary: r.summary, error: r.error, progress: r.progress, userLogin: r.user_login, harness: r.harness, reportedModel: r.reported_model,
+  callId: numOrNull(r.call_id), refusal: r.refusal === "retried" || r.refusal === "failed" ? r.refusal : null,
 });
 
 const group = <K, V>(rows: V[], key: (v: V) => K): Map<K, V[]> => {
@@ -82,6 +84,8 @@ export async function listRuns(db: Db, f: RunFilter, vis: RunVisibility): Promis
     ...(cursor !== null ? [eb(cursorCol, "<", cursor)] : []),
     ...(f.state && f.state !== "recent" ? [eb("r.state", "=", f.state)] : []),
     ...(f.step ? [eb("r.step", "=", f.step)] : []),
+    ...(f.refused ? [eb("r.refusal", "is not", null)] : []),
+    ...(f.since ? [eb("r.started_at", ">=", f.since)] : []),
   ]);
   const rows = (f.repo
     ? await q.all(visibleOnly(k.selectFrom("main.agent_run_items as i").innerJoin("main.agent_runs as r", "r.id", "i.run_id").select(runSelect())
@@ -91,6 +95,51 @@ export async function listRuns(db: Db, f: RunFilter, vis: RunVisibility): Promis
     : await q.all(visibleOnly(k.selectFrom("main.agent_runs as r").select(runSelect()).where(conds("r.id")), vis).orderBy("r.id", "desc").limit(limit + 1))) as unknown as Raw[];
   const page = rows.slice(0, limit);
   return { rows: page.map(toRun), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
+}
+
+/**
+ * The newest later lease of each refused run's call: what the retry came to (it is the call's last lease, so a retry whose own lease
+ * ended and was taken again shows the run that ended it). Runs without a call id or with no later lease are absent. 1 statement per 500 calls.
+ */
+export async function loadRetries(db: Db, runs: { id: number; callId: number | null }[]): Promise<Map<number, { id: number; state: RunRow["state"] }>> {
+  const out = new Map<number, { id: number; state: RunRow["state"] }>();
+  const calls = [...new Set(runs.flatMap((r) => (r.callId === null ? [] : [r.callId])))];
+  if (calls.length === 0) return out;
+  const q = queryDb(db);
+  const later = new Map<number, { id: number; state: RunRow["state"] }[]>();
+  for (const part of kx.chunks(calls)) {
+    for (const r of await q.all(q.k.selectFrom("main.agent_runs").select(["id", "call_id", "state"]).where(kx.inList(db, "call_id", part, "bigint")))) {
+      const c = Number(r.call_id);
+      (later.get(c) ?? later.set(c, []).get(c)!).push({ id: Number(r.id), state: r.state as RunRow["state"] });
+    }
+  }
+  for (const r of runs) {
+    const last = (later.get(r.callId ?? -1) ?? []).filter((x) => x.id > r.id).sort((a, b) => b.id - a.id)[0];
+    if (last) out.set(r.id, last);
+  }
+  return out;
+}
+
+/** The newest refused runs counted by `loadRefusalCounts`: refusals are rare, so they are counted here rather than grouped in SQL. */
+export const REFUSAL_COUNT_MAX = 5000;
+
+/**
+ * Refused runs started at or after `since` (the newest REFUSAL_COUNT_MAX), counted per prompt, first repo, model, Task Runner user and what
+ * became of the call. 1 statement on the refused-runs index.
+ */
+export async function loadRefusalCounts(db: Db, since: string, vis: RunVisibility): Promise<RefusalCount[]> {
+  const q = queryDb(db);
+  const rows = await q.all(visibleOnly(q.k.selectFrom("main.agent_runs as r")
+    .select((eb) => ["r.prompt_id", runFirst(eb, "repo").as("repo"), "r.model", "r.reported_model", "r.user_login", "r.refusal"] as never)
+    .where("r.refusal", "is not", null).where("r.started_at", ">=", since), vis)
+    .orderBy("r.id", "desc").limit(REFUSAL_COUNT_MAX)) as unknown as { prompt_id: string; repo: string | null; model: string; reported_model: string | null; user_login: string | null; refusal: string }[];
+  const out = new Map<string, RefusalCount>();
+  for (const r of rows) {
+    const c: RefusalCount = { promptId: r.prompt_id, repo: r.repo, model: r.reported_model || r.model, login: r.user_login, refusal: r.refusal === "retried" ? "retried" : "failed", n: 0 };
+    const key = JSON.stringify([c.promptId, c.repo, c.model, c.login, c.refusal]);
+    (out.get(key) ?? out.set(key, c).get(key)!).n++;
+  }
+  return [...out.values()];
 }
 
 /**

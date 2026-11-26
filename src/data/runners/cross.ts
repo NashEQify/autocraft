@@ -43,7 +43,7 @@ export async function loadRunnerRole(db: Db, tokenId: number, now: number): Prom
 
 const LEASE_COLS = ["c.id", "c.job_id", "c.run_id", "c.user_login", "c.prompt_id", "c.items", "c.repo", "c.root", "c.lease_secret_hash", "c.token_id", "c.tier", "c.model", "c.asked_model", "c.step", "c.attempt", "c.max_attempts", "c.leased_at", "c.parent_id", "c.for_login", "c.refusals"] as const;
 
-type Found = { lease: LiveLease; bundle: string | null; harness: string | null; referenceRepo: string | null };
+type Found = { lease: LiveLease; bundle: string | null; harness: string | null; harnessVersion: string | null; referenceRepo: string | null };
 
 /**
  * The lease of `secret` with its credential check and lost flag, in one statement; the slow paths (lost lease, credential gone) run here and
@@ -56,7 +56,7 @@ async function findLease(db: Db, secret: string, now: number, o: { bundle?: bool
     .leftJoin("main.mcp_tokens as t", (j) => j.onRef("t.id", "=", "c.token_id").on("t.kind", "=", "runner").on("t.expires_at", ">", new Date(now).toISOString()))
     .leftJoin("main.access as a", (j) => j.onRef("a.login", "=", "t.login").on("a.role", "in", ["maintainer", "operator"]))
     .select([...LEASE_COLS, "a.login as ok", (eb) => eb.case().when(lostLeaseExpr(db, eb, now, "c")).then(1).else(0).end().as("lost")])
-    .$if(!!o.bundle, (b) => b.select(["c.bundle", "c.harness", "c.reference_repo"]))
+    .$if(!!o.bundle, (b) => b.select(["c.bundle", "c.harness", "c.harness_version", "c.reference_repo"]))
     .where("c.lease_secret_hash", "=", hash).where("c.state", "=", "leased"));
   if (!r) return null;
   if (Number(r.lost) === 1) {
@@ -74,7 +74,7 @@ async function findLease(db: Db, secret: string, now: number, o: { bundle?: bool
     secretHash: hash, tokenId: r.token_id === null ? null : Number(r.token_id), tier: r.tier as Tier, model: r.model, askedModel: r.asked_model, step: r.step,
     attempt: Number(r.attempt), maxAttempts: Number(r.max_attempts), leasedAt: r.leased_at === null ? null : Number(r.leased_at), parentId: r.parent_id, forLogin: r.for_login, refusals: Number(r.refusals),
   };
-  return { lease, bundle: r.bundle ?? null, harness: r.harness ?? null, referenceRepo: r.reference_repo ?? null };
+  return { lease, bundle: r.bundle ?? null, harness: r.harness ?? null, harnessVersion: r.harness_version ?? null, referenceRepo: r.reference_repo ?? null };
 }
 
 const validSecret = (secret: string | undefined): secret is string => !!secret && secret.length <= 200 && secret.startsWith("aclease_");
@@ -85,9 +85,9 @@ export async function loadLiveLease(db: Db, secret: string, now: number): Promis
 }
 
 /** The live lease with its bundle, harness and reference repo in one statement. */
-export async function loadLeaseBundle(db: Db, secret: string, now: number): Promise<{ lease: LiveLease; bundle: string; harness: string | null; referenceRepo: string | null } | null> {
+export async function loadLeaseBundle(db: Db, secret: string, now: number): Promise<{ lease: LiveLease; bundle: string; harness: string | null; harnessVersion: string | null; referenceRepo: string | null } | null> {
   const f = validSecret(secret) ? await findLease(db, secret, now, { bundle: true }) : null;
-  return f ? { lease: f.lease, bundle: f.bundle!, harness: f.harness, referenceRepo: f.referenceRepo } : null;
+  return f ? { lease: f.lease, bundle: f.bundle!, harness: f.harness, harnessVersion: f.harnessVersion, referenceRepo: f.referenceRepo } : null;
 }
 
 /** Fast path of a heartbeat: one compare-and-set update guarded by the lease, the lost test and a valid credential. */

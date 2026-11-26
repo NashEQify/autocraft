@@ -1,7 +1,7 @@
 // Model calls and rates on fake data: twelve runs in flight and a few hundred finished ones.
 import { traceRunDetail } from "./traceMock";
 import type { Api } from "../client";
-import type { AgentRun, AgentRunDetail, Rates } from "../types";
+import type { AgentRun, AgentRunDetail, AgentRunTranscript, Rates, RefusalBreakdown, RefusalGroup, RefusalWindow, TranscriptEntry, TranscriptStoreStatus, TranscriptView } from "../types";
 import { NOW, REPOS } from "./fixtures";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -56,6 +56,50 @@ RUNNING[0]!.promptId = "classify.haiku";
 RUNNING[0]!.model = "haiku";
 const RECENT: AgentRun[] = Array.from({ length: 360 }, (_, i) => makeRun(4999 - i, 2 * MIN + i * 4.2 * MIN + rnd() * MIN, false));
 
+// Calls a model's safety filter refused: the refused run sits just after (older than) the run that retried it.
+const REFUSED_ERROR = "helper: model error API Error: Opus's safeguards flagged this message as potentially violating our usage policy.";
+function refuse(i: number, o: { promptId: string; step: string; repo: string; login: string; retry: "done" | "failed" | "refused" | null }) {
+  const r = RECENT[i]!;
+  const via = { login: o.login, harness: "claude", model: "claude-opus-4-5" };
+  Object.assign(r, { promptId: o.promptId, step: o.step, model: "opus", provider: "claude", state: "failed", via, items: [shown({ repo: o.repo, number: 1300 + i })], itemCount: 1 });
+  r.summary = o.retry === null ? `refused by opus on ${o.login}'s Task Runner` : `refused by opus on ${o.login}'s Task Runner; retried on another Task Runner`;
+  if (o.retry === null) {
+    r.refusal = { outcome: "failed", retry: null };
+    return;
+  }
+  const next = RECENT[i - 1]!;
+  const other = o.login === "kiri-n" ? "ochre-fox" : "kiri-n";
+  Object.assign(next, { promptId: o.promptId, step: o.step, model: "opus", provider: "claude", items: r.items, itemCount: 1, via: { ...via, login: other }, state: o.retry === "done" ? "done" : "failed" });
+  next.summary = o.retry === "refused" ? `refused by opus on ${other}'s Task Runner` : o.retry === "done" ? "1 take" : "timeout after 600 s";
+  if (o.retry === "refused") next.refusal = { outcome: "failed", retry: null };
+  r.refusal = { outcome: "retried", retry: { id: next.id, state: next.state } };
+}
+refuse(4, { promptId: "review.opus", step: "opus-review", repo: REPOS[1]!, login: "kiri-n", retry: "done" });
+refuse(9, { promptId: "premerge.opus", step: "premerge", repo: REPOS[1]!, login: "ochre-fox", retry: null });
+refuse(21, { promptId: "review.opus", step: "opus-review", repo: REPOS[2]!, login: "kiri-n", retry: "refused" });
+refuse(48, { promptId: "cifix.patch", step: "cifix", repo: REPOS[0]!, login: "ochre-fox", retry: "done" });
+refuse(130, { promptId: "premerge.opus", step: "premerge", repo: REPOS[1]!, login: "kiri-n", retry: null });
+
+const WINDOW_MS: Record<RefusalWindow, number> = { "24h": 24 * HOUR, "7d": 7 * 24 * HOUR, "30d": 30 * 24 * HOUR };
+const inWindow = (r: AgentRun, w: RefusalWindow | undefined) => !w || NOW - Date.parse(r.startedAt) <= WINDOW_MS[w];
+
+function refusals(window: RefusalWindow): RefusalBreakdown {
+  const runs = RECENT.filter((r) => r.refusal && inWindow(r, window));
+  const by = (key: (r: AgentRun) => string | null): RefusalGroup[] => {
+    const m = new Map<string | null, RefusalGroup>();
+    for (const r of runs) {
+      const g = m.get(key(r)) ?? m.set(key(r), { key: key(r), n: 0, failed: 0 }).get(key(r))!;
+      g.n++;
+      if (r.refusal!.outcome === "failed") g.failed++;
+    }
+    return [...m.values()].sort((a, b) => b.n - a.n);
+  };
+  return {
+    window, total: runs.length, failed: runs.filter((r) => r.refusal!.outcome === "failed").length, capped: false,
+    byPrompt: by((r) => r.promptId), byRepo: by((r) => r.items[0]?.repo ?? null), byModel: by((r) => r.via?.model ?? r.model), byLogin: by((r) => r.via?.login ?? null),
+  };
+}
+
 function rates(window: "24h" | "7d"): Rates {
   const hourly = window === "24h";
   const n = hourly ? 24 : 7;
@@ -75,13 +119,48 @@ function rates(window: "24h" | "7d"): Rates {
   return { window, bucket: hourly ? "hour" : "day", stages };
 }
 
-export function createAgentsMock(): Pick<Api, "agents" | "rates"> {
+// Every finished claude run carries one transcript; a failed one has a first attempt too.
+const transcriptsOf = (r: AgentRun): AgentRunTranscript[] => {
+  if (r.provider !== "claude" || r.state === "running") return [];
+  const one = (id: number, attempt: number, outcome: AgentRunTranscript["outcome"]): AgentRunTranscript => ({
+    id, attempt, outcome, bytes: 38_400 + (r.id % 7) * 9_100, rawBytes: 412_000 + (r.id % 7) * 88_000, lines: 64 + (r.id % 11), toolCount: 9 + (r.id % 5), lastTool: "mcp__build__check", createdAt: r.endedAt ?? r.startedAt,
+  });
+  return r.state === "failed" ? [one(r.id * 10, 0, "failed"), one(r.id * 10 + 1, 1, "failed")] : [one(r.id * 10, 0, "done")];
+};
+
+const TRANSCRIPT_ENTRIES = (r: AgentRun): TranscriptEntry[] => {
+  const t = (s: number) => new Date(Date.parse(r.startedAt) + s * 1000).toISOString();
+  return [
+    { at: t(1), kind: "system", text: "Session started: claude-opus-4, 14 tools" },
+    { at: t(4), kind: "thinking", text: "The diff touches the export path. Read the encoder first, then check whether the quality flag reaches it." },
+    { at: t(5), kind: "tool", name: "Read", text: JSON.stringify({ file_path: "crates/export/src/webp.rs" }, null, 2) },
+    { at: t(6), kind: "result", text: "   1\tuse crate::Quality;\n   2\t\n   3\tpub fn encode(img: &Image, q: Quality) -> Vec<u8> {\n   4\t    let lossy = q.value() < 100;\n   5\t    webp::Encoder::new(img).encode(q.value() as f32)\n   6\t}" },
+    { at: t(9), kind: "tool", name: "Grep", text: JSON.stringify({ pattern: "Quality::from", path: "crates" }, null, 2), sub: true },
+    { at: t(10), kind: "result", text: "crates/export/src/dialog.rs:88:    let q = Quality::from(self.slider);\ncrates/export/src/cli.rs:41:    let q = Quality::from(args.quality);", sub: true },
+    { at: t(14), kind: "text", text: "The quality value reaches the encoder unchanged, but `lossy` is computed and never used: quality 100 still encodes lossy." },
+    { at: t(18), kind: "tool", name: "mcp__build__check", text: JSON.stringify({ command: "cargo test -p export" }, null, 2) },
+    { at: t(141), kind: "result", text: "test webp::tests::lossless_at_100 ... FAILED\n\nfailures:\n    webp::tests::lossless_at_100\n\ntest result: FAILED. 11 passed; 1 failed", isError: true },
+    { at: t(150), kind: "text", text: "Confirmed with the failing test. Writing the review." },
+    { at: t(152), kind: "final", text: "success, 6 turns\n\n{\"verdict\": \"request-changes\", \"reason\": \"Quality 100 must encode lossless (crates/export/src/webp.rs:4).\"}" },
+  ];
+};
+
+let store: TranscriptStoreStatus = {
+  active: { kind: "s3", source: "settings", dir: null, endpoint: "https://0123456789abcdef.r2.cloudflarestorage.com", bucket: "autocraft-transcripts", prefix: "prod/", accessKeyId: "a1b2c3d4e5f6" },
+  saved: { kind: "s3", endpoint: "https://0123456789abcdef.r2.cloudflarestorage.com", bucket: "autocraft-transcripts", prefix: "prod/", accessKeyId: "a1b2c3d4e5f6", secretSet: true },
+  environment: false,
+  problem: null,
+};
+const LOCAL_DIR = "/data/transcripts";
+
+export function createAgentsMock(): Pick<Api, "agents" | "rates" | "transcriptStore"> {
   return {
     agents: {
       list(f) {
         if (f.state === "running") return wait({ runs: RUNNING.filter((r) => (!f.step || r.step === f.step)), nextCursor: null });
         const rows = RECENT.filter(
-          (r) => (!f.state || f.state === "recent" || r.state === f.state) && (!f.step || r.step === f.step) && (!f.repo || r.items.some((i) => i.repo === f.repo)) && (!f.cursor || r.id < Number(f.cursor)),
+          (r) => (!f.state || f.state === "recent" || r.state === f.state) && (!f.step || r.step === f.step) && (!f.repo || r.items.some((i) => i.repo === f.repo)) && (!f.cursor || r.id < Number(f.cursor))
+            && (!f.refused || (!!r.refusal && inWindow(r, f.window))),
         );
         const limit = f.limit ?? 50;
         const runs = rows.slice(0, limit);
@@ -104,8 +183,38 @@ export function createAgentsMock(): Pick<Api, "agents" | "rates"> {
         if (traced) return wait(traced);
         if (!r) throw new Error(`no agent run ${id}`);
         const old = NOW - Date.parse(r.startedAt) > 90 * 24 * HOUR || id < 4850;
-        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" ? null : OUTPUT, error: r.state === "failed" ? "claude -p exited after 600 s without output" : null, tools: [] };
+        const error = r.refusal ? (r.refusal.outcome === "failed" ? `refused by the model's safety filter: ${r.summary!.slice("refused by ".length)}; no other Task Runner or tier could take the call. ${REFUSED_ERROR}` : REFUSED_ERROR)
+          : r.state === "failed" ? "claude -p exited after 600 s without output" : null;
+        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" || r.refusal ? null : OUTPUT, error, tools: [], transcripts: transcriptsOf(r) };
         return wait(d);
+      },
+      refusals: (w) => wait(refusals(w), 80),
+      transcript(runId, id) {
+        const r = [...RUNNING, ...RECENT].find((x) => x.id === runId);
+        const t = r && transcriptsOf(r).find((x) => x.id === id);
+        if (!r || !t) return Promise.reject(new Error(`run ${runId} has no transcript ${id}`));
+        const v: TranscriptView = { runId, transcript: t, entries: TRANSCRIPT_ENTRIES(r), omitted: 0 };
+        return wait(v);
+      },
+    },
+    transcriptStore: {
+      status: () => wait(store),
+      save(input) {
+        if (input.kind === "local") store = { ...store, active: { kind: "local", source: "settings", dir: LOCAL_DIR, endpoint: null, bucket: null, prefix: "", accessKeyId: null }, saved: { kind: "local", endpoint: "", bucket: "", prefix: "", accessKeyId: "", secretSet: false } };
+        else {
+          if (!input.secretAccessKey && !store.saved?.secretSet) return Promise.reject(new Error("Enter the secret access key."));
+          store = { ...store, active: { kind: "s3", source: "settings", dir: null, endpoint: input.endpoint, bucket: input.bucket, prefix: input.prefix, accessKeyId: input.accessKeyId }, saved: { kind: "s3", endpoint: input.endpoint, bucket: input.bucket, prefix: input.prefix, accessKeyId: input.accessKeyId, secretSet: true } };
+        }
+        return wait(store);
+      },
+      clear() {
+        store = { ...store, saved: null, active: null };
+        return wait(store);
+      },
+      test(input) {
+        const kind = (input ?? store.active)?.kind;
+        if (!kind) return wait({ ok: false, detail: "Transcripts are off: no store is configured." }, 300);
+        return wait({ ok: true, detail: kind === "s3" ? `Wrote, read and deleted a probe object in ${input?.kind === "s3" ? input.bucket : store.active?.bucket}.` : `Wrote, read and deleted a probe file in ${LOCAL_DIR}.` }, 300);
       },
     },
     rates: (w) => wait(rates(w), 80),

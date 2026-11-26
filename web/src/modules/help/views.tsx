@@ -102,8 +102,9 @@ function Start() {
       </Part>
       <Part title={t("Link Discord")}>
         <p>
-          {t("Link your Discord account on the Runner page, so")} <Code>/autocraft do</Code> {t("acts as you.")}
+          {t("Link your Discord account on the Runner page, so")} <Code>@AutoCraft</Code> {t("and")} <Code>/autocraft do</Code> {t("act as you.")}
         </p>
+        <p>{t("Once linked, the Verify button in the server's contributor role channel gives you the contributor role when you have a merged pull request.")}</p>
       </Part>
       <Part title={t("Where to type commands")}>
         <ul className="flex list-disc flex-col gap-1 pl-5">
@@ -111,7 +112,10 @@ function Start() {
             {t("GitHub: a comment that starts with the app's name,")} <Code>{`@${mention} ${COMMANDS[1]!.example}`}</Code>
           </li>
           <li>
-            {t("Discord:")} <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code>
+            {t("Discord: mention the bot in a watched channel:")} <Code>{`@AutoCraft ${COMMANDS[1]!.example} ${ITEM}`}</Code>.{" "}
+            {t("Reply to a message that names items with")} <Code>@AutoCraft review</Code> {t("to act on all of them. AutoCraft answers in a thread, where a command that names no item acts on the thread's items.")}{" "}
+            <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code> {t("does the same with a private answer.")}{" "}
+            {t("Reply to a message with")} <Code>@AutoCraft status</Code> {t("for the status of the items it names, or name items after it; anyone may ask.")}
           </li>
           <li>{t("Your agent: the AutoCraft tools take the same words.")}</li>
           <li>{t("This app: the command box on an item, or Command on Items.")}</li>
@@ -132,7 +136,7 @@ function Surfaces({ c }: { c: CommandDef }) {
       </dd>
       <dt className={dt}>Discord</dt>
       <dd className="min-w-0 break-words">
-        <Code>{`/autocraft do text:${c.example}: ${ITEM}`}</Code>
+        <Code>{`@AutoCraft ${c.example} ${ITEM}`}</Code>
       </dd>
       <dt className={dt}>{t("Agent")}</dt>
       <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>

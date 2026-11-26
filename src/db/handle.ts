@@ -631,6 +631,7 @@ export class Handle implements QueryDb {
     const tx: Tx = { mode, state: "opening", lockTimeoutMs: opts.lockTimeoutMs, lock: opts.lock };
     let lockedAt: number | undefined;
     let value: T;
+    let failure: unknown;
     try {
       value = await whileBusy(this, () => this.#als.run(tx, () =>
         this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
@@ -639,11 +640,18 @@ export class Handle implements QueryDb {
           lockedAt = performance.now();
           try {
             return await fn();
+          } catch (e) {
+            failure = e;
+            throw e;
           } finally {
             tx.state = "closed";
           }
         }),
       ));
+    } catch (e) {
+      // A rollback that fails too (the connection is gone) replaces the error that ended the transaction; keep that one as its cause.
+      if (failure !== undefined && e !== failure && e instanceof Error && e.cause === undefined) e.cause = failure;
+      throw e;
     } finally {
       tx.state = "closed";
       if (settingsWriteHook && this.#settingsTx.has(tx)) settingsWriteHook(this);

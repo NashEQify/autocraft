@@ -11,7 +11,7 @@ import { dispatcher } from "../src/discord/index.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import { addSentAlerts } from "../src/data/discord/index.ts";
-import { installAccountCommands } from "../src/discord/commands.ts";
+import { CONTENT_CHARS, V2_TEXT_CHARS, helpReply, installAccountCommands } from "../src/discord/commands.ts";
 import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
 import { RestClient, RestError, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
@@ -118,6 +118,8 @@ const v2text = (b: { components?: unknown[] }): string => ((b.components ?? []) 
 /** Every button of a Components V2 body in order: section accessories, then the action row. */
 const v2buttons = (b: { components?: unknown[] }): V2[] => ((b.components ?? []) as V2[]).flatMap((c) => (c.type === 9 ? [c.accessory!] : c.type === 1 ? c.components! : []));
 
+const ACCOUNT = ["link", "unlink", "alerts", "optout", "optin"];
+
 describe("ping replies", () => {
   test("a reply-ping searches the quoted text and replies once, publicly, with link buttons and no mentions", async () => {
     await pings.dispatch("MESSAGE_CREATE", msg("p1"));
@@ -211,7 +213,7 @@ describe("commands", () => {
     let seen = 0;
     const call = (id: string, sub: string, options: unknown[], user = "u50") => {
       seen = rest.edits.length;
-      ix.dispatch("INTERACTION_CREATE", { id, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: user } }, data: { name: "autocraft", type: 1, options: [{ name: sub, type: 1, options }] } });
+      ix.dispatch("INTERACTION_CREATE", { id, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: user } }, data: { name: "autocraft", type: 1, options: [ACCOUNT.includes(sub) ? { name: "account", type: 1, options: [{ name: "action", type: 3, value: sub }, ...options] } : { name: sub, type: 1, options }] } });
     };
     const settle = () => editAfter(seen);
     const { code } = await createLinkCode(db, keys, "mira");
@@ -225,7 +227,7 @@ describe("commands", () => {
     call("i4", "status", [{ name: "item", type: 3, value: "photocraft#2" }]);
     await settle();
     assert.match(rest.edits.at(-1)!.content!, /photocraft#2 Dark mode for the layers panel\nNew/);
-    ix.dispatch("INTERACTION_CREATE", { id: "i5", token: "t", type: 4, application_id: "app1", data: { name: "autocraft", options: [{ name: "stats", type: 1, options: [{ name: "repo", type: 3, value: "ph", focused: true }] }] } });
+    ix.dispatch("INTERACTION_CREATE", { id: "i5", token: "t", type: 4, application_id: "app1", data: { name: "autocraft", options: [{ name: "status", type: 1, options: [{ name: "repo", type: 3, value: "ph", focused: true }] }] } });
     await until(() => rest.callbacks.at(-1)?.type === 8);
     assert.deepEqual(rest.callbacks.at(-1), { type: 8, ephemeral: undefined, choices: [{ name: "photocraft", value: "photocraft" }] });
     call("i6", "unlink", []);
@@ -247,7 +249,7 @@ describe("/autocraft do", () => {
     assert.match(await run("d1", "u70", "review: photocraft#4"), /Link your account/);
     const { code } = await createLinkCode(db, keys, "nora");
     const linked = rest.edits.length;
-    ix.dispatch("INTERACTION_CREATE", { id: "d2", token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: "u70" } }, data: { name: "autocraft", type: 1, options: [{ name: "link", type: 1, options: [{ name: "code", type: 3, value: code }] }] } });
+    ix.dispatch("INTERACTION_CREATE", { id: "d2", token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: "u70" } }, data: { name: "autocraft", type: 1, options: [{ name: "account", type: 1, options: [{ name: "action", type: 3, value: "link" }, { name: "code", type: 3, value: code }] }] } });
     await editAfter(linked);
     await db.run(db.k.insertInto("main.access").values({ login: "nora", role: "maintainer" }).onConflict((oc) => oc.doNothing()));
     await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "app" })));
@@ -362,4 +364,18 @@ describe("pull requests", () => {
     assert.deepEqual(v2buttons(bodies[1]!).slice(0, 2).map((b) => b.label), ["1 · photocraft#7", "2 · photocraft#8"]);
     assert.equal(logs.length, 1);
   });
+});
+
+test("/autocraft help fits Discord's limits with a long base URL, in both layouts, and keeps the privacy links", () => {
+  const base = `https://${"a".repeat(380)}.example`;
+  const r = helpReply(base);
+  const texts = r.components.filter((c) => (c as { type: number }).type === 10).map((c) => (c as { content: string }).content);
+  assert.ok(texts.join("").length <= V2_TEXT_CHARS);
+  assert.ok(r.legacy.content!.length <= CONTENT_CHARS);
+  assert.ok(texts.some((x) => x.includes("Verify")) && texts.at(-1)!.includes("Privacy"), "every section is in the message");
+  for (const body of [r, r.legacy]) {
+    const urls = (body.components as { type: number; components?: { url?: string }[] }[]).filter((c) => c.type === 1).flatMap((c) => c.components!.map((b) => b.url!));
+    assert.equal(urls.length, 2);
+    assert.ok(urls.every((u) => u.startsWith(base) && u.length <= 512));
+  }
 });

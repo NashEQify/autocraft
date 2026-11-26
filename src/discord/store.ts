@@ -3,7 +3,7 @@
 // kept only as a keyed hash that serves a deletion request.
 import type { DiscordKeys, MessageRef } from "./keys.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
-import { messageText, parseRefs, type TrackedRepo } from "./refs.ts";
+import { messageText, parseRefs, type ItemKey, type TextMessage, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import * as dc from "../data/discord/index.ts";
@@ -38,6 +38,8 @@ export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage
   const have = (await dc.loadMessageMentions(db, [msgHash])).get(msgHash) ?? [];
   // An edit event may carry no author: keep the one sealed with the existing rows.
   const author = m.author?.id ? keys.hash("author", m.author.id) : have.map((h) => keys.open(h.sealed, msgHash)?.author).find((a) => a);
+  // With no author the opt-out cannot be checked, so such an event records nothing new.
+  if (!author) refs = refs.filter((r) => have.some((h) => h.repo === r.repo && h.number === r.number));
   const sealed = keys.seal({ guildId, channelId: m.channel_id, messageId: m.id, at: m.timestamp ?? new Date().toISOString(), ...(author && { author }) }, msgHash);
   const fresh = refs.filter((r) => !have.some((h) => h.repo === r.repo && h.number === r.number)).length;
   if (fresh && !mentionLimits.allow(Date.now(), [
@@ -58,9 +60,25 @@ export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage
   }]);
 }
 
-/** Mention rows only: our replies live in Discord and are deleted with it (src/discord/replies.ts). */
-export const forgetMessages = async (db: Db, keys: DiscordKeys, ids: string[]): Promise<number> =>
-  await dc.removeMentionsOfMessages(db, ids.map((id) => keys.hash("message", id)));
+/**
+ * The items a message names, each once: its mention rows, then the items its text names (`text`: the message as an event carries it,
+ * which also covers a message recorded before its channel was watched, by an opted-out author, or over a limit).
+ */
+export async function messageItems(db: Db, keys: DiscordKeys, messageId: string, text: TextMessage | null | undefined): Promise<ItemKey[]> {
+  const h = keys.hash("message", messageId);
+  const rows = ((await dc.loadMessageMentions(db, [h])).get(h) ?? []).map((r) => ({ repo: r.repo, number: r.number }));
+  const named = text ? parseRefs(messageText(text), await trackedRepos(db)) : [];
+  const out = new Map<string, ItemKey>();
+  for (const r of [...rows, ...named]) if (!out.has(`${r.repo}#${r.number}`)) out.set(`${r.repo}#${r.number}`, r);
+  return [...out.values()];
+}
+
+/** Mention rows, and what a deleted command reply of the bot followed. Returns the mention rows removed; our ping replies live in Discord and are deleted with it (src/discord/replies.ts). */
+export async function forgetMessages(db: Db, keys: DiscordKeys, ids: string[]): Promise<number> {
+  const hashes = ids.map((id) => keys.hash("message", id));
+  await dc.removeFollows(db, hashes);
+  return await dc.removeMentionsOfMessages(db, hashes);
+}
 
 /** For channels that are gone (deleted, or their server removed the bot): their replies went with them, so only the rows are removed. */
 export async function forgetChannels(db: Db, keys: DiscordKeys, channelIds: string[]): Promise<number> {
@@ -75,11 +93,23 @@ export async function forgetAuthor(db: Db, keys: DiscordKeys, userId: string): P
   return await dc.removeMentionRows(db, mine);
 }
 
+/** `/autocraft account action:optout`: the user's messages stop being recorded and their mention rows go. Returns whether the user was opted in, and the rows removed. */
+export async function optOut(db: Db, keys: DiscordKeys, userId: string): Promise<{ changed: boolean; rows: number }> {
+  const changed = await dc.setOptedOut(db, keys.hash("author", userId), true, new Date().toISOString());
+  return { changed, rows: await forgetAuthor(db, keys, userId) };
+}
+
+/** `/autocraft account action:optin`: the user's new messages are recorded again. Returns whether the user was opted out. */
+export const optIn = async (db: Db, keys: DiscordKeys, userId: string): Promise<boolean> =>
+  await dc.setOptedOut(db, keys.hash("author", userId), false, new Date().toISOString());
+
 /** Gateway events that change mention rows. Reads and edits happen in watched channels only; a delete always applies. Returns the message when this event newly recorded it against items, else null. */
 export async function handleDispatch(db: Db, keys: DiscordKeys, type: string, d: unknown): Promise<{ channelId: string; messageId: string; guildId?: string } | null> {
   const x = d as Record<string, unknown> & Partial<DiscordMessage> & { ids?: unknown; unavailable?: boolean };
   if (type === "MESSAGE_CREATE" || type === "MESSAGE_UPDATE") {
     if (typeof x.id !== "string" || typeof x.channel_id !== "string" || !await isWatched(db, x.channel_id)) return null;
+    // An opted-out author's message is not recorded, so it is not flagged or reacted to either; what it asks the bot still runs (pings.ts).
+    if (x.author?.id && await dc.isOptedOut(db, keys.hash("author", x.author.id))) return null;
     const guildId = typeof x.guild_id === "string" ? x.guild_id : await channelGuild(db, x.channel_id);
     const added = await recordMessage(db, keys, x as DiscordMessage, guildId);
     return added > 0 ? { channelId: x.channel_id, messageId: x.id, guildId } : null;

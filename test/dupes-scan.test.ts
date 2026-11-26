@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { resetScansForCutoff } from "../src/data/triage/index.ts";
 import { scanChunk } from "../src/dupes/scan.ts";
 import type { VectorIndex } from "../src/embed/vectors.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -50,4 +51,16 @@ test("an item without a text hash is not scanned", async () => {
   await db.run(db.k.updateTable("items").set({ embed_hash: null }).where("number", "=", 1));
   assert.equal(await scanChunk(db, index({ 1: [[2, 0.95]] }), [{ repo: "app", number: 1 }], NOW), 0);
   assert.equal((await db.all(db.k.selectFrom("duplicate_scans").select("number"))).length, 0);
+});
+
+test("a new scan cut-off clears the scan marks once and keeps the stored pairs", async () => {
+  const db = await fresh("cutoff");
+  await db.run(db.k.insertInto("duplicate_scans").values({ repo: "app", number: 1, hash: "h1", at: T0 }));
+  await db.run(db.k.insertInto("duplicate_pairs").values({ repo: "app", a: 1, b: 2, a_hash: "h1", b_hash: "h2", similarity: 0.9, created_at: T0 }));
+  assert.equal(await resetScansForCutoff(db, 0.5), true);
+  assert.equal((await db.all(db.k.selectFrom("duplicate_scans").select("number"))).length, 0);
+  await db.run(db.k.insertInto("duplicate_scans").values({ repo: "app", number: 1, hash: "h1", at: T0 }));
+  assert.equal(await resetScansForCutoff(db, 0.5), false, "the same cut-off does not clear again");
+  assert.equal((await db.all(db.k.selectFrom("duplicate_scans").select("number"))).length, 1);
+  assert.equal((await db.all(db.k.selectFrom("duplicate_pairs").select("a"))).length, 1);
 });

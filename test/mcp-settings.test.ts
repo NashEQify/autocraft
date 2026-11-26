@@ -27,6 +27,8 @@ test("set_my_settings changes the caller's reserve and audits it; a viewer is re
   assert.equal((await db.get(db.k.selectFrom("audit").select("action").where("action", "=", "usage-reserve")))?.action, "usage-reserve");
   assert.match((await call(maint, "my_settings", {})).result.content[0]!.text, /5-hour 35%/);
   assert.equal((await call(maint, "set_my_settings", { reserve_weekly: 95 })).result.isError, true);
+  assert.match((await call(maint, "set_my_settings", { manual_only: true })).result.content[0]!.text, /manual only: on/);
+  assert.match((await call(maint, "my_settings", {})).result.content[0]!.text, /manual only: on/);
 
   const refused = await call(env("vera", "viewer"), "set_my_settings", { reserve_five_hour: 50 });
   assert.equal(refused.result.isError, true);

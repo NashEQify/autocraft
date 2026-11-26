@@ -22,6 +22,7 @@ import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
 import { holdsToItemsSqlite } from "./db/holds-to-items.ts";
+import { backfillRefusalsSqlite } from "./db/refused-runs.ts";
 import { chatBackfillSqlite } from "./db/chat-backfill.ts";
 import { ACTIVE_LEG_INDEX, ACTIVE_LEG_STATES, builtAfterCopy, copyStateSqlite, oneActiveLegSqlite } from "./db/state-copy.ts";
 
@@ -209,6 +210,10 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["agent_runs", "user_login", "TEXT"],
   ["agent_runs", "harness", "TEXT"],
   ["agent_runs", "reported_model", "TEXT"],
+  // The remote call a Task Runner's lease ran (one call has a run per lease), and, for a lease the model's safety filter declined,
+  // what became of the call: `retried` (sent to another Task Runner or tier) or `failed` (nothing else could take it).
+  ["agent_runs", "call_id", "INTEGER"],
+  ["agent_runs", "refusal", "TEXT"],
   ["mcp_tokens", "can_run", "INTEGER NOT NULL DEFAULT 0"],
   ["mcp_tokens", "idle_claim_at", "INTEGER"],
   ["mcp_tokens", "idle_tiers", "TEXT"],
@@ -370,6 +375,9 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
 // Covering indexes on the hash columns let the planner compare stored hashes without reading item rows.
 // The trigger clears the hashes of an item whose hashed fields were edited without bringing its own (sync does).
 const BASE_INDEXES = [
+  // The refused runs newest first (the Agents page's Refused filter), and the later leases of a refused run's call.
+  "CREATE INDEX IF NOT EXISTS main.agent_runs_refused ON agent_runs(id) WHERE refusal IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS main.agent_runs_call ON agent_runs(call_id, id) WHERE call_id IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS main.workspaces_call ON workspaces(remote_call_id) WHERE remote_call_id IS NOT NULL",
   // Covers the claims' read of the queued remote calls (src/remote/calls.ts queuedCalls) and the room count, so neither walks the overflow pages of each row's bundle.
   // remote_calls_queued, the same index without the pick columns, stays while the previous release may still read it
@@ -417,6 +425,15 @@ const BASE_INDEXES = [
 // Columns of the module state that moved out of settings and of the set-based loaders (src/data/<module>). Old keys stay
 // next to the new ones: a re-keyed table keeps its old key columns until the code that reads them is gone.
 const STATE_COLUMNS: [table: string, column: string, type: string][] = [
+  // Webhook-first sync: delivery health, the backstop poll and GitHub's delivery list (src/mirror.ts pollReason).
+  ["sync_state", "webhook_at", "TEXT"],
+  ["sync_state", "webhook_started_at", "TEXT"],
+  ["sync_state", "polled_at", "TEXT"],
+  ["sync_state", "poll_missed_at", "TEXT"],
+  ["sync_state", "poll_missed", "TEXT"],
+  ["sync_state", "deliveries_checked_at", "TEXT"],
+  // How a Discord link was made: code (dashboard link code) or verify (the public /verify pages).
+  ["discord_links", "source", "TEXT NOT NULL DEFAULT 'code'"],
   // Statements, round trips and database time of a job, and the effects (GitHub writes, model calls, builds) it made.
   ["jobs", "db_statements", "INTEGER"],
   ["jobs", "db_round_trips", "INTEGER"],
@@ -522,6 +539,7 @@ function backfill(db: DatabaseSync): void {
   retireFixAttemptsSqlite(db);
   featuresRepoOnlySqlite(db);
   holdsToItemsSqlite(db);
+  backfillRefusalsSqlite(db);
   chatBackfillSqlite(db);
   // Reviews made before snapshots existed count as having read everything up to now: no wave of re-reviews.
   const now = new Date().toISOString();

@@ -10,7 +10,7 @@ import { resolveKeys, type KeySource } from "../keys.ts";
 import * as control from "../control/fragments.ts";
 import type { HiddenRepos } from "../control/types.ts";
 import { notOwnIntegration } from "../merge/fragments.ts";
-import { inScopeExpr, liveWorkflowExpr } from "../workflow/fragments.ts";
+import { autoEligibleExpr, inScopeExpr, liveWorkflowIn, withLiveLinks } from "../workflow/fragments.ts";
 import type { AreaDue, ClassifierPairRow, DupeEdge, DupeMember, EmbedDiffRow, EmbeddingMark, Pair, PairKey, SampleItem, StreamedEmbedding } from "./types.ts";
 
 
@@ -206,16 +206,23 @@ export async function dupeEdgeRows(db: Db, repo?: string): Promise<DupeEdge[]> {
   return await queryDb(db).all(edgeQuery(db, repo).orderBy("p.repo").orderBy("p.a").orderBy("p.b")) as DupeEdge[];
 }
 
-/** The items on either side of an edge, in the same statement as the edge so the members need no second wave. */
+/**
+ * The items on either side of an edge, in the same statement as the edge so the members need no second wave. `started` is the first half of
+ * `inScopeExpr`: the materialized CTE computes it once, where a flattened subquery would plan its subqueries again for `in_scope`. It reads
+ * the links from `live_links`, which the planner pass's workflow rows share in the same wave (withLiveLinks).
+ */
 export async function dupeMemberRows(db: Db, repo?: string): Promise<DupeMember[]> {
   const q = queryDb(db), k = q.k as any;
-  const rows = await q.all(k.with("e", () => edgeQuery(db, repo)).selectFrom("items as i")
-    .innerJoin(k.selectFrom("e").select(["e.repo", "e.a as number"]).union(k.selectFrom("e").select(["e.repo", "e.b as number"])).as("m"), onKey("m", "i"))
-    .select((eb: any) => ["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.head_oid", "i.embed_hash", "i.comments_count", "i.additions", "i.deletions", "i.closing_issues", "i.state_reason",
-      inScopeExpr(db, eb, "i.repo", "i.number").as("in_scope"), liveWorkflowExpr(eb, "i.repo", "i.number").as("started"),
+  const cols = ["repo", "number", "kind", "state", "title", "head_oid", "embed_hash", "comments_count", "additions", "deletions", "closing_issues", "state_reason"];
+  const rows = await q.all(withLiveLinks(db, k).with("e", () => edgeQuery(db, repo))
+    .with((cte: any) => cte("s").materialized(), () => k.selectFrom("items as i")
+      .innerJoin(k.selectFrom("e").select(["e.repo", "e.a as number"]).union(k.selectFrom("e").select(["e.repo", "e.b as number"])).as("m"), onKey("m", "i"))
+      .select((eb: any) => [...cols.map((c) => `i.${c}`), liveWorkflowIn(eb, "i.repo", "i.number").as("started")]))
+    .selectFrom("s")
+    .select((eb: any) => [...cols.map((c) => `s.${c}`), "s.started", eb.or([eb.ref("s.started"), autoEligibleExpr(eb, "s.repo", "s.number")]).as("in_scope"),
       eb.selectFrom("duplicate_pairs as rp").select(kx.groupConcat(db, "rp.b", ",", "rp.b").as("r"))
-        .whereRef("rp.repo", "=", "i.repo").whereRef("rp.a", "=", "i.number").where("rp.by_operator", "=", 1).as("ruled")])
-    .orderBy("i.repo").orderBy("i.number")) as (Omit<DupeMember, "in_scope" | "started"> & { in_scope: unknown; started: unknown })[];
+        .whereRef("rp.repo", "=", "s.repo").whereRef("rp.a", "=", "s.number").where("rp.by_operator", "=", 1).as("ruled")])
+    .orderBy("s.repo").orderBy("s.number")) as (Omit<DupeMember, "in_scope" | "started"> & { in_scope: unknown; started: unknown })[];
   return rows.map((r) => ({ ...r, in_scope: !!r.in_scope, started: !!r.started }));
 }
 

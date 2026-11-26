@@ -58,3 +58,12 @@ export async function countStatusRetriesDue(db: Db, nowMs: number): Promise<numb
   const r = await q.get(q.k.selectFrom(T).select((eb) => eb.fn.countAll().as("n")).where("final", "=", 0).where("retry_at", "<=", new Date(nowMs).toISOString()));
   return Number(r?.n ?? 0);
 }
+
+/** The GitHub id of each item's status comment (the number in its #issuecomment- URL), by `repo#number`; an item without a known one is absent. */
+export async function loadStatusCommentIds(db: Db, refs: readonly RefKey[]): Promise<Map<RefKey, string>> {
+  if (!refs.length) return new Map();
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.pr_status_comments as c").select(["c.repo", "c.number", "c.comment_id"]).where(kx.refIn(db, "c", refs)).where("c.comment_id", "is not", null),
+    { label: "workflow.loadStatusCommentIds" });
+  return new Map(rows.map((r) => [`${r.repo}#${Number(r.number)}` as RefKey, String(r.comment_id)]));
+}
