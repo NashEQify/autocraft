@@ -1,10 +1,10 @@
 // What AutoCraft writes into an item's chat (src/data/chat) about a workflow: each recommendation it comes back with, and the line it
 // ends with. Also the words of a command whose text was never kept (commands given before the chat existed), rebuilt from its parse.
 import { t, tk } from "../i18n/index.ts";
-import { askedLogins } from "./asked.ts";
+import { askedLogins, asksNobody } from "./asked.ts";
 import { describe } from "./parse.ts";
 import { ruleStopLine } from "./status.ts";
-import { RULE_STARTER, type Entry, type ItemWorkflow, type Parsed, type PlanPart, type Recommendation } from "./types.ts";
+import { type Entry, type ItemWorkflow, type Parsed, type PlanPart, type Recommendation } from "./types.ts";
 import { ENTRY_LABEL, weightWord } from "./vocab.ts";
 
 /** The author and surface of AutoCraft's own messages. */
@@ -20,8 +20,8 @@ export const conversationTitle = (entry: Entry | null | undefined): string => (e
 export type RecommendedPayload = { workflowId: number; rec: Recommendation; parts: PlanPart[]; asked: string[]; rule?: true };
 
 /** The body is the recommendation's sentence; a rule row's, which asks nobody, is its state line: why it stopped and what AutoCraft would do. */
-export function recommendedMessage(w: Pick<ItemWorkflow, "id" | "startedBy" | "approvedBy" | "plan">, rec: Recommendation): { body: string; payload: RecommendedPayload } {
-  const rule = w.startedBy === RULE_STARTER && w.approvedBy === null;
+export function recommendedMessage(w: Pick<ItemWorkflow, "id" | "startedBy" | "approvedBy" | "plan"> & { takenBy?: string | null }, rec: Recommendation): { body: string; payload: RecommendedPayload } {
+  const rule = asksNobody(w);
   return { body: rule ? ruleStopLine(rec) : rec.text, payload: { workflowId: w.id, rec, parts: w.plan, asked: askedLogins(w), ...(rule ? { rule: true as const } : {}) } };
 }
 

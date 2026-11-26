@@ -47,9 +47,9 @@ export async function recordWorkflowMessages(db: Db, before: ChatBefore): Promis
   for (const part of kx.chunks([...before.keys()])) {
     const rows = await q.all((q.k as any).selectFrom("main.item_workflows as w")
       .leftJoin("main.items as i", (j: any) => j.onRef("i.repo", "=", "w.repo").on((eb: any) => eb("i.number", "=", eb.fn.coalesce("w.pr_number", "w.number"))))
-      .select(["w.id", "w.repo", "w.number", "w.state", "w.rec", "w.rec_at", "w.plan", "w.started_by", "w.approved_by", "w.updated_at", "i.state as item_state", "i.base_ref"])
+      .select(["w.id", "w.repo", "w.number", "w.state", "w.rec", "w.rec_at", "w.plan", "w.started_by", "w.approved_by", "w.taken_by", "w.updated_at", "i.state as item_state", "i.base_ref"])
       .where(kx.inList(db, "w.id", part, "bigint")), { label: "chat.recordWorkflowMessages" }) as {
-        id: number | string; repo: string; number: number | string; state: string; rec: string | null; rec_at: string | null; plan: string; started_by: string; approved_by: string | null;
+        id: number | string; repo: string; number: number | string; state: string; rec: string | null; rec_at: string | null; plan: string; started_by: string; approved_by: string | null; taken_by: string | null;
         updated_at: string; item_state: string | null; base_ref: string | null;
       }[];
     for (const r of rows) {
@@ -58,7 +58,7 @@ export async function recordWorkflowMessages(db: Db, before: ChatBefore): Promis
       if (ASKING.includes(r.state) && r.rec !== null && (!ASKING.includes(was.state) || was.recAt !== r.rec_at)) {
         const rec = json<Recommendation | null>(r.rec, null);
         if (rec) {
-          const m = recommendedMessage({ id, startedBy: r.started_by, approvedBy: r.approved_by, plan: json<PlanPart[]>(r.plan, []) }, rec);
+          const m = recommendedMessage({ id, startedBy: r.started_by, approvedBy: r.approved_by, takenBy: r.taken_by, plan: json<PlanPart[]>(r.plan, []) }, rec);
           out.push({ ...item, kind: "recommended", ...m, at: r.rec_at ?? r.updated_at });
         }
       }

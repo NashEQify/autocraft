@@ -82,7 +82,7 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
       eb.case().when("i.kind", "=", "pr").then(kx.jsonNum(db, "i.closing_issues", "$[0]")).else(eb.ref("cl.pr")).end().as("linked"),
       eb.case()
         // A row only the automatic merge rule started asks nobody (src/workflow/asked.ts): it is stopped, not waiting on a person.
-        .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null)])).then("stopped")
+        .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null), eb("w.taken_by", "is", null)])).then("stopped")
         .when("w.state", "in", [...ASKING_STATES]).then("waiting")
         .when("w.state", "in", LIVE_STATES).then("running")
         .when("lw.state", "=", "stopped").then("held")
@@ -91,7 +91,7 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
         .else("none").end().as("autocraft"),
       eb.case().when(eb.and([
         eb("w.state", "in", [...ASKING_STATES]),
-        eb.or([eb.and([kx.ciEq(db, "w.started_by", eb.val(me)), eb("w.started_by", "<>", RULE_STARTER)]), kx.ciEq(db, eb.fn.coalesce("w.approved_by", eb.val("")), eb.val(me))]),
+        eb.or([eb.and([kx.ciEq(db, "w.started_by", eb.val(me)), eb("w.started_by", "<>", RULE_STARTER)]), kx.ciEq(db, eb.fn.coalesce("w.approved_by", eb.val("")), eb.val(me)), kx.ciEq(db, eb.fn.coalesce("w.taken_by", eb.val("")), eb.val(me))]),
       ])).then(1).else(0).end().as("asks_me"),
       eb.case().when("w.approved_by", "is not", null).then(1).else(0).end().as("approved"),
       eb.case().when(isDuplicateClose(db, eb, "i.repo", "i.number")).then(1).else(0).end().as("duplicate"),

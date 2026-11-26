@@ -359,6 +359,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["preapprovals", "reason_params", "TEXT"],
   // A review a person asked for of a PR that merges without one, and when the question an answer is for was asked.
   ["item_workflows", "review_asked_at", "TEXT"],
+  // A row the automatic merge rule started: the person whose answer last ran on it (src/workflow/asked.ts).
+  ["item_workflows", "taken_by", "TEXT"],
   ["workflow_events", "seen_at", "TEXT"],
   // Why the token endpoint refused the login's refresh token ("<error>: <error_description>"), kept while the row is refresh-failed.
   ["user_tokens", "refresh_error", "TEXT"],

@@ -78,6 +78,19 @@ test("the automatic merge rule's unsure stop asks nobody and says why it stopped
   assert.equal(await rows(w, 1), 1);
 });
 
+test("an answer on the rule's stop that does not approve the merge takes the row over: its questions go to the answerer", async () => {
+  const w = current = await (await (await world()).repo()).acting(MAINT);
+  await w.db.run(w.db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
+  await unsure(w, 1);
+  await writePlanCache(w.db, await w.plan());
+  await advanceWorkflows(w.db);
+  assert.equal((await say(w, "review")).outcome, "run");
+  const taken = (await liveWorkflow(w.db, "app", 1))!;
+  assert.equal(taken.approvedBy, null, "the merge is not approved");
+  assert.deepEqual(askedLogins(taken), [MAINT]);
+  assert.doesNotMatch(stateLine(taken), /^Stopped/, "the rule's stop line is gone once a person took the row");
+});
+
 test("starting the rule's stops sends as many statements for many PRs as for one", async () => {
   await expectFlat(async (size) => {
     const w = await (await world()).repo();

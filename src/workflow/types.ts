@@ -126,6 +126,8 @@ export type ItemWorkflow = {
   /** Who holds it, and since when (state `stopped`). */
   stoppedBy: string | null;
   stoppedAt: string | null;
+  /** A row the automatic merge rule started: the person whose answer last ran on it. Its questions go to them (asked.ts). */
+  takenBy: string | null;
   blocker: Blocker | null;
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;
