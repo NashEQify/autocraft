@@ -24,7 +24,7 @@ export const JEV_RETRY_MS = 60 * 60_000;
 export const JEV_UNREADABLE_LIMIT = 20;
 export const JEV_UNREADABLE_SUMMARY = "unreadable answer";
 
-export type JevOutage = { kind: "off" | "missing" | "account" | "format"; reason: string; since: string; at: string };
+export type JevOutage = { kind: "off" | "missing" | "account" | "format" | "model"; reason: string; since: string; at: string };
 
 // Through the control module, so a planner pass reads them from its snapshot.
 const get = setting;
@@ -77,7 +77,7 @@ export async function jevUsable(db: Db, nowMs: number = Date.now()): Promise<boo
   const o = await jevOutage(db);
   if (!o) return true;
   if (o.kind === "missing") return jevInstalled();
-  if (o.kind === "account" || o.kind === "format") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
+  if (o.kind === "account" || o.kind === "format" || o.kind === "model") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
   return true;
 }
 
@@ -89,12 +89,12 @@ export async function jevAvailable(db: Db, nowMs: number = Date.now()): Promise<
   }
   const usable = await jevUsable(db, nowMs), o = await jevOutage(db);
   // A switch turned back on or a command installed since the outage was recorded ends it; an account or format outage ends with a call that works.
-  if (usable && o && o.kind !== "account" && o.kind !== "format") await clear(db);
+  if (usable && o && o.kind !== "account" && o.kind !== "format" && o.kind !== "model") await clear(db);
   return usable;
 }
 
 /** Records a failure; `since` stays at the first failure of an outage. */
-export async function markJevUnavailable(db: Db, kind: "missing" | "account" | "format", reason: string, nowMs: number = Date.now()): Promise<void> {
+export async function markJevUnavailable(db: Db, kind: "missing" | "account" | "format" | "model", reason: string, nowMs: number = Date.now()): Promise<void> {
   const prev = await jevOutage(db);
   const at = new Date(nowMs).toISOString();
   await put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind, reason, since: prev?.kind === kind ? prev.since : at, at } satisfies JevOutage));
@@ -117,12 +117,16 @@ export async function markJevUnreadable(db: Db, nowMs: number = Date.now()): Pro
   return true;
 }
 
+// The API names a model it does not serve (unknown, missing, deprecated): every request fails the same way until the model is back.
+const UNKNOWN_MODEL = /(?:unknown model|no such model|model not found|model does not exist|model (?:is )?(?:unavailable|deprecated|not available))(?::?\s*([\w./:-]+))?/i;
+const modelReason = (name: string | undefined): string => name ? `model unavailable (${name})` : "model unavailable";
+
 /**
  * Whether a finished `jev` process failed because Jev is unavailable (as opposed to a timeout, a server error or a bad answer,
- * which are retried): the command is missing, or the API refused the account.
+ * which are retried): the command is missing, the API refused the account, or the API does not know the model.
  * The CLI prints `jev: API error status=<N> request_id=...: <message>` or `jev: <message>` on stderr.
  */
-export function jevFailure(r: { code: number | null; stderr: string }): { kind: "missing" | "account"; reason: string } | null {
+export function jevFailure(r: { code: number | null; stderr: string }): { kind: "missing" | "account" | "model"; reason: string } | null {
   if (r.code === -1 && /ENOENT/.test(r.stderr)) return { kind: "missing", reason: "not installed" };
   // The jev script exits 127 when the interpreter it starts through is missing.
   if (r.code === 127 && /no such file or directory|not found/i.test(r.stderr)) return { kind: "missing", reason: "not installed" };
@@ -130,10 +134,15 @@ export function jevFailure(r: { code: number | null; stderr: string }): { kind: 
   const line = r.stderr.split("\n").find((l) => l.startsWith("jev: ")) ?? "";
   const status = /API error status=(\d+)/.exec(line)?.[1];
   // With a status, the status decides: a 429 "quota" or a 503 "insufficient capacity" is not an account problem.
+  if (status === "400" || status === "404") {
+    const m = UNKNOWN_MODEL.exec(line);
+    return m ? { kind: "model", reason: modelReason(m[1]) } : null;
+  }
   if (status !== undefined) return status === "402" ? { kind: "account", reason: "out of credit" } : status === "401" || status === "403" ? { kind: "account", reason: "key rejected" } : null;
   if (/credit|balance|billing|payment|insufficient|quota/i.test(line)) return { kind: "account", reason: "out of credit" };
   if (/api key/i.test(line)) return { kind: "account", reason: "key rejected" };
-  return null;
+  const m = UNKNOWN_MODEL.exec(line);
+  return m ? { kind: "model", reason: modelReason(m[1]) } : null;
 }
 
 /** The API status a failed `jev ask` printed (`jev: API error status=<N> ...`), or null when it printed none. */
