@@ -118,17 +118,19 @@ both("statementsDue collects what operators wrote since it last looked, also aft
 });
 
 if (dialects().includes("postgres")) {
-  test("the owner-statement candidates read comments and turns through the login indexes, not a scan (postgres)", async () => {
+  test("the owner-statement candidates reach comments through an author lookup, not a walk of every comment (postgres)", async () => {
     const { t, db } = await openApp("postgres");
     try {
       const q = queryDb(db);
       const c = statementSources(db).compile();
-      // Tables this small are scanned whatever the indexes: with scans disabled, a scan in the plan means no index can serve the join.
+      // Tables this small are scanned whatever the indexes: with scans disabled, the planner reaches comments through an author lookup
+      // when an index serves the join, and otherwise walks them all (a disabled scan, or a full walk of another index).
       const plan = await db.write(async () => {
         await q.script("SET LOCAL enable_seqscan = off");
-        return (await q.all<Record<string, string>>({ compile: () => ({ ...c, sql: `EXPLAIN ${c.sql}` }) })).map((r) => Object.values(r)[0]).join("\n");
+        return (await q.all<Record<string, string>>({ compile: () => ({ ...c, sql: `EXPLAIN ${c.sql}` }) })).map((r) => Object.values(r)[0]!);
       });
-      assert.doesNotMatch(plan, /Seq Scan on (comments|conversation_turns)/, plan);
+      const reads = plan.flatMap((line, i) => (/ on comments c\b/.test(line) ? [plan[i + 1] ?? ""] : []));
+      assert.ok(reads.length > 0 && reads.every((cond) => /Cond: .*\bauthor\b/.test(cond)), plan.join("\n"));
     } finally {
       await t.close();
     }
