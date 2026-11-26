@@ -613,7 +613,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
     let blockPlan = plan;
     if (ended && found.params.reason === ended.reason && premergeStop(ended)) {
-      const extra = await premergeParts(db, { repo: w.repo, number: target, head }, plan);
+      const extra = await premergeParts(db, { repo: w.repo, number: target, head }, plan, w.approvedBy !== null);
       blockPlan = [...plan, ...extra];
       found.params.premerge = extra.map((p) => p.n);
     }

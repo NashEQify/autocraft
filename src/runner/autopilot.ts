@@ -785,6 +785,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
+    // The defects that do not stop the merge of a PR approved for merge become its follow-up issue, before it merges.
+    name: "premerge-followups",
+    perRepo: true,
+    detect: async (db, ctx) => {
+      const due = new Set((await planned(db, "followups", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
+      return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "premerge-followups", params: { repo } }));
+    },
+  },
+  {
     // Opus reviews what the pipeline's merges landed, also where the Pipeline switch is off; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
@@ -1401,7 +1410,7 @@ export const LANE_KINDS: Record<string, ActionKind[]> = {
   classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes"], "dupes-compare": ["dupes-compare"],
   review: ["review"], labels: ["label"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
   implement: ["implement"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
-  "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"],
+  "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"], "premerge-followups": ["followups"],
 };
 
 /** Lanes whose jobs are not about listed items (counters, collection, operator messages, per-repo scans); every other lane needs a LANE_KINDS entry. */

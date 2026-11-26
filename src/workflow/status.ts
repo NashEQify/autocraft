@@ -134,11 +134,11 @@ export const ruleStopLine = (rec: Recommendation): string =>
   rec.stop ? t("Stopped: {reason}. AutoCraft would: {recommendation}", { reason: rec.stop, recommendation: rec.text }) : rec.text;
 
 /**
- * Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts
- * legWait). `veiled`: a quiet pull request's reader, who sees no recommendation, so a rule row's line says only that it stopped.
+ * Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, what became of a close, or the
+ * follow-ups a merge filed (waits.ts legWait). `veiled`: a quiet pull request's reader, who sees no recommendation, so a rule row's line says only that it stopped.
  */
 export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null, veiled = false): string {
-  if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed")) return wait;
+  if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed" || wf.state === "done")) return wait;
   const ruleRec = asksNobody(wf) ? openRecommendation(wf) : null;
   if (ruleRec) return veiled ? t("Stopped") : ruleStopLine(ruleRec);
   switch (wf.state) {

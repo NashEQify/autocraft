@@ -56,7 +56,7 @@ export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[], pre
   const conflict = f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const q = questionFor(f, p, { approved: false, review: view, parts: fixes, conflict });
   if (!q) return null;
-  const defects = p.reasons.includes(PREMERGE_DEFECT_REASON) ? premergePartsOf(premerge, fixes) : null;
+  const defects = p.reasons.includes(PREMERGE_DEFECT_REASON) ? premergePartsOf(premerge, fixes, false) : null;
   const plan = defects ? [...fixes, ...defects] : fixes;
   const rec = defects ? premergeFirst(q.rec, defects.map((d) => d.n)) : q.rec;
   return { repo: f.repo, number: f.number, head: f.head, code, plan, rec: ruleStopped(rec, p.reasons) };

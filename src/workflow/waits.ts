@@ -4,7 +4,8 @@
 // the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
 // close from being made. A merge refused for its approver's access is no wait but a question (ask.ts), which an answer closes, or the
 // approver's next sign-in (src/github/user-lane.ts retryWaiting). A contributor, or a person on GitHub, whom the item waits for without a question. The status comment, the item page and the agent show it as the state line.
-import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
+import { loadPremerge, loadPremergeFollowups, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
+import { loadShown } from "../data/mirror/index.ts";
 import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import { loadPlans } from "../data/planner/index.ts";
 import type { RefusalCode, WaitCode } from "../core/codes.ts";
@@ -34,8 +35,8 @@ export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now()): P
 /**
  * Per workflow id the state line of a workflow whose started work waits for the app identity, whose merge leg waits for its approver's
  * sign-in, or for a pre-merge check that no Task Runner can take, or that only the own runners of the people whose work it is take while
- * none of them can claim (offline, held for its usage, cooling off), or for the contributor or a person on GitHub, or whose close is not made;
- * the others are absent.
+ * none of them can claim (offline, held for its usage, cooling off), or for the contributor or a person on GitHub, or whose close is not made,
+ * and the line of a done workflow whose PR merged with follow-ups filed; the others are absent.
  */
 export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = Date.now()): Promise<Map<number, string>> {
   const out = new Map<number, string>();
@@ -56,6 +57,7 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
   };
   const closesOf = byWorkflow(closes), actionsOf = byWorkflow(actions);
   for (const w of closed) add(w.id, closeWait(closesOf.get(w.id)?.at(-1)));
+  for (const [id, line] of await followUpLines(db, wfs.filter((w) => w.state === "done"))) add(id, line);
   // The PR the workflow's merge leg is on: the item, or the PR an implement workflow works on.
   const linked = new Map(links.map((l) => [l.workflowId, l.pr]));
   const prOf = (w: Waiter): number | null => (w.kind === "pr" ? w.number : linked.get(w.id) ?? null);
@@ -87,6 +89,20 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
     if (!takes(call)) { add(w.id, t("Waiting for the pre-merge check: no Task Runner can take it")); continue; }
     const [first] = waitingOnIn(view, call);
     add(w.id, first ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : null);
+  }
+  return out;
+}
+
+/** Per workflow id, the line of a done workflow whose PR merged with follow-ups filed in its follow-up issue (src/premerge/followups.ts). */
+async function followUpLines(db: Db, done: readonly Waiter[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (!done.length) return out;
+  const linked = new Map((await loadLinks(db, { workflowIds: done.filter((w) => w.kind !== "pr").map((w) => w.id) })).map((l) => [l.workflowId, l.pr]));
+  const prs = done.flatMap((w) => { const pr = w.kind === "pr" ? w.number : linked.get(w.id); return pr == null ? [] : [{ w, repo: w.repo, number: pr }]; });
+  const [filed, shown] = await db.together(() => Promise.all([loadPremergeFollowups(db, prs), loadShown(db, prs)]));
+  for (const { w, repo, number } of prs) {
+    const issue = filed.get(`${repo}#${number}`)?.find((r) => r.issue_number !== null)?.issue_number;
+    if (issue != null && shown.get(`${repo}#${number}`)?.state === "merged") out.set(w.id, t("Merged; follow-ups filed in #{issue}", { issue }));
   }
   return out;
 }

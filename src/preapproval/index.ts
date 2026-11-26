@@ -32,6 +32,7 @@ import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
+import { stoppingDefects } from "../premerge/types.ts";
 import { removeFromBatch } from "../merge/controls.ts";
 import type { Exec } from "../fixup/git.ts";
 import { staleReviews } from "../review/discussion.ts";
@@ -608,7 +609,9 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     const pm = await premergeAt(db, p.repo, p.number, head);
     if (!pm || (pm.findings === null && pm.tries < PREMERGE_MAX_TRIES)) return;
     if (pm.findings === null) return await stop(stopOf("premerge-failed", `the pre-merge review of ${headName(p)} failed`));
-    const defects = findingsOf(pm).filter((x) => x.severity === "defect").length;
+    const all = findingsOf(pm);
+    // On the leg of a PR approved for merge only blocking defects stop it; the others are filed as follow-ups (core/decide.ts) and it merges.
+    const defects = all.some((x) => x.severity === "defect") ? stoppingDefects(all, !!(await factOf())?.workflow?.approved).length : 0;
     if (defects) {
       const found = `the pre-merge review found ${defects} defect${defects === 1 ? "" : "s"}`;
       // Safe fixes get up to PREMERGE_FIX_ROUNDS fix-up rounds, whose pushes are our own; a defect that comes back or what is left after the last round is a person's.

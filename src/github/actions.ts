@@ -41,6 +41,7 @@ export const GITHUB_ACTIONS: Record<string, string> = {
   "autorepin-push": "Pushed",
   "postmerge-file": "Opened issue",
   "act-open-issue": "Opened issue",
+  "premerge-followup": "Filed follow-ups",
   "discord-issue-open": "Opened issue",
   "discord-issue-bot": "Opened issue",
   "discord-issue-label": "Labelled",

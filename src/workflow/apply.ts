@@ -658,7 +658,7 @@ async function answerQuestion(c: fx.Ctx, q: QuestionRef, option: string): Promis
 async function askToFix(db: Db, wf: ItemWorkflow, on: fx.Target): Promise<ItemWorkflow> {
   const pr = on.kind === "pr" ? on.number : (await implementationPr(db, wf))?.number;
   if (!wf.rec || premergeStopped(wf)?.length || pr === undefined || wf.recHead === null) return wf;
-  const parts = await premergeParts(db, { repo: wf.repo, number: pr, head: wf.recHead }, wf.plan);
+  const parts = await premergeParts(db, { repo: wf.repo, number: pr, head: wf.recHead }, wf.plan, wf.approvedBy !== null);
   if (!parts.length) return wf;
   const plan = [...wf.plan, ...parts], blockerParams = { ...wf.blockerParams, premerge: parts.map((p) => p.n) }, recAt = new Date().toISOString();
   const patch = { plan, blockerParams, recAt, rec: atBlocker({ blocker: wf.blocker!, params: blockerParams }, null, plan) };

@@ -656,6 +656,16 @@ export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: 
     { key: onceKey(body, ...answered(details)), lasting: answersOne(details), find: async (since, taken) => { const url = await commentMade(ghRead(exec), { repo: o.repo, number: o.number, body, since, mine: await byUs(w.db), taken }); return url === null ? null : { url }; } });
 }
 
+/** Adds the follow-ups of a later head of a PR approved for merge to the PR's follow-up issue (`issue`), as a comment there. Audited as `premerge-followup`, aimed at the PR. */
+export async function ghFollowupComment(w: Writer, g: Guarded<"followups">, exec: Exec, o: { issue: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
+  covers(g, g.repo, g.number);
+  exec = await laneExec(w, g, exec);
+  const body = posted(note, text);
+  return viaGh(w, idOf(w, g), exec, "premerge-followup", refOf(g.repo, g.number), { ...details, issue: o.issue, text: body },
+    ["issue", "comment", String(o.issue), "--repo", `${slugOf(g.repo)}`, "--body-file", "-"], body,
+    { key: onceKey(body, String(o.issue)), find: async (since, taken) => { const url = await commentMade(ghRead(exec), { repo: g.repo, number: o.issue, body, since, mine: await byUs(w.db), taken }); return url === null ? null : { url }; } });
+}
+
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
 export async function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
@@ -749,7 +759,7 @@ function issueFailed(r: ExecResult): IssueError {
  * Opens an issue; returns its number and URL. Throws an IssueError when `gh` fails or prints no issue URL; `clear` tells
  * whether the failure certainly left no issue behind. `target` is the item the issue follows up.
  */
-export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: string; target: string; title: string; body: string; /** The audit action; the post-merge step's by default. */ action?: string }, note: Note, details: Details = {}): Promise<{ number: number; url: string }> {
+export async function createIssue(w: Writer, g: Grant | Guarded<"followups">, exec: Exec, o: { repo: string; target: string; title: string; body: string; /** The audit action; the post-merge step's by default. */ action?: string }, note: Note, details: Details = {}): Promise<{ number: number; url: string }> {
   covers(g, o.repo);
   const body = posted(note, o.body);
   let r: ExecResult;

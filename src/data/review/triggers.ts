@@ -11,6 +11,7 @@ registerTriggerSource("postmerge",
   { table: "postmerge_reviews" },
   { table: "postmerge_followups" },
   { table: "premerge_reviews" },
+  { table: "premerge_followups" },
 );
 
 // Planner input no other input topic reports (src/db/plan-inputs.ts). 

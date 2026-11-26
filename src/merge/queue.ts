@@ -5,6 +5,7 @@ import { decidePr, mergeEntry, queueEntry } from "../core/decide.ts";
 import { loadPass, loadPrFacts } from "../core/facts.ts";
 import { isQueueState, QUEUE_STATES, type MergePath, type PrFacts, type QueueState } from "../core/plan.ts";
 import { claimsOf, findingsOf, type PremergeFinding } from "../premerge/store.ts";
+import { stoppingDefects } from "../premerge/types.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadPremerge } from "../data/review/index.ts";
 import type { PremergeRow } from "../data/review/types.ts";
@@ -82,7 +83,7 @@ function entryOf(f: PrFacts, plan: ReturnType<typeof decidePr>, title: string, p
   let premerge: QueueEntry["premerge"] = null;
   if (x.premerge) {
     const all = findingsOf(premergeRow);
-    const defects = all.filter((d) => d.severity === "defect");
+    const defects = stoppingDefects(all, !!f.workflow?.approved);
     premerge = { state: x.premerge, defects, unknownClaims: claimsOf(premergeRow).filter((c) => c.impact === "unknown"), minor: all.length - defects.length, error: premergeRow?.error ?? null };
   }
   return {

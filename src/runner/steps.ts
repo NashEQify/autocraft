@@ -720,6 +720,23 @@ export const STEPS: StepDef[] = [
     },
   },
   {
+    name: "premerge-followups",
+    title: "File follow-ups of approved merges",
+    description: "For each pull request a maintainer approved for merge whose pre-merge review found defects that do not stop the merge, opens one follow-up issue that lists them (where, what goes wrong, why it does not block) and links the pull request; a later head's follow-ups are a comment on that issue. The merge waits for the try. Writes to GitHub in repos approved for comments, or as the approver's work.",
+    stage: runStage("premerge-followups"),
+    requires: "operator",
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 20, help: "pull requests to file follow-ups for in this job" },
+    ],
+    run: async (ctx) => {
+      const { runPremergeFollowups } = await import("../premerge/followups.ts");
+      const r = await runPremergeFollowups(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      ctx.acted(r.filed.length + r.commented.length + r.failed.length);
+      return `${r.repo}: ${r.filed.length} follow-up issues opened, ${r.commented.length} comments, ${r.failed.length} failed, ${r.skipped.length} skipped`;
+    },
+  },
+  {
     name: "postmerge",
     title: "Review merged pull requests",
     description: "Opus reads, one pull request per call, what the merges of one repo that need a post-merge review landed, with our own commits and reviews of the PR, and lists defects and minor findings. Reads GitHub; writes only to the local database.",

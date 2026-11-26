@@ -1899,6 +1899,17 @@ export interface Preapprovals {
   reason_params: string | null;
 }
 
+export interface PremergeFollowups {
+  repo: string;
+  number: number;
+  head_oid: string;
+  issue_number: number | null;
+  url: string | null;
+  state: string;
+  at: string;
+  note: string | null;
+}
+
 export interface PremergeReviews {
   repo: string;
   number: number;
@@ -2828,6 +2839,7 @@ export interface DB {
   pr_files: PrFiles;
   pr_status_comments: PrStatusComments;
   preapprovals: Preapprovals;
+  premerge_followups: PremergeFollowups;
   premerge_reviews: PremergeReviews;
   push_outcomes: PushOutcomes;
   release_apps: ReleaseApps;
@@ -3045,6 +3057,7 @@ export interface DB {
   "main.pr_files": PrFiles;
   "main.pr_status_comments": PrStatusComments;
   "main.preapprovals": Preapprovals;
+  "main.premerge_followups": PremergeFollowups;
   "main.premerge_reviews": PremergeReviews;
   "main.push_outcomes": PushOutcomes;
   "main.release_apps": ReleaseApps;
@@ -3266,6 +3279,7 @@ export const COLUMNS = {
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
+  premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],

@@ -2051,6 +2051,20 @@ CREATE TABLE IF NOT EXISTS premerge_reviews (
   PRIMARY KEY (repo, number, head_oid)
 );
 
+-- The follow-up issue of a PR a maintainer approved for merge (src/premerge/followups.ts): one row per PR head whose pre-merge
+-- review found defects that do not stop the merge. The first row's write opens the PR's one issue (issue_number, url); a later
+-- head's row comments on it. state: filing (written before the write), filed, or failed (note: why GitHub refused it).
+CREATE TABLE IF NOT EXISTS premerge_followups (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  head_oid TEXT NOT NULL,
+  issue_number INTEGER,
+  url TEXT,
+  state TEXT NOT NULL,
+  at TEXT NOT NULL,
+  note TEXT,
+  PRIMARY KEY (repo, number, head_oid)
+);
+
 -- What the merge rule reads from a PR's cached diff at one head (src/review/diff.ts), written by the code that writes or
 -- removes the cache files; one row while the diff of that head is cached. reasons: JSON string[] of sensitive-content
 -- reasons (the conservative ones while pending); lines: changed lines of the diff; pending: the diff waits for the

@@ -38,6 +38,7 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
     case "act": return "comment";
     case "merge": return "merge";
     case "post-review": return "comment";
+    case "followups": return "comment";
     case "approve-ci": return "ci";
     case "fixup":
     case "conflict":
@@ -67,10 +68,10 @@ export function showsWorkFor(f: Pick<PrFacts, "workflow" | "standing">): string 
   return f.workflow && s && s.standing === "yes" && !s.boxIdentity ? s.login : null;
 }
 
-/** Who the implementation (and with it its PR's revisions) runs for, who commanded the close, or whose started item the review post shows; null for other work. Their command is the approval, in any repo. */
+/** Who the implementation (and with it its PR's revisions) runs for, who commanded the close, or whose started item the review post and the follow-up issue show; null for other work. Their command is the approval, in any repo. */
 function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
   if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
-  if (a.kind === "post-review") return showsWorkFor(f);
+  if (a.kind === "post-review" || a.kind === "followups") return showsWorkFor(f);
   return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
 }
 
@@ -148,7 +149,7 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
   const ok = { merge: undefined, push: undefined, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": undefined, "main-fix": undefined, status: undefined }[need];
   if (ok) return { ok: true, as: "app", by: null };
   // A started item whose person does not count now: why their start is no approval says more than the repo's switch.
-  return (a.kind === "post-review" && f.workflow ? standingRefusal(f, a, true) : null) ?? refuse("repo-approval", prefix, { need, repo: f.repo });
+  return ((a.kind === "post-review" || a.kind === "followups") && f.workflow ? standingRefusal(f, a, true) : null) ?? refuse("repo-approval", prefix, { need, repo: f.repo });
 }
 
 /** Why the write is refused, or null. */

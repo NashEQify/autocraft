@@ -87,13 +87,13 @@ function progressOf(f: StatusFacts, wf: ItemWorkflow): Progress {
 export const partLine = (p: Pick<PlanPart, "n" | "title" | "state">): string => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
   : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`;
 
-/** The first line of a started item's status comment: where it stands. `wait: false` leaves out what a running item waits for (waits.ts legWait). */
+/** The first line of a started item's status comment: where it stands. `wait: false` leaves out what a running item waits for (waits.ts legWait), not the follow-ups a merge filed. */
 export function workflowHead(f: StatusFacts & { workflow: WorkflowFacts }, o: { wait?: boolean } = {}): string {
   const { wf, quiet, wait } = f.workflow, s = f.status;
   if (s.step === "Merged") return f.batch ? t("Merged with merge batch #{pr}", { pr: f.batch.pr }) : t("Merged");
   if (s.step === "Closed") return t("Closed");
   if (quiet && (wf.state === "recommending" || wf.state === "blocked")) return t("Waiting for a maintainer decision");
-  return stateLine(wf, currentStep(workflowSteps(wf, progressOf(f, wf))), undefined, o.wait === false ? null : wait ?? null);
+  return stateLine(wf, currentStep(workflowSteps(wf, progressOf(f, wf))), undefined, o.wait === false && wf.state !== "done" ? null : wait ?? null);
 }
 
 /**

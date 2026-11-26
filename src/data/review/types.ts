@@ -1,3 +1,4 @@
+import type { PremergeFollowupRow } from "./premerge-followups.ts";
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
 import type { RefKey } from "../mirror/types.ts";
@@ -61,6 +62,8 @@ export type ReviewFacts = {
   carriedChains: Map<RefKey, ReviewRow[]>;
   posts: Map<RefKey, ReviewPost>;
   premerge: Map<HeadRef, PremergeRow>;
+  /** premerge_followups rows of each PR, oldest first. */
+  premergeFollowups: Map<RefKey, PremergeFollowupRow[]>;
   postmerge: Map<RefKey, { at: string; error: string | null }>;
   marks: Map<RefKey, ReviewMarks>;
   discussion: Map<RefKey, DiscussionStat>;

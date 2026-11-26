@@ -41,7 +41,7 @@ export type PlanState = (typeof PLAN_STATES)[number];
 
 export type ActionKind =
   | "review" | "carry" | "post-review" | "verify" | "approve-ci" | "premerge" | "merge"
-  | "fixup" | "conflict" | "cifix" | "lint" | "postmerge"
+  | "fixup" | "conflict" | "cifix" | "lint" | "postmerge" | "followups"
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupes-compare" | "label"
   | "act" | "implement"
@@ -264,7 +264,9 @@ export type PrFacts = {
   screenshots?: { summary: string | null };
 
   /** The pre-merge review row at the reviewed head. */
-  premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
+  premerge: { /** The head the row reviewed: the reviewed (queue) head. */ head?: string; at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; /** The defects that stop the merge: on a PR approved for merge only the blocking ones. */ defects: number; /** On a PR approved for merge, its defects that do not stop it: filed as follow-ups. */ followUps: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
+  /** The follow-up issue of a PR approved for merge (premerge_followups): the heads whose follow-ups were filed or tried, and the issue the first opened. */
+  followUps?: { heads: string[]; issue: number | null };
   premergeFixUsed: boolean;
   /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
   premergeFixRunning?: boolean;

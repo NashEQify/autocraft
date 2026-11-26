@@ -5,7 +5,7 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
-import { defectFix } from "../premerge/types.ts";
+import { defectFix, stoppingDefects } from "../premerge/types.ts";
 import { type Fix, type FixCandidate, type FixSelection, parseFixes } from "./candidates.ts";
 import { loadPatchFacts, loadStoredPatches, type PatchFacts, type StoredPatch } from "../data/changes/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
@@ -89,7 +89,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       // Only a branch we can push to gets a pre-merge round; otherwise the step leaves it alone.
       if (!f.pushable) continue;
       const row = await premergeAt(db, repo, f.number, head);
-      const defects = findingsOf(row).filter((x) => x.severity === "defect");
+      const defects = stoppingDefects(findingsOf(row), !!f.workflow?.approved);
       fix.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map(defectFix))), attempt: 1, model: row?.model ?? null, source: "premerge" });
     } else {
       const r = reads.reviews.get(`${repo}#${f.number}@${head}`);
@@ -117,7 +117,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
         if (o && w.operatorFix === o.id) list({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: w.attempt, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions }, lint });
       } else if (source === "premerge") {
         const pm = await premergeAt(db, repo, f.number, head);
-        const defects = findingsOf(pm).filter((x) => x.severity === "defect");
+        const defects = stoppingDefects(findingsOf(pm), !!f.workflow?.approved);
         list({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map(defectFix))), attempt: w.attempt, model: pm?.model ?? null, source: "premerge", lint });
       } else {
         const r = reads.reviews.get(`${repo}#${f.number}@${head}`);

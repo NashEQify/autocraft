@@ -8,16 +8,17 @@ import { blockerRefsOf } from "../planner/fragments.ts";
 import { discussionAgg, discussionBodies, premergeBase } from "./cross.ts";
 import { headRef, latestRows, noKeys, parseReview, pushTo, refKey, refsOf, reviewWindow } from "./rows.ts";
 import { loadPosts } from "./reviews.ts";
+import { loadPremergeFollowups } from "./premerge-followups.ts";
 import { unsureHeadsQuery } from "./unsure.ts";
 import type { DiscussionStat, ReviewFacts, ReviewMarks, Verdict } from "./types.ts";
 
 /**
- * Eleven statements in one wave: latest reviews, unsure heads, today's reviews, carried chains, posts, pre-merge rows, post-merge rows,
+ * Twelve statements in one wave: latest reviews, unsure heads, today's reviews, carried chains, posts, pre-merge rows, pre-merge follow-ups, post-merge rows,
  * `review_state` marks, the discussion aggregate and its conditional bodies, and blocker verdicts.
  * `o.own`: our logins (`access.loadOwnLogins`); read first, in one more wave, when not given.
  */
 export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number; own?: readonly string[] }): Promise<ReviewFacts> {
-  const facts: ReviewFacts = { latest: new Map(), unsureHeads: new Set(), reviewsToday: new Map(), carriedChains: new Map(), posts: new Map(), premerge: new Map(), postmerge: new Map(), marks: new Map(), discussion: new Map(), blockerLatest: new Map() };
+  const facts: ReviewFacts = { latest: new Map(), unsureHeads: new Set(), reviewsToday: new Map(), carriedChains: new Map(), posts: new Map(), premerge: new Map(), premergeFollowups: new Map(), postmerge: new Map(), marks: new Map(), discussion: new Map(), blockerLatest: new Map() };
   if (noKeys(keys)) return facts;
   const own = o.own ?? [...await loadOwnLogins(db)];
   const today = new Date(o.now).toISOString().slice(0, 10);
@@ -30,7 +31,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
     .select((eb) => ["b.repo", "b.number", "b.verdict", "b.blocked_by", eb.fn.agg<number>("row_number").over((w) => w.partitionBy(["b.repo", "b.number"]).orderBy("b.at", "desc").orderBy(kx.rowid("main.opus_reviews", "b"), "desc")).as("rn")])
     .where("b.verdict", "is not", null);
 
-  const [latest, unsureRows, todays, carried, posts, premerge, postmerge, marks, agg, bodies, blockers] = await db.together(() => Promise.all([
+  const [latest, unsureRows, todays, carried, posts, premerge, premergeFollowups, postmerge, marks, agg, bodies, blockers] = await db.together(() => Promise.all([
     latestRows(db, keys),
     q.all(unsureHeadsQuery(db, keys)),
     q.all(q.k.selectFrom("main.opus_review_history as h").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "h.repo").onRef("kk.number", "=", "h.number"))
@@ -44,6 +45,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
       .leftJoin(latestHead.as("lr"), (j) => j.onRef("lr.repo", "=", "p.repo").onRef("lr.number", "=", "p.number"))
       .select(kx.cols("premerge_reviews", "p"))
       .where("p.head_oid", "=", (eb) => eb.ref("lr.head_oid"))),
+    loadPremergeFollowups(db, keys),
     q.all(q.k.selectFrom("main.postmerge_reviews as r").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "r.repo").onRef("kk.number", "=", "r.number")).select(["r.repo", "r.number", "r.at", "r.error"])),
     q.all(q.k.selectFrom("main.review_state as s").innerJoin(keyed("kk"), (j) => j.onRef("kk.repo", "=", "s.repo").onRef("kk.number", "=", "s.number"))
       .select(["s.repo", "s.number", "s.stale_at", "s.rerun_day", "s.rerun_count", "s.fail_head", "s.fail_count", "s.fail_at"])),
@@ -58,6 +60,7 @@ export async function loadReviewFacts(db: Db, keys: KeySource, o: { now: number;
   for (const r of carried) pushTo(facts.carriedChains, refKey(r.repo, r.number), parseReview(r));
   facts.posts = posts;
   for (const r of premerge) facts.premerge.set(headRef(r.repo, r.number, r.head_oid), r as any);
+  facts.premergeFollowups = premergeFollowups;
   for (const r of postmerge) facts.postmerge.set(refKey(r.repo, r.number), { at: r.at, error: r.error });
   for (const r of marks) {
     const m: ReviewMarks = { staleAt: r.stale_at, rerunDay: r.rerun_day, rerunCount: Number(r.rerun_count), failHead: r.fail_head, failCount: Number(r.fail_count), failAt: r.fail_at };

@@ -15,7 +15,7 @@ import { changesRequestedWhy, GATE_FAILURES, failureNote } from "../merge/change
 import { parseFixes } from "../fixup/candidates.ts";
 import { tierKey, tiersOf, type AuthorRef } from "../whitelist.ts";
 import { findingsOf } from "../premerge/store.ts";
-import { defectFix } from "../premerge/types.ts";
+import { defectFix, followUpDefects, stoppingDefects } from "../premerge/types.ts";
 import { parsePublic } from "../review/opus-parse.ts";
 import { rereadPaceAt } from "../review/diff.ts";
 import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
@@ -475,11 +475,13 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (state !== "OPEN") return base;
 
   if (pmRow) {
-    const all = findingsOf(pmRow);
-    const defects = all.filter((f) => f.severity === "defect");
-    base.premerge = { at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length, error: pmRow.error ?? null };
+    const all = findingsOf(pmRow), approved = !!wfFact?.approved;
+    const defects = stoppingDefects(all, approved), followUps = approved ? followUpDefects(all).length : 0;
+    base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
+    const filed = d.review.premergeFollowups.get(ref);
+    if (filed?.length) base.followUps = { heads: filed.map((x) => x.head_oid), issue: filed.find((x) => x.issue_number !== null)?.issue_number ?? null };
     if (defects.length) {
-      const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? findingsOf(r).filter((x) => x.severity === "defect") : null; };
+      const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved) : null; };
       base.premergeFixUsed = premergeFixUsedIn(patch.fixups, premergeStalledIn(patch.fixups, qh, defectsAt));
       if (premergeFixRunningIn(patch.fixups, qh, pushedOff)) base.premergeFixRunning = true;
     }

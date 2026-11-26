@@ -6,7 +6,7 @@ import {
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, isWork, unassignActions } from "./assignment.ts";
-import { permitted } from "./authority.ts";
+import { permit, permitted } from "./authority.ts";
 import type { Refusal, WaitCode, Why } from "./codes.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
 import { liveAttempt, ownImplementation } from "./implementation.ts";
@@ -85,6 +85,15 @@ const unmergeable = (f: PrFacts): string[] => [
 ];
 
 const fixing = (f: PrFacts): boolean => ["fix", "running"].includes(premergeFix(f));
+
+/**
+ * The pre-merge review at the head of a PR approved for merge found defects that do not stop it, and none that do: the PR goes on to merge,
+ * and those defects are filed in its follow-up issue (a later head's comment on it), once per head.
+ */
+export const followUpsDue = (f: PrFacts): boolean => {
+  const pm = f.premerge;
+  return !!workflowOf(f)?.approved && !!f.head && pm?.head === f.head && pm.hasFindings && pm.followUps > 0 && pm.defects === 0 && !f.followUps?.heads.includes(f.head);
+};
 
 /** The queue entry of a PR that has a take or take-fix review at its head (or merged at the reviewed head), or of a merge-entry PR (no review needed). */
 export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
@@ -713,6 +722,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (!(p && p.head === f.head && r.at <= (p.opusAt ?? p.at ?? ""))) actions.push(act("post-review", f.head));
   }
 
+  // File the follow-ups of a PR approved for merge: the defects of its pre-merge review at the head that do not stop the merge, once per head.
+  if (!held && followUpsDue(f)) actions.push(act("followups", f.head));
+
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
   const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale;
   if (!held && !f.draft && verifiable && f.ci !== "failure" && (!f.verification || f.verification.state === "stale")) {
@@ -772,7 +784,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
 
   if (e) {
     if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
-    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting) {
+    // The follow-ups of an approved PR are filed before it merges, so the issue can name it as open work; a refused filing holds nothing back.
+    const filingFirst = followUpsDue(f) && permit(f, { kind: "followups" }).ok;
+    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && !filingFirst) {
       const singleOnly = f.verification?.state === VERIFY_UNAVAILABLE || f.verifyOverride || f.mainFix;
       actions.push(act("merge", qHead, { singleOnly, batchable: !singleOnly }));
     }

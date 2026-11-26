@@ -19,7 +19,7 @@ const base = (): Omit<PrFacts, "may"> => ({
   verification: { state: "passed", kind: "build", summary: null, note: null }, verifyUnavailable: null,
   handOver: false, mergeWaiting: false,
   workflow: { entry: "review", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true },
-  premerge: { at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, fixesSafe: true, minor: 0, error: null },
+  premerge: { at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, followUps: 0, fixesSafe: true, minor: 0, error: null },
   premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, changesRequested: null, gateFailureNote: null,
 });
 
