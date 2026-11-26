@@ -210,7 +210,7 @@ test("a pool waiting for room reads the room when the queue changes, not on ever
     const stop = w.db.observe((e) => { if (e.kind === "query" && /change_seq/.test(e.sql) && e.site.includes(" + ")) n++; });
     try {
       // Each unit stands for a call waiting in the queue: the others wait for room meanwhile.
-      await pool(numbers(3).map(() => () => new Promise((r) => setTimeout(r, unitMs))), poolRoom(w.db, () => ["app"], (i) => [{ repo: "app", number: i + 1 }]), { pollMs: 2 });
+      await pool(numbers(units).map(() => () => new Promise((r) => setTimeout(r, unitMs))), poolRoom(w.db, () => ["app"], (i) => [{ repo: "app", number: i + 1 }]), { pollMs: 2 });
     } finally {
       stop();
       w.close();
@@ -218,9 +218,12 @@ test("a pool waiting for room reads the room when the queue changes, not on ever
     }
     return n;
   };
+  // Each round of the pool reads the room once and either starts a unit or waits for one to end, so a reading per unit start and
+  // per unit end bounds them whatever the units take; a pool reading on every poll goes past it when they take long.
+  const units = 3;
   const short = await reads(20), long = await reads(200);
   assert.ok(short > 0, "the readings are seen");
-  assert.ok(long <= short, `the room was read ${long} times while the calls took 200 ms each, against ${short} times at 20 ms`);
+  assert.ok(long <= 2 * units, `the room was read ${long} times while ${units} calls took 200 ms each (${short} times at 20 ms)`);
 });
 
 test("calls that wait for their result share one poll", async () => {

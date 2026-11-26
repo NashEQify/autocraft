@@ -158,9 +158,11 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
       }
     }
     if (roomy) {
+      // With `max` jobs running only an end can start another; the room is not read then, so there is no reading to wait on.
+      const full = running.size >= (opts.max ?? Infinity);
       const stop = new AbortController();
       try {
-        await Promise.race([...running, roomy.changed(opts.pollMs ?? allocation.pollMs, stop.signal)]);
+        await Promise.race(!full ? [...running, roomy.changed(opts.pollMs ?? allocation.pollMs, stop.signal)] : [...running]);
       } finally {
         stop.abort();
       }
