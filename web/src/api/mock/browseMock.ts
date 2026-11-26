@@ -132,7 +132,9 @@ export function browseFor(me: User, query: BrowseQuery): BrowseResult {
   const staff = me.role !== "viewer";
   const repo = requestProject();
   const q = strip(parseItemQuery(query.q), staff);
-  const all = sorted(ROWS.filter((r) => matches(r, q, repo)), q);
+  const hit = (r: Row) => !query.refs || query.refs.includes(`${r.repo}#${r.number}`);
+  const found = ROWS.filter((r) => hit(r) && matches(r, q, repo));
+  const all = query.refs ? found.sort((a, b) => query.refs!.indexOf(`${a.repo}#${a.number}`) - query.refs!.indexOf(`${b.repo}#${b.number}`)) : sorted(found, q);
   const offset = query.offset ?? 0, limit = query.limit ?? 50;
   const open = ROWS.filter((r) => r.state === "open" && (!repo || r.repo === repo));
   const top = (vs: string[]) => [...vs.reduce((m, v) => m.set(v, (m.get(v) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([v]) => v);

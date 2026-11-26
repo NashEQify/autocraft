@@ -10,10 +10,12 @@ import type { Req } from "../types.ts";
 import { itemState } from "./shown.ts";
 import { canSeeInternals } from "./staff.ts";
 import { hiddenRepos, visibleRepos } from "./visible.ts";
+import { HttpError } from "../server/util.ts";
 
 const LIMIT_DEFAULT = 50;
 const LIMIT_MAX = 100;
 const OFFSET_MAX = 100_000;
+const REFS_MAX = 100;
 const CI: Record<string, BrowseRow["ci"]> = { SUCCESS: "green", FAILURE: "red", ERROR: "red", PENDING: "pending", EXPECTED: "pending" };
 
 /** `q` without the flags the reader may not filter by: those move to `unknown`, so the page shows them as not applied. */
@@ -49,11 +51,13 @@ export async function browse(db: Db, req: Req): Promise<BrowseResult> {
   const limit = Math.min(LIMIT_MAX, Math.max(1, Number(req.query.get("limit")) || LIMIT_DEFAULT));
   const offset = Math.min(OFFSET_MAX, Math.max(0, Math.floor(Number(req.query.get("offset")) || 0)));
   const withPresets = req.query.get("presets") === "1";
+  const refs = req.query.has("refs") ? (req.query.get("refs") ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, REFS_MAX) : undefined;
+  if (refs?.some((r) => !/^[^#\s]+#\d+$/.test(r))) throw new HttpError(400, "refs must be repo#number");
   const [repos, hidden] = await Promise.all([visibleRepos(db, req), hiddenRepos(db, req)]);
   const scope: BrowseScope = { repos, hidden, staff, login: req.user.login || null };
   const presets = PRESETS.map((p) => ({ id: p.id, query: forReader(parseItemQuery(p.query), staff) }));
   const [page, counts, facets] = await db.together(() => Promise.all([
-    loadBrowsePage(db, scope, query, { offset, limit, normalWeight: WEIGHT_NORMAL }),
+    loadBrowsePage(db, scope, query, { offset, limit, normalWeight: WEIGHT_NORMAL, ...(refs && { refs }) }),
     withPresets ? countPresets(db, scope, presets) : Promise.resolve(null),
     withPresets ? loadFacets(db, scope) : Promise.resolve(null),
   ]));

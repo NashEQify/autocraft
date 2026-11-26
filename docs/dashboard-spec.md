@@ -92,6 +92,7 @@ One list over every item of the visible repos, narrowed to the picked project. T
 | `autocraft:` | `running`, `waiting` (for a person), `held`, `backlog`, `done`, `none` |
 | `sort:` | `updated` (default), `created`, `comments` (comments and reactions), `priority`, `discord`; `-asc` reverses |
 
+- **Words or Meaning.** By meaning, the words are embedded and matched by similarity (at most 100 hits, best first); the qualifiers still filter the hits and no sort applies.
 - **Views** set the whole query: Open, New with no labels, Most discussed, On Discord, Bugs to fix, Ready to merge, AutoCraft working, Waiting on a person, Outside contributors waiting (oldest first), Duplicates, Mine. Each shows its count.
 - **Quick filters** (Repository when no project is picked, Type, State, Label, Priority, Area, Author, AutoCraft, Discord, Sort) rewrite one qualifier of the query. On phones they open in a sheet.
 - The query is the URL: `/items?q=is:open+label:bug`. A qualifier the server does not apply (unknown, a bad value, or not allowed for the reader) is listed as not applied. Older links (`filter=mine`, `show=closed`, `discord=1`, `area=`) open the matching query.

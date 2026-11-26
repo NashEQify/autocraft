@@ -137,6 +137,16 @@ export function parseItemQuery(q: string): ItemQuery {
   return { terms, text: words.join(" ").trim(), numbers, sort, unknown };
 }
 
+/** `q` split into its search words and the rest (qualifiers and `#123`), for a search by meaning that embeds only the words. */
+export function splitWords(q: string): { words: string; rest: string } {
+  const words: string[] = [], rest: string[] = [];
+  for (const tok of tokens(q)) {
+    const body = tok.startsWith("-") ? tok.slice(1) : tok;
+    (body.indexOf(":") > 0 && !body.startsWith('"')) || /^#\d+$/.test(body) ? rest.push(tok) : words.push(tok);
+  }
+  return { words: words.join(" "), rest: rest.join(" ") };
+}
+
 /** The values of the first plain (not negated) term of `key` in `q`, or [] when it has none. */
 export function termValues(q: string, key: QueryKey): string[] {
   return parseItemQuery(q).terms.find((t) => t.key === key && !t.not)?.values ?? [];

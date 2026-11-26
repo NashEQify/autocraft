@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ChatCircleIcon, CheckCircleIcon, CircleDashedIcon, DiscordLogoIcon, FunnelIcon, GitPullRequestIcon, RadioButtonIcon, TerminalIcon, XCircleIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
-import { AUTOCRAFT_STATES, DEFAULT_QUERY, KINDS, PRESETS, PRIORITIES, parseItemQuery, presetOf, termValues, withTerm, type QueryKey } from "../../../../../src/core/item-query.ts";
+import { AUTOCRAFT_STATES, DEFAULT_QUERY, KINDS, PRESETS, PRIORITIES, parseItemQuery, presetOf, splitWords, termValues, withTerm, type QueryKey } from "../../../../../src/core/item-query.ts";
 import { useApi, useQuery } from "../../../api/client";
 import { usePageProject } from "../../../api/scope";
 import type { BrowseAutocraft, BrowseRow, MaintainCommandResult } from "../../../api/types";
@@ -24,6 +24,7 @@ import { Dialog } from "../../../ui/molecules/Dialog";
 import { ItemRef } from "../../../ui/molecules/ItemRef";
 import { Pager } from "../../../ui/molecules/Pager";
 import { SearchField } from "../../../ui/molecules/SearchField";
+import { Segmented } from "../../../ui/molecules/Segmented";
 import { cn } from "../../../ui/cn";
 import type { ViewProps } from "../../../registry/types";
 
@@ -60,14 +61,16 @@ function useBrowseUrl() {
   const params = useMemo(() => new URLSearchParams(loc.search), [loc.search]);
   const q = params.get("q") ?? legacyQuery(params) ?? DEFAULT_QUERY;
   const offset = Math.max(0, Number(params.get("offset")) || 0);
-  const go = (next: { q?: string; offset?: number }) => {
+  const meaning = params.get("by") === "meaning";
+  const go = (next: { q?: string; offset?: number; meaning?: boolean }) => {
     const nq = (next.q ?? q).trim();
-    const no = next.q !== undefined && nq !== q ? 0 : next.offset ?? offset;
+    const nm = next.meaning ?? meaning;
+    const no = (next.q !== undefined && nq !== q) || nm !== meaning ? 0 : next.offset ?? offset;
     const enc = encodeURIComponent(nq).replace(/%20/g, "+").replace(/%3A/gi, ":").replace(/%2C/gi, ",");
-    const search = [nq === DEFAULT_QUERY ? "" : `q=${enc}`, no ? `offset=${no}` : ""].filter(Boolean).join("&");
+    const search = [nq === DEFAULT_QUERY ? "" : `q=${enc}`, nm ? "by=meaning" : "", no ? `offset=${no}` : ""].filter(Boolean).join("&");
     navigate({ pathname: loc.pathname, search: search ? `?${search}` : "" });
   };
-  return { q, offset, go };
+  return { q, offset, meaning, go };
 }
 
 const AUTOCRAFT_WORD: Record<BrowseAutocraft, { label: string; tone: Tone } | null> = {
@@ -200,7 +203,7 @@ const SORT_OPTIONS: [string, string][] = [
 ];
 
 /** The quick filters over the query's qualifiers; each change rewrites one qualifier of `q`. */
-function QuickFilters({ q, set, facets, repos }: { q: string; set: (q: string) => void; facets: { labels: string[]; authors: string[]; areas: string[] } | null; repos: string[] | null }) {
+function QuickFilters({ q, set, facets, repos, meaning }: { q: string; set: (q: string) => void; facets: { labels: string[]; authors: string[]; areas: string[] } | null; repos: string[] | null; meaning: boolean }) {
   const one = (key: QueryKey) => termValues(q, key)[0] ?? "";
   const setOne = (key: QueryKey) => (v: string) => set(withTerm(q, key, v ? [v] : []));
   const parsed = parseItemQuery(q);
@@ -226,7 +229,8 @@ function QuickFilters({ q, set, facets, repos }: { q: string; set: (q: string) =
         options={[["", t("Any AutoCraft state")], ...AUTOCRAFT_STATES.map((s): [string, string] => [s, s === "none" ? t("Not started") : t(AUTOCRAFT_WORD[s]!.label)])]}
       />
       <QuickSelect label={t("Discord")} value={one("discord")} onChange={setOne("discord")} options={[["", t("Discord: any")], ["mentioned", t("Mentioned on Discord")]]} />
-      <QuickSelect label={t("Sort")} prefix value={sort} onChange={(v) => set(withTerm(q, "sort", v === "updated" ? [] : [v]))} options={SORT_OPTIONS.map(([v, l]): [string, string] => [v, t(l)])} />
+      {/* Hits by meaning come best first: no sort applies. */}
+      {!meaning && <QuickSelect label={t("Sort")} prefix value={sort} onChange={(v) => set(withTerm(q, "sort", v === "updated" ? [] : [v]))} options={SORT_OPTIONS.map(([v, l]): [string, string] => [v, t(l)])} />}
     </>
   );
 }
@@ -320,7 +324,14 @@ export function ItemsView(_: ViewProps) {
   // On phones the views scroll sideways: the picked one stays in sight.
   useEffect(() => activeChip.current?.scrollIntoView({ block: "nearest", inline: "center" }), [url.q]);
 
-  const { data, error } = useQuery(`maintain-browse:${url.q}:${url.offset}`, (a) => a.maintain.browse({ q: url.q, offset: url.offset, limit: PAGE }));
+  // A search by meaning embeds the words; the qualifiers still filter its hits, which keep their order.
+  const split = url.meaning ? splitWords(url.q) : null;
+  const { data, error } = useQuery(`maintain-browse:${url.q}:${url.offset}:${url.meaning}`, async (a) => {
+    if (!split?.words) return a.maintain.browse({ q: url.q, offset: url.offset, limit: PAGE });
+    const hits = await a.semanticSearch(split.words);
+    if (!hits.length) return { rows: [], total: 0, offset: 0, limit: PAGE, unknown: [], presets: null, facets: null };
+    return a.maintain.browse({ q: split.rest, refs: hits.map(refOf), offset: url.offset, limit: PAGE });
+  });
   const { data: counts } = useQuery("maintain-browse:presets", (a) => a.maintain.browse({ q: "", limit: 1, presets: true }));
   const { data: repoList } = useQuery("maintain-browse:repos", (a) => a.repos(), { enabled: !project });
   const preset = presetOf(url.q);
@@ -342,7 +353,7 @@ export function ItemsView(_: ViewProps) {
     }
   };
 
-  const filters = <QuickFilters q={url.q} set={set} facets={counts?.facets ?? null} repos={project ? null : repoList ?? []} />;
+  const filters = <QuickFilters q={url.q} set={set} facets={counts?.facets ?? null} repos={project ? null : repoList ?? []} meaning={!!split?.words} />;
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-[1100px] flex-col gap-3 px-4 pb-10 pt-5 md:px-6">
@@ -360,6 +371,13 @@ export function ItemsView(_: ViewProps) {
           <div className="min-w-0 flex-1">
             <SearchField value={typed} onChange={setTyped} onSubmit={(v) => set(v)} label={t("Search items")} placeholder={t("Words, or is:open label:bug author:name")} />
           </div>
+          <Segmented
+            label={t("Search by")}
+            value={url.meaning ? "meaning" : "words"}
+            onChange={(v) => url.go({ meaning: v === "meaning" })}
+            options={[{ value: "words", label: t("Words") }, { value: "meaning", label: t("Meaning") }]}
+            className="hidden shrink-0 flex-nowrap md:flex"
+          />
           <Button ref={filtersButton} icon={FunnelIcon} onClick={() => setSheet(true)} className="h-11 md:hidden" aria-haspopup="dialog">
             {t("Filters")}
           </Button>
@@ -377,7 +395,16 @@ export function ItemsView(_: ViewProps) {
           {filters}
         </div>
         <Dialog open={sheet} onClose={() => setSheet(false)} title={t("Filters")} variant="side" returnFocusRef={filtersButton}>
-          <div className="flex flex-col gap-3">{filters}</div>
+          <div className="flex flex-col gap-3">
+            <Segmented
+              label={t("Search by")}
+              value={url.meaning ? "meaning" : "words"}
+              onChange={(v) => url.go({ meaning: v === "meaning" })}
+              options={[{ value: "words", label: t("Words") }, { value: "meaning", label: t("Meaning") }]}
+              className="flex-nowrap"
+            />
+            {filters}
+          </div>
           <Button variant="primary" className="mt-4 h-11 w-full" onClick={() => setSheet(false)}>
             {data ? t("Show {n} items", { n: num(data.total) }) : t("Done")}
           </Button>

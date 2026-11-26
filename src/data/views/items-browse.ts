@@ -30,6 +30,8 @@ export type BrowseItem = {
 };
 
 export type BrowsePage = { rows: BrowseItem[]; total: number };
+/** `refs`: only these items (`repo#number`), in this order. */
+export type BrowseOpts = { offset: number; limit: number; normalWeight: number; refs?: string[] };
 
 const MAINTAINER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
 const OUTSIDE_ASSOCIATIONS = ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"];
@@ -197,15 +199,18 @@ const ROW_COLS = ["repo", "number", "kind", "state", "is_draft", "title", "autho
   "comments", "reactions", "discord", "linked", "ci_state", "autocraft", "asks_me", "approved", "duplicate", "created_at", "updated_at"].map((c) => `x.${c}`);
 
 /** The statements of one page of the items matching `q` and of their count (exported for measuring them). */
-export function browseStatements(db: Db, scope: BrowseScope, q: ItemQuery, o: { offset: number; limit: number; normalWeight: number }) {
+export function browseStatements(db: Db, scope: BrowseScope, q: ItemQuery, o: BrowseOpts) {
   const fts = q.text ? parseSearch(q.text) : null;
+  const refs = o.refs?.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))] as const);
   const matched = () => (queryDb(db).k as any).selectFrom(facts(db, scope, (eb) => (fts ? [textHit(eb, db, fts)] : [])).as("x"))
-    .where((eb: any) => eb.and(conds(db, eb, scope, q)));
-  return { rows: ordered(matched().select(ROW_COLS), q, o.normalWeight).limit(o.limit).offset(o.offset), total: matched().select((eb: any) => eb.fn.countAll().as("n")) };
+    .where((eb: any) => eb.and([...conds(db, eb, scope, q), ...(refs ? [kx.refIn(db, "x", refs)] : [])]));
+  // Hits of a search by meaning keep their order, best first. The cast keeps the positions numbers on Postgres, where bound values in a CASE are text.
+  const rows = refs ? matched().select(ROW_COLS).orderBy((eb: any) => eb.cast(kx.refCase(refs.map(([r, n], i) => [r, n, i] as const)), "integer")).orderBy("x.repo").orderBy("x.number", "desc") : ordered(matched().select(ROW_COLS), q, o.normalWeight);
+  return { rows: rows.limit(o.limit).offset(o.offset), total: matched().select((eb: any) => eb.fn.countAll().as("n")) };
 }
 
 /** One page of the items matching `q`, and how many match. */
-export async function loadBrowsePage(db: Db, scope: BrowseScope, q: ItemQuery, o: { offset: number; limit: number; normalWeight: number }): Promise<BrowsePage> {
+export async function loadBrowsePage(db: Db, scope: BrowseScope, q: ItemQuery, o: BrowseOpts): Promise<BrowsePage> {
   if (!scope.repos.length) return { rows: [], total: 0 };
   const qd = queryDb(db);
   const st = browseStatements(db, scope, q, o);

@@ -2815,6 +2815,8 @@ export interface BrowseQuery {
   q: string;
   offset?: number;
   limit?: number;
+  /** Only these items (`repo#number`), in this order: the hits of a search by meaning. */
+  refs?: string[];
   /** Also count every preset and list the quick-filter values. */
   presets?: boolean;
 }

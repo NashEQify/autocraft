@@ -1,4 +1,4 @@
-// The Items browser's query: qualifiers combine, negation and sort apply, and pages of one order never overlap.
+// The Items browser's query: qualifiers combine, negation and sort apply, pages of one order never overlap, and hits by meaning keep their order.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -46,6 +46,10 @@ test("label, Discord and sort qualifiers combine, negation and paging hold, pres
     assert.deepEqual(paged, all);
     assert.equal(new Set(paged).size, paged.length);
     assert.equal((await page(q, 0, 5)).total, all.length);
+
+    // Hits of a search by meaning keep their order; qualifiers still filter them.
+    const hits = await loadBrowsePage(db, scope, parseItemQuery("is:open"), { offset: 0, limit: 50, normalWeight: 5, refs: ["app#4", "app#6", "app#2", "other#1"] });
+    assert.deepEqual(hits.rows.map((r) => Number(r.number)), [4, 2]);
 
     const counts = await countPresets(db, scope, PRESETS.map((p) => ({ id: p.id, query: parseItemQuery(p.query) })));
     assert.equal(counts.open, all.length);
