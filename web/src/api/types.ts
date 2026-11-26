@@ -1319,7 +1319,13 @@ export type AgentRun = {
   summary: string | null;    // one line: verdict counts, error class
   progress?: string;         // running calls with tools: the latest thing the model is doing
   via?: RemoteVia;           // user-local mode: who ran the call and with what
+  refusal?: AgentRunRefusal; // operators and maintainers: the model's safety filter declined this run
 };
+/**
+ * A run the model's safety filter declined. `outcome`: the call was `retried` on another Task Runner or tier, or `failed` because
+ * nothing else could take it. `retry`: the call's last later run, null while none ran or for refusals recorded before runs kept their call.
+ */
+export type AgentRunRefusal = { outcome: "retried" | "failed"; retry: { id: number; state: AgentRunState } | null };
 /** A model call run by a user's helper: their login, the harness (claude, codex) and the model it reported. */
 export type RemoteVia = { login: string; harness: string; model: string };
 export type AgentRunDetail = AgentRun & {
@@ -1328,7 +1334,39 @@ export type AgentRunDetail = AgentRun & {
   error: string | null;
   tools: AgentRunTool[];     // tool uses in order
   textsHidden?: boolean;     // prompt, output and tool arguments are withheld from this user (viewers)
+  transcripts?: AgentRunTranscript[]; // full transcripts, one per Task Runner attempt; absent for viewers
 };
+/** A stored full transcript of one attempt of a call: its summary; the events are read with `agents.transcript`. */
+export type AgentRunTranscript = {
+  id: number;
+  attempt: number;
+  outcome: "done" | "failed" | "refused";
+  bytes: number;             // stored (gzip) size
+  rawBytes: number;
+  lines: number;             // events
+  toolCount: number;
+  lastTool: string | null;
+  createdAt: string;
+};
+/** One readable piece of a transcript: a model message, thinking, a tool call and its result, or another harness event. */
+export type TranscriptEntry = {
+  at: string | null;         // arrival of the event on the Task Runner
+  kind: "system" | "user" | "text" | "thinking" | "tool" | "result" | "final" | "event";
+  name?: string;             // tool: the tool's name
+  text: string;              // capped; `truncated` counts the characters left out
+  truncated?: number;
+  isError?: boolean;
+  sub?: boolean;             // from a subagent (the explorer)
+};
+export type TranscriptView = { runId: number; transcript: AgentRunTranscript; entries: TranscriptEntry[]; omitted: number };
+/** Where transcripts are stored. `source`: the admin setting, the environment, or the local directory by default. */
+export type TranscriptStoreStatus = {
+  active: { kind: "local" | "s3"; source: "settings" | "environment" | "default"; dir: string | null; endpoint: string | null; bucket: string | null; prefix: string; accessKeyId: string | null };
+  saved: { kind: "local" | "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretSet: boolean } | null;
+  environment: boolean;      // a bucket is configured in the environment
+  problem: string | null;
+};
+export type TranscriptStoreInput = { kind: "local" } | { kind: "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey?: string };
 export type AgentRunTool = {
   seq: number;
   tool: string;              // e.g. "Read", "mcp__build__check"
@@ -1340,7 +1378,13 @@ export type AgentRunTool = {
   check: { id: number; command: string; crate: string | null; testName: string | null; outcome: string | null } | null;
 };
 export type AgentRunPage = { runs: AgentRun[]; nextCursor: string | null };
-export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; repo?: string; cursor?: string; limit?: number };
+/** `refused` and `window` (runs started in the last 24 hours, 7 days or 30 days) are for operators and maintainers. */
+export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; repo?: string; cursor?: string; limit?: number; refused?: boolean; window?: RefusalWindow };
+export type RefusalWindow = "24h" | "7d" | "30d";
+/** Refused runs in a time range per prompt, repo (a run's first item), model and Task Runner user; `failed`: those nothing else could take. `key` null: none (no item, no user). */
+export type RefusalGroup = { key: string | null; n: number; failed: number };
+/** `capped`: more refused runs than the server counts; the counts cover the newest ones. */
+export type RefusalBreakdown = { window: RefusalWindow; total: number; failed: number; capped: boolean; byPrompt: RefusalGroup[]; byRepo: RefusalGroup[]; byModel: RefusalGroup[]; byLogin: RefusalGroup[] };
 
 export type RateBucket = { t: string; items: number; runs: number; failed: number };
 export type Rates = {

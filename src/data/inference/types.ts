@@ -29,16 +29,19 @@ export type RunStart = {
   items: ItemRef[];
   /** The prompt text (stored scrubbed: `openRun` then needs the caller's `scrub`), or the stored form `packPrompt` made of it. */
   prompt: string | Uint8Array;
-  /** A call a Task Runner leased: its user, harness and the model the claim named. */
-  remote?: { userLogin: string; harness: string; reportedModel: string };
+  /** A call a Task Runner leased: the remote call, its user, harness and the model the claim named. */
+  remote?: { callId: number; userLogin: string; harness: string; reportedModel: string };
 };
 export type RunEnd = {
   id: number; state: Exclude<AgentRunState, "running"> | "cancelled";
   tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   summary?: string | null; error?: string | null; costUsd?: number | null;
+  /** The model's safety filter declined the lease: the call was `retried` elsewhere, or `failed` with nothing else to take it. */
+  refusal?: RunRefusal;
   /** The output text (stored scrubbed: `finishRuns` then needs the caller's `scrub`), or the stored form `packPrompt` made of it. */
   output?: string | Uint8Array | null;
 };
+export type RunRefusal = "retried" | "failed";
 export type RunRow = {
   id: number; jobId: number | null; step: string; stage: number; promptId: string; promptVersion: string; provider: "claude" | "jev"; model: string;
   /** At most `MAX_ITEM_REFS`. */
@@ -48,13 +51,17 @@ export type RunRow = {
   tokens: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null };
   costUsd: number | null; summary: string | null; error: string | null; progress: string | null;
   userLogin: string | null; harness: string | null; reportedModel: string | null;
+  callId: number | null; refusal: RunRefusal | null;
 };
 /** A call as the live board draws it. */
 export type JobCall = Pick<RunRow, "id" | "step" | "provider" | "model" | "state" | "startedAt" | "endedAt" | "userLogin">;
 export type ItemRun = RunRow & { toolCount: number; repo: string; number: number };
 export type ToolRow = { runId: number; seq: number; tool: string; args: string | null; resultBytes: number | null; isError: boolean; startedAt: string | null; endedAt: string | null; checkId: number | null };
 export type ToolView = Omit<ToolRow, "runId">;
-export type RunFilter = Omit<AgentRunFilter, "account">;
+/** `since`: runs started at or after this ISO time. */
+export type RunFilter = Omit<AgentRunFilter, "account" | "window"> & { since?: string };
+/** Refused runs started in a time range, counted per prompt, first repo, model (as the harness reported it) and Task Runner user. */
+export type RefusalCount = { promptId: string; repo: string | null; model: string; login: string | null; refusal: RunRefusal; n: number };
 /** Texts as stored (`unpackText` reads both forms); null when the viewer is not staff or the run has none. Tool arguments are null for a viewer who is not staff. */
 export type RunDetail = { run: RunRow; prompt: Uint8Array | string | null; output: Uint8Array | string | null; tools: ToolView[] };
 export type RunningCounts = { repoN: Map<string, number>; stepN: Map<string, number> };

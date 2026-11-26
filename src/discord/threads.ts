@@ -8,9 +8,7 @@
 // Rows go with their thread, the channel the command was sent in, the bot's reply, a deletion request by user id, or once no command
 // has named the item there for FOLLOW_KEEP_DAYS.
 //
-// Results are posted by a separate poster. It subscribes the way Alerts.start does (src/discord/alerts.ts: polls db.seqs() for the
-// `workflows` and `workflow-events` topics), reads the workflows that changed, asks followersOf for their items, and posts through
-// sendToFollow only what discordDetail (src/discord/visibility.ts) allows for each item.
+// The status changes and results of the followed items are posted by src/discord/results.ts, through sendToFollow.
 import * as dc from "../data/discord/index.ts";
 import type { FollowRow } from "../data/discord/index.ts";
 import type { Db } from "../db/index.ts";
@@ -30,7 +28,7 @@ export const threadTarget = (keys: DiscordKeys, threadId: string): string => key
 export const replyTarget = (keys: DiscordKeys, messageId: string): string => keys.hash("message", messageId);
 
 /** Groups rows by target; a target whose seal does not open is left out. */
-function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {
+export function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {
   const by = new Map<string, FollowRow[]>();
   for (const r of rows) by.set(r.targetHash, [...(by.get(r.targetHash) ?? []), r]);
   return [...by.values()].flatMap((list) => {

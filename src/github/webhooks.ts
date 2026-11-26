@@ -1,5 +1,7 @@
 // GitHub App webhooks. A delivery is verified, reduced to the repo and item number it names, and queued; the
-// runner re-reads those items from GitHub. A new comment addressed to the app with a command (src/github/commands.ts) also
+// runner re-reads those items from GitHub. Every verified delivery also marks the webhooks as working (sync_state.webhook_at), which
+// lets the sync poll only as a backstop (src/mirror.ts pollReason). A push or completed check suite on a default branch makes the
+// default-branch CI poll due. A new comment addressed to the app with a command (src/github/commands.ts) also
 // queues that command, with the commenter and the comment's id. An installation delivery is checked against the allowed
 // owners (src/github/allowed-owners.ts). Nothing else in the payload is stored, and none of it reaches a prompt.
 import { createHmac } from "node:crypto";
@@ -8,7 +10,7 @@ import { queueCommand } from "./commands.ts";
 import { ONE_QUERY, Transient, writeItemNode, type Querier } from "../mirror.ts";
 import { ownerOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
-import { listItems, loadSyncRequests, queueSyncRequests, removeSyncRequests } from "../data/mirror/index.ts";
+import { listItems, loadSyncRequests, queueSyncRequests, removeSyncRequests, saveSyncState } from "../data/mirror/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 
 export const WEBHOOK_PATH = "/webhooks/github";
@@ -48,6 +50,12 @@ export async function itemNumbers(db: Db, repo: string, event: string, payload: 
     case "pull_request":
     case "pull_request_review":
     case "pull_request_review_comment": return one(obj(payload.pull_request).number);
+    case "status": {
+      // A commit status (CI outside GitHub Actions) names a commit: the open pull requests at it. Pending states change nothing settled.
+      const sha = payload.sha;
+      if (payload.state === "pending" || typeof sha !== "string" || !sha) return [];
+      return (await listItems(db, { repos: [repo], kind: "pr", states: ["OPEN"], headOid: sha }, "ref")).map((r) => r.number);
+    }
     case "check_suite": {
       const body = obj(payload.check_suite);
       if (payload.action !== "completed") return [];
@@ -63,6 +71,44 @@ export async function itemNumbers(db: Db, repo: string, event: string, payload: 
   }
 }
 
+/** A push to the default branch, or a completed check suite on it: the default branch's CI state may have changed. */
+export function touchesDefaultBranch(event: string, payload: Obj): boolean {
+  const branch = obj(payload.repository).default_branch;
+  if (typeof branch !== "string" || !branch) return false;
+  if (event === "push") return payload.ref === `refs/heads/${branch}`;
+  if (event === "check_suite") return payload.action === "completed" && obj(payload.check_suite).head_branch === branch;
+  return false;
+}
+
+/** Start of this process: a receiver that started after the last poll may have missed deliveries while it was down. */
+const RECEIVER_STARTED = new Date();
+/** How often one process records that deliveries arrive. */
+const NOTE_EVERY_MS = 30_000;
+let notedAt: number | null = null;
+
+/**
+ * Records that a verified delivery arrived, at most every 30 seconds per process; the first record of a process also names its
+ * start. A failed write is logged and never fails the delivery.
+ */
+export async function noteDelivery(db: Db, now: Date = new Date(), started: Date = RECEIVER_STARTED): Promise<void> {
+  if (notedAt !== null && now.getTime() - notedAt < NOTE_EVERY_MS) return;
+  const first = notedAt === null;
+  notedAt = now.getTime();
+  try {
+    await saveSyncState(db, { webhook_at: isoS(now), ...(first && { webhook_started_at: isoS(started) }) });
+  } catch (e) {
+    notedAt = null;
+    console.log(`webhook note: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  }
+}
+
+/** Forgets this process's last record, as a new process would (tests). */
+export function resetDeliveryNote(): void {
+  notedAt = null;
+}
+
+const isoS = (d: Date): string => d.toISOString().replace(/\.\d+Z$/, "Z");
+
 /** Queues the items one delivery names, one row per item, and a command to the app (`appSlug`) in a new comment. Returns how many items were queued. */
 export async function queueDelivery(db: Db, event: string, payload: unknown, now: Date = new Date(), appSlug?: string | null): Promise<number> {
   const p = obj(payload);
@@ -74,9 +120,10 @@ export async function queueDelivery(db: Db, event: string, payload: unknown, now
   } catch (e) {
     console.log(`webhook command in ${repo}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
   }
+  if (touchesDefaultBranch(event, p)) await saveSyncState(db, { main_ci_polled_at: null });
   const numbers = await itemNumbers(db, repo, event, p);
   if (!numbers.length) return 0;
-  const at = now.toISOString().replace(/\.\d+Z$/, "Z");
+  const at = isoS(now);
   await queueSyncRequests(db, numbers.map((n) => ({ repo, number: n, event, requestedAt: at })), { replace: true });
   return numbers.length;
 }
@@ -88,6 +135,7 @@ export async function handleDelivery(db: Db, secret: string | null, headers: { s
   if (!secret) return { status: 401 };
   if (!headers.signature || !safeEqual(headers.signature, signatureOf(secret, raw))) return { status: 401 };
   const event = headers.event ?? "";
+  await noteDelivery(db);
   if (event === "ping") return { status: 200 };
   let payload: unknown;
   try {

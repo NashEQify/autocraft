@@ -100,7 +100,9 @@ test("a link made on /verify runs no command; a dashboard link code makes it com
   let n = 0;
   const run = async (name: string, option: string, value: string): Promise<string> => {
     const seen = edits.length;
-    ix.dispatch("INTERACTION_CREATE", { id: `c${++n}`, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: USER } }, data: { name: "autocraft", type: 1, options: [{ name, type: 1, options: [{ name: option, type: 3, value }] }] } });
+    ix.dispatch("INTERACTION_CREATE", { id: `c${++n}`, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: USER } }, data: { name: "autocraft", type: 1, options: [name === "link"
+      ? { name: "account", type: 1, options: [{ name: "action", type: 3, value: "link" }, { name: option, type: 3, value }] }
+      : { name, type: 1, options: [{ name: option, type: 3, value }] }] } });
     for (let k = 0; k < 1000 && edits.length === seen; k++) await new Promise((r) => setTimeout(r, 5));
     return String(edits[seen]?.content ?? "");
   };

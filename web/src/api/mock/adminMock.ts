@@ -150,7 +150,7 @@ let appRemoved = false;
 export const AUDIT_ACTIONS = [
   "answer", "undo", "dispute", "dispute-resolve", "answer-sweep", "adopt", "opinion", "opinion-retract", "comment", "override", "rule", "access-add", "access-remove", "access-role",
   "session-revoke", "mcp-token-create", "mcp-token-revoke", "usage-reserve", "my-repos", "max-calls", "sign-in", "sign-in-refused", "repo-track", "repo-untrack",
-  "session-revoke", "sign-in", "sign-in-refused", "github-app-register", "github-app-register-failed", "github-app-remove", "github-identity", "github-app-link-create", "github-app-link-revoke", "github-app-link-use", "github-app-manager", "app-owner-allow", "app-owner-remove", "app-install-removed", "repo-track", "repo-untrack",
+  "session-revoke", "sign-in", "sign-in-refused", "github-app-register", "github-app-register-failed", "github-app-remove", "github-identity", "github-app-link-create", "github-app-link-revoke", "github-app-link-use", "github-app-manager", "app-owner-allow", "app-owner-remove", "app-install-removed", "webhook-redeliver", "repo-track", "repo-untrack",
 ];
 
 function buildAudit(): AuditEntry[] {

@@ -58,7 +58,7 @@ test("Verify gives the role only to a linked member with a merged pull request",
   assert.match(await press("200000000000000001"), /contributor role/);
   assert.deepEqual(rest.roles, [{ guild: GUILD, user: "200000000000000001", role: ROLE }]);
 
-  assert.match(await press("200000000000000009"), /\/autocraft link/);
+  assert.match(await press("200000000000000009"), /\/autocraft account action:link/);
   assert.match(await press("200000000000000002"), /No merged pull request by newcomer/);
   assert.equal(rest.roles.length, 1);
 });

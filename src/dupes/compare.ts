@@ -16,7 +16,7 @@ import { add, askClaude, pool, saveUsage, type Usage } from "../classify/run.ts"
 import { ownerOf } from "../owners.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { checksOf } from "../review/checks.ts";
+import { checksOfAll } from "../review/checks.ts";
 import { cachedDiff, codeDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import type { Lint } from "../replylint.ts";
@@ -132,6 +132,8 @@ const bodyOf = (x: Ctx, repo: string, n: number) => {
 
 async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<ComparePrs> {
   const share = Math.floor(GROUP_DIFF_CHARS / numbers.length);
+  // Read just before the call, for all members at once: CI may have moved while the job waited for a Task Runner.
+  const ci = await checksOfAll(x.db, numbers.filter((n) => bodyOf(x, repo, n).head_oid).map((number) => ({ repo, number })));
   const prs: ComparePr[] = [];
   for (const n of numbers) {
     const it = bodyOf(x, repo, n);
@@ -145,7 +147,7 @@ async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<Compare
         diff = cd.text.length > share ? `${cd.text.slice(0, share)}\n[diff cut]` : cd.text;
       } else diff = `[diff unavailable: ${d.error}]`;
     }
-    const checks = it.head_oid ? await checksOf(x.db, repo, n) : undefined;
+    const checks = it.head_oid ? ci.get(`${repo}#${n}`) : undefined;
     const latest = x.reviews.get(`${repo}#${n}`);
     const review = it.head_oid && latest?.head === it.head_oid ? latest.verdict : null;
     let linked: number[] = [];

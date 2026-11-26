@@ -1041,6 +1041,28 @@ CREATE TABLE IF NOT EXISTS agent_run_tools (
   PRIMARY KEY (run_id, seq)
 ) WITHOUT ROWID;
 
+-- Full transcripts of model calls (every model message, tool call and tool result), one row per Task Runner attempt.
+-- The gzip JSONL object lives in the transcript store (src/transcripts: an S3-compatible bucket or a local directory);
+-- the row is its pointer and summary. Kept ten years, like agent_run_texts.
+CREATE TABLE IF NOT EXISTS agent_run_transcripts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  call_id INTEGER,                    -- remote_calls.id
+  attempt INTEGER NOT NULL DEFAULT 0, -- the call's attempt the transcript is of
+  outcome TEXT NOT NULL,              -- done | failed | refused
+  store TEXT NOT NULL,                -- local | s3
+  bucket TEXT,                        -- s3: the bucket the object is in
+  object_key TEXT NOT NULL,
+  bytes INTEGER NOT NULL,             -- size of the stored (gzip) object
+  raw_bytes INTEGER NOT NULL,         -- size of the JSONL
+  sha256 TEXT NOT NULL,               -- of the stored object
+  lines INTEGER NOT NULL,             -- events in the transcript
+  tool_count INTEGER NOT NULL,
+  last_tool TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_run_transcripts_run ON agent_run_transcripts(run_id, id);
+
 CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 
 -- Build environments: places that run untrusted code (workers), registered by an
@@ -2559,9 +2581,25 @@ CREATE TABLE IF NOT EXISTS discord_follows (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discord_follows_item ON discord_follows (repo, number);
 CREATE INDEX IF NOT EXISTS discord_follows_channel ON discord_follows (channel_hash);
+-- What the bot last posted about each item a target follows (src/discord/results.ts), so a restart posts nothing twice. `status_hash` is a
+-- hash of the status line last posted; `result_key` the workflow id and recommendation time of the result last posted, `result_hash`
+-- a hash of its text and `link_hash` of its GitHub link; `sealed` the result message's id sealed with the target and item (keys.ts),
+-- '' when none. No message text. A row goes once its (target, item) row in `discord_follows` is gone.
+CREATE TABLE IF NOT EXISTS discord_follow_posts (
+  target_hash TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  status_hash TEXT NOT NULL,
+  result_key TEXT NOT NULL DEFAULT '',
+  result_hash TEXT NOT NULL DEFAULT '',
+  link_hash TEXT NOT NULL DEFAULT '',
+  sealed TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL,
+  PRIMARY KEY (target_hash, repo, number)
+) WITHOUT ROWID;
 
 -- Discord accounts linked to dashboard logins (src/discord/links.ts). `user_hash` is a keyed hash of the Discord user id; the id
--- itself is never stored. `source` says how the link was made: code (a dashboard user's `/autocraft link` code; only these run
+-- itself is never stored. `source` says how the link was made: code (a dashboard user's `/autocraft account action:link` code; only these run
 -- commands) or verify (the public /verify pages, which prove the GitHub account but give no AutoCraft login). `discord_link_codes` holds the keyed hash of each unused link code (one per login) until it is used or expires.
 CREATE TABLE IF NOT EXISTS discord_links (
   user_hash TEXT PRIMARY KEY,
@@ -2573,6 +2611,12 @@ CREATE TABLE IF NOT EXISTS discord_link_codes (
   code_hash TEXT PRIMARY KEY,
   login TEXT NOT NULL,
   expires_at TEXT NOT NULL
+) WITHOUT ROWID;
+-- Discord users who asked the bot to stop tracking their messages (`/autocraft optout`, src/discord/store.ts). `user_hash` is a keyed
+-- hash of the Discord user id. Their messages record no mentions; what they send to the bot still runs. Bookkeeping: not a change topic.
+CREATE TABLE IF NOT EXISTS discord_optouts (
+  user_hash TEXT PRIMARY KEY,
+  opted_out_at TEXT NOT NULL
 ) WITHOUT ROWID;
 
 -- Decision alerts by direct message (src/discord/alerts.ts). A row of `discord_alerts` is an opted-in linked account: `sealed` holds the
@@ -2823,7 +2867,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
   full_points_last_run INTEGER,
   author_ids_backfilled_at TEXT,
   author_ids_error TEXT,              -- `<time> <message>` of the last failed account-id pass
-  app_install_sweep_at TEXT
+  app_install_sweep_at TEXT,
+  webhook_at TEXT,                    -- the newest verified GitHub App webhook delivery
+  webhook_started_at TEXT,            -- start of the newest webhook receiver process that has taken a delivery
+  polled_at TEXT,                     -- start of the last finished org-wide poll
+  poll_missed_at TEXT,                -- start of the last poll that found changes no webhook had brought
+  poll_missed TEXT,                   -- that poll's count and first items: `<n> <repo#number> ...`
+  deliveries_checked_at TEXT          -- GitHub's list of the app's webhook deliveries was checked up to here
 );
 
 -- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.

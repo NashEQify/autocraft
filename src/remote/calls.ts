@@ -10,16 +10,18 @@ import { HttpError } from "../dash/server/util.ts";
 import type { Role } from "../dash/types.ts";
 import { fillHarness, rootArgs, validRoot } from "../prompts/harness.ts";
 import { rootAgents } from "../sandbox/agents.ts";
-import { joinParts } from "../prompts/index.ts";
+import { joinParts, TASK_BUDGET_CLAUDE, taskBudgetOf, withoutTaskBudget, withTaskBudget } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { loadFreshWrites, permKey } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
 import * as runners from "../data/runners/index.ts";
 import { LEASE_IDLE_MS } from "../data/runners/index.ts";
+import { ERROR_MAX } from "../data/inference/types.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
-import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
+import { saveCallTranscript } from "../transcripts/index.ts";
+import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
 import { claimReposOf } from "./my-repos.ts";
 import { skipsIn, taskOfStep } from "./my-tasks.ts";
 import { itemsFit, type ItemFilter } from "./task-items.ts";
@@ -564,7 +566,7 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
   const stdin = workspace ? await resumePrompt(db, r.id, base) : bundle.stdin;
   const rewritten = stdin !== bundle.stdin;
   bundle.stdin = stdin;
-  const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "")));
+  const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "", claim.harnessVersion)));
   const l = await runners.leaseCall(db, {
     id: r.id, caller: { tokenId: caller.tokenId, login: caller.login, role: caller.role, claimId: claim.requestId },
     claim: { harness: claim.harness, harnessVersion: claim.harnessVersion, root: claim.root ?? null, requestId: claim.requestId, ownLane: claim.ownLane === true },
@@ -580,13 +582,18 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
  * A queued bundle as one harness reads it: the marked harness phrases of its text, and of the `claude` hints that carry the
  * system prompt, filled in. With the claim's path root (a macOS helper) the marked sandbox paths, the path arguments of the
  * hints and the explorer's prompt name the same paths below it; the mounts keep the fixed paths, which the helper places
- * below its root itself.
+ * below its root itself. The `claude` hints get the prompt's task budget here, not in the queued bundle, and only when the
+ * claim's `harnessVersion` is at least the first Claude Code that takes it (unknown counts as older): an older Claude Code
+ * still runs the call, and a server of an earlier version leasing a queued bundle never hands the flag on.
  */
-export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = ""): B {
+export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = "", harnessVersion?: string | null): B {
   const claude = b.hints.claude;
+  const takes = harness === "claude" && harnessVersion && !olderVersion(harnessVersion, TASK_BUDGET_CLAUDE);
+  const budget = takes ? taskBudgetOf(b.promptId, b.maxTurns !== null) : undefined;
+  const args = claude && (budget !== undefined ? withTaskBudget(withoutTaskBudget(claude.args), budget) : withoutTaskBudget(claude.args));
   return {
     ...b, stdin: fillHarness(b.stdin, harness, root), system: b.system === null ? null : fillHarness(b.system, harness, root),
-    hints: { ...b.hints, ...(claude && { claude: { ...claude, args: rootArgs(claude.args.map((a) => fillHarness(a, "claude", root)), root), ...(claude.agents !== undefined && { agents: rootAgents(claude.agents, root) }) } }) },
+    hints: { ...b.hints, ...(claude && args && { claude: { ...claude, args: rootArgs(args.map((a) => fillHarness(a, "claude", root)), root), ...(claude.agents !== undefined && { agents: rootAgents(claude.agents, root) }) } }) },
   };
 }
 
@@ -600,7 +607,7 @@ export async function bundleOf(db: Db, secret: string | undefined): Promise<Task
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? ""), callId: l.lease.id };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, transcript: true };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
@@ -648,6 +655,13 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   const s = raw as Submit;
   const usage = usageOf((s as { usage?: unknown }).usage);
   const duration = count((s as { durationMs?: unknown }).durationMs);
+  // The full session goes to the transcript store after the reply is recorded; a transcript that cannot be stored never fails the submit.
+  const transcript = (s as { transcript?: unknown }).transcript;
+  const keep = async (outcome: "done" | "failed" | "refused"): Promise<void> => {
+    if (typeof transcript !== "string" || l.runId === null) return;
+    if (transcript.length > TRANSCRIPT_MAX) { console.log(`transcript of remote call ${l.id} not stored: larger than ${TRANSCRIPT_MAX} characters`); return; }
+    try { await saveCallTranscript(db, { runId: l.runId, callId: l.id, attempt: l.attempt, outcome, root: l.root, gzipBase64: transcript }); } catch (e) { console.log(`transcript of remote call ${l.id} not stored: ${String((e as Error).message ?? e).slice(0, 200)}`); }
+  };
   if (s.ok === true) {
     if (typeof s.text !== "string" || s.text.length > REPLY_MAX) throw new HttpError(400, "text must be the reply as a string");
     if (typeof s.model !== "string") throw new HttpError(400, "model must name the model that ran");
@@ -655,6 +669,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     const family = familyOf(l.model ?? "", families);
     if (family === null || familyOf(s.model, families) !== family) {
       await runners.failLease(db, l, { error: `the harness reported model ${s.model.slice(0, 100)}, not the ${family ?? l.model} family claimed for the tier`, skipLogin: true, usage, duration, summary: "refused" }, nowMs);
+      await keep("failed");
       return { accepted: false, reason: `the claim declared ${l.model} for this tier` };
     }
     const byModel: Record<string, ReturnType<typeof usageOf>> = {};
@@ -672,21 +687,38 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
       reply: unrooted(s.text, l.root), model: s.model, usage: { ...(usage ?? usageOf({})), ...(Object.keys(byModel).length > 0 && { byModel }), ...(costUsd !== null && { costUsd }) },
       turns, sessionId, tools, durationMs: duration,
     }, nowMs);
+    if (r.accepted) await keep("done");
     return r.accepted ? { accepted: true } : await gone();
   }
   if (s.ok !== false || typeof s.error !== "string") throw new HttpError(400, "ok must be true with text and model, or false with error");
-  const error = scrubError(`helper: ${unrooted(s.error, l.root)}`);
+  const said = unrooted(s.error, l.root);
+  const error = scrubError(`helper${stopNote(s, usage)}: ${said}`, ERROR_MAX);
+  // The whole failure text (the harness's refusal or error as it printed it) is the failed run's output.
+  const output = packPrompt(said.slice(0, FAILURE_TEXT_MAX));
   if (s.refused === true || SAFETY_REFUSAL.test(s.error)) {
     const to = refusalRetry(await loadViewFor(db, nowMs), l);
-    if (await runners.refuseLease(db, l, to, { error, usage, duration }, nowMs)) {
+    if (await runners.refuseLease(db, l, to, { error, usage, duration, output }, nowMs)) {
       const by = `${l.model ?? l.askedModel} on ${l.login}'s Task Runner`;
       console.log(`remote call ${l.id} (${l.promptId}) refused by ${by}; ${to ? `retried on ${"token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`}` : "not retried"}`);
+      await keep("refused");
     }
     return { accepted: true };
   }
   // The last attempt's tokens stay with the failed call.
-  await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed" }, nowMs);
+  if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs)) await keep("failed");
   return { accepted: true };
+}
+
+const FAILURE_TEXT_MAX = 2000;
+const STOP_WORD = /^[a-z][a-z0-9_]{0,39}$/;
+/** Why a failed run stopped, in parentheses, as the helper reports it: the harness's stop reason and result subtype, and the output tokens it used. Empty when nothing is known. */
+function stopNote(s: Extract<Submit, { ok: false }>, usage: { output: number } | null): string {
+  const parts = [
+    ...(typeof s.stopReason === "string" && STOP_WORD.test(s.stopReason) ? [`stop_reason ${s.stopReason}`] : []),
+    ...(typeof s.subtype === "string" && STOP_WORD.test(s.subtype) ? [`subtype ${s.subtype}`] : []),
+    ...(usage && usage.output > 0 ? [`${usage.output} output tokens`] : []),
+  ];
+  return parts.length ? ` (${parts.join(", ")})` : "";
 }
 
 /** The harness's text for a request the model's safety filter declined, for helpers that do not say so (Submit.refused). */
@@ -735,14 +767,28 @@ type Held = { checks: boolean; workspaceId: number | null };
 type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
 
 /**
- * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
- * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
- * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
- * queued call's poll carries the waits' fields. A failed read of the wave fails every call waiting on it (no reply is taken by
- * then); a write that fails after it fails only the calls it was for, and a stamp that fails none: the next poll stamps again.
+ * The change topics whose writes change a waiting call's poll (src/data/runners/triggers.ts, src/data/build/triggers.ts): its
+ * state and progress, a check requested for it, its lease starting or ending, the queue and Task Runners a queued call waits on,
+ * and its workspace's tool calls.
+ */
+const POLL_TOPICS = ["remote-calls", "remote-queue", "remote-helpers", "workspaces"];
+
+/**
+ * The poll of every call this process waits on, one read wave whatever their number (runners.loadCallPolls), with the check
+ * requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. The wave
+ * runs for a call not polled yet, when a counter of POLL_TOPICS moved, and at least every SEEN_EVERY_MS, for what moves with
+ * time alone (a lease running out, a session's helper going idle). At the other poll intervals only the counters are read, and
+ * the waiters get the last poll again without its checks and tool calls. A lost lease or a gone call among them is ended
+ * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields. A failed read of the
+ * wave fails every call waiting on it (no reply is taken by then); a write that fails after it fails only the calls it was for,
+ * and a stamp that fails none: the next poll stamps again.
  */
 class CallPoller {
   readonly #db: Db;
+  /** The last full poll of each held call, and the POLL_TOPICS counters read with it. */
+  #polls = new Map<number, runners.CallPoll>();
+  #stamp = "";
+  #readAt = 0;
   #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
   /** Calls awaited now, with how many awaits hold each and what else they wait for. */
   #held = new Map<number, Held & { n: number }>();
@@ -758,7 +804,15 @@ class CallPoller {
   }
   release(id: number): void {
     const h = this.#held.get(id);
-    if (h && --h.n <= 0) this.#held.delete(id);
+    if (h && --h.n <= 0) {
+      this.#held.delete(id);
+      this.#polls.delete(id);
+    }
+  }
+
+  async #stampOf(): Promise<string> {
+    const s = await this.#db.seqs(POLL_TOPICS);
+    return POLL_TOPICS.map((t) => s[t] ?? 0).join(",");
   }
 
   /** The next poll of call `id`: the first at once, later ones a poll interval after the one before. */
@@ -794,11 +848,19 @@ class CallPoller {
           console.error(`the liveness of this process's model calls is not stored: ${(e as Error).message}`);
         }
       }
+      if (now - this.#readAt < SEEN_EVERY_MS && ids.every((id) => this.#polls.has(id)) && await this.#stampOf() === this.#stamp) {
+        for (const id of ids) for (const w of batch.get(id)!) w.resolve({ ...this.#polls.get(id)!, checks: false, tools: false });
+        return;
+      }
       const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
       const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
-      const [polls, checks, tools] = await db.together(() => Promise.all([
-        runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
+      // The counters are read in the same statement as the polls, so a write after them moves the counters.
+      const [stamp, polls, checks, tools] = await db.together(() => Promise.all([
+        this.#stampOf(), runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
       ]));
+      this.#stamp = stamp;
+      this.#readAt = now;
+      for (const id of ids) if (this.#held.has(id)) this.#polls.set(id, polls.get(id)!);
       const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
       const resolve = (id: number, p: runners.CallPoll): void => { for (const w of batch.get(id)!) w.resolve({ ...p, checks: checks.has(id), tools: asked.has(id) }); };
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);

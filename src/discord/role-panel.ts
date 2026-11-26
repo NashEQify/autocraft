@@ -1,8 +1,8 @@
 // The contributor role panel: one bot message with a Verify button in the channel an operator chooses. Pressing it
-// gives the presser the configured role when the GitHub login linked to their Discord account (the `/autocraft link`
-// flow, or a GitHub sign-in made for filing) has authored a merged pull request in a repo of the tracked owner. A typed
-// GitHub name is never asked for. The channel and role are instance settings (Discord admin page or
-// `autocraft-server discord role-panel`); the guild is the channel's. The runner posts the panel when the settings
+// gives the presser the configured role when the GitHub login linked to their Discord account (the
+// `/autocraft account action:link` flow, or a GitHub sign-in made for filing) has authored a merged pull request in a
+// repo of the tracked owner. A typed GitHub name is never asked for. The channel and role are instance settings
+// (Discord admin page or `autocraft-server discord role-panel`); the guild is the channel's. The runner posts the panel when the settings
 // change, edits it in place at start, and deletes the old message when the channel moves or the feature is turned off.
 // A member with no linked account gets a link to the public /verify pages (src/dash/server/verify.ts), where the browser proves
 // both accounts; those pages leave a role request that watchRoleGrants carries out here, where the bot token is.
@@ -350,7 +350,7 @@ export function installRolePanel(ix: Interactions, deps: RolePanelDeps): void {
         t("Link your GitHub account first, so AutoCraft knows which pull requests are yours:"),
         `1. ${t("Sign in to the AutoCraft dashboard and open the Runner page.")}`,
         `2. ${t("Under Link Discord, get a code.")}`,
-        `3. ${t("Type /autocraft link with that code in this server.")}`,
+        `3. ${t("Type /autocraft account action:link code:<code> with that code in this server.")}`,
         `4. ${t("Press Verify again.")}`,
       ].join("\n") }));
     }

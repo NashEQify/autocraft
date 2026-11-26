@@ -17,6 +17,7 @@ import { insertRun } from "../src/agents/runs.ts";
 import { linkRepeatedFindings, runScan, type Ask, type ScanDeps } from "../src/security/scan.ts";
 import { securityRepo } from "../src/security/rules.ts";
 import { autoFixConfirmed } from "../src/security/actions.ts";
+import { checkoutHeld } from "../src/sandbox/checkout.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import * as kx from "../src/db/kx.ts";
@@ -335,5 +336,15 @@ describe("security deep scan", () => {
     await maint.get("/api/repos/secret/security", 404);
     const audit = await maint.get<{ entries: { action: string; target: string }[] }>("/api/audit");
     assert.ok(!audit.entries.some((e) => e.target?.startsWith("secret:")));
+  });
+
+  test("the scan's checkout is held against pruning while it runs and released after", async () => {
+    const calls: string[] = [];
+    const deps = fakeModel(undefined, calls);
+    const heldDuring: boolean[] = [];
+    const ask = (async (id: string, input: unknown) => { heldDuring.push(checkoutHeld(tree)); return await (deps.ask as (a: string, b: unknown) => ReturnType<Ask>)(id, input); }) as Ask;
+    await runScan(db, await newScan(null), { ...deps, ask });
+    assert.ok(heldDuring.length > 0 && heldDuring.every(Boolean));
+    assert.equal(checkoutHeld(tree), false);
   });
 });

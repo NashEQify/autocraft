@@ -33,3 +33,14 @@ registerTriggerSource("plan-inputs",
   { table: "github_app", ops: ["INSERT", "DELETE"] },
   { table: "github_app", ops: ["UPDATE"], when: "old.slug IS NOT new.slug" },
 );
+
+// Runner credentials, roles and cached write permissions as the model queue's room reads them (src/data/runners/runner-snapshot.ts):
+// a credential's use (last_used_at) and a permission's refresh while it is fresh are not changes here.
+registerTriggerSource("remote-room",
+  { table: "mcp_tokens", ops: ["INSERT", "DELETE"] },
+  { table: "mcp_tokens", ops: ["UPDATE"], when: "old.login IS NOT new.login OR old.kind IS NOT new.kind OR old.expires_at IS NOT new.expires_at" },
+  { table: "access", ops: ["INSERT", "DELETE"] },
+  { table: "access", ops: ["UPDATE"], when: "old.login IS NOT new.login OR old.role IS NOT new.role" },
+  { table: "repo_permissions", ops: ["INSERT", "DELETE"] },
+  { table: "repo_permissions", ops: ["UPDATE"], when: permission.sqlite, pg: permission.pg },
+);

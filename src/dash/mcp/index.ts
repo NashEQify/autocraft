@@ -238,7 +238,7 @@ export const MODEL_PICK_TOOLS = [
 export const SETTINGS_TOOLS = [
   {
     name: "my_settings",
-    description: "Your user's Task Runner settings as on the Connect page: the usage reserve kept free per plan window, the repos your Task Runners take calls from, the most calls at once and the interactive slots.",
+    description: "Your user's Task Runner settings as on the Connect page: the usage reserve kept free per plan window, the repos your Task Runners take calls from, the most calls at once, the interactive slots and manual only.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true },
   },
@@ -254,6 +254,7 @@ export const SETTINGS_TOOLS = [
         max_calls: { type: "integer", minimum: 1, description: "The most calls your Task Runners run at once." },
         no_max_calls: { type: "boolean", description: "Remove the limit on calls at once." },
         interactive_slots: { type: "integer", minimum: 0, description: "Slots for interactive calls such as Discord replies." },
+        manual_only: { type: "boolean", description: "Take only the calls you picked, calls for work you started or approved, and follow-ups of your own sessions." },
       },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -275,7 +276,7 @@ async function listRepos(env: McpEnv): Promise<ToolResult> {
 }
 
 const NO_ANSWER = "this credential cannot send commands: on the dashboard's Connect page, make a token that sends commands, or allow commands for this Task Runner";
-const PERMISSION_HINT = " (your GitHub permission is read with your newest dashboard session; sign in to the dashboard if you have none)";
+const PERMISSION_HINT = " (your GitHub permission is read with your newest dashboard session, or through the GitHub App when you have none; sign in to the dashboard if neither can read it)";
 
 /** The one place that refuses the command tool to a credential made without it. */
 function requireCommands(env: McpEnv): void {
@@ -359,7 +360,7 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
+  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
   }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } });
   const text = done.lines.join("\n");
@@ -455,8 +456,8 @@ async function pickModelCall(env: McpEnv, raw: unknown, pick: boolean): Promise<
   return { text: pick ? `Picked model call ${a.id as string}: your user's Task Runners take it next.` : `Ended the pick of model call ${a.id as string}.` };
 }
 
-const settingsText = (r: { reserve: { fiveHour: number; weekly: number }; repos: string[]; maxCalls: number | null; interactiveSlots: number }): string =>
-  `reserve kept free: 5-hour ${r.reserve.fiveHour}%, weekly ${r.reserve.weekly}%\nrepos: ${r.repos.length ? r.repos.join(", ") : "all"}\nmax calls at once: ${r.maxCalls ?? "no limit"}\ninteractive slots: ${r.interactiveSlots}`;
+const settingsText = (r: { reserve: { fiveHour: number; weekly: number }; repos: string[]; maxCalls: number | null; interactiveSlots: number; manualOnly: boolean }): string =>
+  `reserve kept free: 5-hour ${r.reserve.fiveHour}%, weekly ${r.reserve.weekly}%\nrepos: ${r.repos.length ? r.repos.join(", ") : "all"}\nmax calls at once: ${r.maxCalls ?? "no limit"}\ninteractive slots: ${r.interactiveSlots}\nmanual only: ${r.manualOnly ? "on" : "off"}`;
 
 /** my_settings: GET /api/me/settings. */
 async function mySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
@@ -466,7 +467,7 @@ async function mySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
 
 /** set_my_settings: PUT /api/me/settings, with its checks and audit rows. */
 async function setMySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
-  const a = args(raw, { reserve_five_hour: "reserve", reserve_weekly: "reserve", repos: "repos", max_calls: "count", no_max_calls: "flag", interactive_slots: "count" });
+  const a = args(raw, { reserve_five_hour: "reserve", reserve_weekly: "reserve", repos: "repos", max_calls: "count", no_max_calls: "flag", interactive_slots: "count", manual_only: "flag" });
   const user = await env.user(true);
   const body: Record<string, unknown> = {};
   if (a.reserve_five_hour !== undefined || a.reserve_weekly !== undefined) {
@@ -478,7 +479,8 @@ async function setMySettings(env: McpEnv, raw: unknown): Promise<ToolResult> {
   if (a.max_calls !== undefined) body.maxCalls = a.max_calls;
   if (a.no_max_calls) body.maxCalls = null;
   if (a.interactive_slots !== undefined) body.interactiveSlots = a.interactive_slots;
-  if (!Object.keys(body).length) throw new BadArgs("send reserve_five_hour, reserve_weekly, repos, max_calls, no_max_calls or interactive_slots");
+  if (a.manual_only !== undefined) body.manualOnly = a.manual_only;
+  if (!Object.keys(body).length) throw new BadArgs("send reserve_five_hour, reserve_weekly, repos, max_calls, no_max_calls, interactive_slots or manual_only");
   const reply = await userSettings.setSettings(env.db, reqOf(user, { method: "PUT", json: body }));
   return { text: `Saved.\n${settingsText(reply)}` };
 }

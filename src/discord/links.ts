@@ -1,5 +1,5 @@
 // Links between a Discord account and a dashboard login. The Discord user id is never stored: a link holds its keyed hash.
-// A signed-in dashboard user asks for a short single-use code and types it into the bot in Discord (`/autocraft link`), so
+// A signed-in dashboard user asks for a short single-use code and types it into the bot in Discord (`/autocraft account action:link`), so
 // the link is always made by the person who controls both accounts. Codes are stored as keyed hashes and expire.
 import { randomInt } from "node:crypto";
 import type { DiscordKeys } from "./keys.ts";

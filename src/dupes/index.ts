@@ -9,9 +9,9 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { checkPairs, defaultCheckDeps, type CheckDeps, type PairKey } from "./check.ts";
-import { loadUncheckedPairs } from "../data/triage/index.ts";
+import { loadUncheckedPairs, resetScansForCutoff } from "../data/triage/index.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
-import { scanChunk, SCAN_CHUNK } from "./scan.ts";
+import { scanChunk, SCAN_CHUNK, SIM_THRESHOLD } from "./scan.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -73,6 +73,7 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
   const stopAt = (i: number) => (i ? stop : cancelled);
   const model = d.index.embedder.id;
   if (!params.dryRun) await fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
+  if (!params.dryRun) await resetScansForCutoff(db, SIM_THRESHOLD);
   const by = params.by ?? CLI_BY;
   const planned = await plannedItems(db, "dupes", { model, by });
   const todo = scanRefs(planned, SCAN_MAX);

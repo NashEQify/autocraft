@@ -192,7 +192,7 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
   }
 }
 
-/** Removes the person's GitHub sign-in (on /autocraft unlink and `discord forget --user`) and queues its token's revoke. Returns whether one existed. */
+/** Removes the person's GitHub sign-in (on /autocraft account action:unlink and `discord forget --user`) and queues its token's revoke. Returns whether one existed. */
 export async function forgetReporter(db: Db, reporter: string): Promise<boolean> {
   return await forgetReporterRow(db, reporter);
 }

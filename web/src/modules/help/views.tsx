@@ -114,7 +114,8 @@ function Start() {
           <li>
             {t("Discord: mention the bot in a watched channel:")} <Code>{`@AutoCraft ${COMMANDS[1]!.example} ${ITEM}`}</Code>.{" "}
             {t("Reply to a message that names items with")} <Code>@AutoCraft review</Code> {t("to act on all of them. AutoCraft answers in a thread, where a command that names no item acts on the thread's items.")}{" "}
-            <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code> {t("does the same with a private answer.")}
+            <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code> {t("does the same with a private answer.")}{" "}
+            {t("Reply to a message with")} <Code>@AutoCraft status</Code> {t("for the status of the items it names, or name items after it; anyone may ask.")}
           </li>
           <li>{t("Your agent: the AutoCraft tools take the same words.")}</li>
           <li>{t("This app: the command box on an item, or Command on Items.")}</li>

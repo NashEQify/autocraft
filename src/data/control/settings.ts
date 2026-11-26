@@ -97,6 +97,8 @@ export const SETTINGS = {
   remoteModels: reg<Record<string, unknown>>("remote_models", "json", {}, { owner: "runners" }, (r) => { const v = jsonOf(r); return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {}; }),
   remotePickMinutes: reg("remote_pick_minutes", "int", 15, { owner: "runners" }, (r) => intIn(r, 0, 24 * 60, 15)),
   jevEnabled: reg("jev_enabled", "bool", true, { owner: "inference" }, (r) => r !== "no"),
+  /** Where model-call transcripts are stored (src/transcripts): JSON with the bucket's secret sealed; read through src/transcripts only. */
+  transcriptStore: reg<string | null>("transcript_store", "json", null, { owner: "inference", shown: false }, (r) => r ?? null),
   planShadow: reg<"on" | "off">("plan_shadow", "text", "off", { owner: "planner" }, (r) => (r === "on" ? "on" : "off")),
   /** The instance-wide build feature switch (`build_feature:scan-tests`). */
   scanTestsEnabled: reg("build_feature:scan-tests", "bool", false, { owner: "build", shown: false }, (r) => r === "on"),

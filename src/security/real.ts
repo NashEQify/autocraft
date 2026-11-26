@@ -2,7 +2,7 @@
 import { ownerOf } from "../owners.ts";
 import { askClaude, saveUsage, type Usage } from "../classify/run.ts";
 import { exec, fixupDir, Git } from "../fixup/git.ts";
-import { checkoutForCommit, sandboxAvailable } from "../sandbox/index.ts";
+import { checkoutForCommit } from "../sandbox/index.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { cachedCrates, ghCrates } from "../verify/crates.ts";
 import type { ScanDeps } from "./scan.ts";
@@ -45,10 +45,6 @@ export function realDeps(db: Db, scanId: number, io: { cancelled: () => Promise<
   return {
     ...io,
     checkout: async (repo, pin) => {
-      if (!sandboxAvailable()) {
-        io.log("the sandbox is not available on this machine");
-        return null;
-      }
       const branch = (await loadRepos(db, { names: [repo], all: true })).get(repo)?.default_branch ?? "main";
       const sha = pin ?? await new Git(exec, fixupDir(), repo).fetchBase(ownerOf(repo), repo, branch);
       const d = await checkoutForCommit(repo, branch, sha, io.log);

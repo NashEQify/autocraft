@@ -147,7 +147,10 @@ export class Interactions {
     }
     if (i.type !== COMMAND) return undefined;
     const sub = i.data?.options?.find((o) => o.type === 1);
-    return this.#commands.get(sub ? `${i.data?.name} ${sub.name}` : (i.data?.name ?? ""));
+    // A subcommand with an `action` choice (autocraft account) is registered per action: "autocraft account link".
+    const action = sub?.options?.find((o) => o.name === "action")?.value;
+    const key = sub ? `${i.data?.name} ${sub.name}` : (i.data?.name ?? "");
+    return (typeof action === "string" ? this.#commands.get(`${key} ${action}`) : undefined) ?? this.#commands.get(key);
   }
 
   async #complete(i: Interaction): Promise<void> {

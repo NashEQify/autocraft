@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { loadLiveConfig } from "../data/control/index.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
-import { itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
+import { allocation, itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
 import { type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun } from "../agents/runs.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type Lint, type LintProblem } from "../replylint.ts";
@@ -27,9 +27,9 @@ import { defaultWorkspace } from "../sandbox/workspace.ts";
 import { runModelStep } from "../agents/step.ts";
 import { CLASSIFY_HAIKU, CLASSIFY_JEV, type ClassifyAnswer, type JevImpact } from "../agents/steps.ts";
 import type { AreaAnswer } from "../areas/parse.ts";
-import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
+import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, withoutTaskBudget, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import { stripMarks } from "../prompts/harness.ts";
-import type { DupePair } from "../dupes/pair.ts";
+import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
@@ -94,7 +94,7 @@ export const POOL_MAX = { fixup: 3, cifix: 3, mainfix: 2, verify: 4, verifyColle
 export type PoolOptions = {
   /** Run the first job alone and the rest after it returns, so the rest read the prompt cache the first one wrote. */
   first?: boolean;
-  /** How long to wait before asking `room` again when nothing finished (default POOL_POLL_MS). */
+  /** How long to wait before asking `width` again when nothing finished (default POOL_POLL_MS); for a PoolRoom, how often to read whether the room changed (PoolRoom.changed; default allocation.pollMs). */
   pollMs?: number;
   /** Upper bound on running jobs, also when `width` is a function. */
   max?: number;
@@ -109,7 +109,9 @@ export type PoolOptions = {
  * account is enabled.
  *
  * A PoolRoom (poolRoom: the model queue's room for each job's repos) starts the first job in order that has room, so a job
- * whose repos have no room does not hold back later ones. When none has room and none runs, the first job whose repos have a
+ * whose repos have no room does not hold back later ones. It asks again when a job ends or the room may have changed
+ * (PoolRoom.changed), so a pool whose calls wait long for a Task Runner reads the room only when the queue or the Task Runners
+ * change. When none has room and none runs, the first job whose repos have a
  * Task Runner that may take them starts regardless; jobs no Task Runner may take never start, and once only they are left the
  * pool ends without them (a later pass picks them again). With `first`, the first job that has such a Task Runner runs alone first.
  * A job whose model call was withdrawn because no Task Runner could take it (NoTakerError) is skipped the same way; the others go on.
@@ -155,7 +157,16 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
         continue;
       }
     }
-    await Promise.race([...running, new Promise((r) => setTimeout(r, opts.pollMs ?? POOL_POLL_MS))]);
+    if (roomy) {
+      // With `max` jobs running only an end can start another; the room is not read then, so there is no reading to wait on.
+      const full = running.size >= (opts.max ?? Infinity);
+      const stop = new AbortController();
+      try {
+        await Promise.race(!full ? [...running, roomy.changed(opts.pollMs ?? allocation.pollMs, stop.signal)] : [...running]);
+      } finally {
+        stop.abort();
+      }
+    } else await Promise.race([...running, new Promise((r) => setTimeout(r, opts.pollMs ?? POOL_POLL_MS))]);
   }
   await Promise.all(running);
   if (failed) throw (failed as { e: unknown }).e;
@@ -243,7 +254,11 @@ export function promptVersion(id: ClaudePromptId | JevPromptId): string {
 function refsOf(input: readonly unknown[]): ItemRef[] {
   const out: ItemRef[] = [];
   for (const x of input as { repo?: string; number?: number; ref?: string; a?: { number: number }; b?: { number: number }; items?: unknown[] }[]) {
-    if (typeof x.repo === "string" && typeof x.number === "number") out.push({ repo: x.repo, number: x.number });
+    // A duplicate request: the item and each of its candidates.
+    if (typeof x.repo === "string" && (x as { item?: { number: number } }).item && Array.isArray((x as { candidates?: unknown }).candidates)) {
+      const ask = x as unknown as DupeAsk;
+      out.push({ repo: ask.repo, number: ask.item.number }, ...ask.candidates.map((c) => ({ repo: ask.repo, number: c.other.number })));
+    } else if (typeof x.repo === "string" && typeof x.number === "number") out.push({ repo: x.repo, number: x.number });
     // An area batch: one repo's list and its items.
     else if (typeof x.repo === "string" && Array.isArray((x as { items?: unknown }).items)) out.push(...refsOf((x as { items: unknown[] }).items));
     // A duplicate pair: both items.
@@ -469,7 +484,8 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
         bundle: {
           promptId: id, promptVersion: promptVersion(id), tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
           stdin: stdin === parts.stdin ? stdin : stripMarks(stdin), system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
-          hints: { claude: { args: lean ? noToolArgs(args) : args, ...(agents && { agents }) } },
+          // The task budget is added when a Task Runner takes the call, for a Claude Code that takes the flag (forHarness).
+          hints: { claude: { args: withoutTaskBudget(lean ? noToolArgs(args) : args), ...(agents && { agents }) } },
         },
       });
       const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });
@@ -527,7 +543,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
 }
 
 /** Sends a registered Jev request (src/prompts) for one item to `jev ask`; the same rule as `askClaude`. Recorded as an agent run without an account. */
-export async function askJev(id: JevPromptId, item: Item | DupePair | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupePair), perCallUsage = true): Promise<Proc> {
+export async function askJev(id: JevPromptId, item: Item | DupePair | DupeAsk | { ref: string }, db: Db, body: string = renderJev(id, item as Item | DupeAsk), perCallUsage = true): Promise<Proc> {
   effect("model-call", id);
   const runId = await startJevRun(db, { promptId: id, promptVersion: promptVersion(id), provider: "jev", model: "jev", items: refsOf([item]), prompt: body });
   const start = now();

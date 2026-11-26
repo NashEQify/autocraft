@@ -137,6 +137,7 @@ const ownFirst = (shared: PoolRoom, own: (i: number) => boolean, busy: (i: numbe
   round: () => shared.round(),
   room: async (i) => (own(i) ? (busy(i) ? 0 : 1) : await shared.room(i)),
   taker: async (i) => own(i) || await shared.taker(i),
+  changed: (pollMs, signal) => shared.changed(pollMs, signal),
 });
 
 /** PR diffs from the diff cache or GitHub; null when unavailable. */

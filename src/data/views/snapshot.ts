@@ -230,14 +230,19 @@ async function readSeqs(db: Db): Promise<Seqs> {
   return out;
 }
 
+/** `q` on `t` limited to the rows the snapshot copies: those of public repositories, without reviews still pending. */
+function publicRows(t: PgTable, q: SelectQueryBuilder<any, any, any>): SelectQueryBuilder<any, any, any> {
+  return q
+    .where("repo", "in", (eb: ExpressionBuilder<any, any>) => eb.selectFrom("repos").select("name").where("visibility", "=", "public"))
+    .$if(t.pending, (q) => q.where((eb) => eb.or([eb("review_state", "is", null), eb("review_state", "<>", "PENDING")])));
+}
+
 /** The public rows of `t` with `select` added, keyset-paged by its key in pages of `size`. */
 async function* pgPages(db: Db, t: PgTable, select: (q: SelectQueryBuilder<any, any, any>) => SelectQueryBuilder<any, any, any>, size: number): AsyncGenerator<Record<string, unknown>[]> {
   let last: (string | number)[] | null = null;
   for (;;) {
     const after = last;
-    const q = select(anyK(db).selectFrom(t.name))
-      .where("repo", "in", (eb: ExpressionBuilder<any, any>) => eb.selectFrom("repos").select("name").where("visibility", "=", "public"))
-      .$if(t.pending, (q) => q.where((eb) => eb.or([eb("review_state", "is", null), eb("review_state", "<>", "PENDING")])))
+    const q = publicRows(t, select(anyK(db).selectFrom(t.name)))
       .$if(after !== null, (q) => q.where((eb) => (t.key.length === 1 ? eb(t.key[0]!, ">", after![0]) : eb(eb.refTuple(t.key[0]!, t.key[1]!), ">", eb.tuple(after![0]!, after![1]!)))))
       .$call((q) => t.key.reduce((o, k) => o.orderBy(k), q))
       .limit(size);
@@ -275,8 +280,86 @@ async function readSource(db: Db): Promise<string> {
   return `${String(r?.name)}:${String(r?.oid)}`;
 }
 
-/** What a refresh stored about its source: the database, its change counters, and when every row was last compared. */
-type SourceMark = { source: string; seqs: Seqs; comparedAt: string };
+/**
+ * What a refresh stored about its source: the database, its change counters, when every row was last compared, and the
+ * transaction horizon when the mark was read (`xmin`, a 64-bit transaction id: every transaction older than it had ended).
+ */
+type SourceMark = { source: string; seqs: Seqs; comparedAt: string; xmin?: string };
+
+/** The current snapshot's horizon, read before any row: a row written by a transaction still running then has an xmin at or after it. */
+async function readXmin(db: Db): Promise<string> {
+  const r = await queryDb(db).get(anyK(db).selectNoFrom(sql<string>`pg_snapshot_xmin(pg_current_snapshot())::text`.as("x")));
+  return String(r?.x);
+}
+
+/**
+ * Rows whose version a transaction at or after the 64-bit id `since` wrote. A row's `xmin` holds the low 32 bits of its
+ * writer's id; counted back from the next id to be assigned, modulo 2^32, it gives the writer's distance from now. A frozen
+ * row (xmin 2) or one more than 2^32 transactions old can only read as newer than it is, which costs a refetch, never a miss.
+ */
+const writtenAfter = (since: string): RawBuilder<boolean> => {
+  const next = sql`pg_snapshot_xmax(pg_current_snapshot())::text::bigint`;
+  return sql<boolean>`((${next} - xmin::text::bigint) % 4294967296 + 4294967296) % 4294967296 <= ${next} - ${since}::bigint`;
+};
+
+/** A table staged for the apply step: `temp.chg_<name>` holds the keys to delete (`refetch` 1 for those read again); `rows` counts the source's public rows. */
+type Staged = { rows: number };
+
+const dropStage = (out: DatabaseSync, t: PgTable): void => {
+  for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
+};
+
+/** The key columns with the snapshot's types: a typeless column has another affinity than the snapshot's INTEGER `number`, so a compare would search the key by `repo` alone. */
+const typedKeys = (t: PgTable): string => t.key.map((k) => `${k} ${INTEGER_COLUMNS.has(k) ? "INTEGER" : "TEXT"}`).join(", ");
+
+/** Stages every public row's key and hash and compares them with the file's: changed or new rows are read again, the file's rows not among them are gone. */
+async function stageByHash(db: Db, out: DatabaseSync, t: PgTable, pageSize: number): Promise<Staged> {
+  const keys = t.key.join(", ");
+  const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
+  dropStage(out, t);
+  out.exec(`CREATE TEMP TABLE pg_${t.name} (${typedKeys(t)}, h TEXT, PRIMARY KEY (${keys}))`);
+  const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
+  for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
+    for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
+  }
+  stage.flush();
+  out.exec(`CREATE TEMP TABLE chg_${t.name} AS
+    SELECT p.${t.key.join(", p.")}, 1 AS refetch FROM temp.pg_${t.name} p LEFT JOIN (${t.local}) l ON ${on} WHERE l.h IS NULL OR l.h <> p.h
+    UNION ALL SELECT l.${t.key.join(", l.")}, 0 FROM (${t.local}) l WHERE NOT EXISTS (SELECT 1 FROM temp.pg_${t.name} p WHERE ${on})`);
+  return { rows: countOf(out, `temp.pg_${t.name}`) };
+}
+
+/**
+ * Stages the keys of the rows of public repositories written since the 64-bit transaction id `since` (pending reviews
+ * included: one that turned pending leaves the file) and counts the public rows. Rows deleted since are not seen here.
+ */
+async function stageWritten(db: Db, out: DatabaseSync, t: PgTable, since: string): Promise<Staged> {
+  dropStage(out, t);
+  out.exec(`CREATE TEMP TABLE chg_${t.name} (${typedKeys(t)}, refetch INTEGER)`);
+  const counted = await queryDb(db).get(publicRows(t, anyK(db).selectFrom(t.name).select((eb) => eb.fn.countAll<number>().as("n"))));
+  const written = (await queryDb(db).all(anyK(db).selectFrom(t.name).select(t.key.map((k) => sql.ref(k).as(k)))
+    .where("repo", "in", (eb: ExpressionBuilder<any, any>) => eb.selectFrom("repos").select("name").where("visibility", "=", "public"))
+    .where(writtenAfter(since)))) as Record<string, unknown>[];
+  const stage = inserter(out, `temp.chg_${t.name}`, [...t.key, "refetch"]);
+  for (const r of written) stage.add([...t.key.map((k) => cell(k, r[k])), 1]);
+  stage.flush();
+  return { rows: Number(counted?.n ?? 0) };
+}
+
+/** Reads the staged rows marked for refetch into `temp.new_<name>`; a changed row that is no longer public is not read again, so it is deleted like a row that is gone. */
+async function refetch(db: Db, out: DatabaseSync, t: PgTable): Promise<void> {
+  out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
+  const fetch = out.prepare(`SELECT ${t.key.join(", ")} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
+  const w = writer(out, t, "temp.new_");
+  for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
+    const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
+    const where = t.key.length === 1
+      ? kx.inList(db, sql.ref(t.key[0]!), chunk.map((r) => r[t.key[0]!]!))
+      : kx.refIn(db, t.name, chunk.map((r) => [String(r.repo), Number(r.number)] as const));
+    w.add((await queryDb(db).all(publicRows(t, anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where)))) as Record<string, unknown>[]);
+  }
+  w.flush();
+}
 
 /** Items and comments are compared in full at least this often, whatever the counters say. */
 const FULL_COMPARE_MS = 24 * 3600_000;
@@ -286,24 +369,30 @@ const countOf = (out: DatabaseSync, table: string): number => Number((out.prepar
 /**
  * Brings the snapshot at `dest` up to date from a Db handle (the Postgres app database). Every row copied carries a hash
  * of its columns (embeddings: model and write time); a refresh compares the public rows' keys and hashes with the
- * file's and rewrites only the rows added, changed or gone, in one transaction. Items and comments are compared only
+ * file's and rewrites only the rows added, changed or gone, in one transaction. Items and comments are looked at only
  * when the change counters of their topics moved since the last refresh, so a refresh after an embed run reads keys
- * and hashes of the embeddings alone; they are compared regardless when a counter went down (a restore, a copy), the
- * database is another one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
- * is missing, has another schema version, or the change is too large to apply row by row. All reads share one snapshot.
+ * and hashes of the embeddings alone. Then only their rows written since the last refresh's transaction horizon are read,
+ * and their public rows counted; a count the file does not match after those rows (a row was deleted) compares every
+ * row by hash. Every row is compared by hash when a counter went down (a restore, a copy), the database is another
+ * one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
+ * is missing, has another schema version, or the change is too large to apply row by row. Both read Postgres statement by
+ * statement, with no transaction open (see refreshFromDb).
  */
-export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
+export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE, hooks: RefreshHooks = {}): Promise<SnapshotStats> {
   mkdirSync(dirname(dest), { recursive: true });
   recoverJournal(dest);
   if (existsSync(dest) && hasVersion(dest)) {
-    const r = await refreshFromDb(db, dest, pageSize);
+    const r = await refreshFromDb(db, dest, pageSize, hooks);
     if (r) return r;
   }
   return rebuildFromDb(db, dest, pageSize);
 }
 
+/** Tests: `beforeRefetch` runs after a table's keys were compared, before its changed rows are read again. */
+type RefreshHooks = { beforeRefetch?: (table: PgTable["name"]) => Promise<void> };
+
 /** The incremental refresh; null when the change is large enough that a rebuild is cheaper. */
-async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<SnapshotStats | null> {
+async function refreshFromDb(db: Db, dest: string, pageSize: number, hooks: RefreshHooks): Promise<SnapshotStats | null> {
   const out = new DatabaseSync(dest, { timeout: 30_000 });
   try {
     const stored = storedMark(out);
@@ -311,53 +400,55 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     // A plain BEGIN: everything read from Postgres goes into temp tables first, so the write lock on the file is taken
     // only by the apply step at the end, which does local work alone.
     out.exec("BEGIN");
-    let mark: SourceMark = { source: "", seqs: {}, comparedAt: stored?.comparedAt ?? "" };
+    // No Postgres transaction is open while this works on the file: the server ends a transaction left idle for 10 s,
+    // and comparing a large table locally can take longer. Each statement reads Postgres on its own instead. The change
+    // counters are read before any row, so a row that changes after it was staged or refetched has moved them past the
+    // mark stored here, and the next refresh compares it again; a refetched row carries the hash of the version fetched.
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: stored?.comparedAt ?? "", xmin: await readXmin(db) };
+    const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
+    // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
+    const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
+      || !(Date.now() - Date.parse(stored.comparedAt) < FULL_COMPARE_MS);
+    const rowsMoved = full || moved("items") || moved("repos");
+    // The full compare's time moves only when every item and comment was compared by hash.
+    const startedAt = new Date().toISOString();
+    const hashed = new Set<PgTable["name"]>();
     let large = false;
     const deltas: { t: PgTable; n: number }[] = [];
-    await db.read(async () => {
-      mark = { ...mark, source: await readSource(db), seqs: await readSeqs(db) };
-      const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
-      // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
-      const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
-        || !(Date.now() - Date.parse(stored.comparedAt) < FULL_COMPARE_MS);
-      const rowsMoved = full || moved("items") || moved("repos");
-      // Comparing items and comments compares all of them.
-      if (rowsMoved) mark.comparedAt = new Date().toISOString();
-      for (const t of PG_TABLES) {
-        if (t.name !== "item_embeddings" && !rowsMoved) continue;
-        const keys = t.key.join(", ");
-        const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
-        for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
-        out.exec(`CREATE TEMP TABLE pg_${t.name} (${keys}, h, PRIMARY KEY (${keys}))`);
-        const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
-        for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
-          for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
-        }
-        stage.flush();
-        // The keys to delete: changed rows (rewritten from new_*) and rows no longer public or present.
-        out.exec(`CREATE TEMP TABLE chg_${t.name} AS
-          SELECT p.${t.key.join(", p.")}, 1 AS refetch FROM temp.pg_${t.name} p LEFT JOIN (${t.local}) l ON ${on} WHERE l.h IS NULL OR l.h <> p.h
-          UNION ALL SELECT l.${t.key.join(", l.")}, 0 FROM (${t.local}) l WHERE NOT EXISTS (SELECT 1 FROM temp.pg_${t.name} p WHERE ${on})`);
+    for (const t of PG_TABLES) {
+      if (t.name !== "item_embeddings" && !rowsMoved) continue;
+      // Items and comments since a mark with a transaction horizon: only the rows written since are read; a count that
+      // then disagrees (a row deleted) compares every row by hash, as the first refresh after a horizon-less mark does.
+      const ways = t.name !== "item_embeddings" && !full && stored?.xmin ? (["written", "hash"] as const) : (["hash"] as const);
+      for (const way of ways) {
+        const staged = way === "written" ? await stageWritten(db, out, t, stored!.xmin!) : await stageByHash(db, out, t, pageSize);
         const n = countOf(out, `temp.chg_${t.name}`);
-        if (n > LARGE_DELTA && n * 2 > countOf(out, `temp.pg_${t.name}`)) {
+        if (n > LARGE_DELTA && n * 2 > staged.rows) {
           large = true;
-          return;
+          break;
         }
-        if (!n) continue;
-        deltas.push({ t, n });
-        out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
-        const fetch = out.prepare(`SELECT ${keys} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
-        const w = writer(out, t, "temp.new_");
-        for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
-          const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
-          const where = t.key.length === 1
-            ? kx.inList(db, sql.ref(t.key[0]!), chunk.map((r) => r[t.key[0]!]!))
-            : kx.refIn(db, t.name, chunk.map((r) => [String(r.repo), Number(r.number)] as const));
-          w.add((await queryDb(db).all(anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where))) as Record<string, unknown>[]);
+        await hooks.beforeRefetch?.(t.name);
+        if (n) await refetch(db, out, t);
+        if (way === "written") {
+          const keys = t.key.join(", ");
+          if (n) {
+            // A transaction of any database that was still open at the last mark holds the horizon back, so rows written
+            // before it may be read again: those the file already has at the same hash are left out.
+            const on = t.key.map((k) => `l.${k} = w.${k}`).join(" AND ");
+            out.exec(`DELETE FROM temp.chg_${t.name} WHERE (${keys}) IN (SELECT w.${t.key.join(", w.")} FROM temp.new_${t.name} w JOIN (${t.local}) l ON ${on} WHERE l.h = w.h)`);
+            out.exec(`DELETE FROM temp.new_${t.name} WHERE (${keys}) NOT IN (SELECT ${keys} FROM temp.chg_${t.name})`);
+          }
+          const kept = countOf(out, `main.${t.name}`) - Number((out.prepare(`SELECT COUNT(*) AS n FROM main.${t.name} WHERE (${keys}) IN (SELECT ${keys} FROM temp.chg_${t.name})`).get() as { n: number }).n);
+          if (kept + (n ? countOf(out, `temp.new_${t.name}`) : 0) !== staged.rows) continue;
         }
-        w.flush();
+        if (way === "hash") hashed.add(t.name);
+        const left = way === "written" && n ? countOf(out, `temp.chg_${t.name}`) : n;
+        if (left) deltas.push({ t, n: left });
+        break;
       }
-    });
+      if (large) break;
+    }
+    if (hashed.has("items") && hashed.has("comments")) mark.comparedAt = startedAt;
     if (large) {
       out.exec("ROLLBACK");
       return null;
@@ -388,7 +479,7 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
   }
 }
 
-/** Writes the whole snapshot into a new file, keyset-paged from one read snapshot, and renames it over `dest`. */
+/** Writes the whole snapshot into a new file, keyset-paged, and renames it over `dest`. */
 async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<SnapshotStats> {
   const target = tmpFile(dest);
   rmSync(target, { force: true });
@@ -398,15 +489,14 @@ async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     out.exec(DDL);
     out.prepare("INSERT INTO meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
     out.exec("BEGIN");
-    let mark: SourceMark | null = null;
-    await db.read(async () => {
-      mark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString() };
-      for (const t of PG_TABLES) {
-        const w = writer(out, t, "main.");
-        for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);
-        w.flush();
-      }
-    });
+    // Statement by statement, with no Postgres transaction open while pages are written, as in refreshFromDb: the counters
+    // read first make the next refresh compare any row that changed during the copy.
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString(), xmin: await readXmin(db) };
+    for (const t of PG_TABLES) {
+      const w = writer(out, t, "main.");
+      for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);
+      w.flush();
+    }
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('pg_source', ?)").run(JSON.stringify(mark));
     const result = { items: countOf(out, "items"), comments: countOf(out, "comments") };
@@ -545,12 +635,51 @@ function hasVersion(file: string): boolean {
   }
 }
 
+/** Starts the line by which `item-tools snapshot` reports a failed build. */
+export const SNAPSHOT_FAILED = "item snapshot failed: ";
+
+const redact = (text: string): string => text.replace(/postgres(ql)?:\/\/\S+/gi, "postgres://<redacted>");
+
+/** An error and its causes, at most five. */
+function chain(e: unknown): unknown[] {
+  const out: unknown[] = [];
+  for (let c = e; c !== undefined && c !== null && out.length < 5; c = (c as { cause?: unknown }).cause) out.push(c);
+  return out;
+}
+
+/** One error's message; a connection failure's AggregateError has none, so its code and first inner error's message. */
+function messageOf(e: unknown): string {
+  const x = e as { message?: unknown; code?: unknown; errors?: unknown[] } | null;
+  const message = typeof x?.message === "string" ? x.message.replace(/\s+/g, " ").trim() : "";
+  if (message) return message;
+  const inner = Array.isArray(x?.errors) && x.errors.length ? messageOf(x.errors[0]) : "";
+  return [typeof x?.code === "string" ? x.code : "", inner].filter(Boolean).join(": ") || String(e);
+}
+
+/** An error's message and those of its causes, on one line, with connection strings redacted. */
+export function errorLine(e: unknown): string {
+  return redact(chain(e).map(messageOf).join("; cause: "));
+}
+
+/**
+ * An error and its causes for a log: name, code, message and stack frames, without the error's other properties (an
+ * invalid URL error carries the URL it was given, which can be a connection string with its password).
+ */
+export function errorReport(e: unknown): string {
+  return redact(chain(e).map((c, i) => {
+    const x = c as { name?: unknown; code?: unknown; stack?: unknown } | null;
+    const head = `${i ? "cause: " : ""}${typeof x?.name === "string" ? x.name : "Error"}${typeof x?.code === "string" ? ` [${x.code}]` : ""}: ${messageOf(c)}`;
+    const frames = typeof x?.stack === "string" ? x.stack.split("\n").filter((l) => /^\s+at /.test(l)) : [];
+    return [head, ...frames].join("\n");
+  }).join("\n"));
+}
+
 /** Updates the snapshot after a run that changed what it copies; a failure is logged, never thrown into the run. */
 export async function refreshSnapshot(log: (line: string) => void = console.log, db?: Db): Promise<void> {
   try {
     const r = await buildSnapshot(db);
     log(`item snapshot${r.rebuilt ? " (rebuilt)" : ""}: ${r.items} items, ${r.comments} comments, changed ${r.changed.items}/${r.changed.comments}/${r.changed.embeddings} (items/comments/embeddings), ${Math.round(r.bytes / 1e6)} MB`);
   } catch (e) {
-    log(`item snapshot failed: ${String((e as Error).message).slice(0, 200)}`);
+    log(`${SNAPSHOT_FAILED}${errorLine(e).slice(0, 1000)}`);
   }
 }

@@ -103,6 +103,26 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     assert.equal((await writeSnapshotFromDb(pdb, fresh, 2)).rebuilt, true);
     assert.deepEqual(dump(file), dump(fresh));
     assert.deepEqual(srcRows(file), srcRows(fresh));
+
+    // Rows written since the last refresh are read alone: an edited comment and a draft review submitted, then the
+    // review back to a draft, which leaves the file.
+    await pdb.prepare("UPDATE comments SET body = 'Seen it twice' WHERE id = 'c1'").run();
+    await pdb.prepare("UPDATE comments SET review_state = 'COMMENTED' WHERE id = 'c2'").run();
+    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 2, embeddings: 0 });
+    await pdb.prepare("UPDATE comments SET review_state = 'PENDING' WHERE id = 'c2'").run();
+    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 1, embeddings: 0 });
+    const fresh2 = join(dir, "fresh2", "items.db");
+    assert.equal((await writeSnapshotFromDb(pdb, fresh2, 2)).rebuilt, true);
+    assert.deepEqual(dump(file), dump(fresh2));
+    assert.deepEqual(srcRows(file), srcRows(fresh2));
+
+    // A repository turned private after its changed items were compared: they are not read again, so they leave the file.
+    await pdb.prepare("UPDATE items SET title = 'Fix kerning again' WHERE repo = 'photocraft' AND number = 7").run();
+    const hidden = await writeSnapshotFromDb(pdb, file, 2, {
+      beforeRefetch: async (t) => void (t === "items" && await pdb.prepare("UPDATE repos SET visibility = 'private' WHERE name = 'photocraft'").run()),
+    });
+    assert.equal(hidden.rebuilt, false);
+    assert.deepEqual(dump(file).items.filter((i) => (i as { number: number }).number === 7), []);
   } finally {
     await pg.close();
     await lite.close();

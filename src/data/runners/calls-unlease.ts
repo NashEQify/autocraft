@@ -34,7 +34,7 @@ export async function unlease(db: Db, r: { id: number; runId: number | null; has
  * and attempt read, so only that lease ends. `skipLogin` keeps the login's runners from being offered the call again for a while.
  * Returns the new state, or null when the lease was not the one named.
  */
-export async function requeue(db: Db, l: { id: number; runId: number | null; attempt: number; maxAttempts: number; hash: string }, reason: string, now: number, opts: { skipLogin?: string; summary?: string } = {}): Promise<"queued" | "failed" | null> {
+export async function requeue(db: Db, l: { id: number; runId: number | null; attempt: number; maxAttempts: number; hash: string }, reason: string, now: number, opts: { skipLogin?: string; summary?: string; tokens?: RunEnd["tokens"]; output?: Uint8Array } = {}): Promise<"queued" | "failed" | null> {
   const fail = l.attempt >= l.maxAttempts;
   const q = queryDb(db);
   const up = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({
@@ -43,7 +43,7 @@ export async function requeue(db: Db, l: { id: number; runId: number | null; att
   })).where("id", "=", l.id).where("state", "=", "leased").where("attempt", "=", l.attempt).where("lease_secret_hash", "=", l.hash));
   if (Number(up.changes) !== 1) return null;
   await bury(db, [{ id: l.id, hash: l.hash }], now);
-  if (l.runId !== null) await finishRuns(db, [{ id: l.runId, state: "failed", error: reason, summary: opts.summary ?? "lease ended" }]);
+  if (l.runId !== null) await finishRuns(db, [{ id: l.runId, state: "failed", error: reason, summary: opts.summary ?? "lease ended", ...(opts.tokens && { tokens: opts.tokens }), ...(opts.output && { output: opts.output }) }]);
   dropQueueCache(db);
   return fail ? "failed" : "queued";
 }

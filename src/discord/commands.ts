@@ -1,5 +1,5 @@
-// `/autocraft link`, `unlink`, `stats` and `status`. Replies are visible to the caller only. Everything they say about
-// items and counts comes from the public status layer (src/public/status.ts).
+// `/autocraft account` (link, unlink, alerts, optout, optin), `status` (an item, or counts), `do` and `help`. Replies are visible to the caller only. Everything
+// they say about items and counts comes from the public status layer (src/public/status.ts).
 import { audit } from "./audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
@@ -13,6 +13,11 @@ import { prepareDo, runDo } from "./do.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { plain } from "./reply.ts";
 import type { Db } from "../db/index.ts";
+import { envVar } from "../env.ts";
+import { DISCORD_PRIVACY_PATH } from "../dash/server/discord-privacy.ts";
+import { DISCORD_TERMS_PATH } from "../dash/server/discord-terms.ts";
+import { optIn, optOut } from "./store.ts";
+import type { ItemKey } from "./refs.ts";
 
 const ATTEMPTS = { n: 5, ms: 60_000 };
 const READ_LIMIT = { n: 10, ms: 60_000 };
@@ -35,44 +40,82 @@ export function formatStatus(s: PublicStatus): string {
   return `${s.ref} ${plain(s.title).slice(0, 100)}\n${s.step}${place}`;
 }
 
-/** The `/autocraft do` lines of Help, generated from the command vocabulary. */
+/** Most items one status answer shows: one row of link buttons. */
+export const STATUS_ITEMS = 5;
+const NO_ITEM = "No item found. Use the form repo#123.";
+
+/**
+ * The status answer for items (the first STATUS_ITEMS): each item's public status, and a link button per item found. An item of a
+ * private or untracked repo, or one the public layer leaves out, reads as not found, so the answer is safe to post publicly.
+ */
+export async function statusReply(db: Db, refs: readonly ItemKey[]): Promise<{ content: string; components: unknown[] }> {
+  const shown = refs.slice(0, STATUS_ITEMS);
+  const found = await Promise.all(shown.map(async (r) => ({ r, s: await publicStatus(db, r.repo, r.number) })));
+  const buttons = found.flatMap(({ s }) => s ? [{ type: 2, style: 5, label: s.ref.slice(0, 80), url: s.url }] : []);
+  if (!buttons.length && shown.length <= 1) return { content: NO_ITEM, components: [] };
+  const blocks = found.map(({ r, s }) => s ? formatStatus(s) : t("{ref}: no item found.", { ref: `${r.repo}#${r.number}` }));
+  if (refs.length > shown.length) blocks.push(t("(+{n} more)", { n: refs.length - shown.length }));
+  return { content: blocks.join("\n\n").slice(0, 1990), components: buttons.length ? [{ type: 1, components: buttons }] : [] };
+}
+
+/** The command words and weight words of Help, generated from the command vocabulary. */
 export function doHelp(): string[] {
   return [
-    t("`/autocraft do text:<command>` sends a command to AutoCraft as your linked login. Name items as repo#number, with a list after a colon: `merge: photocraft#123 photocraft#456`."),
-    t("Commands: {commands}. Weight words: {words}. Help in the dashboard says what each does.", {
-      commands: COMMANDS.map((c) => `\`${c.usage}\``).join(", "),
-      words: WEIGHT_HELP.map((w) => `${t(w.word)} (${t(w.weight)})`).join(", "),
-    }),
+    t("Command words: {commands}", { commands: COMMANDS.map((c) => `\`${c.usage.replace(/\s*\[.*\]$/, "")}\``).join(" · ") }),
+    t("Weight words: {words}", { words: WEIGHT_HELP.map((w) => `${w.word.startsWith("(") ? t("none") : `\`${w.word}\``} (${t(w.weight)})`).join(" · ") }),
   ];
 }
 
-/** The @-command lines of Help: commands in a channel, replies to messages that name items, and the thread. */
+/** The lines of Help on sending commands: privately, in a channel, as a reply, and in the thread AutoCraft answers in. */
 export function atHelp(): string[] {
   return [
-    t("`@AutoCraft review photocraft#123` in a watched channel sends the command in public, as `/autocraft do` does."),
-    t("Reply to a message that names items with `@AutoCraft review` (or `review all`) for all of them, or name one for that one only. Replies to posts of bots and webhooks, such as GitHub's integration, do not pick up their links."),
-    t("AutoCraft confirms in a thread. There, `@AutoCraft fix-up and merge`, or a reply to its message, acts on the thread's items."),
+    t("`/autocraft do text:merge: photocraft#123 photocraft#456` sends it privately"),
+    t("`@AutoCraft review photocraft#123` in a watched channel sends it in public"),
+    t("Reply to a message that names items with `@AutoCraft review` for all of them, or name one"),
+    t("Reply to a message with `@AutoCraft status` for the status of the items it names"),
+    t("AutoCraft answers in a thread and posts each item's status and result there"),
+    t("In that thread, `@AutoCraft fix-up and merge` or a reply to AutoCraft acts on the thread's items"),
   ];
 }
 
-/** Lists what the slash-command picker does not show: pings, the message command and the reaction. */
-export const HELP = [
-  "**AutoCraft**",
-  "`/autocraft search` opens a form. Pick the app and describe the problem or the idea to see matching issues; if none fits, AutoCraft helps write a new issue and opens it on GitHub, ready to submit.",
-  "`/autocraft status item:photocraft#123` shows where an issue or pull request is.",
-  ...doHelp(),
-  ...atHelp(),
-  "`/autocraft stats` shows counts for the public repos.",
-  "`/autocraft link` and `unlink` connect this Discord account to your AutoCraft login and remove the link (the code is under Link Discord in the dashboard menu).",
-  "`/autocraft alerts on|off` turns on direct messages about workflows that need your answer, once linked.",
-  "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues; text that starts with a command word is a command instead.",
-  "Right-click a message, then Apps › Find issue, to search with that message's text.",
-  "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
-  "The Verify button in the contributor role channel gives you the contributor role once you have a merged pull request; link your account first.",
-].join("\n");
+/** `/autocraft help`: short sections for scanning, under Discord's 2,000-character limit. The links show only when the public base URL is known. */
+export function helpText(baseUrl: string | null): string {
+  const base = baseUrl?.replace(/\/+$/, "");
+  return [
+    `**${t("Find issues")}**`,
+    t("`/autocraft search` searches existing issues by a few words"),
+    t("`/autocraft report` reports a bug or requests a feature; AutoCraft helps write the issue"),
+    t("Right-click a message › Apps › Find issue searches with its text"),
+    t("`@AutoCraft <question>` in a watched channel replies with matching issues, in public"),
+    t("Reply to a message with `@AutoCraft` to search with that message's text"),
+    "",
+    `**${t("Status")}**`,
+    t("`/autocraft status item:photocraft#123` shows where an issue or pull request is"),
+    t("`/autocraft status` without an item shows counts for the public repos"),
+    "",
+    `**${t("Commands")}** ${t("(linked account with write access)")}`,
+    ...atHelp(),
+    ...doHelp(),
+    "",
+    `**${t("Your account")}**`,
+    t("`/autocraft account action:link code:<code>` links your AutoCraft login (code: Link Discord in the dashboard menu)"),
+    t("`/autocraft account action:unlink` removes the link"),
+    t("`/autocraft account action:alerts state:on` (or off) sends direct messages when a workflow needs your answer"),
+    t("`/autocraft account action:optout` stops recording your messages and deletes the records; commands still work"),
+    t("`/autocraft account action:optin` records them again"),
+    "",
+    `**${t("Privacy")}**`,
+    t("AutoCraft's reaction means it counted the message for the items it names"),
+    t("Deleting a message deletes its record"),
+    ...(base ? [`[${t("Privacy notice")}](<${base}${DISCORD_PRIVACY_PATH}>) · [${t("Terms")}](<${base}${DISCORD_TERMS_PATH}>)`] : []),
+  ].join("\n");
+}
 
-export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps }): void {
+const ACCOUNT_ACTIONS = ["link", "unlink", "alerts", "optout", "optin"];
+
+export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps; baseUrl?: string | null }): void {
   const { db, keys } = deps;
+  const help = helpText(deps.baseUrl === undefined ? envVar("BASE_URL") ?? null : deps.baseUrl);
   const tries = new Map<string, number[]>();
   /** Sliding window per key: false when `lim.n` uses are already inside it. Keys whose uses have all expired are dropped. */
   const allow = (key: string, lim: { n: number; ms: number }): boolean => {
@@ -91,57 +134,80 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
   const def = {
     name: "autocraft", type: 1 as const, description: "AutoCraft", dm_permission: false,
     options: [
-      { type: 1, name: "link", description: "Link this Discord account to your dashboard login", options: [{ type: 3, name: "code", description: "The code from Link Discord in the dashboard menu", required: true, max_length: 20 }] },
-      { type: 1, name: "unlink", description: "Remove the link between this Discord account and your dashboard login" },
-      { type: 1, name: "alerts", description: "Direct messages about workflows that need your answer", options: [{ type: 3, name: "state", description: "on or off", required: true, choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }] }] },
-      { type: 1, name: "stats", description: "Counts for the public repos", options: [{ type: 3, name: "repo", description: "One repo; all public repos when left out", autocomplete: true }] },
-      { type: 1, name: "status", description: "Where an issue or pull request is in AutoCraft", options: [{ type: 3, name: "item", description: "For example photocraft#123", required: true, max_length: 100 }] },
+      { type: 1, name: "account", description: "Your Discord link, alerts and message recording", options: [
+        { type: 3, name: "action", description: "What to do", required: true, choices: ACCOUNT_ACTIONS.map((a) => ({ name: a, value: a })) },
+        { type: 3, name: "code", description: "For link: the code from Link Discord in the dashboard menu", max_length: 20 },
+        { type: 3, name: "state", description: "For alerts: on or off", choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }] },
+      ] },
+      { type: 1, name: "status", description: "Where an issue or pull request is, or counts for the public repos", options: [
+        { type: 3, name: "item", description: "For example photocraft#123; leave out for counts", max_length: 100 },
+        { type: 3, name: "repo", description: "Counts for one repo; all public repos when both options are left out", autocomplete: true },
+      ] },
       { type: 1, name: "do", description: "Send a command to AutoCraft, for example: merge: photocraft#123", options: [{ type: 3, name: "text", description: "The command, then a colon and the items: review, urgent: photocraft#123 photocraft#456", required: true, max_length: 1000 }] },
       { type: 1, name: "help", description: "What the AutoCraft bot can do" },
     ],
   };
-  ix.command("autocraft link", def, async (call) => {
+  ix.command("autocraft account link", def, async (call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     if (!mayTry(keys.hash("author", call.userId))) return void (await call.edit({ content: "Too many tries. Wait a minute." }));
-    const login = await redeemLinkCode(db, keys, call.option("code") ?? "", call.userId);
+    const code = call.option("code");
+    if (!code) return void (await call.edit({ content: "Link needs the option code." }));
+    const login = await redeemLinkCode(db, keys, code, call.userId);
     if (!login) return void (await call.edit({ content: "That code is not valid, was already used, or has expired." }));
     await audit(db, login, "discord-link", login);
     await call.edit({ content: `Linked to ${plain(login)}` });
   });
-  ix.command("autocraft unlink", null, async (call) => {
+  ix.command("autocraft account unlink", null, async (call) => {
     const n = call.userId ? await forgetLink(db, keys, call.userId) : 0;
     const signedIn = call.userId ? await forgetReporter(db, keys.hash("author", call.userId)) : false;
     const verify = call.userId ? await forgetVerifyRows(db, keys.hash("author", call.userId)) : 0;
     if (n || signedIn || verify) await audit(db, "discord", "discord-unlink", null, { by: "discord", link: n > 0, signedIn, verify });
     await call.edit({ content: n || signedIn || verify ? "Unlinked." : "This Discord account is not linked." });
   });
-  ix.command("autocraft stats", null, async (call: Call) => {
-    if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
-    const repo = call.option("repo")?.trim();
-    const s = await publicStats(db, repo || undefined);
-    await call.edit({ content: s ? formatStats(s) : "No public repo by that name." });
-  });
-  ix.autocomplete("autocraft stats", async (call) => {
+  ix.autocomplete("autocraft status", async (call) => {
+    if (call.focused()?.name !== "repo") return [];
     const typed = (call.focused()?.value ?? "").toLowerCase();
     return (await publicRepoNames(db)).filter((r) => r.toLowerCase().includes(typed)).map((r) => ({ name: r, value: r }));
   });
   ix.command("autocraft do", null, async (call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
-    if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
+    if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft account action:link.") }));
     if (!await mayCommand(db, keys, call.userId, login)) return void (await call.edit({ content: t("Commands need an AutoCraft login with write access. Nothing ran.") }));
     // Discord has no item the text was written on, so the items come from the list in the text.
     const result = await runDo(db, keys, prepareDo(call.option("text") ?? ""), { userId: call.userId, login }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {
-    await call.edit({ content: HELP });
+    await call.edit({ content: help });
+  });
+  ix.command("autocraft account optout", null, async (call) => {
+    if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
+    // Each opt-out opens every mention row to find the caller's: limited like code entries.
+    if (!allow(`opt:${keys.hash("author", call.userId)}`, ATTEMPTS)) return void (await call.edit({ content: TOO_MANY }));
+    const r = await optOut(db, keys, call.userId);
+    if (r.changed || r.rows) await audit(db, "discord", "discord-optout", null, { rows: r.rows });
+    const deleted = r.rows === 1 ? t("Deleted the record of 1 message that named an issue or pull request.") : t("Deleted {n} records of your messages that named issues or pull requests.", { n: r.rows });
+    await call.edit({ content: [
+      r.changed ? t("You are opted out. AutoCraft no longer records your messages, flags them or reacts to them.") : t("You were already opted out."),
+      deleted,
+      t("Commands and searches you send to AutoCraft still work. `/autocraft account action:optin` turns recording back on."),
+    ].join("\n") });
+  });
+  ix.command("autocraft account optin", null, async (call) => {
+    if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
+    const changed = await optIn(db, keys, call.userId);
+    if (changed) await audit(db, "discord", "discord-optin", null);
+    await call.edit({ content: changed ? t("You are opted in. AutoCraft records your new messages that name issues or pull requests again.") : t("You are not opted out.") });
   });
   ix.command("autocraft status", null, async (call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
-    const m = REF.exec(call.option("item") ?? "");
-    const s = m ? await publicStatus(db, m[1]!, Number(m[2])) : null;
-    if (!s) return void (await call.edit({ content: "No item found. Use the form repo#123." }));
-    await call.edit({ content: formatStatus(s), components: [{ type: 1, components: [{ type: 2, style: 5, label: s.ref.slice(0, 80), url: s.url }] }] });
+    const item = call.option("item")?.trim();
+    if (!item) {
+      const s = await publicStats(db, call.option("repo")?.trim() || undefined);
+      return void (await call.edit({ content: s ? formatStats(s) : "No public repo by that name." }));
+    }
+    const m = REF.exec(item);
+    await call.edit(await statusReply(db, m ? [{ repo: m[1]!, number: Number(m[2]) }] : []));
   });
 }

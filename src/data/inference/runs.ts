@@ -34,7 +34,7 @@ export async function openRuns(db: Db, starts: readonly RunStart[], scrub?: Scru
       job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: s.promptId, prompt_version: s.promptVersion, provider: s.provider, model: s.model,
       items: JSON.stringify(s.items.slice(0, MAX_ITEM_REFS)), item_count: s.items.length, state: "running" as const, started_at: at,
       first_repo: repo, first_number: repo === null ? null : Math.min(...s.items.map((r) => r.number)),
-      user_login: s.remote?.userLogin ?? null, harness: s.remote?.harness ?? null, reported_model: s.remote?.reportedModel ?? null,
+      user_login: s.remote?.userLogin ?? null, harness: s.remote?.harness ?? null, reported_model: s.remote?.reportedModel ?? null, call_id: s.remote?.callId ?? null,
     };
   });
   const open = async (): Promise<number[]> => {
@@ -70,9 +70,9 @@ export async function finishRuns(db: Db, ends: RunEnd[], scrub?: Scrub): Promise
   const rows = [...byId.values()].map((e) => ({
     id: e.id, state: e.state, ended_at: at, input_tokens: e.tokens?.input ?? null, output_tokens: e.tokens?.output ?? null,
     cache_read_tokens: e.tokens?.cacheRead ?? null, cache_write_tokens: e.tokens?.cacheWrite ?? null, cost_usd: e.costUsd ?? null,
-    summary: e.summary ?? null, error: e.error ? e.error.slice(0, ERROR_MAX) : null,
+    summary: e.summary ?? null, error: e.error ? e.error.slice(0, ERROR_MAX) : null, refusal: e.refusal ?? null,
   }));
-  const set = ["state", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "summary", "error"] as const;
+  const set = ["state", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "summary", "error", "refusal"] as const;
   const outputs = new Map<number, Uint8Array>();
   for (const e of byId.values()) if (e.output) outputs.set(e.id, stored(e.output, scrub, "the output"));
   return await db.write(async () => {
@@ -80,7 +80,7 @@ export async function finishRuns(db: Db, ends: RunEnd[], scrub?: Scrub): Promise
     for (const chunk of kx.chunks(rows, 500)) {
       const v = kx.valuesTable(db, chunk, {
         id: "bigint", state: "text", ended_at: "text", input_tokens: "bigint", output_tokens: "bigint", cache_read_tokens: "bigint", cache_write_tokens: "bigint",
-        cost_usd: "numeric", summary: "text", error: "text",
+        cost_usd: "numeric", summary: "text", error: "text", refusal: "text",
       }, "v");
       const done = await q.all((q.k as any).updateTable("agent_runs").from(v)
         .set((eb: kx.Eb) => ({ ...Object.fromEntries(set.map((c) => [c, eb.ref(`v.${c}`)])), progress: null }))

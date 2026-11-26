@@ -90,7 +90,7 @@ test("a sender with no linked login gets one short reply and nothing runs", asyn
   await say("u-2", "u99", "<@100> merge photocraft#4");
   assert.deepEqual(await started(), before);
   assert.equal(rest.sent.length, sent + 1);
-  assert.match(rest.sent.at(-1)!.body.content!, /\/autocraft link/);
+  assert.match(rest.sent.at(-1)!.body.content!, /\/autocraft account action:link/);
 });
 
 test("an item of a private repo shows a status line and its link, never the recommendation", async () => {
@@ -119,7 +119,7 @@ test("text that starts with a command word but reads as ambiguous goes to search
   await own.dispatch("MESSAGE_CREATE", m);
   await own.idle();
   assert.equal(searched.length, 1);
-  assert.ok(!rest.sent.slice(sent).some((s) => /\/autocraft link/.test(s.body.content ?? "")));
+  assert.ok(!rest.sent.slice(sent).some((s) => /\/autocraft account action:link/.test(s.body.content ?? "")));
 });
 
 test("a replayed message runs its command once", async () => {
@@ -129,4 +129,55 @@ test("a replayed message runs its command once", async () => {
   assert.ok(first > sent);
   await say("dup-1", "u70", "<@100> review photocraft#4");
   assert.equal(rest.sent.length, first);
+});
+
+test("a write permission cached over a minute ago is read again through the GitHub App, which decides", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  for (const n of [1, 2]) {
+    await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: n, kind: "pr", state: "OPEN", title: `Fix ${n}`, body: "", url: `https://github.com/storytold/texturecraft/pull/${n}` }));
+  }
+  await db.run(db.k.insertInto("main.repo_permissions").values({ login: "nora", repo: "texturecraft", permission: "admin", checked_at: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
+  let answer = "admin";
+  const asked: string[] = [];
+  const own = new Pings({ db, keys, rest, search: {} as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l), permission: async (_d, login, repo) => { asked.push(`${login} ${repo}`); return { kind: "ok", permission: answer }; } }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  const send = async (id: string, content: string) => {
+    const m = { id, channel_id: "c1", guild_id: "g1", content, type: 0, author: { id: "u70" } };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+    await own.dispatch("MESSAGE_CREATE", m);
+    await own.idle();
+  };
+  await send("w-1", "<@100> review texturecraft#1");
+  assert.ok(asked.length > 0, "the stale row is not trusted");
+  assert.ok((await started()).includes("texturecraft#1"));
+
+  answer = "read";
+  const sent = rest.sent.length;
+  await send("w-2", "<@100> review texturecraft#2");
+  assert.ok(!(await started()).includes("texturecraft#2"));
+  assert.match(rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n"), /no write access to texturecraft/);
+});
+
+test("`status` in reply to a message that links a pull request answers with that pull request only, not search results", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  for (const n of [763, 764, 765, 775]) {
+    await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: n, kind: "pr", state: n === 775 ? "OPEN" : "MERGED", title: `Change ${n}`, body: "", url: `https://github.com/storytold/texturecraft/pull/${n}` }));
+  }
+  const merged = [763, 764, 765].map((n) => ({ repo: "texturecraft", number: n, title: `Change ${n}`, url: `https://github.com/storytold/texturecraft/pull/${n}`, closed: true, pr: true, merged: true }));
+  const own = new Pings({ db, keys, rest, search: { allow: () => true, find: async () => ({ matches: merged }) } as unknown as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l) }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  const quoted = { id: "tx-q", channel_id: "c1", guild_id: "g1", type: 0, author: { id: "u2" }, content: "…I pushed the coderabbit response, needs your final merge. https://github.com/storytold/texturecraft/pull/775" };
+  await handleDispatch(db, keys, "MESSAGE_CREATE", quoted);
+  const m = { id: "tx-s", channel_id: "c1", guild_id: "g1", type: 19, author: { id: "u5" }, content: "<@100> status", message_reference: { message_id: quoted.id }, referenced_message: { author: quoted.author, content: quoted.content } };
+  await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+  const sent = rest.sent.length;
+  await own.dispatch("MESSAGE_CREATE", m);
+  await own.idle();
+  const answers = rest.sent.slice(sent);
+  assert.equal(answers.length, 1);
+  const shown = JSON.stringify(answers[0]!.body);
+  assert.ok(shown.includes("texturecraft#775"), shown);
+  assert.ok(![763, 764, 765].some((n) => shown.includes(`#${n}`)), shown);
 });
