@@ -154,6 +154,22 @@ export type Due = { number: number; facts: StatusFacts; line: string; prev: Stor
 /** A started or held item's line: its whole comment text, in paragraphs. */
 const isWorkflowText = (line: string | null | undefined): boolean => !!line?.includes("\n\n");
 
+/** How long a status comment keeps a line that differs from the current one only by Running against waiting for a Task Runner. */
+export const WAIT_FLIP_MS = 60 * 60_000;
+
+/**
+ * Whether two comment texts differ only in their head line flipping between "Running: <step>" and "Waiting for <login>'s Task Runner
+ * (<why>)": a step that waits for a Task Runner is claimable for a moment each time the runner reports, which flips the line without
+ * any change an editor of the comment needs to see.
+ */
+export function onlyWaitFlip(prev: string, line: string): boolean {
+  const split = (s: string): [string, string] => { const i = s.indexOf("\n\n"); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i)]; };
+  const [a, rest] = split(prev), [b, rest2] = split(line);
+  const running = (h: string) => h.startsWith("**Running: ");
+  const waiting = (h: string) => /^\*\*Waiting for .+'s Task Runner \(.+\)\*\*$/.test(h);
+  return rest === rest2 && a !== b && ((running(a) && waiting(b)) || (waiting(a) && running(b)) || (waiting(a) && waiting(b)));
+}
+
 const parseSteps = (s: string): HistoryStep[] => {
   try {
     const v: unknown = JSON.parse(s);
@@ -219,6 +235,7 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     const line = facts.workflow && !ended ? workflowLines({ ...facts, workflow: facts.workflow }).join("\n\n") : statusLine(facts);
     const first = facts.workflow ? !ended : !NO_FIRST_POST.has(status.step);
     const by = commander(w);
+    if (prev?.line != null && prev.line !== line && onlyWaitFlip(prev.line, line) && Date.parse(prev.updated_at) > now - WAIT_FLIP_MS) continue;
     if (prev?.line != null ? prev.line !== line : first) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev, ...(by ? { commandedBy: by } : {}) });
   }
   return out;

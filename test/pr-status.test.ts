@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writePlanCache } from "../src/core/plan-cache.ts";
 import { setStatusApproval } from "../src/prstatus/approval.ts";
-import { MARKER, runPrStatus } from "../src/prstatus/index.ts";
+import { MARKER, onlyWaitFlip, runPrStatus } from "../src/prstatus/index.ts";
 import type { Exec } from "../src/fixup/git.ts";
 import type { Querier } from "../src/mirror.ts";
 import { runCommand } from "../src/workflow/apply.ts";
@@ -108,4 +108,14 @@ test("an item nobody started: its hold's comment shows no steps, and says once t
   } finally {
     w.close();
   }
+});
+
+test("a head line flipping between Running and waiting for a Task Runner is not a new comment edit; other changes are", () => {
+  const run = "**Running: merge**\n\n1. review (done)\n2. merge (running)";
+  const wait = "**Waiting for ann's Task Runner (usage limit)**\n\n1. review (done)\n2. merge (running)";
+  assert.equal(onlyWaitFlip(wait, run), true);
+  assert.equal(onlyWaitFlip(run, wait), true);
+  assert.equal(onlyWaitFlip(wait, wait.replace("usage limit", "offline")), true);
+  assert.equal(onlyWaitFlip(run, run.replace("(running)", "(done)")), false);
+  assert.equal(onlyWaitFlip(wait, "**Held by ann, 10:00 UTC**\n\n1. review (done)\n2. merge (running)"), false);
 });
