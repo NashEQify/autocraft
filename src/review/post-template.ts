@@ -33,6 +33,9 @@ export function modelLabel(id: string | null | undefined): string {
   return t || "unknown model";
 }
 
+/** Characters of one fix or follow-up title line. */
+const PART_LINE_MAX = 200;
+
 const VERDICT_LINE: Record<string, string> = {
   take: "No blocking problems found.",
   "take-fix": "Small fixes needed:",
@@ -99,12 +102,21 @@ export type RecommendInput = {
   mergeApproved: boolean;
   /** Our pushes to the PR are approved and its branch accepts them. */
   canPush: boolean;
+  /** On a PR approved for merge whose review found what does not block it: how many fixes still block it, and how many points are filed as follow-ups. */
+  followUps?: { blocking: number; later: number } | null;
 };
 
 const WAIT = "Recommendation: wait for maintainer feedback.";
 
 /** The closing line of the review. Plain wording only: no rule details, tiers or account names. */
 export function recommendation(r: RecommendInput): string {
+  const fu = r.followUps?.later ? r.followUps : null;
+  if (fu && !fu.blocking) return "Recommendation: merge after CI and checks pass; the follow-ups above will be filed as an issue.";
+  if (fu) {
+    return r.canPush
+      ? "Recommendation: merge after the fixes above, which may be pushed to this branch; the follow-ups will be filed as an issue."
+      : "Recommendation: merge after the fixes above; the follow-ups will be filed as an issue.";
+  }
   switch (r.verdict) {
     case "take":
       if (!r.queue || r.queue.state === "merged") return WAIT;
@@ -138,12 +150,18 @@ export type ReviewPostInput = {
   claims?: { claim: string; status: string; evidence: string }[];
   /** The closing `Recommendation: …` line (see `recommendation`). */
   recommendation: string;
+  /**
+   * On a PR approved for merge whose review found what does not block it: the titles of the fixes made before the merge, and of the
+   * points filed as a follow-up issue instead. With no fix left the verdict line says that nothing blocks the approved merge.
+   */
+  followUps?: { fixes: string[]; later: string[] } | null;
 };
 
 export function reviewBody(r: ReviewPostInput): string {
   const short = (h: string) => (/^[0-9a-f]+$/i.test(h) ? h.slice(0, 7) : h);
   const fixedIn = r.fixedIn ? short(r.fixedIn) : null;
-  const head = verdictLine(r.verdict, r.sure, fixedIn && r.verdict === "take-fix" ? `Small fixes needed, made in ${fixedIn}:` : undefined);
+  const fu = r.followUps?.later.length ? r.followUps : null;
+  const head = verdictLine(r.verdict, r.sure, fu && !fu.fixes.length ? "Nothing found that blocks the approved merge:" : fixedIn && r.verdict === "take-fix" ? `Small fixes needed, made in ${fixedIn}:` : undefined);
   const foot = `Reviewed at ${short(r.head)}.${fixedIn ? ` Fixes pushed in ${fixedIn}.` : ""}`;
   // One line first: the code spans and escapes stripLinks sees are the ones the posted line has.
   const clean = (t: string, max?: number): string => cleanLine(stripLinks(t.replace(/\s+/g, " "), r.owner), max);
@@ -159,7 +177,12 @@ export function reviewBody(r: ReviewPostInput): string {
   });
   const rec = r.recommendation;
   const claimBlock = claims.length ? `Claims checked:\n${claims.join("\n")}\n\n` : "";
-  const fixed = NOTE_RESERVE + head.length + rec.length + foot.length + summary.length + claimBlock.length + 8;
+  const list = (title: string, xs: readonly string[]): string => {
+    const lines = xs.slice(0, MAX_POINTS).flatMap((x) => { const line = clean(x, PART_LINE_MAX); return line ? [`- ${line}`] : []; });
+    return lines.length ? `${title}\n${lines.join("\n")}\n\n` : "";
+  };
+  const fuBlock = fu ? list("Fixes before the merge:", fu.fixes) + list("Follow-ups, to be filed as an issue:", fu.later) : "";
+  const fixed = NOTE_RESERVE + head.length + rec.length + foot.length + summary.length + claimBlock.length + fuBlock.length + 8;
   const kept: string[] = [];
   let used = fixed;
   for (const line of items) {
@@ -170,5 +193,5 @@ export function reviewBody(r: ReviewPostInput): string {
     kept.push(line);
     used += line.length + 1;
   }
-  return `${head}\n\n${summary ? `${summary}\n\n` : ""}${kept.length ? `${kept.join("\n")}\n\n` : ""}${claimBlock}${foot}\n\n${rec}`;
+  return `${head}\n\n${summary ? `${summary}\n\n` : ""}${kept.length ? `${kept.join("\n")}\n\n` : ""}${claimBlock}${fuBlock}${foot}\n\n${rec}`;
 }

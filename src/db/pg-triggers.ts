@@ -25,6 +25,7 @@ import { backfillRefusalsPg } from "./refused-runs.ts";
 import { holdsToItemsPg, HOLDS_TO_ITEMS_VERSION } from "./holds-to-items.ts";
 import { chatBackfillPg, CHAT_BACKFILL_VERSION } from "./chat-backfill.ts";
 import { PG_SCHEMA_GENERATION } from "./pg-generation.ts";
+import { followupsAsidePg, followupsBackPg } from "./followup-source.ts";
 import { builtAfterCopy, copyStatePg, oneActiveLegPg } from "./state-copy.ts";
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
@@ -233,7 +234,10 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     // Columns are only ever added, which the views over the tables allow, so the views are replaced after the schema.
     // Each index of the schema file is one line.
     const schema = pgSchemaSql().split("\n");
+    // premerge_followups gained a source key: a table made before it is made again with its rows (src/db/followup-source.ts).
+    await m.step({ label: "premerge_followups: rows aside", table: "premerge_followups", run: () => followupsAsidePg(client) });
     await m.ddl(schema.filter((l) => !builtAfterCopy(l)).join("\n"), "schema");
+    await m.step({ label: "premerge_followups: rows back", table: "premerge_followups", run: () => followupsBackPg(client) });
     const parts = pgTriggerParts(pgColumns(await rows(PG_COLUMNS_SQL) as { t: string; c: string }[]));
     await m.ddl(parts.ddl, "live tables");
     await m.step({ label: "trigger functions", sql: [...parts.functions, PIN_SEARCH_PATH] });

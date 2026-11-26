@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runPremergeFollowups } from "../src/premerge/followups.ts";
+import { recommendation, reviewBody } from "../src/review/post-template.ts";
 import { appLane } from "./acting.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import type { World } from "./world-db.ts";
@@ -99,4 +100,17 @@ test("on an approved PR, a blocking review fix runs the fix-up and files nothing
   const due = await kinds(w);
   assert.ok(due.includes("fixup:review") && !due.includes("followups"), due.join(", "));
   w.close();
+});
+
+test("the posted review of an approved PR tells the fixes made before the merge from the follow-ups, and with none to make says nothing blocks it", () => {
+  const post = (fixes: string[]) => {
+    const followUps = { fixes, later: ["Clearer name"] };
+    const rec = recommendation({ verdict: "take-fix", queue: null, mergeApproved: true, canPush: false, followUps: { blocking: fixes.length, later: 1 } });
+    return reviewBody({ verdict: "take-fix", sure: true, summary: "S.", points: ["P."], head: "abc1234", recommendation: rec, followUps });
+  };
+  const none = post([]), some = post(["Check the bound"]);
+  assert.match(none, /^Nothing found that blocks the approved merge:/);
+  assert.doesNotMatch(none, /Small fixes needed|after the fixes above/);
+  assert.match(none, /Follow-ups, to be filed as an issue:\n- Clearer name[\s\S]*\nRecommendation: merge after CI and checks pass/);
+  assert.match(some, /^Small fixes needed:[\s\S]*Fixes before the merge:\n- Check the bound\n\nFollow-ups, to be filed as an issue:\n- Clearer name[\s\S]*\nRecommendation: merge after the fixes above; the follow-ups/);
 });

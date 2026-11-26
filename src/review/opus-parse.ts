@@ -313,7 +313,7 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
     .slice(0, OPUS_MAX_FIXES);
   const src = kept.map((f) => f.src);
   const fixes = kept.map((f): ReviewFix => {
-      const title = typeof f.title === "string" && f.title.trim() && !REFERENCE_LEAK.test(f.title) ? f.title.replace(/\s+/g, " ").trim().slice(0, PART_TITLE_CHARS) : null;
+      const title = typeof f.title === "string" && f.title.trim() && !REFERENCE_LEAK.test(f.title) && !drop.has(f.title) ? f.title.replace(/\s+/g, " ").trim().slice(0, PART_TITLE_CHARS) : null;
       // A reason the checks did not clear is left out; the class still counts.
       const blocking = f.blocking && (REFERENCE_LEAK.test(f.blocking.why) || drop.has(f.blocking.why)) ? { ...f.blocking, why: "" } : f.blocking;
       return { file: f.file.slice(0, 200), change: f.change.slice(0, 800), ...(title ? { title } : {}), ...(f.major === true ? { major: true } : {}), ...(blocking ? { blocking } : {}) };
@@ -401,15 +401,17 @@ export function lintOpusReply(text: string, ref: string, unapplied: readonly Una
 /**
  * The texts of a reply that can reach GitHub, for the reference and owner-statement checks, with the field each is in (the
  * index is the position in the reply's array): public text and claims are posted with the review, a fix's change is
- * posted in the comment that lists the fixes when they cannot be pushed, and a blocking reason in a follow-up issue.
+ * posted in the comment that lists the fixes when they cannot be pushed, and a title and blocking reason in the review post and the follow-up issue.
  */
 export function publicTexts(text: string): { field: string; text: string }[] {
   const r = replyObject(text) as { public?: { summary?: unknown; points?: unknown }; claims?: unknown; fixes?: unknown } | null;
   const pc = parseClaims(r?.claims, new Set(), true);
   const claimTexts = (pc?.claims ?? []).flatMap((c, k) => { const i = pc!.indexes[k]!; return [{ field: `claims[${i}].claim`, text: c.claim }, ...(c.evidence ? [{ field: `claims[${i}].evidence`, text: c.evidence }] : [])]; });
   const claimFixes = (Array.isArray(r?.claims) ? r.claims : []).flatMap((c: { fix?: { change?: unknown } } | null, i) => (typeof c?.fix?.change === "string" && c.fix.change.trim() ? [{ field: `claims[${i}].fix.change`, text: c.fix.change }] : []));
-  const fixes = (Array.isArray(r?.fixes) ? r.fixes : []).slice(0, OPUS_MAX_FIXES).flatMap((f: { change?: unknown; blocking?: { why?: unknown } } | null, i) => [
+  const fixes = (Array.isArray(r?.fixes) ? r.fixes : []).slice(0, OPUS_MAX_FIXES).flatMap((f: { change?: unknown; title?: unknown; blocking?: { why?: unknown } } | null, i) => [
     ...(typeof f?.change === "string" && f.change.trim() ? [{ field: `fixes[${i}].change`, text: f.change }] : []),
+    // A title is posted with the review of a PR approved for merge, and in its follow-up issue.
+    ...(typeof f?.title === "string" && f.title.trim() ? [{ field: `fixes[${i}].title`, text: f.title }] : []),
     // A reason that does not block is filed in the follow-up issue.
     ...(typeof f?.blocking?.why === "string" && f.blocking.why.trim() ? [{ field: `fixes[${i}].blocking.why`, text: f.blocking.why }] : []),
   ]);

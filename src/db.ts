@@ -1,4 +1,5 @@
 import { isBotCommand, isBotLogin } from "./review/bots.ts";
+import { followupsAsideSqlite, followupsBackSqlite } from "./db/followup-source.ts";
 import { loadOwners, type OwnerRow } from "./owners.ts";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -936,7 +937,9 @@ function open(path: string): DatabaseSync {
     loadOwners(() => ownerRows(db));
     return db;
   }
+  followupsAsideSqlite(db);
   db.exec(schema);
+  followupsBackSqlite(db);
   addColumns(db);
   dropColumns(db);
   oneActiveLegSqlite(db);

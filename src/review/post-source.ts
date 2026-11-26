@@ -3,6 +3,7 @@
 import { CARRIED } from "./carry.ts";
 import { parsePublic, storedClaims, type PublicReview } from "./opus-parse.ts";
 import type { Db } from "../db/index.ts";
+import type { Blocking } from "../premerge/types.ts";
 import { loadReviewRows, loadReviewTexts, type ReviewRow, type ReviewTexts } from "../data/review/index.ts";
 
 type Row = ReviewRow & Pick<ReviewTexts, "public_review" | "claims">;
@@ -24,6 +25,9 @@ export type PostSource = {
   fixedIn: string | null;
   /** The `at` of the review at the head. */
   at: string;
+  /** The fixes and hold class of the review the text comes from: on a PR approved for merge the post tells what blocks it from what is filed. */
+  fixes: ReviewRow["fixes"];
+  hold: Blocking | null;
 };
 
 const isCarried = (r: Pick<Row, "model" | "mode">) => r.model === CARRIED || r.mode === CARRIED;
@@ -85,5 +89,6 @@ async function sourceFrom(get: (head: string) => Promise<Row | undefined>, head:
     public: hasPublic ? parsePublic(safeJson(src.public_review!)) : { summary: "", points: [] },
     hasPublic, claims: storedClaims(safeJson(src.claims ?? "[]")),
     model: isCarried(src) ? null : src.model, reviewedAt: carried ? src.head : o.head, fixedIn: carried ? o.head : null, at: o.at,
+    fixes: src.verdict === "take-fix" ? src.fixes : [], hold: src.workflow?.hold ?? null,
   };
 }
