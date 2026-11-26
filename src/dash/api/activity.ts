@@ -19,8 +19,8 @@ import { allOwnLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
 
 export const ACTIVITY_PAGE_DEFAULT = 50, ACTIVITY_PAGE_MAX = 200;
-/** Plan changes and stages come from every planner pass of every item and would bury the rest, so they show only when asked for. */
-export const ACTIVITY_DEFAULT_KINDS: TraceKind[] = KINDS.filter((k) => k !== "plan");
+/** Plan changes and stages come from every planner pass of every item and would bury the rest, so they show only when asked for. Discord mentions are listed per item only. */
+export const ACTIVITY_DEFAULT_KINDS: TraceKind[] = KINDS.filter((k) => k !== "plan" && k !== "discord");
 /** Sorts after every event id of the same time. */
 const LAST = "~";
 

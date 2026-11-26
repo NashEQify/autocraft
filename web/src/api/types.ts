@@ -1842,12 +1842,14 @@ export type AreaStep = "propose" | "suggest" | "rescan";
 
 // ---- Item trace ----------------------------------------------------------------
 
-export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation";
+export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation" | "discord";
 export type TraceActor = { type: "person" | "step" | "model"; name: string };
 /** Ids needed to fetch an event's details: runs and tasks have their own endpoints; the rest use the trace detail endpoint. */
 export type TraceRef = {
   runId?: number; /** A review's model calls, oldest first (a fix turn or repeat adds one). */ runIds?: number[]; jobId?: number; taskId?: number; checkId?: number; auditRowid?: number;
   reviewId?: string; commentId?: string; head?: string; toHead?: string;
+  /** A Discord mention: the link that opens the message in Discord. */
+  url?: string;
   /** The integration batch the event belongs to (merge, hold and batch writes). */
   batchId?: number;
 };
@@ -2654,6 +2656,40 @@ export interface MaintainRow {
   stoppedBy: string | null;
   updatedAt: string;
 }
+
+/** Where a person's message to AutoCraft was written. */
+export type ChatVia = "dashboard" | "github" | "discord" | "agent" | "cli";
+export interface ChatFinding { n: number; title: string; file: string | null; major: boolean }
+/** One Discord mention of the item: the link opens the message in Discord; `channel` is null for a channel the bot cannot name. */
+export interface ChatDiscordLink { url: string; at: string; channel: string | null }
+/**
+ * One entry of an item conversation, oldest first. `work` is something AutoCraft did; `github` stands for GitHub activity not addressed
+ * to AutoCraft between two other entries (`count` events in all; `lines` and `eventIds` keep the last 5); `discord` for mentions of the
+ * item on Discord, folded the same way. On a quiet pull request a viewer gets who and when, without bodies, findings or outcomes.
+ */
+export type ChatEntry =
+  | { t: "said"; id: string; at: string; login: string; via: ChatVia; body: string; url: string | null; /** Waiting for Opus's answer. */ pending?: boolean; /** Why the message got no answer. */ refusal?: string | null }
+  | { t: "reply"; id: string; at: string; body: string; findings: ChatFinding[]; ask: { to: string[]; question: string } | null }
+  | { t: "work"; id: string; at: string; state: "done" | "running" | "failed"; title: string; model: string | null; seconds: number | null; costUsd: number | null; outcome: string | null; detail: [string, string][]; eventId: string | null }
+  | { t: "github"; id: string; at: string; lines: string[]; count?: number; eventIds?: string[] }
+  | { t: "discord"; id: string; at: string; links: ChatDiscordLink[] };
+export interface ItemConversation {
+  id: string;
+  title: string;
+  /** The item the conversation is about. */
+  item: { repo: RepoName; number: number } | null;
+  entries: ChatEntry[];
+  /** The open question: who it asks. */
+  open: { to: string[]; question: string } | null;
+  canReply: boolean;
+  /** AutoCraft is working: the running step's line. */
+  working: string | null;
+}
+/** Where AutoCraft is with an item, for the item header. */
+export type ItemChatState = "running" | "waiting" | "held" | "done" | "idle";
+/** `status` is the one line the item header shows; `next` is what follows (null when nothing does). `stamp` as for `ItemTrace`. */
+export interface ItemChat { repo: RepoName; number: number; stamp: string; status: string; state: ItemChatState; next: string | null; conversations: ItemConversation[] }
+export type ItemChatUnchanged = { unchanged: true; stamp: string };
 
 /** The reader's Task Runner line: their own runners (fresh status = online) and other users' ready runners that take shared work. */
 export interface MaintainRunnerLine {

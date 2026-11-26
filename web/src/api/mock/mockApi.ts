@@ -246,6 +246,7 @@ export function createMockApi(): Api {
     ...createQueueMock(me, changed),
     ...createMaintainMock(me),
     ...createMaintainItemMock(me, changed),
+    itemChat: { get: (repo, number) => wait({ repo, number, stamp: "mock", status: "Not started", state: "idle" as const, next: null, conversations: [] }, 60) },
     prompts: () => wait(promptsReport(null), 60),
     next: () => wait(nextPageFixture(), 60),
     mention: () => wait({ mention: "autocraft" }, 20),

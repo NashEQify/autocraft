@@ -145,6 +145,9 @@ export function createHttpApi(): Api {
       },
     },
     itemPage: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/page${qs({ since })}`),
+    itemChat: {
+      get: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/chat${qs({ since })}`),
+    },
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
     securityList: () => get("/api/security/findings"),
     findingPage: (repo, number) => get(`/api/security/findings/${encodeURIComponent(repo)}/${number}/page`),

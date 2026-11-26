@@ -20,13 +20,14 @@ import { loadQuiet } from "../../data/security/index.ts";
 import { loadShown } from "../../data/mirror/index.ts";
 import { loadItemTrace, loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
 import type { AuditRow } from "../../data/control/types.ts";
+import { openMentions, type ItemMention } from "./discord.ts";
 
 export type Ev = TraceEvent & { detail?: Record<string, unknown> };
 /** `staff`: operators and maintainers; `hidden`: repos the viewer may not see, whose runs are left out like getRun does. */
 export type Ctx = { db: Db; repo: string; n: number; ref: string; own: Set<string>; box: string; staff: boolean; /** A quiet pull request seen by a viewer: model output stays out of the trace. */ veiled: boolean; operator: boolean; hidden: HiddenRepos };
 
 export const TRACE_PAGE_DEFAULT = 100, TRACE_PAGE_MAX = 500;
-export const KINDS: TraceKind[] = ["github", "plan", "job", "model-call", "check", "review", "decision", "write", "step", "conversation"];
+export const KINDS: TraceKind[] = ["github", "plan", "job", "model-call", "check", "review", "decision", "write", "step", "conversation", "discord"];
 
 export const humanize = (id: string): string => { const t = id.replace(/[-_]+/g, " ").trim(); return t.charAt(0).toUpperCase() + t.slice(1); };
 /** A step's name as the dashboard shows it. */
@@ -322,13 +323,22 @@ export const workflowEvent = (e: { id: number; login: string; kind: string; pars
   };
 };
 
+/** A mention of the item on Discord: the link, the time and the channel; no message text is stored. */
+export const discordEvent = (m: ItemMention): Ev => ({
+  id: `discord:${m.msgHash}`, kind: "discord", at: m.at, head: null, actor: person("Discord"),
+  summary: m.channel ? `Mentioned on Discord in #${m.channel}` : "Mentioned in a Discord channel", ref: { url: m.url },
+});
+
+/** The trace's rows with the Discord mentions the key opens. */
+export type TraceRows = ItemTraceRows & { discord?: ItemMention[] };
+
 /** The scope the data views take, from the request context. */
 export const traceScope = (c: Ctx) => ({ staff: c.staff, operator: c.operator, hidden: c.hidden });
 
 const least = (a: string | null, b: string | null): string => (a !== null && (b === null || a <= b) ? a : b ?? "");
 
 /** Every source's events of the item, unfiltered and not yet shaped for the reader. An event's id is made from its stored row's key, as the activity feed makes it. */
-export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
+export function eventsFrom(c: Ctx, r: TraceRows): Ev[] {
   const { own, staff } = c;
   const out: Ev[] = [];
   const it = r.detail.item;
@@ -378,6 +388,7 @@ export function eventsFrom(c: Ctx, r: ItemTraceRows): Ev[] {
   for (const m of r.merges) out.push(mergeEvent({ rowid: m.rowid, head_oid: m.head, at: m.at, path: m.path, method: m.method, outcome: m.outcome, reason: m.reason }));
   for (const w of r.workflowEvents) out.push(workflowEvent(w, c));
   for (const t of r.turns) out.push(turnEvent(t));
+  for (const m of r.discord ?? []) out.push(discordEvent(m));
   for (const a of r.writes as AuditRow[]) {
     const e = writeEvent(a, staff);
     const branch = typeof a.details?.batch === "string" ? a.details.batch : null;
@@ -400,7 +411,10 @@ export function shape(c: Ctx, raw: Ev[], kinds: Set<TraceKind> | null): Ev[] {
   return (kinds ? all.filter((e) => kinds.has(e.kind)) : all).filter((e) => !(e.kind === "model-call" && taken.has(e.ref.runId ?? -1))).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
 }
 
-export const loadTraceRows = (c: Ctx): Promise<ItemTraceRows> => loadItemTrace(c.db, traceScope(c), { repo: c.repo, number: c.n }, writeActions(c.staff, c.operator));
+export async function loadTraceRows(c: Ctx): Promise<TraceRows & { discord: ItemMention[] }> {
+  const rows = await loadItemTrace(c.db, traceScope(c), { repo: c.repo, number: c.n }, writeActions(c.staff, c.operator));
+  return { ...rows, discord: await openMentions(c.db, rows.mentions) };
+}
 
 export async function gather(c: Ctx, kinds: Set<TraceKind> | null): Promise<Ev[]> {
   return shape(c, eventsFrom(c, await loadTraceRows(c)), kinds);
@@ -427,7 +441,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
 }
 
 /** A fingerprint of what the item's sources hold. Equal fingerprints mean the answer would not change, so `since` is answered without gathering anything. */
-const fingerprint = (c: Ctx, qkey: string, sources: unknown[]): string => {
+export const fingerprint = (c: Ctx, qkey: string, sources: unknown[]): string => {
   const parts: unknown[] = [qkey, c.staff, c.operator, c.hidden, ...sources];
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
 };
