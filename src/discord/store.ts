@@ -99,7 +99,7 @@ export async function optOut(db: Db, keys: DiscordKeys, userId: string): Promise
   return { changed, rows: await forgetAuthor(db, keys, userId) };
 }
 
-/** `/autocraft optin`: the user's new messages are recorded again. Returns whether the user was opted out. */
+/** `/autocraft account action:optin`: the user's new messages are recorded again. Returns whether the user was opted out. */
 export const optIn = async (db: Db, keys: DiscordKeys, userId: string): Promise<boolean> =>
   await dc.setOptedOut(db, keys.hash("author", userId), false, new Date().toISOString());
 
