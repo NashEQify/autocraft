@@ -20,6 +20,7 @@ import { refreshPlanCache } from "../src/core/plan-cache.ts";
 import { runRank } from "../src/rank/index.ts";
 import { runDupeCompare, type CompareDeps } from "../src/dupes/compare.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
+import { embedDue } from "../src/embed/store.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { queueSlots } from "../src/rank/position.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
@@ -279,7 +280,7 @@ test("calls a Task Runner runs cost their caller no write while nothing asks for
   const stop = w.db.observe((e) => {
     if (e.kind !== "query") return;
     if (/^\s*update\b.*remote_checks/is.test(e.sql)) writes++;
-    if (/remote_calls/.test(e.sql) && /^\s*select/i.test(e.sql)) polls++;
+    if (/change_seq/.test(e.sql) && /^\s*select/i.test(e.sql)) polls++;
   });
   const was = allocation.pollMs;
   allocation.pollMs = 10;
@@ -294,6 +295,60 @@ test("calls a Task Runner runs cost their caller no write while nothing asks for
     stop();
   }
   assert.equal(writes, 0);
+  w.close();
+  await w.db.close();
+});
+
+test("a call that waits while nothing changes reads only the change counters, and its end wakes the poll", async () => {
+  const w = await world();
+  await w.repo();
+  await seedPrs(w, 1);
+  const id = await queueCall(w, 1);
+  const now = Date.now();
+  await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "leased", leased_at: now, heartbeat_at: now, started_at: now }));
+  let counters = 0, polls = 0;
+  const stop = w.db.observe((e) => {
+    if (e.kind !== "query" || !/^\s*select/i.test(e.sql)) return;
+    if (/remote_calls/.test(e.sql)) polls++;
+    else if (/change_seq/.test(e.sql)) counters++;
+  });
+  const was = allocation.pollMs;
+  allocation.pollMs = 5;
+  try {
+    const wait = awaitCall(w.db, id, { log: () => {} });
+    await until(() => counters >= 10);
+    const quiet = polls;
+    await w.db.run(w.db.k.updateTable("remote_calls").set({ state: "failed", error: "ended" }));
+    assert.equal((await wait).state, "failed");
+    assert.ok(quiet < counters, `the call was read ${quiet} times in ${counters} quiet polls`);
+    assert.ok(polls > quiet, "the call's end was read");
+  } finally {
+    allocation.pollMs = was;
+    stop();
+  }
+  w.close();
+  await w.db.close();
+});
+
+test("the embed lane probes the items for missing vectors only when their counters moved", async () => {
+  const w = await world();
+  await w.repo();
+  await seedPrs(w, 3);
+  let probes = 0;
+  const stop = w.db.observe((e) => { if (e.kind === "query" && /item_embeddings/.test(e.sql) && /^\s*select/i.test(e.sql)) probes++; });
+  const plans = { items: [] } as never;
+  try {
+    const seqs = await w.db.seqs();
+    const first = await embedDue(w.db, "m", plans, seqs);
+    const once = probes;
+    assert.equal(await embedDue(w.db, "m", plans, seqs), first);
+    assert.equal(probes, once, "the same counters ask nothing again");
+    await w.pr(9001);
+    await embedDue(w.db, "m", plans, await w.db.seqs());
+    assert.ok(probes > once, "a new item asks again");
+  } finally {
+    stop();
+  }
   w.close();
   await w.db.close();
 });
