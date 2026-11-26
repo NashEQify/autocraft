@@ -264,7 +264,7 @@ export type PrFacts = {
   screenshots?: { summary: string | null };
 
   /** The pre-merge review row at the reviewed head. */
-  premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
+  premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   premergeFixUsed: boolean;
   /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
   premergeFixRunning?: boolean;

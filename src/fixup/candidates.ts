@@ -11,7 +11,7 @@ export const MAX_ATTEMPTS = FIXUP_MAX_ATTEMPTS;
 export type Fix = { file: string; change: string };
 /** `model` wrote the text the ask comment carries: the Opus review's fix list. */
 export type FixCandidate = { repo: string; number: number; head: string; reason: string; fixes: Fix[]; attempt: number; model: string | null;
-  /** `premerge`: the fixes are the pre-merge review's defect fixes; the PR's one pre-merge round, apart from the take-fix tries. */
+  /** `premerge`: the fixes are the pre-merge review's defect fixes; a pre-merge round (up to PREMERGE_FIX_ROUNDS per PR), apart from the take-fix tries. */
   source?: "premerge" | "operator";
   /** An operator's fix-up (source `operator`): the instructions replace the fix list; the files are the PR's own changed files. */
   operator?: { id: number; instructions: string };

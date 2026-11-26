@@ -1,5 +1,5 @@
 // Pure functions over loaded patch facts; no handle. Rows arrive ordered by id; each helper applies the order its caller had before.
-import { CIFIX_ASK_REASON, CIFIX_NO_LOG_REASON, CIFIX_PUSH_STATES, CIFIX_TRY_STATES, CIFIX_UNREAD_DELAYS_MS, CONFLICT_MAX_MERGES_PER_PR_PER_DAY, unsentAsk } from "../../core/rules.ts";
+import { PREMERGE_FIX_ROUNDS, CIFIX_ASK_REASON, CIFIX_NO_LOG_REASON, CIFIX_PUSH_STATES, CIFIX_TRY_STATES, CIFIX_UNREAD_DELAYS_MS, CONFLICT_MAX_MERGES_PER_PR_PER_DAY, unsentAsk } from "../../core/rules.ts";
 import type {
   CifixFacts, CifixRow, ConflictBucket, ConflictRow, FixupAtHead, FixupRow, LintFactOf, MadeBy, OutcomeRow, PatchFacts, PatchKind, PushEdge, TaskStates, UnsentAsk,
 } from "./types.ts";
@@ -31,9 +31,23 @@ export function attemptsIn(rows: readonly FixupRow[]): number {
 export function operatorTriesIn(rows: readonly FixupRow[]): number {
   return rows.filter((r) => r.source === "operator" && FIXUP_TRY_STATES.includes(r.state)).length;
 }
-/** The PR already had a pre-merge fix round (a row with source premerge, pushed or not). */
-export function premergeFixUsedIn(rows: readonly FixupRow[]): boolean {
-  return rows.some((r) => r.source === "premerge" && r.state !== "linting" && r.state !== "superseded");
+/** Pre-merge fix rounds the PR has had (rows with source premerge, pushed or not). */
+export function premergeFixRoundsIn(rows: readonly FixupRow[]): number {
+  return rows.filter((r) => r.source === "premerge" && r.state !== "linting" && r.state !== "superseded").length;
+}
+/** The pre-merge fix rounds are used up: the limit is reached, or a defect came back (`stalled`). */
+export function premergeFixUsedIn(rows: readonly FixupRow[], stalled = false): boolean {
+  return stalled || premergeFixRoundsIn(rows) >= PREMERGE_FIX_ROUNDS;
+}
+/** The pre-merge review at `head`, which our own pre-merge fix-up pushed, reports a defect (same file and title) of the review that fix-up answered: the fix did not take. */
+export function premergeStalledIn(rows: readonly FixupRow[], head: string, defectsAt: (head: string) => readonly { file: string; title: string }[] | null): boolean {
+  const now = defectsAt(head);
+  if (!now?.length) return false;
+  return rows.some((r) => {
+    if (r.source !== "premerge" || r.toHead !== head || (r.state !== "pushed" && r.state !== "pushing")) return false;
+    const before = defectsAt(r.fromHead);
+    return !!before && now.some((d) => before.some((b) => b.file === d.file && b.title === d.title));
+  });
 }
 /** The pre-merge fix round made on `head` is being pushed, or was pushed off it (`pushedOff`: the mirror does not show our push yet). */
 export function premergeFixRunningIn(rows: readonly FixupRow[], head: string, pushedOff: boolean): boolean {

@@ -23,7 +23,7 @@ const HANDED = { handOver: true } as const;
 /** The merge leg of an approved PR waits in `ci`: for CI, then the pre-merge review. */
 const IN_CI = { operator: { fix: null, hold: true, premerge: true } } as const;
 const BLOCKED_GATE = { live: true, entry: "review", state: "blocked", startedBy: "maint", approvedBy: "maint", approvedAt: "2026-11-04T09:00:00.000Z", blocker: "other", baseHead: "h1", leg: null } as const;
-const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, minor: 0, error: null, ...o });
+const premerge = (o: Partial<NonNullable<PrFacts["premerge"]>>) => ({ at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, minor: 0, error: null, ...o });
 const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });
 const conflicting = (o: Partial<NonNullable<PrFacts["conflict"]>> = {}) => ({ mergeable: "CONFLICTING", conflict: { bucket: "merge", base: "main", baseOk: true, ...o } });
@@ -118,7 +118,6 @@ const rows: Row[] = [
   { name: "failed try waits for its backoff", facts: { premerge: premerge({ hasFindings: false, tries: 1, at: new Date(NOW - 600_000).toISOString() }) }, expect: { state: "waiting-premerge", actions: [] } },
   { name: "failed try is due after the backoff", facts: { premerge: premerge({ hasFindings: false, tries: 1, at: new Date(NOW - 3_700_000).toISOString() }) }, expect: { state: "waiting-premerge", actions: ["premerge"] } },
   { name: "three failed tries: outside the rule", facts: { premerge: premerge({ hasFindings: false, tries: 3 }) }, expect: { state: "needs-decision", reasons: [PREMERGE_FAILED_REASON], actions: [] } },
-  { name: "defect without a fix is asked about", facts: { premerge: premerge({ defects: 1, defectsAllFixable: false }) }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON], actions: [] } },
   { name: "fixable defects go to fix-up", facts: { ...UNSTARTED, premerge: premerge({ defects: 2 }) }, expect: { state: "needs-fix-up", path: "rule", actions: ["fixup:premerge"], note: "pre-merge review: 2 defects to fix" } },
   { name: "one fixable defect is singular", facts: { premerge: premerge({ defects: 1 }) }, expect: { state: "needs-fix-up", note: "pre-merge review: 1 defect to fix" } },
   { name: "fix-up already used: defect", facts: { premerge: premerge({ defects: 1 }), premergeFixUsed: true }, expect: { state: "needs-decision", reasons: [PREMERGE_DEFECT_REASON] } },
@@ -335,7 +334,7 @@ for (const row of rows) {
 const merges = (f: PrFacts): boolean => decidePr(f).actions.some((a) => a.kind === "merge");
 
 test("a rule PR without a clean pre-merge review never gets merge", () => {
-  for (const pm of [null, premerge({ hasFindings: false, tries: 1 }), premerge({ hasFindings: false, tries: 3 }), premerge({ defects: 1 }), premerge({ defects: 1, defectsAllFixable: false })]) {
+  for (const pm of [null, premerge({ hasFindings: false, tries: 1 }), premerge({ hasFindings: false, tries: 3 }), premerge({ defects: 1 })]) {
     assert.equal(merges(prFacts({ ...UNSTARTED, premerge: pm })), false, JSON.stringify(pm));
   }
   assert.equal(merges(prFacts({ ...UNSTARTED, premerge: premerge({}) })), true);

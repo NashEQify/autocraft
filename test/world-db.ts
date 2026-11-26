@@ -275,8 +275,8 @@ export async function world() {
       return w;
     },
     /** The pre-merge review at the head: clean, or with one defect (a fix when `fixable`). */
-    async premerge(n: number, kind: "clean" | "defect", fixable = true) {
-      const findings: PremergeFinding[] = kind === "clean" ? [] : [{ severity: "defect", file: "src/lib.rs", line: 3, title: "off by one", scenario: "an empty list panics", ...(fixable ? { fix: { file: "src/lib.rs", change: "check the bound" } } : {}) }];
+    async premerge(n: number, kind: "clean" | "defect", fixable = true, title = "off by one") {
+      const findings: PremergeFinding[] = kind === "clean" ? [] : [{ severity: "defect", file: "src/lib.rs", line: 3, title, scenario: "an empty list panics", ...(fixable ? { fix: { file: "src/lib.rs", change: "check the bound" } } : {}) }];
       await savePremerge(db, { repo: "app", number: n, head: await headOf(n), at: T0, runId: "pm", model: "test", findings, searched: "" });
       // The real pre-merge review caches the diff it read; the merge rule reads it from there.
       mkdirSync(join(diffCacheDir(), "app"), { recursive: true });

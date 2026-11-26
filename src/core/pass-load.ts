@@ -211,6 +211,8 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
     if (latest) for (const h of pushChainOf(moves, latest.head)) pairs.push({ repo, sha: h });
     const eh = o.mergeEntryHead(data, key);
     if (eh) entryHeads.push({ repo, number, head: eh });
+    // The heads our pre-merge fix-ups answered: a defect that is still found at the head they pushed stops the rounds.
+    for (const r of patches.get(key)?.fixups ?? []) if (r.source === "premerge" && r.toHead) entryHeads.push({ repo, number, head: r.fromHead });
   }
   // Members of an integration PR's batch decide its scope; a ref list of keys may leave them out.
   const members = [...merge.integration.values()].flatMap((b) => b.members.map((m) => ({ repo: b.repo, number: m.number }))).filter((m) => !mirror.has(refKey(m.repo, m.number)));

@@ -59,8 +59,9 @@ export const fixAllowed = (f: PrFacts): boolean => {
 };
 
 /**
- * Where the one fix-up round of a pre-merge review's defects is at the head: it can be made, it is under way (linting, being pushed, or
- * pushed and not in the mirror yet), it is used up, or there is none to make (no defect, a defect no fix-up may apply, a PR nobody approved
+ * Where the automatic fix-up of a pre-merge review's defects is at the head (up to PREMERGE_FIX_ROUNDS rounds per PR, fewer when a
+ * defect comes back after a round): it can be made, it is under way (linting, being pushed, or
+ * pushed and not in the mirror yet), the rounds are used up, or there is none to make (no defect, a defect in a file no fix-up may edit, a PR nobody approved
  * or already handed over, a branch or approval that takes no push).
  */
 export function premergeFix(f: PrFacts): "fix" | "running" | "used" | "none" {
@@ -68,7 +69,7 @@ export function premergeFix(f: PrFacts): "fix" | "running" | "used" | "none" {
   if (!row?.hasFindings || row.defects === 0 || f.handOver || (w && !w.approved && w.entry !== "merge")) return "none";
   if (f.premergeFixRunning || f.lint.some((l) => l.source === "premerge")) return "running";
   if (f.premergeFixUsed) return "used";
-  return row.defectsAllFixable && row.fixesSafe && f.pushable && pushAllowed(f, "fixup") ? "fix" : "none";
+  return row.fixesSafe && f.pushable && pushAllowed(f, "fixup") ? "fix" : "none";
 }
 
 /** Why nothing merges the PR, whoever approves it: only CI's answer on a head lets it merge, and only the default branch is merged into. */

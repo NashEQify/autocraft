@@ -63,6 +63,8 @@ export function sizeOf(linesChanged: number): Size {
 export const MAX_FAILURES = 2;
 /** A failed head counts as failed after this many pre-merge tries. */
 export const PREMERGE_MAX_TRIES = 3;
+/** Automatic fix-up rounds of a PR's pre-merge defects over its whole life; a round that brings a defect back stops them sooner. */
+export const PREMERGE_FIX_ROUNDS = 3;
 /** How long a failed try waits before the next one. */
 export const RETRY_AFTER_MS = 3600_000;
 

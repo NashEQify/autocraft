@@ -7,7 +7,7 @@
 //              here at its head. A merge-queue entry waits here only for a review it owes (src/core/evidence.ts neededReview).
 //   ci      -> that review says take (sure or unsure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it.
 //              A take-fix review keeps the row in review while the pipeline's fix-up of its fixes runs; that push is reviewed again. The
-//              pre-merge review's defects get one fix-up round, and fixes or red CI the pipeline cannot repair wait for the contributor.
+//              pre-merge review's defects get up to three fix-up rounds, and fixes or red CI the pipeline cannot repair wait for the contributor.
 //   queued  -> CI is green and the pre-merge review is clean: the merge queue merges it as the person who approved the workflow
 //              (src/core/may.ts mayMerge), with every check it always makes (safe-merge included). It goes back
 //              to review when a new review asks for fixes; what only a person's answer settles is the workflow's question (src/workflow/ask.ts).
@@ -611,7 +611,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     const defects = findingsOf(pm).filter((x) => x.severity === "defect").length;
     if (defects) {
       const found = `the pre-merge review found ${defects} defect${defects === 1 ? "" : "s"}`;
-      // Safe fixes get one fix-up round, whose push is our own; what is left after it is a person's.
+      // Safe fixes get up to PREMERGE_FIX_ROUNDS fix-up rounds, whose pushes are our own; a defect that comes back or what is left after the last round is a person's.
       const f = await factOf();
       if (f && f.head !== head) return;
       const round = f && premergeFix(f);
@@ -619,7 +619,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
         // Where a person has to have the defects fixed, the failed verification is no question of its own: the fix is a head verified anew.
         const failed = verifyStop(p, head, pf, leg);
         if (failed) return await stop(failed);
-        return await noteOnce(db, p, head, "premerge-fixup", `${found[0]!.toUpperCase()}${found.slice(1)}; the merge was approved, so the fix-up runs once.`);
+        return await noteOnce(db, p, head, "premerge-fixup", `${found[0]!.toUpperCase()}${found.slice(1)}; the merge was approved, so the fix-up runs.`);
       }
       return await stop(stopOf("premerge-defect", found, { defects }));
     }

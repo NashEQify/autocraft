@@ -336,7 +336,7 @@ export function factsOf(w: PrRows): PrFacts {
   const pm = w.premerge;
   if (pm) {
     const defects = pm.findings ? pm.defects : 0;
-    f.premerge = { at: pm.at, tries: pm.tries, hasFindings: pm.findings, unsure: pm.findings && pm.unsure, defects, defectsAllFixable: pm.fixable || !defects, fixesSafe: (pm.fixable && pm.safe) || !defects, minor: 0, error: pm.findings ? null : "no answer" };
+    f.premerge = { at: pm.at, tries: pm.tries, hasFindings: pm.findings, unsure: pm.findings && pm.unsure, defects, fixesSafe: (pm.fixable && pm.safe) || !defects, minor: 0, error: pm.findings ? null : "no answer" };
     if (defects) {
       f.premergeFixUsed = premergeFixUsedIn(w.patches.fixups);
       if (premergeFixRunningIn(w.patches.fixups, qh, w.pushedOff)) f.premergeFixRunning = true;

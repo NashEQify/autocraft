@@ -145,9 +145,10 @@ describe("pre-approved merge", () => {
     assert.equal((await preapprovalOf(w.db, "app", 4))?.state, "failed");
   });
 
-  test("a defect of the pre-merge review stops the hand-over", async () => {
+  test("a defect of the pre-merge review after the last fix-up round stops the hand-over", async () => {
     const w = await (await take(await fresh(), 10)).review(10, { verdict: "take-fix" });
     await inCi(w, 10);
+    for (const [i, from] of ["sha10x", "sha10y", "sha10z"].entries()) await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 10, from_head: from, to_head: `${from}2`, state: "failed", attempt: 1, created_at: T0, source: "premerge" }));
     await w.premerge(10, "defect", false);
     await settle(w);
     const p = (await preapprovalOf(w.db, "app", 10))!;
@@ -156,7 +157,7 @@ describe("pre-approved merge", () => {
     assert.deepEqual(await codes(w, 10), ["premerge-defect"]);
   });
 
-  test("a pre-merge defect with a safe fix gets one fix-up round; what the round leaves stops the hand-over", async () => {
+  test("a pre-merge defect with a safe fix gets a fix-up round; a defect that comes back stops the hand-over", async () => {
     const w = await (await take(await fresh(), 11)).review(11, { verdict: "take-fix" });
     await inCi(w, 11);
     await (await w.verified(11)).premerge(11, "defect");
@@ -174,6 +175,27 @@ describe("pre-approved merge", () => {
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 11))?.state, "failed");
     assert.deepEqual(await codes(w, 11), ["premerge-defect"]);
+  });
+
+  test("pre-merge fix-up rounds run while each review finds a different defect, also for a defect with no fix text, and stop when one comes back", async () => {
+    const w = await (await take(await fresh(), 12)).review(12, { verdict: "take-fix" });
+    await inCi(w, 12);
+    const roundOf = async () => premergeFix((await w.plan()).prs.find((x) => x.facts.number === 12)!.facts);
+    await (await w.verified(12)).premerge(12, "defect", false, "first");
+    await settle(w);
+    assert.equal(await roundOf(), "fix", "a defect without fix text gets a round");
+    // Each round's push is ours; the next pre-merge review finds another defect, then the same one again.
+    let from = "sha12b";
+    for (const [to, title, expected] of [["sha12c", "second", "fix"], ["sha12d", "second", "used"]] as const) {
+      await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 12, from_head: from, to_head: to, state: "pushed", attempt: 1, created_at: T0, source: "premerge" }));
+      await addOwnCommits(w.db, [{ repo: "app", sha: to, action: "fixup-push" }]);
+      await (await w.synced(12, to)).review(12, { head: to });
+      await settle(w);
+      await w.premerge(12, "defect", true, title);
+      await settle(w);
+      assert.equal(await roundOf(), expected, `at ${to}`);
+      from = to;
+    }
   });
 
   test("the defects of an approved PR outside the rule go to the one pre-merge fix-up", async () => {

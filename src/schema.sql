@@ -1300,7 +1300,7 @@ CREATE INDEX IF NOT EXISTS actions_item ON actions(repo, number);
 -- comment-unsent (that comment never reached GitHub: asked again after a backoff, src/core/rules.ts unsentAsk; a carry-over's row has source 'carry'), pushing (written before the push, to_head is the commit about to be
 -- pushed; replaced by the push's outcome; one left behind by a crash counts as a try). Only the first
 -- three count against the two tries per PR. superseded: a row whose reason no longer applies (kept for the record, ignored).
--- source: NULL = the review's fix list, 'premerge' = the pre-merge review's fix list (one round per PR).
+-- source: NULL = the review's fix list, 'premerge' = the pre-merge review's fix list (up to PREMERGE_FIX_ROUNDS rounds per PR).
 CREATE TABLE IF NOT EXISTS fixups (
   repo TEXT NOT NULL, number INTEGER NOT NULL,
   from_head TEXT NOT NULL,            -- the reviewed head commit the fix was made on
