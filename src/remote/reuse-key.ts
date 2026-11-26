@@ -21,6 +21,6 @@ const inWorkspace = (path: string): boolean => path.startsWith(`${REPOS_ROOT}/`)
 export function reuseKey(bundle: Omit<TaskBundle, "callId">, items: readonly ItemRef[]): string {
   const { mcpServers: _servers, hints: _hints, mounts, ...asked } = bundle;
   const refs = [...new Set(items.map((i) => `${i.repo}#${i.number}`))].sort();
-  const key = { ...asked, mounts: mounts.filter((m) => !inWorkspace(m.path)), items: refs };
+  const key = { ...asked, mounts: (mounts ?? []).filter((m) => !inWorkspace(m.path)), items: refs };
   return createHash("sha256").update(canonicalJson(key)).digest("hex");
 }

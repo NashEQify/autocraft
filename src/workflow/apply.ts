@@ -198,8 +198,8 @@ export async function runCommand(db: Db, actor: Actor, via: Surface, input: Comm
   const many = items.length > 1;
   const lines = items.map((o) => (many ? t("{ref}: {line}", { ref: refText(o.repo, o.number), line: o.line }) : o.line));
   const failed = items.filter((o) => o.outcome !== "run");
-  if (many && failed.length) lines.push(t("Not run: {refs}.", { refs: listText(failed.map((o) => refText(o.repo, o.number))) }));
   lines.push(...new Set(items.flatMap((o) => (o.runners ? [o.runners] : []))));
+  if (many && failed.length) lines.push(t("Not run: {refs}.", { refs: listText(failed.map((o) => refText(o.repo, o.number))) }));
   return { items, lines };
 }
 
