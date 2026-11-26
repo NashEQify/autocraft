@@ -19,7 +19,7 @@
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import * as dc from "../data/discord/index.ts";
-import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
+import { freshWrite, type PermissionFn } from "../remote/permission.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import type { CommandResult } from "../workflow/apply.ts";
@@ -68,6 +68,8 @@ export type AtMessage = {
 export type AtRest = Pick<DiscordRest, "createMessage"> & { startThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> };
 export type AtDeps = {
   db: Db; keys: DiscordKeys; rest: AtRest; log: (line: string) => void; read?: ReadDeps; now?: () => number;
+  /** Replaces the GitHub App permission lookup (tests). */
+  permission?: PermissionFn;
   /** Called once the answer is posted and its target follows what ran: the thread's first status lines go out without waiting for a workflow change. */
   followed?: () => void;
 };
@@ -158,12 +160,16 @@ export class AtCommands {
     const login = await loginOf(db, keys, userId);
     if (!login) return await this.#refuse(m, t("Link your Discord account with /autocraft link to send commands. Nothing ran."));
     const tracked = await loadTrackedRepos(db);
-    const denied: string[] = [];
+    const denied: string[] = [], unknown: string[] = [];
     for (const repo of new Set(targetsOf(d).map((i) => i.repo.split("/").pop()!))) {
-      if (tracked.has(repo) && !await cachedWrite(db, login, repo, PERM_WRITE_TTL)) denied.push(repo);
+      if (!tracked.has(repo)) continue;
+      const w = await freshWrite(db, login, repo, this.#d.permission);
+      if (w.kind === "no") denied.push(repo);
+      else if (w.kind === "unknown") unknown.push(repo);
     }
     if (denied.length) return await this.#refuse(m, t("{login} has no write access to {repos}. Nothing ran.", { login, repos: listText(denied) }));
-    const result = await runDo(db, keys, d, { userId, login }, this.#d.read);
+    if (unknown.length) return await this.#refuse(m, t("Could not check {login}'s write access to {repos}. Try again. Nothing ran.", { login, repos: listText(unknown) }));
+    const result = await runDo(db, keys, d, { userId, login }, this.#d.read, this.#d.permission);
     await this.#answer(m, d, result, here, login);
     if (result.items.some((o) => o.outcome === "run")) this.#d.followed?.();
   }

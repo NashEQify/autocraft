@@ -43,7 +43,7 @@ export async function fakeTaskRunner(db: Db, answer: (call: FakeCall, beat: (pro
   const loop = (async () => {
     while (!stopped) {
       try {
-        const r = await claimCall(db, caller, { requestId: `fake-claim-${login}-${String(++n).padStart(6, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: MODEL_OF_TIER, sessions }, async () => true);
+        const r = await claimCall(db, caller, { requestId: `fake-claim-${login}-${String(++n).padStart(6, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1.323", tiers: MODEL_OF_TIER, sessions }, async () => true);
         const b = r.lease ? await bundleOf(db, r.lease.secret) : null;
         if (!r.lease || !b) { await new Promise((res) => setTimeout(res, 5)); continue; }
         calls.push(b);

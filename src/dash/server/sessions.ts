@@ -6,6 +6,7 @@ import * as access from "../../data/access/index.ts";
 import { PERM_READ_TTL, PERM_WRITE_TTL, OPERATOR_SESSION_MAX, SESSION_MAX, SESSION_TTL, sessionEndsAt } from "../../data/access/index.ts";
 import type { Sealed } from "../../data/access/index.ts";
 import type { Db } from "../../db/index.ts";
+import { writeAccess } from "../../remote/permission.ts";
 
 // A session also ends SESSION_MAX after sign-in however active it is; operators' sessions are shorter.
 export { PERM_READ_TTL, PERM_WRITE_TTL, OPERATOR_SESSION_MAX, SESSION_MAX, SESSION_TTL, sessionEndsAt };
@@ -131,8 +132,18 @@ export async function userForLogin(db: Db, box: TokenBox, provider: Provider, lo
   const permissions = permissionsOnce(db, login, cachedAll);
   const cached = async (repo: string): Promise<string | null> => {
     const row = (await permissions()).get(repo);
-    return row && Date.now() - Date.parse(row.checkedAt) < (forWrite ? PERM_WRITE_TTL : PERM_READ_TTL) ? row.permission : null;
+    return row && Date.now() - Date.parse(row.checkedAt) < PERM_READ_TTL ? row.permission : null;
   };
+  // With no session, a write's permission comes from the GitHub App when the cached one is over a minute old.
+  if (forWrite) {
+    const write = writeAccess(db, login);
+    return {
+      login, role,
+      canWrite: write.canWrite,
+      canRead: async (repo) => { const p = await cached(repo); return p !== null && p !== "none"; },
+      permissionError: write.writeError,
+    };
+  }
   return {
     login, role,
     canWrite: async (repo) => WRITE_PERMISSIONS.has(await cached(repo) ?? ""),

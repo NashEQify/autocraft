@@ -1,6 +1,6 @@
 // Agent runs: one row per model call made through the prompt registry. Written by the callers in src/classify/run.ts, read by the API.
 // Storage and queries live in src/data/inference; this file shapes the API rows and carries the end-of-run waker.
-import type { AgentRun, AgentRunDetail, AgentRunFilter, AgentRunPage, AgentRunTool, ItemRef, ItemShown, RateBucket, Rates } from "../../web/src/api/types.ts";
+import type { AgentRun, AgentRunDetail, AgentRunFilter, AgentRunPage, AgentRunTool, ItemRef, ItemShown, RateBucket, Rates, RefusalBreakdown, RefusalGroup, RefusalWindow } from "../../web/src/api/types.ts";
 import { loadModelChecksOfRun } from "../data/changes/index.ts";
 import * as inference from "../data/inference/index.ts";
 import type { HiddenRepos, RunEnd as ModuleRunEnd, RunRow, RunStart as ModuleRunStart } from "../data/inference/index.ts";
@@ -55,8 +55,10 @@ export async function failRunning(db: Db, reason: string, jobId?: number): Promi
 
 // ---- reading -----------------------------------------------------------------
 
-/** `via` (the helper's login) goes to staff only. */
-function toRun(r: RunRow, shown: Map<string, ItemShown>, staff: boolean): AgentRun {
+type Retries = Awaited<ReturnType<typeof inference.loadRetries>>;
+
+/** `via` and `refusal` go to staff only. */
+function toRun(r: RunRow, shown: Map<string, ItemShown>, staff: boolean, retries: Retries = new Map()): AgentRun {
   const none: ItemShown = { kind: null, state: null, title: null };
   return {
     id: r.id, jobId: r.jobId, step: r.step, stage: r.stage, promptId: r.promptId, promptVersion: r.promptVersion,
@@ -64,6 +66,7 @@ function toRun(r: RunRow, shown: Map<string, ItemShown>, staff: boolean): AgentR
     items: r.items.map((x) => ({ ...x, ...(shown.get(`${x.repo}#${x.number}`) ?? none) })), itemCount: r.itemCount, state: r.state, startedAt: r.startedAt, endedAt: r.endedAt,
     inputTokens: r.tokens.input, outputTokens: r.tokens.output, cacheReadTokens: r.tokens.cacheRead, cacheWriteTokens: r.tokens.cacheWrite, costUsd: r.costUsd, summary: r.summary,
     ...(staff && r.userLogin && { via: { login: r.userLogin, harness: r.harness ?? "", model: r.reportedModel ?? "" } }),
+    ...(staff && r.refusal && { refusal: { outcome: r.refusal, retry: retries.get(r.id) ?? null } }),
     ...(r.state === "running" && r.progress && { progress: r.progress }),
   };
 }
@@ -84,15 +87,44 @@ const CURSOR_RE = /^[1-9][0-9]{0,15}$/;
 export const AGENT_PAGE_DEFAULT = 50, AGENT_PAGE_MAX = 200;
 
 /** Newest first, keyset on id: a page costs index reads proportional to its size, however many runs exist. */
-export async function listRuns(db: Db, f: AgentRunFilter, hidden: HiddenRepos = [], staff = false): Promise<AgentRunPage> {
+export async function listRuns(db: Db, f: AgentRunFilter, hidden: HiddenRepos = [], staff = false, nowMs: number = Date.now()): Promise<AgentRunPage> {
   if (f.state !== undefined && !["running", "done", "failed", "recent"].includes(f.state)) throw new RunQueryError(400, "unknown state");
   if (f.step !== undefined && !STEP_RE.test(f.step)) throw new RunQueryError(400, "bad step");
   if (f.repo !== undefined && !REPO_RE.test(f.repo)) throw new RunQueryError(400, "bad repo");
   if (f.cursor !== undefined && !CURSOR_RE.test(f.cursor)) throw new RunQueryError(400, "bad cursor");
   if (f.limit !== undefined && (!Number.isInteger(f.limit) || f.limit < 1 || f.limit > AGENT_PAGE_MAX)) throw new RunQueryError(400, `limit must be a whole number from 1 to ${AGENT_PAGE_MAX}`);
-  const { rows, nextCursor } = await inference.listRuns(db, { ...f, limit: f.limit ?? AGENT_PAGE_DEFAULT }, { hidden, staff });
-  const shown = await shownOf(db, rows);
-  return { runs: rows.map((x) => toRun(x, shown, staff)), nextCursor };
+  if (f.window !== undefined && !WINDOWS.includes(f.window)) throw new RunQueryError(400, "window must be 24h, 7d or 30d");
+  // Which runs a safety filter declined says something about their errors: viewers see neither.
+  if ((f.refused || f.window !== undefined) && !staff) throw new RunQueryError(403, "operators and maintainers only");
+  const { window, ...rest } = f;
+  const { rows, nextCursor } = await inference.listRuns(db, { ...rest, limit: f.limit ?? AGENT_PAGE_DEFAULT, ...(window && { since: sinceOf(window, nowMs) }) }, { hidden, staff });
+  const [shown, retries] = await db.together(() => Promise.all([shownOf(db, rows), staff ? inference.loadRetries(db, rows.filter((r) => r.refusal !== null)) : Promise.resolve(new Map() as Retries)]));
+  return { runs: rows.map((x) => toRun(x, shown, staff, retries)), nextCursor };
+}
+
+const WINDOWS: readonly RefusalWindow[] = ["24h", "7d", "30d"];
+const WINDOW_MS: Record<RefusalWindow, number> = { "24h": 24 * 3600_000, "7d": 7 * 24 * 3600_000, "30d": 30 * 24 * 3600_000 };
+const sinceOf = (w: RefusalWindow, nowMs: number): string => new Date(nowMs - WINDOW_MS[w]).toISOString();
+
+/** The refused runs of the last `window` counted per prompt, repo, model and Task Runner user, most first: where refusals share a cause. Staff only. */
+export async function refusals(db: Db, window: unknown, hidden: HiddenRepos = [], nowMs: number = Date.now()): Promise<RefusalBreakdown> {
+  if (!WINDOWS.includes(window as RefusalWindow)) throw new RunQueryError(400, "window must be 24h, 7d or 30d");
+  const w = window as RefusalWindow;
+  const counts = await inference.loadRefusalCounts(db, sinceOf(w, nowMs), { hidden, staff: true });
+  const by = (key: (c: (typeof counts)[number]) => string | null): RefusalGroup[] => {
+    const m = new Map<string | null, RefusalGroup>();
+    for (const c of counts) {
+      const g = m.get(key(c)) ?? m.set(key(c), { key: key(c), n: 0, failed: 0 }).get(key(c))!;
+      g.n += c.n;
+      if (c.refusal === "failed") g.failed += c.n;
+    }
+    return [...m.values()].sort((a, b) => b.n - a.n || String(a.key).localeCompare(String(b.key)));
+  };
+  const total = counts.reduce((s, c) => s + c.n, 0);
+  return {
+    window: w, total, failed: counts.reduce((s, c) => s + (c.refusal === "failed" ? c.n : 0), 0), capped: total >= inference.REFUSAL_COUNT_MAX,
+    byPrompt: by((c) => c.promptId), byRepo: by((c) => c.repo), byModel: by((c) => c.model), byLogin: by((c) => c.login),
+  };
 }
 
 /** A run that touches a hidden repo is not found; prompt and output text go only to `texts` viewers (operators). */
@@ -108,7 +140,8 @@ export async function getRun(db: Db, id: unknown, view: { hidden?: HiddenRepos; 
     return { seq: t.seq, tool: t.tool, args: t.args, resultBytes: t.resultBytes, isError: t.isError, startedAt: t.startedAt, endedAt: t.endedAt,
       check: t.checkId === null ? null : { id: t.checkId, command: c?.command ?? "", crate: c?.crate ?? null, testName: c?.testName ?? null, outcome: c?.outcome ?? null } };
   });
-  const run = toRun(detail.run, await shownOf(db, [detail.run]), staff);
+  const [shown, retries] = await db.together(() => Promise.all([shownOf(db, [detail.run]), staff && detail.run.refusal ? inference.loadRetries(db, [detail.run]) : Promise.resolve(new Map() as Retries)]));
+  const run = toRun(detail.run, shown, staff, retries);
   if (!view.texts) return { ...run, prompt: null, output: null, error: detail.run.error ? "failed" : null, tools, textsHidden: true };
   return { ...run, prompt: inference.unpackText(detail.prompt), output: inference.unpackText(detail.output), error: detail.run.error, tools };
 }

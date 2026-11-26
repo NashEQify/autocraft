@@ -1,7 +1,7 @@
 // Model calls and rates on fake data: twelve runs in flight and a few hundred finished ones.
 import { traceRunDetail } from "./traceMock";
 import type { Api } from "../client";
-import type { AgentRun, AgentRunDetail, AgentRunTranscript, Rates, TranscriptEntry, TranscriptStoreStatus, TranscriptView } from "../types";
+import type { AgentRun, AgentRunDetail, AgentRunTranscript, Rates, RefusalBreakdown, RefusalGroup, RefusalWindow, TranscriptEntry, TranscriptStoreStatus, TranscriptView } from "../types";
 import { NOW, REPOS } from "./fixtures";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -55,6 +55,50 @@ RUNNING[0]!.step = "classify-new";
 RUNNING[0]!.promptId = "classify.haiku";
 RUNNING[0]!.model = "haiku";
 const RECENT: AgentRun[] = Array.from({ length: 360 }, (_, i) => makeRun(4999 - i, 2 * MIN + i * 4.2 * MIN + rnd() * MIN, false));
+
+// Calls a model's safety filter refused: the refused run sits just after (older than) the run that retried it.
+const REFUSED_ERROR = "helper: model error API Error: Opus's safeguards flagged this message as potentially violating our usage policy.";
+function refuse(i: number, o: { promptId: string; step: string; repo: string; login: string; retry: "done" | "failed" | "refused" | null }) {
+  const r = RECENT[i]!;
+  const via = { login: o.login, harness: "claude", model: "claude-opus-4-5" };
+  Object.assign(r, { promptId: o.promptId, step: o.step, model: "opus", provider: "claude", state: "failed", via, items: [shown({ repo: o.repo, number: 1300 + i })], itemCount: 1 });
+  r.summary = o.retry === null ? `refused by opus on ${o.login}'s Task Runner` : `refused by opus on ${o.login}'s Task Runner; retried on another Task Runner`;
+  if (o.retry === null) {
+    r.refusal = { outcome: "failed", retry: null };
+    return;
+  }
+  const next = RECENT[i - 1]!;
+  const other = o.login === "kiri-n" ? "ochre-fox" : "kiri-n";
+  Object.assign(next, { promptId: o.promptId, step: o.step, model: "opus", provider: "claude", items: r.items, itemCount: 1, via: { ...via, login: other }, state: o.retry === "done" ? "done" : "failed" });
+  next.summary = o.retry === "refused" ? `refused by opus on ${other}'s Task Runner` : o.retry === "done" ? "1 take" : "timeout after 600 s";
+  if (o.retry === "refused") next.refusal = { outcome: "failed", retry: null };
+  r.refusal = { outcome: "retried", retry: { id: next.id, state: next.state } };
+}
+refuse(4, { promptId: "review.opus", step: "opus-review", repo: REPOS[1]!, login: "kiri-n", retry: "done" });
+refuse(9, { promptId: "premerge.opus", step: "premerge", repo: REPOS[1]!, login: "ochre-fox", retry: null });
+refuse(21, { promptId: "review.opus", step: "opus-review", repo: REPOS[2]!, login: "kiri-n", retry: "refused" });
+refuse(48, { promptId: "cifix.patch", step: "cifix", repo: REPOS[0]!, login: "ochre-fox", retry: "done" });
+refuse(130, { promptId: "premerge.opus", step: "premerge", repo: REPOS[1]!, login: "kiri-n", retry: null });
+
+const WINDOW_MS: Record<RefusalWindow, number> = { "24h": 24 * HOUR, "7d": 7 * 24 * HOUR, "30d": 30 * 24 * HOUR };
+const inWindow = (r: AgentRun, w: RefusalWindow | undefined) => !w || NOW - Date.parse(r.startedAt) <= WINDOW_MS[w];
+
+function refusals(window: RefusalWindow): RefusalBreakdown {
+  const runs = RECENT.filter((r) => r.refusal && inWindow(r, window));
+  const by = (key: (r: AgentRun) => string | null): RefusalGroup[] => {
+    const m = new Map<string | null, RefusalGroup>();
+    for (const r of runs) {
+      const g = m.get(key(r)) ?? m.set(key(r), { key: key(r), n: 0, failed: 0 }).get(key(r))!;
+      g.n++;
+      if (r.refusal!.outcome === "failed") g.failed++;
+    }
+    return [...m.values()].sort((a, b) => b.n - a.n);
+  };
+  return {
+    window, total: runs.length, failed: runs.filter((r) => r.refusal!.outcome === "failed").length, capped: false,
+    byPrompt: by((r) => r.promptId), byRepo: by((r) => r.items[0]?.repo ?? null), byModel: by((r) => r.via?.model ?? r.model), byLogin: by((r) => r.via?.login ?? null),
+  };
+}
 
 function rates(window: "24h" | "7d"): Rates {
   const hourly = window === "24h";
@@ -115,7 +159,8 @@ export function createAgentsMock(): Pick<Api, "agents" | "rates" | "transcriptSt
       list(f) {
         if (f.state === "running") return wait({ runs: RUNNING.filter((r) => (!f.step || r.step === f.step)), nextCursor: null });
         const rows = RECENT.filter(
-          (r) => (!f.state || f.state === "recent" || r.state === f.state) && (!f.step || r.step === f.step) && (!f.repo || r.items.some((i) => i.repo === f.repo)) && (!f.cursor || r.id < Number(f.cursor)),
+          (r) => (!f.state || f.state === "recent" || r.state === f.state) && (!f.step || r.step === f.step) && (!f.repo || r.items.some((i) => i.repo === f.repo)) && (!f.cursor || r.id < Number(f.cursor))
+            && (!f.refused || (!!r.refusal && inWindow(r, f.window))),
         );
         const limit = f.limit ?? 50;
         const runs = rows.slice(0, limit);
@@ -138,9 +183,12 @@ export function createAgentsMock(): Pick<Api, "agents" | "rates" | "transcriptSt
         if (traced) return wait(traced);
         if (!r) throw new Error(`no agent run ${id}`);
         const old = NOW - Date.parse(r.startedAt) > 90 * 24 * HOUR || id < 4850;
-        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" ? null : OUTPUT, error: r.state === "failed" ? "claude -p exited after 600 s without output" : null, tools: [], transcripts: transcriptsOf(r) };
+        const error = r.refusal ? (r.refusal.outcome === "failed" ? `refused by the model's safety filter: ${r.summary!.slice("refused by ".length)}; no other Task Runner or tier could take the call. ${REFUSED_ERROR}` : REFUSED_ERROR)
+          : r.state === "failed" ? "claude -p exited after 600 s without output" : null;
+        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" || r.refusal ? null : OUTPUT, error, tools: [], transcripts: transcriptsOf(r) };
         return wait(d);
       },
+      refusals: (w) => wait(refusals(w), 80),
       transcript(runId, id) {
         const r = [...RUNNING, ...RECENT].find((x) => x.id === runId);
         const t = r && transcriptsOf(r).find((x) => x.id === id);

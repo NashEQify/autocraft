@@ -3,8 +3,11 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { safeEqual } from "../src/dash/server/crypto.ts";
-import { drainSyncRequests, handleDelivery, signatureOf } from "../src/github/webhooks.ts";
-import { writeItemNode } from "../src/mirror.ts";
+import { checkDeliveries, type Delivery } from "../src/github/deliveries.ts";
+import { drainSyncRequests, handleDelivery, resetDeliveryNote, signatureOf } from "../src/github/webhooks.ts";
+import { loadSyncState, saveSyncState } from "../src/data/mirror/index.ts";
+import { pollReason, writeItemNode } from "../src/mirror.ts";
+import type { AppSecrets } from "../src/dash/server/config.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
@@ -125,4 +128,42 @@ test("re-reading an unchanged item bumps no items topic and keeps its newest com
   node.comments = { nodes: [comment(2)] };
   await read();
   assert.deepEqual((await db.all(db.k.selectFrom("comments").select("id").where("repo", "=", "a").where("number", "=", 5))).map((r) => r.id), ["c2"]);
+});
+
+test("with webhooks arriving the poll waits for the backstop; a failed delivery is asked for again once per attempt and makes the run poll", async () => {
+  const db = await scratch();
+  resetDeliveryNote();
+  const t0 = Date.now();
+  const none = { webhooks: true, unread: false, deliveries: null };
+  assert.equal(pollReason(await loadSyncState(db), t0, none), "no webhook delivery yet");
+  await deliver(db, "ping", {});
+  const state = await loadSyncState(db);
+  assert.ok(state.webhook_at && state.webhook_started_at, "a delivery records that webhooks arrive");
+  // A poll right after the receiver started: nothing is due until the backstop.
+  await saveSyncState(db, { polled_at: new Date(t0 + 1000).toISOString() });
+  assert.equal(pollReason(await loadSyncState(db), t0 + 60_000, none), null);
+  assert.equal(pollReason(await loadSyncState(db), t0 + 60_000, { ...none, webhooks: false }), "webhooks are not set up");
+  assert.equal(pollReason(await loadSyncState(db), t0 + 16 * 60_000, none), "backstop");
+
+  const at = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
+  const page: Delivery[] = [
+    { id: 1, guid: "ok", delivered_at: at(t0 - 120_000), status_code: 202, event: "issues" },
+    { id: 2, guid: "down", delivered_at: at(t0 - 110_000), status_code: 502, event: "issue_comment" },
+    { id: 3, guid: "refused", delivered_at: at(t0 - 100_000), status_code: 401, event: "issues" },
+    { id: 4, guid: "fresh", delivered_at: at(t0 - 5_000), status_code: 0, event: "issues" },
+  ];
+  const asked: string[] = [];
+  const deps = { list: async () => [...page], redeliver: async (d: Delivery) => { asked.push(d.guid); }, log: () => {} };
+  const app = {} as AppSecrets;
+  const first = await checkDeliveries(db, app, t0, deps);
+  assert.deepEqual(asked, ["down"], "only a delivery that got no good answer, settled and worth retrying, is asked for again");
+  assert.equal(first.failed, 2);
+  assert.ok(pollReason(await loadSyncState(db), t0 + 1000, { ...none, deliveries: first }), "a failed delivery makes the run poll");
+  // The same list read again (a redelivery of the check) asks for nothing new; the in-flight one is looked at once it settles.
+  const again = await checkDeliveries(db, app, t0 + 20_000, deps);
+  assert.deepEqual(asked, ["down"]);
+  assert.equal(again.failed, 0);
+  page.push({ id: 5, guid: "down", delivered_at: at(t0 + 25_000), status_code: 202, event: "issue_comment" });
+  await checkDeliveries(db, app, t0 + 60_000, deps);
+  assert.deepEqual(asked, ["down", "fresh"], "the redelivered one succeeded; the in-flight one failed once settled");
 });

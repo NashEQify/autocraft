@@ -36,8 +36,11 @@ import { attributionLines, confirmLine, currentStep, listText, recommendationLin
 import { asksForApprover, heldWork, openRecommendation, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
-/** Who sent the command. `canWrite` reads the person's live write permission on a repo; `githubId` is needed by autorepin only. */
-export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; githubId?: number | null };
+/**
+ * Who sent the command. `canWrite` reads the person's live write permission on a repo; `writeError` says why it could not be read, so a
+ * refusal then says the check failed rather than that the person has no access. `githubId` is needed by autorepin only.
+ */
+export type Actor = { login: string | null; canWrite: (repo: string) => Promise<boolean>; writeError?: (repo: string) => Promise<string | null>; githubId?: number | null };
 
 export type CommandInput = {
   parsed: Parsed;
@@ -75,6 +78,11 @@ export const COMMAND_LIMITS: Record<Surface, number> = { dashboard: 200, agent: 
 const HOUR_MS = 3_600_000;
 
 const refText = (repo: string, n: number): string => `${slugOf(repo)}#${n}`;
+
+async function refusalOf(r: access.ActRefusal, actor: Actor, repo: string): Promise<string> {
+  const why = r === "no-write" ? await actor.writeError?.(repo).catch(() => null) : null;
+  return why ? t("Could not check {login}'s write access to {repo} ({why}). Try again.", { login: actor.login ?? "", repo: slugOf(repo), why }) : refusalLine(r, actor.login, repo);
+}
 
 function refusalLine(r: access.ActRefusal, login: string | null, repo: string): string {
   switch (r) {
@@ -245,7 +253,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   if (!repo || (input.visible && !await input.visible(repo))) return out("refused", t("{repo} is not a repository AutoCraft tracks.", { repo: target.repo }));
   // The CLI runs on the box, as nobody's login.
   const no = via === "cli" ? null : await actRefusal(db, actor, repo);
-  if (no) return out("refused", refusalLine(no, actor.login, repo));
+  if (no) return out("refused", await refusalOf(no, actor, repo));
   const login = actor.login!;
   const ref = refText(repo, target.number);
   const key = `${repo}#${target.number}`;
@@ -692,7 +700,7 @@ export async function runControl(db: Db, actor: Actor, via: Surface, input: Cont
   const repo = trackedRepo(new Set((await loadTrackedRepos(db)).keys()), written);
   if (!repo) return { ok: false, line: t("{repo} is not a repository AutoCraft tracks.", { repo: written }) };
   const no = await actRefusal(db, actor, repo);
-  if (no) return { ok: false, line: refusalLine(no, actor.login, repo) };
+  if (no) return { ok: false, line: await refusalOf(no, actor, repo) };
   const at = new Date().toISOString();
   switch (input.control) {
     case "resume-breaker":

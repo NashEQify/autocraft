@@ -2611,6 +2611,12 @@ CREATE TABLE IF NOT EXISTS discord_link_codes (
   login TEXT NOT NULL,
   expires_at TEXT NOT NULL
 ) WITHOUT ROWID;
+-- Discord users who asked the bot to stop tracking their messages (`/autocraft optout`, src/discord/store.ts). `user_hash` is a keyed
+-- hash of the Discord user id. Their messages record no mentions; what they send to the bot still runs. Bookkeeping: not a change topic.
+CREATE TABLE IF NOT EXISTS discord_optouts (
+  user_hash TEXT PRIMARY KEY,
+  opted_out_at TEXT NOT NULL
+) WITHOUT ROWID;
 
 -- Decision alerts by direct message (src/discord/alerts.ts). A row of `discord_alerts` is an opted-in linked account: `sealed` holds the
 -- direct-message channel id. A row of `discord_alert_msgs` is one message about a decision, kept to edit it after the answer; `sealed` is
@@ -2830,7 +2836,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
   full_points_last_run INTEGER,
   author_ids_backfilled_at TEXT,
   author_ids_error TEXT,              -- `<time> <message>` of the last failed account-id pass
-  app_install_sweep_at TEXT
+  app_install_sweep_at TEXT,
+  webhook_at TEXT,                    -- the newest verified GitHub App webhook delivery
+  webhook_started_at TEXT,            -- start of the newest webhook receiver process that has taken a delivery
+  polled_at TEXT,                     -- start of the last finished org-wide poll
+  poll_missed_at TEXT,                -- start of the last poll that found changes no webhook had brought
+  poll_missed TEXT,                   -- that poll's count and first items: `<n> <repo#number> ...`
+  deliveries_checked_at TEXT          -- GitHub's list of the app's webhook deliveries was checked up to here
 );
 
 -- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.

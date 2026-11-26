@@ -41,13 +41,30 @@ export async function pending(db: Db, modelId: string, all = false, plans?: Plan
   return (await todosOf(db, hashed)).sort((a, b) => a.text.length - b.text.length);
 }
 
-/** Whether the embed step has work: open items the Plans send here, or closed ones with a missing or stale vector. */
-export async function embedDue(db: Db, modelId: string, plans?: PlanSet): Promise<boolean> {
+/**
+ * Whether the embed step has work: open items the Plans send here, or closed ones with a missing or stale vector. With `seqs`, the
+ * change counters a planner pass read before asking, the closed items' probe is answered again only when DIFF_TOPICS moved.
+ */
+export async function embedDue(db: Db, modelId: string, plans?: PlanSet, seqs?: Record<string, number>): Promise<boolean> {
   if (plans ? plans.items.some((p) => p.plan.actions.some((a) => a.kind === "embed" && mayRun({ facts: p.facts, action: a }, "pipeline").ok)) : (await plannedItems(db, "embed", { model: modelId, run: null })).length) return true;
   // Owner statements (src/memory/) are embedded by the same step.
   if (await statementsDue(db, modelId)) return true;
-  return await hasEmbedDiff(db, modelId);
+  if (!seqs) return await hasEmbedDiff(db, modelId);
+  const key = [modelId, ...DIFF_TOPICS.map((t) => seqs[t] ?? 0)].join(",");
+  const last = diffProbes.get(db);
+  if (last?.key === key) return last.due;
+  const due = await hasEmbedDiff(db, modelId);
+  diffProbes.set(db, { key, due });
+  return due;
 }
+
+/**
+ * The change topics whose writes can change the embed diff: items and their embed hashes (items), the tracked repos (repos) and
+ * vectors written (plan-inputs). Deleting a vector moves none of them; only prune does, and only for vectors the diff skips.
+ */
+const DIFF_TOPICS = ["items", "repos", "plan-inputs"];
+/** The diff probe's last answer per database, under the counters (`seqs` read before it) and model it was asked with. */
+const diffProbes = new WeakMap<Db, { key: string; due: boolean }>();
 
 // Vectors of items that left the mirror or the tracked repos.
 export const prune = (db: Db): Promise<number> => pruneEmbeddings(db);

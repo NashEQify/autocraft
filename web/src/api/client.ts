@@ -49,6 +49,8 @@ import type {
   ItemTraceUnchanged,
   ItemPageUnchanged,
   AgentRunFilter,
+  RefusalBreakdown,
+  RefusalWindow,
   AgentRunPage,
   JevStatus,
   Rates,
@@ -382,6 +384,8 @@ export interface Api {
   agents: {
     list(filter: AgentRunFilter): Promise<AgentRunPage>;
     get(id: number): Promise<AgentRunDetail>;
+    /** Operators and maintainers. */
+    refusals(window: RefusalWindow): Promise<RefusalBreakdown>;
     /** One full transcript of a run; operators and maintainers only. */
     transcript(runId: number, id: number): Promise<TranscriptView>;
   };

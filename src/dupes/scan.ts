@@ -10,10 +10,10 @@ import type { Db } from "../db/index.ts";
 
 /**
  * Cosine similarity of the embedding model (bge-small) from which a neighbour becomes a candidate pair. The same bug in other
- * words can score in the 0.7s, and the pair check that follows is cheap; below 0.75 Jev finds almost no duplicates.
+ * words can score in the 0.7s, and the pair check that follows is cheap; below 0.78 the pair check finds few duplicates for its cost.
  * Changing it rescans every item once (src/db.ts).
  */
-export const SIM_THRESHOLD = 0.75;
+export const SIM_THRESHOLD = 0.78;
 /** Most neighbours kept per scanned item. */
 export const MAX_NEIGHBOURS = 3;
 /** Neighbours looked up per item before the filters; the filters drop some. */

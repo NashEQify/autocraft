@@ -109,6 +109,8 @@ export interface AgentRuns {
   user_login: string | null;
   harness: string | null;
   reported_model: string | null;
+  call_id: number | null;
+  refusal: string | null;
   first_repo: string | null;
   first_number: number | null;
 }
@@ -713,6 +715,11 @@ export interface DiscordMentions {
   number: number;
   sealed: string;
   signal: Generated<number>;
+}
+
+export interface DiscordOptouts {
+  user_hash: string;
+  opted_out_at: string;
 }
 
 export interface DiscordReplies {
@@ -2395,6 +2402,12 @@ export interface SyncState {
   author_ids_backfilled_at: string | null;
   author_ids_error: string | null;
   app_install_sweep_at: string | null;
+  webhook_at: string | null;
+  webhook_started_at: string | null;
+  polled_at: string | null;
+  poll_missed_at: string | null;
+  poll_missed: string | null;
+  deliveries_checked_at: string | null;
 }
 
 export interface TokenUsage {
@@ -2648,6 +2661,7 @@ export interface DB {
   discord_link_codes: DiscordLinkCodes;
   discord_links: DiscordLinks;
   discord_mentions: DiscordMentions;
+  discord_optouts: DiscordOptouts;
   discord_replies: DiscordReplies;
   discord_status: DiscordStatus;
   download_deltas: DownloadDeltas;
@@ -2858,6 +2872,7 @@ export interface DB {
   "main.discord_link_codes": DiscordLinkCodes;
   "main.discord_links": DiscordLinks;
   "main.discord_mentions": DiscordMentions;
+  "main.discord_optouts": DiscordOptouts;
   "main.discord_replies": DiscordReplies;
   "main.discord_status": DiscordStatus;
   "main.download_deltas": DownloadDeltas;
@@ -3020,7 +3035,7 @@ export const COLUMNS = {
   agent_run_texts: ["run_id", "prompt", "output"],
   agent_run_tools: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"],
   agent_run_transcripts: ["id", "run_id", "call_id", "attempt", "outcome", "store", "bucket", "object_key", "bytes", "raw_bytes", "sha256", "lines", "tool_count", "last_tool", "created_at"],
-  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "first_repo", "first_number"],
+  agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "call_id", "refusal", "first_repo", "first_number"],
   app_allowed_owners: ["login", "account_id", "added_by", "added_at"],
   area_lists: ["repo", "version", "areas", "at", "by", "note"],
   area_proposals: ["id", "repo", "kind", "areas", "created_at", "created_by", "state", "decided_by", "decided_at"],
@@ -3072,6 +3087,7 @@ export const COLUMNS = {
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],
+  discord_optouts: ["user_hash", "opted_out_at"],
   discord_replies: ["ping_hash", "quoted_hash", "channel_hash", "sealed"],
   discord_status: ["id", "state", "detail", "at"],
   download_deltas: ["asset_id", "t", "span", "delta"],
@@ -3208,7 +3224,7 @@ export const COLUMNS = {
   sync_repo_errors: ["repo", "kind", "message", "moved_to", "since", "at"],
   sync_requests: ["repo", "number", "event", "requested_at"],
   sync_runs: ["started_at", "ended_at", "mode", "items", "error"],
-  sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at"],
+  sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at", "webhook_at", "webhook_started_at", "polled_at", "poll_missed_at", "poll_missed", "deliveries_checked_at"],
   token_usage: ["run_id", "agent", "stage", "model", "repo", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"],
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
   user_settings: ["login", "key", "value", "updated_at"],

@@ -1,7 +1,7 @@
 import { SAMPLE_CIFIX_PRS } from "../src/cifix/types.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -11,7 +11,7 @@ import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { SAMPLE_FIXUP_CHECK } from "../src/patchcheck/types.ts";
 import { SAMPLE_FIXUP_PRS } from "../src/prompts/samples.ts";
 import { SAMPLE_VERIFY_PLAN } from "../src/verify/types.ts";
-import { buildCheckout, safePath } from "../src/sandbox/checkout.ts";
+import { BatchReader, buildCheckout, holdCheckouts, pruneCheckouts, safePath } from "../src/sandbox/checkout.ts";
 import { REPO_PATH, sandboxCommand } from "../src/sandbox/command.ts";
 import type { SessionAsk } from "../src/prepush/resume.ts";
 import { fakeTaskRunner } from "./fake-runner.ts";
@@ -103,6 +103,38 @@ describe("checkout", () => {
     assert.equal(lstatSync(join(dest, "run.sh")).mode & 0o111, 0);
     for (const gone of ["link", "big.bin", "sub"]) assert.equal(existsSync(join(dest, gone)), false, gone);
     assert.equal((await buildCheckout(bare, sha, dest)).ok, true, "reused");
+  });
+
+  test("cat-file output split at any byte gives the same blobs; a cut-off stream is not complete", () => {
+    const out = Buffer.from("aa blob 3\nabc\nbb blob 0\n\ncc blob 2\n\n\n\n");
+    const got: string[] = [];
+    const r = new BatchReader(3, (i, b) => got.push(`${i}:${b.toString()}`));
+    for (let i = 0; i < out.length; i++) r.push(out.subarray(i, i + 1));
+    assert.deepEqual(got, ["0:abc", "1:", "2:\n\n"]);
+    assert.equal(r.end(), true);
+    const cut = new BatchReader(3, () => {});
+    cut.push(out.subarray(0, 20));
+    assert.equal(cut.end(), false);
+  });
+
+  test("over the size cap, the least recently used checkouts go first and a held one stays", () => {
+    const root = join(dir, "lru");
+    const now = Date.now();
+    const make = (name: string, minutesAgo: number): string => {
+      const d = join(root, "app", name);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "f"), Buffer.alloc(1000));
+      const t = new Date(now - minutesAgo * 60_000);
+      utimesSync(d, t, t);
+      return d;
+    };
+    const oldest = make("a", 30), held = make("b", 20), mid = make("c", 10), newest = make("d", 1);
+    const release = holdCheckouts([held]);
+    const t = new Date(now - 20 * 60_000);
+    utimesSync(held, t, t);
+    assert.equal(pruneCheckouts(root, 24 * 3600_000, now, 2500), 2);
+    release();
+    assert.deepEqual([oldest, held, mid, newest].map(existsSync), [false, true, false, true]);
   });
 
 
