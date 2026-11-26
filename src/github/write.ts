@@ -16,7 +16,7 @@ import { Client, type Querier } from "../mirror.ts";
 import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstallationError, type TokenScope } from "./install-token.ts";
 import { type Note, withNote } from "./note.ts";
 import { isUnsent, markUnsent, rateLimited, refusedWrite, unclearWrite } from "./unsent.ts";
-import { advisoryMade, byUs, commentMade, issueMade, nodeCommentMade, reviewMade, type GhRead } from "./made.ts";
+import { advisoryMade, byUs, commentMade, issueMade, nodeCommentMade, reviewMade, reviewReads, type GhRead } from "./made.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { AppError, appJwt, call, GITHUB_API } from "./app.ts";
@@ -559,6 +559,8 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
 export async function editReview(w: Writer, q: Querier, g: Guarded<"post-review">, reviewId: string, note: Note, text: string, details: Details = {}): Promise<void> {
   q = await laneQuery(w, g, q);
   const body = posted(note, text);
+  // An edit whose answer was lost may have gone through: one that would change nothing is not made.
+  if (await reviewReads(q, reviewId, body)) return;
   await recorded(w, idOf(w, g), "review-edit", refOf(g.repo, g.number), { ...details, head: g.head, review: reviewId }, () => q.query(EDIT_REVIEW, { id: reviewId, body }));
 }
 

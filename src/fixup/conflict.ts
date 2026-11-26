@@ -12,6 +12,7 @@ import { guard, liveOf } from "../core/guard.ts";
 import { isOwnLogin, ownLogins } from "../github/identity.ts";
 import type { Note } from "../github/note.ts";
 import { ghAskComment, ghComment, ghEditComment, pushBranch, type Writer } from "../github/write.ts";
+import { MAX_PATCH_BYTES } from "../build/tasks.ts";
 import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { cachedDiff } from "../review/diff.ts";
@@ -359,7 +360,10 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       // A resolution with Rust files is stored and linted before it is pushed (the collect step above pushes it, or asks again with the findings).
       const rs = resFiles.map((f) => f.path).filter((p) => p.endsWith(".rs"));
       dropSessions(c.lint?.session, keptNow);
-      const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head, base: baseSha, patch: await git.diffText(head, tree), files: rs }) : null;
+      const patch = rs.length ? await git.diffText(head, tree) : "";
+      // The lint task takes the merge as a patch on the head; one over the task limit is over it at every run for this head.
+      if (Buffer.byteLength(patch) > MAX_PATCH_BYTES) { await refuse("the merge is larger than 1 MiB as a patch, over the lint task limit"); return; }
+      const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head, base: baseSha, patch, files: rs }) : null;
       if (task !== null) {
         const round = c.lint ? c.lint.round + 1 : 1;
         await storePatch(db, { kind: "conflict", storedId: c.lint?.rowid, repo: x.repo, number: c.number, head: c.head, patch: JSON.stringify(resFiles), files, lintTask: task, lintRound: round, lintState: "pending", session: storeSessions(keptNow, new Date(x.at())), baseSha: baseSha ?? undefined, attempt: c.attempt, at: x.at() });
