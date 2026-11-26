@@ -1,7 +1,9 @@
 // A PR the automatic merge rule takes up by itself (core/rules.ts autoEligible) and that then stops for a person's judgement gets a
 // workflow row of its own, started by the rule (RULE_STARTER): it comes back with one recommendation, built like any other item's from
-// its review and its wait (ask.ts questionFor), and is answered the same way. Whoever answers takes it over, so the merge is then
-// theirs. The row enters at Review and is not approved: until a person answers, nothing runs as anyone.
+// its review and its wait (ask.ts questionFor), with why the rule stopped (`stop`). It asks nobody (asked.ts): no alert and no open
+// question anywhere, only its state line "Stopped: <reason>. AutoCraft would: <recommendation>". A person with write access answers it
+// the same way as any question, and takes it over, so the merge is then theirs. The row enters at Review and is not approved: until a
+// person answers, nothing runs as anyone.
 //
 // Only waits that need judgement make a row: the end of the steps (`answer`: an unsure or hold review, a pre-merge defect, a statement
 // conflict, sensitive files), a failed verification and a screenshot regression. Waits that clear by themselves (CI, GitHub's

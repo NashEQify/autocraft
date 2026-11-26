@@ -2847,6 +2847,8 @@ export interface MaintainItemStatus {
   rec: string | null;
   /** When the open question was asked, sent back with an answer; null when none is open. */
   asked: string | null;
+  /** Who the open question goes to: the item's starter and approver. Empty when none is open, and for an item only the automatic merge rule started, which asks nobody. */
+  to: string[];
   /** The last answer was unclear: who wrote it and what AutoCraft replied. */
   unclear: { by: string; at: string; line: string } | null;
   /** The confirmation line of the last accepted command. */

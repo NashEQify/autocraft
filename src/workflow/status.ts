@@ -4,7 +4,8 @@
 import { t, tk } from "../i18n/index.ts";
 import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
-import { heldWork, RULE_STARTER } from "./types.ts";
+import { asksNobody } from "./asked.ts";
+import { heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend";
@@ -114,9 +115,21 @@ export function earlierReview(parts: readonly number[], verdict?: "hold" | "clos
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts legWait). */
-export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null): string {
+/**
+ * The state line of a row the automatic merge rule stopped, which asks nobody: why it stopped and what a yes would run. A rule row's
+ * recommendation stored before `stop` existed has the reason in its sentence ("The automatic merge rule stops here: …"), shown as it is.
+ */
+export const ruleStopLine = (rec: Recommendation): string =>
+  rec.stop ? t("Stopped: {reason}. AutoCraft would: {recommendation}", { reason: rec.stop, recommendation: rec.text }) : rec.text;
+
+/**
+ * Where the item stands, in one line. `wait`: what a running item waits for that nothing can move on, or what became of a close (waits.ts
+ * legWait). `veiled`: a quiet pull request's reader, who sees no recommendation, so a rule row's line says only that it stopped.
+ */
+export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcClock, wait: string | null = null, veiled = false): string {
   if (wait && (wf.state === "running" || wf.state === "waiting" || wf.state === "closed")) return wait;
+  const ruleRec = asksNobody(wf) ? openRecommendation(wf) : null;
+  if (ruleRec) return veiled ? t("Stopped") : ruleStopLine(ruleRec);
   switch (wf.state) {
     case "running": return current ? t("Running: {step}", { step: stepLabel(current) }) : t("Running");
     case "waiting": return current ? t("Waiting: {step}", { step: stepLabel(current) }) : t("Waiting");

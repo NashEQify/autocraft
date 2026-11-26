@@ -25,7 +25,8 @@ import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runText } from "../../workflow/read.ts";
 import { saying } from "../../workflow/said.ts";
-import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
+import { attributionLines, listText, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
+import { openQuestion } from "../../workflow/asked.ts";
 import { eventsOf } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
@@ -61,7 +62,7 @@ const INSTRUCTIONS = `AutoCraft's MCP Connector. AutoCraft runs a maintainer wor
 
 How to help:
 1. Find work: my_items lists your user's items and the ones waiting for an answer, list_repos gives an overview, list_fixups lists pull requests whose review fixes the pipeline could not apply, list_merge_queue shows the merge queue.
-2. Read one: get_item gives an item's state, the open recommendation and how to answer it.
+2. Read one: get_item gives an item's state, the open recommendation, who it asks and how to answer it.
 3. Work it with your user on their machine: check out the code, build, run, compare with the reference app, read the discussion. Explain what you find and let the user decide.
 4. Report back: the result of a fix-up belongs on GitHub (a suggestion or commit on the pull request), made by your user.
 
@@ -173,7 +174,7 @@ const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 export const WORKFLOW_READ_TOOLS = [
   {
     name: "get_item",
-    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and holds it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
+    description: "One item's workflow as every surface shows it: where it stands, the open question (its recommendation, how to answer it, and who it asks: the item's starter and approver), who started, approved and holds it, the plan's parts and the latest commands sent. An item only the automatic merge rule started asks nobody: its state says why it stopped and what AutoCraft would do, and a yes runs that and takes the item over. Only for repositories switched to AutoCraft commands.",
     inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
     annotations: { readOnlyHint: true },
   },
@@ -201,7 +202,7 @@ export const WORKFLOW_COMMAND_TOOLS = [
       properties: {
         item: { type: "string", description: ITEM_HELP },
         text: { type: "string", maxLength: 4000, description: "The command in words, e.g. \"fix-up and merge\", \"urgent\", \"yes\", \"drop 2\". Send only what your user chose." },
-        asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
+        asked: { type: "string", maxLength: 40, description: "With an answer to a recommendation: the workflow.open.asked that came with the recommendation your user read. An answer to one that was replaced since runs nothing." },
       },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -321,16 +322,19 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   }
   const wait = wf ? await legWait(env.db, wf) : null;
   const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);
+  const open = openQuestion(wf);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
       ...(on ? { item: on } : {}),
-      state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), ...(wf.rec && wf.recAt ? { asked: wf.recAt } : {}), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
+      state: stateLine(wf, undefined, undefined, wait),
+      open: open ? { to: open.to, recommendation: recommendationLine(open.rec), ...(wf.recAt ? { asked: wf.recAt } : {}) } : null,
+      weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
+  const header = open ? `${ref} waits for an answer from ${listText(open.to)}. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.open.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
   return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
 

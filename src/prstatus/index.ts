@@ -7,8 +7,9 @@
 // queues the step when a PR's line differs from the one posted; a PR whose writes keep failing waits out a backoff.
 //
 // Every item a person started, issue or PR, gets the comment as soon as it starts, built from the workflow's lines (src/workflow/status.ts): where it stands, who started,
-// approved, answered or held it, its steps, its place in the merge queue, its numbered parts and the open recommendation.
-// A quiet PR's comment carries no parts, recommendation or blocker reason. Items nobody started keep the line above; one that was held
+// approved, answered or held it, its steps, its place in the merge queue, its numbered parts, the open recommendation and who it asks
+// (plain logins, no mention: an edit notifies nobody anyway). A row only the automatic merge rule started asks nobody: its state line
+// says why it stopped and what AutoCraft would do. A quiet PR's comment carries no parts, recommendation or blocker reason. Items nobody started keep the line above; one that was held
 // before anyone started it has no steps, and its comment says so once nobody holds it any more.
 import { commentStatuses, type PublicStatus, type PublicStep } from "../public/status.ts";
 import { guardRepo } from "../core/guard.ts";
@@ -28,7 +29,8 @@ import { t } from "../i18n/index.ts";
 import { freshConfig } from "../data/control/index.ts";
 import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
-import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
+import { attributionLines, currentStep, listText, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
+import { openQuestion } from "../workflow/asked.ts";
 import { heldWork, type ItemWorkflow } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
 
@@ -101,8 +103,9 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
     out.push([t("Parts:"), ...wf.plan.map((p) => `- ${p.state === "dropped" ? t("**{n}** {title} (dropped)", { n: p.n, title: p.title })
       : p.state === "fixed" ? t("**{n}** {title} (fixed)", { n: p.n, title: p.title }) : t("**{n}** {title}", { n: p.n, title: p.title })}`)].join("\n"));
   }
-  const rec = !quiet && !ended ? recommendationLine(wf.rec) : null;
-  if (rec) out.push(rec);
+  const open = ended ? null : openQuestion(wf);
+  if (open && !quiet) out.push(recommendationLine(open.rec)!);
+  if (open) out.push(t("Asks {logins}", { logins: listText(open.to) }));
   return out;
 }
 
@@ -289,7 +292,7 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
       const wf = d.facts.workflow;
       const ended = d.facts.status.step === "Merged" || d.facts.status.step === "Closed";
       const body = wf
-        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && wf.wf.rec !== null, slug, base)
+        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && openQuestion(wf.wf) !== null, slug, base)
         : d.released ? workflowBody(p.repo, d.number, [`**${d.line}**`], false, slug, base)
         : commentBody(p.repo, d.number, d.line, history, d.facts.status.step === "In the merge queue", base);
       const shown = d.line.split("\n")[0];

@@ -34,6 +34,7 @@ import type { ItemBase } from "../../data/views/types.ts";
 import { statusFromItem, type ItemPhase, type ItemStatus } from "../../core/item-status.ts";
 import type { PlanView } from "../../core/plan-cache.ts";
 import { WEIGHT_NORMAL } from "../../workflow/types.ts";
+import { openQuestion } from "../../workflow/asked.ts";
 import { HttpError } from "../server/util.ts";
 import { itemState } from "./shown.ts";
 import { readerOf, statusFor } from "./reader.ts";
@@ -298,8 +299,8 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
 function wfLine(wf: ItemWorkflow | null, unclear: boolean, veiled: boolean): string | null {
   if (unclear) return t("Waiting for a clear answer");
   if (!wf) return null;
-  const rec = veiled ? null : openRecommendation(wf);
-  return rec ? recommendationText(rec) : stateLine(wf);
+  const rec = veiled ? null : openQuestion(wf)?.rec;
+  return rec ? recommendationText(rec) : stateLine(wf, undefined, undefined, null, veiled);
 }
 
 /** GET /api/maintain/waiting: per visible repo, the started items that wait for an answer, for the project picker; repos with none are left out. */
