@@ -371,3 +371,11 @@ export async function withdrawTurn(db: Db, ref: RefKey, by: { login: string; ope
     await withdrawTurnCalls(db, { ref, forLogin: wait.login, reason: why });
   });
 }
+
+/** How many questions `login` put to Opus (operator and maintainer turns) after `since`. */
+export async function countAskedTurns(db: Db, login: string, since: string): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.conversation_turns").select((eb) => eb.fn.countAll().as("n"))
+    .where("login", "=", login).where("kind", "in", ["operator", "maintainer"]).where("at", ">", since));
+  return Number(r?.n ?? 0);
+}

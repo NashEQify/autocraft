@@ -177,8 +177,8 @@ test("a maintainer's message waiting for Opus can be withdrawn from the chat, an
   const db = await seed();
   const k = db.k as any;
   await db.run(k.insertInto("conversations").values({ repo: "photocraft", number: 7, item_block: "", item_sig: "", created_at: at(5), created_by: "maint" }));
-  const turn = await db.run(k.insertInto("conversation_turns").values({ repo: "photocraft", number: 7, kind: "maintainer", login: "maint", at: at(5), body: "Does it clamp?", block: "", status: "pending" }));
-  await db.run(k.insertInto("chat_messages").values({ conversation_id: 1, author: "maint", via: "dashboard", kind: "said", body: "Does it clamp?", payload: null, workflow_event_id: null, turn_id: Number(turn.lastInsertRowid), at: at(5) }));
+  const turn = await db.get(k.insertInto("conversation_turns").values({ repo: "photocraft", number: 7, kind: "maintainer", login: "maint", at: at(5), body: "Does it clamp?", block: "", status: "pending" }).returning("id")) as { id: number | string };
+  await db.run(k.insertInto("chat_messages").values({ conversation_id: 1, author: "maint", via: "dashboard", kind: "said", body: "Does it clamp?", payload: null, workflow_event_id: null, turn_id: Number(turn.id), at: at(5) }));
   const bubble = (c: ItemChat) => c.conversations[0]!.entries.find((e): e is Extract<ChatEntry, { t: "said" }> => e.t === "said" && e.body === "Does it clamp?")!;
 
   assert.deepEqual([bubble(await read(db)).pending, bubble(await read(db)).canWithdraw], [true, true], "an operator may withdraw it");

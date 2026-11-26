@@ -6,14 +6,13 @@ import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatShot, ChatVia, ItemCh
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
 import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, setMessageRefusal, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
-import { loadThreads } from "../../data/conversations/index.ts";
+import { commentDatabaseId, loadThreads } from "../../data/conversations/index.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadScreenshotRuns } from "../../data/merge/index.ts";
 import type { CardRow, ThreadTurn } from "../../data/conversations/types.ts";
 import { loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
 import { loadLegs, loadWorkflowHistory } from "../../data/workflow/index.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
-import { commentDatabaseId } from "../../data/conversations/statements.ts";
 import { t } from "../../i18n/index.ts";
 import { askedLogins } from "../../workflow/asked.ts";
 import { yesClause, yesNext } from "../../workflow/status.ts";

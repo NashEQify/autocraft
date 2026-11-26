@@ -313,6 +313,21 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
   return Number(r?.n ?? 0);
 }
 
+/** The id of the newest workflow event, 0 when there is none. */
+export async function loadLastEventId(db: Db): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.max("id").as("m")));
+  return Number(r?.m ?? 0);
+}
+
+/** The id of the newest event `login` wrote on the item through `via` with an id above `after`, or null. */
+export async function loadNewestEventBy(db: Db, f: { repo: string; number: number; login: string; via: string; after: number }): Promise<number | null> {
+  const q = queryDb(db);
+  const e = await q.get(q.k.selectFrom("main.workflow_events").select("id").where("repo", "=", f.repo).where("number", "=", f.number)
+    .where("login", "=", f.login).where("via", "=", f.via as never).where("id", ">", f.after).orderBy("id", "desc").limit(1));
+  return e ? Number(e.id) : null;
+}
+
 /** Items a login started, approved or answered on after `since` whose number is one of `numbers`, newest first, each once. */
 export async function loadLoginItems(db: Db, f: { login: string; numbers: number[]; since: string }): Promise<{ repo: string; number: number; at: string }[]> {
   if (!f.numbers.length) return [];

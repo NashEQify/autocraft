@@ -5,7 +5,7 @@ import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandTe
 import { queueReason } from "../../conversations/queue.ts";
 import { cardDigest, type CardRow } from "../../conversations/act.ts";
 import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
-import { ConversationError, loadQueue, type Queue } from "../../data/conversations/index.ts";
+import { ConversationError, countAskedTurns, loadQueue, type Queue } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -15,7 +15,6 @@ import { githubIdentity } from "../../github/identity.ts";
 import { canActMany, permKey } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
-import { queryDb } from "../../db/query-db.ts";
 import { tierOfModel } from "../../remote/mode.ts";
 import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
 import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
@@ -140,10 +139,7 @@ export const ASK_LIMITS = { hour: 10, day: 50 } as const;
 
 /** Throws 429 when the user has put ASK_LIMITS questions to Opus in the last hour or day. */
 export async function assertAskRate(db: Db, login: string): Promise<void> {
-  const q = queryDb(db);
-  const since = (ms: number) => new Date(Date.now() - ms).toISOString();
-  const count = async (ms: number) => Number((await q.get(q.k.selectFrom("main.conversation_turns").select((eb) => eb.fn.countAll().as("n"))
-    .where("login", "=", login).where("kind", "in", ["operator", "maintainer"]).where("at", ">", since(ms))))?.n ?? 0);
+  const count = (ms: number) => countAskedTurns(db, login, new Date(Date.now() - ms).toISOString());
   if (await count(3_600_000) >= ASK_LIMITS.hour || await count(86_400_000) >= ASK_LIMITS.day) throw new HttpError(429, "Too many questions to Opus. Try again later.");
 }
 

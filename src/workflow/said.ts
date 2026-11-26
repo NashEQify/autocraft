@@ -7,12 +7,12 @@
 // (the chat's rule, dash/api/conversations.ts canTalk). A command that ran nothing and wrote no event keeps its reply on its message
 // (`payload.refusal`), so the chat shows the answer after a reload.
 import * as access from "../data/access/index.ts";
-import { linkMessage, recordMessages, setMessageRefusal } from "../data/chat/index.ts";
+import { linkMessage, loadCommentMessage, recordMessages, setMessageRefusal } from "../data/chat/index.ts";
 import type { ChatVia } from "../data/chat/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
+import { loadLastEventId, loadNewestEventBy } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
-import { queryDb } from "../db/query-db.ts";
 import { ownerOf } from "../owners.ts";
 import type { CommandResult } from "./apply.ts";
 import type { ItemRef } from "./types.ts";
@@ -58,13 +58,6 @@ async function storable(db: Db, o: SaidInput): Promise<ItemRef[]> {
   return out;
 }
 
-/** The id of the newest workflow event; events written after it are the command's. */
-async function lastEventId(db: Db): Promise<number> {
-  const q = queryDb(db);
-  const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.max("id").as("m")));
-  return Number(r?.m ?? 0);
-}
-
 /** Stores the text as one message on each item it may be stored on (`storable`). Failures are logged, not thrown. */
 export async function recordSaid(db: Db, o: SaidInput): Promise<Said[]> {
   const body = o.text.trim();
@@ -89,12 +82,10 @@ export async function linkSaid(db: Db, said: readonly Said[], o: { login: string
   const linked = new Set<number>();
   if (!said.length) return linked;
   try {
-    const q = queryDb(db);
     for (const s of said) {
-      const e = await q.get(q.k.selectFrom("main.workflow_events").select("id").where("repo", "=", s.repo).where("number", "=", s.number)
-        .where("login", "=", o.login).where("via", "=", o.via as never).where("id", ">", o.after).orderBy("id", "desc").limit(1));
-      if (e) {
-        await linkMessage(db, s.id, { workflowEventId: Number(e.id) });
+      const e = await loadNewestEventBy(db, { repo: s.repo, number: s.number, login: o.login, via: o.via, after: o.after });
+      if (e !== null) {
+        await linkMessage(db, s.id, { workflowEventId: e });
         linked.add(s.id);
       }
     }
@@ -117,7 +108,7 @@ function replyOf(s: Said, res: CommandResult): string | null {
 
 /** Stores the text as a message on its items, runs the command, links the messages to the events it wrote and keeps the reply on the others. */
 export async function saying(db: Db, o: SaidInput, run: () => Promise<CommandResult>): Promise<CommandResult> {
-  const after = await lastEventId(db).catch(() => 0);
+  const after = await loadLastEventId(db).catch(() => 0);
   const said = await recordSaid(db, o);
   let res: CommandResult | null = null;
   try {
@@ -135,10 +126,7 @@ export async function saying(db: Db, o: SaidInput, run: () => Promise<CommandRes
 /** The stored message of a GitHub comment, or none. */
 export async function saidByComment(db: Db, commentId: number): Promise<Said | null> {
   try {
-    const q = queryDb(db);
-    const m = await q.get(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
-      .select(["m.id as id", "c.repo as repo", "c.number as number"]).where("m.github_comment_id", "=", commentId));
-    return m && m.repo ? { id: Number(m.id), repo: m.repo, number: Number(m.number) } : null;
+    return await loadCommentMessage(db, commentId);
   } catch {
     return null;
   }
@@ -146,7 +134,7 @@ export async function saidByComment(db: Db, commentId: number): Promise<Said | n
 
 /** Runs a GitHub comment's command and links the comment's stored message to the event it wrote. */
 export async function linkingComment<T>(db: Db, commentId: number, login: string, run: () => Promise<T>): Promise<T> {
-  const after = await lastEventId(db).catch(() => 0);
+  const after = await loadLastEventId(db).catch(() => 0);
   try {
     return await run();
   } finally {

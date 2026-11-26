@@ -1,5 +1,4 @@
 // Conversations and their messages (`chat_conversations`, `chat_messages`): the chat of an item.
-import { sql } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
@@ -37,11 +36,10 @@ const messageOf = (r: MessageDbRow): ChatMessageRow => ({
 });
 
 /** The title a new main conversation takes: the entry of the item's first workflow, or UNTITLED before it has one. */
-const titleOf = (db: Db, repo: string, number: number) => {
-  const q = queryDb(db);
-  const first = q.k.selectFrom("main.item_workflows as w").select(kx.caseOf(sql.ref("w.entry"), Object.entries(ENTRY_LABEL)).as("title"))
+const titleOf = (q: ReturnType<typeof queryDb>, repo: string, number: number) => {
+  const first = q.k.selectFrom("main.item_workflows as w").select(kx.caseOf("w.entry", Object.entries(ENTRY_LABEL)).as("title"))
     .where("w.repo", "=", repo).where("w.number", "=", number).orderBy("w.id").limit(1);
-  return sql<string>`COALESCE((${first}), ${UNTITLED})`;
+  return q.k.fn.coalesce(first, kx.literal(UNTITLED));
 };
 
 /**
@@ -57,9 +55,9 @@ export async function ensureMainConversations(db: Db, items: readonly { repo: st
   await db.write(async () => {
     for (const part of kx.batches([...byKey.values()])) {
       await q.run((q.k as any).insertInto("main.chat_conversations").values(part.map((i) => ({
-        repo: i.repo, number: i.number, is_main: 1, title: titleOf(db, i.repo, i.number), created_at: i.at ?? now, created_by: i.by,
+        repo: i.repo, number: i.number, is_main: 1, title: titleOf(q, i.repo, i.number), created_at: i.at ?? now, created_by: i.by,
       // A conflict target repeats a partial index's predicate as written there: a bound value does not match it.
-      }))).onConflict((oc: any) => oc.columns(["repo", "number"]).where(sql`is_main = 1`).doNothing()));
+      }))).onConflict((oc: any) => oc.columns(["repo", "number"]).where("is_main", "=", kx.literal(1)).doNothing()));
       const got = await q.all(q.k.selectFrom("main.chat_conversations as c").select(["c.id", "c.repo", "c.number"]).where("c.is_main", "=", 1)
         .where(kx.refIn(db, "c", part.map((i) => keyOf(i.repo, i.number)))), { label: "chat.ensureMainConversations" });
       for (const r of got) out.set(keyOf(r.repo!, Number(r.number)), Number(r.id));
@@ -116,7 +114,7 @@ export async function recordMessages(db: Db, ms: readonly NewChatMessage[]): Pro
         conversation_id: convs.get(keyOf(m.repo, m.number))!, author: m.author, via: m.via, kind: m.kind, body: m.body,
         payload: m.payload === undefined || m.payload === null ? null : JSON.stringify(m.payload),
         workflow_event_id: m.workflowEventId ?? null, turn_id: m.turnId ?? null, workflow_id: m.workflowId ?? null, github_comment_id: m.githubCommentId ?? null, at: m.at ?? now,
-      }))).onConflict((oc: any) => oc.column("github_comment_id").where(sql`github_comment_id IS NOT NULL`).doNothing()).returning(MESSAGE_COLS)) as MessageDbRow[];
+      }))).onConflict((oc: any) => oc.column("github_comment_id").where("github_comment_id", "is not", null).doNothing()).returning(MESSAGE_COLS)) as MessageDbRow[];
       out.push(...got.map(messageOf).sort((a, b) => a.id - b.id));
     }
     const stored = new Set(out.flatMap((m) => (m.githubCommentId === null ? [] : [m.githubCommentId])));
@@ -134,6 +132,14 @@ export async function recordMessage(db: Db, m: NewChatMessage): Promise<ChatMess
   const [row] = await recordMessages(db, [m]);
   if (!row) throw new Error(`chat: message on ${m.repo}#${m.number} was not stored`);
   return row;
+}
+
+/** The item and id of the message stored for a GitHub comment, or null. */
+export async function loadCommentMessage(db: Db, commentId: number): Promise<{ id: number; repo: string; number: number } | null> {
+  const q = queryDb(db);
+  const m = await q.get(q.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
+    .select(["m.id as id", "c.repo as repo", "c.number as number"]).where("m.github_comment_id", "=", commentId));
+  return m && m.repo ? { id: Number(m.id), repo: m.repo, number: Number(m.number) } : null;
 }
 
 /** Links a stored message to what it produced: the workflow event of its command, or the turn of its question. Joins the caller's `db.write`. */

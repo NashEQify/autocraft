@@ -18,10 +18,8 @@ import { healthOptions } from "../../health-checks.ts";
 import { mainCiRepos } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadLastEntries, loadMineRefs, type LastEntry } from "../../data/chat/index.ts";
-import { loadItems } from "../../data/mirror/index.ts";
+import { loadItems, loadRecentRefs } from "../../data/mirror/index.ts";
 import { listWorkflows } from "../../data/workflow/index.ts";
-import * as kx from "../../db/kx.ts";
-import { queryDb } from "../../db/query-db.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -107,9 +105,8 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   ]);
   if (viewer) {
     // The newest updated items of the repos a viewer sees.
-    const q = queryDb(db);
-    const recent = repos.length ? await q.all(q.k.selectFrom("main.items as i").select(["i.repo", "i.number"]).where(kx.inList(db, "i.repo", repos)).orderBy("i.updated_at", "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(MINE_ROWS), { label: "home.recent" }) : [];
-    return { mine: [], mineTotal: 0, recent: await homeRows(db, recent.map((r) => `${r.repo}#${Number(r.number)}`), { login: null, staff }), runner: null, attention };
+    const recent = await loadRecentRefs(db, repos, MINE_ROWS);
+    return { mine: [], mineTotal: 0, recent: await homeRows(db, recent.map((r) => `${r.repo}#${r.number}`), { login: null, staff }), runner: null, attention };
   }
   const visible = new Set(repos);
   const mineRefs = (await loadMineRefs(db, req.user.login, { doneDays: MINE_DONE_DAYS, nowMs })).filter((r) => visible.has(refParts(r).repo));
