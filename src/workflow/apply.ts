@@ -19,6 +19,8 @@ import { ACTION_WAITS } from "../core/may.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { redAtHead } from "../core/decide.ts";
+import { loadRunnerRoom } from "../core/runner-room.ts";
+import { envVar } from "../env.ts";
 import { loadPrFact } from "../core/facts.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -32,7 +34,7 @@ import { isOpenQuestion } from "./question.ts";
 import { premergeParts } from "./premerge.ts";
 import { atBlocker } from "./recommend.ts";
 import { isLive, premergeStopped, resolve, type Refusal, type Run } from "./resolve.ts";
-import { attributionLines, confirmLine, currentStep, listText, recommendationLine, recommendationText, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
+import { approvedNowLine, attributionLines, confirmLine, currentStep, listText, recommendationLine, recommendationText, replyLine, runnerLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
 import { asksForApprover, heldWork, openRecommendation, RULE_STARTER, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
@@ -66,7 +68,7 @@ export type CommandInput = {
   proposed?: string;
 };
 
-export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string }; /** Why a clear command is not possible on the item. */ refusal?: Refusal["why"] };
+export type ItemOutcome = { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null; /** The question the line shows: it took the place of the one the person answered. */ question?: { workflowId: number; recAt: string }; /** Why a clear command is not possible on the item. */ refusal?: Refusal["why"]; /** A list item's Task Runner line (runnerLine), which the reply shows once. */ runners?: string };
 export type CommandResult = { items: ItemOutcome[]; lines: string[] };
 
 /** The actions that close an item as the person, and their states before they end. */
@@ -197,6 +199,7 @@ export async function runCommand(db: Db, actor: Actor, via: Surface, input: Comm
   const lines = items.map((o) => (many ? t("{ref}: {line}", { ref: refText(o.repo, o.number), line: o.line }) : o.line));
   const failed = items.filter((o) => o.outcome !== "run");
   if (many && failed.length) lines.push(t("Not run: {refs}.", { refs: listText(failed.map((o) => refText(o.repo, o.number))) }));
+  lines.push(...new Set(items.flatMap((o) => (o.runners ? [o.runners] : []))));
   return { items, lines };
 }
 
@@ -321,10 +324,14 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const line = t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: `${replyLine(r, input.clock, input.mention)} ${t("Already asked: {question}", { question: recommendationText(wf!.rec!) })}` });
     return { ...out("refused", reply(line), wf!.id), ...(wf!.recAt ? { question: { workflowId: wf!.id, recAt: wf!.recAt } } : {}) };
   }
-  if (r.kind === "refused") return { ...out("refused", reply(replyLine(r, input.clock, input.mention)), wf?.id ?? null), refusal: r.refusal.why };
+  if (r.kind === "refused") {
+    const now = r.refusal.why === "already-approved" && wf ? approvedNowLine(wf, input.clock) : null;
+    return { ...out("refused", reply([replyLine(r, input.clock, input.mention), now].filter((x) => x !== null).join(" ")), wf?.id ?? null), refusal: r.refusal.why };
+  }
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
+    const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on.repo, login, input.clock);
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
@@ -334,17 +341,33 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     const line = confirmLine(r.run, login, at, input.clock ?? utcClock, done.waits) + (done.failed.length ? ` ${t("Could not stop: {what}.", { what: done.failed.join("; ") })}` : "")
       + (done.note ? ` ${done.note}` : "")
       + (more.length ? ` ${t("The work on {refs} is held too.", { refs: listText(more.map((x) => refText(x.item.repo, x.item.number))) })}` : "")
-      + (close !== on ? ` ${t("{ref} closes; {on} stays open and its work ends.", { ref, on: refText(on.repo, on.number) })}` : "");
+      + (close !== on ? ` ${t("{ref} closes; {on} stays open and its work ends.", { ref, on: refText(on.repo, on.number) })}` : "")
+      + (runners && !batch.many ? ` ${runners}` : "");
     const id = await db.write(async () => {
       const id = await done.commit();
       const started = done.started ? [event("stopped", wf!.id, noted(line))] : [];
       await recordEvents(db, [event(eventKind(r.run), id, noted(line), done.started), ...started, ...more.map((x) => event("stopped", x.workflow!.id, line, x.item))]);
       return id;
     });
-    return out("run", reply(line), id);
+    return { ...out("run", reply(line), id), ...(runners && batch.many ? { runners } : {}) };
   } catch (e) {
     if (!(e instanceof fx.EffectError)) throw e;
     return out("refused", t("Nothing ran on {ref}: {why}", { ref: refText(on.repo, on.number), why: e.message }), wf?.id ?? null);
+  }
+}
+
+/** A run that gives a Task Runner work: anything but an end, an autorepin, a weight alone and a resume of what nobody started. */
+const needsRunner = (r: Run): boolean =>
+  r.end === null && r.autorepin === null && r.resume !== "unstarted"
+  && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0);
+
+/** The Task Runner line for work `login` started or approved on `repo` (runnerLine); null when there is nothing to say or the runners could not be read. */
+async function runnerNotice(db: Db, repo: string, login: string, clock: Clock = utcClock): Promise<string | null> {
+  try {
+    const connect = `${envVar("BASE_URL")?.replace(/\/+$/, "") ?? ""}/connect`;
+    return runnerLine(await loadRunnerRoom(db, repo, login), repo, connect, clock);
+  } catch {
+    return null;
   }
 }
 

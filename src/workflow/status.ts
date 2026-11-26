@@ -296,6 +296,35 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   return t("{what}{weight} {by}. Reply hold to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
 }
 
+/**
+ * The line a confirmation adds about the Task Runners (src/core/runner-room.ts RunnerRoom): why none can take the work now, and the
+ * setup page for a person with no Task Runner of their own; null when one can and the person has their own. `connect`: the setup page's URL.
+ */
+export function runnerLine(room: { can: boolean; own: boolean; why?: "none" | "held" | "own-held"; until?: string | null }, repo: string, connect: string, clock: Clock = utcClock): string | null {
+  if (room.can) return room.own ? null : t("You have no Task Runner yet: {url}", { url: connect });
+  const until = room.until ? clock(room.until) : null;
+  const reason = room.why === "own-held"
+    ? until ? t("your Task Runner is held by its usage limit until {time}", { time: until }) : t("your Task Runner is held by its usage limit")
+    : room.why === "held"
+      ? until ? t("the Task Runners that may take {repo} are held by their usage limit until {time}", { repo, time: until }) : t("the Task Runners that may take {repo} are held by their usage limit", { repo })
+      : t("no Task Runner that may take {repo} is ready", { repo });
+  const line = t("No Task Runner can take this right now ({reason}). It starts when one is free.", { reason });
+  return room.own ? line : `${line} ${t("Set up your own Task Runner: {url}", { url: connect })}`;
+}
+
+/**
+ * Where approved work stands, for a refusal that says it is already approved: the state line and the steps still to come, the merge
+ * with its checks. Null when no step is current.
+ */
+export function approvedNowLine(wf: ItemWorkflow, clock: Clock = utcClock): string | null {
+  const steps = workflowSteps(wf, "other");
+  const current = currentStep(steps);
+  if (!current) return null;
+  const next = steps.filter((s) => s.state === "next").map((s) => (s.name === "merge" ? t("{step} {checks}", { step: stepLabel(s), checks: AFTER_CHECKS() }) : stepLabel(s)));
+  const now = stateLine(wf, current, clock);
+  return next.length ? t("{state}. Next: {steps}.", { state: now, steps: listText(next) }) : t("{state}.", { state: now });
+}
+
 /** The reply when nothing ran: what was understood, and why it waits. `proposed`: a command a model read in text the parser could not read. */
 export function replyLine(r: Exclude<Resolved, { kind: "run" }>, clock: Clock = utcClock, mention?: string, proposed?: string): string {
   return r.kind === "ambiguous" ? ambiguityText(r.understood, r.ambiguity, mention, proposed) : refusalText(r.refusal, clock);
