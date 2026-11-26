@@ -201,7 +201,7 @@ async function start(run: BuildRun, deps: ReviseDeps, impl: Implementation, roun
   let ci: CiFailure | null = null, ciSkip: string | null = null;
   if (due.ci) {
     const reading = await readFailure(deps.gh, impl.repo, head, await optionalChecks(db, impl.repo));
-    if (reading.kind === "failure") ci = reading.failure;
+    if (reading.kind !== "skip") ci = reading.failure;
     else ciSkip = reading.why;
   }
   const result: ReviseRound = { prNumber: pr, head, from, review: !!review, ci: !!ci, message: reviseMessage(pr, review, ci) };

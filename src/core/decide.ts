@@ -386,6 +386,9 @@ export type CifixBucket = "unreviewed" | "comment-wait" | "work" | "unapproved" 
 /** A person approved the PR's merge (or started it at the merge queue): its red CI is AutoCraft's to fix, and what the CI fix gives up on goes back to that person, never to the contributor. */
 export const mergeOwned = (f: PrFacts): boolean => { const w = workflowOf(f); return !!w && (w.approved || w.entry === "merge"); };
 
+/** The CI fix may have the failed jobs rerun: the repo approves CI reruns, and a review read the head (none at a head the contributor pushed). */
+export const cifixMayRerun = (f: PrFacts): boolean => f.repoFacts.ciApproved && !f.gateRed;
+
 /** CI is red at the head, the review gate waits on it, and no take review covers the head. */
 function unreviewedRed(f: PrFacts): boolean {
   const r = f.review;
@@ -447,7 +450,7 @@ function cifixOf(f: PrFacts): "work" | "collect" | "rerun" | "capped" | "ask" | 
   // A PR a person approved for merge goes back to that person instead (its workflow stops with the question).
   if ((b === "failed" || b === "capped") && f.repoFacts.commentApproved && !f.quiet && !f.brokeByUs && !mergeOwned(f) && fixupOf(f)?.bucket !== "asked") return "ask";
   // No rerun at a head the contributor pushed that no review has read.
-  if (b === "rerun") return f.repoFacts.ciApproved && !f.gateRed ? "rerun" : "other";
+  if (b === "rerun") return cifixMayRerun(f) ? "rerun" : "other";
   return b === "work" || b === "collect" || b === "capped" ? b : "other";
 }
 

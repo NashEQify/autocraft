@@ -375,7 +375,8 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     };
     try {
       const r = await readFailure(gh, repo, b.commit_sha, await optionalChecks(db, repo));
-      return r.kind === "failure" ? r.failure : null;
+      // A log not readable yet still names the failed checks and their runs: the batch traces nothing in it and reruns or waits.
+      return r.kind === "skip" ? null : r.failure;
     } catch {
       return null;
     }

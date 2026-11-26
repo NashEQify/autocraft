@@ -2,6 +2,7 @@
 import { mayRun, permit, pushPermission } from "../core/authority.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
+import { cifixMayRerun } from "../core/decide.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { CifixCandidate, CifixSelection } from "./candidates.ts";
@@ -19,7 +20,7 @@ export async function selectCifix(db: Db, repo: string, run?: string | null, pla
     const c: CifixCandidate = {
       repo, number: f.number, head: action.head!, verdict: r?.verdict === "take-fix" ? "take-fix" : "take", reason: r?.reason ?? "", attempt: x.tries + 1,
       route: f.pushable ? "branch" : "comment", mayPush: pushPermission(f, "cifix").ok, mayComment: mayComment(f), rerun: x.rerunAt !== null, rerunAt: x.rerunAt,
-      unreads: x.unreads, mayRerun: f.repoFacts.ciApproved && !f.gateRed, author: f.authorIsPipeline ? null : f.author,
+      unreads: x.unreads, mayRerun: cifixMayRerun(f), author: f.authorIsPipeline ? null : f.author,
     };
     const bucket = action.params?.bucket;
     if (bucket === "work") out.work.push(c);

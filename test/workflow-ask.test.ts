@@ -481,7 +481,8 @@ test("red CI that ended the merge leg is one question: green CI closes it and a 
     await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head: "sha1", kind: "code", state: "capped", attempt: 1, created_at: new Date().toISOString() }));
     await settle(w);
     const asked = await wf(w), blocked = async () => (await eventsOf(w.db, "app", 1)).filter((e) => e.kind === "blocked").length;
-    assert.deepEqual([asked.state, asked.rec?.cause?.code, await leg(w), await blocked()], ["blocked", "red-ci", "failed", 1], `own: ${own}`);
+    // The approver is asked as soon as the CI fix gives up; the question's block ends the leg.
+    assert.deepEqual([asked.state, asked.rec?.cause?.code, await leg(w), await blocked()], ["blocked", "red-ci", "cancelled", 1], `own: ${own}`);
     await pause();
     await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success", checks: "[]" }));
     await settle(w);

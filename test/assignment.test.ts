@@ -53,7 +53,8 @@ test("a fix-up that gave up asks the contributor, then releases the PR, unless i
 test("a take-fix PR with a conflict give-up, an ended CI fix and CI runs a maintainer approves are released; a refused merge is kept", () => {
   const held = { mergeable: "CONFLICTING", conflict: { bucket: "held", base: "main", baseOk: true } };
   assert.equal(unassigns(decidePr(prFacts({ review: { verdict: "take-fix" }, fixup: { fixes: 0, attempts: 0, recorded: [] as string[] }, ...held, assignment: ours }))), true, "conflict held, take-fix");
-  const cifix = (states: string[]) => ({ ci: "failure", cifix: { states, tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, checksAt: null }, assignment: ours });
+  // `askedPatch`: the asked row is a posted patch, which ends the CI fix on a PR approved for merge (a plain ask to the contributor does not).
+  const cifix = (states: string[]) => ({ ci: "failure", cifix: { states, tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, checksAt: null, askedPatch: true }, assignment: ours });
   assert.equal(unassigns(decidePr(prFacts(cifix(["asked"])))), true, "CI fix ended without a push");
   assert.equal(unassigns(decidePr(prFacts(cifix([])))), false, "CI fix due");
   assert.equal(unassigns(decidePr(prFacts({ runs: { waiting: 1, reread: false, crossRepo: true, approvable: 1 }, repoFacts: { ciApproved: false }, assignment: ours }))), true, "CI runs wait for a maintainer");

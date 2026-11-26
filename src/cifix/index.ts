@@ -782,7 +782,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       }
       const g = await guard(db, { repo, number: c.number }, { kind: "cifix", bucket: "ask", head: c.head }, params.by ?? CLI_BY, liveOf(db, d.querier));
       if ("refused" in g) { summary.skipped.push(ref); log(`  ${ref}: skipped: ${g.refused}`); continue; }
-      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.kind === "unread" ? reading.checks : reading.failure.checks.map((x) => x.name), c.author ?? null), { run: runId, head: c.head });
+      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.failure.checks.map((x) => x.name), c.author ?? null), { run: runId, head: c.head });
       if (cm.code !== 0) {
         const reason = `the comment ${cm.sent === false ? "was not sent" : "failed"}: ${scrubReason(oneLine(cm.stderr), d.root)}`;
         await rec.set(c, "code", cm.sent === false ? "comment-unsent" : "comment-failed", reason);
