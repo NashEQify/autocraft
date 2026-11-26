@@ -17,3 +17,8 @@ export async function roundHeadOf(db: Db, c: { repo: string; number: number; hea
   if (wf?.kind !== "pr" || wf.number !== c.number) return null;
   return authorRound({ approved: wf.approvedBy !== null, baseHead: wf.baseHead }, pushes.get(ref) ?? [], c.head_oid);
 }
+
+/** Why a round's review was not made (the review's reason; src/workflow/advance.ts stops for the approver with it): the new commits could not be told apart from a PR too large to review whole. */
+export const ROUND_UNSEPARATED = "the author's new commits could not be separated from the rest of this large pull request";
+/** As `ROUND_UNSEPARATED`: what the new commits changed is itself over the review's size cap. */
+export const ROUND_DELTA_LARGE = "the author's new commits are too large to review automatically";

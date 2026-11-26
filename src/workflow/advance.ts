@@ -33,6 +33,7 @@ import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
+import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED } from "../core/author-round.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
 import { startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
@@ -92,6 +93,12 @@ const key = (repo: string, n: number): string => `${repo}#${n}`;
 
 /** Whether our own pushes lead from `from` to `to`. */
 const ownChain = (pass: Pass, ref: string, from: string, to: string): boolean => chainsOwn(pass.moves.get(ref) ?? [], from, to);
+
+/** Why the review round's review was not made, as the approver reads it (src/review/opus.ts writes the reason). */
+const unreadReason = (reason: string): string =>
+  reason === ROUND_UNSEPARATED ? t("the author's new commits could not be separated from the rest of this large pull request")
+    : reason === ROUND_DELTA_LARGE ? t("the author's new commits are too large to review automatically")
+      : t("the pull request is too large to review automatically");
 
 const reviewAt = (pass: Pass, ref: string, head: string): ReviewRow | null => pass.reviews.get(ref)?.find((r) => r.head === head) ?? null;
 
@@ -538,12 +545,15 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // finds the commits within what was approved; one that finds them beyond it asks the approver, naming its public finding. A merge entry
   // owes the review as one a person asked for, so the planner makes it and the new leg waits for it.
   if (w.kind === "pr" && authorPush && approved) {
-    if (stored && (stored.mode === "carried" || stored.workflow?.author_commits?.in_scope !== false)) {
+    // A review hold written without a model call (too large to review) judged nothing: the approver decides.
+    const unread = stored !== null && stored.model === null;
+    if (stored && !unread && (stored.mode === "carried" || stored.workflow?.author_commits?.in_scope !== false)) {
       Object.assign(patch, { baseHead: head, acceptedHead: head });
       authorPush = null;
     } else {
       let round: Found | null = null;
-      if (stored) round = { blocker: "author-commits", params: { from: authorPush.from, to: head, round: "out-of-scope", ...(stored.public_summary ? { finding: stored.public_summary } : {}) } };
+      if (unread) round = { blocker: "other", params: { reason: unreadReason(stored.reason), round: "too-large" } };
+      else if (stored) round = { blocker: "author-commits", params: { from: authorPush.from, to: head, round: "out-of-scope", ...(stored.public_summary ? { finding: stored.public_summary } : {}) } };
       else if (read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined) {
         round = { blocker: "other", params: { reason: t("the review of the author's new commits failed"), round: "review-failed" } };
       }

@@ -1,12 +1,15 @@
 // The review round: commits the author pushes to a PR approved for merge are reviewed, not asked about. A push that leaves the PR's
 // own diff as reviewed keeps the review without a model call, a review that finds the commits within the approval goes on, and one
-// that finds them beyond it asks the approver.
+// that finds them beyond it asks the approver. The PR's own diffs come from git, never from the diff cache of an earlier process.
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { diffCacheDir, type DiffResult } from "../src/review/diff.ts";
+import { exec, Git } from "../src/fixup/git.ts";
+import { diffCacheDir } from "../src/review/diff.ts";
 import { prepareOpusInput, runOpusReview, type OpusDeps } from "../src/review/opus.ts";
+import { ownDiffsAt } from "../src/review/round-diff.ts";
 import { selectOpusCandidates } from "../src/review/opus-candidates.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
@@ -14,9 +17,30 @@ import { liveWorkflow } from "../src/workflow/store.ts";
 import { approvedReview, ticks } from "./workflow-advance-world.ts";
 import { tmpdir } from "./world-db.ts";
 
-/** One hunk of `file` that changes `a` at line `at`, with context lines of its own. */
-const hunk = (at: number, context: string, line = "+a: 2", file = "src/lib.rs") => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -${at},2 +${at},2 @@\n ${context}\n-a: 1\n${line}\n`;
-const deps = (text: string): OpusDeps => ({ fetchDiff: async (): Promise<DiffResult> => ({ ok: true, text }), fetchDelta: async () => ({ ok: false, tooLarge: false, error: "unused" }), model: "opus", maxChars: 120_000 });
+const git = (dir: string, ...args: string[]): string => execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args],
+  { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+
+/**
+ * The PR's branches, named as the PR's heads: `sha1` (approved) changes `a`; then main changes `m` and adds a file, the author merges main
+ * (`merged`), and adds `src/b.rs` (`theirs`). The reviews read each head's own diff against main, as GitHub and the round's git reader do.
+ */
+function prRepo(root: string): { deps: OpusDeps } {
+  const dir = join(root, "app");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const lib = (a: string, m: string) => writeFileSync(join(dir, "src/lib.rs"), ["fn a() {", a, ...Array.from({ length: 40 }, (_, i) => `l${i}`), "fn m() {", m, ""].join("\n"));
+  const commit = (msg: string) => { git(dir, "add", "-A"); git(dir, "commit", "-qm", msg); };
+  git(dir, "init", "-q", "-b", "main");
+  lib("a: 1", "m: 1"); commit("base");
+  git(dir, "checkout", "-qb", "sha1"); lib("a: 2", "m: 1"); commit("approved");
+  git(dir, "checkout", "-q", "main"); lib("a: 1", "m: 2"); writeFileSync(join(dir, "src/main_only.rs"), "x\n"); commit("main moves");
+  git(dir, "checkout", "-qb", "merged", "sha1"); git(dir, "merge", "-q", "--no-edit", "main");
+  git(dir, "checkout", "-qb", "theirs"); writeFileSync(join(dir, "src/b.rs"), "b: 3\n"); commit("new");
+  const repo = new Git(exec, root, "app/.git");
+  return { deps: {
+    fetchDiff: async (_r, _n, head) => ({ ok: true, text: git(dir, "diff", `main...${head}`) }), fetchDelta: async () => ({ ok: false, tooLarge: false, error: "unused" }),
+    ownDiffs: async (_r, _n, _b, from, to) => await ownDiffsAt(repo, from, to, "main"), model: "opus", maxChars: 120_000,
+  } };
+}
 const reviewed = async (w: Awaited<ReturnType<typeof approvedReview>>, head: string, workflow: object | null, summary: string | null = null) =>
   await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
     repo: "app", number: 1, head_oid: head, run_id: "rv", at: new Date().toISOString(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r",
@@ -25,11 +49,10 @@ const reviewed = async (w: Awaited<ReturnType<typeof approvedReview>>, head: str
 
 test("the author's commits on an approved PR are reviewed: an unchanged diff carries the review, in scope goes on, out of scope asks", async () => {
   process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("author-round"), "cache");
+  const { deps } = prRepo(tmpdir("author-round-git"));
   const w = await approvedReview();
-  // The review at the approved head, with the diff it read.
+  // The review at the approved head, made by another runner process: this one has no diff cached for it.
   await reviewed(w, "sha1", null);
-  mkdirSync(join(diffCacheDir(), "app"), { recursive: true });
-  writeFileSync(join(diffCacheDir(), "app", "1-sha1.diff"), hunk(1, "fn a() {"));
   await ticks(w);
 
   // (a) The author merges the base branch: the PR's own change is the same lines at another place, so the review carries without a model call.
@@ -38,21 +61,25 @@ test("the author's commits on an approved PR are reviewed: an unchanged diff car
   const round = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([round.state, round.blocker, round.step], ["running", null, "review new commits"]);
   // No Task Runner is connected, so only a review that needs no model call can be made.
-  await runOpusReview(w.db, { repo: "app" }, () => {}, deps(hunk(40, "// moved by main")));
+  await runOpusReview(w.db, { repo: "app" }, () => {}, deps);
+  assert.equal(existsSync(join(diffCacheDir(), "app", "1-sha1.diff")), false);
   assert.deepEqual((await w.rows("SELECT mode FROM opus_reviews WHERE head_oid = 'merged'")).map((r) => r.mode), ["carried"]);
   await ticks(w);
   const carried = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([carried.state, carried.blocker, carried.baseHead, carried.approvedBy], ["running", null, "merged", round.approvedBy]);
 
-  // (b) A commit that changes the code: Opus reads what the PR's own diff gained, told the approved head; a review in scope goes on to the merge.
+  // (b) A commit that changes the code: Opus reads what the PR's own diff gained (not main's changes the merge brought), told the heads and
+  // the files the new commits touch; a review in scope goes on to the merge.
   await w.synced(1, "theirs");
   await advanceWorkflows(w.db);
   // The review is due at once, whatever the interval since the carried one, and reads what the PR's own diff gained.
   const [cand] = await selectOpusCandidates(w.db, "app");
   assert.equal(cand?.head_oid, "theirs");
-  const p = await prepareOpusInput(w.db, "app", cand!, deps(hunk(40, "// moved by main") + hunk(90, "fn b() {", "+b: 3", "src/b.rs")), () => {});
+  const p = await prepareOpusInput(w.db, "app", cand!, deps, () => {});
   assert.ok(p.kind === "ready");
-  assert.deepEqual([p.input.mode, p.input.author_commits, p.input.diff.includes("+b: 3"), p.input.diff.includes("+a: 2")], ["delta", { approved_head: "merged" }, true, false]);
+  assert.deepEqual([p.input.mode, p.input.author_commits], ["delta", { approved_head: "merged", new_head: "theirs", separated: true, files: ["src/b.rs"] }]);
+  assert.match(p.input.diff, /\+b: 3/);
+  assert.doesNotMatch(p.input.diff, /a: 2|m: 2|main_only/);
   const reply = JSON.stringify({ ref: "app#1", verdict: "take", sure: true, reason: "fine", fixes: [], risks: [], summary: "s.", why: "w.", public: { summary: "p", points: [] }, author_commits: { in_scope: true, note: "a fix" }, claims: [] });
   assert.deepEqual(parseOpusReply(reply, "app#1")?.workflow?.author_commits, { in_scope: true, note: "a fix" });
   await reviewed(w, "theirs", { outside_purpose: null, recommendation: null, author_commits: { in_scope: true, note: "a fix" } });

@@ -71,8 +71,12 @@ export type OpusPr = {
   unapplied_fixes?: UnappliedFix[];
   /** Present only when a person settled that the change belongs in the app (src/review/opus.ts scopeSettled): the review does not reopen scope. */
   scope_settled?: { answer: string; by: string | null; note: string | null };
-  /** Present only when the PR's author pushed commits after a person approved its merge: the head they approved; the reply then says whether the new commits stay within it. */
-  author_commits?: { approved_head: string };
+  /**
+   * Present only when the PR's author pushed commits after a person approved its merge: the head they approved and the head under review; the
+   * reply then says whether the new commits stay within the approval. `separated`: the new commits were told apart from the rest of the PR
+   * (the delta of the PR's own diffs, base-branch changes left out) and `files` lists the files they touch; false: the diff is the whole PR.
+   */
+  author_commits?: { approved_head: string; new_head: string; separated?: boolean; files?: string[] };
   /** Present only when our pipeline pushed commits to the PR since `earlier_opus`'s head: kind, sha, note and the fixes each was meant to make. */
   pipeline_commits?: { kind: string; sha: string; note: string; fixes_meant: string[] }[];
   diff: string;

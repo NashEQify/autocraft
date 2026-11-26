@@ -16,7 +16,8 @@ import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
 import type { DiscussionEntry } from "./parse.ts";
 import { changedHunks, reviewAfterBaseMerge, sameOwnDiff } from "./own-diff.ts";
-import { MAX_DIFF_CHARS, cachedDiff, cachedDiffBase, cachedDiffText, codeDiff, ghDelta, ghDiff, type DeltaFetcher, type DiffFetcher } from "./diff.ts";
+import { MAX_DIFF_CHARS, cachedDiff, cachedDiffBase, codeDiff, ghDelta, ghDiff, splitDiff, type DeltaFetcher, type DiffFetcher } from "./diff.ts";
+import { roundOwnDiffs, type OwnDiffReader } from "./round-diff.ts";
 import { CARRIED } from "./carry.ts";
 import { selectOpusCandidates, type OpusCandidate } from "./opus-candidates.ts";
 import { carriedOutcome, rawReason, type EarlierOpus, type OpusPr, type OpusReview, type UnappliedFix } from "./opus-parse.ts";
@@ -33,7 +34,7 @@ import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, loadReviewTexts, saveReviews, type ReviewRow } from "../data/review/index.ts";
-import { roundHeadOf } from "../core/author-round.ts";
+import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundHeadOf } from "../core/author-round.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
@@ -59,6 +60,8 @@ export type OpusDeps = {
   checkout?: (repo: string, number: number, head: string) => Promise<string | null>;
   /** The Jev and Haiku calls of the semantic reference check; absent: the real ones. */
   semantic?: SemanticDeps;
+  /** The PR's own diffs at two heads, for the review round; absent: unavailable, so the round reviews the whole diff where it fits. */
+  ownDiffs?: OwnDiffReader;
 };
 export type OpusSummary = {
   runId: string; repo: string; candidates: number; reviewed: number; dropped: number;
@@ -71,7 +74,7 @@ const now = () => new Date().toISOString();
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 
 export function defaultOpusDeps(): OpusDeps {
-  return { querier: new Client(500), fetchDiff: ghDiff, fetchDelta: ghDelta, model: PROMPT.models[0]!, maxChars: MAX_DIFF_CHARS, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log) };
+  return { querier: new Client(500), fetchDiff: ghDiff, fetchDelta: ghDelta, model: PROMPT.models[0]!, maxChars: MAX_DIFF_CHARS, checkout: (r, n, h) => checkoutForPr(r, n, h, console.log), ownDiffs: roundOwnDiffs };
 }
 
 type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string | null; model: string | null; review: OpusReview;
@@ -144,9 +147,9 @@ export type RoundCarry = { review: OpusReview; from: string; baseRef: string | n
  * The review the round's head takes over without a model call: the author's push left the PR's own diff as the latest earlier review read it
  * (a merge of the base branch, a rebase), so that sure take or take-fix carries to the head with its fixes, as over our own merge of the base
  * branch (carry.ts). Null when it does not carry: no round, no such review, a review stale for new discussion (`stale`: "repo#n@head"), another
- * base branch, the earlier head's diff not cached, or the head's diff not readable.
+ * base branch, the own diffs not readable (`ownDiffs`), or the head's diff not readable.
  */
-export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, "fetchDiff">, stale: ReadonlySet<string>): Promise<RoundCarry | null> {
+export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, "fetchDiff" | "ownDiffs">, stale: ReadonlySet<string>): Promise<RoundCarry | null> {
   const { repo, number } = c, ref = refOf(c);
   const [workflows, stored, items, repos] = await db.together(() => Promise.all([
     loadPrWorkflows(db, [{ repo, number }]), loadReviewRows(db, [{ repo, number }]), loadItems(db, [{ repo, number }], "pr"), loadRepos(db, { names: [repo] }),
@@ -159,10 +162,13 @@ export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, 
   if (!e || (since !== null && e.at <= since) || !e.sure || (e.verdict !== "take" && e.verdict !== "take-fix") || stale.has(`${ref}@${e.head}`)) return null;
   const baseRef = e.base_ref ?? repos.get(repo)?.default_branch ?? null, liveBase = items.get(ref)?.base_ref ?? null;
   if (baseRef && liveBase && baseRef !== liveBase) return null;
-  const was = cachedDiffText(repo, number, e.head);
-  if (was === null) return null;
+  const branch = liveBase ?? baseRef;
+  if (!branch || !deps.ownDiffs) return null;
+  const own = await deps.ownDiffs(repo, number, branch, e.head, c.head_oid);
+  if (!own.ok || !sameOwnDiff(own.before, own.after)) return null;
+  // The head's diff is read as for any review: its facts are what the merge rule reads, and a PR GitHub cannot show is not carried to a merge.
   const d = await cachedDiff(db, repo, number, c.head_oid, deps.fetchDiff, liveBase);
-  if (!d.ok || (d.base && baseRef && d.base !== baseRef) || !sameOwnDiff(was, d.text)) return null;
+  if (!d.ok || (d.base && baseRef && d.base !== baseRef)) return null;
   const texts = (await loadReviewTexts(db, [{ repo, number, head: e.head }])).get(`${ref}@${e.head}`);
   return {
     review: {
@@ -178,7 +184,7 @@ export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, 
 export type PreparedOpus =
   | { kind: "no-diff"; error: string }
   | { kind: "off"; why: string }
-  | { kind: "large"; mode: "full" | "delta"; base: string | null; baseRef: string | null }
+  | { kind: "large"; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** Why, when it is not the whole PR's size (the review round's). */ reason?: string }
   | { kind: "no-threads"; error: string }
   | { kind: "ready"; input: OpusPr; snap: Snapshot; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** A maintainer's entry was left out of the discussion for length. */ maintDropped?: boolean };
 
@@ -216,9 +222,11 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const ch = await checksOf(db, repo, c.number);
   // Test files are shown while they fit the size cap; the merge rule sends a PR whose tests do not fit to a person.
   const cd = codeDiff(d.text, deps.maxChars);
-  // The size cap applies to the whole PR, so a small push never lets a too-large PR through as a delta.
-  if (cd.text.length > deps.maxChars || (!cd.files.length && cd.testsOmitted.length)) return { kind: "large", mode: "full", base: null, baseRef };
+  // The size cap applies to the whole PR, so a small push never lets a too-large PR through as a delta. In the review round the approver
+  // accepted the rest, so there it applies to what the author's new commits changed.
+  const fits = cd.text.length <= deps.maxChars && !(!cd.files.length && cd.testsOmitted.length);
   if (opts.independent) {
+    if (!fits) return { kind: "large", mode: "full", base: null, baseRef };
     const input: OpusPr = {
       ref: refOf(c), title: c.title, body: c.body, author_association: c.author_association, size: c.size, lines_changed: c.lines_changed,
       ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
@@ -235,11 +243,28 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const earlier = prior && (priorBase === null || baseRef === null || priorBase === baseRef) ? prior : null;
   // A merge commit of ours carries the base branch's changes since the earlier head, so a delta of the heads would show unrelated changes: the delta is taken between the PR's own diffs.
   const merged = (await loadOwnDeltas(db, [{ ref, toHead: c.head_oid }])).get(`${ref}@${c.head_oid}`);
-  // So does an author's merge of the base branch: in the review round the delta is what the PR's own diff gained and lost, where the earlier head's diff is cached.
   const accepted = await roundHeadOf(db, c);
-  const was = accepted && earlier && !merged ? cachedDiffText(repo, c.number, earlier.head) : null;
-  const own = was !== null ? codeDiff(changedHunks(was, d.text), deps.maxChars) : null;
-  if (own?.text && !own.testsOmitted.length) { mode = "delta"; diff = own.text; base = earlier!.head; }
+  /** The review round's delta: whether the author's new commits were separated from the rest of the PR, and the files they touch. */
+  let round: { separated: true; files: string[] } | { separated: false } | null = null;
+  if (accepted && !merged) {
+    // So does an author's merge of the base branch: the round reads what the PR's own diff gained and lost since the earlier review, or since
+    // the approved head when none was made after it (a PR sent to merge without one).
+    const from = earlier?.head ?? accepted;
+    const branch = baseRef ?? repos.get(repo)?.default_branch ?? null;
+    const own = !branch ? { ok: false as const, error: "the base branch is unknown" } : deps.ownDiffs ? await deps.ownDiffs(repo, c.number, branch, from, c.head_oid) : { ok: false as const, error: "no reader of the PR's own diffs" };
+    if (own.ok) {
+      const delta = changedHunks(own.before, own.after);
+      round = { separated: true, files: splitDiff(delta).map((f) => f.path) };
+      const dd = delta ? codeDiff(delta, deps.maxChars) : null;
+      if (dd && (dd.text.length > deps.maxChars || (dd.testsOmitted.length && !fits))) return { kind: "large", mode: "delta", base: from, baseRef, reason: ROUND_DELTA_LARGE };
+      // A delta whose test files do not all fit is not used: the full diff shows them. An empty one (the own diff unchanged) leaves the full diff.
+      if (dd && !dd.testsOmitted.length) { mode = "delta"; diff = dd.text; base = from; }
+    } else {
+      log(`  ${ref}: the author's commits since ${from.slice(0, 7)} could not be separated (${own.error}); full diff`);
+      round = { separated: false };
+    }
+    if (mode === "full" && !fits) return { kind: "large", mode: "full", base: null, baseRef, ...(round.separated ? {} : { reason: ROUND_UNSEPARATED }) };
+  } else if (!fits) return { kind: "large", mode: "full", base: null, baseRef };
   else if (earlier && !merged) {
     const delta = await deps.fetchDelta(repo, earlier.head, c.head_oid);
     // A delta whose test files do not all fit is not used: the full diff shows them.
@@ -267,7 +292,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const input: OpusPr = {
     ref: refOf(c), title: c.title, body: c.body, author_association: c.author_association, size: c.size, lines_changed: c.lines_changed,
     ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
-    mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}), ...(accepted ? { author_commits: { approved_head: accepted } } : {}),
+    mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}),
+    ...(accepted ? { author_commits: { approved_head: accepted, new_head: c.head_oid, ...(round ?? {}) } } : {}),
     ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
     related_open: await relatedOpen(db, repo, c.number, cd.files),
     statements: await relatedStatements(db, repo, c.number), ...scope,
@@ -342,7 +368,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       return;
     }
     if (p.kind === "large") {
-      const r: OpusReview = { ref: refOf(c), verdict: "hold", sure: true, reason: TOO_LARGE, fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] };
+      const r: OpusReview = { ref: refOf(c), verdict: "hold", sure: true, reason: p.reason ?? TOO_LARGE, fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] };
       await saveOpus(db, runId, c, { mode: p.mode, base: p.base, baseRef: p.baseRef, model: null, review: r });
       await tally(c, r);
       params.onHandled?.(++handled);

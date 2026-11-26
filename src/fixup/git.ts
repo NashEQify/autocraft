@@ -131,6 +131,18 @@ export class Git {
     return have;
   }
 
+  /**
+   * Whether commit `sha` is in the cache, fetched by its id from `org/repo` when it is not. GitHub serves a commit by id after a force-push
+   * took it off every branch, until it is garbage collected; false when it does not have the commit.
+   */
+  async fetchCommit(org: string, repo: string, sha: string): Promise<boolean> {
+    await this.init();
+    const have = async () => (await this.git(["cat-file", "-e", `${sha}^{commit}`])).code === 0;
+    if (await have()) return true;
+    await this.git(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", `https://github.com/${org}/${repo}.git`, sha]);
+    return have();
+  }
+
   /** The blob at `sha:path` as text with its mode, or why it can't be used. */
   async file(sha: string, path: string): Promise<{ ok: true; mode: string; content: string } | { ok: false; reason: string; tooLarge?: true }> {
     const t = await this.git(["ls-tree", sha, "--", path]);
