@@ -1310,7 +1310,13 @@ export type AgentRun = {
   summary: string | null;    // one line: verdict counts, error class
   progress?: string;         // running calls with tools: the latest thing the model is doing
   via?: RemoteVia;           // user-local mode: who ran the call and with what
+  refusal?: AgentRunRefusal; // operators and maintainers: the model's safety filter declined this run
 };
+/**
+ * A run the model's safety filter declined. `outcome`: the call was `retried` on another Task Runner or tier, or `failed` because
+ * nothing else could take it. `retry`: the call's last later run, null while none ran or for refusals recorded before runs kept their call.
+ */
+export type AgentRunRefusal = { outcome: "retried" | "failed"; retry: { id: number; state: AgentRunState } | null };
 /** A model call run by a user's helper: their login, the harness (claude, codex) and the model it reported. */
 export type RemoteVia = { login: string; harness: string; model: string };
 export type AgentRunDetail = AgentRun & {
@@ -1331,7 +1337,13 @@ export type AgentRunTool = {
   check: { id: number; command: string; crate: string | null; testName: string | null; outcome: string | null } | null;
 };
 export type AgentRunPage = { runs: AgentRun[]; nextCursor: string | null };
-export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; repo?: string; cursor?: string; limit?: number };
+/** `refused` and `window` (runs started in the last 24 hours, 7 days or 30 days) are for operators and maintainers. */
+export type AgentRunFilter = { state?: AgentRunState | "recent"; step?: string; repo?: string; cursor?: string; limit?: number; refused?: boolean; window?: RefusalWindow };
+export type RefusalWindow = "24h" | "7d" | "30d";
+/** Refused runs in a time range per prompt, repo (a run's first item), model and Task Runner user; `failed`: those nothing else could take. `key` null: none (no item, no user). */
+export type RefusalGroup = { key: string | null; n: number; failed: number };
+/** `capped`: more refused runs than the server counts; the counts cover the newest ones. */
+export type RefusalBreakdown = { window: RefusalWindow; total: number; failed: number; capped: boolean; byPrompt: RefusalGroup[]; byRepo: RefusalGroup[]; byModel: RefusalGroup[]; byLogin: RefusalGroup[] };
 
 export type RateBucket = { t: string; items: number; runs: number; failed: number };
 export type Rates = {

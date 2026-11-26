@@ -510,6 +510,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/items/:repo/:n/release-outside", handler: ok(outside.release) },
     get("/api/prompts", prompts),
     get("/api/agents", agents.list),
+    get("/api/agents/refusals", agents.refusals),
     get("/api/agents/:id", agents.detail),
     get("/api/rates", agents.rates),
     get("/api/envs", build.envs),
