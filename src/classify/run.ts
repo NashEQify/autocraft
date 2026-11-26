@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { loadLiveConfig } from "../data/control/index.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
-import { itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
+import { allocation, itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
 import { type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun } from "../agents/runs.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type Lint, type LintProblem } from "../replylint.ts";
@@ -94,7 +94,7 @@ export const POOL_MAX = { fixup: 3, cifix: 3, mainfix: 2, verify: 4, verifyColle
 export type PoolOptions = {
   /** Run the first job alone and the rest after it returns, so the rest read the prompt cache the first one wrote. */
   first?: boolean;
-  /** How long to wait before asking `room` again when nothing finished (default POOL_POLL_MS). */
+  /** How long to wait before asking `width` again when nothing finished (default POOL_POLL_MS); for a PoolRoom, how often to read whether the room changed (PoolRoom.changed; default allocation.pollMs). */
   pollMs?: number;
   /** Upper bound on running jobs, also when `width` is a function. */
   max?: number;
@@ -109,7 +109,9 @@ export type PoolOptions = {
  * account is enabled.
  *
  * A PoolRoom (poolRoom: the model queue's room for each job's repos) starts the first job in order that has room, so a job
- * whose repos have no room does not hold back later ones. When none has room and none runs, the first job whose repos have a
+ * whose repos have no room does not hold back later ones. It asks again when a job ends or the room may have changed
+ * (PoolRoom.changed), so a pool whose calls wait long for a Task Runner reads the room only when the queue or the Task Runners
+ * change. When none has room and none runs, the first job whose repos have a
  * Task Runner that may take them starts regardless; jobs no Task Runner may take never start, and once only they are left the
  * pool ends without them (a later pass picks them again). With `first`, the first job that has such a Task Runner runs alone first.
  * A job whose model call was withdrawn because no Task Runner could take it (NoTakerError) is skipped the same way; the others go on.
@@ -155,7 +157,14 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
         continue;
       }
     }
-    await Promise.race([...running, new Promise((r) => setTimeout(r, opts.pollMs ?? POOL_POLL_MS))]);
+    if (roomy) {
+      const stop = new AbortController();
+      try {
+        await Promise.race([...running, roomy.changed(opts.pollMs ?? allocation.pollMs, stop.signal)]);
+      } finally {
+        stop.abort();
+      }
+    } else await Promise.race([...running, new Promise((r) => setTimeout(r, opts.pollMs ?? POOL_POLL_MS))]);
   }
   await Promise.all(running);
   if (failed) throw (failed as { e: unknown }).e;

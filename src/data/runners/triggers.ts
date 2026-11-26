@@ -15,3 +15,11 @@ registerTriggerSource("remote-queue",
   { table: "remote_calls", ops: ["INSERT"] },
   { table: "remote_calls", ops: ["UPDATE"], when: "(old.state IS NOT new.state AND (new.state = 'queued' OR old.state = 'queued')) OR old.picked_by IS NOT new.picked_by OR old.pick_until IS NOT new.pick_until" },
 );
+
+// What moves the model queue's room (src/remote/room.ts) that remote-queue and remote-helpers do not report: the runner users'
+// settings (Manual only, My repos, tasks, items, max calls) and their cool-offs. Read by pools waiting for room
+// (src/agents/call.ts PoolRoom.changed); not planner input, and no page reads it.
+registerTriggerSource("remote-room",
+  { table: "user_settings" },
+  { table: "remote_cooloffs" },
+);

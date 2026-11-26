@@ -79,6 +79,17 @@ export function roomStateOf(v: RemoteView, queue: Ordered): RoomState {
   return { v, queue, ready: rows, active: rows.filter((h) => isActive(h, nowMs)), left: new Map(), fresh };
 }
 
+/**
+ * When the room of a reading next rises with time alone, with no write to report it: a counted queued call's caller going stale
+ * (CALLER_STALE_MS after its last stamp) or a cool-off ending. Null when neither is ahead.
+ */
+export function roomRisesAt(st: RoomState): number | null {
+  let at = Infinity;
+  for (const r of st.queue.all) if (r.seen_at >= st.v.now - CALLER_STALE_MS) at = Math.min(at, r.seen_at + CALLER_STALE_MS + 1);
+  for (const c of st.v.snapshot.cooled.values()) at = Math.min(at, Date.parse(c.until));
+  return at === Infinity ? null : at;
+}
+
 const isActive = (h: Helper, nowMs: number): boolean =>
   (h.beatAt !== null && h.beatAt >= nowMs - LIVE_LEASE_MS) || (h.idleClaimAt !== null && h.idleClaimAt >= nowMs - IDLE_FRESH_MS);
 
