@@ -2772,6 +2772,67 @@ export interface MaintainItems {
   counts: Record<MaintainItemGroup, number>;
 }
 
+/** AutoCraft's part in an item, in one word: working on it, waiting for a person, held, in the Backlog, done, or never started. */
+export type BrowseAutocraft = "running" | "waiting" | "held" | "backlog" | "done" | "none";
+
+/** One row of the Items browser. */
+export interface BrowseRow {
+  repo: RepoName;
+  number: number;
+  kind: ItemKind;
+  state: ItemState;
+  draft: boolean;
+  title: string;
+  author: string | null;
+  /** The author is not an owner, member or collaborator of the repo. */
+  outside: boolean;
+  /** GitHub label names. */
+  labels: string[];
+  priority: PriorityLevel | null;
+  /** A pull request's size by changed lines; issues have none. */
+  size: "S" | "M" | "L" | "XL" | null;
+  /** Classification by its short name (bug, feature, perf, extra, plugin, infra). */
+  classified: string | null;
+  area: string | null;
+  comments: number;
+  reactions: number;
+  /** Mentions in watched Discord channels. */
+  discord: number;
+  /** A PR's first closing issue, or the lowest-numbered open or merged PR that closes an issue. */
+  linked: number | null;
+  ci: "green" | "red" | "pending" | null;
+  autocraft: BrowseAutocraft;
+  /** The open question of its workflow is addressed to the reader. */
+  asksYou: boolean;
+  approved: boolean;
+  duplicate: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrowseQuery {
+  /** The search text with its qualifiers (src/core/item-query.ts). */
+  q: string;
+  offset?: number;
+  limit?: number;
+  /** Also count every preset and list the quick-filter values. */
+  presets?: boolean;
+}
+
+export interface BrowseResult {
+  rows: BrowseRow[];
+  /** Matches of the query, whatever the page cuts. */
+  total: number;
+  offset: number;
+  limit: number;
+  /** Qualifiers that were not applied: unknown, a bad value, or not allowed for the reader. */
+  unknown: string[];
+  /** Matches per preset id, when asked. */
+  presets: Record<string, number> | null;
+  /** Labels, authors and areas of the open items of the repos shown, most used first, when asked. */
+  facets: { labels: string[]; authors: string[]; areas: string[] } | null;
+}
+
 /** What a command did to each item, and the lines to show the sender (confirmation, ambiguity or refusal). */
 export interface MaintainCommandResult {
   items: { repo: string; number: number; outcome: "run" | "ambiguous" | "refused"; line: string; workflowId: number | null }[];

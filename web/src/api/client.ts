@@ -25,6 +25,8 @@ import type {
   MaintainStats,
   MaintainItems,
   MaintainItemsQuery,
+  BrowseQuery,
+  BrowseResult,
   MaintainCommandResult,
   MaintainItem,
   MaintainReply,
@@ -181,6 +183,8 @@ export interface Api {
     stats(period: "7d" | "30d"): Promise<MaintainStats>;
     /** Items: four lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
     items(query: MaintainItemsQuery): Promise<MaintainItems>;
+    /** The Items browser: one page of the items matching a search with qualifiers; the page's project narrows it. */
+    browse(query: BrowseQuery): Promise<BrowseResult>;
     /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
     /** `asked`: the `asked` of the rows shown, by repo#number. */
     command(text: string, asked?: Record<string, string>): Promise<MaintainCommandResult>;

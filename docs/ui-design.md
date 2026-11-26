@@ -92,13 +92,10 @@ Rules:
 
 ### Items
 
-- `/items` is one browser. The toolbar has search on its own row, then State, Type, Classification, Repository, Area, Type label and Flag. The toolbar's own width sets its columns: seven from 1258 px, three from 488 px, otherwise two.
-- Area lists the areas of the one repository shown, plus Any area and No area (`area=none`); with no repository or several it offers only those two. Area applies with or without a phase. Group (under More filters, list mode only) set to By area (`group=area`) puts each area's rows under a heading with its count, areas by name and No area last; rows show their area.
-- On phones (< 861 px) search, State and Type stay in the first row. A Filters button opens the other controls inline; while it is shut, a line lists the filters it holds.
-- Phase is picked below the desktop toolbar or in the phone Filters panel; Home's phase tiles link to `/items?phase=…`. With a phase set, State, Classification, Type label and Flag read "By phase" and are disabled, and Clear phase returns to the regular list. Phase and classification filters never combine.
-- Each applied filter shows as a control value or a removable chip, and Reset clears them all. A URL value the endpoint does not take is listed as not applied. A field with several values shows them all (`Settled + Classifiers disagree`).
-- A control change adds one history entry; typing in search or author replaces the current one.
-- `open=repo#number` opens a row's details; filter and paging changes close them. `peek` links open the same row, and `/items/filters` redirects to `/items`.
+- `/items` is one browser: the search box with qualifiers on its own row (the phone Filters button beside it), then the views as chips (one sideways-scrolling row on phones, the picked one kept in sight), then the quick filters (in a side sheet on phones). Grammar and views: dashboard-spec.md, Items.
+- Each quick filter is a select over one qualifier; Label, Priority, Area, Author and Sort read "Label: bug" when set. A value typed in the box that a list lacks still shows as picked. Qualifiers the server did not apply are listed as not applied, in warning text.
+- Every change of the query adds one history entry; the query and the page offset are the URL (`?q=is:open+label:bug&offset=50`).
+- Rows are `ItemRef` rows, stretched; on phones the second line holds the markers, two labels and "+n", CI, counts, author and time; on desktop all labels, classification, size and area, with CI, counts and the linked item in a right-hand column.
 
 ### Home
 
@@ -108,7 +105,7 @@ Rules:
 
 ### Items
 
-- The Items page lists what needs an answer, what was started, what AutoCraft works by itself and the rest, with search, filters and a command box that takes a command and a list of items.
+- The Items page is one paged list with a search box that takes qualifiers, a row of views and quick filters, and a command box that takes a command and a list of items (dashboard-spec.md, Items).
 
 ### Item page
 

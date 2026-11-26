@@ -128,6 +128,7 @@ export function createHttpApi(): Api {
       queue: () => get("/api/maintain/queue"),
       stats: (period) => get(`/api/maintain/stats${qs({ period })}`),
       items: (q) => get(`/api/maintain/items${qs({ ...q, filters: undefined, filter: q.filters?.join(","), areas: undefined, area: q.areas?.join(","), refs: q.refs?.join(",") })}`),
+      browse: (q) => get(`/api/maintain/browse${qs(q)}`),
       command: (text, asked) => post("/api/commands", { text, asked }),
       repos: () => get("/api/maintain/repos"),
       waiting: () => get("/api/maintain/waiting"),
