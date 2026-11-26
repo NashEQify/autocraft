@@ -7,6 +7,7 @@ import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { advanceWorkflows } from "../src/workflow/advance.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
+import { runText } from "../src/workflow/read.ts";
 import { eventsOf, liveWorkflow } from "../src/workflow/store.ts";
 import { type World } from "./world-db.ts";
 import { actor, answer, ANSWERS, approvedReview, asked, askedReview, authorPushed, later, leg2, legState, MAINT, ownPush, pause, planned2, pushNow, review2, reviewNow, ticks } from "./workflow-advance-world.ts";
@@ -329,5 +330,36 @@ test("an answer to a question that was asked anew since is refused and shows the
       assert.equal((await liveWorkflow(w.db, "app", 2))!.baseHead, "theirs2");
       w.close();
     }
+  }
+});
+
+test("a fix with the person's words answers a held PR: the fix-up does what they say, as theirs, and the merge stays approved; a model reading gets there too", async () => {
+  const item = { repo: "app", number: 2 };
+  for (const [text, translated, instruction] of [
+    ["fix the UV seam shading with the importer's smooth normals, then merge", null, "the UV seam shading with the importer's smooth normals"],
+    ["can you sort out the seam shading the review found and then land it", "fix the seam shading the review found, then merge", "the seam shading the review found"],
+  ] as const) {
+    const w = await approvedReview();
+    await w.pr(2, { label: "feature" });
+    assert.equal((await answer(w, "review and merge")).outcome, "run");
+    await pause();
+    await reviewNow(w, "sha2", "hold");
+    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ public_review: JSON.stringify({ summary: "Exports recompute normals without welding the vertices split at UV seams.", points: [] }) }).where("number", "=", 2));
+    await advanceWorkflows(w.db);
+    assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "major-finding");
+
+    const parsed = parse(text, { repo: "app" });
+    assert.equal(parsed.kind, translated ? "ambiguous" : "commands", text);
+    const o = (await runText(w.db, actor, "dashboard", { parsed, items: [item] }, {
+      text, own: [item], named: false, parse: { repo: "app" },
+      deps: { translate: async () => (translated ? { command: translated, confidence: 0.9 } : null), score: async () => 0.95 },
+    })).items[0]!;
+    assert.equal(o.outcome, "run", o.line);
+    assert.ok(o.line.includes(`Fixing “${instruction}”, then merging when CI is green`), o.line);
+    const made = await w.rows("SELECT instructions, by FROM operator_fixups WHERE number = 2");
+    assert.deepEqual(made.map((r) => [r.instructions, r.by]), [[instruction, MAINT]]);
+    const now = (await liveWorkflow(w.db, "app", 2))!;
+    assert.deepEqual([now.state, now.approvedBy, now.blocker], ["running", MAINT, null]);
+    w.close();
   }
 });

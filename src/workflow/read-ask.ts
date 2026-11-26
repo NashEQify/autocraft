@@ -33,7 +33,7 @@ export type ScoreAsk = { message: string; command: string };
 
 /** The command vocabulary as the prompt lists it, from the parser's own list. */
 export const READ_VOCABULARY = [
-  ...COMMANDS.map((c) => `- ${c.usage}: ${c.short}${c.answer ? " Only in an answer to an open question; it names parts of the plan by number or by words from their title." : ""} Example: ${c.example}`),
+  ...COMMANDS.map((c) => `- ${c.usage}: ${c.short}${c.word === "fix" ? " It names parts of the plan by number or by words from their title; other words after fix are instructions for the fix-up, which must be the message's own words." : c.answer ? " Only in an answer to an open question; it names parts of the plan by number or by words from their title." : ""} Example: ${c.example}`),
   `- yes: runs the open recommendation as it stands (also: ${YES_WORDS.filter((w) => w !== "yes").slice(0, 6).join(", ")}). Only when a question is open.`,
   `- Weight words, alone or after a command: ${WEIGHT_HELP.filter((w) => w.word !== "(none)").map((w) => w.word).join(", ")}.`,
   "- Several commands in one: separate them with commas, as in \"fix 1, drop 2, then merge\".",
@@ -73,6 +73,20 @@ export function parseTranslation(text: string): { command: string | null; confid
   if (typeof v.command !== "string") return null;
   const command = v.command.replace(/\s+/g, " ").trim();
   return { command: command && command.length <= READ_COMMAND_CHARS ? command : null, confidence: c };
+}
+
+/** Words a fix's instructions may hold that the message need not: articles and the like. */
+const LINKING = new Set(["the", "a", "an", "of", "in", "on", "for", "to", "and", "with", "it", "its", "this", "that", "from", "by", "as", "at", "so", "is", "are"]);
+const wordsIn = (s: string): string[] => s.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean);
+const stem = (w: string): string => w.replace(/(?:es|s)$/, "");
+
+/**
+ * The words of a fix's instructions in a command read from the message (`fix`: the words as the parser read them) that are neither in
+ * the message nor in a plan part's title the call showed: the model added them. Empty when the instructions are the person's own words.
+ */
+export function addedWords(fix: string, a: ReadAsk): string[] {
+  const known = new Set([a.message, ...a.items.flatMap((i) => (i.parts ?? []).map((p) => p.title))].flatMap(wordsIn).map(stem));
+  return wordsIn(fix).filter((w) => !LINKING.has(w) && !known.has(stem(w)));
 }
 
 /** Jev's answer: the probability that the message asks for exactly the command, or null without a number from 0 to 1. */

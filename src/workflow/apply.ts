@@ -475,7 +475,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (mirrorBehind(pushes.get(`${pr.repo}#${pr.number}`) ?? [], pr.head, repos.get(pr.repo)?.synced_at ?? null)) throw new fx.EffectError(CHANGED());
     }
     const weight = r.weight ?? ends?.weight ?? WEIGHT_NORMAL;
-    const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve);
+    const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve, r.instruction);
     // What was dropped stays dropped in a review the new work may owe.
     const dropped = (ends?.plan ?? []).flatMap((p) => (p.state === "dropped" || r.drop.includes(p.n) ? [{ ...p, state: "dropped" as const }] : []));
     return {
@@ -518,7 +518,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await issuePr(live)] : [])].filter((x) => x !== null);
-  const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges, says: o.says && r.approve }) : null;
+  const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges, says: o.says && r.approve, instruction: r.instruction }) : null;
   if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));

@@ -1,7 +1,8 @@
 // A model reading of text the command parser could not read, on every surface. When parse() gives `ambiguous` and the sender may
 // send commands on the items, Haiku translates the text into one command in the parser's words: on the sender's own Task Runner
 // first (a bound call, outside its slots), else on any Task Runner's Interactive slots (never for a quiet item), never on pipeline
-// slots. The command must parse in full and name no item the text does not; Jev then scores whether the text asks for exactly it.
+// slots. The command must parse in full, name no item the text does not, and hold no word in a fix's instructions that the text (or a
+// plan part's title) does not; Jev then scores whether the text asks for exactly it.
 // It runs through runCommand as if the sender had typed it only with Jev's score at READ_RUN_SCORE or more, with the message's own
 // items, and with no condition or hedge in the text (a hold runs anyway); otherwise the reply proposes it. With no reading (no Task
 // Runner took the call, it failed or timed out, or the model found it unclear) the reply is the parser's own. The text goes only
@@ -20,7 +21,7 @@ import { ownerOf } from "../owners.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
 import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
-import { jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
+import { addedWords, jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
 import { isLive } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
@@ -207,6 +208,8 @@ export async function readCommand(db: Db, login: string, read: ReadText): Promis
   const parsed = parse(tr.command, read.parse);
   const fit = itemsFit(parsed, tr.command, read);
   if (fit === "none") return null;
+  // A fix's words are the person's own: a reading that adds to them is no reading.
+  if (parsed.kind === "commands" && parsed.parts.some((x) => x.word === "fix" && typeof x.part === "string" && addedWords(x.text ?? x.part, ask).length)) return null;
   const p = await (read.deps?.score ?? score)(db, { message: ask.message, command: tr.command });
   return p === null ? { command: tr.command, parsed, score: tr.confidence, source: "haiku", fit } : { command: tr.command, parsed, score: p, source: "jev", fit };
 }

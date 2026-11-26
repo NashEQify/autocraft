@@ -66,11 +66,11 @@ export const COMMANDS: readonly CommandDef[] = [
     example: "drop 2",
   },
   {
-    word: "fix", usage: "fix <part>", aliases: [], entry: null, answer: true,
-    short: tk("Fix only the named findings."),
-    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again. With no part, fix is fix-up."),
+    word: "fix", usage: "fix <part or instructions>", aliases: [], entry: null, answer: true,
+    short: tk("Fix the named findings, or what your words after fix say."),
+    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again. Words that match no part are instructions: the fix-up does what they say, with the planned findings. With no part, fix is fix-up; if the review lists no fix, it fixes what the review found."),
     back: tk("As the plan said before."),
-    example: "fix 1, drop 2, then merge",
+    example: "fix the export normals, then merge",
   },
   {
     word: "backlog", usage: "backlog", aliases: ["park"], entry: null,

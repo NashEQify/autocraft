@@ -70,6 +70,8 @@ export type Recommendation = {
   answer?: QuestionAnswer;
   /** The open question of the implementation the recommendation stands for: once it is answered or set aside, the recommendation goes. */
   question?: QuestionRef;
+  /** What the review found, in the words the question shows (its public summary), where it lists no fix: a bare fix makes the fix-up fix it. */
+  finding?: string;
 };
 
 /** A question an implementation attempt asked: the attempt and the round that asked it (answers are recorded on that attempt). */
@@ -157,7 +159,7 @@ export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate
 export type CommandPart =
   | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "hold" | "resume" | "autorepin"; args?: string }
   | { word: "close"; reason?: CloseReason }
-  | { word: "drop" | "fix"; part: number | string }
+  | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
   | { word: "weight"; weight: number };
 
 /**

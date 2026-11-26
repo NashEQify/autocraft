@@ -128,11 +128,21 @@ function conflictSaid(item: Target, path: ConflictPath | null): ConflictSaid {
  * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself. An approved PR gets its
  * merge leg at once, and what is said of a conflict with its base branch names who settles it.
  */
-export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean): Promise<{ write: Write } & ConflictSaid> {
+export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean, instruction: Instruction | null = null): Promise<{ write: Write } & ConflictSaid> {
   const { db, by, item } = c;
   const merges = approved || entry === "merge";
   if (merges) await checkMerges(c);
   if (entry === "implement") return { write: nothing };
+  // A fix-up start with the person's words makes that fix first; its push is reviewed as any push of ours is, and carries the merge leg.
+  if (instruction && item.kind === "pr") {
+    const had = merges ? await activeLeg(db, item) : null;
+    const f = merges ? await loadPrFact(db, item.repo, item.number) : null;
+    const path = conflictPath(f);
+    if (byHand(path)) throw new EffectError(t("{ref} conflicts with its base branch, which someone has to resolve before AutoCraft can fix it.", { ref: ref(item) }));
+    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions([], [], instruction), merge: merges && had === null, afterBase: path !== null })));
+    const leg = merges && had !== null ? await mergeLeg(c, had) : nothing;
+    return { ...(merges ? conflictSaid(item, await conflictAhead(db, item, f)) : {}), write: async (id) => { await leg(id); await fix(id); } };
+  }
   const leg = merges ? await mergeLeg(c, await activeLeg(db, item)) : nothing;
   return {
     ...(merges ? conflictSaid(item, await conflictAhead(db, item)) : {}),
@@ -145,11 +155,18 @@ export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: bool
 
 // ---- answers on a started item -------------------------------------------------------------------------------------------
 
-/** The fix-up instructions for the named parts of the plan; the latest review's fixes when the plan names none. */
-export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[]): string {
+/** What the fix-up is to do beyond the plan's parts: a person's own words, or the finding of a review that lists no fix (`review`). */
+export type Instruction = { text: string; review?: true };
+
+/**
+ * The fix-up instructions: the person's words or the review's finding, and the named parts of the plan; the latest review's fixes when
+ * neither names anything.
+ */
+export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[], instruction: Instruction | null = null): string {
   const parts = plan.filter((p) => fix.includes(p.n));
-  if (!parts.length) return "Make the fixes the latest review of this pull request lists.";
-  let out = "Fix these findings of the review, and nothing else:";
+  const said = instruction ? (instruction.review ? `Fix what the latest review of this pull request found:\n${instruction.text}` : instruction.text) : null;
+  if (!parts.length) return said ?? "Make the fixes the latest review of this pull request lists.";
+  let out = said ? `${said}\n\nAlso fix these findings of the review:` : "Fix these findings of the review, and nothing else:";
   for (const p of parts) {
     const line = `\n${p.n}. ${p.title}${p.file ? ` (${p.file})` : ""}`;
     if (out.length + line.length > INSTRUCTIONS_MAX) break;
@@ -167,7 +184,7 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
  * waits for them (`waits`). `says`: the person said merge, which is refused where none can be made, and whose confirmation names who
  * settles a conflict.
  */
-export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean; says?: boolean }): Promise<{ write: Write } & ConflictSaid> {
+export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan: readonly PlanPart[]; fix: readonly number[]; merges: boolean; says?: boolean; instruction?: Instruction | null }): Promise<{ write: Write } & ConflictSaid> {
   const { db, by, item } = c;
   if (o.says) await checkMerges(c);
   if (item.kind !== "pr") return { write: nothing };
@@ -181,10 +198,10 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   const said = o.says ? conflictSaid(item, await conflictAhead(db, item, f)) : {};
   // A major finding the person said to fix would come back as a question at the next head; their request is the answer to it.
   const major = o.plan.some((p) => p.major && o.fix.includes(p.n));
-  if (o.again === "fixup" && path !== null && f?.review?.verdict === "take-fix" && !major) return { write: await mergeLeg(c, had), ...note };
+  if (o.again === "fixup" && path !== null && f?.review?.verdict === "take-fix" && !major && !o.instruction) return { write: await mergeLeg(c, had), ...note };
   if (o.again === "fixup") {
     const merge = o.merges && had === null;
-    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix), merge, afterBase: path !== null })));
+    const fix = writeOf(await step(() => checkFixup(db, { repo: item.repo, number: item.number, by, instructions: fixInstructions(o.plan, o.fix, o.instruction ?? null), merge, afterBase: path !== null })));
     const leg = o.merges && !merge ? await mergeLeg(c, had) : nothing;
     return { write: async (id) => { await leg(id); await fix(id); }, ...note };
   }
