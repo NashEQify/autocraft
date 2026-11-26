@@ -107,6 +107,7 @@ test("the chat tells an item as bubbles, replies, work and folded GitHub and Dis
   assert.ok(discord?.t === "discord" && discord.links.every((l) => l.channel === "dev" && l.url.startsWith("https://discord.com/channels/g1/ch1/")));
   assert.equal(conv!.canReply, true);
   assert.equal(chat.state, "waiting");
+  assert.match(chat.next ?? "", /fix 1.*merge/, "while it waits for an answer, next is what a yes runs");
 
   assert.deepEqual(await itemChat(db, req("operator", { since: chat.stamp })), { unchanged: true, stamp: chat.stamp });
   await db.run((db.k as any).insertInto("chat_messages").values({ conversation_id: 1, author: "op", via: "dashboard", kind: "said", body: "looks good", payload: null, workflow_event_id: null, turn_id: null, at: at(5) }));

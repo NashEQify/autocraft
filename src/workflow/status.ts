@@ -132,6 +132,17 @@ export function stateLine(wf: ItemWorkflow, current?: Step, clock: Clock = utcCl
 
 const AFTER_CHECKS = (): string => t("after the pre-merge check and green CI");
 
+/** What a yes runs before a merge, as a clause ("fix 1 and 2", "look again"); null when it runs only the merge, or nothing. */
+function yesWhat(rec: Recommendation): string | null {
+  const fix = rec.parts.fix;
+  if (rec.close && !fix.length) return t("close it");
+  if (rec.answer && !fix.length) return rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
+  if (rec.waits && !rec.again) return t("approve the merge and wait");
+  if (rec.goes === "look") return t("look again");
+  if (rec.goes === "on" && !fix.length && !rec.again) return t("go on in your name");
+  return fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.newCommits ? t("review the new commits") : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
+}
+
 /**
  * What a bare yes runs for this recommendation, built from its stored fields in the order `accept` (resolve.ts) applies them;
  * null when a yes runs nothing (the recommendation's text says what answers it instead).
@@ -140,15 +151,22 @@ export function yesClause(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("Reply yes to close it.");
   if (rec.answer && !fix.length) {
-    const what = rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
+    const what = yesWhat(rec)!;
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   }
   if (rec.waits && !rec.again) return t("Reply yes to approve the merge and wait; new commits come back to you.");
   if (rec.goes === "look") return rec.merges ? t("Reply yes to look again, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to look again.");
   if (rec.goes === "on" && !fix.length && !rec.again) return rec.merges ? t("Reply yes to go on in your name, then merge ({checks}).", { checks: AFTER_CHECKS() }) : t("Reply yes to go on in your name.");
-  const what = fix.length ? t("fix {parts}", { parts: listText(fix) }) : rec.newCommits ? t("review the new commits") : rec.again === "review" ? t("review it again") : rec.again === "fixup" ? t("fix what the review found") : null;
+  const what = yesWhat(rec);
   if (what) return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
   return rec.merges ? t("Reply yes to merge it ({checks}).", { checks: AFTER_CHECKS() }) : null;
+}
+
+/** What a yes to the recommendation runs, as the item header's next step ("fix 1, then merge"); null when it runs nothing. */
+export function yesNext(rec: Recommendation): string | null {
+  const what = yesWhat(rec);
+  if ((rec.close && !rec.parts.fix.length) || (rec.waits && !rec.again)) return what;
+  return what ? (rec.merges ? t("{what}, then merge", { what }) : what) : rec.merges ? t("merge") : null;
 }
 
 /** A recommendation's sentence and what a yes runs; the sentence alone, with a request for words, when a yes runs nothing. */

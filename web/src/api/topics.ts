@@ -7,7 +7,7 @@
  */
 export type Topic =
   | "repos" | "sync" | "items" | "ranks" | "stages" | "checks" | "classify" | "dupes" | "reviews" | "queue" | "workflows" | "workflow-events" | "jobs" | "usage" | "agents"
-  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue";
+  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue" | "chat";
 
 /** What moves an item's queue position (src/rank/position.ts), for every query that carries the badge. */
 const withSlot = (...topics: Topic[]): Topic[] => [...new Set<Topic>([...topics, "steps", "repos"])];
@@ -27,7 +27,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   // The item page is the trace plus the header (labels, Discord, holds) and the GitHub side; it also asks `since` its last stamp.
   ["item-page:", [...new Set<Topic>([...TRACE, "discord", "ranks"])]],
   // The item chat: messages, AutoCraft's replies and work, GitHub and Discord lines; it also asks `since` its last stamp.
-  ["item-chat:", [...new Set<Topic>([...TRACE, "conversations", "workflows", "discord"])]],
+  ["item-chat:", [...new Set<Topic>([...TRACE, "chat", "conversations", "workflows", "discord"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
   ["maintain-asked", ["workflows", "workflow-events"]],

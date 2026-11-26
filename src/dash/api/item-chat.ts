@@ -2,10 +2,12 @@
 // come from the chat messages, the workflow events they produced and the Opus turns; the work AutoCraft did, the GitHub activity and the
 // Discord mentions come from the item trace (trace.ts), GitHub and Discord folded into one line per run between two other entries.
 // A fixed number of set-based reads per request: the stamp's wave, then the trace, the thread and the merge leg's wait.
-import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
+import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
+import { loadArtifacts } from "../../data/build/index.ts";
 import { loadConversationsOfItem, loadMessages, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
 import { loadThreads } from "../../data/conversations/index.ts";
+import { loadScreenshotRuns } from "../../data/merge/index.ts";
 import type { CardRow, ThreadTurn } from "../../data/conversations/types.ts";
 import { loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
 import { loadLegs, loadWorkflowHistory } from "../../data/workflow/index.ts";
@@ -13,7 +15,7 @@ import type { StoredEvent } from "../../data/workflow/types.ts";
 import { commentDatabaseId } from "../../data/conversations/statements.ts";
 import { t } from "../../i18n/index.ts";
 import { askedLogins } from "../../workflow/asked.ts";
-import { yesClause } from "../../workflow/status.ts";
+import { yesClause, yesNext } from "../../workflow/status.ts";
 import { ENTRY_LABEL } from "../../workflow/vocab.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
@@ -69,7 +71,9 @@ export async function readChat(db: Db, req: Req): Promise<ItemChat> {
 async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
   const { c } = b;
   const wf = shownWorkflow(b.history);
-  const [rows, threads, wait] = await Promise.all([loadTraceRows(c), loadThreads(db, [c.ref]), wf ? legWait(db, wf) : Promise.resolve(null)]);
+  const [rows, threads, wait, shots] = await Promise.all([
+    loadTraceRows(c), loadThreads(db, [c.ref]), wf ? legWait(db, wf) : Promise.resolve(null), c.staff && !c.veiled ? shotsOf(db, c) : Promise.resolve(new Map<string, ChatShot[]>()),
+  ]);
   // The chat veils by entry (who and when stay), so it reads the unveiled events and strips what a viewer may not read itself.
   const events = shape({ ...c, veiled: false }, eventsFrom({ ...c, veiled: false }, rows), null);
   const thread = threads.get(c.ref);
@@ -83,7 +87,7 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
       workflowEvents: rows.workflowEvents, workflows: b.history,
       turns: (thread?.turns ?? []).filter((x) => turnConversation(x) === (row?.id ?? null) || (main && turnConversation(x) === null)),
       cards: thread?.cards ?? [],
-      events: main ? events : [], mentions: main ? rows.discord : [],
+      events: main ? events : [], mentions: main ? rows.discord : [], shots,
     });
     const running = main ? [...entries].reverse().find((e) => e.t === "work" && e.state === "running") : undefined;
     return {
@@ -118,7 +122,10 @@ function headerFor(c: Ctx, wf: ItemWorkflow | null, rows: ItemTraceRows, leg: Ba
   const s = statusOf(wf, events, leg && leg.workflowId === wf.id ? leg.state : null, c.veiled, wait);
   const steps = s.steps ?? [];
   const at = steps.findIndex((x) => x.state === "running" || x.state === "waiting" || x.state === "stopped");
-  return { status: s.headline, state: STATE[wf.state], next: at >= 0 ? steps[at + 1]?.label ?? null : null };
+  // While the item waits for an answer, what follows is what a yes runs.
+  const rec = STATE[wf.state] === "waiting" ? openRecommendation(wf) : null;
+  const yes = rec ? yesNext(rec) : null;
+  return { status: s.headline, state: STATE[wf.state], next: yes ?? (at >= 0 ? steps[at + 1]?.label ?? null : null) };
 }
 
 const question = (rec: Recommendation): string => yesClause(rec) ?? t("Reply yes, or write what to do instead.");
@@ -134,7 +141,7 @@ function openOf(c: Ctx, wf: ItemWorkflow | null): ItemConversation["open"] {
 
 type Sources = {
   messages: ChatMessageRow[]; workflowEvents: StoredEvent[]; workflows: ItemWorkflow[]; turns: ThreadTurn[]; cards: CardRow[];
-  events: Ev[]; mentions: ItemMention[];
+  events: Ev[]; mentions: ItemMention[]; shots: Map<string, ChatShot[]>;
 };
 /** One element of the timeline before folding: a chat entry, or an event that folds into a GitHub or Discord line. */
 type Part = { at: string; rank: number; key: string } & ({ entry: ChatEntry } | { gh: Ev } | { dc: ItemMention });
@@ -187,7 +194,7 @@ export function entriesOf(c: Ctx, s: Sources): ChatEntry[] {
       const comment = e.ref.commentId;
       if (comment && saidComments.has(commentDatabaseId(comment) ?? "")) continue;
       parts.push({ at: e.at, rank: 2, key: e.id, gh: e });
-    } else if (WORK_KINDS.has(e.kind)) parts.push({ at: e.at, rank: 2, key: e.id, entry: workOf(c, e) });
+    } else if (WORK_KINDS.has(e.kind)) parts.push({ at: e.at, rank: 2, key: e.id, entry: workOf(c, e, s.shots.get(e.id)) });
   }
   for (const m of s.mentions) if (!discordCommands.has(m.msgHash)) parts.push({ at: m.at, rank: 2, key: `discord:${m.msgHash}`, dc: m });
 
@@ -239,7 +246,7 @@ function githubLine(e: Ev): string {
 }
 
 /** A work entry from a trace event: the part of its summary before the colon is the title, the rest the outcome. */
-function workOf(c: Ctx, e: Ev): ChatEntry {
+function workOf(c: Ctx, e: Ev, shots: ChatShot[] | undefined): ChatEntry {
   const colon = e.summary.indexOf(": ");
   const title = colon >= 0 ? e.summary.slice(0, colon) : e.summary;
   const outcome = colon >= 0 ? e.summary.slice(colon + 2) : null;
@@ -255,5 +262,28 @@ function workOf(c: Ctx, e: Ev): ChatEntry {
     outcome: c.veiled ? null : outcome,
     detail: c.veiled || !e.head ? [] : [[t("Commit"), e.head.slice(0, 7)]],
     eventId: e.id,
+    ...(shots ? { shots } : {}),
   };
+}
+
+/**
+ * The pictures of each screenshot run, keyed by the trace event of its head task: base then head per screen both tasks stored.
+ * Staff only, as the screenshots were on the item page; the images are served by the task artifact route.
+ */
+async function shotsOf(db: Db, c: Ctx): Promise<Map<string, ChatShot[]>> {
+  const runs = [...(await loadScreenshotRuns(db, [{ repo: c.repo, number: c.n }])).values()]
+    .flatMap((r) => (r.headTaskId !== null && r.baseTaskId !== null ? [{ head: r.headTaskId, base: r.baseTaskId }] : []));
+  const out = new Map<string, ChatShot[]>();
+  if (!runs.length) return out;
+  const artifacts = await loadArtifacts(db, runs.flatMap((r) => [r.base, r.head]), { contentType: "image/png" });
+  const names = (id: number): string[] => (artifacts.get(id) ?? []).map((x) => x.name);
+  for (const r of runs) {
+    const before = new Set(names(r.base));
+    const shots = names(r.head).filter((n) => before.has(n)).sort((a, b) => parseInt(a.slice(1), 10) - parseInt(b.slice(1), 10)).flatMap((name): ChatShot[] => [
+      { label: t("{screen}, before", { screen: name }), taskId: r.base, name },
+      { label: t("{screen}, after", { screen: name }), taskId: r.head, name },
+    ]);
+    if (shots.length) out.set(`task:${r.head}`, shots);
+  }
+  return out;
 }
