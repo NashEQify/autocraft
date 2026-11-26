@@ -69,6 +69,7 @@ safe-merge.test.ts
 search-github-url.test.ts
 sensitive.test.ts
 tarball-symlink.test.ts
+thread-call.test.ts
 warm-copy.test.ts
 warm-manifest.test.ts
 warm-sync.test.ts
