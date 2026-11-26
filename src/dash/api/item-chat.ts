@@ -183,7 +183,7 @@ export function entriesOf(c: Ctx, s: Sources): ChatEntry[] {
         t: "said", id: `msg:${m.id}`, at: m.at, login: m.author, via: VIA[m.via] ?? "dashboard", body: c.veiled ? "" : m.body, url: str(p.url),
         ...(turn && WAITING.has(turn.status ?? "") ? { pending: true, ...(turn.kind === "maintainer" && (c.operator || turn.login.toLowerCase() === s.reader?.toLowerCase()) ? { canWithdraw: true } : {}) } : {}),
         ...(refusal ? { refusal: c.veiled ? "" : refusal } : {}),
-        ...(withdrawnBy && !str(p.refusal) ? { withdrawnBy } : {}),
+        ...(withdrawnBy ? { withdrawnBy } : {}),
       } });
       const ev = m.workflowEventId !== null ? eventById.get(m.workflowEventId) : undefined;
       if (ev?.line) parts.push({ at: ev.at < m.at ? m.at : ev.at, rank: 1, key: `workflow:${ev.id}`, entry: { t: "reply", id: `workflow:${ev.id}`, at: ev.at, body: hide(ev.line), findings: [], ask: null } });
