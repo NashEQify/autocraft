@@ -35,11 +35,12 @@ import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, loadReviewTexts, saveReviews, type ReviewRow } from "../data/review/index.ts";
-import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundHeadOf } from "../core/author-round.ts";
+import { mergeApprovedOf, ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundHeadOf } from "../core/author-round.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
-import { droppedTitles, keptFixes } from "../workflow/work.ts";
+import { droppedTitles } from "../workflow/work.ts";
+import { fixesToMake } from "../core/review-blocking.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
@@ -127,17 +128,17 @@ const earlierOf = (o: ReviewRow): EarlierOpus => ({ head: o.head, verdict: o.ver
 /**
  * The fixes of the PR's latest earlier reviewed head, when that review was a take-fix whose fixes were never pushed
  * and never posted as a comment (a conflict merge of ours or an author push made a new head first). `plan`: its workflow's; a part a person
- * dropped from it is left out.
+ * dropped from it is left out, and so, on a PR approved for merge (`approved`), is a fix that does not block it (it is filed, not made).
  */
-export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }, rows?: Map<string, ReviewRow[]>, plan: readonly PlanPart[] = []): Promise<UnappliedFix[]> {
+export async function unappliedFixes(db: Db, c: { repo: string; number: number; head_oid: string }, rows?: Map<string, ReviewRow[]>, plan: readonly PlanPart[] = [], approved = false): Promise<UnappliedFix[]> {
   // A hold in between (an author push the reviewer could not judge) does not make the older take-fix's fixes moot.
   const [first, second] = earlierRows(rows ?? await loadReviewRows(db, [{ repo: c.repo, number: c.number }]), c);
   const e = first && first.verdict === "hold" ? second : first;
   if (!e || e.verdict !== "take-fix") return [];
   const facts = (await loadPatchFacts(db, [{ repo: c.repo, number: c.number }])).get(refOf(c));
   if (facts?.fixups.some((f) => f.fromHead === e.head && (f.state === "pushed" || f.state === "asked"))) return [];
-  const asked = (e.fixes as { file: string; change: string; title?: string }[]).filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string");
-  return keptFixes(asked, droppedTitles(plan)).map((f) => ({ head: e.head, file: f.file, change: f.change }));
+  const asked = e.fixes.filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string");
+  return fixesToMake(asked, droppedTitles(plan), approved).map((f) => ({ head: e.head, file: f.file, change: f.change }));
 }
 
 /** The base branch the review's diff was computed against; the mirrored base when the cached diff does not say. */
@@ -291,7 +292,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   } catch (e) {
     return { kind: "no-threads", error: String((e as Error).message ?? e) };
   }
-  const unapplied = await unappliedFixes(db, c, rows, workflows.get(ref)?.plan);
+  const mergeApproved = await mergeApprovedOf(db, c);
+  const unapplied = await unappliedFixes(db, c, rows, workflows.get(ref)?.plan, mergeApproved);
   // Our own commits since the earlier reviewed head, for the reviewer to check against what was asked of them.
   const ours = earlier ? (await ourCommitsSince(db, repo, c.number, earlier.head, c.head_oid)).commits.map(({ from: _from, ...x }) => x) : [];
   const input: OpusPr = {
@@ -299,7 +301,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
     ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
     mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}),
     ...(accepted ? { author_commits: { approved_head: accepted, new_head: c.head_oid, ...(round ?? {}) } } : {}),
-    ...(ours.length ? { pipeline_commits: ours } : {}), diff, discussion,
+    ...(ours.length ? { pipeline_commits: ours } : {}), ...(mergeApproved ? { merge_approved: true } : {}), diff, discussion,
     related_open: await relatedOpen(db, repo, c.number, cd.files),
     statements: await relatedStatements(db, repo, c.number), ...scope,
   };

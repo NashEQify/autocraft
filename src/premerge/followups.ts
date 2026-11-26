@@ -1,15 +1,19 @@
-// The follow-up issue of a PR a maintainer approved for merge: the defects of its pre-merge review that do not stop the merge
-// (src/premerge/types.ts followUpDefects), filed so that a maintainer finds them in the item queue like any issue. One issue per
-// PR, opened at the first head with follow-ups; a later head's follow-ups are a comment on it. Runs the Plan's `followups`
-// actions (src/core/decide.ts followUpsDue); the PR's merge waits for the try, not for its success.
+// The follow-up issue of a PR a maintainer approved for merge: what its reviews found that does not stop the merge, filed so that a
+// maintainer finds it in the item queue like any issue. Two sources: the Opus review's fixes and hold that do not block
+// (src/core/review-blocking.ts), which are not made, and the pre-merge review's defects that do not block (src/premerge/types.ts
+// followUpDefects). One issue per PR, opened by the first filing; a later head's or source's follow-ups are a comment on it. Runs the
+// Plan's `followups` actions (src/core/decide.ts followUpsDue, reviewFollowUpsDue); the PR's merge waits for the try, not for its success.
 //
-// A head's row is written in state `filing` before the write, so a head is filed once. A write GitHub refused is recorded
+// A head's row (premerge_followups for the pre-merge review's head, review_followups for the reviewed head) is written in state
+// `filing` before the write, so a head is filed once. A write GitHub refused is recorded
 // `failed` with its reason, and the merge goes on; one that sent nothing removes the row, so a later run tries again. A head
-// whose follow-ups an earlier head filed already (same file and title) is recorded `filed` without a post.
+// whose follow-ups an earlier row filed already (same file and title) is recorded `filed` without a post.
 import { guard } from "../core/guard.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
-import { claimPremergeFollowup, dropPremergeFollowup, loadPremerge, loadPremergeFollowups, settlePremergeFollowup } from "../data/review/index.ts";
+import { claimFollowup, dropFollowup, loadFollowupRows, loadPremerge, loadReviewsAt, settleFollowup, type FollowupSource, type ReviewRow } from "../data/review/index.ts";
+import { reviewFollowUps } from "../core/review-blocking.ts";
+import { partTitle } from "../workflow/work.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
 import { exec, type Exec } from "../fixup/git.ts";
@@ -22,6 +26,8 @@ import { findingsOf, premergeAt } from "./store.ts";
 import { followUpDefects, type PremergeFinding } from "./types.ts";
 
 export const ACTOR = "premerge-followup";
+/** The title of a hold's follow-up, which names no file. */
+const HOLD_TITLE = "Open question from the review";
 const SHORT_TITLE = 80;
 
 export type FollowupsParams = { repo: string; limit?: number; onHandled?: (n: number) => void; by?: By };
@@ -42,21 +48,39 @@ export function followupTitle(pr: number, title: string): string {
 /** Untrusted model text on one line, cleaned as a public issue's text is (no mentions, URLs, raw HTML or issue references). */
 const line = (t: string): string => issueText(t).replace(/\s*\n\s*/g, " ");
 
-/** The findings of one head, numbered: where, what goes wrong, and why it does not stop the merge. */
-export function followupBody(pr: number, head: string, fs: readonly PremergeFinding[], first: boolean): string {
+/** One follow-up: its title, where (file and line; empty for a hold), what to change or what goes wrong, and why it does not stop the merge. */
+export type FollowupEntry = { title: string; where: string; text: string; why: string };
+
+/** The pre-merge review's defects that do not stop the merge. */
+const premergeEntries = (fs: readonly PremergeFinding[]): FollowupEntry[] =>
+  followUpDefects(fs).map((f) => ({ title: f.title, where: `${f.file}${f.line ? `:${f.line}` : ""}`, text: f.scenario, why: f.blocking?.why ?? "" }));
+
+/** The Opus review's fixes that do not block the merge and nobody dropped (`dropped`), and the reason of its hold when that does not block it. */
+export const reviewEntries = (r: Pick<ReviewRow, "verdict" | "fixes" | "workflow" | "blocked_by">, dropped: readonly string[] | undefined): FollowupEntry[] => {
+  const { fixes, hold } = reviewFollowUps({ ...r, hold: r.workflow?.hold, blockedBy: r.blocked_by }, dropped);
+  return [
+    ...fixes.map((x) => ({ title: partTitle(x), where: x.file, text: x.change, why: x.blocking?.why ?? "" })),
+    ...(hold ? [{ title: HOLD_TITLE, where: "", text: hold, why: "" }] : []),
+  ];
+};
+
+/** The follow-ups of one head, numbered: where, what to change or what goes wrong, and why it does not stop the merge. */
+export function followupBody(pr: number, head: string, source: FollowupSource, fs: readonly FollowupEntry[], first: boolean): string {
+  const found = source === "review" ? "found these changes to make" : "found these defects";
+  const what = source === "review" ? "the review" : "the pre-merge review";
   const lead = first
-    ? `The pre-merge review of #${pr} at ${head.slice(0, 7)} found these defects. A maintainer approved #${pr} for merge, and none of them stops it, so they are listed here to fix separately.`
-    : `The pre-merge review of #${pr} at its new head ${head.slice(0, 7)} found these defects. None of them stops the merge.`;
+    ? `${what[0]!.toUpperCase()}${what.slice(1)} of #${pr} at ${head.slice(0, 7)} ${found}. A maintainer approved #${pr} for merge, and none of them stops it, so they are listed here to fix separately.`
+    : `${what[0]!.toUpperCase()}${what.slice(1)} of #${pr} at ${head.slice(0, 7)} ${found}. None of them stops the merge.`;
   const items = fs.map((f, i) => [
-    `${i + 1}. **${issueTitle(f.title)}** (\`${f.file.replace(/`/g, "")}${f.line ? `:${f.line}` : ""}\`)`,
-    `   ${line(f.scenario)}`,
-    ...(f.blocking?.why ? [`   Not blocking: ${line(f.blocking.why)}`] : []),
+    `${i + 1}. **${issueTitle(f.title)}**${f.where ? ` (\`${f.where.replace(/`/g, "")}\`)` : ""}`,
+    `   ${line(f.text)}`,
+    ...(f.why ? [`   Not blocking: ${line(f.why)}`] : []),
   ].join("\n"));
   return `${lead}\n\n${items.join("\n\n")}\n`;
 }
 
-/** A finding as the "comes back" check of the fix-up rounds matches it: same file and title. */
-const findingKey = (f: Pick<PremergeFinding, "file" | "title">): string => `${f.file}\u0000${f.title}`;
+/** A follow-up as the "comes back" check of the fix-up rounds matches a finding: same place and title. A hold has neither, so its reason keys it. */
+const entryKey = (f: FollowupEntry): string => (f.title === HOLD_TITLE && !f.where ? `\u0000hold\u0000${f.text}` : `${f.where.replace(/:\d+$/, "")}\u0000${f.title}`);
 
 /** Runs the repo's due `followups` actions: one issue per PR, a comment on it for a later head. */
 export async function runPremergeFollowups(db: Db, params: FollowupsParams, log: (line: string) => void = console.log, deps: FollowupsDeps = defaultFollowupsDeps()): Promise<FollowupsSummary> {
@@ -69,36 +93,49 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
   for (const { facts: f, action } of due) {
     if (params.limit !== undefined && handled >= params.limit) break;
     const number = f.number, head = action.head!, ref = `${repo}#${number}`;
+    const source: FollowupSource = action.params?.source === "review" ? "review" : "premerge";
+    // A review's follow-ups are of its own head, which leads to the PR's head through our own pushes; its row is keyed by it.
+    const rowHead = source === "review" && typeof action.params?.reviewHead === "string" ? action.params.reviewHead : head;
+    const dropped = f.workflow?.dropped;
     const skip = async (reason: string) => { s.skipped.push({ ref, reason }); await jobItem(db, repo, number, `follow-ups not filed: ${reason}`, log); };
-    const row = await premergeAt(db, repo, number, head), all = followUpDefects(findingsOf(row));
-    if (!all.length) { await skip("the pre-merge review at the head has none"); continue; }
-    const g = await guard(db, { repo, number }, { kind: "followups", head }, by);
+    const rv = source === "review" ? [...(await loadReviewsAt(db, [{ repo, number, head: rowHead }])).values()][0] ?? null : null;
+    const pm = source === "premerge" ? await premergeAt(db, repo, number, head) : null;
+    const row = rv ?? pm;
+    const all = rv ? reviewEntries(rv, dropped) : pm ? premergeEntries(findingsOf(pm)) : [];
+    if (!all.length) { await skip(`the ${source === "review" ? "review" : "pre-merge review"} at the head has none`); continue; }
+    const g = await guard(db, { repo, number }, { kind: "followups", head, source }, by);
     if ("refused" in g) { await skip(g.refused); continue; }
-    const rows = (await loadPremergeFollowups(db, [{ repo, number }])).get(ref) ?? [];
-    // What earlier heads filed (or may have filed) is not posted again: a new head repeats the same findings after every push of ours.
-    const before = rows.filter((x) => x.head_oid !== head && x.state !== "failed");
-    const earlier = await loadPremerge(db, before.map((x) => ({ repo, number, head: x.head_oid })));
-    const sent = new Set([...earlier.values()].flatMap((r) => followUpDefects(findingsOf(r)).map(findingKey)));
-    const fs = all.filter((f) => !sent.has(findingKey(f)));
-    const prev = rows.findLast((x) => x.issue_number !== null && x.url !== null);
+    const [pmRows, rvRows] = await Promise.all([loadFollowupRows(db, [{ repo, number }], "premerge"), loadFollowupRows(db, [{ repo, number }], "review")]);
+    const mine = (source === "review" ? rvRows : pmRows).get(ref) ?? [], other = (source === "review" ? pmRows : rvRows).get(ref) ?? [];
+    // What earlier rows of either table filed (or may have filed) is not posted again: a new head repeats the same findings after every push of ours.
+    const kept = (x: { state: string }) => x.state !== "failed";
+    const earlierOwn = mine.filter((x) => x.head_oid !== rowHead && kept(x)), earlierOther = other.filter(kept);
+    const [pmBefore, rvBefore] = source === "review" ? [earlierOther, earlierOwn] : [earlierOwn, earlierOther];
+    const [earlierPm, earlierRv] = await Promise.all([
+      loadPremerge(db, pmBefore.map((x) => ({ repo, number, head: x.head_oid }))),
+      loadReviewsAt(db, rvBefore.map((x) => ({ repo, number, head: x.head_oid }))),
+    ]);
+    const sent = new Set([...[...earlierPm.values()].flatMap((r) => premergeEntries(findingsOf(r))), ...[...earlierRv.values()].flatMap((r) => reviewEntries(r, dropped))].map(entryKey));
+    const fs = all.filter((x) => !sent.has(entryKey(x)));
+    const prev = [...mine, ...other].filter((x) => x.issue_number !== null && x.url !== null).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1);
     const shown = await loadShown(db, [{ repo, number }, ...(prev ? [{ repo, number: prev.issue_number! }] : [])]);
     // The issue a later head comments on must still be open; a closed one gets a new issue for what is new.
     const issue = prev && shown.get(`${repo}#${prev.issue_number}`)?.state !== "closed" ? { number: prev.issue_number!, url: prev.url! } : null;
     const title = followupTitle(number, shown.get(ref)?.title ?? "");
-    const body = followupBody(number, head, fs, !issue);
+    const body = followupBody(number, rowHead, source, fs, !issue);
     const at = () => deps.now().toISOString();
     const bad = refusal([title, body], login);
-    if (!await claimPremergeFollowup(db, { repo, number, head, at: at() })) continue;
+    if (!await claimFollowup(db, { repo, number, source, head: rowHead, at: at() })) continue;
     handled++;
     params.onHandled?.(handled);
     if (!fs.length) {
       // Nothing new: the head counts as filed, and its merge goes on.
-      await settlePremergeFollowup(db, { repo, number, head, at: at(), state: "filed", issue: prev ? { number: prev.issue_number!, url: prev.url! } : null });
+      await settleFollowup(db, { repo, number, source, head: rowHead, at: at(), state: "filed", issue: prev ? { number: prev.issue_number!, url: prev.url! } : null });
       s.repeated.push(ref);
       continue;
     }
     if (bad) {
-      await settlePremergeFollowup(db, { repo, number, head, at: at(), state: "failed", note: bad });
+      await settleFollowup(db, { repo, number, source, head: rowHead, at: at(), state: "failed", note: bad });
       s.failed.push({ ref, reason: bad });
       continue;
     }
@@ -114,19 +151,19 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
         made = await createIssue(w, g, deps.exec, { repo, target: ref, title, body, action: ACTOR }, note, { head });
         s.filed.push(ref);
       }
-      await settlePremergeFollowup(db, { repo, number, head, at: at(), state: "filed", issue: made });
+      await settleFollowup(db, { repo, number, source, head: rowHead, at: at(), state: "filed", issue: made });
       await jobItem(db, repo, number, `follow-ups filed in ${made.url}`, log);
     } catch (e) {
       const reason = oneLine(e);
       // Nothing was sent: the head is tried again by a later run.
       if (isUnsent(e) || (e instanceof IssueError && (e.later || e.unsettled))) {
-        await dropPremergeFollowup(db, { repo, number, head });
+        await dropFollowup(db, { repo, number, source, head: rowHead });
         s.skipped.push({ ref, reason });
         continue;
       }
       // An outcome that is not known keeps the `filing` row: the issue may exist, and it is not opened twice.
       if (e instanceof IssueError && !e.clear) { s.failed.push({ ref, reason: `outcome unknown: ${reason}` }); continue; }
-      await settlePremergeFollowup(db, { repo, number, head, at: at(), state: "failed", issue, note: reason });
+      await settleFollowup(db, { repo, number, source, head: rowHead, at: at(), state: "failed", issue, note: reason });
       s.failed.push({ ref, reason });
       await jobItem(db, repo, number, `follow-ups not posted on GitHub: ${reason}`, log);
     }

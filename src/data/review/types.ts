@@ -2,6 +2,7 @@ import type { PremergeFollowupRow } from "./premerge-followups.ts";
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
 import type { RefKey } from "../mirror/types.ts";
+import type { Blocking } from "../../premerge/types.ts";
 
 export type { RefKey };
 
@@ -10,12 +11,14 @@ export type HeadRef = string;
 export type HeadKey = { repo: string; number: number; head: string };
 
 /** One plan part of a review. */
-export type ReviewFinding = { file: string; change: string; title?: string; major?: boolean };
+export type ReviewFinding = { file: string; change: string; title?: string; major?: boolean; /** Absent: blocking (premerge/types.ts). */ blocking?: Blocking };
 export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
 export type ReviewWorkflow = {
   outside_purpose: { lines: number; note: string } | null; recommendation: ReviewRecommendation | null;
   /** Whether the author's commits since the approved head stay within the approval (review/opus-parse.ts). */
   author_commits?: { in_scope: boolean; note: string } | null;
+  /** A hold's blocking class (review/opus-parse.ts); absent: blocking. */
+  hold?: Blocking | null;
 };
 export type Verdict = "take" | "take-fix" | "hold" | "close";
 
@@ -64,6 +67,8 @@ export type ReviewFacts = {
   premerge: Map<HeadRef, PremergeRow>;
   /** premerge_followups rows of each PR, oldest first. */
   premergeFollowups: Map<RefKey, PremergeFollowupRow[]>;
+  /** review_followups rows of each PR, oldest first. */
+  reviewFollowups: Map<RefKey, PremergeFollowupRow[]>;
   postmerge: Map<RefKey, { at: string; error: string | null }>;
   marks: Map<RefKey, ReviewMarks>;
   discussion: Map<RefKey, DiscussionStat>;

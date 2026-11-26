@@ -28,6 +28,7 @@ import { opusCandidateOf, type OpusCandidate } from "../review/opus-candidates.t
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
 import { type PremergeReview } from "./parse.ts";
+import { notBlocking } from "./types.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { savePremerge as saveReviews } from "../data/review/index.ts";
 import { jobItem } from "../runner/job-items.ts";
@@ -50,7 +51,7 @@ export type PremergeParams = {
   approved?: boolean;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
-export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
+export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; /** Defects that block, or carry no class (which blocks). */ defects: number; /** Defects classed as not blocking: on a PR approved for merge they are filed as follow-ups. */ notBlocking: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
 
 export function defaultPremergeDeps(): PremergeDeps {
   const d = defaultOpusDeps();
@@ -92,7 +93,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
   let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now(), ...(params.by ? { by: params.by } : {}), ...(params.approved !== undefined ? { approved: params.approved } : {}) });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
-  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [], off: [] };
+  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, notBlocking: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);
   if (params.dryRun || !cands.length) {
     log(`premerge ${repo}: ${s.candidates.length} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);
@@ -169,11 +170,11 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       } else if (got) {
         await saveReviews(db, [{ repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef }]);
         await jobItem(db, repo, e.number, `pre-merge review: ${got.findings.length} findings`, log);
-        s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect").length;
+        s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect" && !notBlocking(f)).length; s.notBlocking += got.findings.filter((f) => f.severity === "defect" && notBlocking(f)).length;
       } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
     }
     params.onHandled?.(++handled);
   })), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
-  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
+  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} blocking defects, ${s.notBlocking} not blocking), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
   return s;
 }

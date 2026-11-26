@@ -47,7 +47,7 @@ import { markStuck, type StuckCause } from "./stuck.ts";
 import { addRounds, attemptNow, currentAttempt, roundOf, setRound, writeStep, type Attempt, type NewRound } from "./attempt.ts";
 import { implTitle } from "./template.ts";
 import { IMPLEMENT_WORKSPACE_DEADLINE_SEC, implementEnv } from "./workspace.ts";
-import { keptFixes } from "../workflow/work.ts";
+import { fixesToMake } from "../core/review-blocking.ts";
 import type { Implementation, ImplementationRound, ReviseRound } from "./types.ts";
 
 /** The audit login of the stage's writes. */
@@ -195,7 +195,7 @@ async function start(run: BuildRun, deps: ReviseDeps, impl: Implementation, roun
   if (due.review) {
     const at = [...(await loadReviewsAt(db, [{ repo: impl.repo, number: pr, head }])).values()][0];
     const r = at?.verdict === "take-fix" ? at : undefined;
-    const fixes = keptFixes(parseFixes(r ? JSON.stringify(r.fixes) : null), f.workflow?.dropped);
+    const fixes = fixesToMake(parseFixes(r ? JSON.stringify(r.fixes) : null), f.workflow?.dropped, !!f.workflow?.approved);
     if (fixes.length) review = { reason: r?.reason ?? "", fixes };
   }
   let ci: CiFailure | null = null, ciSkip: string | null = null;

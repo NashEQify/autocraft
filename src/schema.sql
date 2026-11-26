@@ -2065,6 +2065,20 @@ CREATE TABLE IF NOT EXISTS premerge_followups (
   PRIMARY KEY (repo, number, head_oid)
 );
 
+-- The review side of the same follow-up issue (src/premerge/followups.ts): one row per reviewed head of a PR approved for merge
+-- whose Opus review had fixes, or a hold, that do not block the merge (src/core/review-blocking.ts). The issue is the one of
+-- premerge_followups or this table, whichever opened it; a later row comments on it. state as in premerge_followups.
+CREATE TABLE IF NOT EXISTS review_followups (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  head_oid TEXT NOT NULL,
+  issue_number INTEGER,
+  url TEXT,
+  state TEXT NOT NULL,
+  at TEXT NOT NULL,
+  note TEXT,
+  PRIMARY KEY (repo, number, head_oid)
+);
+
 -- What the merge rule reads from a PR's cached diff at one head (src/review/diff.ts), written by the code that writes or
 -- removes the cache files; one row while the diff of that head is cached. reasons: JSON string[] of sensitive-content
 -- reasons (the conservative ones while pending); lines: changed lines of the diff; pending: the diff waits for the

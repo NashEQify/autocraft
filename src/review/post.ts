@@ -10,11 +10,14 @@ import { guard } from "../core/guard.ts";
 import { auditIdentity, githubIdentity } from "../github/identity.ts";
 import { ownerOf } from "../owners.ts";
 import { planned, runnable } from "../core/select.ts";
-import { isQueueState } from "../core/plan.ts";
+import { isQueueState, type PrFacts } from "../core/plan.ts";
+import { fixesToMake, reviewFollowUps } from "../core/review-blocking.ts";
+import { mayRun } from "../core/authority.ts";
+import { partTitle } from "../workflow/work.ts";
 import { CLI_BY, mergeAllowed, pushAllowed, type By } from "../core/gates.ts";
 import { Client, GithubError, type Querier } from "../mirror.ts";
 import { prInfo } from "../merge/index.ts";
-import { postSourcesOf } from "./post-source.ts";
+import { postSourcesOf, type PostSource } from "./post-source.ts";
 import { loadPosts, saveReviewPosts } from "../data/review/index.ts";
 import { reviewBody, recommendation } from "./post-template.ts";
 import { jobItem } from "../runner/job-items.ts";
@@ -64,15 +67,33 @@ async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandid
     if (!pub) continue;
     const prev = posts.get(`${repo}#${f.number}`);
     const editId = prev && lane(prev.posted_as) === nowLane ? prev.review_id ?? null : null;
+    const fu = postFollowUps(o, f);
     out.push({
       repo, number: f.number, head_oid: head, editId, opusAt: o.at, model: o.model,
       body: reviewBody({
-        verdict: o.sourceVerdict, sure: o.sure, summary: pub.summary, points: pub.points, claims: o.claims, head: o.reviewedAt, owner: ownerOf(repo), fixedIn: o.fixedIn,
-        recommendation: recommendation({ verdict: o.verdict, queue: o.verdict === "take" && isQueueState(plan.state) ? { path: plan.path, state: plan.state } : null, mergeApproved: mergeAllowed(f), canPush: f.pushable && pushAllowed(f, "fixup") }),
+        verdict: o.sourceVerdict, sure: o.sure, summary: pub.summary, points: pub.points, claims: o.claims, head: o.reviewedAt, owner: ownerOf(repo), fixedIn: o.fixedIn, followUps: fu,
+        recommendation: recommendation({
+          verdict: o.verdict, queue: o.verdict === "take" && isQueueState(plan.state) ? { path: plan.path, state: plan.state } : null, mergeApproved: mergeAllowed(f), canPush: f.pushable && pushAllowed(f, "fixup"),
+          followUps: fu ? { blocking: fu.fixes.length, later: fu.later.length, filed: !fu.notFiled } : null,
+        }),
       }),
     });
   }
   return { due: out, held };
+}
+
+/**
+ * On a PR approved for merge, what the review's post lists apart: the fixes made before the merge, and the fixes and hold that do not
+ * block it and are filed as a follow-up issue (src/core/review-blocking.ts). Null elsewhere, or when nothing is filed.
+ */
+function postFollowUps(o: PostSource, f: PrFacts): { fixes: string[]; later: string[]; notFiled: string | null } | null {
+  if (!f.workflow?.approved) return null;
+  const fu = reviewFollowUps({ verdict: o.sourceVerdict, fixes: o.fixes, hold: o.hold, blockedBy: o.blockedBy }, f.workflow.dropped);
+  const later = [...fu.fixes.map(partTitle), ...(fu.hold ? [fu.hold] : [])];
+  if (!later.length) return null;
+  // The same gate as the filing itself (src/core/decide.ts reviewFollowUpsDue): a refused one says why.
+  const may = mayRun({ facts: f, action: { kind: "followups", head: f.head } }, "pipeline");
+  return { fixes: fixesToMake(o.fixes, f.workflow.dropped, true).map(partTitle), later, notFiled: may.ok ? null : may.why.text };
 }
 
 /** Whether an edit failed because the review no longer exists or the token may not edit it. */

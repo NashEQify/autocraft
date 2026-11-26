@@ -76,7 +76,8 @@ describe("model replies", () => {
     assert.match(held.reason, /^Claim shows wrong code/);
     const fixed = run({ claims: [{ ...bad, fix: { file: "src/a.rs", change: "add the encloses_area test" } }] });
     assert.equal(fixed.verdict, "take-fix");
-    assert.deepEqual(fixed.fixes, [{ file: "src/a.rs", change: "add the encloses_area test" }]);
+    // The claim's fix blocks the merge even of an approved PR: the PR does not do what it says.
+    assert.deepEqual(fixed.fixes.map((f) => [f.file, f.change, f.blocking?.class]), [["src/a.rs", "add the encloses_area test", "off-purpose"]]);
     const stale = run({ claims: [{ ...bad, impact: "description-only" }] });
     assert.deepEqual([stale.verdict, stale.sure], ["take", true], "a stale description does not block");
     assert.equal(run({ claims: [{ ...bad, impact: "unknown" }] }).sure, false);

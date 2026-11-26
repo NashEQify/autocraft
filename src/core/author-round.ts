@@ -18,6 +18,12 @@ export async function roundHeadOf(db: Db, c: { repo: string; number: number; hea
   return authorRound({ approved: wf.approvedBy !== null, baseHead: wf.baseHead }, pushes.get(ref) ?? [], c.head_oid);
 }
 
+/** True when the PR's live workflow (its own, or an implementation PR's issue's) is approved for merge. */
+export async function mergeApprovedOf(db: Db, c: { repo: string; number: number }): Promise<boolean> {
+  const wf = (await loadPrWorkflows(db, [{ repo: c.repo, number: c.number }])).get(`${c.repo}#${c.number}`);
+  return !!wf && wf.approvedBy !== null;
+}
+
 /** Why a round's review was not made (the review's reason; src/workflow/advance.ts stops for the approver with it): the new commits could not be told apart from a PR too large to review whole. */
 export const ROUND_UNSEPARATED = "the author's new commits could not be separated from the rest of this large pull request";
 /** As `ROUND_UNSEPARATED`: what the new commits changed is itself over the review's size cap. */

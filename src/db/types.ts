@@ -2165,6 +2165,17 @@ export interface ReviewBlockers {
   head_oid: string;
 }
 
+export interface ReviewFollowups {
+  repo: string;
+  number: number;
+  head_oid: string;
+  issue_number: number | null;
+  url: string | null;
+  state: string;
+  at: string;
+  note: string | null;
+}
+
 export interface ReviewGates {
   repo: string;
   number: number;
@@ -2860,6 +2871,7 @@ export interface DB {
   reporter_tokens: ReporterTokens;
   repos: Repos;
   review_blockers: ReviewBlockers;
+  review_followups: ReviewFollowups;
   review_gates: ReviewGates;
   review_posts: ReviewPosts;
   review_state: ReviewState;
@@ -3078,6 +3090,7 @@ export interface DB {
   "main.reporter_tokens": ReporterTokens;
   "main.repos": Repos;
   "main.review_blockers": ReviewBlockers;
+  "main.review_followups": ReviewFollowups;
   "main.review_gates": ReviewGates;
   "main.review_posts": ReviewPosts;
   "main.review_state": ReviewState;
@@ -3300,6 +3313,7 @@ export const COLUMNS = {
   reporter_tokens: ["reporter", "github_id", "login", "token_enc", "version", "updated_at", "status"],
   repos: ["name", "owner", "visibility", "default_branch", "open_prs", "open_issues", "synced_at", "high_water", "reconciled_at"],
   review_blockers: ["b_repo", "b_number", "repo", "number", "head_oid"],
+  review_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   review_gates: ["repo", "number", "blocked", "by_login", "read_at", "failures"],
   review_posts: ["repo", "number", "review_id", "head_oid", "posted_at", "edited_at", "posted_as", "opus_at"],
   review_state: ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],

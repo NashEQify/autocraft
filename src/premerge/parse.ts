@@ -4,7 +4,7 @@ import { wholeReplyJson } from "../core/reply-json.ts";
 import { safePath } from "../fixup/patch.ts";
 import type { LintProblem } from "../replylint.ts";
 import { evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
-import { BLOCKING_CLASSES, type Blocking, type BlockingClass, type PremergeFinding } from "./types.ts";
+import { BLOCKING_CLASSES, blockingOf, type Blocking, type PremergeFinding } from "./types.ts";
 
 export const PREMERGE_MAX_FINDINGS = 30;
 export const PREMERGE_TITLE_CHARS = 160;
@@ -12,7 +12,6 @@ export const PREMERGE_SCENARIO_CHARS = 1500;
 export const PREMERGE_FILE_CHARS = 300;
 export const PREMERGE_FIX_CHARS = 800;
 export const PREMERGE_SEARCHED_CHARS = 400;
-export const PREMERGE_WHY_CHARS = 300;
 
 export type PremergeReview = { findings: PremergeFinding[]; searched: string | null; conflicts: StatementConflict[]; /** A claim is unverified or the claims list is missing: a person decides, no fix-up. */ unsure: boolean; /** The claims of the title and body as stored and posted. */ claims: Claim[] };
 
@@ -25,13 +24,6 @@ function replyObject(text: string): Record<string, unknown> | null {
 
 type Entry = { index: number; severity: "defect" | "minor"; file: string; line: number; title: string; scenario: string; fix?: { file: string; change: string }; /** Absent on a minor finding, and when the reply gave no valid class or null. */ blocking?: Blocking };
 
-/** A defect's blocking field: a class or null with its reason, or undefined when the field is missing or not valid. */
-function blockingOf(v: unknown): Blocking | undefined {
-  if (!v || typeof v !== "object") return undefined;
-  const b = v as { class?: unknown; why?: unknown };
-  if (b.class !== null && (typeof b.class !== "string" || !(BLOCKING_CLASSES as readonly string[]).includes(b.class))) return undefined;
-  return { class: b.class as BlockingClass | null, why: typeof b.why === "string" ? clean(b.why).slice(0, PREMERGE_WHY_CHARS) : "" };
-}
 
 /** The well-formed entries of a valid reply (null when the reply is not valid), with the fixes over the cap already removed. */
 function entries(text: string, ref: string): { entries: Entry[]; searched: string | null; conflicts: unknown } | null {

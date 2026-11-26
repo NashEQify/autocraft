@@ -130,6 +130,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "preapprovals", class: "item", why: "A pre-approved merge of one PR." },
     { table: "premerge_reviews", class: "item", why: "Pre-merge reviews of one PR." },
     { table: "premerge_followups", class: "item", why: "The follow-up issue of one PR approved for merge, per head." },
+    { table: "review_followups", class: "item", why: "The follow-up issue of one PR approved for merge, per reviewed head." },
     { table: "push_outcomes", class: "item", why: "Our pushes to one PR (pushed heads, broken heads)." },
     {
       table: "workflow_events", class: "item", why: "When a person last chose to go on with a started item, and who answered it.", when: "r.kind IN ('started', 'answered')",

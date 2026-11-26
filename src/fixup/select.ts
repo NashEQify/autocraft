@@ -14,7 +14,7 @@ import { loadReviewsAt } from "../data/review/index.ts";
 import { triesIn, type ConflictCandidate, type ConflictRow } from "./conflict-state.ts";
 import { queuedOperatorFix } from "../preapproval/state.ts";
 import type { Db } from "../db/index.ts";
-import { keptFixes } from "../workflow/work.ts";
+import { fixesToMake } from "../core/review-blocking.ts";
 
 type Planned = Awaited<ReturnType<typeof planned>>;
 type FixReads = {
@@ -61,8 +61,8 @@ function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Prom
 /** Why the PR's conflict is resolved, for the models: its review's reason, or the approval that stands in for one. */
 const wantedFor = (f: PrFacts): string => f.review?.reason ?? "a maintainer approved the merge; it has no review";
 
-/** A review's fixes that nobody dropped from the PR's workflow. */
-const reviewFixes = (f: PrFacts, stored: string | null | undefined): Fix[] => keptFixes(parseFixes(stored ?? null), f.workflow?.dropped);
+/** A review's fixes that nobody dropped from the PR's workflow; on a PR approved for merge only the blocking ones. */
+const reviewFixes = (f: PrFacts, stored: string | null | undefined): Fix[] => fixesToMake(parseFixes(stored ?? null), f.workflow?.dropped, !!f.workflow?.approved);
 
 /** The selection cut to one PR (`number`), stored patches still all listed; the whole selection without `number`. */
 export function onlyPr(sel: FixSelection, number: number | undefined): FixSelection {
