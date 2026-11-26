@@ -18,13 +18,12 @@ import { listWorkflows } from "../data/workflow/index.ts";
 import { cardWriteCount, needOf, queuedAhead, roomFor, type QueueArgs } from "./queue.ts";
 import { addLabels, assignTo, commentOn, createIssue, IssueError, removeLabel, reopenItem, requestReviewers, transferIssue, type Note, type Writer } from "../github/write.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
-import type { CardEdit } from "../../web/src/api/types.ts";
 import { repoLabels } from "../labels/github.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { actionRefusal, cardRepos, dependsOnCode, isRegistry, itemLabels, otherTypeLabel, readParams, type CardParams, type FollowUp, type OtherAction, type RegistryCommand } from "./cards.ts";
 import { ConversationError, insertTurn, prChanged, seenHead, systemBlock, type StoreDeps } from "./store.ts";
-import { COMMENT_MAX, NOTE_MAX } from "./types.ts";
+import { NOTE_MAX } from "./types.ts";
 import { ownerOf } from "../owners.ts";
 import { parse } from "../workflow/parse.ts";
 import { runCommand } from "../workflow/apply.ts";
@@ -81,33 +80,6 @@ const nowOf = (d?: StoreDeps): Date => d?.now?.() ?? new Date();
 
 /** What a press is bound to: the card's text and parameters as the presser's screen showed them. Any edit gives a new digest. */
 export const cardDigest = (c: Pick<CardRow, "text" | "params">): string => createHash("sha256").update(JSON.stringify([c.text, c.params])).digest("hex").slice(0, 16);
-
-/** Replaces the comment text of a card that has not run. */
-export async function editCard(db: Db, id: number, by: string, edit: CardEdit, deps?: StoreDeps): Promise<CardRow> {
-  const c = await need(db, id);
-  if (paramsOf(c).kind !== "comment") throw new ConversationError(400, "only a comment card has text to edit");
-  const text = edit.text.trim();
-  if (!text) throw new ConversationError(400, "the comment is empty");
-  if (text.length > COMMENT_MAX) throw new ConversationError(400, `the comment is longer than ${COMMENT_MAX} characters`);
-  const at = nowOf(deps).toISOString();
-  await db.write(async () => {
-    if (!await markCard(db, id, ["proposed"], { text, edited_by: by, edited_at: at })) throw new ConversationError(409, `the card is already ${c.state}`);
-    await addAudit(db, [{ login: by, action: "conversation-card-edit", target: ref(c.repo, c.number), details: { card: id } }]);
-  });
-  return await need(db, id);
-}
-
-/** Dismisses a proposed card, or a queued press. The presser of a queued card stays on the card as `queuedBy` in the audit. */
-export async function dismissCard(db: Db, id: number, by: string, deps?: StoreDeps & { role?: string }): Promise<CardRow> {
-  const c = await need(db, id);
-  const at = nowOf(deps).toISOString();
-  await db.write(async () => {
-    if (!await markCard(db, id, ["proposed", "queued"], { state: "dismissed", acted_by: by, acted_at: at })) throw new ConversationError(409, `the card is already ${c.state}`);
-    await addAudit(db, [{ login: by, action: "conversation-card-dismiss", target: ref(c.repo, c.number), details: { card: id, ...(c.state === "queued" && { queuedBy: c.acted_by ?? undefined }) } }]);
-    await insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${by} dismissed the card: ${c.description}.`, block: systemBlock(`The ${deps?.role ?? "operator"} ${by} dismissed the proposed action: ${c.description}.`) }, deps);
-  });
-  return await need(db, id);
-}
 
 type Outcome = { result: string; url: string | null; held?: FollowUp[]; workflowId?: number | null };
 type Item = ItemOf<"text">;

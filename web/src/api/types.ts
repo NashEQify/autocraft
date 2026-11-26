@@ -1770,9 +1770,6 @@ export interface QueuePage {
 
 // ---- conversations with Opus (src/dash/api/conversations.ts) ----
 
-/** A proposed comment card's text as a person edited it. */
-export type CardEdit = { text: string };
-
 /** "replaced": a later Opus reply proposed a new set; the card can no longer run. */
 export type ConversationCardState = "proposed" | "queued" | "running" | "done" | "failed" | "dismissed" | "replaced";
 
@@ -2808,11 +2805,11 @@ export interface MaintainStats {
 // ---- the Items page (GET /api/maintain/items) ----
 
 /**
- * Which list an item is in: `needs` (an open recommendation or an unclear last answer), `started` (a live workflow), `automatic`
+ * Which list an item is in: `started` (a live workflow, or an unclear last answer), `automatic`
  * (AutoCraft works it without anyone picking it: review, fix, verify or merge queue), `rest` (open, nothing running), `backlog`
  * (open, nothing planned) and `done` (merged or closed).
  */
-export type MaintainItemGroup = "needs" | "started" | "automatic" | "rest" | "backlog" | "done";
+export type MaintainItemGroup = "started" | "automatic" | "rest" | "backlog" | "done";
 /** `merged`: the pull requests AutoCraft merged (its merge step or a merged batch), newest merge first. */
 export type MaintainItemsShow = "open" | "backlog" | "closed" | "merged";
 /** `security` and `stuck` are for operators and maintainers. */
@@ -2863,7 +2860,7 @@ export interface MaintainItemsQuery {
   limit?: number;
 }
 
-/** Rows in group order (needs, started, automatic, rest; or backlog; or done), each group cut at the query's limit; `counts` has every match. */
+/** Rows in group order (started, automatic, rest; or backlog; or done), each group cut at the query's limit; `counts` has every match. */
 export interface MaintainItems {
   rows: MaintainItemRow[];
   counts: Record<MaintainItemGroup, number>;

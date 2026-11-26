@@ -387,13 +387,12 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/maintain/asked", maintain.asked),
     get("/api/maintain/queue", maintain.queueMeta),
     scoped(get("/api/maintain/stats", maintain.stats)),
-    // The Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
+    // The Items page: three lists of the open items, the Backlog or the closed items, with filters and search.
     scoped(get("/api/maintain/items", maintain.items)),
     // The Items browser: one page of the items matching a search with qualifiers, presets and quick-filter values.
     scoped(get("/api/maintain/browse", itemsBrowse.browse)),
     get("/api/maintain/items/:repo/:n", maintainItem.item),
     get("/api/maintain/repos", maintain.repos),
-    get("/api/maintain/waiting", maintain.waiting),
     get("/api/me/settings", userSettings.settings),
     { method: "PUT", pattern: "/api/me/settings", handler: ok(userSettings.setSettings) },
     get("/api/runners", runners.list),
@@ -415,12 +414,8 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/downloads", downloads),
     get("/api/items/:repo/:n/trace", itemTrace),
     get("/api/items/:repo/:n/trace/event", itemTraceDetail),
-    get("/api/conversations/:repo/:n", conv.getConversation),
     { method: "POST", pattern: "/api/conversations/:repo/:n/messages", handler: ok(async (db, req) => conv.postMessage(db, req)) },
     { method: "POST", pattern: "/api/conversations/:repo/:n/withdraw", handler: ok(async (db, req) => conv.postWithdraw(db, req)) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/edit", handler: ok(conv.editCardText) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/do", handler: ok(async (db, req) => conv.doIt(db, req)) },
-    { method: "POST", pattern: "/api/conversation-cards/:id/dismiss", handler: ok(conv.dismiss) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/cancel", handler: ok(operator.cancelItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/retry", handler: ok(operator.retryItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/review-again", handler: ok(operator.reviewItemAgain) },

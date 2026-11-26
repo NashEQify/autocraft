@@ -1,5 +1,5 @@
 // Opus conversations: card validation, Do it runs once (commands through the workflow, comments and labels through fake writers), and
-// viewers read but cannot write. GitHub is a fake querier.
+// viewers cannot write. GitHub is a fake querier.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { setCommentApproval } from "../src/act/approval.ts";
 import { setApproval as setLabelApproval } from "../src/labels/approval.ts";
 import { applicableSteps, cleanComment, headline, isRegistry, loadCardFacts, parseReply, type NewCard } from "../src/conversations/cards.ts";
 import { cardOf, doCard } from "../src/conversations/act.ts";
-import { addMessage, claimPending, ConversationError, ensureConversation, insertTurn, loadStale, refreshItem, storeReply, turnsOf } from "../src/conversations/store.ts";
+import { addMessage, claimPending, ConversationError, ensureConversation, insertTurn, loadStale, refreshItem, turnsOf } from "../src/conversations/store.ts";
 import { answerPending } from "../src/conversations/run.ts";
 import { cleanReason } from "../src/act/templates.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
@@ -326,30 +326,15 @@ function req(role: "operator" | "viewer", params: Record<string, string>, json?:
 }
 
 describe("access", () => {
-  test("a viewer reads the conversation and cannot write; chat routes are operator-only", async () => {
+  test("a viewer cannot write; no conversation route is operator-only", async () => {
     const db = await fresh();
-    await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Hi" }));
-    const held = (await claimPending(db, "app", 1))!;
-    const reply = (await parseReply(db, "app", 1, "Reply.\n```actions\n[{\"kind\":\"resolution\",\"steps\":[{\"kind\":\"comment\"}],\"text\":\"Which version do you run?\"}]\n```"))!;
-    await storeReply(db, "app", 1, held.claim, reply.text, reply.cards, reply.notes, null);
-    const view = await conv.getConversation(db, req("viewer", { repo: "app", n: "1" }));
-    assert.equal(view.exists, true);
-    assert.deepEqual(view.turns.map((t) => t.login), ["op", "opus"]);
-    assert.equal(view.turns[1]!.actions[0]!.state, "proposed");
-    const cardId = String(view.turns[1]!.actions[0]!.id);
-    for (const f of [
-      () => conv.postMessage(db, req("viewer", { repo: "app", n: "1" }, { text: "Hi" })),
-      () => conv.doIt(db, req("viewer", { id: cardId })),
-      () => conv.dismiss(db, req("viewer", { id: cardId })),
-      () => conv.editCardText(db, req("viewer", { id: cardId }, { text: "x" })),
-    ]) await assert.rejects(f, (e) => e instanceof HttpError && e.status === 403);
-    assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state")))!.state, "proposed");
+    await assert.rejects(() => conv.postMessage(db, req("viewer", { repo: "app", n: "1" }, { text: "Hi" })), (e) => e instanceof HttpError && e.status === 403);
     const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
-    assert.equal(writes.length, 5);
-    // No route is operator-only: messages and the card routes check who may write or settle in the handler (refused for the viewer above).
+    assert.equal(writes.length, 2);
+    // No route is operator-only: messages and withdrawals check who may write in the handler (refused for the viewer above).
     assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern), []);
     // A second message while Opus has not answered the first is refused.
-    await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "More" }));
+    await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Hi" }));
     await assert.rejects(() => conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Again" })), (e) => e instanceof HttpError && e.status === 409);
   });
 });
@@ -388,15 +373,14 @@ describe("maintainers' messages wait and are withdrawn", () => {
     assert.equal((await turn()).status, "pending");
     assert.equal(handled, 0, "a message given back is no work done");
     const as = (login: string, role: "maintainer" | "operator"): Req => ({ ...req("viewer", { repo: "app", n: "1" }), user: { login, role, canWrite: async () => true, canRead: async () => true } });
-    assert.equal((await conv.getConversation(db, as("maint", "maintainer"))).canWithdraw, true);
     await assert.rejects(() => conv.postWithdraw(db, as("someone", "maintainer")), (e) => e instanceof HttpError && e.status === 403);
     const view = await conv.postWithdraw(db, as("maint", "maintainer"));
     assert.equal(view.pending, false);
     assert.match((await turn()).error ?? "", /withdrawn by maint/);
     await addMessage(db, "app", 1, { login: "maint", kind: "maintainer" }, "And now?");
-    await conv.postWithdraw(db, as("op", "operator"));
+    const after = await conv.postWithdraw(db, as("op", "operator"));
     assert.equal((await turn()).status, "failed");
-    assert.equal((await conv.getConversation(db, as("op", "operator"))).canWithdraw, false, "nothing waits any more");
+    assert.equal(after.canWithdraw, false, "nothing waits any more");
   });
 
   test("withdrawing a turn that is being answered withdraws its model call", async () => {

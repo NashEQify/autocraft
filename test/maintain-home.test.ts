@@ -1,7 +1,7 @@
 // Home's own items and the asked count (src/dash/api/maintain.ts).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { asked, home, items, repos, waiting } from "../src/dash/api/maintain.ts";
+import { asked, home, items, repos } from "../src/dash/api/maintain.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { addEvent, insertWorkflow } from "../src/workflow/store.ts";
 import { recordMessage } from "../src/data/chat/index.ts";
@@ -70,8 +70,8 @@ test("an item stopped at a blocker shows its recommendation and needs an answer 
   const m = as("maintainer", ["app"]), v = as("viewer", []);
   assert.deepEqual(shown((await home(db, m)).mine), [[1, true], [2, true]]);
   const list = await items(db, m);
-  assert.deepEqual([shown(list.rows.filter((r) => r.group === "needs")), list.counts.needs], [[[1, true], [2, true]], 2]);
-  assert.deepEqual([await waiting(db, m), (await repos(db, m))[0]!.waiting], [{ app: 2 }, 2]);
+  assert.deepEqual([shown(list.rows.filter((r) => r.group === "started")), list.counts.started], [[[1, true], [2, true]], 2]);
+  assert.equal((await repos(db, m))[0]!.waiting, 2);
   assert.deepEqual(shown((await home(db, v)).recent), [[1, true], [2, false]]);
   assert.deepEqual(shown((await items(db, v)).rows), [[1, true], [2, false]]);
 });

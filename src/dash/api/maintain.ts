@@ -26,7 +26,7 @@ import { queryDb } from "../../db/query-db.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadQuiet } from "../../data/security/index.ts";
-import { countWaiting, loadHeldWorkflows } from "../../data/workflow/index.ts";
+import { loadHeldWorkflows } from "../../data/workflow/index.ts";
 import { loadMaintainStats } from "../../data/views/stats.ts";
 import { loadItemRowFacts, loadItemsBase } from "../../data/views/maintain-items.ts";
 import type { ItemBase } from "../../data/views/types.ts";
@@ -180,7 +180,7 @@ export async function stats(db: Db, req: Req): Promise<MaintainStats> {
 }
 
 // ---- GET /api/maintain/items: the Items page ------------------------------------------------------------------------
-// Open items of the repos the reader may see, in four lists (groupOf), each ordered by priority: the workflow weight, then the
+// Open items of the repos the reader may see, in three lists (groupOf), each ordered by priority: the workflow weight, then the
 // work rank (src/rank). A started item's line comes from its workflow row; an item nobody started shows the pipeline's status
 // line (the plan view), veiled for the reader as on every other list. Grouping runs here over the open items' narrow columns;
 // only the rows sent are read in full. Closed items are read newest first, one page at a time.
@@ -190,16 +190,15 @@ const WORKING_PHASES: ReadonlySet<ItemPhase> = new Set(["Review", "Fixing", "Ver
 const SHOWS: readonly MaintainItemsShow[] = ["open", "backlog", "closed", "merged"];
 const FILTERS: readonly MaintainItemsFilter[] = ["security", "outside", "stuck", "duplicates", "mine"];
 const STAFF_FILTERS: readonly MaintainItemsFilter[] = ["security", "stuck"];
-const GROUPS: readonly MaintainItemGroup[] = ["needs", "started", "automatic", "rest", "backlog", "done"];
+const GROUPS: readonly MaintainItemGroup[] = ["started", "automatic", "rest", "backlog", "done"];
 const LIMIT_DEFAULT = 50;
 const LIMIT_MAX = 500;
 const REFS_MAX = 100;
 
-/** Which list an item goes in. An answer awaited comes first, then a live workflow; a Backlog item leaves the active lists. */
+/** Which list an item goes in. A live workflow or an awaited answer puts it in Started; a Backlog item leaves the active lists. */
 export function groupOf(x: { open: boolean; live: boolean; waits: boolean; backlog: boolean; phase: ItemPhase }): MaintainItemGroup {
   if (!x.open) return "done";
-  if (x.waits) return "needs";
-  if (x.live) return "started";
+  if (x.live || x.waits) return "started";
   if (x.backlog) return "backlog";
   return WORKING_PHASES.has(x.phase) ? "automatic" : "rest";
 }
@@ -310,11 +309,6 @@ function wfLine(wf: ItemWorkflow | null, unclear: boolean, veiled: boolean): str
   if (!wf) return null;
   const rec = veiled ? null : openQuestion(wf)?.rec;
   return rec ? recommendationText(rec) : stateLine(wf, undefined, undefined, null, veiled);
-}
-
-/** GET /api/maintain/waiting: per visible repo, the started items that wait for an answer, for the project picker; repos with none are left out. */
-export async function waiting(db: Db, req: Req): Promise<Record<string, number>> {
-  return Object.fromEntries(await countWaiting(db, await allVisibleRepos(db, req)));
 }
 
 /** GET /api/maintain/repos: the Repos page, for every role. Counts and switches are the reader's visible tracked repos; only who may act differs. */

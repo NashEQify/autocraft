@@ -86,8 +86,6 @@ export function createHttpApi(): Api {
     changed();
     return v;
   }
-  const conv = (repo: string, n: number, rest = "") => `/api/conversations/${encodeURIComponent(repo)}/${encodeURIComponent(String(n))}${rest}`;
-
   return {
     me: Object.assign(() => get<User>("/api/me"), {
       settings: {
@@ -97,14 +95,6 @@ export function createHttpApi(): Api {
     }),
     repos: () => get("/api/repos"),
     repoOwners: () => get("/api/repos/owners"),
-    conversations: {
-      get: (repo, number) => get(conv(repo, number)),
-      say: (repo, number, text, ask) => post(conv(repo, number, "/messages"), ask === false ? { text, ask: false } : { text }),
-      withdraw: (repo, number) => post(conv(repo, number, "/withdraw")),
-      editCard: (id, edit) => post(`/api/conversation-cards/${id}/edit`, edit),
-      doCard: (id, digest) => post(`/api/conversation-cards/${id}/do`, { digest }),
-      dismissCard: (id) => post(`/api/conversation-cards/${id}/dismiss`),
-    },
     areas: {
       get: (repo) => get(`/api/areas/${encodeURIComponent(repo)}`),
       edit: (repo, edit) => post(`/api/areas/${encodeURIComponent(repo)}/edit`, edit),

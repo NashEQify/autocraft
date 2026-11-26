@@ -86,7 +86,7 @@ Rules:
 
 ### Project scope
 
-- The sidebar and the phone drawer hold the project picker, with each project's count of items waiting for an answer.
+- The sidebar and the phone drawer hold the project picker.
 - A single `repo` in a list URL wins over the saved pick; a URL with several repositories picks no project. Item and settings pages are not scoped.
 - Picking a project replaces the list URL; it adds no history entry. While a project is picked, lists hide their own repository control.
 
@@ -99,8 +99,8 @@ Rules:
 
 ### Home
 
-- One Task Runner line first ("0 Task Runners connected", "3 others available"), then what waits for the reader's answer, what the reader started, problems, stuck items and the live board.
-- Each row has its item link and GitHub button, the one recommendation in a sentence, and the plain-text answer box: `yes`, or another command (see the Commands section of pipeline.md). Arrow keys, Home/End and `j`/`k` move between rows, `p` opens the preview and `o` the item page.
+- One Task Runner line first ("0 Task Runners connected", "3 others available"), then problems, then the reader's own items: those they started, approved, held, resumed, answered or wrote about, newest conversation entry first. Show more opens `/items?filter=mine`. Viewers see the recently updated items of the repos they can see instead.
+- Each row has its item link and GitHub button and the conversation's last message. A row whose open question is addressed to the reader is marked, and the Home entry in the sidebar counts those questions.
 - Editable fields use 16 px text on phones, so the page does not zoom on focus.
 
 ### Items
@@ -109,9 +109,9 @@ Rules:
 
 ### Item page
 
-- The AutoCraft side shows the status (steps, numbered parts and the recommendation), the command box and the controls, then signals, security, the implementation, screenshots, the conversation with the model and the History. Model-call and tool details load when opened.
-- The GitHub side sits beside the AutoCraft side from 1024 px and below it from 768 px. Phones show one side at a time with an AutoCraft/GitHub switch; viewers start on GitHub.
-- A link to `#hist-…` or `#gh-…` opens the side and the section that hold the target, then scrolls to it.
+- A header with the status, the next step and badges (weight, duplicates, outside hold, security findings for staff), over the chat with AutoCraft: people's messages from every surface, AutoCraft's replies and recommendations, its work rows, and folded GitHub and Discord lines. Holds and paused steps show as a notice with their button above the composer.
+- The side dock holds the GitHub and Events tabs beside the chat, resizable, with a width remembered per viewer and tab. Phones show Chat, GitHub and Events as tabs under the header.
+- `?tab=github|events&event=<id>` opens a tab, and an event in Events; a work row opens its event.
 
 ## 5. Extensibility
 
@@ -136,12 +136,11 @@ interface FeatureModule {
 
 ## 6. Screens
 
-### Item status and command box
+### Item status and chat
 
 - The status names the entry the item runs from (review, fix-up, implement or merge queue), the step it is at, and who started or approved it ("approved by mira", "held by david").
-- The plan is a numbered list of parts (findings and changes). `drop 2` removes a part by number or by words of its title.
-- The recommendation is one plain sentence of what AutoCraft does next and whether it then merges or comes back. Its reason stands under it when the model gave one.
-- The command box takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `hold`). Text that is not fully understood runs nothing; AutoCraft shows what it read. Every accepted answer gets one confirmation line.
+- A recommendation is AutoCraft's message in the chat: the findings and changes as a numbered list, then one plain sentence of what AutoCraft does next and whether it then merges or comes back. `drop 2` removes a part by number or by words of its title.
+- The composer takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `hold`). Text that is not fully understood runs nothing; AutoCraft replies with what it read. Every accepted answer gets one confirmation line.
 - Weight shows as a word next to the item when it is not normal.
 
 Description rendering is for untrusted input: raw HTML is dropped, only `http(s)`, `mailto`, relative and anchor links survive, links open in a new tab with `rel="noopener noreferrer nofollow"`, and only GitHub-hosted images load inline. The CSP allows only same-origin images, so the renderer sends images on the hosts the server allows through the image proxy; others show as a link.
