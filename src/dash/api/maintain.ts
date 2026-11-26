@@ -117,13 +117,23 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   return { mine: await homeRows(db, mineRefs.slice(0, MINE_ROWS), { login: req.user.login, staff }), mineTotal: mineRefs.length, recent: [], runner, attention };
 }
 
-/** GET /api/maintain/asked: how many open questions are addressed to the reader (askedLogins of the open workflows), in the repos they see. */
-export async function asked(db: Db, req: Req): Promise<{ count: number }> {
-  if (req.user.role === "viewer") return { count: 0 };
+/** The items whose open question is addressed to the reader (askedLogins of the open workflows), in the repos they see, oldest question first. */
+async function askedRefs(db: Db, req: Req): Promise<string[]> {
+  if (req.user.role === "viewer") return [];
   const me = req.user.login.toLowerCase();
   const visible = new Set(await visibleRepos(db, req));
   const wfs = await listWorkflows(db, { states: [...ASKING_STATES], logins: [req.user.login] });
-  return { count: wfs.filter((w) => visible.has(w.repo) && isAsked(w, me)).length };
+  return wfs.filter((w) => visible.has(w.repo) && isAsked(w, me)).sort((a, b) => ((a.recAt ?? "") < (b.recAt ?? "") ? -1 : 1)).map((w) => `${w.repo}#${w.number}`);
+}
+
+/** GET /api/maintain/asked: how many open questions are addressed to the reader. */
+export async function asked(db: Db, req: Req): Promise<{ count: number }> {
+  return { count: (await askedRefs(db, req)).length };
+}
+
+/** Every item whose open question is addressed to the reader, as Home rows (the agent's my_items). */
+export async function askedRows(db: Db, req: Req): Promise<MaintainRow[]> {
+  return await homeRows(db, await askedRefs(db, req), { login: req.user.login, staff: canSeeInternals(req) });
 }
 
 function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>["runner"]>, login: string): MaintainRunnerLine {

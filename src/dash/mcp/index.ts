@@ -29,7 +29,8 @@ import { attributionLines, listText, recommendationLine, stateLine, weightLabel 
 import { openQuestion } from "../../workflow/asked.ts";
 import { eventsOf } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
-import { home } from "../api/maintain.ts";
+import { askedRows, home } from "../api/maintain.ts";
+import type { MaintainRow } from "../../../web/src/api/types.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -180,7 +181,7 @@ export const WORKFLOW_READ_TOOLS = [
   },
   {
     name: "my_items",
-    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or held, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
+    description: "Your user's items, as Home lists them. mine: the newest of the items they started, approved, held, resumed, answered or wrote about in the item's chat (open ones, and done ones for 7 days), newest chat entry first, with mineTotal; askedOfYou: every item whose open question is addressed to them (they started or approved it). Each row has its state line, weight, who started and approved it, and the chat's last message (last.question: the question is addressed to your user). Viewers get recent: the newest updated items of the repositories they can see.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true },
   },
@@ -342,13 +343,16 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
 async function myItems(env: McpEnv, raw: unknown): Promise<ToolResult> {
   args(raw, {});
   const user = await env.user(false);
-  const h = await home(env.db, reqOf(user));
-  const row = (x: { repo: string; number: number; title: string; line: string; weight: string | null; startedBy: string | null; approvedBy: string | null; state?: string; last?: { by: string; text: string; question: boolean } }) =>
-    ({ item: `${x.repo}#${x.number}`, title: x.title, state: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy, ...(x.state && { itemState: x.state }), ...(x.last && { lastMessage: { by: x.last.by, text: x.last.text } }) });
-  const waitingForYou = h.mine.filter((x) => x.last?.question).map(row);
-  const data = { waitingForYou, yours: h.mine.filter((x) => !x.last?.question).map(row), total: h.mineTotal };
-  const n = waitingForYou.length;
-  return show(`${n} item${n === 1 ? "" : "s"} waiting for your user's answer.`, "my items", data);
+  const req = reqOf(user);
+  const [h, askedOfMe] = await Promise.all([home(env.db, req), askedRows(env.db, req)]);
+  // Home's rows (GET /api/maintain/home), with the fields an agent uses.
+  const row = (x: MaintainRow) => ({
+    repo: x.repo, number: x.number, kind: x.kind, title: x.title, line: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy,
+    updatedAt: x.updatedAt, ...(x.state && { state: x.state }), ...(x.last && { last: x.last }),
+  });
+  const data = { mine: h.mine.map(row), mineTotal: h.mineTotal, askedOfYou: askedOfMe.map(row), ...(user.role === "viewer" ? { recent: h.recent.map(row) } : {}) };
+  const n = data.askedOfYou.length;
+  return show(`${n} item${n === 1 ? "" : "s"} waiting for your user's answer; ${data.mine.length} of their ${data.mineTotal} items, newest first.`, "my items", data);
 }
 
 function helpText(): ToolResult {
