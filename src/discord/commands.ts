@@ -10,6 +10,7 @@ import { forgetLink, loginOf, redeemLinkCode } from "./links.ts";
 import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
 import { t } from "../i18n/index.ts";
 import { parse } from "../workflow/parse.ts";
+import { saying } from "../workflow/said.ts";
 import { READ_OWN_MAX, refsIn, runText, type ReadDeps } from "../workflow/read.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { plain } from "./reply.ts";
@@ -121,8 +122,10 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     // Discord has no item the text was written on, so the items come from the list in the text; text the parser cannot read is read by a model (runText).
     const userHash = keys.hash("author", call.userId);
     const shown = await loadShownQuestions(db, userHash);
-    const result = await runText(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) },
-      { text, own: refsIn(text).slice(0, READ_OWN_MAX), named: true, ...(deps.read ? { deps: deps.read } : {}) });
+    const own = refsIn(text).slice(0, READ_OWN_MAX);
+    const said = { login, via: "discord" as const, text, items: [...own, ...(parsed.kind !== "ambiguous" ? parsed.items ?? [] : [])], payload: { msgHash: keys.hash("message", call.interaction.id) } };
+    const result = await saying(db, said, () => runText(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) },
+      { text, own, named: true, ...(deps.read ? { deps: deps.read } : {}) }));
     // The reply shows the question that took the answered one's place, as an alert does.
     const sentAt = new Date().toISOString();
     await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));

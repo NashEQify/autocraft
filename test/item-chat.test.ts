@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
-import { itemChat } from "../src/dash/api/item-chat.ts";
+import { itemChat, postChat } from "../src/dash/api/item-chat.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ChatEntry, ItemChat } from "../web/src/api/types.ts";
@@ -124,4 +124,26 @@ test("the chat tells an item as bubbles, replies, work and folded GitHub and Dis
   }
   assert.ok(v.entries.some((e) => e.t === "work"), "the work rows stay, without their outcomes");
   assert.ok(!JSON.stringify(v).includes("one problem is left") && !JSON.stringify(v).includes("weight high"));
+});
+
+test("a command written in the chat is stored as the person's message, linked to its event, and shown with its reply; a viewer may not write", async () => {
+  const db = await seed();
+  const k = db.k as any;
+  await db.run(k.insertInto("access").values({ login: "op", role: "operator" }));
+  await db.run(k.insertInto("settings").values({ key: "github_identity", value: "app" }));
+  await db.run(k.insertInto("tracked_repos").values({ name: "photocraft", workflow: "new" }).onConflict((oc: any) => oc.column("name").doUpdateSet({ workflow: "new" })));
+  const post = (role: "operator" | "viewer", text: string): Req => ({ ...req(role), json: { conversation: "main", text } });
+  await assert.rejects(postChat(db, post("viewer", "weight low")), { status: 403 });
+
+  const { chat, lines } = await postChat(db, post("operator", "weight low"));
+  assert.ok(lines.length > 0, "the command answered");
+  const stored = await db.all(db.k.selectFrom("chat_messages").select(["id", "body", "via", "workflow_event_id"]).where("body", "=", "weight low"));
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]!.via, "dashboard");
+  assert.ok(stored[0]!.workflow_event_id, "linked to the workflow event the command wrote");
+
+  const entries = chat.conversations[0]!.entries;
+  const i = entries.findIndex((e) => e.t === "said" && e.body === "weight low");
+  assert.ok(i >= 0, "the bubble is in the chat");
+  assert.equal(entries[i + 1]?.t, "reply", "the command's reply follows it");
 });

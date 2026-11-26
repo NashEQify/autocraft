@@ -13,7 +13,8 @@ import { mentionName, shownMention } from "../../github/slugs.ts";
 import { parse } from "../../workflow/parse.ts";
 import { runControl, type CommandResult, type ControlInput } from "../../workflow/apply.ts";
 import { refsIn, runText } from "../../workflow/read.ts";
-import type { ItemRef } from "../../workflow/types.ts";
+import { saying } from "../../workflow/said.ts";
+import type { ItemRef, Parsed } from "../../workflow/types.ts";
 
 /** Longer text is no command anyone types. */
 const TEXT_MAX = 4000;
@@ -37,7 +38,7 @@ async function visibleFn(db: Db, req: Req): Promise<(repo: string) => Promise<bo
 }
 
 /** `owner/name#n`, `name#n` or `{ repo, number }`. */
-function itemOf(v: unknown): ItemRef {
+export function itemOf(v: unknown): ItemRef {
   if (typeof v === "string") {
     const m = /^((?:[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+)#([1-9][0-9]*)$/.exec(v.trim());
     if (m) return { repo: m[1]!, number: Number(m[2]) };
@@ -59,8 +60,14 @@ export async function itemCommand(db: Db, req: Req): Promise<CommandResult> {
   const parsed = parse(text, { repo });
   if (parsed.kind !== "ambiguous" && (parsed.items?.length ?? 0) > ITEMS_MAX) throw new HttpError(400, `at most ${ITEMS_MAX} items in one command`);
   const asked = obj(req.json).asked;
-  return await runText(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible: await visibleFn(db, req), asked: ({ ref }) => (ref === `${repo}#${n}` ? timeOf(asked) : null) },
-    { text, own: [{ repo, number: n }], named: false, parse: { repo } });
+  return await runItemText(db, req, repo, n, text, parsed, timeOf(asked));
+}
+
+/** Text written on one item through the command core, stored as the person's message in the item's chat. */
+export async function runItemText(db: Db, req: Req, repo: string, n: number, text: string, parsed: Parsed, asked: string | null): Promise<CommandResult> {
+  return await saying(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }] }, async () =>
+    await runText(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible: await visibleFn(db, req), asked: ({ ref }) => (ref === `${repo}#${n}` ? asked : null) },
+      { text, own: [{ repo, number: n }], named: false, parse: { repo } }));
 }
 
 export async function listCommand(db: Db, req: Req): Promise<CommandResult> {
@@ -72,8 +79,9 @@ export async function listCommand(db: Db, req: Req): Promise<CommandResult> {
   if (Math.max(items.length, parsed.kind !== "ambiguous" ? parsed.items?.length ?? 0 : 0) > ITEMS_MAX) throw new HttpError(400, `at most ${ITEMS_MAX} items in one command`);
   const asked = obj(obj(req.json).asked);
   const own = items.length ? items : refsIn(text).slice(0, ITEMS_MAX);
-  return await runText(db, actorOf(req), "dashboard", { parsed, items, visible: await visibleFn(db, req), asked: ({ ref }) => timeOf(Object.hasOwn(asked, ref) ? asked[ref] : null) },
-    { text, own, named: !items.length });
+  return await saying(db, { login: req.user.login, via: "dashboard", text, items: own }, async () =>
+    await runText(db, actorOf(req), "dashboard", { parsed, items, visible: await visibleFn(db, req), asked: ({ ref }) => timeOf(Object.hasOwn(asked, ref) ? asked[ref] : null) },
+      { text, own, named: !items.length }));
 }
 
 export async function control(db: Db, req: Req): Promise<{ ok: boolean; line: string }> {

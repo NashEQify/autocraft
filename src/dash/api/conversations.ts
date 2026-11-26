@@ -17,6 +17,7 @@ import { actRefusal, githubIdentity } from "../../github/identity.ts";
 import { canActMany, permKey } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
+import { queryDb } from "../../db/query-db.ts";
 import { tierOfModel } from "../../remote/mode.ts";
 import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
 import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
@@ -215,6 +216,34 @@ export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<C
   if (refused) throw new HttpError(409, refused);
   await guard(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
   return await viewFor(db, req, repo, n);
+}
+
+/** Questions a person may put to Opus per hour and per day. */
+export const ASK_LIMITS = { hour: 10, day: 50 } as const;
+
+/** Throws 429 when the user has put ASK_LIMITS questions to Opus in the last hour or day. */
+export async function assertAskRate(db: Db, login: string): Promise<void> {
+  const q = queryDb(db);
+  const since = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const count = async (ms: number) => Number((await q.get(q.k.selectFrom("main.conversation_turns").select((eb) => eb.fn.countAll().as("n"))
+    .where("login", "=", login).where("kind", "in", ["operator", "maintainer"]).where("at", ">", since(ms))))?.n ?? 0);
+  if (await count(3_600_000) >= ASK_LIMITS.hour || await count(86_400_000) >= ASK_LIMITS.day) throw new HttpError(429, "Too many questions to Opus. Try again later.");
+}
+
+/**
+ * Puts a question to Opus on the sender's own runner, as postMessage does, for a message the chat has stored already. Returns the
+ * turn it created, or why the question was not asked (the message stays in the chat): a maintainer's refusal (ownAskRefusal) or an
+ * open question that Opus has not answered.
+ */
+export async function askOpus(db: Db, req: Req, repo: string, n: number, body: string, deps?: StoreDeps): Promise<{ turnId: number } | { refusal: string }> {
+  const refused = isOperator(req) ? null : await ownAskRefusal(db, req.user.login, repo);
+  if (refused) return { refusal: refused };
+  try {
+    return { turnId: await addMessage(db, repo, n, { login: req.user.login, kind: isOperator(req) ? "operator" : "maintainer" }, body, deps, true) };
+  } catch (e) {
+    if (e instanceof ConversationError && e.status === 409) return { refusal: e.message };
+    throw e;
+  }
 }
 
 /** Withdraws the maintainer's message that waits for Opus: an operator, or the maintainer who wrote it, so an item is never held by a message no runner takes. */
