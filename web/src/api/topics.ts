@@ -30,7 +30,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["item-chat:", [...new Set<Topic>([...TRACE, "chat", "conversations", "workflows", "discord"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
-  ["maintain-asked", ["workflows", "workflow-events"]],
+  ["maintain-asked", ["workflows", "workflow-events", "chat"]],
   ["maintain-queue", ["workflows", "items", "repos"]],
   // The item page: the workflow row and its events, signals, findings, holds and breakers.
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
@@ -39,7 +39,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   // The list of the pull requests AutoCraft merged: each merge moves the queue topic.
   ["maintain-items:merged:", ["queue", "access", "repos"]],
   ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "outside", "access", "security", "repos"]],
-  ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
+  ["maintain-home", ["workflows", "workflow-events", "chat", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
   // One opened event row: its detail reads what the timeline does; the run and the task behind it read one table each.
   ["item-trace-detail:", TRACE],
   ["item-trace-run:", ["agents"]],

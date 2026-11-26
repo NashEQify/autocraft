@@ -337,10 +337,11 @@ async function myItems(env: McpEnv, raw: unknown): Promise<ToolResult> {
   args(raw, {});
   const user = await env.user(false);
   const h = await home(env.db, reqOf(user));
-  const row = (x: { repo: string; number: number; title: string; line: string; weight: string | null; startedBy: string | null; approvedBy: string | null }) =>
-    ({ item: `${x.repo}#${x.number}`, title: x.title, state: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy });
-  const data = { waitingForYou: h.needs.map(row), yours: h.mine.map(row), waiting: h.waiting.map(row), running: h.running.map(row) };
-  const n = data.waitingForYou.length;
+  const row = (x: { repo: string; number: number; title: string; line: string; weight: string | null; startedBy: string | null; approvedBy: string | null; state?: string; last?: { by: string; text: string; question: boolean } }) =>
+    ({ item: `${x.repo}#${x.number}`, title: x.title, state: x.line, weight: x.weight, startedBy: x.startedBy, approvedBy: x.approvedBy, ...(x.state && { itemState: x.state }), ...(x.last && { lastMessage: { by: x.last.by, text: x.last.text } }) });
+  const waitingForYou = h.mine.filter((x) => x.last?.question).map(row);
+  const data = { waitingForYou, yours: h.mine.filter((x) => !x.last?.question).map(row), total: h.mineTotal };
+  const n = waitingForYou.length;
   return show(`${n} item${n === 1 ? "" : "s"} waiting for your user's answer.`, "my items", data);
 }
 

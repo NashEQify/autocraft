@@ -383,6 +383,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/mcp/tokens", mcp.create),
     post("/api/mcp/tokens/revoke", mcp.revoke),
     scoped(get("/api/maintain/home", maintain.home)),
+    get("/api/maintain/asked", maintain.asked),
     get("/api/maintain/queue", maintain.queueMeta),
     scoped(get("/api/maintain/stats", maintain.stats)),
     // The Items page: four lists of the open items, the Backlog or the closed items, with filters and search.
