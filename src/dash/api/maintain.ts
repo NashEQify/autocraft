@@ -5,7 +5,8 @@
 import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRepo, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { recommendationText, stateLine, weightLabel } from "../../workflow/status.ts";
-import { openRecommendation, type ItemWorkflow, type WorkflowEventKind } from "../../workflow/types.ts";
+import { LIVE_STATES } from "../../workflow/store.ts";
+import { ASKING_STATES, openRecommendation, type ItemWorkflow, type WorkflowEventKind } from "../../workflow/types.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Req } from "../types.ts";
 import { problems, stoppedRows } from "./home.ts";
@@ -17,6 +18,12 @@ import * as control from "../../data/control/index.ts";
 import { healthOptions } from "../../health-checks.ts";
 import { mainCiRepos } from "../../mainci/index.ts";
 import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
+import { loadLastEntries, loadMineRefs, type LastEntry } from "../../data/chat/index.ts";
+import { loadItems } from "../../data/mirror/index.ts";
+import { listWorkflows } from "../../data/workflow/index.ts";
+import * as kx from "../../db/kx.ts";
+import { queryDb } from "../../db/query-db.ts";
+import { askedLogins } from "../../workflow/asked.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -32,21 +39,51 @@ import { itemState } from "./shown.ts";
 import { readerOf, statusFor } from "./reader.ts";
 import type { Db } from "../../db/index.ts";
 
-type HomeRow = ItemWorkflow & { title: string | null; author: string | null; lastEvent: WorkflowEventKind | null };
-
 /** A quiet pull request (the landing fix of a security finding) shows viewers no recommendation text, as on the item page. */
 const quietFor = async (db: Db, staff: boolean, asking: (ItemWorkflow | null)[]): Promise<Set<string>> =>
   (staff ? new Set() : await loadQuiet(db, asking.flatMap((w) => (openRecommendation(w) ? [`${w!.repo}#${w!.number}` as const] : []))));
 
-function rowsOf(wfs: HomeRow[], quiet: ReadonlySet<string>): MaintainRow[] {
-  return wfs.map((w) => {
-    const isUnclear = w.lastEvent === "ambiguous";
-    const open = openRecommendation(w) !== null;
+const MINE_ROWS = 8;
+const MINE_DONE_DAYS = 7;
+const LAST_TEXT = 240;
+
+const refParts = (ref: string): { repo: string; number: number } => ({ repo: ref.slice(0, ref.lastIndexOf("#")), number: Number(ref.slice(ref.lastIndexOf("#") + 1)) });
+
+/** The workflow each item shows on Home: its live one, else its newest. */
+async function workflowsOf(db: Db, refs: { repo: string; number: number }[]): Promise<Map<string, ItemWorkflow>> {
+  const out = new Map<string, ItemWorkflow>();
+  for (const w of await listWorkflows(db, { refs })) {
+    const key = `${w.repo}#${w.number}`, was = out.get(key);
+    const live = (x: ItemWorkflow) => (LIVE_STATES as readonly string[]).includes(x.state);
+    if (!was || (live(w) && !live(was)) || (live(w) === live(was) && w.id > was.id)) out.set(key, w);
+  }
+  return out;
+}
+
+const clip = (text: string): string => (text.length > LAST_TEXT ? `${text.slice(0, LAST_TEXT - 1)}…` : text);
+
+/** Home rows for `refs`, in that order: workflow facts, item title and state, and (with `login`) the newest chat entry. A few set-based reads whatever the count. */
+async function homeRows(db: Db, refs: string[], opts: { login: string | null; staff: boolean }): Promise<MaintainRow[]> {
+  if (!refs.length) return [];
+  const parts = refs.map(refParts);
+  const [items, wfs, lasts] = await db.together(() => Promise.all([
+    loadItems(db, parts, "card"),
+    workflowsOf(db, parts),
+    opts.login ? loadLastEntries(db, refs as never[]) : Promise.resolve(new Map<string, LastEntry>()),
+  ]));
+  const quiet = await quietFor(db, opts.staff, [...wfs.values()]);
+  const me = opts.login?.toLowerCase() ?? null;
+  return refs.map((ref): MaintainRow => {
+    const it = items.get(ref), wf = wfs.get(ref) ?? null, { repo, number } = refParts(ref);
+    const open = wf !== null && openRecommendation(wf) !== null;
+    const last = lasts.get(ref);
+    const asked = me !== null && open && askedLogins(wf!).some((l) => l.toLowerCase() === me);
+    const state = it?.state === "MERGED" ? "merged" : it?.state === "CLOSED" ? "closed" : undefined;
     return {
-      repo: w.repo, number: w.number, kind: w.kind, title: w.title ?? `${w.repo}#${w.number}`, author: w.author ?? null, entry: w.entry,
-      line: wfLine(w, isUnclear, quiet.has(`${w.repo}#${w.number}`))!,
-      waits: open || isUnclear, blocked: w.state === "blocked", weight: weightLabel(w.weight),
-      startedBy: w.startedBy, approvedBy: w.approvedBy, stoppedBy: w.stoppedBy, updatedAt: w.updatedAt,
+      repo, number, kind: it?.kind === "pr" ? "pr" : "issue", title: it?.title ?? ref, author: it?.author ?? null, entry: wf?.entry ?? "review",
+      line: wf ? wfLine(wf, false, quiet.has(ref))! : "", waits: open, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
+      startedBy: wf?.startedBy ?? "", approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null, updatedAt: last && last.at > (it?.updated_at ?? "") ? last.at : it?.updated_at ?? wf?.updatedAt ?? "",
+      ...(state && { state }), ...(last && { last: { by: last.by, text: clip(last.body), question: asked } }),
     };
   });
 }
@@ -56,27 +93,37 @@ export async function home(db: Db, req: Req): Promise<MaintainHome> {
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
   const nowMs = Date.now();
+  const viewer = req.user.role === "viewer";
   const [facts, ci] = await Promise.all([
     loadMaintainHome(db, { repos, hidden, staff, login: req.user.login }, { nowMs, withRunner: staff, health: healthOptions(), limits: { steps: LIMIT_STEPS, defaults: DEFAULT_PER_DAY } }),
     mainCiRepos(db, hidden),
   ]);
   const live = new Set([...facts.rows, ...facts.attention.closesFailed].map((w) => w.repo));
-  const may = req.user.role === "viewer" ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
+  const may = viewer ? [] : await Promise.all([...live].map((r) => mayRunRepo(req.user, r)));
   const acting = new Set([...live].filter((_, i) => may[i]));
   const stops = await stoppedRows(facts.attention.stops, hidden);
   const [attention, runner] = await Promise.all([
     problems(db, { hidden, staff, nowMs, ci, stops, facts: facts.attention, acting }),
     Promise.resolve(facts.runner ? runnerLine(facts.runner, req.user.login) : null),
   ]);
-  const rows = rowsOf(facts.rows, await quietFor(db, staff, facts.rows));
-  // Most recently moved first.
-  rows.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
-  if (req.user.role === "viewer") return { needs: [], mine: [], waiting: rows.filter((r) => r.waits), running: rows.filter((r) => !r.waits), runner: null, attention };
-  const needs = rows.filter((r) => r.waits && acting.has(r.repo));
+  if (viewer) {
+    // The newest updated items of the repos a viewer sees.
+    const q = queryDb(db);
+    const recent = repos.length ? await q.all(q.k.selectFrom("main.items as i").select(["i.repo", "i.number"]).where(kx.inList(db, "i.repo", repos)).orderBy("i.updated_at", "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(MINE_ROWS), { label: "home.recent" }) : [];
+    return { mine: [], mineTotal: 0, recent: await homeRows(db, recent.map((r) => `${r.repo}#${Number(r.number)}`), { login: null, staff }), runner: null, attention };
+  }
+  const visible = new Set(repos);
+  const mineRefs = (await loadMineRefs(db, req.user.login, { doneDays: MINE_DONE_DAYS, nowMs })).filter((r) => visible.has(refParts(r).repo));
+  return { mine: await homeRows(db, mineRefs.slice(0, MINE_ROWS), { login: req.user.login, staff }), mineTotal: mineRefs.length, recent: [], runner, attention };
+}
+
+/** GET /api/maintain/asked: how many open questions are addressed to the reader (askedLogins of the open workflows), in the repos they see. */
+export async function asked(db: Db, req: Req): Promise<{ count: number }> {
+  if (req.user.role === "viewer") return { count: 0 };
   const me = req.user.login.toLowerCase();
-  const byMe = (l: string | null) => l !== null && l.toLowerCase() === me;
-  const mine = rows.filter((r) => !needs.includes(r) && (byMe(r.startedBy) || byMe(r.approvedBy) || byMe(r.stoppedBy)));
-  return { needs, mine, waiting: [], running: [], runner, attention };
+  const visible = new Set(await visibleRepos(db, req));
+  const wfs = await listWorkflows(db, { states: [...ASKING_STATES], logins: [req.user.login] });
+  return { count: wfs.filter((w) => visible.has(w.repo) && openRecommendation(w) !== null && askedLogins(w).some((l) => l.toLowerCase() === me)).length };
 }
 
 function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>["runner"]>, login: string): MaintainRunnerLine {
@@ -131,7 +178,7 @@ export async function stats(db: Db, req: Req): Promise<MaintainStats> {
 /** Plan phases in which AutoCraft works an item that nobody started. */
 const WORKING_PHASES: ReadonlySet<ItemPhase> = new Set(["Review", "Fixing", "Verifying", "In queue"]);
 const SHOWS: readonly MaintainItemsShow[] = ["open", "backlog", "closed", "merged"];
-const FILTERS: readonly MaintainItemsFilter[] = ["security", "outside", "stuck", "duplicates"];
+const FILTERS: readonly MaintainItemsFilter[] = ["security", "outside", "stuck", "duplicates", "mine"];
 const STAFF_FILTERS: readonly MaintainItemsFilter[] = ["security", "stuck"];
 const GROUPS: readonly MaintainItemGroup[] = ["needs", "started", "automatic", "rest", "backlog", "done"];
 const LIMIT_DEFAULT = 50;
@@ -164,9 +211,10 @@ export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const staff = canSeeInternals(req);
   const filters = listParam(q, "filter") as MaintainItemsFilter[];
   for (const f of filters) {
-    if (!FILTERS.includes(f)) throw new HttpError(400, "filter must be security, outside, stuck or duplicates");
+    if (!FILTERS.includes(f)) throw new HttpError(400, "filter must be security, outside, stuck, duplicates or mine");
     if (!staff && STAFF_FILTERS.includes(f)) throw new HttpError(403, "only operators and maintainers filter by security findings or stuck items");
   }
+  const mine = filters.includes("mine") ? (await loadMineRefs(db, req.user.login, { doneDays: MINE_DONE_DAYS })) : undefined;
   const areas = listParam(q, "area");
   const text = (q.get("q") ?? "").trim();
   const refs = listParam(q, "refs").slice(0, REFS_MAX);
@@ -180,7 +228,7 @@ export async function items(db: Db, req: Req): Promise<MaintainItems> {
   const visible = await visibleRepos(db, req);
   if (!visible.length || (q.has("refs") && !refPairs.length)) return { rows: [], counts };
   const hidden = await hiddenRepos(db, req);
-  const base = await loadItemsBase(db, { repos: visible, hidden }, { show, filters, areas, text: text || null, refs, limit: refPairs.length ? REFS_MAX : limit, sort, normalWeight: WEIGHT_NORMAL });
+  const base = await loadItemsBase(db, { repos: visible, hidden }, { show, filters: filters.filter((f) => f !== "mine"), ...(mine && { mine }), areas, text: text || null, refs, limit: refPairs.length ? REFS_MAX : limit, sort, normalWeight: WEIGHT_NORMAL });
 
   let placed: Placed[];
   if (show === "closed" || show === "merged") {

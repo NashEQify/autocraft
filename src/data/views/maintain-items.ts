@@ -49,6 +49,7 @@ export async function loadItemsBase(db: Db, scope: Pick<Scope, "repos" | "hidden
   const conds = (eb: kx.AnyEb): Expression<SqlBool>[] => {
     const c: Expression<SqlBool>[] = [kx.inList(db, "i.repo", scope.repos), merged ? eb("i.kind", "=", "pr") : closed ? eb("i.state", "<>", "OPEN") : eb("i.state", "=", "OPEN")];
     if (f.refs.length) c.push(kx.refIn(db, "i", f.refs.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))] as const)));
+    if (f.mine) c.push(kx.refIn(db, "i", f.mine));
     if (fts) c.push(textHit(eb, db, fts));
     for (const x of f.filters) {
       if (x === "outside") c.push(heldExpr(eb, "i.repo", "i.number"));

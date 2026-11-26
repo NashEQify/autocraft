@@ -1,9 +1,11 @@
-// The new Home's needs-an-answer list (src/dash/api/maintain.ts): only repos where the reader may act.
+// Home's own items and the asked count (src/dash/api/maintain.ts).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { home, items, repos, waiting } from "../src/dash/api/maintain.ts";
+import { asked, home, items, repos, waiting } from "../src/dash/api/maintain.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { addEvent, insertWorkflow } from "../src/workflow/store.ts";
+import { recordMessage } from "../src/data/chat/index.ts";
+import { RULE_STARTER } from "../src/workflow/types.ts";
 
 const T = "2026-11-01T00:00:00.000Z";
 const as = (role: string, writable: string[]) => ({
@@ -11,28 +13,41 @@ const as = (role: string, writable: string[]) => ({
   user: { login: "u1", role, canWrite: async (r: string) => writable.includes(r), canRead: async () => true },
 }) as never;
 
-test("needs an answer counts only repos where the reader may act", async () => {
-  const db = await connectDb(":memory:");
-  for (const name of ["app", "lib"]) {
-    await db.run(db.k.insertInto("repos").values({ name, visibility: "public" }));
-    await db.run(db.k.insertInto("tracked_repos").values({ name, added_by: "op", added_at: T, pipeline: 1 }));
-  }
-  const rec = { text: "Fix 1, then merge?", parts: { fix: [1], drop: [] }, merges: true };
-  const wf = { kind: "pr" as const, entry: "review" as const, startedBy: "m2", startedAt: T, startedVia: "github" as const };
-  await insertWorkflow(db, { ...wf, repo: "app", number: 1, state: "recommending", rec });
-  await insertWorkflow(db, { ...wf, repo: "lib", number: 2, state: "recommending", rec });
-  // An unclear answer on a running item waits for a person too.
-  const running = await insertWorkflow(db, { ...wf, repo: "app", number: 3, state: "running" });
-  await addEvent(db, { workflowId: running, repo: "app", number: 3, login: "m2", via: "github", kind: "ambiguous" });
-  await insertWorkflow(db, { ...wf, repo: "app", number: 4, state: "running" });
+const item = (db: Awaited<ReturnType<typeof connectDb>>, repo: string, number: number, extra: Record<string, unknown> = {}) =>
+  db.run(db.k.insertInto("main.items").values({ repo, number, kind: "pr", state: "OPEN", title: `t${number}`, body: "", head_oid: "h", author: "a", created_at: T, updated_at: T, ...extra } as never));
 
-  const refs = (rows: { repo: string; number: number }[]) => rows.map((r) => `${r.repo}#${r.number}`).sort();
-  assert.deepEqual(refs((await home(db, as("maintainer", ["app"]))).needs), ["app#1", "app#3"]);
-  assert.deepEqual(refs((await home(db, as("maintainer", []))).needs), []);
-  assert.deepEqual(refs((await home(db, as("operator", []))).needs), ["app#1", "app#3", "lib#2"]);
-  const viewer = await home(db, as("viewer", ["app", "lib"]));
-  assert.deepEqual(refs(viewer.needs), []);
-  assert.deepEqual(refs(viewer.waiting), ["app#1", "app#3", "lib#2"]);
+test("mine holds the items the reader started, approved, answered or wrote about, not authored or rule-started ones; done items drop after 7 days", async () => {
+  const db = await connectDb(":memory:");
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T, pipeline: 1 }));
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 20 * 86_400_000).toISOString();
+  const wf = { kind: "pr" as const, entry: "review" as const, startedAt: T, startedVia: "github" as const };
+  for (const n of [1, 2, 3, 4, 5, 6, 7]) await item(db, "app", n, n === 6 ? { author: "u1" } : n === 7 ? { state: "MERGED", merged_at: old } : {});
+  await insertWorkflow(db, { ...wf, repo: "app", number: 1, startedBy: "u1", state: "recommending", rec: { text: "Fix 1, then merge?", parts: { fix: [1], drop: [] }, merges: true } });
+  await insertWorkflow(db, { ...wf, repo: "app", number: 2, startedBy: "m2", approvedBy: "u1", approvedAt: T, approvedVia: "github", state: "running" });
+  await insertWorkflow(db, { ...wf, repo: "app", number: 3, startedBy: RULE_STARTER, state: "running" });
+  await insertWorkflow(db, { ...wf, repo: "app", number: 7, startedBy: "u1", state: "done" });
+  // Item 4: the reader only wrote a message. Item 6 is only authored by the reader.
+  await recordMessage(db, { repo: "app", number: 4, author: "u1", via: "dashboard", kind: "said", body: "what about this?", at: now });
+  const five = await insertWorkflow(db, { ...wf, repo: "app", number: 5, startedBy: "m2", state: "running" });
+  await addEvent(db, { workflowId: five, repo: "app", number: 5, login: "u1", via: "github", kind: "answered" });
+
+  const refs = (rows: { repo: string; number: number }[]) => rows.map((r) => r.number).sort();
+  const m = await home(db, as("maintainer", ["app"]));
+  assert.deepEqual(refs(m.mine), [1, 2, 4, 5]);
+  assert.equal(m.mineTotal, 4);
+  assert.deepEqual(m.recent, []);
+  const four = m.mine.find((r) => r.number === 4)!;
+  assert.deepEqual([four.last?.by, four.last?.text, four.last?.question], ["u1", "what about this?", false]);
+  assert.equal(m.mine.find((r) => r.number === 1)!.waits, true);
+  assert.deepEqual(refs((await items(db, { ...(as("maintainer", ["app"]) as object), query: new URLSearchParams("filter=mine") } as never)).rows), [1, 2, 4, 5]);
+  assert.deepEqual((await asked(db, as("maintainer", ["app"]))).count, 1);
+  assert.deepEqual((await asked(db, as("operator", [])).then((r) => r.count)), 1);
+
+  const viewer = await home(db, as("viewer", ["app"]));
+  assert.deepEqual([viewer.mine, viewer.mineTotal], [[], 0]);
+  assert.equal(viewer.recent.length, 7);
 });
 
 test("an item stopped at a blocker shows its recommendation and needs an answer in every list and count; viewers read none of a quiet pull request", async () => {
@@ -42,7 +57,7 @@ test("an item stopped at a blocker shows its recommendation and needs an answer 
   for (const number of [1, 2]) {
     await db.run(db.k.insertInto("main.items").values({ repo: "app", number, kind: "pr", state: "OPEN", title: "Fix", body: "", head_oid: "h", author: "a", created_at: T, updated_at: T }));
     await insertWorkflow(db, {
-      repo: "app", number, kind: "pr", entry: "merge", state: "blocked", startedBy: "m2", startedAt: T, startedVia: "github", approvedBy: "m2", approvedAt: T, approvedVia: "github", blocker: "other",
+      repo: "app", number, kind: "pr", entry: "merge", state: "blocked", startedBy: "u1", startedAt: T, startedVia: "github", approvedBy: "u1", approvedAt: T, approvedVia: "github", blocker: "other",
       rec: { text: "Merge past the stop.", parts: { fix: [], drop: [] }, merges: true },
     });
   }
@@ -53,11 +68,11 @@ test("an item stopped at a blocker shows its recommendation and needs an answer 
   const shown = (rows: { number: number; line: string | null }[]) => rows.map((r) => [r.number, r.line?.startsWith("Merge past the stop. Reply yes") ?? false]).sort();
 
   const m = as("maintainer", ["app"]), v = as("viewer", []);
-  assert.deepEqual(shown((await home(db, m)).needs), [[1, true], [2, true]]);
+  assert.deepEqual(shown((await home(db, m)).mine), [[1, true], [2, true]]);
   const list = await items(db, m);
   assert.deepEqual([shown(list.rows.filter((r) => r.group === "needs")), list.counts.needs], [[[1, true], [2, true]], 2]);
   assert.deepEqual([await waiting(db, m), (await repos(db, m))[0]!.waiting], [{ app: 2 }, 2]);
-  assert.deepEqual(shown((await home(db, v)).waiting), [[1, true], [2, false]]);
+  assert.deepEqual(shown((await home(db, v)).recent), [[1, true], [2, false]]);
   assert.deepEqual(shown((await items(db, v)).rows), [[1, true], [2, false]]);
 });
 

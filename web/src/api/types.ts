@@ -2762,7 +2762,7 @@ export type MaintainItemGroup = "needs" | "started" | "automatic" | "rest" | "ba
 /** `merged`: the pull requests AutoCraft merged (its merge step or a merged batch), newest merge first. */
 export type MaintainItemsShow = "open" | "backlog" | "closed" | "merged";
 /** `security` and `stuck` are for operators and maintainers. */
-export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates";
+export type MaintainItemsFilter = "security" | "outside" | "stuck" | "duplicates" | "mine";
 
 export interface MaintainItemRow {
   repo: RepoName;
