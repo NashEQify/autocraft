@@ -1,12 +1,16 @@
 // The public /verify flow: Discord and GitHub sign-ins in one browser leave one role request for a member with a merged pull
-// request, the runner side gives the role, and a spent or expired OAuth state is refused.
+// request, the runner side gives the role, and a spent or expired OAuth state is refused. The link it leaves runs no command
+// until the login has an AutoCraft login.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { verifyRoute, type DiscordOAuth, type VerifyDeps } from "../src/dash/server/verify.ts";
+import { installAccountCommands } from "../src/discord/commands.ts";
+import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
+import type { DiscordRest, EditBody } from "../src/discord/rest.ts";
 import { loginOf } from "../src/discord/links.ts";
 import { runRoleGrants, setRoleConfig, type RoleRest } from "../src/discord/role-panel.ts";
 import { saveChannels } from "../src/data/discord/index.ts";
@@ -73,4 +77,25 @@ test("a completed flow with a merged pull request leaves one role request that t
   now += 16 * 60_000;
   assert.equal((await go("GET", `/verify/callback?code=${lateCode}&state=${param(late.githubUrl, "state")}`, late.cookie)).r.status, 400);
   assert.equal(await runRoleGrants(db, keys, rest, (l) => assert.fail(l)), 0);
+});
+
+test("a link made on /verify runs no command until the login has an AutoCraft login", async () => {
+  assert.equal(await loginOf(db, keys, USER), "merger");
+  const edits: EditBody[] = [];
+  const ixRest: DiscordRest = {
+    async createMessage() { return { id: "m" }; }, async editMessage() {}, async deleteMessage() {},
+    async interactionCallback() {}, async editInteractionResponse(_a, _t, body) { edits.push(body); }, async overwriteGuildCommands() {},
+  };
+  const ix = new Interactions(ixRest, (l) => assert.fail(l));
+  installAccountCommands(ix, { db, keys });
+  let n = 0;
+  const run = async (text: string): Promise<string> => {
+    const seen = edits.length;
+    ix.dispatch("INTERACTION_CREATE", { id: `c${++n}`, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: USER } }, data: { name: "autocraft", type: 1, options: [{ name: "do", type: 1, options: [{ name: "text", type: 3, value: text }] }] } });
+    for (let k = 0; k < 1000 && edits.length === seen; k++) await new Promise((r) => setTimeout(r, 5));
+    return String(edits[seen]?.content ?? "");
+  };
+  assert.match(await run("review: photocraft#4"), /need an AutoCraft login/);
+  await db.run(db.k.insertInto("main.access").values({ login: "merger", role: "maintainer" }));
+  assert.doesNotMatch(await run("review: photocraft#4"), /need an AutoCraft login/);
 });

@@ -31,7 +31,7 @@ import { commandOf } from "../workflow/vocab.ts";
 import { prepareDo, runDo, targetsOf, type DoText } from "./do.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { discordDetail } from "./visibility.ts";
-import { loginOf } from "./links.ts";
+import { loginOf, mayCommand } from "./links.ts";
 import { CREATE_PUBLIC_THREADS, READ_MESSAGE_HISTORY, SEND_MESSAGES_IN_THREADS, guildPerms } from "./perms.ts";
 import type { DiscordRest } from "./rest.ts";
 import { follow, followOf, replyTarget, threadTarget, type Follow, type FollowTarget } from "./threads.ts";
@@ -153,6 +153,7 @@ export class AtCommands {
     const userId = m.author!.id;
     const login = await loginOf(db, keys, userId);
     if (!login) return await this.#refuse(m, t("Link your Discord account with /autocraft link to send commands. Nothing ran."));
+    if (!await mayCommand(db, login)) return await this.#refuse(m, t("Commands need an AutoCraft login with write access. Nothing ran."));
     const tracked = await loadTrackedRepos(db);
     const denied: string[] = [];
     for (const repo of new Set(targetsOf(d).map((i) => i.repo.split("/").pop()!))) {

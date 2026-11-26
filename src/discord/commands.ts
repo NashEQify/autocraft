@@ -5,7 +5,7 @@ import { publicRepoNames, publicStats, publicStatus, type PublicStats, type Publ
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { forgetReporter } from "./file-issue.ts";
-import { forgetLink, loginOf, redeemLinkCode } from "./links.ts";
+import { forgetLink, loginOf, mayCommand, redeemLinkCode } from "./links.ts";
 import { t } from "../i18n/index.ts";
 import type { ReadDeps } from "../workflow/read.ts";
 import { prepareDo, runDo } from "./do.ts";
@@ -127,6 +127,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
+    if (!await mayCommand(db, login)) return void (await call.edit({ content: t("Commands need an AutoCraft login with write access. Nothing ran.") }));
     // Discord has no item the text was written on, so the items come from the list in the text.
     const result = await runDo(db, keys, prepareDo(call.option("text") ?? ""), { userId: call.userId, login }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
