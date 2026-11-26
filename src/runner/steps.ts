@@ -694,7 +694,10 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runReviewPost } = await import("../review/post.ts");
       const r = await runReviewPost(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      return `${r.repo}: ${r.posted.length} posted, ${r.edited.length} edited, ${r.skipped.length} skipped, ${r.failed.length} failed${r.note ? `; ${r.note}` : ""}`;
+      const line = `${r.repo}: ${r.posted.length} posted, ${r.edited.length} edited, ${r.skipped.length} skipped, ${r.failed.length} failed${r.note ? `; ${r.note}` : ""}`;
+      // A review that could not be written stays due: a failed job backs off instead of trying again at once.
+      if (r.failed.length && !r.posted.length && !r.edited.length) throw new Error(`${line}; ${r.failed[0]!.ref}: ${r.failed[0]!.reason}`);
+      return line;
     },
   },
   {

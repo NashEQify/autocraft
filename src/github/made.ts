@@ -77,6 +77,14 @@ export async function nodeCommentMade(q: Pick<Querier, "query">, o: Where & { id
   return r.node?.comments?.nodes.find((c) => Date.parse(c.createdAt) >= Date.parse(from(o.since)) && text(c.body) === text(o.body) && o.mine(c.author?.login) && !o.taken?.has(c.url))?.url ?? null;
 }
 
+const REVIEW_BODY = `query($id: ID!) { node(id: $id) { ... on PullRequestReview { body } } }`;
+
+/** Whether the review already reads this text. */
+export async function reviewReads(q: Pick<Querier, "query">, id: string, body: string): Promise<boolean> {
+  const r = await q.query(REVIEW_BODY, { id }) as { node?: { body?: string | null } | null };
+  return typeof r.node?.body === "string" && text(r.node.body) === text(body);
+}
+
 /** The id of the review with this text on the PR's commit, submitted since `since`. */
 export async function reviewMade(q: Pick<Querier, "query">, o: Where & { id: string; head: string; body: string }): Promise<string | null> {
   const r = await q.query(REVIEWS, { id: o.id }) as { node?: { reviews?: { nodes: { id: string; body: string; submittedAt: string | null; author?: { login: string } | null; commit: { oid: string } | null }[] } } | null };
