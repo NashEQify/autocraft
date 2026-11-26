@@ -13,7 +13,9 @@ import { CHECK_SERVER } from "../checktool/bridge.ts";
 import { TOOL as CHECK_TOOL } from "../checktool/server/tool.ts";
 import { fixupDir, GIT_ENV, gitDirEnv, HARDENING } from "../fixup/git.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
-import { callTool as itemTool, openDb, TOOLS as ITEM_TOOLS, type ToolResult } from "../itemtools/server/tools.ts";
+import { TOOLS as ITEM_TOOLS, type ToolResult } from "../itemtools/server/tools.ts";
+import type { ItemsCall } from "./items-worker.ts";
+import { ThreadCall } from "../thread-call.ts";
 import { snapshotFile } from "../itemtools/snapshot.ts";
 import { MAX_AROUND, MAX_RESULTS, referenceAround, referenceSearch, type Passage, type SearchOptions } from "../data/external/index.ts";
 import { diffCacheDir } from "../review/diff.ts";
@@ -22,7 +24,6 @@ import { relayCheck } from "./check-relay.ts";
 import { relayWorkspaceCall } from "../build/workspace-relay.ts";
 import { WORKSPACE_SERVER, WORKSPACE_TOOLS, type WorkspaceToolResult } from "../build/workspace-tools.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type { Db } from "../db/index.ts";
 import { addPassages, loadLeaseBundle, loadLiveLease, loadPassageCount } from "../data/runners/index.ts";
 import { envVar } from "../env.ts";
@@ -129,36 +130,9 @@ async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): 
   return { text: served.map(passageText).join("\n\n") + cut };
 }
 
-const SNAPSHOT_IDLE_MS = 60_000;
-let snapshotHandle: { file: string; stamp: string; db: DatabaseSync; timer: NodeJS.Timeout } | undefined;
-
-function closeSnapshot(): void {
-  if (!snapshotHandle) return;
-  clearTimeout(snapshotHandle.timer);
-  try { snapshotHandle.db.close(); } catch { /* already closed */ }
-  snapshotHandle = undefined;
-}
-
-/** The read-only handle of the snapshot database, kept open between tool calls; reopened when the file is replaced, closed after an idle minute. */
-function snapshotDb(file: string): DatabaseSync {
-  const st = statSync(file), stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
-  if (snapshotHandle && (snapshotHandle.file !== file || snapshotHandle.stamp !== stamp)) closeSnapshot();
-  if (!snapshotHandle) snapshotHandle = { file, stamp, db: openDb(file), timer: setTimeout(closeSnapshot, SNAPSHOT_IDLE_MS).unref() };
-  else snapshotHandle.timer.refresh();
-  return snapshotHandle.db;
-}
-
-function items(name: string, raw: unknown): ToolResult {
-  const file = snapshotFile();
-  let db: DatabaseSync;
-  try {
-    db = snapshotDb(file);
-  } catch {
-    closeSnapshot();
-    return { text: "the item tools are not available right now", isError: true };
-  }
-  return itemTool(db, { db: file, diffs: diffCacheDir() }, name, raw);
-}
+// One worker for the item tools of this process; it opens the snapshot on its first call.
+const itemsThread = new ThreadCall<ItemsCall, ToolResult>(new URL("./items-worker.ts", import.meta.url), "item tools");
+const items = (name: string, raw: unknown): Promise<ToolResult> => itemsThread.call({ file: snapshotFile(), diffs: diffCacheDir(), name, raw });
 
 /** The runner's worker API, for a dashboard that does not share the runner's disk (AUTOCRAFT_RUNNER_URL); null: the files are local. */
 export const runnerUrl = (env: NodeJS.ProcessEnv = process.env): string | null => envVar("RUNNER_URL", env)?.replace(/\/+$/, "") || null;
