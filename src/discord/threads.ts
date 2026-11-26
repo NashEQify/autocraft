@@ -26,6 +26,8 @@ export type Follow = { targetHash: string; channelHash: string; target: FollowTa
 
 export const threadTarget = (keys: DiscordKeys, threadId: string): string => keys.hash("channel", threadId);
 export const replyTarget = (keys: DiscordKeys, messageId: string): string => keys.hash("message", messageId);
+/** What a result post's seal is bound to (results.ts): its target and item. */
+export const resultAad = (p: { targetHash: string; repo: string; number: number }): string => `result:${p.targetHash}:${p.repo}#${p.number}`;
 
 /** Groups rows by target; a target whose seal does not open is left out. */
 export function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {

@@ -4,9 +4,10 @@
 // search ping (pings.ts). A command runs as `/autocraft do` runs it (do.ts): the same parser, model reading, linked login, write
 // permission per repo, limits and audit.
 //
-// Items: those the text names. A command naming none acts on its context: the items the replied-to message names (the mention rows
-// store.ts recorded for it), else those of the bot's reply or thread it answers. Named items replace the context; they need not be
-// among it. `review all` reads as `review`.
+// Items: those the text names. A command naming none acts on its context: the items of the message it replies to (the bot's reply
+// or result post, else the message's mention rows and the items its text names), else the thread's. Named items replace the
+// context; they need not be among it. `review all` reads as `review`. A bare number, and a command in a thread with several items,
+// are settled against the conversation first (context.ts).
 //
 // `status` (alone, or followed by items) is a lookup, not a workflow command: anyone may send it, at most READ_LIMIT a minute. It
 // answers with a plain reply like `/autocraft status`: the items named, else the replied-to message's items (its mention rows, the
@@ -32,6 +33,7 @@ import type { ReadDeps } from "../workflow/read.ts";
 import { listText } from "../workflow/status.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import { commandOf } from "../workflow/vocab.ts";
+import { bareNumbers, repliedItems, settle } from "./context.ts";
 import { prepareDo, runDo, targetsOf, type DoText } from "./do.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { discordDetail } from "./visibility.ts";
@@ -161,17 +163,13 @@ export class AtCommands {
       if (!this.#once(m.id)) return async () => {};
       return () => this.#status(m, status, repliedId, ourReply?.items ?? [], here?.items ?? []);
     }
-    let context: ItemRef[] = ourReply?.items ?? [];
-    if (repliedId && !toBot) {
-      const h = keys.hash("message", repliedId);
-      context = ((await dc.loadMessageMentions(db, [h])).get(h) ?? []).map((r) => ({ repo: r.repo, number: r.number }));
-    }
-    if (!context.length) context = here?.items ?? [];
+    const replied = repliedId ? await repliedItems(db, keys, { messageId: repliedId, message: m.referenced_message, ours: ourReply?.items ?? [], thread: here, toBot }) : [];
+    const context = replied.length ? replied : here?.items ?? [];
     // Text that starts with a command word but reads as ambiguous is a command only with items to act on; otherwise it is a search.
     const d = prepareDo(text, context);
-    if (d.parsed.kind === "ambiguous" && !(startsWithCommandWord(text) && (d.named.length || context.length))) return null;
+    if (d.parsed.kind === "ambiguous" && !(startsWithCommandWord(text) && (d.named.length || context.length || bareNumbers(d.text).clean))) return null;
     if (!this.#once(m.id)) return async () => {};
-    return () => this.#run(m, d, here);
+    return () => this.#run(m, d, here, replied);
   }
 
   /** False when message `id` was already taken. */
@@ -198,12 +196,18 @@ export class AtCommands {
     await discord.createMessage(m.channel_id, { content, components, allowed_mentions: { parse: [] }, message_reference: { message_id: m.id, fail_if_not_exists: false } });
   }
 
-  async #run(m: AtMessage, d: DoText, here: Follow | null): Promise<void> {
+  async #run(m: AtMessage, said: DoText, here: Follow | null, replied: readonly ItemRef[]): Promise<void> {
     const { db, keys } = this.#d;
     const userId = m.author!.id;
     const login = await loginOf(db, keys, userId);
     if (!login) return await this.#refuse(m, t("Link your Discord account with /autocraft account action:link to send commands. Nothing ran."));
     if (!await mayCommand(db, keys, userId, login)) return await this.#refuse(m, t("Commands need an AutoCraft login with write access. Nothing ran."));
+    const settled = await settle(db, keys, said, { channelId: m.channel_id, replied, thread: here, userId, login, nowMs: (this.#d.now ?? Date.now)() });
+    if (settled.kind === "ask") {
+      await this.#d.rest.createMessage(m.channel_id, { content: settled.line, allowed_mentions: { parse: [] }, message_reference: { message_id: m.id, fail_if_not_exists: false } });
+      return;
+    }
+    const d = settled.d;
     const tracked = await loadTrackedRepos(db);
     const denied: string[] = [], unknown: string[] = [];
     for (const repo of new Set(targetsOf(d).map((i) => i.repo.split("/").pop()!))) {

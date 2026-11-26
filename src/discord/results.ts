@@ -38,7 +38,7 @@ import type { DiscordKeys } from "./keys.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 import { MISSING_ACCESS, RestError, UNKNOWN_CHANNEL, UNKNOWN_MESSAGE, type DiscordRest, type EditBody } from "./rest.ts";
 import { parseResult, type ResultAsk, type ResultLine } from "./result-ask.ts";
-import { followsOf, sendToFollow, type Follow } from "./threads.ts";
+import { followsOf, resultAad as sealAad, sendToFollow, type Follow } from "./threads.ts";
 import { discordDetail, type DiscordDetail } from "./visibility.ts";
 
 /** Discord allows 2000 characters per message; a result is kept under this. */
@@ -362,4 +362,3 @@ export class ThreadResults {
   }
 }
 
-const sealAad = (p: { targetHash: string; repo: string; number: number }): string => `result:${p.targetHash}:${p.repo}#${p.number}`;

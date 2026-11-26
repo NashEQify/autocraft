@@ -10,6 +10,8 @@ import { parse } from "../workflow/parse.ts";
 import { READ_OWN_MAX, refsIn, runText, type ReadDeps } from "../workflow/read.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { DiscordKeys } from "./keys.ts";
+import { t } from "../i18n/index.ts";
+import { slugOf } from "../owners.ts";
 import { writeAccess, type PermissionFn } from "../remote/permission.ts";
 
 /** "all", "both", "all of them" at the end: every context item, which is what a command naming no item acts on anyway. */
@@ -24,6 +26,10 @@ export type DoText = {
   context: ItemRef[];
   /** The repo a bare `#n` takes: the context items' one repo. */
   repo?: string;
+  /** The text ends in "all" or "both": every context item. */
+  all?: true;
+  /** The items were picked out of the conversation (context.ts), so the reply names each one. */
+  picked?: true;
 };
 
 /** Parses the text against its context items. `review all` with context items reads as `review`. */
@@ -34,12 +40,13 @@ export function prepareDo(raw: string, context: readonly ItemRef[] = []): DoText
   let text = raw.trim();
   let parsed = parse(text, opts);
   const named = refsIn(text, repo);
+  const all = ALL_TAIL.test(text);
   if (parsed.kind === "ambiguous" && context.length && !named.length) {
     const cut = text.replace(ALL_TAIL, "");
     const p = cut !== text ? parse(cut, opts) : null;
     if (p && p.kind !== "ambiguous") { text = cut; parsed = p; }
   }
-  return { text, parsed, named, context: [...context], ...(repo ? { repo } : {}) };
+  return { text, parsed, named, context: [...context], ...(repo ? { repo } : {}), ...(all ? { all: true as const } : {}) };
 }
 
 /** The items the command acts on: those it names, else its context items. */
@@ -56,6 +63,9 @@ export async function runDo(db: Db, keys: DiscordKeys, d: DoText, sender: { user
   const result = await runText(db, { login, ...writeAccess(db, login, permission) }, "discord",
     { parsed: d.parsed, items: byName ? [] : d.context, asked: ({ workflow }) => shown.get(workflow.id) },
     { text: d.text, own: (byName ? d.named : d.context).slice(0, READ_OWN_MAX), named: byName, ...(d.repo ? { parse: { repo: d.repo } } : {}), ...(read ? { deps: read } : {}) });
+  // An item picked out of the conversation is named in the reply, which for one item the command core leaves out.
+  const one = result.items.length === 1 ? result.items[0]! : null;
+  if (d.picked && one && result.lines.length === 1 && !result.lines[0]!.includes(`#${one.number}`)) result.lines[0] = t("{ref}: {line}", { ref: `${slugOf(one.repo.split("/").pop()!)}#${one.number}`, line: result.lines[0]! });
   // The reply shows the question that took the answered one's place, as an alert does.
   const sentAt = new Date().toISOString();
   await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));

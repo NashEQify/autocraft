@@ -9,6 +9,8 @@ import { forgetVerifyRows } from "../data/discord/index.ts";
 import { forgetLink, loginOf, mayCommand, redeemLinkCode } from "./links.ts";
 import { t } from "../i18n/index.ts";
 import type { ReadDeps } from "../workflow/read.ts";
+import { settle } from "./context.ts";
+import { followOf, threadTarget } from "./threads.ts";
 import { prepareDo, runDo } from "./do.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { deliver, IS_COMPONENTS_V2, plain, type Rendered } from "./reply.ts";
@@ -207,8 +209,16 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft account action:link.") }));
     if (!await mayCommand(db, keys, call.userId, login)) return void (await call.edit({ content: t("Commands need an AutoCraft login with write access. Nothing ran.") }));
-    // Discord has no item the text was written on, so the items come from the list in the text.
-    const result = await runDo(db, keys, prepareDo(call.option("text") ?? ""), { userId: call.userId, login }, deps.read);
+    // Discord has no item the text was written on, so the items come from the list in the text; a bare number from the channel (context.ts).
+    const channelId = call.interaction.channel_id;
+    let d = prepareDo(call.option("text") ?? "");
+    if (channelId) {
+      const thread = await followOf(db, keys, threadTarget(keys, channelId));
+      const settled = await settle(db, keys, d, { channelId, replied: [], thread, userId: call.userId, login, nowMs: Date.now() });
+      if (settled.kind === "ask") return void (await call.edit({ content: settled.line }));
+      d = settled.d;
+    }
+    const result = await runDo(db, keys, d, { userId: call.userId, login }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {

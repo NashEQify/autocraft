@@ -321,6 +321,16 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
   return Number(r?.n ?? 0);
 }
 
+/** Items a login started, approved or answered on after `since` whose number is one of `numbers`, newest first, each once. */
+export async function loadLoginItems(db: Db, f: { login: string; numbers: number[]; since: string }): Promise<{ repo: string; number: number; at: string }[]> {
+  if (!f.numbers.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.workflow_events").select(["repo", "number", "at"]).where("login", "=", f.login).where("at", ">", f.since)
+    .where(kx.inList(db, "kind", ["started", "approved", "answered"])).where(kx.inList(db, "number", f.numbers, "bigint")).orderBy("at", "desc"), { label: "workflow.loadLoginItems" });
+  const seen = new Set<string>();
+  return rows.map((r) => ({ repo: r.repo, number: Number(r.number), at: r.at })).filter((r) => !seen.has(`${r.repo}#${r.number}`) && !!seen.add(`${r.repo}#${r.number}`));
+}
+
 /**
  * Inserts workflows in the `running` state, one statement per 500 rows, `ON CONFLICT DO NOTHING` against the unique index of live workflows: a
  * ref missing from the result already has a live workflow. A row with `approvedBy` is approved at its `at`; a PR's base head is the head its

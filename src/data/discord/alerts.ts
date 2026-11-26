@@ -86,6 +86,14 @@ export async function loadShownQuestions(db: Db, userHash: string): Promise<Map<
   return new Map(rows.flatMap((r) => (r.rec_at ? [[Number(r.workflow_id), r.rec_at] as const] : [])));
 }
 
+/** The workflows whose questions a person's alerts showed after `since`. */
+export async function loadShownSince(db: Db, userHash: string, since: string): Promise<number[]> {
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.discord_alert_msgs").select("workflow_id").distinct()
+    .where("user_hash", "=", userHash).where("workflow_id", "is not", null).where("sent_at", ">", since), { label: "discord.loadShownSince" });
+  return rows.map((r) => Number(r.workflow_id));
+}
+
 /** Deletes sent alerts before a time. */
 export async function pruneSentAlerts(db: Db, beforeIso: string): Promise<number> {
   const q = queryDb(db);

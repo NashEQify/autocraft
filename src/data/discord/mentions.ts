@@ -24,6 +24,14 @@ export async function loadMessageMentions(db: Db, msgHashes: string[]): Promise<
   return out;
 }
 
+/** The rows of a channel's messages that name an item numbered one of `numbers`. */
+export async function loadChannelMentions(db: Db, channelHash: string, numbers: number[]): Promise<MentionRow[]> {
+  if (!numbers.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.discord_mentions").select(COLS).where("channel_hash", "=", channelHash).where(kx.inList(db, "number", numbers, "bigint")), { label: "discord.loadChannelMentions" });
+  return rows.map(rowOf);
+}
+
 /** Rows per item, unordered (callers sort by the opened time); an item with no rows is absent. */
 export async function loadMentionsOfItems(db: Db, refs: Ref[]): Promise<Map<Ref, MentionRow[]>> {
   const q = queryDb(db);

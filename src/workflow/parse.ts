@@ -546,6 +546,9 @@ const addItems = (into: ItemRef[], more: readonly ItemRef[]): ItemRef[] => {
   return into;
 };
 
+/** Text that ends where a plan part's number follows (`fix `, `drop 1 and `): a number after it is a part, not an item. */
+export const PART_BEFORE = /\b(?:drop|fix)(?:\s+(?:parts?|findings?|changes?))?(?:(?:\s*[,;]\s*|\s+and\s+|\s+)#?\d+)*(?:\s*[,;]\s*|\s+and\s+|\s+)$/i;
+
 /** Wraps the index of an item taken out of the text, so the reader can tell which words an item stood in. */
 const MARK = "\u0001";
 const MARK_RE = /\u0001(\d+)\u0001/g;
@@ -565,7 +568,7 @@ function pullItems(text: string, repo: string | undefined, mark = false): { text
     const tok = raw.replace(/[.)!?]+$/, "");
     let ref = refOf(tok);
     if (!ref && /^#\d+$/.test(tok)) {
-      if (!last || /\b(?:drop|fix)(?:\s+(?:parts?|findings?|changes?))?(?:(?:\s*[,;]\s*|\s+and\s+|\s+)#?\d+)*(?:\s*[,;]\s*|\s+and\s+|\s+)$/i.test(before)) return m;
+      if (!last || PART_BEFORE.test(before)) return m;
       ref = { repo: last, number: Number(tok.slice(1)) };
       if (!Number.isSafeInteger(ref.number) || ref.number < 1) return m;
     }
