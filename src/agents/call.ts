@@ -211,9 +211,9 @@ export async function takersCut<T>(db: Db, items: readonly T[], limit: number | 
 export type PoolRoom = {
   round(): void; room(i: number): Promise<number>; taker(i: number): Promise<boolean>;
   /**
-   * Resolves once the room may differ from the round's reading: a change topic it reads moved, the moment the reading says it rises
-   * with time alone came (roomRisesAt), or ROOM_REFRESH_MS passed; at once when the round read nothing. Reads only the topics'
-   * counters, every `pollMs`, until then or until `signal` aborts.
+   * Resolves once the room may differ from the last reading: a change topic it reads moved, the moment the reading says it rises
+   * with time alone came (roomRisesAt), or ROOM_REFRESH_MS passed; never before one pause of at most `pollMs`. Reads only the
+   * topics' counters, every `pollMs`, until then or until `signal` aborts.
    */
   changed(pollMs: number, signal: AbortSignal): Promise<void>;
 };
@@ -283,9 +283,11 @@ export function poolRoom(db: Db, reposOf: (i: number) => readonly string[] | und
       return t;
     },
     changed: async (pollMs, signal) => {
-      while (!signal.aborted && Date.now() < wakeAt) {
-        await pause(Math.min(pollMs, wakeAt - Date.now()), signal);
-        if (signal.aborted || await stampOf() !== stamp) return;
+      // Always one pause first: a pool that wakes at once and reads the room again from caches would otherwise loop on microtasks
+      // and starve the event loop its own jobs run on.
+      for (;;) {
+        await pause(Math.max(1, Math.min(pollMs, wakeAt - Date.now())), signal);
+        if (signal.aborted || Date.now() >= wakeAt || await stampOf() !== stamp) return;
       }
     },
   };
