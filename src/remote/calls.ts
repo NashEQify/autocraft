@@ -735,21 +735,22 @@ type Held = { checks: boolean; workspaceId: number | null };
 type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
 
 /**
- * The poll of every call this process waits on, one read wave whatever their number (runners.loadCallPolls), with the check
- * requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. The wave
- * runs for a call not polled yet, when a counter of POLL_TOPICS moved, and at least every SEEN_EVERY_MS, for what moves with
- * time alone (a lease running out, a session's helper going idle). At the other poll intervals only the counters are read, and
- * the waiters get the last poll again without its checks and tool calls. A lost lease or a gone call among them is ended
- * (runners.expireLeases) and read again in the same poll; a
- * queued call's poll carries the waits' fields. A failed read of the wave fails every call waiting on it (no reply is taken by
- * then); a write that fails after it fails only the calls it was for, and a stamp that fails none: the next poll stamps again.
- */
-/**
  * The change topics whose writes change a waiting call's poll (src/data/runners/triggers.ts, src/data/build/triggers.ts): its
  * state and progress, a check requested for it, its lease starting or ending, the queue and Task Runners a queued call waits on,
  * and its workspace's tool calls.
  */
 const POLL_TOPICS = ["remote-calls", "remote-queue", "remote-helpers", "workspaces"];
+
+/**
+ * The poll of every call this process waits on, one read wave whatever their number (runners.loadCallPolls), with the check
+ * requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. The wave
+ * runs for a call not polled yet, when a counter of POLL_TOPICS moved, and at least every SEEN_EVERY_MS, for what moves with
+ * time alone (a lease running out, a session's helper going idle). At the other poll intervals only the counters are read, and
+ * the waiters get the last poll again without its checks and tool calls. A lost lease or a gone call among them is ended
+ * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields. A failed read of the
+ * wave fails every call waiting on it (no reply is taken by then); a write that fails after it fails only the calls it was for,
+ * and a stamp that fails none: the next poll stamps again.
+ */
 class CallPoller {
   readonly #db: Db;
   /** The last full poll of each held call, and the POLL_TOPICS counters read with it. */
