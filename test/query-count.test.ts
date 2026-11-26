@@ -18,6 +18,9 @@ import { FakeProvider } from "../src/dash/server/provider.ts";
 import { makeUser } from "../src/dash/server/sessions.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
 import { runRank } from "../src/rank/index.ts";
+import { runDupeCompare, type CompareDeps } from "../src/dupes/compare.ts";
+import { fillEmbedHashes } from "../src/itemhash.ts";
+import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { queueSlots } from "../src/rank/position.ts";
 import { itemPage } from "../src/dash/api/item-page.ts";
 import { setMainFixApproval } from "../src/mainfix/approval.ts";
@@ -203,6 +206,34 @@ test("calls that wait for their result share one poll", async () => {
     // Each await is one model call, which opens and closes its own relays; a call whose relays open late joins the next poll.
     return () => Promise.all(ids.map((id) => { effect("model-call"); return awaitCall(w.db, id, { log: () => {} }); }));
   }), 1, 8, { perEffect: 3 });
+});
+
+test("comparing a duplicate set of pull requests reads their CI in sets", async () => {
+  await expectFlat(unit(async (w, n) => {
+    const prs = numbers(n);
+    // A diff cache of its own: a cached diff is read without a fetch.
+    process.env.AUTOCRAFT_DIFF_CACHE = tmpdir("query-count-diffs");
+    for (const i of prs) await w.pr(i, { ci: i % 2 ? "failure" : "success" });
+    await fillEmbedHashes(w.db);
+    const hash = new Map((await w.db.all(w.db.k.selectFrom("items").select(["number", "embed_hash"]).where("repo", "=", "app"))).map((r) => [Number(r.number), r.embed_hash!]));
+    // One group: a chain of duplicate pairs, compared in one call (n stays within GROUP_MAX).
+    await w.db.run(w.db.k.insertInto("duplicate_pairs").values(prs.slice(1).map((b) => ({
+      repo: "app", a: b - 1, b, a_hash: hash.get(b - 1)!, b_hash: hash.get(b)!, similarity: 0.9, verdict: "duplicate", canonical: b - 1, created_at: iso(60), checked_at: iso(60),
+    }))));
+    await w.db.run(w.db.k.insertInto("access").values({ login: "olga", role: "operator" }));
+    const id = (await createToken(w.db, "olga", "helper", { kind: "runner" })).row.id;
+    await storeStatus(w.db, id, "olga", parseStatus({ slots: 4, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    await w.db.run(w.db.k.updateTable("remote_helpers").set({ idle_claim_at: Date.now() }).where("token_id", "=", id));
+    const deps: CompareDeps = {
+      fetchDiff: async () => { effect("github-read"); return { ok: true, text: "diff --git a/src/x.rs b/src/x.rs\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n" } as never; },
+      ask: (async () => {
+        effect("model-call");
+        return { text: JSON.stringify({ keep: 1, reason: "first", summary: "The same fix.", why: "It came first.", others: prs.slice(1).map((number) => ({ number, duplicate: true, better: [], carry: [] })) }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: null } };
+      }) as never,
+      now: () => new Date(),
+    };
+    return async () => assert.equal((await runDupeCompare(w.db, {}, () => {}, deps)).compared, 1);
+  }), 2, 8).finally(() => { delete process.env.AUTOCRAFT_DIFF_CACHE; });
 });
 
 test("calls a Task Runner runs cost their caller no write while nothing asks for a check", async () => {

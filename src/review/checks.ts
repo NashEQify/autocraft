@@ -1,7 +1,7 @@
 // CI and merge state of PR heads: one GraphQL query per chunk of PRs, stored in pr_checks.
 import { ownerOf } from "../owners.ts";
 import type { Querier } from "../mirror.ts";
-import { overallAt, type Suite } from "../merge/ci-approval.ts";
+import { overallsAt, type Suite } from "../merge/ci-approval.ts";
 import type { Db } from "../db/index.ts";
 import { resolvePushes } from "../data/control/index.ts";
 import { recordRuns } from "../data/merge/index.ts";
@@ -150,7 +150,17 @@ export async function refreshChecks(db: Db, client: Querier, repo: string, numbe
 }
 
 /** The stored checks of a PR; `overall` reads "pending" while workflow runs wait for approval at that head (see overallAt). */
-export async function checksOf(db: Db, repo: string, number: number): Promise<{ head_oid: string; overall: Overall; mergeable: string | null; maintainer_can_modify: number | null } | undefined> {
-  const r = (await loadChecks(db, [{ repo, number }])).get(`${repo}#${number}`);
-  return r && { head_oid: r.head_oid, overall: await overallAt(db, repo, number, r.head_oid, r.overall) as Overall, mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify };
+export async function checksOf(db: Db, repo: string, number: number): Promise<StoredChecks | undefined> {
+  return (await checksOfAll(db, [{ repo, number }])).get(`${repo}#${number}`);
+}
+
+export type StoredChecks = { head_oid: string; overall: Overall; mergeable: string | null; maintainer_can_modify: number | null };
+
+/** checksOf for many PRs, by `repo#number`, in two waves whatever their number; a PR without stored checks has no entry. */
+export async function checksOfAll(db: Db, refs: readonly { repo: string; number: number }[]): Promise<Map<string, StoredChecks>> {
+  if (!refs.length) return new Map();
+  const rows = await loadChecks(db, [...refs]);
+  const found = refs.flatMap((ref) => { const r = rows.get(`${ref.repo}#${ref.number}`); return r ? [{ ...ref, r }] : []; });
+  const overall = await overallsAt(db, found.map(({ repo, number, r }) => ({ repo, number, head: r.head_oid, overall: r.overall })));
+  return new Map(found.map(({ repo, number, r }) => [`${repo}#${number}`, { head_oid: r.head_oid, overall: overall.get(`${repo}#${number}`) as Overall, mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify }]));
 }
