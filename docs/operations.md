@@ -831,6 +831,7 @@ Every path is set by an environment variable. When a variable is unset, the code
 | `AUTOCRAFT_RUNNER_LOGS` (job logs) | `~/.cache/autocraft-logs/jobs` | `/data/cache/autocraft/jobs` | `<root>/cache/autocraft/jobs` |
 | `AUTOCRAFT_DIFF_CACHE` | `~/.cache/autocraft/diffs` | `/data/cache/autocraft/diffs` | `<root>/cache/autocraft/diffs` |
 | `AUTOCRAFT_CHECKOUT_DIR` | `~/.cache/autocraft/checkouts-v2` | `/data/cache/autocraft/checkouts` | `<root>/cache/autocraft/checkouts` |
+| `AUTOCRAFT_CHECKOUT_MAX_GB` (most the checkouts keep; past it the least recently used are removed, and any unused for 24 hours) | `10` | unset | unset |
 | `AUTOCRAFT_FIXUP_DIR` (bare git cache) | `~/.cache/autocraft/fixups` | `/data/cache/autocraft/fixups` | `<root>/cache/autocraft/fixups` |
 | `AUTOCRAFT_BACKUP_DIR` | `<database dir>/backups` | `/data/backups` | `<database dir>/backups` |
 | `AUTOCRAFT_ARTIFACT_DIR` | `<data dir>/artifacts` | unset | unset |
