@@ -60,6 +60,8 @@ export const STICKY_CAP_MS = scaled(15 * 60_000);
 export const CLAIM_RETRY_S = scaledS(15);
 /** The oldest helper version that may run a lease. */
 export const REQUIRED_HELPER = "1.2.0";
+/** The oldest helper that may run a workspace call: earlier ones run the session with no tools, and bill it, when the MCP server fails to load (worker `claudeMcpProblem`). */
+export const WORKSPACE_HELPER = "1.3.7";
 /** Where interactive calls go (claimOrder): only to the interactive lane, to no claim (the claim's pipeline slots), or, for a helper older than INTERACTIVE_HELPER that has no such lane, to any claim. */
 type InteractiveMode = "lane" | "off" | "legacy";
 /** Where a claim's bound calls go (claimOrder). */
@@ -463,6 +465,8 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   // Calls the latest try could have taken but for their time limit (Claim.maxTimeoutSeconds): the claim then counts as no
   // idle helper's, so other runners do not pass over those calls for it, and its empty reply says why.
   let tooLong = 0;
+  // Workspace calls the latest try left because the helper is older than WORKSPACE_HELPER; they stay queued for other runners.
+  let oldHelper = 0;
   const attempt: ClaimTry = async (now, { quick, live }) => {
     // A quick try with nothing to take changes nothing; the full tries, at least every RETRY_MS, check the credential as well.
     if (quick && accepted) {
@@ -471,6 +475,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       if (!claimOrder(orderedOf(queue, now), orderReadsOf(v, login), caller, tiers, repos, claim.sessions ?? [], now, { fastLane: fast, bound, lane: mode }).length) return null;
     }
     tooLong = 0;
+    oldHelper = 0;
     const x = (now === nowMs && pending) || await claimReads(db, caller, now);
     pending = null;
     const f = x.facts, set = f.settings;
@@ -521,6 +526,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
         }, started, !fast && !own && !lane && f.idle, live);
         // The client left, or shutdown answered the claim: nothing is leased to nobody.
         if (got === "gone") return null;
+        if (got === "old") { oldHelper++; continue; }
         if (got === "limit") {
           limited = true;
           continue;
@@ -542,8 +548,9 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     attempt,
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
     // (idleOthers). The fast lane and the own lane say nothing about the helper's other slots.
-    idle: async (now) => { if (!fast && !own && !tooLong) await runners.markHelperIdle(db, caller, { now, tiers: [...tiers], repos: repos ? [...repos] : null }); },
+    idle: async (now) => { if (!fast && !own && !tooLong && !oldHelper) await runners.markHelperIdle(db, caller, { now, tiers: [...tiers], repos: repos ? [...repos] : null }); },
     empty: async (now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: last?.at === now ? last.reserve : settingsOf(await runners.loadRunnerSnapshot(db, now), login).reserve,
+      ...(!tooLong && oldHelper && { reason: `${oldHelper} queued workspace call${oldHelper === 1 ? "" : "s"} need a helper of ${WORKSPACE_HELPER} or newer, this one is ${claim.helperVersion}: update the Task Runner` }),
       ...(tooLong && { reason: `${tooLong} queued call${tooLong === 1 ? " needs" : "s need"} more time than the ${Math.max(0, Math.floor((claim.maxTimeoutSeconds! * 1000 - (now - nowMs)) / 60_000))} min this Task Runner's harness login has before its refresh` }) }),
     slots: () => last?.slots ?? 0,
   };
@@ -554,13 +561,14 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
  * compare-and-set). The run's stored prompt is built before: scrubbing and compressing a large prompt takes milliseconds. A
  * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace.
  */
-async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { perLogin: number | null; interactive: number | null }, started: boolean, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
+async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { perLogin: number | null; interactive: number | null }, started: boolean, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
   const source = await runners.loadLeaseSource(db, r.id);
   if (!source) return null;
   const bundle = JSON.parse(source.bundle) as Omit<TaskBundle, "callId">;
   // A workspace session runs only in Claude Code with its own tools off; another harness would keep a shell of its own.
   const workspace = bundle.mcpServers.includes(WORKSPACE_SERVER);
   if (workspace && claim.harness !== "claude") return null;
+  if (workspace && olderVersion(claim.helperVersion, WORKSPACE_HELPER)) return "old";
   // Its prompt tells a session after a lost lease that the workspace keeps the earlier session's work; stored with the lease.
   const base = source.baseStdin ?? bundle.stdin;
   const stdin = workspace ? await resumePrompt(db, r.id, base) : bundle.stdin;
