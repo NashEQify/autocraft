@@ -8,13 +8,22 @@ import { fileURLToPath } from "node:url";
 import type { Db } from "../db/index.ts";
 import { dbEnv, dbTarget } from "../db/open.ts";
 import { loadLastSyncEnd } from "../data/mirror/index.ts";
-import { snapshotFile } from "./snapshot.ts";
+import { errorLine, SNAPSHOT_FAILED, snapshotFile } from "./snapshot.ts";
 
 const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 const CHECK_MS = 10_000;
 const TAIL = 2000;
+const MESSAGE_MAX = 1000;
 
-/** One build by `autocraft-server item-tools snapshot`; resolves with its summary line, rejects with its output's end. */
+/** Why a build exited: its failure line, or else the last lines of its output that are not stack frames. */
+function failureText(out: string): string {
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const own = lines.findLast((l) => l.startsWith(SNAPSHOT_FAILED));
+  if (own) return own.slice(SNAPSHOT_FAILED.length);
+  return lines.filter((l) => !l.startsWith("at ") && !l.startsWith("Node.js v")).slice(-3).join(" / ");
+}
+
+/** One build by `autocraft-server item-tools snapshot`; resolves with its summary line, rejects with why it failed. */
 function buildChild(signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--no-warnings", CLI, "item-tools", "snapshot"], { stdio: ["ignore", "pipe", "pipe"], env: dbEnv(dbTarget()) });
@@ -32,7 +41,7 @@ function buildChild(signal: AbortSignal): Promise<string> {
       done();
       const text = out.trim();
       if (code === 0) resolve(text.split("\n").pop() ?? "");
-      else reject(new Error(`exited ${code ?? sig}: ${text.slice(-300)}`));
+      else reject(new Error(`exited ${code ?? sig}: ${failureText(text)}`));
     });
   });
 }
@@ -55,7 +64,7 @@ export function keepSnapshot(db: Db, signal: AbortSignal, log: (line: string) =>
       seen = t;
       log(`item snapshot: ${await build(signal)}`);
     } catch (e) {
-      if (!signal.aborted) log(`item snapshot failed: ${String((e as Error).message).slice(0, 300)}`);
+      if (!signal.aborted) log(`${SNAPSHOT_FAILED}${errorLine(e).slice(0, MESSAGE_MAX)}`);
     } finally {
       busy = false;
     }
