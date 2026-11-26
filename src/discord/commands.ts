@@ -11,7 +11,7 @@ import { t } from "../i18n/index.ts";
 import type { ReadDeps } from "../workflow/read.ts";
 import { prepareDo, runDo } from "./do.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
-import { plain } from "./reply.ts";
+import { deliver, IS_COMPONENTS_V2, plain, type Rendered } from "./reply.ts";
 import type { Db } from "../db/index.ts";
 import { envVar } from "../env.ts";
 import { DISCORD_PRIVACY_PATH } from "../dash/server/discord-privacy.ts";
@@ -78,44 +78,77 @@ export function atHelp(): string[] {
   ];
 }
 
-/** `/autocraft help`: short sections for scanning, under Discord's 2,000-character limit. The links show only when the public base URL is known. */
-export function helpText(baseUrl: string | null): string {
-  const base = baseUrl?.replace(/\/+$/, "");
+/** Discord's limits: 4,000 characters of text across a Components V2 message, 2,000 of `content` in a plain one. */
+export const V2_TEXT_CHARS = 4000;
+export const CONTENT_CHARS = 2000;
+
+/** The sections of `/autocraft help`, each a heading and its lines. */
+function helpSections(): string[] {
   return [
-    `**${t("Find issues")}**`,
-    t("`/autocraft search` searches existing issues by a few words"),
-    t("`/autocraft report` reports a bug or requests a feature; AutoCraft helps write the issue"),
-    t("Right-click a message › Apps › Find issue searches with its text"),
-    t("`@AutoCraft <question>` in a watched channel replies with matching issues, in public"),
-    t("Reply to a message with `@AutoCraft` to search with that message's text"),
-    "",
-    `**${t("Status")}**`,
-    t("`/autocraft status item:photocraft#123` shows where an issue or pull request is"),
-    t("`/autocraft status` without an item shows counts for the public repos"),
-    "",
-    `**${t("Commands")}** ${t("(linked account with write access)")}`,
-    ...atHelp(),
-    ...doHelp(),
-    "",
-    `**${t("Your account")}**`,
-    t("`/autocraft account action:link code:<code>` links your AutoCraft login (code: Link Discord in the dashboard menu)"),
-    t("`/autocraft account action:unlink` removes the link"),
-    t("`/autocraft account action:alerts state:on` (or off) sends direct messages when a workflow needs your answer"),
-    t("`/autocraft account action:optout` stops recording your messages and deletes the records; commands still work"),
-    t("`/autocraft account action:optin` records them again"),
-    "",
-    `**${t("Privacy")}**`,
-    t("AutoCraft's reaction means it counted the message for the items it names"),
-    t("Deleting a message deletes its record"),
-    ...(base ? [`[${t("Privacy notice")}](<${base}${DISCORD_PRIVACY_PATH}>) · [${t("Terms")}](<${base}${DISCORD_TERMS_PATH}>)`] : []),
-  ].join("\n");
+    [
+      `**${t("Find issues")}**`,
+      t("`/autocraft search` searches existing issues by a few words"),
+      t("`/autocraft report` reports a bug or asks for a feature; AutoCraft helps write it"),
+      t("Right-click a message › Apps › Find issue searches with its text"),
+      t("`@AutoCraft <question>` in a watched channel replies with matching issues, in public"),
+      t("Reply to a message with `@AutoCraft` to search with its text"),
+    ],
+    [
+      `**${t("Status")}**`,
+      t("`/autocraft status item:photocraft#123` shows where an issue or pull request is"),
+      t("`/autocraft status` alone shows counts for the public repos"),
+    ],
+    [`**${t("Commands")}** ${t("(linked account with write access)")}`, ...atHelp(), ...doHelp()],
+    [
+      `**${t("Your account")}**`,
+      t("`/autocraft account action:link code:<code>` links your AutoCraft login (code: Link Discord in the dashboard menu)"),
+      t("`/autocraft account action:unlink` removes the link"),
+      t("`/autocraft account action:alerts state:on` (or off): direct messages when a workflow needs your answer"),
+      t("`/autocraft account action:optout` stops recording your messages and deletes the records"),
+      t("`/autocraft account action:optin` records them again"),
+      t("Contributor role: press Verify in the role channel (needs a merged pull request)"),
+    ],
+    [
+      `**${t("Privacy")}**`,
+      t("AutoCraft's reaction means it counted the message for the items it names"),
+      t("Deleting a message deletes its record"),
+    ],
+  ].map((lines) => lines.join("\n"));
+}
+
+/**
+ * `/autocraft help`: one text display per section with separators between them, and the privacy notice and terms as
+ * link buttons when the public base URL is known. The plain fallback keeps the whole sections that fit in `content`.
+ */
+export function helpReply(baseUrl: string | null): Rendered {
+  const base = baseUrl?.replace(/\/+$/, "");
+  const sections = helpSections();
+  const links = base ? [{ type: 1, components: [
+    { type: 2, style: 5, label: t("Privacy notice"), url: `${base}${DISCORD_PRIVACY_PATH}` },
+    { type: 2, style: 5, label: t("Terms"), url: `${base}${DISCORD_TERMS_PATH}` },
+  ] }] : [];
+  const v2: unknown[] = [];
+  let size = 0;
+  for (const text of sections) {
+    if (size + text.length > V2_TEXT_CHARS) break;
+    if (v2.length) v2.push({ type: 14 });
+    v2.push({ type: 10, content: text });
+    size += text.length;
+  }
+  let content = "";
+  for (const text of sections) {
+    const next = content ? `${content}\n\n${text}` : text;
+    if (next.length > CONTENT_CHARS) break;
+    content = next;
+  }
+  return { components: [...v2, ...links], flags: IS_COMPONENTS_V2, legacy: { content, components: links } };
 }
 
 const ACCOUNT_ACTIONS = ["link", "unlink", "alerts", "optout", "optin"];
 
 export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps; baseUrl?: string | null }): void {
   const { db, keys } = deps;
-  const help = helpText(deps.baseUrl === undefined ? envVar("BASE_URL") ?? null : deps.baseUrl);
+  const help = helpReply(deps.baseUrl === undefined ? envVar("BASE_URL") ?? null : deps.baseUrl);
   const tries = new Map<string, number[]>();
   /** Sliding window per key: false when `lim.n` uses are already inside it. Keys whose uses have all expired are dropped. */
   const allow = (key: string, lim: { n: number; ms: number }): boolean => {
@@ -179,7 +212,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {
-    await call.edit({ content: help });
+    await deliver(help, (b) => call.edit(b));
   });
   ix.command("autocraft account optout", null, async (call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));

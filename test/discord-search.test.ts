@@ -11,7 +11,7 @@ import { dispatcher } from "../src/discord/index.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import { addSentAlerts } from "../src/data/discord/index.ts";
-import { installAccountCommands } from "../src/discord/commands.ts";
+import { CONTENT_CHARS, V2_TEXT_CHARS, helpReply, installAccountCommands } from "../src/discord/commands.ts";
 import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
 import { RestClient, RestError, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
@@ -364,4 +364,18 @@ describe("pull requests", () => {
     assert.deepEqual(v2buttons(bodies[1]!).slice(0, 2).map((b) => b.label), ["1 · photocraft#7", "2 · photocraft#8"]);
     assert.equal(logs.length, 1);
   });
+});
+
+test("/autocraft help fits Discord's limits with a long base URL, in both layouts, and keeps the privacy links", () => {
+  const base = `https://${"a".repeat(380)}.example`;
+  const r = helpReply(base);
+  const texts = r.components.filter((c) => (c as { type: number }).type === 10).map((c) => (c as { content: string }).content);
+  assert.ok(texts.join("").length <= V2_TEXT_CHARS);
+  assert.ok(r.legacy.content!.length <= CONTENT_CHARS);
+  assert.ok(texts.some((x) => x.includes("Verify")) && texts.at(-1)!.includes("Privacy"), "every section is in the message");
+  for (const body of [r, r.legacy]) {
+    const urls = (body.components as { type: number; components?: { url?: string }[] }[]).filter((c) => c.type === 1).flatMap((c) => c.components!.map((b) => b.url!));
+    assert.equal(urls.length, 2);
+    assert.ok(urls.every((u) => u.startsWith(base) && u.length <= 512));
+  }
 });
