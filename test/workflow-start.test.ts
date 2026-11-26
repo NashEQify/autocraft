@@ -265,6 +265,32 @@ test("an approved merge stopped at a pre-merge defect while it had no fix-up rou
   }
 });
 
+test("an approved merge stopped at a pre-merge defect goes on without a question once the author's fix passes the review round", async () => {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await run(w, "review and merge");
+  await settle(w);
+  await review(w);
+  await w.premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
+  await settle(w);
+  const stopped = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([stopped.state, stopped.blocker], ["blocked", "major-finding"]);
+  // The author pushes their own fix; the review round finds the new commits within what was approved.
+  await w.synced(1, "theirs");
+  await settle(w);
+  assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.state], ["running"]);
+  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: 1, head_oid: "theirs", run_id: "rv", at: new Date(Date.now() + 1000).toISOString(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r",
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: "Merge as it stands", merge: true, author_commits: { in_scope: true, note: "fixes the defect" } }),
+  }));
+  await settle(w);
+  const goes = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([goes.state, goes.blocker, goes.rec, goes.acceptedHead], ["running", null, null, "theirs"], JSON.stringify(goes.rec));
+  const leg = (await w.rows("SELECT state, head FROM preapprovals WHERE number = 1 ORDER BY id DESC"))[0]!;
+  assert.ok(leg.head === "theirs" && !["failed", "cancelled"].includes(leg.state as string), JSON.stringify(leg));
+});
+
 test("merge at a stop on defects the pre-merge review gave no fix for is refused and asks to fix them first; the yes has them fixed", async () => {
   const w = await unstarted(false);
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));

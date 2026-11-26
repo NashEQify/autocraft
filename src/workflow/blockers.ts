@@ -26,7 +26,7 @@ export type BlockerFacts = {
   thresholds: { largeFix: number; outsideMin: number };
 };
 
-export type EndedLeg = { reason: string; code?: StopCode | null };
+export type EndedLeg = { reason: string; code?: StopCode | null; head?: string | null };
 
 /** Why the leg ended, its text's where the row has no code. */
 export const codeOf = (leg: EndedLeg): StopCode => leg.code ?? stopCodeOf(leg.reason);
@@ -40,6 +40,12 @@ const PREMERGE_STOP = /pre-merge review found/;
 
 /** The stopped merge leg's reason is the pre-merge review's finding: its defects. An unsure review stops no workflow's merge leg. */
 export const premergeStop = (leg: EndedLeg): boolean => (leg.code ? leg.code === "premerge-defect" : PREMERGE_STOP.test(leg.reason));
+
+/** Stops a check of the leg's head made: what they found is about that head's code, not about a later head. */
+const HEAD_CHECKS: readonly StopCode[] = ["premerge-defect", "premerge-failed", "ci-failed", "verification-failed"];
+
+/** The leg ended on a check of a head other than `head`. */
+export const checkedOtherHead = (leg: EndedLeg, head: string): boolean => !!leg.head && leg.head !== head && HEAD_CHECKS.includes(codeOf(leg));
 
 /**
  * The blocker a stopped merge leg (src/preapproval) stands for. One failed try is `other`, shown with its reason: a step
