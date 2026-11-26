@@ -26,6 +26,8 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["item-trace:", TRACE],
   // The item page is the trace plus the header (labels, Discord, holds) and the GitHub side; it also asks `since` its last stamp.
   ["item-page:", [...new Set<Topic>([...TRACE, "discord", "ranks"])]],
+  // The item chat: messages, AutoCraft's replies and work, GitHub and Discord lines; it also asks `since` its last stamp.
+  ["item-chat:", [...new Set<Topic>([...TRACE, "conversations", "workflows", "discord"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
   ["maintain-asked", ["workflows", "workflow-events"]],

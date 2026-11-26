@@ -1,13 +1,14 @@
 // Item conversations on fake data: three items told as one stream each (what people said, what AutoCraft answered and did, and
 // GitHub activity around it). The chat read folds the GitHub activity into one line per run; the trace read (Events) lists all of it.
-import type { ChatEntry, ChatFinding, ChatVia, ItemChat, ItemChatState, ItemConversation } from "../chat-types";
+import type { ChatEntry, ChatFinding, ChatShot, ChatVia, ItemChat, ItemChatState, ItemConversation } from "../chat-types";
+import type { Api } from "../client";
 import type { AgentRunDetail, TraceEvent, TraceKind, User } from "../types";
 import { NOW } from "./fixtures";
 
 const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
 const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 
-type Work = { state?: "done" | "running" | "failed"; title: string; model?: string; seconds?: number; costUsd?: number; outcome?: string; detail?: [string, string][]; kind: TraceKind; run?: number; tokens?: [number, number]; tools?: number };
+type Work = { state?: "done" | "running" | "failed"; title: string; model?: string; seconds?: number; costUsd?: number; outcome?: string; detail?: [string, string][]; kind: TraceKind; run?: number; tokens?: [number, number]; tools?: number; shots?: ChatShot[] };
 type Beat =
   | { b: "said"; min: number; login: string; via: ChatVia; body: string }
   | { b: "reply"; min: number; body: string; findings?: ChatFinding[]; ask?: { to: string[]; question: string } }
@@ -114,6 +115,12 @@ const ISSUE_77: Story = {
     { b: "work", min: 76, kind: "check", state: "failed", title: "Ran the export tests", seconds: 95, outcome: "58 passed, 1 failed", detail: [["Command", "cargo test -p export"], ["Failed", "notes_page_wraps_long_text"]] },
     { b: "gh", min: 74, actor: "brushstroke42", summary: "Commented", body: "Notes should use the slide's font if possible." },
     { b: "work", min: 72, kind: "model-call", run: 7303, title: "Fixed the failing notes-layout test", model: "Sonnet", seconds: 140, costUsd: 0.12, outcome: "1 file", tokens: [21_000, 1_300], tools: 8 },
+    { b: "work", min: 70, kind: "check", title: "Took screenshots of the export dialog and a notes page", seconds: 48, outcome: "2 screens, as planned",
+      detail: [["Commit", "c41d9e2"]],
+      shots: [
+        { label: "Export dialog, before", taskId: 9101, name: "export-dialog.png" }, { label: "Export dialog, after", taskId: 9102, name: "export-dialog.png" },
+        { label: "Notes page, before", taskId: 9103, name: "notes-page.png" }, { label: "Notes page, after", taskId: 9104, name: "notes-page.png" },
+      ] },
     { b: "work", min: 6, kind: "check", state: "running", title: "Running the full test suite in the workspace", detail: [["Command", "cargo test --workspace"], ["Workspace", "deckcraft at 81c2e0a + 2 commits"]] },
   ],
 };
@@ -122,6 +129,7 @@ const STORIES: Record<string, Story> = { "photocraft#812": PR_812, "designcraft#
 
 export const CHAT_ITEMS = new Set(Object.keys(STORIES));
 
+const discordUrl = (i: number) => `https://discord.com/channels/1/2/${1000 + i}`;
 const traceId = (ref: string, i: number, w?: Work) => (w?.run ? `run:${w.run}` : `${ref}:${i}`);
 
 /** The chat read of one story: GitHub activity between two chat entries folds into one line. */
@@ -131,7 +139,7 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
     const id = `${ref}:${i}`;
     if (x.b === "plan") return;
     if (x.b === "discord") {
-      const link = { url: `https://discord.com/channels/1/2/${1000 + i}`, at: at(x.min), channel: x.channel };
+      const link = { url: discordUrl(i), at: at(x.min), channel: x.channel };
       const prev = entries[entries.length - 1];
       if (prev?.t === "discord") prev.links.push(link);
       else entries.push({ t: "discord", id, at: at(x.min), links: [link] });
@@ -146,7 +154,7 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
     }
     if (x.b === "said") entries.push({ t: "said", id, at: at(x.min), login: x.login, via: x.via, body: x.body, url: x.via === "github" ? `https://github.com/storytold/${ref.replace("#", "/pull/")}` : null });
     else if (x.b === "reply") entries.push({ t: "reply", id, at: at(x.min), body: x.body, findings: x.findings ?? [], ask: x.ask ?? null });
-    else entries.push({ t: "work", id, at: at(x.min), state: x.state ?? "done", title: x.title, model: x.model ?? null, seconds: x.seconds ?? null, costUsd: x.costUsd ?? null, outcome: x.outcome ?? null, detail: x.detail ?? [], eventId: traceId(ref, i, x) });
+    else entries.push({ t: "work", id, at: at(x.min), state: x.state ?? "done", title: x.title, model: x.model ?? null, seconds: x.seconds ?? null, costUsd: x.costUsd ?? null, outcome: x.outcome ?? null, detail: x.detail ?? [], eventId: traceId(ref, i, x), ...(x.shots ? { shots: x.shots } : {}) });
   });
   const lastReply = [...entries].reverse().find((e) => e.t === "reply" || e.t === "said");
   const open = lastReply?.t === "reply" && lastReply.ask ? lastReply.ask : null;
@@ -157,7 +165,7 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
 function traceOf(ref: string, s: Story): TraceEvent[] {
   return s.beats.map((x, i): TraceEvent => {
     const base = { at: at(x.min), head: null };
-    if (x.b === "discord") return { ...base, id: traceId(ref, i), kind: "conversation", actor: { type: "step", name: "Discord" }, summary: `Mentioned on Discord${x.channel ? ` in #${x.channel}` : ""}`, ref: {} };
+    if (x.b === "discord") return { ...base, id: traceId(ref, i), kind: "discord", actor: { type: "step", name: "Discord" }, summary: `Mentioned on Discord${x.channel ? ` in #${x.channel}` : ""}`, ref: { url: discordUrl(i) } };
     if (x.b === "gh") return { ...base, id: traceId(ref, i), kind: "github", actor: { type: x.actor === "github-actions" ? "step" : "person", name: x.actor }, summary: x.body ? `${x.summary}: ${x.body}` : x.summary, ref: {} };
     if (x.b === "said") return { ...base, id: traceId(ref, i), kind: "conversation", actor: { type: "person", name: x.login }, summary: `${x.body} (on ${SAID_ON[x.via]})`, ref: {} };
     if (x.b === "reply") return { ...base, id: traceId(ref, i), kind: x.ask ? "decision" : "conversation", actor: { type: "step", name: "AutoCraft" }, summary: x.body.split("\n")[0]!.replace(/\*\*/g, ""), ref: {} };
@@ -216,19 +224,18 @@ export function chatRunDetail(id: number): AgentRunDetail | null {
   return null;
 }
 
-export interface ChatMockApi { get(repo: string, number: number): Promise<ItemChat>; send(repo: string, number: number, conversation: string, text: string): Promise<ItemChat> }
-
-export function createChatMock(me: User, changed: () => void): { itemChat: ChatMockApi } {
+export function createChatMock(me: User, changed: () => void): Pick<Api, "itemChat"> {
   const stories: Record<string, Story> = structuredClone(STORIES);
   const read = (repo: string, number: number): ItemChat => {
     const ref = `${repo}#${number}`;
     const s = stories[ref];
-    return { repo, number, status: s?.status ?? "", state: s?.state ?? "idle", next: s?.next ?? null, conversations: s ? [chatOf(ref, s, me)] : [] };
+    return { repo, number, stamp: `mock:${s?.beats.length ?? 0}`, status: s?.status ?? "", state: s?.state ?? "idle", next: s?.next ?? null, conversations: s ? [chatOf(ref, s, me)] : [] };
   };
   return {
     itemChat: {
       get: (repo, number) => wait(read(repo, number)),
       async send(repo, number, _conversation, text) {
+        let line: string;
         const ref = `${repo}#${number}`;
         const s = stories[ref];
         if (!s) throw new Error(`No conversation on ${ref}.`);
@@ -243,17 +250,20 @@ export function createChatMock(me: User, changed: () => void): { itemChat: ChatM
           s.state = "running";
           s.next = "merge when CI is green";
           s.working = "Fixing the hidden-group case";
+          line = `Fixing the hidden-group case, then merging (answered by ${me.login}).`;
         } else if (/^(hold|stop|pause|wait)$/.test(word)) {
           s.beats.push({ b: "reply", min: 0, body: `On hold (held by ${me.login}). I keep off it until someone replies **resume**.` });
           s.status = `Held by ${me.login}`;
           s.state = "held";
           s.next = null;
           s.working = null;
+          line = `On hold (held by ${me.login}).`;
         } else {
+          line = `Nothing runs: “${text.trim()}” is not a clear instruction.`;
           s.beats.push({ b: "reply", min: 0, body: `I couldn't read “${text.trim()}” as an instruction. Nothing runs until it is clear.`, ask: open ?? undefined });
         }
         changed();
-        return wait(read(repo, number), 400);
+        return wait({ chat: read(repo, number), lines: [line] }, 400);
       },
     },
   };

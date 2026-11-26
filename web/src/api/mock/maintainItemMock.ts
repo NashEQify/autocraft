@@ -5,6 +5,7 @@ import type { Api } from "../client";
 import type { MaintainEvent, MaintainItem, MaintainItemStatus, User } from "../types";
 import { MAINTAINER_WRITES } from "./adminMock";
 import { NOW } from "./fixtures";
+import { itemPageFor } from "./itemPagesData";
 
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
 const hhmm = (iso: string) => `${iso.slice(11, 16)} UTC`;
@@ -101,7 +102,7 @@ export function createMaintainItemMock(me: User, changed: () => void): Pick<Api,
         const s = state.get(ref);
         const staff = me.role !== "viewer";
         const out: MaintainItem = {
-          repo, number, kind: "pr", canAct: may(repo),
+          repo, number, kind: itemPageFor(repo, number)?.kind ?? "pr", canAct: may(repo),
           status: s?.status ?? null, events: s?.events ?? [], duplicates: s?.duplicates ?? [],
           security: staff ? s?.security ?? [] : [],
           outside: s?.outside ? { ...s.outside, canRelease: may(repo) } : null,

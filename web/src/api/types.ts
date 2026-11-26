@@ -1842,12 +1842,14 @@ export type AreaStep = "propose" | "suggest" | "rescan";
 
 // ---- Item trace ----------------------------------------------------------------
 
-export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation";
+export type TraceKind = "github" | "plan" | "job" | "model-call" | "check" | "review" | "decision" | "write" | "step" | "conversation" | "discord";
 export type TraceActor = { type: "person" | "step" | "model"; name: string };
 /** Ids needed to fetch an event's details: runs and tasks have their own endpoints; the rest use the trace detail endpoint. */
 export type TraceRef = {
   runId?: number; /** A review's model calls, oldest first (a fix turn or repeat adds one). */ runIds?: number[]; jobId?: number; taskId?: number; checkId?: number; auditRowid?: number;
   reviewId?: string; commentId?: string; head?: string; toHead?: string;
+  /** A Discord mention: the link that opens the message in Discord. */
+  url?: string;
   /** The integration batch the event belongs to (merge, hold and batch writes). */
   batchId?: number;
 };

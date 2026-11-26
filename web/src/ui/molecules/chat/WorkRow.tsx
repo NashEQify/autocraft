@@ -5,6 +5,7 @@ import type { ChatEntry } from "../../../api/chat-types";
 import { MessageTime } from "../../atoms/MessageTime";
 import { cn } from "../../cn";
 import { Facts } from "../Facts";
+import { ShotStrip } from "./ShotStrip";
 
 type Work = Extract<ChatEntry, { t: "work" }>;
 
@@ -58,6 +59,7 @@ export function WorkRow({ e, onEvent }: { e: Work; onEvent: (id: string) => void
               {t("Open in Events")}
             </button>
           )}
+          {e.shots && e.shots.length > 0 && <ShotStrip shots={e.shots} />}
         </div>
       )}
     </li>

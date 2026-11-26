@@ -30,7 +30,6 @@ import { stuckModule } from "../modules/stuck";
 import { batchModule } from "../modules/batch";
 import { securityModule } from "../modules/security";
 import { similarModule } from "../modules/similar";
-import { dockDemoModule } from "../modules/dockdemo";
 
 export const modules: FeatureModule[] = [
   maintainHomeModule,
@@ -63,7 +62,6 @@ export const modules: FeatureModule[] = [
   batchModule,
   securityModule,
   similarModule,
-  ...(import.meta.env.VITE_MOCK === "1" ? [dockDemoModule] : []),
 ];
 
 setListPages(modules.flatMap((m) => m.routes.filter((r) => r.scoped).map((r) => r.path)));

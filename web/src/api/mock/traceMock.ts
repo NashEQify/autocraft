@@ -2,6 +2,7 @@
 import type { Api } from "../client";
 import type { AgentRunDetail, AgentRunTool, ItemTrace, ItemTraceDetail, TraceEvent, TraceKind } from "../types";
 import { NOW, PIPELINE_OFF } from "./fixtures";
+import { chatRunDetail, chatTrace, chatTraceFields } from "./chatMock";
 
 const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 export const at = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -103,7 +104,7 @@ const TOOLS: AgentRunTool[] = [
 /** Run detail for the runs of the trace mock, with tool calls. */
 export function traceRunDetail(id: number): AgentRunDetail | null {
   const e = [...EVENTS, ...REVIEW_CALLS].find((x) => x.ref.runId === id && x.call);
-  if (!e?.call) return null;
+  if (!e?.call) return chatRunDetail(id);
   const c = e.call;
   const text = (n: number) => Array.from({ length: n }, (_, i) => `Line ${i + 1} of the model text for ${e.summary}.`).join("\n");
   return {
@@ -126,6 +127,8 @@ export function createTraceMock(): Pick<Api, "itemTrace" | "itemTraceDetail"> {
   return {
     itemTrace(repo, number, q = {}) {
       if (repo === PIPELINE_OFF.repo && number === PIPELINE_OFF.number) return wait({ ...OFF_TRACE, events: [...OFF_EVENTS].reverse(), nextCursor: null });
+      const chat = chatTrace(repo, number);
+      if (chat) return wait({ ...TRACE, header: { ...TRACE.header, next: [] }, stamp: "mock-chat", events: chat, nextCursor: null });
       if (repo === "photocraft" && number === 4133) return wait({ ...OFF_TRACE, events: ISSUE_EVENTS, nextCursor: null });
       const kinds = q.kinds ? new Set<TraceKind>(q.kinds) : null;
       let list = EVENTS.filter((e) => (!kinds || kinds.has(e.kind)) && (!q.autocraftOnly || e.actor.type !== "person"));
@@ -139,7 +142,9 @@ export function createTraceMock(): Pick<Api, "itemTrace" | "itemTraceDetail"> {
       const last = events[events.length - 1];
       return wait({ ...TRACE, events, nextCursor: list.length > limit && last ? `${last.at}|${last.id}` : null });
     },
-    itemTraceDetail(_repo, _number, id): Promise<ItemTraceDetail> {
+    itemTraceDetail(repo, number, id): Promise<ItemTraceDetail> {
+      const c = chatTrace(repo, number)?.find((x) => x.id === id);
+      if (c) return wait({ id: c.id, kind: c.kind, at: c.at, summary: c.summary, fields: chatTraceFields(repo, number, id) ?? {} });
       const e = EVENTS.find((x) => x.id === id);
       if (!e) throw new Error(`no event ${id}`);
       return wait({ id: e.id, kind: e.kind, at: e.at, summary: e.summary, fields: FIELDS[e.id] ?? { head: e.head, note: "mock detail" } });
