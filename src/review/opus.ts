@@ -33,8 +33,7 @@ import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, loadReviewTexts, saveReviews, type ReviewRow } from "../data/review/index.ts";
-import { loadOwnPushes } from "../data/views/own-pushes.ts";
-import { authorRound } from "../core/evidence.ts";
+import { roundHeadOf } from "../core/author-round.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
@@ -138,16 +137,6 @@ async function reviewedBase(db: Db, c: { repo: string; number: number; head_oid:
   return cachedDiffBase(c.repo, c.number, c.head_oid) ?? (await loadItems(db, [{ repo: c.repo, number: c.number }], "pr")).get(refOf(c))?.base_ref ?? null;
 }
 
-/**
- * The review round of the author's new commits (src/workflow/advance.ts): the head the approver accepted, when someone else's commits lead
- * from it to the candidate's head; null otherwise. `wf`: the PR's live workflow.
- */
-async function roundOf(db: Db, c: { repo: string; number: number; head_oid: string }, wf: ItemWorkflow | undefined): Promise<string | null> {
-  if (wf?.kind !== "pr" || wf.number !== c.number || wf.approvedBy === null) return null;
-  const pushes = (await loadOwnPushes(db, [{ repo: c.repo, number: c.number }])).get(refOf(c)) ?? [];
-  return authorRound({ approved: true, baseHead: wf.baseHead }, pushes, c.head_oid);
-}
-
 /** A review recorded at a head without a model call: what it says, the head it was carried from, and the discussion mark of that review. */
 export type RoundCarry = { review: OpusReview; from: string; baseRef: string | null; snap: Snapshot };
 
@@ -163,7 +152,7 @@ export async function roundCarry(db: Db, c: OpusCandidate, deps: Pick<OpusDeps, 
     loadPrWorkflows(db, [{ repo, number }]), loadReviewRows(db, [{ repo, number }]), loadItems(db, [{ repo, number }], "pr"), loadRepos(db, { names: [repo] }),
   ]));
   const wf = workflows.get(ref);
-  if (!wf || (stored.get(ref) ?? []).some((r) => r.head === c.head_oid) || !await roundOf(db, c, wf)) return null;
+  if (!wf || (stored.get(ref) ?? []).some((r) => r.head === c.head_oid) || !await roundHeadOf(db, c)) return null;
   // A PR a person sent to merge without a review carries only a review made after they did.
   const since = wf.entry === "merge" ? (await loadGoOnAt(db, [wf])).get(wf.id)!.since : null;
   const e = earlierRows(stored, c)[0];
@@ -247,7 +236,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   // A merge commit of ours carries the base branch's changes since the earlier head, so a delta of the heads would show unrelated changes: the delta is taken between the PR's own diffs.
   const merged = (await loadOwnDeltas(db, [{ ref, toHead: c.head_oid }])).get(`${ref}@${c.head_oid}`);
   // So does an author's merge of the base branch: in the review round the delta is what the PR's own diff gained and lost, where the earlier head's diff is cached.
-  const accepted = await roundOf(db, c, wf);
+  const accepted = await roundHeadOf(db, c);
   const was = accepted && earlier && !merged ? cachedDiffText(repo, c.number, earlier.head) : null;
   const own = was !== null ? codeDiff(changedHunks(was, d.text), deps.maxChars) : null;
   if (own?.text && !own.testsOmitted.length) { mode = "delta"; diff = own.text; base = earlier!.head; }

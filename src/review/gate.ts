@@ -1,6 +1,7 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
-import { authorRound, ciAt, type OwnPush } from "../core/evidence.ts";
+import { ciAt } from "../core/evidence.ts";
+import { roundWaits } from "../core/author-round.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
@@ -13,7 +14,7 @@ import { loadReviewRunCounts } from "../data/inference/index.ts";
 import { loadRunApprovals } from "../data/merge/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadReviewFacts, recordReviewFailures, type ReviewFacts } from "../data/review/index.ts";
-import { loadLegs, loadWorkflowFacts, type WorkflowFact } from "../data/workflow/index.ts";
+import { loadLegs, loadWorkflowFacts } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 
 /** Opus review calls of one PR per UTC day, new heads, re-runs and failed calls together (a reply-fix turn is part of its review). */
@@ -76,9 +77,6 @@ export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
   authorRound?: (ref: string, head: string) => boolean;
 };
 
-/** A running workflow of the PR itself, approved for merge, whose author pushed past the head it accepted (core/evidence.ts authorRound). */
-export const roundWaits = (w: (Pick<WorkflowFact, "approved" | "baseHead" | "own" | "state">) | null | undefined, pushes: readonly OwnPush[], head: string): boolean =>
-  !!w && w.own && w.state === "running" && authorRound(w, pushes, head) !== null;
 
 export type HoldCheck = (repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>;
 
