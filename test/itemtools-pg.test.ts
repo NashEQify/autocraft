@@ -103,6 +103,14 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     assert.equal((await writeSnapshotFromDb(pdb, fresh, 2)).rebuilt, true);
     assert.deepEqual(dump(file), dump(fresh));
     assert.deepEqual(srcRows(file), srcRows(fresh));
+
+    // A repository turned private after its changed items were compared: they are not read again, so they leave the file.
+    await pdb.prepare("UPDATE items SET title = 'Fix kerning again' WHERE repo = 'photocraft' AND number = 7").run();
+    const hidden = await writeSnapshotFromDb(pdb, file, 2, {
+      beforeRefetch: async (t) => void (t === "items" && await pdb.prepare("UPDATE repos SET visibility = 'private' WHERE name = 'photocraft'").run()),
+    });
+    assert.equal(hidden.rebuilt, false);
+    assert.deepEqual(dump(file).items.filter((i) => (i as { number: number }).number === 7), []);
   } finally {
     await pg.close();
     await lite.close();
