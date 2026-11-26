@@ -66,7 +66,11 @@ export type AtMessage = {
 };
 
 export type AtRest = Pick<DiscordRest, "createMessage"> & { startThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> };
-export type AtDeps = { db: Db; keys: DiscordKeys; rest: AtRest; log: (line: string) => void; read?: ReadDeps; now?: () => number };
+export type AtDeps = {
+  db: Db; keys: DiscordKeys; rest: AtRest; log: (line: string) => void; read?: ReadDeps; now?: () => number;
+  /** Called once the answer is posted and its target follows what ran: the thread's first status lines go out without waiting for a workflow change. */
+  followed?: () => void;
+};
 
 const refOf = (i: ItemRef): string => `${i.repo.split("/").pop()!}#${i.number}`;
 
@@ -161,6 +165,7 @@ export class AtCommands {
     if (denied.length) return await this.#refuse(m, t("{login} has no write access to {repos}. Nothing ran.", { login, repos: listText(denied) }));
     const result = await runDo(db, keys, d, { userId, login }, this.#d.read);
     await this.#answer(m, d, result, here, login);
+    if (result.items.some((o) => o.outcome === "run")) this.#d.followed?.();
   }
 
   /** One short public reply per sender within REFUSAL_GAP_MS; later ones are dropped. */

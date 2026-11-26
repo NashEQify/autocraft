@@ -137,8 +137,9 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   installAccountCommands(interactions, { db, keys });
   installPanel(interactions, db, installIssueNew(interactions, { db, keys, search, log }));
   installAlerts(db, keys, rest, interactions, signal, log);
-  new ThreadResults({ db, keys, rest, log }).start(signal);
-  const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log }) });
+  const results = new ThreadResults({ db, keys, rest, log });
+  results.start(signal);
+  const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log, followed: () => void results.sync() }) });
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });
   // A crash during a call can leave the question in a recorded prompt.

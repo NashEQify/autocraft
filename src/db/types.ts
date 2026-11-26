@@ -653,6 +653,7 @@ export interface DiscordFollowPosts {
   status_hash: string;
   result_key: Generated<string>;
   result_hash: Generated<string>;
+  link_hash: Generated<string>;
   sealed: Generated<string>;
   at: string;
 }
@@ -3044,7 +3045,7 @@ export const COLUMNS = {
   discord_events: ["at", "kind"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
   discord_filing_repos: ["name", "owner", "added_by", "added_at"],
-  discord_follow_posts: ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "sealed", "at"],
+  discord_follow_posts: ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "link_hash", "sealed", "at"],
   discord_follows: ["target_hash", "repo", "number", "kind", "channel_hash", "sealed", "command", "login", "at"],
   discord_hidden_repos: ["name", "hidden_by", "hidden_at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],

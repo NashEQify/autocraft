@@ -28,7 +28,7 @@ export const threadTarget = (keys: DiscordKeys, threadId: string): string => key
 export const replyTarget = (keys: DiscordKeys, messageId: string): string => keys.hash("message", messageId);
 
 /** Groups rows by target; a target whose seal does not open is left out. */
-function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {
+export function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {
   const by = new Map<string, FollowRow[]>();
   for (const r of rows) by.set(r.targetHash, [...(by.get(r.targetHash) ?? []), r]);
   return [...by.values()].flatMap((list) => {
@@ -46,11 +46,6 @@ function followsOf(keys: DiscordKeys, rows: readonly FollowRow[]): Follow[] {
 /** What a target (threadTarget or replyTarget) follows, or null. */
 export async function followOf(db: Db, keys: DiscordKeys, targetHash: string): Promise<Follow | null> {
   return followsOf(keys, (await dc.loadFollows(db, [targetHash])).get(targetHash) ?? [])[0] ?? null;
-}
-
-/** Every target with what it follows. */
-export async function allFollows(db: Db, keys: DiscordKeys): Promise<Follow[]> {
-  return followsOf(keys, await dc.loadAllFollows(db));
 }
 
 /** The targets that follow each item, by `repo#number` (short repo name); an item nobody follows is absent. */

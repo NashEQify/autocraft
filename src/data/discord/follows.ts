@@ -87,14 +87,14 @@ export async function loadAllFollows(db: Db): Promise<FollowRow[]> {
   return (await q.all(q.k.selectFrom("main.discord_follows").select(COLS), { label: "discord.loadAllFollows" })).map(rowOf);
 }
 
-const POST_COLS = ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "sealed", "at"] as const;
+const POST_COLS = ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "link_hash", "sealed", "at"] as const;
 
 /** What the bot last posted about each followed (target, item), by `target\0repo\0number`. */
 export async function loadFollowPosts(db: Db): Promise<Map<string, FollowPost>> {
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.discord_follow_posts").select(POST_COLS), { label: "discord.loadFollowPosts" });
   return new Map(rows.map((r) => {
-    const p: FollowPost = { targetHash: r.target_hash, repo: r.repo, number: Number(r.number), statusHash: r.status_hash, resultKey: r.result_key, resultHash: r.result_hash, sealed: r.sealed, at: r.at };
+    const p: FollowPost = { targetHash: r.target_hash, repo: r.repo, number: Number(r.number), statusHash: r.status_hash, resultKey: r.result_key, resultHash: r.result_hash, linkHash: r.link_hash, sealed: r.sealed, at: r.at };
     return [followPostKey(p), p];
   }));
 }
@@ -108,8 +108,8 @@ export async function saveFollowPosts(db: Db, rows: FollowPost[]): Promise<void>
   await db.write(async () => {
     for (const part of kx.batches(rows)) {
       await q.run(q.k.insertInto("main.discord_follow_posts").values(part.map((p) => ({
-        target_hash: p.targetHash, repo: p.repo, number: p.number, status_hash: p.statusHash, result_key: p.resultKey, result_hash: p.resultHash, sealed: p.sealed, at: p.at,
-      }))).onConflict((oc) => oc.columns(["target_hash", "repo", "number"]).doUpdateSet(kx.excluded(["status_hash", "result_key", "result_hash", "sealed", "at"]))));
+        target_hash: p.targetHash, repo: p.repo, number: p.number, status_hash: p.statusHash, result_key: p.resultKey, result_hash: p.resultHash, link_hash: p.linkHash, sealed: p.sealed, at: p.at,
+      }))).onConflict((oc) => oc.columns(["target_hash", "repo", "number"]).doUpdateSet(kx.excluded(["status_hash", "result_key", "result_hash", "link_hash", "sealed", "at"]))));
     }
   });
 }

@@ -2561,8 +2561,8 @@ CREATE INDEX IF NOT EXISTS discord_follows_item ON discord_follows (repo, number
 CREATE INDEX IF NOT EXISTS discord_follows_channel ON discord_follows (channel_hash);
 -- What the bot last posted about each item a target follows (src/discord/results.ts), so a restart posts nothing twice. `status_hash` is a
 -- hash of the status line last posted; `result_key` the workflow id and recommendation time of the result last posted, `result_hash`
--- a hash of its text; `sealed` the result message's id sealed with the target and item (keys.ts), '' when none. No message text. A row
--- goes once its (target, item) row in `discord_follows` is gone.
+-- a hash of its text and `link_hash` of its GitHub link; `sealed` the result message's id sealed with the target and item (keys.ts),
+-- '' when none. No message text. A row goes once its (target, item) row in `discord_follows` is gone.
 CREATE TABLE IF NOT EXISTS discord_follow_posts (
   target_hash TEXT NOT NULL,
   repo TEXT NOT NULL,
@@ -2570,6 +2570,7 @@ CREATE TABLE IF NOT EXISTS discord_follow_posts (
   status_hash TEXT NOT NULL,
   result_key TEXT NOT NULL DEFAULT '',
   result_hash TEXT NOT NULL DEFAULT '',
+  link_hash TEXT NOT NULL DEFAULT '',
   sealed TEXT NOT NULL DEFAULT '',
   at TEXT NOT NULL,
   PRIMARY KEY (target_hash, repo, number)

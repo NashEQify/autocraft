@@ -1,19 +1,25 @@
 // The work on the items a thread (or a command reply) follows, posted where the command was answered (src/discord/threads.ts).
 //
 // What is posted: for each followed item, its status line whenever it changes (the first line of the item's GitHub status comment,
-// src/prstatus: "Running: review", "Running: fix-up: 1 and 2", "Stopped at a blocker: …", "Held by …", "Merged"), and its result when
-// it comes back to a person: the numbered parts and the recommendation line, the same words as the status comment, with a link button
-// to that comment (to the item where none is known). The status lines of one target that changed together go in one message. A result
-// that changes while it stays open (a part dropped, a new recommendation text at the same time) edits its message.
+// src/prstatus workflowHead, without the place in line or what a running item waits for, which change too often: "Running: review",
+// "Running: fix-up: 1 and 2", "Stopped at a blocker: …", "Held by …", "Merged"), and its result when it comes back to a person: the
+// numbered parts and the recommendation line, the same words as the status comment, with a link button to that comment (to the item
+// where none is known). The status lines of one target that changed together go in one message. A result that changes while it stays
+// open edits its message; a new link edits only the button.
 //
 // Long results: a result that does not fit one message gets a Haiku summary of its parts (discord.result.haiku, on an Interactive
 // slot); the recommendation line stays word for word. Without a summary the parts are cut to fit, with how many more are on GitHub.
+// The text is kept in memory by the result's hash, so a send that is tried again makes no new call.
 //
-// Private repos and quiet PRs (visibility.ts discordDetail): status lines and links only, never parts, recommendations or review text.
+// Private repos and quiet items (visibility.ts discordDetail): status lines and links only, never parts, recommendations or review
+// text. An item that becomes status-only after its result was posted has that message edited down to its status line and link.
 //
-// When: like Alerts.start (alerts.ts), a poll of the change markers of the `workflows` topic; a change runs one pass. Nothing here
-// writes a planner topic (`discord_follow_posts` feeds none). What was posted is kept per (target, item) in `discord_follow_posts`, so
-// a restart posts nothing twice. A thread that is gone, or where the bot may no longer post, stops being followed.
+// When: like Alerts.start (alerts.ts), a poll of the change markers of the `workflows` topic; a change runs one pass, and so does a new
+// follow (AtCommands' `followed`). A pass reads each followed item's workflow version, visibility and status comment, and builds the
+// full view only of items where one of them changed, that a target newly follows, or whose post failed. Nothing here writes a planner
+// topic (`discord_follow_posts` feeds none). What was posted is kept per (target, item) in `discord_follow_posts`, so a restart posts
+// nothing twice. A target whose channel is gone or closed to the bot (Discord codes 10003, 50001) stops being followed; any other
+// failed send backs that target off (FAIL_FIRST_MS, doubling up to FAIL_MAX_MS) and its items are tried again after it.
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep } from "../agents/step.ts";
 import { exclusive } from "../async-seq.ts";
@@ -23,16 +29,16 @@ import { loadStatusCommentIds, loadWorkflowHistory } from "../data/workflow/inde
 import { loadStatusExtras } from "../data/views/prStatus.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
-import { partLine, statusLine, workflowLines, type StatusFacts } from "../prstatus/index.ts";
+import { partLine, statusLine, workflowHead, type StatusFacts } from "../prstatus/index.ts";
 import { commentStatuses } from "../public/status.ts";
 import { recommendationLine } from "../workflow/status.ts";
 import { ASKING_STATES, shownWorkflow, type ItemRef, type ItemWorkflow, type WorkflowState } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
-import { RestError, type DiscordRest } from "./rest.ts";
+import { MISSING_ACCESS, RestError, UNKNOWN_CHANNEL, UNKNOWN_MESSAGE, type DiscordRest, type EditBody } from "./rest.ts";
 import { parseResult, type ResultAsk, type ResultLine } from "./result-ask.ts";
-import { allFollows, sendToFollow, type Follow } from "./threads.ts";
+import { followsOf, sendToFollow, type Follow } from "./threads.ts";
 import { discordDetail, type DiscordDetail } from "./visibility.ts";
 
 /** Discord allows 2000 characters per message; a result is kept under this. */
@@ -41,10 +47,15 @@ const POLL_MS = 2000;
 const TOPICS = ["workflows"];
 /** Link buttons in one action row. */
 const ROW_BUTTONS = 5;
+/** The back-off of a target after a failed send: the first wait, doubled per failure in a row up to the last. */
+export const FAIL_FIRST_MS = 30_000;
+export const FAIL_MAX_MS = 30 * 60_000;
+/** Result texts kept in memory by hash. */
+const TEXT_CACHE = 200;
 
 /** What the thread shows of one item. `result`: the parts and recommendation, null while nothing waits for a person or where only status may show. */
 export type ItemView = {
-  ref: ItemRef; key: string; url: string; status: string;
+  ref: ItemRef; key: string; url: string; status: string; detail: DiscordDetail;
   result: { key: string; parts: { n: number; title: string; state: "planned" | "dropped" | "fixed"; major?: boolean }[]; rec: string | null } | null;
 };
 
@@ -73,37 +84,49 @@ const shortKey = (i: ItemRef): string => `${i.repo.split("/").pop()!}#${i.number
 const hash = (s: string): string => createHash("sha256").update(s).digest("base64url").slice(0, 22);
 /** Text from GitHub or a model in a message: no mention or link syntax, one line. */
 const plain = (s: string): string => s.replace(/[<>]/g, " ").replace(/\s+/g, " ").trim();
-const bold = (s: string): string => s.replace(/^\*\*(.*)\*\*$/, "$1");
 
-/** What each followed item shows now, by `repo#number`; an item without a public status row is absent. */
-export async function itemViews(db: Db, refs: readonly ItemRef[]): Promise<Map<string, ItemView>> {
-  const out = new Map<string, ItemView>();
+/** What is read of every followed item each pass: its shown workflow, visibility and status comment id; `sig` changes when any does. */
+type Glance = { wf: ItemWorkflow | undefined; detail: DiscordDetail; commentId: string | undefined; sig: string };
+
+export async function glances(db: Db, refs: readonly ItemRef[]): Promise<Map<string, Glance>> {
+  const out = new Map<string, Glance>();
   if (!refs.length) return out;
-  const keys = refs.map(shortKey);
-  const [history, statuses, detail, commentIds] = await db.together(() => Promise.all([
-    loadWorkflowHistory(db, [...refs]), commentStatuses(db, refs), discordDetail(db, refs), loadStatusCommentIds(db, keys),
+  const [history, detail, commentIds] = await db.together(() => Promise.all([
+    loadWorkflowHistory(db, [...refs]), discordDetail(db, refs), loadStatusCommentIds(db, refs.map(shortKey)),
   ]));
-  const wfs = new Map<string, ItemWorkflow>();
-  for (const k of keys) { const w = shownWorkflow(history.get(k) ?? []); if (w) wfs.set(k, w); }
-  const [extras, waits] = await Promise.all([loadStatusExtras(db, refs, [...wfs.values()].map((w) => w.id)), legWaits(db, [...wfs.values()])]);
   for (const ref of refs) {
     const key = shortKey(ref);
-    const status = statuses.get(key);
-    if (!status) continue;
-    const wf = wfs.get(key);
+    const wf = shownWorkflow(history.get(key) ?? []) ?? undefined;
+    const d = detail.get(key) ?? "status", commentId = commentIds.get(key);
+    out.set(key, { wf, detail: d, commentId, sig: `${wf ? `${wf.id}:${wf.version}` : "-"}|${d}|${commentId ?? ""}` });
+  }
+  return out;
+}
+
+/** What each of `refs` shows now, by `repo#number`; an item without a public status row is absent. */
+export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<string, Glance>): Promise<Map<string, ItemView>> {
+  const out = new Map<string, ItemView>();
+  if (!refs.length) return out;
+  const [g, statuses] = await Promise.all([seen ?? glances(db, refs), commentStatuses(db, refs)]);
+  const wfs = refs.flatMap((r) => g.get(shortKey(r))?.wf ?? []);
+  const [extras, waits] = await Promise.all([loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs)]);
+  for (const ref of refs) {
+    const key = shortKey(ref);
+    const status = statuses.get(key), at = g.get(key);
+    if (!status || !at) continue;
+    const { wf, detail } = at;
     const pr = (status.queue ? extras.batches.get(`open:${key}`) : status.step === "Merged" ? extras.batches.get(`merged:${key}`) : undefined)?.pr;
     const a = wf ? extras.answered.get(wf.id) : undefined;
+    // No place in line: it moves with every merge ahead.
     const facts: StatusFacts = {
-      status, ...(pr ? { batch: { pr } } : {}),
+      status: { ...status, queue: undefined }, ...(pr ? { batch: { pr } } : {}),
       ...(wf ? { workflow: { wf, answered: a ? { by: a.login, at: a.at } : null, quiet: extras.quiet.has(key), wait: waits.get(wf.id) ?? null } } : {}),
     };
-    const line = facts.workflow ? bold(workflowLines({ ...facts, workflow: facts.workflow })[0]!) : statusLine(facts);
-    const id = commentIds.get(key);
-    const full: DiscordDetail = detail.get(key) ?? "status";
+    const line = facts.workflow ? workflowHead({ ...facts, workflow: facts.workflow }, { wait: false }) : statusLine(facts);
     const asking = !!wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) && status.step !== "Merged" && status.step !== "Closed";
     out.set(key, {
-      ref, key, url: id ? `${status.url}#issuecomment-${id}` : status.url, status: line,
-      result: asking && full === "full" ? {
+      ref, key, url: at.commentId ? `${status.url}#issuecomment-${at.commentId}` : status.url, status: line, detail,
+      result: asking && detail === "full" ? {
         key: `${wf!.id}|${wf!.recAt ?? ""}|${wf!.state}`,
         parts: wf!.plan.map((p) => ({ n: p.n, title: plain(p.title), state: p.state, ...(p.major ? { major: true } : {}) })),
         rec: recommendationLine(wf!.rec),
@@ -156,24 +179,36 @@ export function summaryResult(v: ItemView, lines: readonly ResultLine[], max = R
   return text.length <= max ? text : cutResult(v, max);
 }
 
+const linkRow = (v: ItemView): unknown[] => rows([button(t("Full result on GitHub"), v.url)]);
+/** The channel is gone or closed to the bot: following it is over. */
+const goneTarget = (e: unknown): boolean => e instanceof RestError && (e.code === UNKNOWN_CHANNEL || e.code === MISSING_ACCESS);
+
 export class ThreadResults {
   #d: ResultDeps;
   #running: Promise<void> | null = null;
   #again = false;
   #last = "";
+  /** Each followed item's Glance signature as the last pass handled it. */
+  #sig = new Map<string, string>();
+  /** Items whose post failed or waits out a back-off, to build again on the next pass. */
+  #pending = new Set<string>();
+  #backoff = new Map<string, { until: number; fails: number }>();
+  #texts = new Map<string, string>();
 
   constructor(d: ResultDeps) {
     this.#d = d;
   }
 
-  /** Polls the change markers of the workflow topic; a change runs one pass. Runs a first pass at once. */
+  /** Polls the change markers of the workflow topic; a change, or the end of a target's back-off, runs one pass. Runs a first pass at once. */
   start(signal: AbortSignal): void {
     void this.sync();
     const poll = exclusive(async () => {
       try {
         const seqs = await this.#d.db.seqs();
         const sig = TOPICS.map((k) => seqs[k] ?? 0).join(",");
-        if (sig !== this.#last) { this.#last = sig; void this.sync(); }
+        const now = this.#now();
+        const retry = this.#pending.size > 0 && [...this.#backoff.values()].some((b) => b.until <= now);
+        if (sig !== this.#last || retry) { this.#last = sig; void this.sync(); }
       } catch (e) {
         this.#d.log(`discord: thread results poll failed: ${(e as Error).message}`);
       }
@@ -200,79 +235,127 @@ export class ThreadResults {
     return run;
   }
 
+  #now(): number {
+    return (this.#d.now ?? Date.now)();
+  }
+
   async #pass(): Promise<void> {
     const { db, keys } = this.#d;
-    const [follows, posts] = await Promise.all([allFollows(db, keys), dc.loadFollowPosts(db)]);
-    const followed = new Set(follows.flatMap((f) => f.items.map((i) => dc.followPostKey({ targetHash: f.targetHash, repo: i.repo, number: i.number }))));
+    const [rows, posts] = await Promise.all([dc.loadAllFollows(db), dc.loadFollowPosts(db)]);
+    // Counted from the stored rows, so a target whose seal does not open is not taken for one nobody follows.
+    const followed = new Set(rows.map((r) => dc.followPostKey(r)));
     if ([...posts.keys()].some((k) => !followed.has(k))) await dc.pruneFollowPosts(db);
-    if (!follows.length) return;
+    const follows = followsOf(keys, rows);
     const refs = [...new Map(follows.flatMap((f) => f.items).map((i) => [shortKey(i), i])).values()];
-    const views = await itemViews(db, refs);
+    const seen = await glances(db, refs);
+    const fresh = (f: Follow, i: ItemRef): boolean => !posts.has(dc.followPostKey({ targetHash: f.targetHash, repo: i.repo, number: i.number }));
+    const due = new Set(refs.map(shortKey).filter((k) => this.#pending.has(k) || this.#sig.get(k) !== seen.get(k)?.sig));
+    for (const f of follows) for (const i of f.items) if (fresh(f, i)) due.add(shortKey(i));
+    for (const k of [...this.#sig.keys()]) if (!seen.has(k)) this.#sig.delete(k);
+    if (!due.size) return;
+    const views = await itemViews(db, refs.filter((r) => due.has(shortKey(r))), seen);
+    const pending = new Set<string>();
+    const now = this.#now();
     for (const f of follows) {
+      const items = f.items.filter((i) => due.has(shortKey(i)));
+      if (!items.length) continue;
+      const b = this.#backoff.get(f.targetHash);
+      if (b && b.until > now) { for (const i of items) pending.add(shortKey(i)); continue; }
       try {
-        await this.#target(f, views, posts);
+        await this.#target(f, items, views, posts);
+        this.#backoff.delete(f.targetHash);
       } catch (e) {
-        // Gone (404) or no longer allowed (403): the target stops following. Anything else is tried again on the next change.
-        if (e instanceof RestError && (e.status === 404 || e.status === 403)) {
-          this.#d.log(`discord: thread results: target ${f.targetHash.slice(0, 8)} is gone or closed to the bot (${e.status}); it stops following`);
+        if (goneTarget(e)) {
+          this.#d.log(`discord: thread results: target ${f.targetHash.slice(0, 8)} is gone or closed to the bot (${(e as RestError).code}); it stops following`);
           await dc.removeFollows(db, [f.targetHash]);
-        } else {
-          this.#d.log(`discord: thread results not posted: ${(e as Error).message}`);
+          this.#backoff.delete(f.targetHash);
+          continue;
         }
+        const fails = (b?.fails ?? 0) + 1;
+        const wait = Math.min(FAIL_MAX_MS, FAIL_FIRST_MS * 2 ** (fails - 1));
+        this.#backoff.set(f.targetHash, { until: now + wait, fails });
+        this.#d.log(`discord: thread results not posted (target ${f.targetHash.slice(0, 8)}, failure ${fails}, next try in ${Math.round(wait / 1000)} s): ${(e as Error).message}`);
+        for (const i of items) pending.add(shortKey(i));
       }
+    }
+    for (const k of due) { const g = seen.get(k); if (g) this.#sig.set(k, g.sig); }
+    this.#pending = pending;
+  }
+
+  /** Edits a message of the target; false when Discord no longer has it (10008). */
+  async #edit(f: Follow, messageId: string, body: EditBody): Promise<boolean> {
+    try {
+      await this.#d.rest.editMessage(f.target.channelId, messageId, body);
+      return true;
+    } catch (e) {
+      if (e instanceof RestError && e.code === UNKNOWN_MESSAGE) return false;
+      throw e;
     }
   }
 
-  /** One message of the target's changed status lines, then one message per new result; each post is recorded as soon as it is sent. */
-  async #target(f: Follow, views: Map<string, ItemView>, posts: Map<string, FollowPost>): Promise<void> {
+  /** Results first, one message per result, then one message of the changed status lines; each post is recorded as soon as it is sent. */
+  async #target(f: Follow, items: readonly ItemRef[], views: Map<string, ItemView>, posts: Map<string, FollowPost>): Promise<void> {
     const { db, keys, rest } = this.#d;
-    const at = new Date((this.#d.now ?? Date.now)()).toISOString();
+    const at = new Date(this.#now()).toISOString();
     const changed: { v: ItemView; post: FollowPost }[] = [];
-    for (const item of f.items) {
+    for (const item of items) {
       const v = views.get(shortKey(item));
       if (!v) continue;
       const base = { targetHash: f.targetHash, repo: item.repo, number: item.number };
       const prev = posts.get(dc.followPostKey(base));
       const statusHash = hash(v.status);
+      const msg = prev?.sealed ? keys.open(prev.sealed, sealAad(base))?.messageId : undefined;
+      const save = async (p: FollowPost): Promise<void> => { await dc.saveFollowPosts(db, [p]); posts.set(dc.followPostKey(p), p); };
       if (v.result) {
-        // Hashed before any summary, so an unchanged result makes no model call.
-        const resultHash = hash(`${fullResult(v)}\0${v.url}`);
-        if (prev?.resultKey === v.result.key && prev.resultHash === resultHash) continue;
-        const body = { content: await this.#resultText(v), components: rows([button(t("Full result on GitHub"), v.url)]) };
-        if (prev?.resultKey === v.result.key) {
-          const msg = prev.sealed ? keys.open(prev.sealed, sealAad(base))?.messageId : undefined;
-          if (msg) {
-            await rest.editMessage(f.target.channelId, msg, body);
-            await dc.saveFollowPosts(db, [{ ...prev, statusHash, resultHash, at }]);
-            continue;
-          }
+        // Hashed before any summary and without the link, so an unchanged result makes no model call and a new link edits only the button.
+        const resultHash = hash(fullResult(v)), linkHash = hash(v.url);
+        const same = prev?.resultKey === v.result.key;
+        if (same && prev!.resultHash === resultHash) {
+          if (prev!.linkHash === linkHash) continue;
+          if (msg && await this.#edit(f, msg, { components: linkRow(v) })) { await save({ ...prev!, linkHash, at }); continue; }
         }
+        const body = { content: await this.#resultText(v, resultHash), components: linkRow(v) };
+        if (same && msg && await this.#edit(f, msg, body)) { await save({ ...prev!, statusHash, resultHash, linkHash, at }); continue; }
         const sent = await sendToFollow(rest, f.target, body);
         const sealed = keys.seal({ guildId: f.target.guildId, channelId: f.target.channelId, messageId: sent.id, at }, sealAad(base));
-        await dc.saveFollowPosts(db, [{ ...base, statusHash, resultKey: v.result.key, resultHash, sealed, at }]);
+        await save({ ...base, statusHash, resultKey: v.result.key, resultHash, linkHash, sealed, at });
+        continue;
+      }
+      // The item may show only its status now: its earlier result message keeps no parts or recommendation.
+      if (v.detail === "status" && prev?.resultKey) {
+        if (msg) await this.#edit(f, msg, { content: `**${v.key}** ${v.status}`, components: rows([button(v.key, v.url)]) });
+        await save({ ...prev, statusHash, resultKey: "", resultHash: "", linkHash: "", sealed: "", at });
         continue;
       }
       if (prev?.statusHash === statusHash) continue;
-      changed.push({ v, post: { ...base, statusHash, resultKey: prev?.resultKey ?? "", resultHash: prev?.resultHash ?? "", sealed: prev?.sealed ?? "", at } });
+      changed.push({ v, post: { ...base, statusHash, resultKey: prev?.resultKey ?? "", resultHash: prev?.resultHash ?? "", linkHash: prev?.linkHash ?? "", sealed: prev?.sealed ?? "", at } });
     }
     if (!changed.length) return;
     const content = changed.map(({ v }) => `**${v.key}** ${v.status}`).join("\n").slice(0, RESULT_MAX);
     await sendToFollow(rest, f.target, { content, components: rows(changed.slice(0, 25).map(({ v }) => button(v.key, v.url))) });
     await dc.saveFollowPosts(db, changed.map((c) => c.post));
+    for (const c of changed) posts.set(dc.followPostKey(c.post), c.post);
   }
 
-  /** The full result when it fits, else Haiku's summary, else the result cut to fit. */
-  async #resultText(v: ItemView): Promise<string> {
+  /** The full result when it fits, else Haiku's summary, else the result cut to fit; kept by `resultHash`. */
+  async #resultText(v: ItemView, resultHash: string): Promise<string> {
+    const kept = this.#texts.get(resultHash);
+    if (kept !== undefined) return kept;
     const full = fullResult(v);
-    if (full.length <= RESULT_MAX) return full;
-    const r = v.result!;
-    let lines: ResultLine[] | null = null;
-    try {
-      lines = await (this.#d.summarize ?? modelSummary)(this.#d.db, { ref: v.key, recommendation: r.rec, parts: r.parts });
-    } catch (e) {
-      this.#d.log(`discord: result summary failed: ${(e as Error).message.slice(0, 200)}`);
+    let text = full;
+    if (full.length > RESULT_MAX) {
+      const r = v.result!;
+      let lines: ResultLine[] | null = null;
+      try {
+        lines = await (this.#d.summarize ?? modelSummary)(this.#d.db, { ref: v.key, recommendation: r.rec, parts: r.parts });
+      } catch (e) {
+        this.#d.log(`discord: result summary failed: ${(e as Error).message.slice(0, 200)}`);
+      }
+      text = lines ? summaryResult(v, lines) : cutResult(v);
     }
-    return lines ? summaryResult(v, lines) : cutResult(v);
+    this.#texts.set(resultHash, text);
+    if (this.#texts.size > TEXT_CACHE) this.#texts.delete(this.#texts.keys().next().value!);
+    return text;
   }
 }
 

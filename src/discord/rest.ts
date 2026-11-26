@@ -44,11 +44,18 @@ export interface DiscordRest {
 
 export class RestError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Discord's JSON error code (10003 Unknown Channel, 10008 Unknown Message, 50001 Missing Access, ...), when the body had one. */
+  code: number | null;
+  constructor(status: number, message: string, code: number | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+export const UNKNOWN_CHANNEL = 10003;
+export const UNKNOWN_MESSAGE = 10008;
+export const MISSING_ACCESS = 50001;
 
 export type RestDeps = { token: string; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>; now?: () => number };
 
@@ -185,7 +192,11 @@ export class RestClient implements DiscordRest {
       }
       // The window is used up: the next request of the bucket waits for it to reset.
       if (r.headers.get("x-ratelimit-remaining") === "0") this.#notBefore.set(owner, now() + Math.ceil(Number(r.headers.get("x-ratelimit-reset-after") ?? 1) * 1000));
-      if (!r.ok) throw new RestError(r.status, `${method} ${key.slice(method.length + 1)} failed: HTTP ${r.status}`);
+      if (!r.ok) {
+        const code = (await r.json().catch(() => null) as { code?: unknown } | null)?.code;
+        const c = typeof code === "number" ? code : null;
+        throw new RestError(r.status, `${method} ${key.slice(method.length + 1)} failed: HTTP ${r.status}${c !== null ? ` (code ${c})` : ""}`, c);
+      }
       return r.status === 204 ? undefined : r.json().catch(() => undefined);
     }
   }
