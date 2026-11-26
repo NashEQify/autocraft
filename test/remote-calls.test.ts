@@ -418,7 +418,14 @@ describe("user-local remote calls", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const first = (await leaseFor("bob"))!;
     assert.equal(await heartbeat(db, first.secret, { phase: "running" }), true);
-    assert.deepEqual(await submitCall(db, first.secret, { ok: false, error: "harness crashed", durationMs: 5 }), { accepted: true });
+    const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", first.id)))!.run_id!;
+    const failure = { ok: false, error: "model error the run stopped (exit 1)", stopReason: "max_tokens", subtype: "error_during_execution", usage: { inputTokens: 900, outputTokens: 128000 }, durationMs: 5 };
+    assert.deepEqual(await submitCall(db, first.secret, failure), { accepted: true });
+    // The attempt's run records why it stopped and what it used.
+    const run = (await db.get(db.k.selectFrom("agent_runs").select(["state", "error", "output_tokens"]).where("id", "=", runId)))!;
+    assert.equal(run.state, "failed");
+    assert.match(run.error ?? "", /stop_reason max_tokens.*subtype error_during_execution.*128000 output tokens.*the run stopped/);
+    assert.equal(Number(run.output_tokens), 128000);
     assert.deepEqual({ ...await db.get(db.k.selectFrom("remote_calls").select(["state", "attempt", "released_by", "started_at"]).where("id", "=", first.id)) }, { state: "queued", attempt: 2, released_by: "bob", started_at: null });
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false });
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "not offered to the user whose helper failed it");

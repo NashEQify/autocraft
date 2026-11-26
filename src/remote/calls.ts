@@ -17,6 +17,7 @@ import { loadFreshWrites, permKey } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
 import * as runners from "../data/runners/index.ts";
 import { LEASE_IDLE_MS } from "../data/runners/index.ts";
+import { ERROR_MAX } from "../data/inference/types.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
 import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
@@ -675,18 +676,33 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     return r.accepted ? { accepted: true } : await gone();
   }
   if (s.ok !== false || typeof s.error !== "string") throw new HttpError(400, "ok must be true with text and model, or false with error");
-  const error = scrubError(`helper: ${unrooted(s.error, l.root)}`);
+  const said = unrooted(s.error, l.root);
+  const error = scrubError(`helper${stopNote(s, usage)}: ${said}`, ERROR_MAX);
+  // The whole failure text (the harness's refusal or error as it printed it) is the failed run's output.
+  const output = packPrompt(said.slice(0, FAILURE_TEXT_MAX));
   if (s.refused === true || SAFETY_REFUSAL.test(s.error)) {
     const to = refusalRetry(await loadViewFor(db, nowMs), l);
-    if (await runners.refuseLease(db, l, to, { error, usage, duration }, nowMs)) {
+    if (await runners.refuseLease(db, l, to, { error, usage, duration, output }, nowMs)) {
       const by = `${l.model ?? l.askedModel} on ${l.login}'s Task Runner`;
       console.log(`remote call ${l.id} (${l.promptId}) refused by ${by}; ${to ? `retried on ${"token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`}` : "not retried"}`);
     }
     return { accepted: true };
   }
   // The last attempt's tokens stay with the failed call.
-  await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed" }, nowMs);
+  await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs);
   return { accepted: true };
+}
+
+const FAILURE_TEXT_MAX = 2000;
+const STOP_WORD = /^[a-z][a-z0-9_]{0,39}$/;
+/** Why a failed run stopped, in parentheses, as the helper reports it: the harness's stop reason and result subtype, and the output tokens it used. Empty when nothing is known. */
+function stopNote(s: Extract<Submit, { ok: false }>, usage: { output: number } | null): string {
+  const parts = [
+    ...(typeof s.stopReason === "string" && STOP_WORD.test(s.stopReason) ? [`stop_reason ${s.stopReason}`] : []),
+    ...(typeof s.subtype === "string" && STOP_WORD.test(s.subtype) ? [`subtype ${s.subtype}`] : []),
+    ...(usage && usage.output > 0 ? [`${usage.output} output tokens`] : []),
+  ];
+  return parts.length ? ` (${parts.join(", ")})` : "";
 }
 
 /** The harness's text for a request the model's safety filter declined, for helpers that do not say so (Submit.refused). */

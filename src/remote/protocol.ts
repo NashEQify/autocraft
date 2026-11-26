@@ -286,7 +286,8 @@ export type SubmitTool = { name: string; /** The input as JSON, at most 4000 cha
 
 export type Submit =
   | { ok: true; text: string; /** The full model id the harness reported (e.g. from the CLI's result); matched by family against the claim's model for the tier. */ model: string; usage: Usage; /** Per model id, subagents (the explorer) included; `usage` is the whole call when this is absent. */ modelUsage?: Record<string, Usage>; /** The harness's cost for the whole call at list price, when it reports one (the Claude CLI's `total_cost_usd`). */ costUsd?: number; turns?: number; /** The harness session id, kept by the helper for follow-ups. */ sessionId?: string; /** Tool uses in order, subagents included. */ tools?: SubmitTool[]; durationMs: number }
-  | { ok: false; error: string; usage?: Usage; durationMs: number; /** The model's safety filter declined the request: the server runs the call once more on another Task Runner or a lower tier, without using an attempt. */ refused?: boolean };
+  | { ok: false; /** What went wrong, with the harness's own refusal or error text. */ error: string; /** The tokens the run used before it stopped. */ usage?: Usage; durationMs: number; /** The model's safety filter declined the request: the server runs the call once more on another Task Runner or a lower tier, without using an attempt. */ refused?: boolean;
+      /** Why the harness's last model turn stopped, as it reports it (Claude: the result's `stop_reason`, such as refusal or max_tokens); helpers from 1.4.3. */ stopReason?: string; /** The harness's kind of result (Claude: the result's `subtype`, such as error_max_turns or error_during_execution); helpers from 1.4.3. */ subtype?: string };
 
 export type SubmitReply = { accepted: boolean; reason?: string };
 

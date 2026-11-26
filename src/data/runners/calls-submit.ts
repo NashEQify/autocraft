@@ -35,12 +35,15 @@ export async function submitLease(db: Db, lease: LiveLease, s: ParsedSubmit, now
   });
 }
 
-/** Requeues with the helper's error, notes the failure and the last attempt's usage, in one transaction. False when the lease was not the one named. */
-export async function failLease(db: Db, lease: LiveLease, f: { error: string; skipLogin: boolean; usage: unknown; duration: number; summary?: string }, now: number): Promise<boolean> {
+/**
+ * Requeues with the helper's error, notes the failure and the last attempt's usage, in one transaction. The attempt's run keeps the error, the
+ * tokens the attempt used (`usage` in the stored shape) and `output`, the stored form of the helper's whole failure text. False when the lease was not the one named.
+ */
+export async function failLease(db: Db, lease: LiveLease, f: { error: string; skipLogin: boolean; usage: Tokens | null; duration: number; summary?: string; output?: Uint8Array }, now: number): Promise<boolean> {
   const q = queryDb(db);
   return await db.write(async () => {
     const state = await requeue(db, { id: lease.id, runId: lease.runId, attempt: lease.attempt, maxAttempts: lease.maxAttempts, hash: lease.secretHash }, f.error, now,
-      { ...(f.skipLogin && { skipLogin: lease.login }), summary: f.summary ?? "helper failed" });
+      { ...(f.skipLogin && { skipLogin: lease.login }), summary: f.summary ?? "helper failed", ...(f.usage && { tokens: f.usage }), ...(f.output && { output: f.output }) });
     if (state === null) return false;
     await noteFailure(db, lease.login, now);
     // The last attempt's tokens stay with the failed call.
@@ -53,7 +56,7 @@ export async function failLease(db: Db, lease: LiveLease, f: { error: string; sk
  * The safety-filter case: the call goes back to the queue once without using an attempt (`to`, decided by the pure `refusalRetry`), or fails as refused when
  * `to` is null. Neither counts toward the login's cool-off. Update, tombstone and run finish in one transaction. False when the lease was not the one named.
  */
-export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a: { error: string; usage: Tokens | null; duration: number }, now: number): Promise<boolean> {
+export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a: { error: string; usage: Tokens | null; duration: number; output?: Uint8Array }, now: number): Promise<boolean> {
   const q = queryDb(db);
   const by = `${lease.model ?? lease.askedModel} on ${lease.login}'s Task Runner`;
   const leaseWhere = (b: any) => b.where("id", "=", lease.id).where("state", "=", "leased").where("lease_secret_hash", "=", lease.secretHash);
@@ -69,7 +72,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
       if (Number(up.changes) !== 1) return false;
       await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
       const where = "token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`;
-      if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: a.error, summary: `refused by ${by}; retried on ${where}` }]);
+      if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: a.error, summary: `refused by ${by}; retried on ${where}`, ...(a.output && { output: a.output }) }]);
       return true;
     }
     const why = lease.refusals > 0 ? `${REFUSED_PREFIX} again: ${by}, after the retry` : lease.parentId !== null ? `${REFUSED_PREFIX}: ${by}, in a follow-up turn` : `${REFUSED_PREFIX}: ${by}; no other Task Runner or tier could take the call`;
@@ -78,7 +81,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     })));
     if (Number(up.changes) !== 1) return false;
     await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
-    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: `${why}. ${a.error}`, summary: `refused by ${by}` }]);
+    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: `${why}. ${a.error}`, summary: `refused by ${by}`, ...(a.output && { output: a.output }) }]);
     return true;
   });
   if (ok) {
