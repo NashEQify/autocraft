@@ -2,7 +2,7 @@ import { keepPreviousData, useInfiniteQuery, useQuery as useTanstackQuery } from
 import { createContext, useCallback, useContext, useRef } from "react";
 import { topicsFor } from "./topics";
 import { usePageProject, withProject } from "./scope";
-import type { WorkspaceCallOutput, WorkspaceCalls, WorkspaceDetail, WorkspacePage } from "./types";
+import type { WorkspaceCallOutput, WorkspaceCalls, WorkspaceDetail, WorkspacePage, TranscriptStoreInput, TranscriptStoreStatus, TranscriptView } from "./types";
 import type {
   CacheReport,
   DiscordAccount,
@@ -386,6 +386,15 @@ export interface Api {
     get(id: number): Promise<AgentRunDetail>;
     /** Operators and maintainers. */
     refusals(window: RefusalWindow): Promise<RefusalBreakdown>;
+    /** One full transcript of a run; operators and maintainers only. */
+    transcript(runId: number, id: number): Promise<TranscriptView>;
+  };
+  /** Operator only: where model-call transcripts are stored. `test` without input checks the active store. */
+  transcriptStore: {
+    status(): Promise<TranscriptStoreStatus>;
+    save(input: TranscriptStoreInput): Promise<TranscriptStoreStatus>;
+    clear(): Promise<TranscriptStoreStatus>;
+    test(input?: TranscriptStoreInput): Promise<{ ok: boolean; detail: string }>;
   };
   /** Build environments (workers that run untrusted code) and their tasks. Everyone reads; operators write. A worker key is returned once. */
   envs: {

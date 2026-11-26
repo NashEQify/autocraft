@@ -1,7 +1,7 @@
 // Model calls and rates on fake data: twelve runs in flight and a few hundred finished ones.
 import { traceRunDetail } from "./traceMock";
 import type { Api } from "../client";
-import type { AgentRun, AgentRunDetail, Rates, RefusalBreakdown, RefusalGroup, RefusalWindow } from "../types";
+import type { AgentRun, AgentRunDetail, AgentRunTranscript, Rates, RefusalBreakdown, RefusalGroup, RefusalWindow, TranscriptEntry, TranscriptStoreStatus, TranscriptView } from "../types";
 import { NOW, REPOS } from "./fixtures";
 
 const wait = <T>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -119,7 +119,41 @@ function rates(window: "24h" | "7d"): Rates {
   return { window, bucket: hourly ? "hour" : "day", stages };
 }
 
-export function createAgentsMock(): Pick<Api, "agents" | "rates"> {
+// Every finished claude run carries one transcript; a failed one has a first attempt too.
+const transcriptsOf = (r: AgentRun): AgentRunTranscript[] => {
+  if (r.provider !== "claude" || r.state === "running") return [];
+  const one = (id: number, attempt: number, outcome: AgentRunTranscript["outcome"]): AgentRunTranscript => ({
+    id, attempt, outcome, bytes: 38_400 + (r.id % 7) * 9_100, rawBytes: 412_000 + (r.id % 7) * 88_000, lines: 64 + (r.id % 11), toolCount: 9 + (r.id % 5), lastTool: "mcp__build__check", createdAt: r.endedAt ?? r.startedAt,
+  });
+  return r.state === "failed" ? [one(r.id * 10, 0, "failed"), one(r.id * 10 + 1, 1, "failed")] : [one(r.id * 10, 0, "done")];
+};
+
+const TRANSCRIPT_ENTRIES = (r: AgentRun): TranscriptEntry[] => {
+  const t = (s: number) => new Date(Date.parse(r.startedAt) + s * 1000).toISOString();
+  return [
+    { at: t(1), kind: "system", text: "Session started: claude-opus-4, 14 tools" },
+    { at: t(4), kind: "thinking", text: "The diff touches the export path. Read the encoder first, then check whether the quality flag reaches it." },
+    { at: t(5), kind: "tool", name: "Read", text: JSON.stringify({ file_path: "crates/export/src/webp.rs" }, null, 2) },
+    { at: t(6), kind: "result", text: "   1\tuse crate::Quality;\n   2\t\n   3\tpub fn encode(img: &Image, q: Quality) -> Vec<u8> {\n   4\t    let lossy = q.value() < 100;\n   5\t    webp::Encoder::new(img).encode(q.value() as f32)\n   6\t}" },
+    { at: t(9), kind: "tool", name: "Grep", text: JSON.stringify({ pattern: "Quality::from", path: "crates" }, null, 2), sub: true },
+    { at: t(10), kind: "result", text: "crates/export/src/dialog.rs:88:    let q = Quality::from(self.slider);\ncrates/export/src/cli.rs:41:    let q = Quality::from(args.quality);", sub: true },
+    { at: t(14), kind: "text", text: "The quality value reaches the encoder unchanged, but `lossy` is computed and never used: quality 100 still encodes lossy." },
+    { at: t(18), kind: "tool", name: "mcp__build__check", text: JSON.stringify({ command: "cargo test -p export" }, null, 2) },
+    { at: t(141), kind: "result", text: "test webp::tests::lossless_at_100 ... FAILED\n\nfailures:\n    webp::tests::lossless_at_100\n\ntest result: FAILED. 11 passed; 1 failed", isError: true },
+    { at: t(150), kind: "text", text: "Confirmed with the failing test. Writing the review." },
+    { at: t(152), kind: "final", text: "success, 6 turns\n\n{\"verdict\": \"request-changes\", \"reason\": \"Quality 100 must encode lossless (crates/export/src/webp.rs:4).\"}" },
+  ];
+};
+
+let store: TranscriptStoreStatus = {
+  active: { kind: "s3", source: "settings", dir: null, endpoint: "https://0123456789abcdef.r2.cloudflarestorage.com", bucket: "autocraft-transcripts", prefix: "prod/", accessKeyId: "a1b2c3d4e5f6" },
+  saved: { kind: "s3", endpoint: "https://0123456789abcdef.r2.cloudflarestorage.com", bucket: "autocraft-transcripts", prefix: "prod/", accessKeyId: "a1b2c3d4e5f6", secretSet: true },
+  environment: false,
+  problem: null,
+};
+const LOCAL_DIR = "/data/transcripts";
+
+export function createAgentsMock(): Pick<Api, "agents" | "rates" | "transcriptStore"> {
   return {
     agents: {
       list(f) {
@@ -151,10 +185,33 @@ export function createAgentsMock(): Pick<Api, "agents" | "rates"> {
         const old = NOW - Date.parse(r.startedAt) > 90 * 24 * HOUR || id < 4850;
         const error = r.refusal ? (r.refusal.outcome === "failed" ? `refused by the model's safety filter: ${r.summary!.slice("refused by ".length)}; no other Task Runner or tier could take the call. ${REFUSED_ERROR}` : REFUSED_ERROR)
           : r.state === "failed" ? "claude -p exited after 600 s without output" : null;
-        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" || r.refusal ? null : OUTPUT, error, tools: [] };
+        const d: AgentRunDetail = { ...r, prompt: old ? null : PROMPT(r), output: old || r.state === "running" || r.refusal ? null : OUTPUT, error, tools: [], transcripts: transcriptsOf(r) };
         return wait(d);
       },
       refusals: (w) => wait(refusals(w), 80),
+      transcript(runId, id) {
+        const r = [...RUNNING, ...RECENT].find((x) => x.id === runId);
+        const t = r && transcriptsOf(r).find((x) => x.id === id);
+        if (!r || !t) return Promise.reject(new Error(`run ${runId} has no transcript ${id}`));
+        const v: TranscriptView = { runId, transcript: t, entries: TRANSCRIPT_ENTRIES(r), omitted: 0 };
+        return wait(v);
+      },
+    },
+    transcriptStore: {
+      status: () => wait(store),
+      save(input) {
+        if (input.kind === "local") store = { ...store, active: { kind: "local", source: "settings", dir: LOCAL_DIR, endpoint: null, bucket: null, prefix: "", accessKeyId: null }, saved: { kind: "local", endpoint: "", bucket: "", prefix: "", accessKeyId: "", secretSet: false } };
+        else {
+          if (!input.secretAccessKey && !store.saved?.secretSet) return Promise.reject(new Error("Enter the secret access key."));
+          store = { ...store, active: { kind: "s3", source: "settings", dir: null, endpoint: input.endpoint, bucket: input.bucket, prefix: input.prefix, accessKeyId: input.accessKeyId }, saved: { kind: "s3", endpoint: input.endpoint, bucket: input.bucket, prefix: input.prefix, accessKeyId: input.accessKeyId, secretSet: true } };
+        }
+        return wait(store);
+      },
+      clear() {
+        store = { ...store, saved: null, active: { kind: "local", source: "default", dir: LOCAL_DIR, endpoint: null, bucket: null, prefix: "", accessKeyId: null } };
+        return wait(store);
+      },
+      test: (input) => wait({ ok: true, detail: (input ?? store.active).kind === "s3" ? `Wrote, read and deleted a probe object in ${input?.kind === "s3" ? input.bucket : store.active.bucket}.` : `Wrote, read and deleted a probe file in ${LOCAL_DIR}.` }, 300),
     },
     rates: (w) => wait(rates(w), 80),
   };

@@ -65,6 +65,24 @@ export interface AgentRunTools {
   check_id: number | null;
 }
 
+export interface AgentRunTranscripts {
+  id: Generated<number>;
+  run_id: number;
+  call_id: number | null;
+  attempt: Generated<number>;
+  outcome: string;
+  store: string;
+  bucket: string | null;
+  object_key: string;
+  bytes: number;
+  raw_bytes: number;
+  sha256: string;
+  lines: number;
+  tool_count: number;
+  last_tool: string | null;
+  created_at: string;
+}
+
 export interface AgentRuns {
   id: Generated<number>;
   job_id: number | null;
@@ -2590,6 +2608,7 @@ export interface DB {
   agent_run_items: AgentRunItems;
   agent_run_texts: AgentRunTexts;
   agent_run_tools: AgentRunTools;
+  agent_run_transcripts: AgentRunTranscripts;
   agent_runs: AgentRuns;
   app_allowed_owners: AppAllowedOwners;
   area_lists: AreaLists;
@@ -2800,6 +2819,7 @@ export interface DB {
   "main.agent_run_items": AgentRunItems;
   "main.agent_run_texts": AgentRunTexts;
   "main.agent_run_tools": AgentRunTools;
+  "main.agent_run_transcripts": AgentRunTranscripts;
   "main.agent_runs": AgentRuns;
   "main.app_allowed_owners": AppAllowedOwners;
   "main.area_lists": AreaLists;
@@ -3014,6 +3034,7 @@ export const COLUMNS = {
   agent_run_items: ["run_id", "repo", "number"],
   agent_run_texts: ["run_id", "prompt", "output"],
   agent_run_tools: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"],
+  agent_run_transcripts: ["id", "run_id", "call_id", "attempt", "outcome", "store", "bucket", "object_key", "bytes", "raw_bytes", "sha256", "lines", "tool_count", "last_tool", "created_at"],
   agent_runs: ["id", "job_id", "step", "stage", "prompt_id", "prompt_version", "provider", "model", "account_id", "items", "item_count", "state", "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "summary", "error", "progress", "cost_usd", "user_login", "harness", "reported_model", "call_id", "refusal", "first_repo", "first_number"],
   app_allowed_owners: ["login", "account_id", "added_by", "added_at"],
   area_lists: ["repo", "version", "areas", "at", "by", "note"],

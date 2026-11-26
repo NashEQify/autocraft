@@ -1,6 +1,7 @@
 // HTTP server: sign-in, sessions, CSRF, rate limits, security headers and
 // routing for the dashboard. Handlers only ever see authenticated requests.
 import { AppKeys, bindSecrets, useAppKeys } from "../../github/app-keys.ts";
+import { useTranscriptSealer } from "../../transcripts/index.ts";
 import { apart } from "../../apart.ts";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -66,7 +67,8 @@ const AUTHORIZE_PREFIX = "authorize:";
 const STATE_COOKIE = "__Host-craft_oauth";
 const BODY_LIMIT = 64 * 1024;
 /** A helper's submit carries the whole reply (a patch can be large). */
-const SUBMIT_BODY_LIMIT = 8 * 1024 * 1024;
+// The reply (at most 8 MiB as JSON) and its transcript (src/remote/protocol.ts TRANSCRIPT_MAX).
+const SUBMIT_BODY_LIMIT = 26 * 1024 * 1024;
 /** A task tool call: a `check` call carries the whole patch, as the local bridge allows. */
 const TOOL_BODY_LIMIT = 2 * 1024 * 1024;
 /** A workspace `write` carries a file of up to 2 MiB, which JSON escaping can make several times larger. */
@@ -242,6 +244,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const dbAppKeys = await new AppKeys(db, box, config.secretsFile).load();
   bindSecrets(config.secrets, dbAppKeys);
   useAppKeys(dbAppKeys);
+  useTranscriptSealer(box);
   // Without the runner's disk, build artifacts are asked of the runner (src/remote/runner-client.ts).
   const runnerBase = runnerUrl();
   useRunnerClient(runnerBase ? { url: runnerBase, sessionKey: config.secrets.sessionKey } : null);

@@ -304,6 +304,13 @@ export function createHttpApi(): Api {
       list: (f) => get(`/api/agents${qs(f)}`),
       get: (id) => get(`/api/agents/${id}`),
       refusals: (window) => get(`/api/agents/refusals${qs({ window })}`),
+      transcript: (runId, id) => get(`/api/agents/${runId}/transcripts/${id}`),
+    },
+    transcriptStore: {
+      status: () => get("/api/admin/transcript-store"),
+      save: (input) => put("/api/admin/transcript-store", input),
+      clear: () => del("/api/admin/transcript-store"),
+      test: (input) => post("/api/admin/transcript-store/test", input ?? {}),
     },
     rates: (window) => get(`/api/rates${qs({ window })}`),
     prompts: () => get("/api/prompts"),

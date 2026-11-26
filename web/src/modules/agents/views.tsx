@@ -23,6 +23,7 @@ import { ItemRef } from "../../ui/molecules/ItemRef";
 import { cn } from "../../ui/cn";
 import { Block, ErrorLine, Page, selectCls, useUrlState } from "../admin/parts";
 import { RunsQueueSwitch } from "./queue";
+import { TranscriptLinks } from "./transcript";
 
 const STATE_TONE: Record<AgentRunState, Tone> = { running: "accent", done: "ok", failed: "bad" };
 const STATE_LABEL: Record<AgentRunState, string> = { running: "Running", done: "Done", failed: "Failed" };
@@ -377,6 +378,7 @@ export function RunDetailBody({ id }: { id: number }) {
         <>
           <Collapsible title="Prompt" text={r.prompt} empty="Prompt text removed after ten years." />
           <Collapsible title="Output" text={r.output} empty={r.state === "running" ? "Still running." : "Output removed after ten years."} open />
+          <TranscriptLinks runId={r.id} transcripts={r.transcripts ?? []} />
         </>
       )}
     </div>
