@@ -16,7 +16,7 @@ export type WaitCode = RefusalCode
   | "fix-contributor" | "fix-running" | "fix-failed" | "conflict-contributor" | "conflict-person" | "conflict-cap"
   | "ci-contributor" | "ci-running" | "ci-fix-failed" | "ci-own-breakage" | "ci-nothing-to-fix" | "ask-unsent" | "ask-failed" | "lint"
   | "screenshots" | "revision" | "revision-failed" | "implement-question" | "implement-stuck" | "implement-off" | "implement-ended" | "implement-room"
-  | "open-pr" | "draft" | "mirror" | "triage" | "open-request" | "outside-hold";
+  | "implement-start-retry" | "open-pr" | "draft" | "mirror" | "triage" | "open-request" | "outside-hold";
 
 /** Why a merge leg ended without a merge. */
 export type StopCode =

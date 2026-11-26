@@ -28,8 +28,9 @@ export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
  * `ask-failed`: posting or asking a stored plan's questions failed; the next job tries the write again from the stored plan.
  * `answer`: a person answered a question or stuck recommendation (AnswerRound).
  * `revise`: a revision of our open PR starts (ReviseRound); the turns and checks after it belong to that revision.
+ * `start-failed`: the plan bucket's workspace did not start, before its model call (StartFailedRound); AutoCraft starts it again itself.
  */
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer"] as const;
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise", "answer", "start-failed"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
@@ -83,6 +84,8 @@ export type QuestionRound = { audience: QuestionAudience; text: string; commentI
 export type AnswerRound = { by: string; via: string; at: string; option?: string; text?: string; question: number };
 /** The result of an `ask-failed` round: what failed, for the plan round whose questions it was writing. */
 export type AskFailedRound = { planRound: number; error: string };
+/** A `start-failed` round: why the workspace did not start; `fromStuck` when the attempt was stuck on it and AutoCraft took it up again. */
+export type StartFailedRound = { error: string; fromStuck?: true };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**
@@ -140,6 +143,8 @@ export type IssueAttempt = {
   /** Heads of this attempt's `revise` rounds with a review or CI fix. */
   reviseHeads: string[];
   lastRevise: ReviseRound | null;
+  /** AutoCraft's own retry of a failed workspace start (src/implement/start-retry.ts): the failures in a row and when the next start is due; null when none is due. */
+  startRetry: { failures: number; dueAt: number } | null;
   /** Attempts of the issue per text_hash; empty while its only attempt is neither failed nor stuck. */
   textCounts: Record<string, number>;
   /** Attempts with a PR, newest id first; the plan each was built from only with `withPlans`. */

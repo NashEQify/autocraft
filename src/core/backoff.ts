@@ -12,3 +12,10 @@ export const RECHECK_MAX_MS = 2 * 60_000;
 
 /** The wait after `failures` failed runs in a row of a check the runner makes itself: none after the first, then 1 minute, then 2. */
 export const recheckDelayMs = (failures: number): number => (failures < 2 ? 0 : Math.min(RECHECK_MAX_MS, failureDelayMs(failures - 1)));
+
+/** Retries AutoCraft makes itself of an implementation whose workspace did not start before its plan call; the next failure asks a person. */
+export const IMPLEMENT_START_RETRIES = 3;
+const IMPLEMENT_START_DELAYS_MIN = [5, 15, 30] as const;
+
+/** The wait after the `failures`-th failed implementation start in a row: 5, 15, then 30 minutes. */
+export const implementStartDelayMs = (failures: number): number => IMPLEMENT_START_DELAYS_MIN[Math.min(Math.max(failures, 1), IMPLEMENT_START_DELAYS_MIN.length) - 1]! * 60_000;

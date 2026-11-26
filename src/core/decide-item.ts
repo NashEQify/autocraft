@@ -3,6 +3,7 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
+import { IMPLEMENT_START_RETRIES } from "./backoff.ts";
 import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
 import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
@@ -23,7 +24,8 @@ export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again"
  * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
  * Implement feature and room among the repo's live implementations, and waits while an open PR closes the issue (a PR that only mentions
  * it holds nothing). A question is planned again when its answer may have
- * come: the issue text changed, a person commented after it, or the workflow's recommendation is answered.
+ * come: the issue text changed, a person commented after it, or the workflow's recommendation is answered. An attempt whose workspace
+ * did not start before its plan call is planned again by AutoCraft after the retry's backoff, a stuck one of those at once (start-retry.ts).
  */
 export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wait: Wait } | null {
   const im = f.implement, row = im.row;
@@ -40,6 +42,8 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
     if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: system("implement-room", `${im.liveInRepo} implementations already running in ${f.repo}`) };
     return due("plan");
   }
+  const retry = row!.startRetry;
+  if (retry && f.now < retry.dueAt) return { wait: system("implement-start-retry", `a new workspace start at ${new Date(retry.dueAt).toISOString().slice(11, 16)} UTC (retry ${retry.failures} of ${IMPLEMENT_START_RETRIES})`) };
   if (state === "planning") return due("plan");
   if (state === "asked") {
     if (row!.textChanged || row!.newCommentAfterQuestion || row!.decisionAnswered) return due("plan");
@@ -47,7 +51,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   }
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
-  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: person("implement-stuck", "a maintainer's answer on the stuck implementation") };
+  if (state === "stuck") return row!.decisionAnswered ? due("build") : retry ? due("plan") : { wait: person("implement-stuck", "a maintainer's answer on the stuck implementation") };
   // pr-opened: the open PR is the wait (openPr); a PR that merged or closed while the issue stayed open ends the attempt with
   // it (the revise work records that and ends the workspace). Its revisions, and the end of an attempt whose issue is closed
   // too, are planned on the PR (decidePr).
