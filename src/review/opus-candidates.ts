@@ -23,9 +23,9 @@ export async function opusCandidateOf(db: Db, f: Pick<PrFacts, "repo" | "number"
   return candidateOf((await loadItems(db, [{ repo: f.repo, number: f.number }], "text")).get(`${f.repo}#${f.number}`), f, head, fallbackTitle);
 }
 
-/** PRs of `repo` still to review, highest work score first. */
-export async function selectOpusCandidates(db: Db, repo: string, run?: string | null, by: By = CLI_BY): Promise<OpusCandidate[]> {
-  const rows = await planned(db, "review", { repo, by, ...(run !== undefined ? { run } : {}) });
+/** PRs of `repo` still to review, highest work score first; `approved`: only those approved for merge, or only the others. */
+export async function selectOpusCandidates(db: Db, repo: string, run?: string | null, by: By = CLI_BY, approved?: boolean): Promise<OpusCandidate[]> {
+  const rows = await planned(db, "review", { repo, by, ...(run !== undefined ? { run } : {}), ...(approved !== undefined ? { approved } : {}) });
   const items = await loadItems(db, rows.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), "text");
   return rows.map((p) => ({ ...candidateOf(items.get(`${p.facts.repo}#${p.facts.number}`), p.facts, p.action.head!, ""), auto: onAutoPath(p.facts) }));
 }

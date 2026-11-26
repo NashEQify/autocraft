@@ -6,7 +6,7 @@ import { itemsStartedSince, limitResets } from "./cross.ts";
 import { loadHeldLeaseKeys } from "./leases.ts";
 import { RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
-import { nowIso } from "./sql.ts";
+import { approvedOf, nowIso, numberOf } from "./sql.ts";
 import type { EndedJob, FpRecord, JobState, LaneInputs, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow } from "./types.ts";
 
 const PIPELINE_USER = "pipeline";
@@ -18,6 +18,9 @@ const STREAK_ROWS = 12;
 /** The start of the UTC day that `ms` falls in, as job times are stored. */
 export const dayStart = (ms: number): string => `${new Date(ms).toISOString().slice(0, 10)}T00:00:00.000Z`;
 
+/** Postgres reads a JSON number as text. */
+const approvedNum = (n: unknown): number | null => (n === null || n === undefined ? null : Number(n));
+
 /**
  * One load per planner pass: eight statements in one `together`, joined into the pass's wave. `marks` holds the
  * planner marks and the round-robin cursors, keyed by name. `streaks` keeps, per step and repo, the newest pipeline
@@ -27,19 +30,22 @@ export async function loadLaneInputs(db: Db, nowMs: number): Promise<LaneInputs>
   const q = queryDb(db);
   const day = dayStart(nowMs);
   const notStopped = (eb: kx.AnyEb) => eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED);
-  const ranked = q.k.selectFrom("jobs").select((eb) => ["step", "repo", "id", "state", "error", "ended_at",
-    eb.fn.agg<number>("row_number").over((o) => o.partitionBy(["step", "repo"]).orderBy("id", "desc")).as("rn"),
-    eb.fn.max<number | null>(eb.case().when("state", "=", "done").then(eb.ref("id")).end()).over((o) => o.partitionBy(["step", "repo"])).as("last_ok")])
+  // The PR of a job of the approved lane, null for every other job: each approved PR's jobs keep their own ends and streaks.
+  const approvedNumber = (eb: kx.AnyEb) => eb.case().when(approvedOf(db, eb)).then(numberOf(db)).end().as("approved_number");
+  const recent = q.k.selectFrom("jobs").select((eb) => ["step", "repo", "id", "state", "error", "ended_at", approvedNumber(eb)])
     .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW))
     .where("requested_by", "=", PIPELINE_USER).where("state", "in", ["done", "failed"])
     .where((eb) => eb.and([notStopped(eb), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]));
+  const ranked = q.k.selectFrom(recent.as("j")).select((eb) => ["j.step", "j.repo", "j.id", "j.state", "j.error", "j.ended_at", "j.approved_number",
+    eb.fn.agg<number>("row_number").over((o) => o.partitionBy(["j.step", "j.repo", "j.approved_number"]).orderBy("j.id", "desc")).as("rn"),
+    eb.fn.max<number | null>(eb.case().when("j.state", "=", "done").then(eb.ref("j.id")).end()).over((o) => o.partitionBy(["j.step", "j.repo", "j.approved_number"])).as("last_ok")]);
   const [live, used, ends, streaks, fps, resets, heldLeaseKeys, marks] = await db.together(() => Promise.all([
     loadLiveJobs(db),
     q.all(itemsStartedSince(db, day)),
-    q.all(q.k.selectFrom("jobs").select(["id", "step", "repo", "requested_by", "state", "error", "ended_at", "items", "acted", "lease_skips", "lease_skip_keys"]).$narrowType<{ state: JobState }>()
-      .where("id", "in", (eb) => eb.selectFrom("jobs").select((e) => e.fn.max<number>("id").as("m"))
-        .where((e) => e.and([e("ended_at", "is not", null), notStopped(e)])).groupBy(["step", "repo", "requested_by"]))),
-    q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.repo", "r.id", "r.state", "r.error", "r.ended_at"]).$narrowType<{ state: JobState }>()
+    q.all(q.k.selectFrom("jobs").select((eb) => ["id", "step", "repo", "requested_by", "state", "error", "ended_at", "items", "acted", "lease_skips", "lease_skip_keys", approvedNumber(eb)]).$narrowType<{ state: JobState }>()
+      .where("id", "in", (eb) => eb.selectFrom(eb.selectFrom("jobs").select((e) => ["id", "step", "repo", "requested_by", approvedNumber(e)])
+        .where((e) => e.and([e("ended_at", "is not", null), notStopped(e)])).as("e")).select((e) => e.fn.max<number>("e.id").as("m")).groupBy(["e.step", "e.repo", "e.requested_by", "e.approved_number"]))),
+    q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.repo", "r.id", "r.state", "r.error", "r.ended_at", "r.approved_number"]).$narrowType<{ state: JobState }>()
       .where("r.rn", "<=", STREAK_ROWS).where((eb) => eb.or([eb("r.last_ok", "is", null), eb("r.id", ">=", eb.ref("r.last_ok"))])).orderBy("r.step").orderBy("r.repo").orderBy("r.id", "desc")),
     q.all(q.k.selectFrom("lane_state").select(["step", "repo", "value", "job_id"]).where("kind", "=", "fp")),
     q.all(limitResets(db)),
@@ -49,8 +55,8 @@ export async function loadLaneInputs(db: Db, nowMs: number): Promise<LaneInputs>
   return {
     live,
     usedToday: new Map(used.map((r) => [r.step, Number(r.n)])),
-    ends: ends as EndedJob[],
-    streaks: streaks as StreakRow[],
+    ends: (ends as EndedJob[]).map((e) => ({ ...e, approved_number: approvedNum(e.approved_number) })),
+    streaks: (streaks as StreakRow[]).map((r) => ({ ...r, approved_number: approvedNum(r.approved_number) })),
     fps: new Map(fps.map((r): [string, FpRecord] => [`${r.step}|${r.repo}`, { job: r.job_id, fp: r.value }])),
     resets: new Map(resets.map((r) => [r.step, r.reset_at!])),
     heldLeaseKeys,

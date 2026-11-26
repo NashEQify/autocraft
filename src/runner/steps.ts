@@ -31,6 +31,28 @@ export type Params = Record<string, string | number>;
 
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
+/**
+ * The `lane` of a job of a per-repo step that works PRs a maintainer approved for merge: such a job works only those, and
+ * a job without it only the others, so approved work never waits behind the repo's other work (src/runner/concurrency.ts).
+ */
+export const APPROVED_LANE = "approved";
+const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE], help: "approved: only pull requests a maintainer approved for merge; empty: only the others" };
+const PR_PARAM: ParamDef = { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000, help: "only this pull request" };
+
+/** The `number` param of a job of an approved-lane step: the one PR it works. */
+const onlyPr = (params: Params): { number?: number } => (typeof params.number === "number" ? { number: params.number } : {});
+
+/** The step has an approved lane (Review, Pre-merge review, Fix-up, Fix): each approved PR gets a job of its own, `{ repo, number, lane: "approved" }`. */
+export const hasApprovedLane = (step: StepDef | undefined): boolean => !!step?.params.some((p) => p.name === LANE_PARAM.name);
+
+/** True for a job (its params, as an object or the stored JSON) of the approved lane. */
+export function approvedLane(params: Params | string | null | undefined): boolean {
+  if (typeof params === "string") {
+    try { return (JSON.parse(params) as Params).lane === APPROVED_LANE; } catch { return false; }
+  }
+  return params?.lane === APPROVED_LANE;
+}
+
 export type StepContext = {
   db: Db;
   /** `resumes`: times the job resumed after a runner stop or restart (src/runner/resuming.ts); 0 on its first run. */
@@ -343,11 +365,13 @@ export const STEPS: StepDef[] = [
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to fix up in this job" },
+      LANE_PARAM,
+      PR_PARAM,
     ],
     // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runFixup } = await import("../fixup/index.ts");
-      const r = await runFixup(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runFixup(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.pushed.length + r.asked.length + r.failed.length + r.held.length);
       return `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} asked, ${r.failed.length} failed or refused, ${r.held.length} held`;
     },
@@ -659,10 +683,12 @@ export const STEPS: StepDef[] = [
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to review in this job" },
+      LANE_PARAM,
+      PR_PARAM,
     ],
     run: async (ctx) => {
       const { runOpusReview } = await import("../review/opus.ts");
-      const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runOpusReview(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
       return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates} candidates${v ? ` (${v})` : ""}; ${r.skipped.length} without a diff, ${r.off.length} off the automatic path, ${r.missing.length} without an answer`;
@@ -711,10 +737,12 @@ export const STEPS: StepDef[] = [
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 10, help: "pull requests to review in this job" },
+      LANE_PARAM,
+      PR_PARAM,
     ],
     run: async (ctx) => {
       const { runPremerge } = await import("../premerge/review.ts");
-      const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runPremerge(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
       return `${r.repo}: reviewed ${r.reviewed} of ${r.candidates.length} candidates; ${r.findings} findings (${r.defects} defects), ${r.failed.length} without an answer, ${r.off.length} off the path, ${r.moved.length} moved`;
     },
@@ -950,11 +978,13 @@ export const STEPS: StepDef[] = [
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5, help: "pull requests to work on in this job" },
+      LANE_PARAM,
+      PR_PARAM,
     ],
     // No repo check: whether we may push to a PR is its own (src/core/may.ts), and the planner plans only what is approved.
     run: async (ctx) => {
       const { runCifix } = await import("../cifix/index.ts");
-      const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
+      const r = await runCifix(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), approved: approvedLane(ctx.params), ...onlyPr(ctx.params), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       const acted = r.pushed.length + r.asked.length + r.queued.length + r.failed.length + r.held.length + r.infra.length;
       ctx.acted(acted + r.unasked.length);
       const line = `${r.repo}: pushed ${r.pushed.length}, ${r.asked.length} commented, ${r.queued.length} formatter runs queued, ${r.infra.length} infrastructure failures, ${r.failed.length + r.unasked.length} failed or refused, ${r.held.length} held`;

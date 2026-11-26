@@ -11,7 +11,7 @@ import { checksOf, refreshChecks } from "./checks.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
 import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
 import type { By } from "../core/gates.ts";
-import { notDue, planNow } from "../core/select.ts";
+import { laneMismatch, notDue, planNow } from "../core/select.ts";
 import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
 import type { DiscussionEntry } from "./parse.ts";
@@ -28,6 +28,7 @@ import { checkoutForPr } from "../sandbox/index.ts";
 import { referenceDir } from "../reference.ts";
 import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
 import { jobItem } from "../runner/job-items.ts";
+import { leaseItem } from "../runner/leases.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -51,6 +52,10 @@ export type OpusParams = {
   onHandled?: (n: number) => void;
   /** Who asked; a command-line run is an operator's. */
   by?: By;
+  /** Only PRs approved for merge (the step's approved job), or only the others; absent: every PR. */
+  approved?: boolean;
+  /** Only this PR. */
+  number?: number;
 };
 export type OpusDeps = {
   /** Reads the live head and state of the candidates just before the model calls; absent: the mirror's view stands. */
@@ -304,7 +309,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
 export async function runOpusReview(db: Db, params: OpusParams, log: (line: string) => void = console.log, deps: OpusDeps = defaultOpusDeps()): Promise<OpusSummary> {
   const { repo } = params;
   const runId = `opus-review-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await selectOpusCandidates(db, repo, undefined, params.by);
+  let cands = await selectOpusCandidates(db, repo, undefined, params.by, params.approved);
+  if (params.number !== undefined) cands = cands.filter((c) => c.number === params.number);
   const uncapped = await staleReviews(db, repo, true);
   const allStale = await staleReviews(db, repo);
   const capped = [...allStale].filter((k) => !uncapped.has(k));
@@ -354,7 +360,22 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
   }
   let handled = 0;
   const tally = async (c: { repo: string; number: number }, r: OpusReview) => { summary.verdicts[r.verdict] = (summary.verdicts[r.verdict] ?? 0) + 1; summary.reviewed++; await jobItem(db, c.repo, c.number, `Opus review: ${r.verdict}${r.sure ? "" : " (unsure)"}`, log); };
-  await pool(cands.map((c) => async () => {
+  /**
+   * A job of one lane (src/runner/concurrency.ts) reviews a PR under the step's lease, and only while it is still due at the head and in
+   * the job's lane: the other lane's job of the repo may have reviewed it, or a maintainer approved it, since this job picked it.
+   */
+  const inLane = async (c: OpusCandidate, fn: () => Promise<void>): Promise<void> => {
+    if (params.approved === undefined) return await fn();
+    const release = await leaseItem(db, `review:${refOf(c)}`, log);
+    if (!release) return;
+    try {
+      const p = await planNow(db, repo, c.number);
+      const why = notDue(p, "review", c.head_oid) ?? laneMismatch(p!.facts, params.approved);
+      if (why) { await jobItem(db, c.repo, c.number, `not reviewed: ${why}`, log); return; }
+      await fn();
+    } finally { await release(); }
+  };
+  await pool(cands.map((c) => async () => await inLane(c, async () => {
     const p = await prepareOpusInput(db, repo, c, deps, log, c.auto ? { off: async () => notDue(await planNow(db, repo, c.number), "review", c.head_oid) } : {});
     if (p.kind === "off") {
       await jobItem(db, c.repo, c.number, `not reviewed: ${p.why}`, log);
@@ -413,7 +434,7 @@ export async function runOpusReview(db: Db, params: OpusParams, log: (line: stri
       summary.missing.push(refOf(c));
     }
     params.onHandled?.(++handled);
-  }), poolRoom(db, (i) => [cands[i]!.repo], (i) => [cands[i]!]));
+  })), poolRoom(db, (i) => [cands[i]!.repo], (i) => [cands[i]!]));
   log(`opus-review ${repo}: ${summary.reviewed} reviewed (${Object.entries(summary.verdicts).map(([v, k]) => `${k} ${v}`).join(", ")}); ${summary.skipped.length} without a diff, ${summary.off.length} off the automatic path, ${summary.missing.length} without an answer`);
   return summary;
 }

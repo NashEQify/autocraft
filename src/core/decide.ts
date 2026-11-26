@@ -30,6 +30,8 @@ const verifyFailed = (f: PrFacts): boolean => f.verification?.state === "failed"
 
 /** The PR's live maintainer workflow, or null. */
 export const workflowOf = (f: Pick<PrFacts, "workflow">): WorkflowFact | null => f.workflow ?? null;
+/** A maintainer approved the PR for merge: its work runs in the approved job of each per-repo step, apart from the repo's other work (src/runner/concurrency.ts). */
+export const approvedForMerge = (f: Pick<PrFacts, "workflow">): boolean => !!workflowOf(f)?.approved;
 /**
  * An unstarted PR that the workflow takes up by itself: a small or medium bug fix on the merge rule's criteria.
  * Not once its workflow (an implementation PR's: its issue's) ended: stopped, sent to the backlog, closed or done with an answer that

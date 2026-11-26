@@ -4,7 +4,7 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { lastLeaseOf, remoteQueuedOf } from "../runners/fragments.ts";
 import { resumingJobs } from "./fragments.ts";
-import { hasFilter, nowIso, numberOf, octets, repoVisible } from "./sql.ts";
+import { approvedOf, hasFilter, nowIso, numberOf, octets, repoVisible } from "./sql.ts";
 import type { CliJob, HiddenRepos, JobRow, JobState, LiveJob, LogCursor, NewJob, QueuedJob, RunningState } from "./types.ts";
 
 /** Longest a Task Runner caller may go unseen and still count as polling; the runner passes `CALLER_STALE_MS` of the remote protocol. */
@@ -122,23 +122,25 @@ function limitOf(params: string): number | null {
 /**
  * One guarded `UPDATE ... WHERE state = 'queued' AND NOT EXISTS (...)`; false when no row changed. The block rules
  * (the same work running, the step already working `cap` repos, a running job of a mutex step) are the SQL twin of
- * `jobBlock` with `states: ["running"]`.
+ * `jobBlock` with `states: ["running"]`. `approved`: a job of the approved lane (params `lane: "approved"`), one per PR `number`,
+ * outside the repo count.
  */
-export async function claimJob(db: Db, c: { id: number; step: string; repo: string | null; number: number | null; cap: number | null; mutexSteps: string[]; logPath: string }): Promise<boolean> {
+export async function claimJob(db: Db, c: { id: number; step: string; repo: string | null; number: number | null; approved?: boolean; cap: number | null; mutexSteps: string[]; logPath: string }): Promise<boolean> {
   const q = queryDb(db);
   const running = (eb: kx.AnyEb, alias: string): any => (kx.schemaEb(eb) as any).selectFrom(`jobs as ${alias}`).where(`${alias}.state`, "=", "running");
   const res = await q.run(q.k.updateTable("jobs").set({ state: "running", started_at: nowIso(), log_path: c.logPath })
     .where("id", "=", c.id).where("state", "=", "queued")
     .where((eb) => {
       const same = running(eb, "s").where("s.step", "=", c.step).select(eb.lit(1).as("one"));
-      const sameWork = c.repo === null ? same : same.where((e: kx.AnyEb) => e.or([e("s.repo", "is", null), e.and([e("s.repo", "=", c.repo!),
-        c.step === "security-fix" ? (c.number === null ? e(numberOf(db, "s.params"), "is", null) : e(numberOf(db, "s.params"), "=", c.number)) : e.lit(true)])]));
+      const sameNumber = (e: kx.AnyEb) => (c.number === null ? e(numberOf(db, "s.params"), "is", null) : e(numberOf(db, "s.params"), "=", c.number));
+      const lane = c.step === "security-fix" ? sameNumber : c.approved ? (e: kx.AnyEb) => e.and([approvedOf(db, e, "s.params"), sameNumber(e)]) : (e: kx.AnyEb) => e.not(approvedOf(db, e, "s.params"));
+      const sameWork = c.repo === null ? same : same.where((e: kx.AnyEb) => e.or([e("s.repo", "is", null), e.and([e("s.repo", "=", c.repo!), lane(e)])]));
       const conds = [eb.not(eb.exists(sameWork))];
-      if (c.cap !== null) {
-        const repos = running(eb, "p").where("p.step", "=", c.step);
+      if (c.cap !== null && !c.approved) {
+        const repos = running(eb, "p").where("p.step", "=", c.step).where((e: kx.AnyEb) => e.not(approvedOf(db, e, "p.params")));
         conds.push(eb.or([
           eb(repos.select((e: kx.AnyEb) => e.fn.count<number>(e.fn.coalesce("p.repo", e.val(""))).distinct().as("n")), "<", c.cap),
-          eb.exists(running(eb, "r").where("r.step", "=", c.step).where((e: kx.AnyEb) => e(e.fn.coalesce("r.repo", e.val("")), "=", c.repo ?? "")).select(eb.lit(1).as("one"))),
+          eb.exists(running(eb, "r").where("r.step", "=", c.step).where((e: kx.AnyEb) => e.and([e(e.fn.coalesce("r.repo", e.val("")), "=", c.repo ?? ""), e.not(approvedOf(db, e, "r.params"))])).select(eb.lit(1).as("one"))),
         ]));
       }
       if (c.mutexSteps.length) conds.push(eb.not(eb.exists(running(eb, "m").where("m.step", "in", c.mutexSteps).select(eb.lit(1).as("one")))));

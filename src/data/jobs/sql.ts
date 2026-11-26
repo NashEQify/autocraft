@@ -20,3 +20,6 @@ export const nowIso = (): string => new Date().toISOString();
 
 /** The item a job names in its params. */
 export const numberOf = (db: Db, col = "params") => kx.jsonNum(db, col, "$.number");
+
+/** The job is of the approved lane: its params say `lane: "approved"` (src/runner/steps.ts APPROVED_LANE). */
+export const approvedOf = (db: Db, eb: AnyEb, col = "params") => eb(eb.fn.coalesce(kx.jsonText(db, col, "$.lane"), eb.val("")), "=", "approved");

@@ -38,7 +38,7 @@ import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
 import { dropSessions, SessionLedger, sessionAsk, storeSessions, sweepSessions, type SessionAsk } from "../prepush/resume.ts";
 import { parseFixes, type FixCandidate } from "./candidates.ts";
-import { selectFixups } from "./select.ts";
+import { onlyPr, selectFixups } from "./select.ts";
 import { Git, exec, fixupDir, type Exec } from "./git.ts";
 import { scrubGitError } from "../worker/patch.ts";
 import { ensureAuthorWrites } from "./author-permission.ts";
@@ -111,6 +111,10 @@ export type FixupParams = {
   stopping?: () => Promise<boolean>;
   /** Who asked; default: an operator at the command line. */
   by?: By;
+  /** Only PRs approved for merge (the step's approved job), or only the others; absent: every PR. */
+  approved?: boolean;
+  /** Only this PR. */
+  number?: number;
 };
 export type FixupSummary = {
   runId: string; repo: string; dryRun: boolean;
@@ -222,7 +226,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   const runId = `fixup-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   const gw: Writer = { db, login: ACTOR, ...deps?.lane };
   const summary: FixupSummary = { runId, repo, dryRun, pushed: [], asked: [], failed: [], held: [] };
-  const sel = await selectFixups(db, repo, undefined, undefined, params.by);
+  const sel = onlyPr(await selectFixups(db, repo, undefined, undefined, params.by, params.approved), params.number);
   const asks = await takersCut(db, sel.ask, params.limit, repo, (c) => c.number);
   // Stored patches whose lint task ended come first: they hold a model patch that is already paid for.
   const wanted = [...sel.lint, ...sel.fix];

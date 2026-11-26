@@ -10,7 +10,7 @@ import { buildQueue } from "../merge/queue.ts";
 import { workflowOf } from "../core/decide.ts";
 import { mergePermission } from "../core/authority.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
-import { notDue, planned, planNow } from "../core/select.ts";
+import { laneMismatch, notDue, planned, planNow } from "../core/select.ts";
 import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
 import type { PlanSet } from "../core/plan-set.ts";
@@ -31,6 +31,7 @@ import { type PremergeReview } from "./parse.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { savePremerge as saveReviews } from "../data/review/index.ts";
 import { jobItem } from "../runner/job-items.ts";
+import { leaseItem } from "../runner/leases.ts";
 import type { Db } from "../db/index.ts";
 
 const PROMPT = CLAUDE_PROMPTS["premerge.opus"];
@@ -45,6 +46,8 @@ export type PremergeParams = {
   onHandled?: (n: number) => void;
   /** Who asked; a command-line run is an operator's. */
   by?: By;
+  /** Only PRs approved for merge (the step's approved job), or only the others; absent: every PR. */
+  approved?: boolean;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
 export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
@@ -61,7 +64,7 @@ export type PremergeItem = { repo: string; number: number; head: string; facts: 
  * The PRs whose Plan holds a `premerge` action (the queue holds them in waiting-premerge and the head is due a try), in selection order.
  * `wake` collects when the failed tries are due again (ms): nothing in the data changes then, so the planner must be told.
  */
-export async function premergeCandidates(db: Db, opts: { repo?: string; at?: number; wake?: number[]; run?: string | null; plans?: PlanSet; by?: By } = {}): Promise<PremergeItem[]> {
+export async function premergeCandidates(db: Db, opts: { repo?: string; at?: number; wake?: number[]; run?: string | null; plans?: PlanSet; by?: By; approved?: boolean } = {}): Promise<PremergeItem[]> {
   const { wake, at, by = CLI_BY, ...rest } = opts;
   const pace = wake ? (opts.plans?.pass ?? loadPass(at)).rereadPaceAt : 0;
   return (await planned(db, "premerge", {
@@ -87,7 +90,7 @@ const stillHead = async (db: Db, repo: string, number: number, head: string): Pr
 export async function runPremerge(db: Db, params: PremergeParams, log: (line: string) => void = console.log, deps: PremergeDeps = defaultPremergeDeps()): Promise<PremergeSummary> {
   const { repo } = params;
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now(), ...(params.by ? { by: params.by } : {}) });
+  let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now(), ...(params.by ? { by: params.by } : {}), ...(params.approved !== undefined ? { approved: params.approved } : {}) });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
   const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);
@@ -100,7 +103,14 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const bases = await loadItems(db, cands.filter((e) => e.facts.diffPending).map((e) => ({ repo, number: e.number })), "pr");
   // Read once per pass, before the first re-read.
   let rateLowP: Promise<boolean> | undefined;
-  await pool(cands.map((e) => async () => {
+  // A job of one lane (src/runner/concurrency.ts) reviews a PR under the step's lease: the other lane's job of the repo may hold it.
+  const leased = async (e: PremergeItem, fn: () => Promise<void>): Promise<void> => {
+    if (params.approved === undefined) return await fn();
+    const release = await leaseItem(db, `premerge:${refOf(e)}`, log);
+    if (!release) return;
+    try { await fn(); } finally { await release(); }
+  };
+  await pool(cands.map((e) => async () => await leased(e, async () => {
     const ref = refOf(e), head = e.head;
     const fail = async (error: string, final = false) => {
       await jobItem(db, repo, e.number, error, log);
@@ -131,7 +141,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
     // A person's approval does not read the diff's facts: only the merge rule's own merges wait for what they read beside the diff.
     const off = async (): Promise<string | null> => {
       const p = await planNow(db, repo, e.number, deps.now?.());
-      return notDue(p, "premerge", head) ?? (p!.facts.diffPending && !workflowOf(p!.facts) ? EXTRAS_PENDING_REASON : null);
+      return notDue(p, "premerge", head) ?? (params.approved !== undefined ? laneMismatch(p!.facts, params.approved) : null) ?? (p!.facts.diffPending && !workflowOf(p!.facts) ? EXTRAS_PENDING_REASON : null);
     };
     const p = await prepareOpusInput(db, repo, await candidateOf(db, e), opusDeps, log, { independent: true, off });
     if (p.kind === "off") {
@@ -163,7 +173,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
     }
     params.onHandled?.(++handled);
-  }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
+  })), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
   log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} defects), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
   return s;
 }

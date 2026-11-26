@@ -1,5 +1,5 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
-import { decidePr } from "./decide.ts";
+import { approvedForMerge, decidePr } from "./decide.ts";
 import { loadPass, loadPrFact, loadPrFacts } from "./facts.ts";
 import { loadPassBase } from "./pass-load.ts";
 import { loadDueRefs } from "../data/planner/index.ts";
@@ -31,6 +31,8 @@ export type PlannedOptions = {
   plans?: PlanSet;
   /** Called with every PR decided, due or not (the autopilot reads wake times from them). */
   onPlan?: (facts: PrFacts, plan: Plan) => void;
+  /** Only PRs approved for merge (true) or only the others (false): the work of a step's approved or regular job. */
+  approved?: boolean;
 };
 
 export { WAITS_ON_PERSON, inFlightNow };
@@ -50,6 +52,12 @@ export function notDue(p: { facts: PrFacts; plan: Plan } | null, kind: ActionKin
   return [...p.plan.reasons, ...(p.plan.wait ? [p.plan.wait] : [])].join(", ") || `now ${p.plan.state}`;
 }
 
+/** Why a PR no longer belongs to the lane of a job that works only PRs approved for merge (`approved`) or only the others; null when it does. */
+export function laneMismatch(f: PrFacts, approved: boolean): string | null {
+  if (approvedForMerge(f) === approved) return null;
+  return approved ? "no longer approved for merge" : "approved for merge since the job started: the approved job works it";
+}
+
 /** The due work that may run for `by` (mayRun), and why the rest may not: the first reason, with how many it and others hold back (null: none). */
 export function runnable<T extends { facts: PrFacts | ItemFacts; action: Action }>(due: readonly T[], by: By): { may: T[]; held: string | null } {
   const may: T[] = [];
@@ -67,7 +75,7 @@ export function runnable<T extends { facts: PrFacts | ItemFacts; action: Action 
  * Our own broken pushes come first, then work in flight, then rank score. Facts are loaded once for all of them.
  */
 export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {}): Promise<Planned[]> {
-  const { bucket, onPlan, plans, by = "pipeline", refused, ...load } = opts;
+  const { bucket, onPlan, plans, by = "pipeline", refused, approved, ...load } = opts;
   const out: Planned[] = [];
   let source: Iterable<{ facts: PrFacts; plan: Plan }>;
   if (plans) {
@@ -84,6 +92,7 @@ export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {
   }
   for (const { facts, plan } of source) {
     onPlan?.(facts, plan);
+    if (approved !== undefined && approvedForMerge(facts) !== approved) continue;
     for (const action of plan.actions) {
       if (action.kind === kind && (bucket === undefined || action.params?.bucket === bucket) && (refused || mayRun({ facts, action }, by).ok)) out.push({ facts, plan, action });
     }

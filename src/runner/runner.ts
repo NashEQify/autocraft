@@ -31,8 +31,8 @@ import { advanceSecurityFixes, autoFixConfirmed, loadSecurityFixWork } from "../
 import { advanceScanTests, loadScanTestWork } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
 import { buildDiffFacts } from "../review/diff.ts";
-import { loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
-import { jobBlock, STEP_PARALLEL_KEY } from "./concurrency.ts";
+import { approvedLane, loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
+import { jobBlock, STEP_PARALLEL_KEY, wantOf } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
 import { pruneWorkspaceImages } from "../build/workspace-relay.ts";
@@ -649,7 +649,7 @@ export class Runner {
           continue;
         }
         // The claim checks the same rules in one statement; this test spares the model-queue questions for a job that cannot start.
-        if (await jobBlock(this.db, steps, { step: q.step, repo: q.repo, number: numberOfParams(q.params) }, { states: ["running"], mutex: true, active: running, cap })) continue;
+        if (await jobBlock(this.db, steps, { ...wantOf(q.step, q.params), repo: q.repo }, { states: ["running"], mutex: true, active: running, cap })) continue;
         let claude = false;
         try { claude = usesClaude(modelsOf(step, JSON.parse(q.params) as Params)); } catch { /* params are checked when the job runs */ }
         const cls = step.priority ?? 0;
@@ -695,7 +695,7 @@ export class Runner {
     const deadlineMin = this.maxMin(stepName, q.limit ?? undefined);
     const mutexSteps = step.exclusive ? [...steps.values()].filter((x) => x.exclusive === step.exclusive).map((x) => x.name) : [];
     // One guarded statement: a command-line run cannot take the step in between.
-    const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
+    const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), approved: approvedLane(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
     if (!claimed) return null;
     const fd = openSync(logPath, "a");
     let child: ChildProcess;

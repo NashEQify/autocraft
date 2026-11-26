@@ -1,5 +1,6 @@
 // The PRs the fix-up and conflict steps work on: those whose Plan holds a `fixup` or `conflict` action.
 import { planned } from "../core/select.ts";
+import { approvedForMerge } from "../core/decide.ts";
 import { mayRun } from "../core/authority.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -63,8 +64,15 @@ const wantedFor = (f: PrFacts): string => f.review?.reason ?? "a maintainer appr
 /** A review's fixes that nobody dropped from the PR's workflow. */
 const reviewFixes = (f: PrFacts, stored: string | null | undefined): Fix[] => keptFixes(parseFixes(stored ?? null), f.workflow?.dropped);
 
-/** The work that may run for `by` (mayRun). */
-export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, by: By = CLI_BY): Promise<FixSelection> {
+/** The selection cut to one PR (`number`), stored patches still all listed; the whole selection without `number`. */
+export function onlyPr(sel: FixSelection, number: number | undefined): FixSelection {
+  if (number === undefined) return sel;
+  const one = <T extends { number: number }>(l: T[]): T[] => l.filter((c) => c.number === number);
+  return { ...sel, fix: one(sel.fix), cannotPush: one(sel.cannotPush), ask: one(sel.ask), lint: one(sel.lint), conflictMerge: one(sel.conflictMerge), conflictAsk: one(sel.conflictAsk) };
+}
+
+/** The work that may run for `by` (mayRun); `approved`: only the PRs approved for merge, or only the others (the step's two jobs). */
+export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet, by: By = CLI_BY, approved?: boolean): Promise<FixSelection> {
   const opts = { repo, by, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
   const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], listed: [], conflictMerge: [], conflictAsk: [] };
   const conflicts = await planned(db, "conflict", opts), fixups = await planned(db, "fixup", opts);
@@ -138,5 +146,9 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
     }
   }
   out.fix.push(...fix);
-  return out;
+  if (approved === undefined) return out;
+  // Every stored patch stays listed, so neither job drops the other one's.
+  const lane = new Set([...conflicts, ...fixups, ...lintFixups, ...lintConflicts].filter((p) => approvedForMerge(p.facts) === approved).map((p) => p.facts.number));
+  const mine = <T extends { number: number }>(l: T[]): T[] => l.filter((c) => lane.has(c.number));
+  return { ...out, fix: mine(out.fix), cannotPush: mine(out.cannotPush), ask: mine(out.ask), lint: mine(out.lint), conflictMerge: mine(out.conflictMerge), conflictAsk: mine(out.conflictAsk) };
 }

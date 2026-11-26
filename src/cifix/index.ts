@@ -141,7 +141,7 @@ export function defaultDeps(): CifixDeps {
   };
 }
 
-export type CifixParams = { repo: string; limit?: number; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean>; /** Default true. */ dryRun?: boolean; onHandled?: (n: number) => void; /** Who asked; default: an operator at the command line. */ by?: By };
+export type CifixParams = { repo: string; limit?: number; /** Only PRs approved for merge (the step's approved job), or only the others; absent: every PR. */ approved?: boolean; /** Only this PR. */ number?: number; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean>; /** Default true. */ dryRun?: boolean; onHandled?: (n: number) => void; /** Who asked; default: an operator at the command line. */ by?: By };
 export type CifixSummary = {
   runId: string; repo: string; dryRun: boolean;
   pushed: string[]; asked: string[]; queued: string[]; infra: string[]; skipped: string[];
@@ -368,7 +368,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   const at = () => (deps?.now() ?? new Date()).toISOString();
   const runId = `cifix-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   const summary: CifixSummary = { runId, repo, dryRun, pushed: [], asked: [], queued: [], infra: [], skipped: [], failed: [], held: [], unasked: [] };
-  const sel = await selectCifix(db, repo, undefined, undefined, params.by);
+  const sel = await selectCifix(db, repo, undefined, undefined, params.by, params.approved, params.number);
   const collect = params.limit === undefined ? sel.collect : sel.collect.slice(0, params.limit);
   const work = await takersCut(db, sel.work, params.limit === undefined ? undefined : params.limit - collect.length, repo, (c) => c.number);
   log(`cifix ${repo}: ${sel.work.length} PRs with a failing check to read, ${sel.collect.length} formatter results to apply, ${sel.rerun.length} reruns due`);

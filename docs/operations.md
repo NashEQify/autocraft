@@ -567,7 +567,7 @@ It reads the same variables as the CLI (`AUTOCRAFT_DB` and the rest), plus:
 | Variable | Meaning |
 |---|---|
 | `AUTOCRAFT_RUNNER_LOGS` | Directory of the per-job log files. Default `~/.cache/autocraft-logs/jobs`. The runner also copies the last 256 KiB of each job's log into the database (`job_log_chunks`, scrubbed, every 5 seconds while the job runs and once at its end) and keeps those copies 90 days. The dashboard reads a job's log from the path recorded in its row when it can, and otherwise from the database, so a dashboard on another disk shows logs up to 5 seconds behind. |
-| `AUTOCRAFT_RUNNER_JOBS` | Most jobs running at once. Default 32. A job whose step calls Claude also waits for a free account slot before it starts. Jobs of one step run together only for different repos, within the `step_parallel` setting (`autocraft-server pipeline parallel [N|none]`, default 1). |
+| `AUTOCRAFT_RUNNER_JOBS` | Most jobs running at once. Default 32. A job whose step calls Claude also waits for a free account slot before it starts. Jobs of one step run together only for different repos, within the `step_parallel` setting (`autocraft-server pipeline parallel [N|none]`, default 1); the approved-lane jobs of Review, Pre-merge review, Fix-up and Fix (one per pull request approved for merge) run beside them, outside that setting. |
 | `AUTOCRAFT_RUNNER_POLL_MS` | Poll interval. Default 2000. |
 | `AUTOCRAFT_LOCK_DIR` | Directory of the lock file, shared with `sync`. Default `~/.cache/autocraft-logs`. |
 | `AUTOCRAFT_EXTRA_STEPS` | A module exporting `steps: StepDef[]` that is added to the step list, for tests and development (`test/runner-steps.ts` has fake steps). Set it for the dashboard and the runner alike, or not at all. |
