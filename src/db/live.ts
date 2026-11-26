@@ -59,10 +59,11 @@ export const TOPICS: string[] = [
   "outside", "plans", "jobs", "limits", "usage", "agents", "envs", "build-features", "pr-builds", "nightly", "workspaces", "tasks", "actions",
   "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "downloads", "security", "postmerge", "access", "settings",
   "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "plan-inputs", "job-ends", "task-ends", "github",
+  "statement-sources",
 ];
 
 /** Topics that read tables other topics already watch: their triggers have names of their own. */
-const OWN_NAMES = new Set(["steps", "trace", "limits", "build-features", "rank-inputs", "remote-queue", "plan-inputs", "job-ends", "task-ends"]);
+const OWN_NAMES = new Set(["steps", "trace", "limits", "build-features", "rank-inputs", "remote-queue", "plan-inputs", "job-ends", "task-ends", "statement-sources"]);
 
 /** Topics whose counter moves also send a notification on the channel of the same name (Postgres), for `Db.listen`. */
 export const NOTIFY_TOPICS = ["settings"];

@@ -9,15 +9,27 @@ import { STATEMENT_BATCH, collectStatements as collectOwnerStatements, loadState
 export { STATEMENT_MAX_CHARS, STATEMENT_MIN_CHARS, commentDatabaseId } from "../data/conversations/index.ts";
 export type StatementKind = "comment" | "conversation";
 
+const SOURCES_TOPIC = "statement-sources";
+
 /** Adds the sources that have no statement yet; returns how many. Needs no model. */
 export const collectStatements = async (db: Db): Promise<number> => await collectOwnerStatements(db);
 
 /** What a statement is embedded from: the item's title, then what was said. */
 export const statementText = (title: string, text: string): string => `${title.trim()}\n${cleanBody(text).slice(0, BODY_CHARS)}`.trim();
 
-/** Whether there are sources to collect or statements to embed with `modelId`. */
+/** The `statement-sources` counter each handle last collected at. The counter is read before the candidates, so a source written after the read moves it again. */
+const collectedAt = new WeakMap<Db, number>();
+
+/**
+ * Whether there are statements to embed with `modelId`, after collecting the new sources. It runs on every planner pass, so it collects only when
+ * the `statement-sources` topic moved since this handle last collected: an operator's comment or turn, a role, or a removed statement.
+ */
 export async function statementsDue(db: Db, modelId: string): Promise<boolean> {
-  await collectStatements(db);
+  const seq = (await db.seqs([SOURCES_TOPIC]))[SOURCES_TOPIC] ?? 0;
+  if (collectedAt.get(db) !== seq) {
+    await collectStatements(db);
+    collectedAt.set(db, seq);
+  }
   return (await loadStatementWork(db, modelId, 1)).length > 0;
 }
 

@@ -52,16 +52,19 @@ const ownPost = (db: Db, eb: kx.Eb) => eb.or([
 const tag = (eb: kx.Eb, value: string) => eb.cast<string>(eb.val(value), "text");
 const textLength = (eb: kx.Eb, col: string) => eb.fn<number>("length", [eb.fn("trim", [col])]);
 
-/** Operators' comments and reviews and operators' conversation turns that have no statement yet (an `ignored` row counts as one), with the item's title. */
-const newSources = (db: Db) => {
+/**
+ * Operators' comments and reviews and operators' conversation turns that have no statement yet (an `ignored` row counts as one), with the item's title.
+ * The login joins use the case-insensitive login indexes (comments_author_nocase, conversation_turns_operator), so the read walks only operators' rows.
+ */
+export const statementSources = (db: Db) => {
   const k = queryDb(db).k;
   const union = k.selectFrom("main.comments as c")
-    .innerJoin("main.access as a", (j) => j.on(kx.ciEq(db, "a.login", "c.author")).on("a.role", "=", "operator"))
+    .innerJoin("main.access as a", (j) => j.on(kx.nocaseEq(db, "c.author", "a.login")).on("a.role", "=", "operator"))
     .select((eb) => [tag(eb, "comment").as("kind"), "c.id as sid", "c.repo", "c.number", eb.fn<string>("trim", ["c.body"]).as("text"), "c.author", "c.created_at as at"])
     .where("c.kind", "in", ["comment", "review"])
     .where((eb) => eb.and([eb(textLength(eb, "c.body"), ">=", STATEMENT_MIN_CHARS), eb.not(ownPost(db, eb))]))
     .unionAll(k.selectFrom("main.conversation_turns as t")
-      .innerJoin("main.access as a", (j) => j.on(kx.ciEq(db, "a.login", "t.login")).on("a.role", "=", "operator"))
+      .innerJoin("main.access as a", (j) => j.on(kx.nocaseEq(db, "t.login", "a.login")).on("a.role", "=", "operator"))
       .select((eb) => [tag(eb, "conversation").as("kind"), eb.cast<string>("t.id", "text").as("sid"), "t.repo", "t.number", eb.fn<string>("trim", ["t.body"]).as("text"), "t.login as author", "t.at"])
       .where("t.kind", "=", "operator")
       .where((eb) => eb.and([eb(eb.fn.coalesce("t.status", eb.val("")), "<>", "failed"), eb(textLength(eb, "t.body"), ">=", STATEMENT_MIN_CHARS)])));
@@ -76,22 +79,23 @@ const newSources = (db: Db) => {
 /**
  * Adds the sources that have no statement yet and returns how many. The comments AutoCraft wrote itself (from the audit rows of its writes,
  * `control.loadPostedCommentIds`, read only back to a day before the oldest uncollected comment) are stored as `ignored` rows so they are not candidates
- * again. 3 statements: candidates, posted ids (only when a comment is a candidate), the insert.
+ * again. 3 statements: candidates, posted ids (only when a comment is a candidate), the insert. Only the insert holds the writer lock: a source that
+ * another collector stored in between is skipped by the unique key on (source_kind, source_id).
  */
 export async function collectStatements(db: Db, _o?: { now: Date }): Promise<number> {
+  const q = queryDb(db);
+  const rows = await q.all(statementSources(db));
+  if (!rows.length) return 0;
+  const comments = rows.filter((r) => r.kind === "comment");
+  const own = comments.length
+    ? await control.loadPostedCommentIds(db, { since: new Date(Date.parse(comments.map((r) => r.at).reduce((a, b) => (a < b ? a : b))) - POST_LEAD_MS).toISOString() })
+    : { numbers: new Set<string>(), nodes: new Set<string>() };
+  const isOwn = (r: { kind: string; sid: string }): boolean => {
+    if (r.kind !== "comment") return false;
+    const num = commentDatabaseId(r.sid);
+    return own.nodes.has(r.sid) || (num !== null && own.numbers.has(num));
+  };
   return await db.write(async () => {
-    const q = queryDb(db);
-    const rows = await q.all(newSources(db));
-    if (!rows.length) return 0;
-    const comments = rows.filter((r) => r.kind === "comment");
-    const own = comments.length
-      ? await control.loadPostedCommentIds(db, { since: new Date(Date.parse(comments.map((r) => r.at).reduce((a, b) => (a < b ? a : b))) - POST_LEAD_MS).toISOString() })
-      : { numbers: new Set<string>(), nodes: new Set<string>() };
-    const isOwn = (r: { kind: string; sid: string }): boolean => {
-      if (r.kind !== "comment") return false;
-      const num = commentDatabaseId(r.sid);
-      return own.nodes.has(r.sid) || (num !== null && own.numbers.has(num));
-    };
     let n = 0;
     for (const part of kx.batches(rows)) {
       const got = await q.all(q.k.insertInto("main.owner_statements").values(part.map((r) => ({
