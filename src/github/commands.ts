@@ -35,6 +35,7 @@ import { runCommand, type Actor } from "../workflow/apply.ts";
 import { READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
 import { commentLines } from "./comment-lines.ts";
 import { commentCondition, parseComment } from "../workflow/parse.ts";
+import { linkingComment, recordSaid } from "../workflow/said.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -71,6 +72,8 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
   if (now.getTime() - created > STALE_MS) return false;
   const parsed = parseComment(comment.body, await commentNames(db, slug), { repo });
   if (!parsed) return false;
+  const url = typeof comment.html_url === "string" && comment.html_url.startsWith("https://") ? comment.html_url : undefined;
+  await recordSaid(db, { login, via: "github", text: typeof comment.body === "string" ? comment.body.slice(0, 65_536) : "", items: [{ repo, number }], githubCommentId: commentId, ...(url ? { payload: { url } } : {}) });
   return await queueCommands(db, [{
     comment_id: commentId, repo, number, pr: issue.pull_request ? 1 : 0, login, github_id: githubId,
     created_at: new Date(created).toISOString(), requested_at: now.toISOString(), parsed: JSON.stringify(parsed),
@@ -331,7 +334,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   }
   try {
     const own: Parsed = again.kind === "ambiguous" || items.length !== 1 ? again : { ...again, items: [] };
-    const res = await runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString(), asked: () => r.created_at });
+    const res = await linkingComment(db, Number(r.comment_id), r.login, () => runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString(), asked: () => r.created_at }));
     const o = res.items[0];
     await settle(db, d, r, o?.outcome === "run" ? "done" : "refused", o?.line ?? (res.lines.join(" ") || NOT_RUN), now, { reply, allowed });
   } catch (e) {
@@ -383,8 +386,8 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
   const job = (async () => {
     let state: CommandState = "refused", line = NOT_RUN;
     try {
-      const res = await runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
-        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) });
+      const res = await linkingComment(db, id, r.login, () => runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
+        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) }));
       const out = res.items[0];
       state = out?.outcome === "run" ? "done" : "refused";
       line = out?.line ?? (res.lines.join(" ") || NOT_RUN);

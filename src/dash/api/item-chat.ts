@@ -5,7 +5,7 @@
 import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
-import { loadConversationsOfItem, loadMessages, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
+import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
 import { loadThreads } from "../../data/conversations/index.ts";
 import { loadScreenshotRuns } from "../../data/merge/index.ts";
 import type { CardRow, ThreadTurn } from "../../data/conversations/types.ts";
@@ -20,7 +20,13 @@ import { ENTRY_LABEL } from "../../workflow/vocab.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
 import type { Req } from "../types.ts";
-import { canTalk } from "./conversations.ts";
+import { queryDb } from "../../db/query-db.ts";
+import { parse } from "../../workflow/parse.ts";
+import { recordSaid } from "../../workflow/said.ts";
+import { HttpError } from "../server/util.ts";
+import { needVisible } from "./visible.ts";
+import { askOpus, assertAskRate, canTalk } from "./conversations.ts";
+import { runItemText } from "./commands.ts";
 import { discordKeys, type ItemMention } from "./discord.ts";
 import { statusOf } from "./maintain-item.ts";
 import { clip, context, contextScope, eventsFrom, fingerprint, headerOf, loadTraceRows, shape, visibleItem, type Ctx, type Ev } from "./trace.ts";
@@ -286,4 +292,47 @@ async function shotsOf(db: Db, c: Ctx): Promise<Map<string, ChatShot[]>> {
     if (shots.length) out.set(`task:${r.head}`, shots);
   }
   return out;
+}
+
+/** Longer text is no message anyone types (the command box's limit). */
+const TEXT_MAX = 4000;
+
+/**
+ * POST /api/items/:repo/:n/chat { conversation, text }: what a person writes in the item's chat. The text is stored as their message,
+ * then it is a question to Opus (the parser reads it as nothing and it has a "?") or a command through the command core, as the command
+ * box runs it. Only the main conversation takes messages. Nothing is posted to GitHub beyond what a command writes. Returns the chat and
+ * the lines the command answered with.
+ */
+export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; lines: string[] }> {
+  const repo = req.params.repo!;
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "not an item number");
+  await needVisible(db, req, repo);
+  if (!await canTalk(db, req.user, repo)) throw new HttpError(403, "only operators, and maintainers with write access to the repository, write in the chat");
+  const b = req.json && typeof req.json === "object" && !Array.isArray(req.json) ? (req.json as Record<string, unknown>) : {};
+  if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "text is required");
+  if (b.text.length > TEXT_MAX) throw new HttpError(400, `text is over ${TEXT_MAX} characters`);
+  const text = b.text;
+  const mainId = await ensureMainConversation(db, repo, n, req.user.login);
+  if (b.conversation !== MAIN && String(b.conversation) !== String(mainId)) throw new HttpError(404, "only the main conversation takes messages");
+  const parsed = parse(text, { repo });
+  const lines: string[] = [];
+  if (parsed.kind === "ambiguous" && parsed.understood === "" && text.includes("?")) {
+    await assertAskRate(db, req.user.login);
+    const [said] = await recordSaid(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }] });
+    const asked = await askOpus(db, req, repo, n, text);
+    if (said) {
+      if ("turnId" in asked) await linkMessage(db, said.id, { turnId: asked.turnId });
+      else await setRefusal(db, said.id, asked.refusal);
+    }
+    if ("refusal" in asked) lines.push(asked.refusal);
+  } else {
+    lines.push(...(await runItemText(db, req, repo, n, text, parsed, null)).lines);
+  }
+  return { chat: await readChat(db, req), lines };
+}
+
+async function setRefusal(db: Db, id: number, refusal: string): Promise<void> {
+  const q = queryDb(db);
+  await db.write(() => q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify({ refusal }) }).where("id", "=", id)));
 }
