@@ -66,9 +66,8 @@ export const SESSION_COOKIE = "__Host-craft_session";
 const AUTHORIZE_PREFIX = "authorize:";
 const STATE_COOKIE = "__Host-craft_oauth";
 const BODY_LIMIT = 64 * 1024;
-/** A helper's submit carries the whole reply (a patch can be large). */
-// The reply (at most 8 MiB as JSON) and its transcript (src/remote/protocol.ts TRANSCRIPT_MAX).
-const SUBMIT_BODY_LIMIT = 26 * 1024 * 1024;
+/** A helper's submit carries the whole reply (a patch can be large; at most 8 MiB as JSON) and its transcript (src/remote/protocol.ts TRANSCRIPT_MAX). */
+export const SUBMIT_BODY_LIMIT = 26 * 1024 * 1024;
 /** A task tool call: a `check` call carries the whole patch, as the local bridge allows. */
 const TOOL_BODY_LIMIT = 2 * 1024 * 1024;
 /** A workspace `write` carries a file of up to 2 MiB, which JSON escaping can make several times larger. */

@@ -8,7 +8,7 @@ import { canSeeInternals } from "./staff.ts";
 import { SECURITY_STEP } from "../../security/rules.ts";
 import type { Db } from "../../db/index.ts";
 import type { Res } from "../types.ts";
-import { loadRunTranscripts, loadTranscript, type TranscriptRow } from "../../data/inference/transcripts.ts";
+import { loadRunTranscripts, loadTranscript, type TranscriptRow } from "../../data/inference/index.ts";
 import { saveStore, storeStatus, summaryOf, testStore, transcriptObject, transcriptView } from "../../transcripts/index.ts";
 
 const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {

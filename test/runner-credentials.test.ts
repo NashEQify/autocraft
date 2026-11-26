@@ -12,7 +12,7 @@ import { apiRoutes } from "../src/dash/api/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { randomToken, sha256hex } from "../src/dash/server/crypto.ts";
-import { startServer } from "../src/dash/server/index.ts";
+import { startServer, SUBMIT_BODY_LIMIT } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { HttpError, RateLimiter } from "../src/dash/server/util.ts";
 import { parseClaim } from "../src/remote/calls.ts";
@@ -261,7 +261,7 @@ describe("over HTTP", async () => {
     }).returning("id")))!.id);
     const enc = (body: unknown) => ({ encoding: "gzip+base64", body: gzipSync(JSON.stringify(body)).toString("base64") });
     const reply = { ok: true, text: "<script>alert(1)</script> UNION SELECT", model: "claude-opus-4-5", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 5 };
-    assert.equal((await post(ROUTES.submit, enc({ ...reply, text: "x".repeat(8 * 1024 * 1024) }), secret)).status, 413);
+    assert.equal((await post(ROUTES.submit, enc({ ...reply, text: "x".repeat(SUBMIT_BODY_LIMIT) }), secret)).status, 413);
     assert.equal((await post(ROUTES.heartbeat, enc({ phase: "running", progress: "Reading /etc/passwd" }), secret)).status, 200);
     assert.deepEqual(await post(ROUTES.submit, enc(reply), secret), { status: 200, body: { accepted: true } });
     assert.equal((await db.get(db.k.selectFrom("remote_calls").select("reply").where("id", "=", call)))!.reply, reply.text);
