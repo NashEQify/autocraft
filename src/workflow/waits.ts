@@ -67,7 +67,7 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
   const legs = new Map([...prLegs, ...implLegs]);
   moving.forEach((w, i) => {
     const p = plans.get(`${w.repo}#${planned[i]!.number}`);
-    const code = p?.view.waitCode, line = code && BY_OTHERS[code];
+    const code = p?.view.waitCode, line = code && (BY_OTHERS[code] ?? OWN_STEPS[code]);
     if (line && !(code === "implement-question" && p!.view.waitKind !== "contributor")) add(w.id, t(line));
   });
   const inCi: { w: Waiter; pr: number; head: string }[] = [];
@@ -101,7 +101,7 @@ async function followUpLines(db: Db, done: readonly Waiter[]): Promise<Map<numbe
   const prs = done.flatMap((w) => { const pr = w.kind === "pr" ? w.number : linked.get(w.id); return pr == null ? [] : [{ w, repo: w.repo, number: pr }]; });
   const [filed, shown] = await db.together(() => Promise.all([loadPremergeFollowups(db, prs), loadShown(db, prs)]));
   for (const { w, repo, number } of prs) {
-    const issue = filed.get(`${repo}#${number}`)?.find((r) => r.issue_number !== null)?.issue_number;
+    const issue = filed.get(`${repo}#${number}`)?.findLast((r) => r.issue_number !== null)?.issue_number;
     if (issue != null && shown.get(`${repo}#${number}`)?.state === "merged") out.set(w.id, t("Merged; follow-ups filed in #{issue}", { issue }));
   }
   return out;
@@ -119,6 +119,9 @@ const BY_OTHERS: Partial<Record<WaitCode, string>> = {
   draft: tk("Waiting for the pull request to be marked ready for review"),
   "implement-question": tk("Waiting for the author's answer"),
 };
+
+/** The state line of an item whose merge waits for a step of AutoCraft's own that the plan names by its wait code. */
+const OWN_STEPS: Partial<Record<WaitCode, string>> = { followups: tk("Filing follow-ups before the merge") };
 
 const HOLD_WORD: Record<RunnerHold, string> = { offline: tk("offline"), "usage-limit": tk("usage limit"), "cooling-off": tk("cooling off"), "not-ready": tk("not ready") };
 
