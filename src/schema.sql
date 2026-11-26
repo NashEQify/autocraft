@@ -1063,6 +1063,18 @@ CREATE TABLE IF NOT EXISTS agent_run_transcripts (
 );
 CREATE INDEX IF NOT EXISTS agent_run_transcripts_run ON agent_run_transcripts(run_id, id);
 
+-- Transcripts a Task Runner may still send (ROUTES.transcript) for an attempt it has just submitted, by the lease secret's
+-- hash: the upload takes its row, and rows past `until_ms` are dropped on the next insert.
+CREATE TABLE IF NOT EXISTS transcript_waits (
+  secret_hash TEXT PRIMARY KEY,
+  run_id INTEGER NOT NULL,
+  call_id INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  outcome TEXT NOT NULL,              -- done | failed | refused
+  root TEXT,                          -- the claim's path root
+  until_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+
 CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 
 -- Build environments: places that run untrusted code (workers), registered by an
@@ -2913,6 +2925,15 @@ CREATE TABLE IF NOT EXISTS sync_state (
   poll_missed TEXT,                   -- that poll's count and first items: `<n> <repo#number> ...`
   deliveries_checked_at TEXT          -- GitHub's list of the app's webhook deliveries was checked up to here
 );
+
+-- Webhook deliveries the delivery check asked GitHub to send again (src/github/deliveries.ts), by delivery GUID. GitHub keeps
+-- deliveries three days; rows older than that are pruned.
+CREATE TABLE IF NOT EXISTS webhook_redeliveries (
+  guid TEXT PRIMARY KEY,
+  asked INTEGER NOT NULL,             -- redelivery requests made, failed requests included
+  asked_at TEXT,                      -- the last request GitHub accepted; an attempt before it is answered by the redelivery
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
 
 -- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.
 CREATE TABLE IF NOT EXISTS repo_step_approvals (

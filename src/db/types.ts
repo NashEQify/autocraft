@@ -2483,6 +2483,16 @@ export interface TrackedRepos {
   workflow: Generated<string>;
 }
 
+export interface TranscriptWaits {
+  secret_hash: string;
+  run_id: number;
+  call_id: number;
+  attempt: number;
+  outcome: string;
+  root: string | null;
+  until_ms: number;
+}
+
 export interface UserSettings {
   login: string;
   key: string;
@@ -2526,6 +2536,13 @@ export interface Verifications {
   note: string | null;
   created_at: string;
   finished_at: string | null;
+}
+
+export interface WebhookRedeliveries {
+  guid: string;
+  asked: number;
+  asked_at: string | null;
+  updated_at: string;
 }
 
 export interface WhitelistOverrides {
@@ -2854,10 +2871,12 @@ export interface DB {
   sync_state: SyncState;
   token_usage: TokenUsage;
   tracked_repos: TrackedRepos;
+  transcript_waits: TranscriptWaits;
   user_settings: UserSettings;
   user_token_revocations: UserTokenRevocations;
   user_tokens: UserTokens;
   verifications: Verifications;
+  webhook_redeliveries: WebhookRedeliveries;
   whitelist_overrides: WhitelistOverrides;
   work_leases: WorkLeases;
   workflow_actions: WorkflowActions;
@@ -3069,10 +3088,12 @@ export interface DB {
   "main.sync_state": SyncState;
   "main.token_usage": TokenUsage;
   "main.tracked_repos": TrackedRepos;
+  "main.transcript_waits": TranscriptWaits;
   "main.user_settings": UserSettings;
   "main.user_token_revocations": UserTokenRevocations;
   "main.user_tokens": UserTokens;
   "main.verifications": Verifications;
+  "main.webhook_redeliveries": WebhookRedeliveries;
   "main.whitelist_overrides": WhitelistOverrides;
   "main.work_leases": WorkLeases;
   "main.workflow_actions": WorkflowActions;
@@ -3288,10 +3309,12 @@ export const COLUMNS = {
   sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at", "webhook_at", "webhook_started_at", "polled_at", "poll_missed_at", "poll_missed", "deliveries_checked_at"],
   token_usage: ["run_id", "agent", "stage", "model", "repo", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"],
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
+  transcript_waits: ["secret_hash", "run_id", "call_id", "attempt", "outcome", "root", "until_ms"],
   user_settings: ["login", "key", "value", "updated_at"],
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
   user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
+  webhook_redeliveries: ["guid", "asked", "asked_at", "updated_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
   workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at", "close_as"],

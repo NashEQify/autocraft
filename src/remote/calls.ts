@@ -20,8 +20,8 @@ import { LEASE_IDLE_MS } from "../data/runners/index.ts";
 import { ERROR_MAX } from "../data/inference/types.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
-import { saveCallTranscript, transcriptsOn } from "../transcripts/index.ts";
-import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
+import { expectTranscript, storeCallTranscript, takeTranscript, transcriptAwaited, transcriptsOn } from "../transcripts/index.ts";
+import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, TRANSCRIPT_WAIT_S, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
 import { claimReposOf } from "./my-repos.ts";
 import { skipsIn, taskOfStep } from "./my-tasks.ts";
 import { itemsFit, type ItemFilter } from "./task-items.ts";
@@ -615,7 +615,7 @@ export async function bundleOf(db: Db, secret: string | undefined): Promise<Task
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcript: true }) };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcriptAfter: true }) };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
@@ -663,12 +663,18 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   const s = raw as Submit;
   const usage = usageOf((s as { usage?: unknown }).usage);
   const duration = count((s as { durationMs?: unknown }).durationMs);
-  // The full session goes to the transcript store after the reply is recorded; a transcript that cannot be stored never fails the submit.
+  // Once the reply is recorded the helper sends the full session to ROUTES.transcript (helpers 1.5.0 and 1.5.1 sent it in
+  // the submit); it is stored in the background, and a transcript that cannot be stored never fails the submit.
   const transcript = (s as { transcript?: unknown }).transcript;
   const keep = async (outcome: "done" | "failed" | "refused"): Promise<void> => {
-    if (typeof transcript !== "string" || l.runId === null) return;
-    if (transcript.length > TRANSCRIPT_MAX) { console.log(`transcript of remote call ${l.id} not stored: larger than ${TRANSCRIPT_MAX} characters`); return; }
-    try { await saveCallTranscript(db, { runId: l.runId, callId: l.id, attempt: l.attempt, outcome, root: l.root, gzipBase64: transcript }); } catch (e) { console.log(`transcript of remote call ${l.id} not stored: ${String((e as Error).message ?? e).slice(0, 200)}`); }
+    if (l.runId === null) return;
+    const attempt = { runId: l.runId, callId: l.id, attempt: l.attempt, outcome, root: l.root };
+    if (typeof transcript === "string") {
+      if (transcript.length > TRANSCRIPT_MAX) console.log(`transcript of remote call ${l.id} not stored: larger than ${TRANSCRIPT_MAX} characters`);
+      else storeCallTranscript(db, { ...attempt, gzipBase64: transcript });
+      return;
+    }
+    try { await expectTranscript(db, secret!, attempt, nowMs + scaledS(TRANSCRIPT_WAIT_S) * 1000, nowMs); } catch (e) { console.log(`transcript of remote call ${l.id} not awaited: ${(e as Error).message}`); }
   };
   if (s.ok === true) {
     if (typeof s.text !== "string" || s.text.length > REPLY_MAX) throw new HttpError(400, "text must be the reply as a string");
@@ -715,6 +721,21 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   // The last attempt's tokens stay with the failed call.
   if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs)) await keep("failed");
   return { accepted: true };
+}
+
+/** Whether the attempt behind this lease secret may still send its transcript; checked before its body is read. */
+export async function transcriptWanted(db: Db, secret: string | undefined, nowMs: number = Date.now()): Promise<boolean> {
+  return !!secret && await transcriptAwaited(db, secret, nowMs);
+}
+
+/** Takes a helper's transcript for the attempt it just submitted and stores it in the background; false when none is awaited (the route answers 410). */
+export async function uploadTranscript(db: Db, secret: string | undefined, raw: unknown): Promise<boolean> {
+  const t = (raw as { transcript?: unknown } | null)?.transcript;
+  if (typeof t !== "string" || !t || t.length > TRANSCRIPT_MAX) throw new HttpError(400, `transcript must be the gzip JSONL as base64, at most ${TRANSCRIPT_MAX} characters`);
+  const w = secret ? await takeTranscript(db, secret) : null;
+  if (!w) return false;
+  storeCallTranscript(db, { ...w, gzipBase64: t });
+  return true;
 }
 
 const FAILURE_TEXT_MAX = 2000;
@@ -793,10 +814,8 @@ const POLL_TOPICS = ["remote-calls", "remote-queue", "remote-helpers", "workspac
  */
 class CallPoller {
   readonly #db: Db;
-  /** The last full poll of each held call, and the POLL_TOPICS counters read with it. */
-  #polls = new Map<number, runners.CallPoll>();
-  #stamp = "";
-  #readAt = 0;
+  /** The last full poll of each held call, with the POLL_TOPICS counters read with it and when it was read. */
+  #polls = new Map<number, { poll: runners.CallPoll; stamp: string; at: number }>();
   #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
   /** Calls awaited now, with how many awaits hold each and what else they wait for. */
   #held = new Map<number, Held & { n: number }>();
@@ -856,9 +875,13 @@ class CallPoller {
           console.error(`the liveness of this process's model calls is not stored: ${(e as Error).message}`);
         }
       }
-      if (now - this.#readAt < SEEN_EVERY_MS && ids.every((id) => this.#polls.has(id)) && await this.#stampOf() === this.#stamp) {
-        for (const id of ids) for (const w of batch.get(id)!) w.resolve({ ...this.#polls.get(id)!, checks: false, tools: false });
-        return;
+      const cached = ids.map((id) => this.#polls.get(id));
+      if (cached.every((c) => c && now - c.at < SEEN_EVERY_MS)) {
+        const stamp = await this.#stampOf();
+        if (cached.every((c) => c!.stamp === stamp)) {
+          ids.forEach((id, i) => { for (const w of batch.get(id)!) w.resolve({ ...cached[i]!.poll, checks: false, tools: false }); });
+          return;
+        }
       }
       const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
       const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
@@ -866,9 +889,12 @@ class CallPoller {
       const [stamp, polls, checks, tools] = await db.together(() => Promise.all([
         this.#stampOf(), runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
       ]));
-      this.#stamp = stamp;
-      this.#readAt = now;
-      for (const id of ids) if (this.#held.has(id)) this.#polls.set(id, polls.get(id)!);
+      // A done call's poll carries the reply this wave takes, so it is never served again from here.
+      for (const id of ids) {
+        const poll = polls.get(id)!;
+        if (this.#held.has(id) && poll.call?.state !== "done") this.#polls.set(id, { poll, stamp, at: now });
+        else this.#polls.delete(id);
+      }
       const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
       const resolve = (id: number, p: runners.CallPoll): void => { for (const w of batch.get(id)!) w.resolve({ ...p, checks: checks.has(id), tools: asked.has(id) }); };
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);

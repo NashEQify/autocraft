@@ -51,7 +51,7 @@ import { scaled, TIME_SCALE } from "../../remote/time-scale.ts";
 import { isBusy } from "../../db.ts";
 import { hasFreshRunner, parseStatus, storeStatus } from "../../remote/helpers.ts";
 import { addressKey, parseLoginStart, pollLogin, startLogin } from "../../remote/device-login.ts";
-import { ENCODINGS, ROUTES, toolContent, type ClaimReply, type LoginPollReply, type LoginStartReply, type StatusReply, type ToolReply } from "../../remote/protocol.ts";
+import { ENCODINGS, ROUTES, toolContent, TRANSCRIPT_MAX, type ClaimReply, type LoginPollReply, type LoginStartReply, type StatusReply, type ToolReply } from "../../remote/protocol.ts";
 import { userReserve } from "../../remote/reserve.ts";
 import { startLiveness } from "../../remote/liveness.ts";
 import { WORKSPACE_SERVER } from "../../build/workspace-tools.ts";
@@ -68,8 +68,10 @@ export const SESSION_COOKIE = "__Host-craft_session";
 const AUTHORIZE_PREFIX = "authorize:";
 const STATE_COOKIE = "__Host-craft_oauth";
 const BODY_LIMIT = 64 * 1024;
-/** A helper's submit carries the whole reply (a patch can be large; at most 8 MiB as JSON) and its transcript (src/remote/protocol.ts TRANSCRIPT_MAX). */
-export const SUBMIT_BODY_LIMIT = 26 * 1024 * 1024;
+/** A helper's submit carries the whole reply (a patch can be large). */
+export const SUBMIT_BODY_LIMIT = 8 * 1024 * 1024;
+/** A transcript upload: src/remote/protocol.ts TRANSCRIPT_MAX characters of base64 (gzip barely shrinks them, so as an Envelope they arrive a little larger). */
+const TRANSCRIPT_BODY_LIMIT = TRANSCRIPT_MAX + 4 * 1024 * 1024;
 /** A task tool call: a `check` call carries the whole patch, as the local bridge allows. */
 const TOOL_BODY_LIMIT = 2 * 1024 * 1024;
 /** A workspace `write` carries a file of up to 2 MiB, which JSON escaping can make several times larger. */
@@ -913,6 +915,12 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         if (!remoteStatusLimit.allow(String(caller.tokenId))) return tooMany();
         await storeStatus(db, caller.tokenId, caller.login, parseStatus(await readRemoteJson(req)));
         return reply(200, { ok: true, reserve: await userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies StatusReply);
+      }
+      // A transcript is taken only from the lease of an attempt just submitted, whose lease route is gone by then.
+      if (path === ROUTES.transcript) {
+        const late = (): void => reply(410, { error: "no transcript is awaited for this lease (none was asked, it was sent already, or it came too late)" });
+        if (!await remote.transcriptWanted(db, bearer)) return mcpLimitIp.allow(clientIp(req)) ? late() : tooMany();
+        return await remote.uploadTranscript(db, bearer, await readRemoteJson(req, TRANSCRIPT_BODY_LIMIT)) ? reply(200, { ok: true }) : late();
       }
       const tool = path.startsWith(`${ROUTES.tool}/`) ? /^([a-z][a-z0-9_-]{0,40})\/([a-z][a-z0-9_]{0,60})$/.exec(path.slice(ROUTES.tool.length + 1)) : null;
       if (![ROUTES.bundle, ROUTES.heartbeat, ROUTES.submit, ROUTES.release, ROUTES.tarball].includes(path as never) && !tool) return reply(404, { error: "not found" });

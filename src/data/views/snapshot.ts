@@ -281,10 +281,18 @@ async function readSource(db: Db): Promise<string> {
 }
 
 /**
- * What a refresh stored about its source: the database, its change counters, when every row was last compared, and the
- * transaction horizon when the mark was read (`xmin`, a 64-bit transaction id: every transaction older than it had ended).
+ * What a refresh stored about its source: the database, its change counters, when every row was last compared, the
+ * transaction horizon when the mark was read (`xmin`, a 64-bit transaction id: every transaction older than it had ended),
+ * and a hash of the names of the public repositories (`pub`).
  */
-type SourceMark = { source: string; seqs: Seqs; comparedAt: string; xmin?: string };
+type SourceMark = { source: string; seqs: Seqs; comparedAt: string; xmin?: string; pub?: string };
+
+/** A hash of the public repositories' names: a visibility change writes no item or comment row, so the rows written since a mark miss it. */
+async function readPublic(db: Db): Promise<string> {
+  const r = await queryDb(db).get(anyK(db).selectFrom("repos").select(sql<string>`md5(coalesce(string_agg(name, ',' ORDER BY name), ''))`.as("h"))
+    .where("visibility", "=", "public"));
+  return String(r?.h);
+}
 
 /** The current snapshot's horizon, read before any row: a row written by a transaction still running then has an xmin at or after it. */
 async function readXmin(db: Db): Promise<string> {
@@ -294,8 +302,10 @@ async function readXmin(db: Db): Promise<string> {
 
 /**
  * Rows whose version a transaction at or after the 64-bit id `since` wrote. A row's `xmin` holds the low 32 bits of its
- * writer's id; counted back from the next id to be assigned, modulo 2^32, it gives the writer's distance from now. A frozen
- * row (xmin 2) or one more than 2^32 transactions old can only read as newer than it is, which costs a refetch, never a miss.
+ * writer's id; counted back from the next id to be assigned, modulo 2^32, it gives the writer's distance from now. Freezing
+ * keeps that id readable (Postgres 9.4 and later mark a frozen row in its info bits, not by overwriting `xmin`), so a row
+ * frozen soon after its write still reads as written then. A row more than 2^32 transactions old can only read as newer
+ * than it is, which costs a refetch, never a miss.
  */
 const writtenAfter = (since: string): RawBuilder<boolean> => {
   const next = sql`pg_snapshot_xmax(pg_current_snapshot())::text::bigint`;
@@ -372,9 +382,9 @@ const countOf = (out: DatabaseSync, table: string): number => Number((out.prepar
  * file's and rewrites only the rows added, changed or gone, in one transaction. Items and comments are looked at only
  * when the change counters of their topics moved since the last refresh, so a refresh after an embed run reads keys
  * and hashes of the embeddings alone. Then only their rows written since the last refresh's transaction horizon are read,
- * and their public rows counted; a count the file does not match after those rows (a row was deleted) compares every
- * row by hash. Every row is compared by hash when a counter went down (a restore, a copy), the database is another
- * one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
+ * and their public rows counted; a count the file does not match after those rows (a row was deleted) or a changed set
+ * of public repositories compares every row by hash. Every row is compared by hash when a counter went down (a
+ * restore, a copy), the database is another one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
  * is missing, has another schema version, or the change is too large to apply row by row. Both read Postgres statement by
  * statement, with no transaction open (see refreshFromDb).
  */
@@ -404,7 +414,7 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number, hooks: Refr
     // and comparing a large table locally can take longer. Each statement reads Postgres on its own instead. The change
     // counters are read before any row, so a row that changes after it was staged or refetched has moved them past the
     // mark stored here, and the next refresh compares it again; a refetched row carries the hash of the version fetched.
-    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: stored?.comparedAt ?? "", xmin: await readXmin(db) };
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: stored?.comparedAt ?? "", xmin: await readXmin(db), pub: await readPublic(db) };
     const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
     // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
     const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
@@ -418,8 +428,9 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number, hooks: Refr
     for (const t of PG_TABLES) {
       if (t.name !== "item_embeddings" && !rowsMoved) continue;
       // Items and comments since a mark with a transaction horizon: only the rows written since are read; a count that
-      // then disagrees (a row deleted) compares every row by hash, as the first refresh after a horizon-less mark does.
-      const ways = t.name !== "item_embeddings" && !full && stored?.xmin ? (["written", "hash"] as const) : (["hash"] as const);
+      // then disagrees (a row deleted) compares every row by hash, as the first refresh after a horizon-less mark does. A
+      // changed set of public repositories compares every row too: two opposite visibility changes would leave the count as it was.
+      const ways = t.name !== "item_embeddings" && !full && stored?.xmin && stored.pub === mark.pub ? (["written", "hash"] as const) : (["hash"] as const);
       for (const way of ways) {
         const staged = way === "written" ? await stageWritten(db, out, t, stored!.xmin!) : await stageByHash(db, out, t, pageSize);
         const n = countOf(out, `temp.chg_${t.name}`);
@@ -491,7 +502,7 @@ async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     out.exec("BEGIN");
     // Statement by statement, with no Postgres transaction open while pages are written, as in refreshFromDb: the counters
     // read first make the next refresh compare any row that changed during the copy.
-    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString(), xmin: await readXmin(db) };
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString(), xmin: await readXmin(db), pub: await readPublic(db) };
     for (const t of PG_TABLES) {
       const w = writer(out, t, "main.");
       for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);

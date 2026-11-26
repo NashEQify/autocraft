@@ -14,24 +14,22 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { gunzip, gzip } from "node:zlib";
+import { gunzip } from "node:zlib";
 import type { Db } from "../db/index.ts";
 import { dataDir } from "../db.ts";
 import { envVar } from "../env.ts";
 import type { TokenBox } from "../dash/server/crypto.ts";
-import { insertTranscript, type TranscriptRow } from "../data/inference/index.ts";
+import { addTranscriptWait, insertTranscript, loadTranscriptWait, takeTranscriptWait, type TranscriptRow, type TranscriptWait } from "../data/inference/index.ts";
 import { saveSettings, setting } from "../data/control/index.ts";
-import { scrub } from "../runner/scrub.ts";
+import { ThreadCall } from "../thread-call.ts";
+import { RAW_MAX, type PrepareInput, type Prepared } from "./prepare.ts";
 import { deleteObject, getObject, putObject, StorageError, type S3Bucket } from "../storage/s3.ts";
 import type { AgentRunTranscript, TranscriptEntry, TranscriptStoreStatus, TranscriptView } from "../../web/src/api/types.ts";
 
-const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
 export const SETTING_KEY = "transcript_store";
 const SECRET_AAD = "settings:transcript_store";
-/** The largest JSONL a submitted transcript may inflate to. */
-export const RAW_MAX = 64 * 1024 * 1024;
 /** Per entry and per page, what the transcript view returns; the download has everything. */
 const ENTRY_TEXT_MAX = 20_000;
 const ENTRIES_MAX = 4000;
@@ -123,69 +121,63 @@ async function del(store: ActiveStore, key: string): Promise<void> {
 
 // ---- writing --------------------------------------------------------------------
 
-/** Tool names of one harness event: Claude's assistant tool_use blocks, Codex's completed MCP tool calls. */
-function toolNames(ev: any): string[] {
-  if (ev?.type === "assistant" && Array.isArray(ev.message?.content)) return ev.message.content.filter((b: any) => b?.type === "tool_use" && typeof b.name === "string").map((b: any) => b.name as string);
-  if (ev?.type === "item.completed" && ev.item?.type === "mcp_tool_call") return [`mcp__${String(ev.item.server ?? "")}__${String(ev.item.tool ?? "")}`];
-  return [];
-}
+export type CallTranscript = PrepareInput;
 
-/** Image data in tool results is replaced by its size: screenshots are kept with the workspace, not in transcripts. */
-function dropImages(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(dropImages);
-  if (!v || typeof v !== "object") return v;
-  const o = v as Record<string, unknown>;
-  if (o.type === "image") {
-    const src = o.source as Record<string, unknown> | undefined;
-    const data = typeof src?.data === "string" ? src.data : typeof o.data === "string" ? o.data : null;
-    if (data !== null) return { type: "image", omitted: `${Math.round(data.length * 0.75)} bytes` };
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, x] of Object.entries(o)) out[k] = dropImages(x);
-  return out;
-}
-
-export type CallTranscript = { runId: number; callId: number; attempt: number; outcome: "done" | "failed" | "refused"; root: string | null; gzipBase64: string };
+/** Transcripts prepared at once, each in its own worker thread; one submitted while all are busy is dropped. */
+const STORING_MAX = 2;
+const workers = Array.from({ length: STORING_MAX }, () => new ThreadCall<PrepareInput, Prepared>(new URL("./prepare-worker.ts", import.meta.url), "transcript"));
+const busy = new Set<number>();
+const storing = new Set<Promise<void>>();
 
 /**
- * Stores one submitted transcript: inflates and checks it (one JSON object per line, `{at, event}`), takes the claim's
- * path root off, drops image data, hides credentials, writes the gzip JSONL to the active store and records the pointer.
- * Null when transcripts are off. Throws for a transcript that is not gzip JSONL or is too large; the caller logs and goes on.
+ * Stores one submitted transcript: prepares it in a worker thread (prepare.ts), writes the gzip JSONL to the active store
+ * and records the pointer. Null when transcripts are off. Throws for a transcript that is not gzip JSONL or is too large.
  */
-export async function saveCallTranscript(db: Db, t: CallTranscript, now: Date = new Date()): Promise<TranscriptRow | null> {
+export async function saveCallTranscript(db: Db, t: CallTranscript, now: Date = new Date(), worker: ThreadCall<PrepareInput, Prepared> = workers[0]!): Promise<TranscriptRow | null> {
   const { store } = await activeStore(db);
   if (!store) return null;
-  let raw: Buffer;
-  try { raw = await gunzipAsync(Buffer.from(t.gzipBase64, "base64"), { maxOutputLength: RAW_MAX }); } catch (e) {
-    throw new Error((e as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" ? `the transcript inflates past ${RAW_MAX / 1024 / 1024} MiB` : "the transcript is not gzip");
-  }
-  const lines: string[] = [JSON.stringify({ transcript: 1, runId: t.runId, callId: t.callId, attempt: t.attempt, outcome: t.outcome })];
-  let tools = 0, lastTool: string | null = null, events = 0;
-  for (let line of raw.toString("utf8").split("\n")) {
-    if (!line.trim()) continue;
-    if (t.root) line = line.split(t.root).join("");
-    let v: { at?: unknown; event?: unknown; omitted?: unknown };
-    try { v = JSON.parse(line) as typeof v; } catch { continue; }
-    if (!v || typeof v !== "object") continue;
-    const at = typeof v.at === "string" ? v.at.slice(0, 40) : null;
-    const entry = typeof v.omitted === "number" ? { at, omitted: v.omitted } : { at, event: dropImages(v.event) };
-    const names = toolNames((entry as { event?: unknown }).event);
-    if (names.length) { tools += names.length; lastTool = names.at(-1)!.slice(0, 200); }
-    lines.push(scrub(JSON.stringify(entry)));
-    events++;
-  }
-  if (events === 0) throw new Error("the transcript has no events");
-  const jsonl = Buffer.from(`${lines.join("\n")}\n`, "utf8");
-  const body = await gzipAsync(jsonl);
+  const p = await worker.call(t);
   const iso = now.toISOString();
   const key = `${store.kind === "s3" ? store.prefix : ""}calls/${iso.slice(0, 4)}/${iso.slice(5, 7)}/run-${t.runId}-call-${t.callId}-${t.attempt}-${randomBytes(6).toString("hex")}.jsonl.gz`;
-  await put(store, key, body);
+  await put(store, key, p.body);
   const row = {
     runId: t.runId, callId: t.callId, attempt: t.attempt, outcome: t.outcome, store: store.kind, bucket: store.kind === "s3" ? store.bucket.bucket : null, objectKey: key,
-    bytes: body.length, rawBytes: jsonl.length, sha256: createHash("sha256").update(body).digest("hex"), lines: events, toolCount: tools, lastTool, createdAt: iso,
+    bytes: p.body.length, rawBytes: p.rawBytes, sha256: p.sha256, lines: p.lines, toolCount: p.toolCount, lastTool: p.lastTool, createdAt: iso,
   } as const;
   await insertTranscript(db, row);
   return { id: 0, ...row };
+}
+
+/**
+ * Stores a submitted transcript in the background, after the submit has answered; at most STORING_MAX at once, and one
+ * that comes while all are busy is dropped with a log line. Failures are logged, never thrown.
+ */
+export function storeCallTranscript(db: Db, t: CallTranscript): void {
+  const slot = [...workers.keys()].find((i) => !busy.has(i));
+  if (slot === undefined) { console.log(`transcript of remote call ${t.callId} not stored: ${STORING_MAX} transcripts are being stored already`); return; }
+  busy.add(slot);
+  const job = (async () => {
+    try { await saveCallTranscript(db, t, new Date(), workers[slot]); } catch (e) { console.log(`transcript of remote call ${t.callId} not stored: ${String((e as Error).message ?? e).slice(0, 200)}`); }
+  })().finally(() => { busy.delete(slot); storing.delete(job); });
+  storing.add(job);
+}
+
+const secretHash = (secret: string): string => createHash("sha256").update(secret).digest("hex");
+
+/** After an accepted submit: the attempt's transcript is taken from its lease secret until `untilMs` (ROUTES.transcript), when transcripts are on. */
+export async function expectTranscript(db: Db, secret: string, w: TranscriptWait, untilMs: number, now: number): Promise<void> {
+  if (await transcriptsOn(db)) await addTranscriptWait(db, secretHash(secret), w, untilMs, now);
+}
+
+/** Whether a transcript is awaited from this lease secret now. */
+export const transcriptAwaited = async (db: Db, secret: string, now: number): Promise<boolean> => await loadTranscriptWait(db, secretHash(secret), now);
+
+/** Takes the awaited transcript's attempt for this lease secret (one upload each), or null. */
+export const takeTranscript = async (db: Db, secret: string): Promise<TranscriptWait | null> => await takeTranscriptWait(db, secretHash(secret));
+
+/** Resolves once the transcripts being stored now are done (for shutdown and tests). */
+export async function transcriptsStored(): Promise<void> {
+  await Promise.all([...storing]);
 }
 
 // ---- reading --------------------------------------------------------------------

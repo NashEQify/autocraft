@@ -521,8 +521,9 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/agents", agents.list),
     get("/api/agents/refusals", agents.refusals),
     get("/api/agents/:id", agents.detail),
-    { method: "GET", pattern: "/api/agents/:id/transcripts/:tid", external: true, handler: ok(agents.transcript) },
-    { method: "GET", pattern: "/api/agents/:id/transcripts/:tid/download", external: true, handler: agents.transcriptDownload },
+    // A transcript is read from the store and inflated (up to RAW_MAX): each read spends the expensive-GET budget.
+    heavy({ method: "GET", pattern: "/api/agents/:id/transcripts/:tid", external: true, handler: ok(agents.transcript) }),
+    heavy({ method: "GET", pattern: "/api/agents/:id/transcripts/:tid/download", external: true, handler: agents.transcriptDownload }),
     { method: "GET", pattern: "/api/admin/transcript-store", operator: true, handler: ok(agents.storeGet) },
     { method: "PUT", pattern: "/api/admin/transcript-store", operator: true, handler: ok(agents.storePut) },
     { method: "DELETE", pattern: "/api/admin/transcript-store", operator: true, handler: ok(agents.storeClear) },
