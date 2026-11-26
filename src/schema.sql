@@ -1063,6 +1063,18 @@ CREATE TABLE IF NOT EXISTS agent_run_transcripts (
 );
 CREATE INDEX IF NOT EXISTS agent_run_transcripts_run ON agent_run_transcripts(run_id, id);
 
+-- Transcripts a Task Runner may still send (ROUTES.transcript) for an attempt it has just submitted, by the lease secret's
+-- hash: the upload takes its row, and rows past `until_ms` are dropped on the next insert.
+CREATE TABLE IF NOT EXISTS transcript_waits (
+  secret_hash TEXT PRIMARY KEY,
+  run_id INTEGER NOT NULL,
+  call_id INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  outcome TEXT NOT NULL,              -- done | failed | refused
+  root TEXT,                          -- the claim's path root
+  until_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+
 CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 
 -- Build environments: places that run untrusted code (workers), registered by an

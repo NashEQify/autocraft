@@ -19,7 +19,7 @@ import type { Db } from "../db/index.ts";
 import { dataDir } from "../db.ts";
 import { envVar } from "../env.ts";
 import type { TokenBox } from "../dash/server/crypto.ts";
-import { insertTranscript, type TranscriptRow } from "../data/inference/index.ts";
+import { addTranscriptWait, insertTranscript, loadTranscriptWait, takeTranscriptWait, type TranscriptRow, type TranscriptWait } from "../data/inference/index.ts";
 import { saveSettings, setting } from "../data/control/index.ts";
 import { ThreadCall } from "../thread-call.ts";
 import { RAW_MAX, type PrepareInput, type Prepared } from "./prepare.ts";
@@ -161,6 +161,19 @@ export function storeCallTranscript(db: Db, t: CallTranscript): void {
   })().finally(() => { busy.delete(slot); storing.delete(job); });
   storing.add(job);
 }
+
+const secretHash = (secret: string): string => createHash("sha256").update(secret).digest("hex");
+
+/** After an accepted submit: the attempt's transcript is taken from its lease secret until `untilMs` (ROUTES.transcript), when transcripts are on. */
+export async function expectTranscript(db: Db, secret: string, w: TranscriptWait, untilMs: number, now: number): Promise<void> {
+  if (await transcriptsOn(db)) await addTranscriptWait(db, secretHash(secret), w, untilMs, now);
+}
+
+/** Whether a transcript is awaited from this lease secret now. */
+export const transcriptAwaited = async (db: Db, secret: string, now: number): Promise<boolean> => await loadTranscriptWait(db, secretHash(secret), now);
+
+/** Takes the awaited transcript's attempt for this lease secret (one upload each), or null. */
+export const takeTranscript = async (db: Db, secret: string): Promise<TranscriptWait | null> => await takeTranscriptWait(db, secretHash(secret));
 
 /** Resolves once the transcripts being stored now are done (for shutdown and tests). */
 export async function transcriptsStored(): Promise<void> {

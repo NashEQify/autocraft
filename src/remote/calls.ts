@@ -20,8 +20,8 @@ import { LEASE_IDLE_MS } from "../data/runners/index.ts";
 import { ERROR_MAX } from "../data/inference/types.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
-import { storeCallTranscript, transcriptsOn } from "../transcripts/index.ts";
-import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
+import { expectTranscript, storeCallTranscript, takeTranscript, transcriptAwaited, transcriptsOn } from "../transcripts/index.ts";
+import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, TRANSCRIPT_WAIT_S, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
 import { claimReposOf } from "./my-repos.ts";
 import { skipsIn, taskOfStep } from "./my-tasks.ts";
 import { itemsFit, type ItemFilter } from "./task-items.ts";
@@ -615,7 +615,7 @@ export async function bundleOf(db: Db, secret: string | undefined): Promise<Task
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcript: true }) };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcriptAfter: true }) };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
@@ -663,12 +663,18 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   const s = raw as Submit;
   const usage = usageOf((s as { usage?: unknown }).usage);
   const duration = count((s as { durationMs?: unknown }).durationMs);
-  // The full session goes to the transcript store in the background once the reply is recorded; a transcript that cannot be stored never fails the submit.
+  // Once the reply is recorded the helper sends the full session to ROUTES.transcript (helpers 1.5.0 and 1.5.1 sent it in
+  // the submit); it is stored in the background, and a transcript that cannot be stored never fails the submit.
   const transcript = (s as { transcript?: unknown }).transcript;
-  const keep = (outcome: "done" | "failed" | "refused"): void => {
-    if (typeof transcript !== "string" || l.runId === null) return;
-    if (transcript.length > TRANSCRIPT_MAX) { console.log(`transcript of remote call ${l.id} not stored: larger than ${TRANSCRIPT_MAX} characters`); return; }
-    storeCallTranscript(db, { runId: l.runId, callId: l.id, attempt: l.attempt, outcome, root: l.root, gzipBase64: transcript });
+  const keep = async (outcome: "done" | "failed" | "refused"): Promise<void> => {
+    if (l.runId === null) return;
+    const attempt = { runId: l.runId, callId: l.id, attempt: l.attempt, outcome, root: l.root };
+    if (typeof transcript === "string") {
+      if (transcript.length > TRANSCRIPT_MAX) console.log(`transcript of remote call ${l.id} not stored: larger than ${TRANSCRIPT_MAX} characters`);
+      else storeCallTranscript(db, { ...attempt, gzipBase64: transcript });
+      return;
+    }
+    try { await expectTranscript(db, secret!, attempt, nowMs + scaledS(TRANSCRIPT_WAIT_S) * 1000, nowMs); } catch (e) { console.log(`transcript of remote call ${l.id} not awaited: ${(e as Error).message}`); }
   };
   if (s.ok === true) {
     if (typeof s.text !== "string" || s.text.length > REPLY_MAX) throw new HttpError(400, "text must be the reply as a string");
@@ -677,7 +683,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     const family = familyOf(l.model ?? "", families);
     if (family === null || familyOf(s.model, families) !== family) {
       await runners.failLease(db, l, { error: `the harness reported model ${s.model.slice(0, 100)}, not the ${family ?? l.model} family claimed for the tier`, skipLogin: true, usage, duration, summary: "refused" }, nowMs);
-      keep("failed");
+      await keep("failed");
       return { accepted: false, reason: `the claim declared ${l.model} for this tier` };
     }
     const byModel: Record<string, ReturnType<typeof usageOf>> = {};
@@ -695,7 +701,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
       reply: unrooted(s.text, l.root), model: s.model, usage: { ...(usage ?? usageOf({})), ...(Object.keys(byModel).length > 0 && { byModel }), ...(costUsd !== null && { costUsd }) },
       turns, sessionId, tools, durationMs: duration,
     }, nowMs);
-    if (r.accepted) keep("done");
+    if (r.accepted) await keep("done");
     return r.accepted ? { accepted: true } : await gone();
   }
   if (s.ok !== false || typeof s.error !== "string") throw new HttpError(400, "ok must be true with text and model, or false with error");
@@ -708,13 +714,28 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     if (await runners.refuseLease(db, l, to, { error, usage, duration, output }, nowMs)) {
       const by = `${l.model ?? l.askedModel} on ${l.login}'s Task Runner`;
       console.log(`remote call ${l.id} (${l.promptId}) refused by ${by}; ${to ? `retried on ${"token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`}` : "not retried"}`);
-      keep("refused");
+      await keep("refused");
     }
     return { accepted: true };
   }
   // The last attempt's tokens stay with the failed call.
-  if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs)) keep("failed");
+  if (await runners.failLease(db, l, { error, skipLogin: true, usage, duration, summary: "helper failed", output }, nowMs)) await keep("failed");
   return { accepted: true };
+}
+
+/** Whether the attempt behind this lease secret may still send its transcript; checked before its body is read. */
+export async function transcriptWanted(db: Db, secret: string | undefined, nowMs: number = Date.now()): Promise<boolean> {
+  return !!secret && await transcriptAwaited(db, secret, nowMs);
+}
+
+/** Takes a helper's transcript for the attempt it just submitted and stores it in the background; false when none is awaited (the route answers 410). */
+export async function uploadTranscript(db: Db, secret: string | undefined, raw: unknown): Promise<boolean> {
+  const t = (raw as { transcript?: unknown } | null)?.transcript;
+  if (typeof t !== "string" || !t || t.length > TRANSCRIPT_MAX) throw new HttpError(400, `transcript must be the gzip JSONL as base64, at most ${TRANSCRIPT_MAX} characters`);
+  const w = secret ? await takeTranscript(db, secret) : null;
+  if (!w) return false;
+  storeCallTranscript(db, { ...w, gzipBase64: t });
+  return true;
 }
 
 const FAILURE_TEXT_MAX = 2000;

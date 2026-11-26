@@ -42,3 +42,33 @@ export async function loadTranscript(db: Db, runId: number, id: number): Promise
   const r = await q.get(q.k.selectFrom("main.agent_run_transcripts").select([...COLS]).where("id", "=", id).where("run_id", "=", runId));
   return r ? toRow(r as Raw) : null;
 }
+
+/** A transcript a Task Runner may still send for an attempt it submitted (transcript_waits). */
+export type TranscriptWait = { runId: number; callId: number; attempt: number; outcome: "done" | "failed" | "refused"; root: string | null };
+
+/** Records that the attempt behind `secretHash` may send its transcript until `untilMs`, and drops the waits that ran out: 2 statements. */
+export async function addTranscriptWait(db: Db, secretHash: string, w: TranscriptWait, untilMs: number, now: number): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run(q.k.deleteFrom("main.transcript_waits").where("until_ms", "<", now));
+    await q.run(q.k.insertInto("main.transcript_waits").values({ secret_hash: secretHash, run_id: w.runId, call_id: w.callId, attempt: w.attempt, outcome: w.outcome, root: w.root, until_ms: untilMs })
+      .onConflict((oc) => oc.column("secret_hash").doUpdateSet({ run_id: w.runId, call_id: w.callId, attempt: w.attempt, outcome: w.outcome, root: w.root, until_ms: untilMs })));
+  });
+}
+
+const waitOf = (r: { run_id: number; call_id: number; attempt: number; outcome: string; root: string | null }): TranscriptWait => ({
+  runId: Number(r.run_id), callId: Number(r.call_id), attempt: Number(r.attempt), outcome: r.outcome as TranscriptWait["outcome"], root: r.root,
+});
+
+/** Whether a transcript is still awaited for `secretHash`: 1 statement. */
+export async function loadTranscriptWait(db: Db, secretHash: string, now: number): Promise<boolean> {
+  const q = queryDb(db);
+  return (await q.get(q.k.selectFrom("main.transcript_waits").select("run_id").where("secret_hash", "=", secretHash).where("until_ms", ">=", now))) !== undefined;
+}
+
+/** Takes the wait of `secretHash` (one upload per attempt), or null when there is none: 1 statement. */
+export async function takeTranscriptWait(db: Db, secretHash: string): Promise<TranscriptWait | null> {
+  const q = queryDb(db);
+  const r = await db.write(async () => await q.get(q.k.deleteFrom("main.transcript_waits").where("secret_hash", "=", secretHash).returning(["run_id", "call_id", "attempt", "outcome", "root"])));
+  return r ? waitOf(r) : null;
+}

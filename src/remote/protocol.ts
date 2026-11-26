@@ -27,6 +27,8 @@ export const ROUTES = {
   heartbeat: "/api/remote/heartbeat",
   /** Lease secret. Body `Submit`, reply `SubmitReply`. */
   submit: "/api/remote/submit",
+  /** Lease secret of an attempt just submitted. Body `TranscriptUpload`, reply `{ ok: true }`, or 410 when no transcript is awaited for it (none asked, already sent, or past TRANSCRIPT_WAIT_S). */
+  transcript: "/api/remote/transcript",
   /** Lease secret. Body `Release`, reply `{ ok: true }`: the call goes back to the queue without using an attempt (the helper is too old, or its platform or harness login is missing). */
   release: "/api/remote/release",
   /** Lease secret. A private repo's checkout or a workspace entry as a tar stream: `?repo=<name>&sha=<sha>`. */
@@ -261,8 +263,8 @@ export type TaskBundle = {
   mcpServers: string[];
   /** Whether the helper keeps the harness session after the call: a follow-up turn (lint fix, check reminder, resume) may continue it. */
   keepSession: boolean;
-  /** The server stores the call's full session (Submit.transcript), set only on an instance with a transcript store: the helper sends it with the submit, whatever the outcome. */
-  transcript?: boolean;
+  /** The server stores the call's full session, set only on an instance with a transcript store: whatever the outcome, once the submit is accepted the helper sends it to ROUTES.transcript (helpers from 1.5.2). */
+  transcriptAfter?: boolean;
   /** A follow-up turn: resume this helper's session of the parent call instead of starting one. The helper resumes with the session id it recorded; the hints never carry `--resume`. */
   resume?: { parentCallId: number };
   /** Exact arguments for adapters that can use them; an adapter without hints builds its own from the fields above. */
@@ -290,8 +292,12 @@ export type SubmitTool = { name: string; /** The input as JSON, at most 4000 cha
  * The full session, for the call's transcript (src/transcripts): gzip of JSONL, base64. Each line is `{"at": <ISO time the
  * line arrived>, "event": <one JSON event the harness streamed>}`, in order; a helper that had to cut a long session
  * keeps its start and end and puts `{"at", "omitted": <events left out>}` between them. At most TRANSCRIPT_MAX characters.
+ * Helpers 1.5.0 and 1.5.1 send it in `Submit.transcript`, which the server still stores when the submit fits its limit.
  */
 export const TRANSCRIPT_MAX = 16 * 1024 * 1024;
+export type TranscriptUpload = { transcript: string };
+/** How long after an accepted submit the server takes the attempt's transcript. */
+export const TRANSCRIPT_WAIT_S = 10 * 60;
 
 export type Submit =
   | { ok: true; text: string; /** The full model id the harness reported (e.g. from the CLI's result); matched by family against the claim's model for the tier. */ model: string; usage: Usage; /** Per model id, subagents (the explorer) included; `usage` is the whole call when this is absent. */ modelUsage?: Record<string, Usage>; /** The harness's cost for the whole call at list price, when it reports one (the Claude CLI's `total_cost_usd`). */ costUsd?: number; turns?: number; /** The harness session id, kept by the helper for follow-ups. */ sessionId?: string; /** Tool uses in order, subagents included. */ tools?: SubmitTool[]; transcript?: string; durationMs: number }

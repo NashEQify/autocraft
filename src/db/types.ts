@@ -2457,6 +2457,16 @@ export interface TrackedRepos {
   workflow: Generated<string>;
 }
 
+export interface TranscriptWaits {
+  secret_hash: string;
+  run_id: number;
+  call_id: number;
+  attempt: number;
+  outcome: string;
+  root: string | null;
+  until_ms: number;
+}
+
 export interface UserSettings {
   login: string;
   key: string;
@@ -2826,6 +2836,7 @@ export interface DB {
   sync_state: SyncState;
   token_usage: TokenUsage;
   tracked_repos: TrackedRepos;
+  transcript_waits: TranscriptWaits;
   user_settings: UserSettings;
   user_token_revocations: UserTokenRevocations;
   user_tokens: UserTokens;
@@ -3039,6 +3050,7 @@ export interface DB {
   "main.sync_state": SyncState;
   "main.token_usage": TokenUsage;
   "main.tracked_repos": TrackedRepos;
+  "main.transcript_waits": TranscriptWaits;
   "main.user_settings": UserSettings;
   "main.user_token_revocations": UserTokenRevocations;
   "main.user_tokens": UserTokens;
@@ -3256,6 +3268,7 @@ export const COLUMNS = {
   sync_state: ["id", "org_high_water", "full_sync_cursor", "search_catchup_at", "repos_refreshed_at", "main_ci_polled_at", "releases_polled_at", "releases_offset", "rate_remaining", "rate_reset_at", "points_last_run", "full_points_last_run", "author_ids_backfilled_at", "author_ids_error", "app_install_sweep_at", "webhook_at", "webhook_started_at", "polled_at", "poll_missed_at", "poll_missed", "deliveries_checked_at"],
   token_usage: ["run_id", "agent", "stage", "model", "repo", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"],
   tracked_repos: ["name", "added_by", "added_at", "pipeline", "workflow"],
+  transcript_waits: ["secret_hash", "run_id", "call_id", "attempt", "outcome", "root", "until_ms"],
   user_settings: ["login", "key", "value", "updated_at"],
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
   user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],

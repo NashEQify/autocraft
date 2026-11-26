@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.5.1";
+export const HELPER_VERSION = "1.5.2";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -61,6 +61,7 @@ export const ROUTES = {
   bundle: "/api/remote/bundle",
   heartbeat: "/api/remote/heartbeat",
   submit: "/api/remote/submit",
+  transcript: "/api/remote/transcript",
   release: "/api/remote/release",
   tarball: "/api/remote/tarball",
   tool: "/api/remote/tool",
@@ -146,7 +147,7 @@ const capacity = { slots: 1, busy: 0 };
  * @property {Mount[]} mounts
  * @property {string[]} mcpServers
  * @property {boolean} keepSession  keep the harness session after the call, for follow-up turns
- * @property {boolean} [transcript]  the server stores the full session: send it with the submit
+ * @property {boolean} [transcriptAfter]  the server stores the full session: send it to ROUTES.transcript once the submit is accepted
  * @property {{ parentCallId: number }} [resume]
  * @property {{ claude?: { args: string[], agents?: string } }} hints
  */
@@ -174,8 +175,8 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
 /** @typedef {{ inputTokens: number, outputTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number }} Usage */
 /** @typedef {{ name: string, args: string, resultBytes: number | null, isError: boolean, startedAt?: string, endedAt?: string }} SubmitTool */
 /**
- * @typedef {{ ok: true, text: string, model: string, usage: Usage, modelUsage?: Record<string, Usage>, costUsd?: number, turns?: number, sessionId?: string, tools?: SubmitTool[], transcript?: string, durationMs: number }
- *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean, stopReason?: string, subtype?: string, transcript?: string }} Submit
+ * @typedef {{ ok: true, text: string, model: string, usage: Usage, modelUsage?: Record<string, Usage>, costUsd?: number, turns?: number, sessionId?: string, tools?: SubmitTool[], durationMs: number }
+ *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean, stopReason?: string, subtype?: string }} Submit
  */
 /** @typedef {{ accepted: boolean, reason?: string }} SubmitReply */
 /** @typedef {{ reason: string }} Release */
@@ -3084,8 +3085,9 @@ async function runLease(cfg, id, opt = {}) {
   /** @param {string} error @param {Usage} [usage] @param {boolean} [refused] @param {{ stopReason?: string, subtype?: string }} [stop] the harness's stop reason and result subtype @param {string} [transcript] */
   const fail = async (error, usage, refused, stop, transcript) => {
     /** @type {Submit} */
-    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started, ...(refused && { refused: true }), ...(stop?.stopReason && { stopReason: stop.stopReason }), ...(stop?.subtype && { subtype: stop.subtype }), ...(transcript && { transcript }) };
+    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started, ...(refused && { refused: true }), ...(stop?.stopReason && { stopReason: stop.stopReason }), ...(stop?.subtype && { subtype: stop.subtype }) };
     try { await call(ROUTES.submit, body); } catch (e) { return undelivered(`the failure (${error})`, e); }
+    if (transcript) sendTranscript(lease, transcript);
     noteError(`${lease.title}: ${error}`, "call");
     return end("failed", `failed: ${lease.title}: ${error}`);
   };
@@ -3159,7 +3161,7 @@ async function runLease(cfg, id, opt = {}) {
     if ("fail" in out) return await fail(out.fail, out.usage);
     const { r, reply, tools } = out;
     if (r.gone) return lost();
-    const transcript = b.transcript && r.events ? transcriptOf(r.events) : undefined;
+    const transcript = b.transcriptAfter && r.events ? transcriptOf(r.events) : undefined;
     if (r.timedOut) return await fail(`timed out after ${b.timeoutSeconds} s`, reply.usage, false, reply, transcript);
     if (r.stopped) return await giveBack("stopped on the helper");
     if (!reply.ok) {
@@ -3175,7 +3177,7 @@ async function runLease(cfg, id, opt = {}) {
     }
     const usage = reply.usage ?? { inputTokens: 0, outputTokens: 0 };
     /** @type {Submit} */
-    const body = { ok: true, text: reply.text, model: reply.model, usage, ...(reply.modelUsage && { modelUsage: reply.modelUsage }), ...(reply.costUsd !== undefined && { costUsd: reply.costUsd }), ...(reply.turns !== undefined && { turns: reply.turns }), ...(reply.sessionId && { sessionId: reply.sessionId }), ...(tools.length > 0 && { tools }), ...(transcript && { transcript }), durationMs: Date.now() - started };
+    const body = { ok: true, text: reply.text, model: reply.model, usage, ...(reply.modelUsage && { modelUsage: reply.modelUsage }), ...(reply.costUsd !== undefined && { costUsd: reply.costUsd }), ...(reply.turns !== undefined && { turns: reply.turns }), ...(reply.sessionId && { sessionId: reply.sessionId }), ...(tools.length > 0 && { tools }), durationMs: Date.now() - started };
     /** @type {SubmitReply} */
     let s;
     // A finished reply is never turned into a failure: the same body is retried until the server answers it (accepted, 410
@@ -3187,6 +3189,7 @@ async function runLease(cfg, id, opt = {}) {
       throw e;
     });
     try { s = await withRetry(submit, { deadline: deadline() + SUBMIT_OUTAGE_MS }); } catch (e) { return undelivered("the reply", e); }
+    if (transcript) sendTranscript(lease, transcript);
     if (!s.accepted) return end("failed", `rejected: ${lease.title}: ${s.reason ?? "no reason given"}`);
     clearError("call");
     return end("submitted", `submitted: ${lease.title}, ${kTokens(tokensOf(usage))} tokens`);
@@ -3297,8 +3300,22 @@ const TRANSCRIPT_MAX = 16 * 1024 * 1024;
 
 /** @typedef {{ head: string[], tail: string[], omitted: number }} Events  the harness's event lines as transcript lines, `{"at","event"}` */
 
+/** How long the server takes a transcript after the submit (src/remote/protocol.ts TRANSCRIPT_WAIT_S). */
+const TRANSCRIPT_WAIT_MS = scaled(10 * 60_000);
+
 /**
- * The submit's transcript: the event lines as gzip JSONL, base64, with known secrets redacted. A session too large for
+ * Sends a submitted attempt's transcript in the background: the reply is already in, so a slow or failed upload costs
+ * only the transcript. Retried within the server's window; a 410 (too late, or not awaited) ends it quietly.
+ * @param {LeaseRecord} lease @param {string} transcript
+ */
+function sendTranscript(lease, transcript) {
+  const deadline = Date.now() + TRANSCRIPT_WAIT_MS;
+  void withRetry(() => api(lease.server, ROUTES.transcript, lease.secret, { transcript }, { timeoutMs: Math.max(1000, deadline - Date.now()) }), { deadline })
+    .catch((e) => { if (!(e instanceof Gone)) console.log(`${lease.title}: the transcript did not reach the server: ${msg(e)}`); });
+}
+
+/**
+ * The attempt's transcript: the event lines as gzip JSONL, base64, with known secrets redacted. A session too large for
  * TRANSCRIPT_MAX keeps its start and end, with a line counting the events left out between them.
  * @param {Events} ev @returns {string | undefined}
  */
@@ -3358,7 +3375,7 @@ function harness(c, b, beat, signal, adapter, root) {
     const kill = () => { signalRun("SIGTERM"); setTimeout(() => signalRun("SIGKILL"), 5000).unref(); };
     /** @param {string} l @param {string} at */
     const keep = (l, at) => {
-      if (b.transcript && l.startsWith("{") && l.trimEnd().endsWith("}")) record(l.trimEnd(), at);
+      if (b.transcriptAfter && l.startsWith("{") && l.trimEnd().endsWith("}")) record(l.trimEnd(), at);
       const k = adapter.compact(l);
       if (k !== null) { kept.push(k); stamps.push(at); }
       else if (!l.startsWith("{") && l.trim()) tail = `${tail}${l}\n`.slice(-STDOUT_TAIL);
