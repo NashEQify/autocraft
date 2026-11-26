@@ -226,6 +226,20 @@ const RULE_REASONS: readonly (readonly [(r: string) => boolean, () => string])[]
 /** Reasons a sentence names at most. */
 const RULE_REASONS_SHOWN = 3;
 
+/**
+ * The recommendation of a PR the rule stopped at the pre-merge review's defects (`premerge`: their plan parts), where the end of its steps
+ * would merge it as it is: the defects are fixed first, then it merges, as on an item approved for merge (atBlocker). A recommendation that
+ * closes it, fixes nothing it could merge, or waits for a person to resolve a conflict stays as it is.
+ */
+export function premergeFirst(rec: Recommendation, premerge: readonly number[]): Recommendation {
+  if (!rec.merges || rec.close || rec.waits || rec.again) return rec;
+  const drop = rec.parts.drop;
+  if (!premerge.length) return { text: t("Review it again, then merge."), parts: { fix: [], drop }, merges: true, again: "review" };
+  const fix = [...rec.parts.fix, ...premerge];
+  const text = rec.parts.fix.length ? textFor({ fix, merges: true }) : t("Fix the pre-merge review's findings {parts}, then merge.", { parts: listText(premerge) });
+  return { text, parts: { fix, drop }, merges: true };
+}
+
 /** The recommendation of a PR the automatic merge rule took up and stopped, with why the rule does not merge it. */
 export function ruleStopped(rec: Recommendation, reasons: readonly string[]): Recommendation {
   const why = [...new Set(reasons.map((r) => RULE_REASONS.find(([is]) => is(r))?.[1]() ?? r))].slice(0, RULE_REASONS_SHOWN);
