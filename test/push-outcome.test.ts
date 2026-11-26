@@ -62,3 +62,22 @@ test("the unsettled-push gate counts only recent pushes whose PR is open at the 
   assert.equal(await unsettled(now), true);
   assert.equal(await unsettled(new Date("2026-11-07T14:00:00Z")), false, "pushes older than 2 hours no longer count");
 });
+
+test("a red after a green from before the base branch moved is stale and does not count as broke", async () => {
+  const db = await connectDb(join(tmpdir("push-stale"), "t.db"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "o/r", added_by: "op", added_at: "2026-11-01T00:00:00Z" }));
+  const t = (d: number) => `2026-11-${String(d).padStart(2, "0")}T00:00:00Z`;
+  await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: "m1", branch: "main", state: "green", failing: "[]", checks: "[]", committed_at: t(20), first_seen_at: t(20), state_changed_at: t(20), updated_at: t(20) }));
+  const green = JSON.stringify([{ name: "gate", state: "success" }]);
+  const red = JSON.stringify([{ name: "gate", state: "failure" }]);
+  for (const [n, from, to, committed] of [[1, "old", "n1", 9], [2, "new", "n2", 25]] as const) {
+    await db.run(db.k.insertInto("pr_commits").values({ repo: "o/r", number: n, oid: from, committed_at: t(committed) }));
+    await db.run(db.k.insertInto("pr_checks").values({ repo: "o/r", number: n, head_oid: from, overall: "success", checks: green, fetched_at: t(26) }));
+    await addPushOutcomes(db, [{ action: "fixup-push", repo: "o/r", number: n, from, to, base: null }]);
+    await resolvePushes(db, [{ repo: "o/r", number: n, head_oid: to, checks: red }]);
+  }
+  const outcome = async (to: string) => (await db.get(db.k.selectFrom("push_outcomes").select("outcome").where("to_oid", "=", to)))!.outcome;
+  assert.equal(await outcome("n1"), "stale", "green from 9 Nov ran before main's commit of 20 Nov");
+  assert.equal(await outcome("n2"), "broke", "green from after main's last commit still counts");
+  assert.equal(breakerTripped(["stale", "stale", "broke"]), false);
+});

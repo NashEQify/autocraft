@@ -2,7 +2,9 @@
 
 /** The result of the required checks at one commit. Optional checks and skipped ones do not count. */
 export type Required = "green" | "red" | "pending" | "none";
-export type Outcome = "kept-green" | "fixed" | "broke" | "still-red" | "unknown";
+export type Outcome = "kept-green" | "fixed" | "broke" | "still-red" | "unknown" | "stale";
+/** The result before a push; `stale` is a green that ran against an older base branch than the push met, so a red after it is not the push's doing. */
+export type Before = Required | "unknown" | "stale";
 
 /** The stages that push or merge, as the circuit breaker names them. */
 export const TRIP_STAGES = ["fixup", "cifix", "implement", "merge"] as const;
@@ -20,10 +22,10 @@ export function requiredResult(checks: { name: string; state: string }[], option
 }
 
 /** The outcome once the checks after the push are final, or null while they are not (including before any required check exists; the 3-day expiry then gives `unknown`). A side without a known result gives `unknown`. */
-export function classifyPush(before: Required | "unknown", after: Required | "unknown"): Outcome | null {
+export function classifyPush(before: Before, after: Required | "unknown"): Outcome | null {
   if (after === "pending" || after === "none") return null;
-  if (after === "red") return before === "green" ? "broke" : before === "red" ? "still-red" : "unknown";
-  if (after === "green") return before === "red" ? "fixed" : before === "green" ? "kept-green" : "unknown";
+  if (after === "red") return before === "green" ? "broke" : before === "red" ? "still-red" : before === "stale" ? "stale" : "unknown";
+  if (after === "green") return before === "red" ? "fixed" : before === "green" || before === "stale" ? "kept-green" : "unknown";
   return "unknown";
 }
 
