@@ -1,5 +1,6 @@
 // The new Home's and Items page's mock reads: started items of several repos, so each role sees what it may act on.
 import { heldItems } from "./heldMock";
+import { browseFor } from "./browseMock";
 import type { Api } from "../client";
 import type { ItemPhase, MaintainCommandResult, MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsQuery, MaintainRepo, MaintainRow, MaintainStats, User } from "../types";
 import { requestProject } from "../scope";
@@ -145,6 +146,7 @@ export function createMaintainMock(me: User): Pick<Api, "maintain"> {
         return new Promise((r) => setTimeout(() => r({ period, merged, implemented: Math.round(merged / 6), reviewed: Math.round(merged * 1.4), backlog: 25308, backlogChange: period === "30d" ? -212 : -48, spend: period === "30d" ? 412 : 96, perDay }), 60));
       },
       items: (query) => new Promise((r, j) => setTimeout(() => { try { r(structuredClone(itemsFor(me, query))); } catch (e) { j(e); } }, 60)),
+      browse: (query) => new Promise((r) => setTimeout(() => r(structuredClone(browseFor(me, query))), 60)),
       command: (text) => new Promise((r) => setTimeout(() => r(commandFor(me, text)), 120)),
       async repos(): Promise<MaintainRepo[]> {
         const mine = repos.map((r) => ({ ...r, canRun: me.runRepos.includes(r.name), trips: r.trips.map((t) => ({ ...t, canResume: me.runRepos.includes(r.name) })) }));

@@ -23,7 +23,6 @@ import { loadItems } from "../../data/mirror/index.ts";
 import { listWorkflows } from "../../data/workflow/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { askedLogins } from "../../workflow/asked.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadQuiet } from "../../data/security/index.ts";
@@ -34,7 +33,7 @@ import type { ItemBase } from "../../data/views/types.ts";
 import { statusFromItem, type ItemPhase, type ItemStatus } from "../../core/item-status.ts";
 import type { PlanView } from "../../core/plan-cache.ts";
 import { WEIGHT_NORMAL } from "../../workflow/types.ts";
-import { openQuestion } from "../../workflow/asked.ts";
+import { isAsked, openQuestion } from "../../workflow/asked.ts";
 import { HttpError } from "../server/util.ts";
 import { itemState } from "./shown.ts";
 import { readerOf, statusFor } from "./reader.ts";
@@ -76,9 +75,9 @@ async function homeRows(db: Db, refs: string[], opts: { login: string | null; st
   const me = opts.login?.toLowerCase() ?? null;
   return refs.map((ref): MaintainRow => {
     const it = items.get(ref), wf = wfs.get(ref) ?? null, { repo, number } = refParts(ref);
-    const open = wf !== null && openRecommendation(wf) !== null;
+    const open = openQuestion(wf) !== null;
     const last = lasts.get(ref);
-    const asked = me !== null && open && askedLogins(wf!).some((l) => l.toLowerCase() === me);
+    const asked = me !== null && wf !== null && isAsked(wf, me);
     const state = it?.state === "MERGED" ? "merged" : it?.state === "CLOSED" ? "closed" : undefined;
     return {
       repo, number, kind: it?.kind === "pr" ? "pr" : "issue", title: it?.title ?? ref, author: it?.author ?? null, entry: wf?.entry ?? "review",
@@ -124,7 +123,7 @@ export async function asked(db: Db, req: Req): Promise<{ count: number }> {
   const me = req.user.login.toLowerCase();
   const visible = new Set(await visibleRepos(db, req));
   const wfs = await listWorkflows(db, { states: [...ASKING_STATES], logins: [req.user.login] });
-  return { count: wfs.filter((w) => visible.has(w.repo) && openRecommendation(w) !== null && askedLogins(w).some((l) => l.toLowerCase() === me)).length };
+  return { count: wfs.filter((w) => visible.has(w.repo) && isAsked(w, me)).length };
 }
 
 function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>["runner"]>, login: string): MaintainRunnerLine {

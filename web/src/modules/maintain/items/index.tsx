@@ -1,5 +1,5 @@
-// The Items page: what needs an answer, what was started, what AutoCraft works by itself and the rest,
-// with filters, search and a command box for several items at once.
+// The Items page: a paged browser over every item of the visible repos, with a qualifier search, views, quick filters
+// and a command box for several items at once.
 import type { FeatureModule } from "../../../registry/types";
 import { lazyView } from "../../../registry/lazyView";
 import { t } from "../../../../../src/i18n/index.ts";

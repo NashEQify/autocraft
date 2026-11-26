@@ -74,7 +74,30 @@ Same blocks as Progress, filtered to one repo, plus what waits for an answer and
 
 ### Items (`/items`)
 
-One table over every tracked repo: ref, title, kind, state, author, updated, settled label with Jev's confidence, flags, latest stage. Filters, all kept in the URL: full-text query over titles, bodies and comments (words, "phrases", prefix\*, -excluded, OR; the matching snippet is shown), repo (several), area (several; `none` for items without one), kind, state (default open), settled label, settled status, flags, author, updated since. Sort by relevance, updated, created or number; `group=area` orders the rows by area (items without one last) and returns the count per area for the group headings; 50 rows a page; cards on phones. The top-bar search jumps to `repo#n` and links here for full results.
+One list over every item of the visible repos, narrowed to the picked project. The server filters, sorts and pages it (`GET /api/maintain/browse`, 50 rows a page); the browser never holds more than a page.
+
+- **Search box.** Words go to the full-text index of titles and bodies; `#123` matches the number. Qualifiers, GitHub style, with comma lists for "any of" and a leading `-` to negate (grammar in `src/core/item-query.ts`):
+
+| Qualifier | Values |
+|---|---|
+| `is:` | `pr`, `issue`, `open`, `closed`, `merged`, `draft`, `outside` (author is not an owner, member or collaborator), `mine` (I started, approved, held or answered it), `asked` (its open question is mine), `approved` (approved for merge), `duplicate`, `outside-held`; operators and maintainers also `security`, `stuck` |
+| `label:` `author:` `repo:` `area:` | names; `area:none` |
+| `priority:` | `P0`–`P4` (the rated level) |
+| `kind:` | classification: `bug`, `feature`, `perf`, `extra`, `plugin`, `infra` |
+| `size:` | `S`, `M`, `L`, `XL` (pull requests, by changed lines) |
+| `discord:mentioned` | mentioned in a watched Discord channel |
+| `has:` / `no:` | `pr`, `label`, `priority`, `area`, `kind`, `discord`, `response` (a comment by a maintainer of the repo) |
+| `ci:` | `green`, `red`, `pending` |
+| `review:clean` | the model review of the current head is a sure take |
+| `autocraft:` | `running`, `waiting` (for a person), `held`, `backlog`, `done`, `none` |
+| `sort:` | `updated` (default), `created`, `comments` (comments and reactions), `priority`, `discord`; `-asc` reverses |
+
+- **Words or Meaning.** By meaning, the words are embedded and matched by similarity (at most 100 hits, best first); the qualifiers still filter the hits and no sort applies.
+- **Views** set the whole query: Open, New with no labels, Most discussed, On Discord, Bugs to fix, Ready to merge, AutoCraft working, Waiting on a person, Outside contributors waiting (oldest first), Duplicates, Mine. Each shows its count.
+- **Quick filters** (Repository when no project is picked, Type, State, Label, Priority, Area, Author, AutoCraft, Discord, Sort) rewrite one qualifier of the query. On phones they open in a sheet.
+- The query is the URL: `/items?q=is:open+label:bug`. A qualifier the server does not apply (unknown, a bad value, or not allowed for the reader) is listed as not applied. Older links (`filter=mine`, `show=closed`, `discord=1`, `area=`) open the matching query.
+- **Rows**: kind and state icon, `repo#number` and title, the "Asks you" marker, AutoCraft's state in one word, priority, Duplicate, labels, classification, size, area, author (marked when outside), updated time (opened time when sorted by creation), CI, comment count, Discord mentions and the linked PR or issue. Arrow keys, `j`/`k`, Home and End move the focus between rows.
+- People who may send commands tick rows to fill the command box with the list form.
 
 ### Item (`/items/<repo>/<n>`)
 
@@ -96,7 +119,7 @@ Access list with add, remove and role change; active sessions with revoke.
 
 A setting; the pipeline does not depend on it. The bot's connection state, the servers and text channels it reports (names and IDs) with a switch per channel for watching (threads and forum posts follow their parent channel), the contact text for deletion requests, and a link to the public privacy page. Only operators can open the page or change anything; the writes are audited (`discord-watch`, `discord-unwatch`, `discord-contact`).
 
-The item page shows a "Discord N" badge in its header and, in the details, a list of message links (`discord.com/channels/<server>/<channel>/<message>` with the time). Counts are visible to everyone who sees the item; the links are decrypted on the server and need the key file in the dashboard's environment, otherwise only the count shows. The Items page has a Discord column (a badge on phones), the sort "Discord mentions" and the filter "Seen on Discord".
+The item page shows a "Discord N" badge in its header and, in the details, a list of message links (`discord.com/channels/<server>/<channel>/<message>` with the time). Counts are visible to everyone who sees the item; the links are decrypted on the server and need the key file in the dashboard's environment, otherwise only the count shows. The Items page shows the count on each row, sorts by it (`sort:discord`) and filters by it (`discord:mentioned`).
 
 `/privacy` and `/terms` are the pages outside sign-in: what the bot reads, what it keeps, what it never keeps, and how to ask for deletion.
 
