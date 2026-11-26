@@ -290,7 +290,8 @@ const countOf = (out: DatabaseSync, table: string): number => Number((out.prepar
  * when the change counters of their topics moved since the last refresh, so a refresh after an embed run reads keys
  * and hashes of the embeddings alone; they are compared regardless when a counter went down (a restore, a copy), the
  * database is another one, or the last such compare is a day old. The file is built from scratch (in a temporary file renamed into place) when it
- * is missing, has another schema version, or the change is too large to apply row by row. All reads share one snapshot.
+ * is missing, has another schema version, or the change is too large to apply row by row. Both read Postgres statement by
+ * statement, with no transaction open (see refreshFromDb).
  */
 export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
   mkdirSync(dirname(dest), { recursive: true });
@@ -311,57 +312,57 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     // A plain BEGIN: everything read from Postgres goes into temp tables first, so the write lock on the file is taken
     // only by the apply step at the end, which does local work alone.
     out.exec("BEGIN");
-    let mark: SourceMark = { source: "", seqs: {}, comparedAt: stored?.comparedAt ?? "" };
+    // No Postgres transaction is open while this works on the file: the server ends a transaction left idle for 10 s,
+    // and comparing a large table locally can take longer. Each statement reads Postgres on its own instead. The change
+    // counters are read before any row, so a row that changes after it was staged or refetched has moved them past the
+    // mark stored here, and the next refresh compares it again; a refetched row carries the hash of the version fetched.
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: stored?.comparedAt ?? "" };
+    const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
+    // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
+    const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
+      || !(Date.now() - Date.parse(stored.comparedAt) < FULL_COMPARE_MS);
+    const rowsMoved = full || moved("items") || moved("repos");
+    // Comparing items and comments compares all of them.
+    if (rowsMoved) mark.comparedAt = new Date().toISOString();
     let large = false;
     const deltas: { t: PgTable; n: number }[] = [];
-    await db.read(async () => {
-      mark = { ...mark, source: await readSource(db), seqs: await readSeqs(db) };
-      const moved = (t: string) => stored?.seqs[t] !== mark.seqs[t];
-      // Counters that went down, another database or an old full compare: the counters say nothing, so compare every row.
-      const full = !stored || stored.source !== mark.source || SEQ_TOPICS.some((t) => (mark.seqs[t] ?? 0) < (stored.seqs[t] ?? 0))
-        || !(Date.now() - Date.parse(stored.comparedAt) < FULL_COMPARE_MS);
-      const rowsMoved = full || moved("items") || moved("repos");
-      // Comparing items and comments compares all of them.
-      if (rowsMoved) mark.comparedAt = new Date().toISOString();
-      for (const t of PG_TABLES) {
-        if (t.name !== "item_embeddings" && !rowsMoved) continue;
-        const keys = t.key.join(", ");
-        const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
-        for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
-        // The key columns carry the snapshot's types: a typeless column has another affinity than the snapshot's INTEGER
-        // `number`, so the compare below would search this key by `repo` alone, scanning a repository's keys per row.
-        // That compare runs inside the Postgres read, which the server ends after 10 s idle in a transaction.
-        const typed = t.key.map((k) => `${k} ${INTEGER_COLUMNS.has(k) ? "INTEGER" : "TEXT"}`).join(", ");
-        out.exec(`CREATE TEMP TABLE pg_${t.name} (${typed}, h TEXT, PRIMARY KEY (${keys}))`);
-        const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
-        for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
-          for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
-        }
-        stage.flush();
-        // The keys to delete: changed rows (rewritten from new_*) and rows no longer public or present.
-        out.exec(`CREATE TEMP TABLE chg_${t.name} AS
-          SELECT p.${t.key.join(", p.")}, 1 AS refetch FROM temp.pg_${t.name} p LEFT JOIN (${t.local}) l ON ${on} WHERE l.h IS NULL OR l.h <> p.h
-          UNION ALL SELECT l.${t.key.join(", l.")}, 0 FROM (${t.local}) l WHERE NOT EXISTS (SELECT 1 FROM temp.pg_${t.name} p WHERE ${on})`);
-        const n = countOf(out, `temp.chg_${t.name}`);
-        if (n > LARGE_DELTA && n * 2 > countOf(out, `temp.pg_${t.name}`)) {
-          large = true;
-          return;
-        }
-        if (!n) continue;
-        deltas.push({ t, n });
-        out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
-        const fetch = out.prepare(`SELECT ${keys} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
-        const w = writer(out, t, "temp.new_");
-        for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
-          const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
-          const where = t.key.length === 1
-            ? kx.inList(db, sql.ref(t.key[0]!), chunk.map((r) => r[t.key[0]!]!))
-            : kx.refIn(db, t.name, chunk.map((r) => [String(r.repo), Number(r.number)] as const));
-          w.add((await queryDb(db).all(anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where))) as Record<string, unknown>[]);
-        }
-        w.flush();
+    for (const t of PG_TABLES) {
+      if (t.name !== "item_embeddings" && !rowsMoved) continue;
+      const keys = t.key.join(", ");
+      const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
+      for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
+      // The key columns carry the snapshot's types: a typeless column has another affinity than the snapshot's INTEGER
+      // `number`, so the compare below would search this key by `repo` alone, scanning a repository's keys per row.
+      const typed = t.key.map((k) => `${k} ${INTEGER_COLUMNS.has(k) ? "INTEGER" : "TEXT"}`).join(", ");
+      out.exec(`CREATE TEMP TABLE pg_${t.name} (${typed}, h TEXT, PRIMARY KEY (${keys}))`);
+      const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
+      for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
+        for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
       }
-    });
+      stage.flush();
+      // The keys to delete: changed rows (rewritten from new_*) and rows no longer public or present.
+      out.exec(`CREATE TEMP TABLE chg_${t.name} AS
+        SELECT p.${t.key.join(", p.")}, 1 AS refetch FROM temp.pg_${t.name} p LEFT JOIN (${t.local}) l ON ${on} WHERE l.h IS NULL OR l.h <> p.h
+        UNION ALL SELECT l.${t.key.join(", l.")}, 0 FROM (${t.local}) l WHERE NOT EXISTS (SELECT 1 FROM temp.pg_${t.name} p WHERE ${on})`);
+      const n = countOf(out, `temp.chg_${t.name}`);
+      if (n > LARGE_DELTA && n * 2 > countOf(out, `temp.pg_${t.name}`)) {
+        large = true;
+        break;
+      }
+      if (!n) continue;
+      deltas.push({ t, n });
+      out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
+      const fetch = out.prepare(`SELECT ${keys} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
+      const w = writer(out, t, "temp.new_");
+      for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
+        const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
+        const where = t.key.length === 1
+          ? kx.inList(db, sql.ref(t.key[0]!), chunk.map((r) => r[t.key[0]!]!))
+          : kx.refIn(db, t.name, chunk.map((r) => [String(r.repo), Number(r.number)] as const));
+        w.add((await queryDb(db).all(anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where))) as Record<string, unknown>[]);
+      }
+      w.flush();
+    }
     if (large) {
       out.exec("ROLLBACK");
       return null;
@@ -392,7 +393,7 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
   }
 }
 
-/** Writes the whole snapshot into a new file, keyset-paged from one read snapshot, and renames it over `dest`. */
+/** Writes the whole snapshot into a new file, keyset-paged, and renames it over `dest`. */
 async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<SnapshotStats> {
   const target = tmpFile(dest);
   rmSync(target, { force: true });
@@ -402,15 +403,14 @@ async function rebuildFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
     out.exec(DDL);
     out.prepare("INSERT INTO meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
     out.exec("BEGIN");
-    let mark: SourceMark | null = null;
-    await db.read(async () => {
-      mark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString() };
-      for (const t of PG_TABLES) {
-        const w = writer(out, t, "main.");
-        for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);
-        w.flush();
-      }
-    });
+    // Statement by statement, with no Postgres transaction open while pages are written, as in refreshFromDb: the counters
+    // read first make the next refresh compare any row that changed during the copy.
+    const mark: SourceMark = { source: await readSource(db), seqs: await readSeqs(db), comparedAt: new Date().toISOString() };
+    for (const t of PG_TABLES) {
+      const w = writer(out, t, "main.");
+      for await (const rows of pgPages(db, t, (q) => q.select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]), pageSize)) w.add(rows);
+      w.flush();
+    }
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('pg_source', ?)").run(JSON.stringify(mark));
     const result = { items: countOf(out, "items"), comments: countOf(out, "comments") };
