@@ -13,11 +13,12 @@ import { weightOfScore } from "../../core/work-score.ts";
 import { goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
+import { loadChatBefore, patchTalks, recordWorkflowMessages, retitleConversations } from "../chat/workflow.ts";
 import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import { ASKING_STATES, RULE_STARTER, type Parsed } from "../../workflow/types.ts";
+import { RULE_STARTER, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 
@@ -35,7 +36,7 @@ export type WorkflowRow = {
   id: number; repo: string; number: number; kind: string; entry: string; weight: number; state: string; started_by: string; started_at: string; started_via: string;
   base_head: string | null; approved_by: string | null; approved_at: string | null; approved_via: string | null; stopped_by: string | null; stopped_at: string | null;
   blocker: string | null; blocker_params: string | null; rec: string | null; rec_at: string | null; rec_head: string | null; plan: string; legacy_preapproval_id: number | null;
-  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null; review_asked_at: string | null;
+  updated_at: string; step: string | null; pr_number: number | string | null; version: number; accepted_head: string | null; review_asked_at: string | null; taken_by: string | null;
 };
 
 /** An `item_workflows` row as the domain type (the module's one mapper). */
@@ -44,7 +45,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     id: Number(r.id), repo: r.repo, number: Number(r.number), kind: r.kind as ItemKind, entry: r.entry as Entry, weight: Number(r.weight), state: r.state as WorkflowState,
     startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head, acceptedHead: r.accepted_head,
     approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null,
-    stoppedBy: r.stopped_by, stoppedAt: r.stopped_at,
+    stoppedBy: r.stopped_by, stoppedAt: r.stopped_at, takenBy: r.taken_by ?? null,
     blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
     plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), reviewAskedAt: r.review_asked_at, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
@@ -182,15 +183,6 @@ export async function listWorkflows(db: Db, f: WorkflowFilter = {}): Promise<Ite
   return rows.map(workflowOf);
 }
 
-/** The items with an open recommendation, per repo of `repos`. One statement; a repo without one is absent. */
-export async function countWaiting(db: Db, repos: string[]): Promise<Map<string, number>> {
-  if (repos.length === 0) return new Map();
-  const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("main.item_workflows as w").select((eb) => ["w.repo", eb.fn.countAll<number>().as("n")])
-    .where("w.state", "in", ASKING_STATES).where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
-  return new Map(rows.map((r) => [r.repo, Number(r.n)]));
-}
-
 /** The live workflow that works on each PR: its own, else the implement workflow of an issue that does (linkRows). `others`: without the PR's own. One statement. */
 export async function loadPrWorkflows(db: Db, refs: { repo: string; number: number }[], o: { others?: boolean } = {}): Promise<PrWorkflows> {
   const out: PrWorkflows = new Map();
@@ -321,6 +313,21 @@ export async function countEventsSince(db: Db, c: { login: string; via: Surface;
   return Number(r?.n ?? 0);
 }
 
+/** The id of the newest workflow event, 0 when there is none. */
+export async function loadLastEventId(db: Db): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("main.workflow_events").select((eb) => eb.fn.max("id").as("m")));
+  return Number(r?.m ?? 0);
+}
+
+/** The id of the newest event `login` wrote on the item through `via` with an id above `after`, or null. */
+export async function loadNewestEventBy(db: Db, f: { repo: string; number: number; login: string; via: string; after: number }): Promise<number | null> {
+  const q = queryDb(db);
+  const e = await q.get(q.k.selectFrom("main.workflow_events").select("id").where("repo", "=", f.repo).where("number", "=", f.number)
+    .where("login", "=", f.login).where("via", "=", f.via as never).where("id", ">", f.after).orderBy("id", "desc").limit(1));
+  return e ? Number(e.id) : null;
+}
+
 /** Items a login started, approved or answered on after `since` whose number is one of `numbers`, newest first, each once. */
 export async function loadLoginItems(db: Db, f: { login: string; numbers: number[]; since: string }): Promise<{ repo: string; number: number; at: string }[]> {
   if (!f.numbers.length) return [];
@@ -355,6 +362,7 @@ export async function startWorkflows(db: Db, rows: NewWorkflow[]): Promise<Map<R
     }
     const ids = rows.filter((w) => w.entry === "implement").flatMap((w) => out.get(refKey(w.repo, w.number)) ?? []);
     await linkWorkflows(db, { ids });
+    await retitleConversations(db, rows.filter((w) => out.has(refKey(w.repo, w.number))));
   });
   return out;
 }
@@ -363,7 +371,7 @@ type Cell = string | number | null;
 const PATCH_COLUMNS: { [K in keyof WorkflowPatch]-?: (v: never) => [string, Cell] } = {
   entry: (v) => ["entry", v], weight: (v) => ["weight", v], state: (v) => ["state", v], baseHead: (v) => ["base_head", v], acceptedHead: (v) => ["accepted_head", v],
   approvedBy: (v) => ["approved_by", v], approvedAt: (v) => ["approved_at", v], approvedVia: (v) => ["approved_via", v],
-  stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], blocker: (v) => ["blocker", v],
+  stoppedBy: (v) => ["stopped_by", v], stoppedAt: (v) => ["stopped_at", v], takenBy: (v) => ["taken_by", v], blocker: (v) => ["blocker", v],
   blockerParams: (v) => ["blocker_params", v ? JSON.stringify(v) : null], rec: (v) => ["rec", v ? JSON.stringify(v) : null], recAt: (v) => ["rec_at", v],
   recHead: (v) => ["rec_head", v], plan: (v) => ["plan", JSON.stringify(v ?? [])], step: (v) => ["step", v], reviewAskedAt: (v) => ["review_asked_at", v], legacyPreapprovalId: (v) => ["legacy_preapproval_id", v],
 };
@@ -393,15 +401,22 @@ function patchGroups(rows: { id: number; patch: WorkflowPatch; at?: string }[]):
 /** The columns of a patch that are not text. */
 const BIGINT: readonly string[] = ["id", "weight", "legacy_preapproval_id"];
 
-/** Batched update, one statement per distinct patch column set; each row's `version` goes up by one. Returns the rows changed. */
+/**
+ * Batched update, one statement per distinct patch column set; each row's `version` goes up by one. A row that comes back with a new
+ * recommendation, or ends done or closed, gets AutoCraft's message in its item's chat in the same write (src/data/chat/workflow.ts).
+ * Returns the rows changed.
+ */
 export async function saveWorkflows(db: Db, rows: { id: number; patch: WorkflowPatch; at?: string }[]): Promise<number> {
   if (rows.length === 0) return 0;
   return await db.write(async () => {
+    const talking = rows.filter((r) => patchTalks(r.patch)).map((r) => r.id);
+    const before = talking.length ? await loadChatBefore(db, talking) : null;
     let changed = 0;
     for (const group of patchGroups(rows)) {
       const set = Object.fromEntries(Object.keys(group[0]!).filter((c) => c !== "id").map((c) => [c, BIGINT.includes(c) ? "bigint" as const : "text" as const]));
       changed += await patchRows(db, "main.item_workflows", { id: "bigint" }, set, group, { also: (eb) => ({ version: eb("main.item_workflows.version", "+", 1) }) });
     }
+    if (before) await recordWorkflowMessages(db, before);
     return changed;
   });
 }

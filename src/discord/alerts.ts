@@ -1,5 +1,6 @@
-// Workflow alerts by direct message. A linked account that turned alerts on gets a text message when a workflow it may answer
-// recommends or stops at a blocker, with the link and the command that answers it. Stored per message: the workflow and the
+// Workflow alerts by direct message. A linked account that turned alerts on gets a text message when a workflow it started or
+// approved (workflow/asked.ts) recommends or stops at a blocker and it may still answer there, with the link and the command that
+// answers it. A row only the automatic merge rule started asks nobody and sends none. Stored per message: the workflow and the
 // recommendation's time, nothing else about the content.
 import { loadAccess, loadPermissionsOfLogins, permKey, readsUseApp, isWrite, savePermissions, type PermEntry } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
@@ -16,6 +17,7 @@ import { RestError, type DiscordRest } from "./rest.ts";
 import { ghPermission, type PermissionReader } from "../fixup/author-permission.ts";
 import { exclusive } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { isAsked, openQuestion } from "../workflow/asked.ts";
 import type { ItemWorkflow } from "../workflow/types.ts";
 
 /** What the alerts need from Discord beyond messages: the direct-message channel of a user. */
@@ -170,8 +172,8 @@ export class Alerts {
   }
 
   /**
-   * Workflows that stopped at a blocker or came back with a recommendation since the person turned alerts on, in repos where they may
-   * answer: one text message per recommendation, within an hourly limit per person.
+   * Workflows that stopped at a blocker or came back with a recommendation since the person turned alerts on, whose question goes to
+   * them, in repos where they may answer: one text message per recommendation, within an hourly limit per person.
    */
   async #pass(): Promise<void> {
     const { db, keys, rest, log } = this.#d;
@@ -181,7 +183,7 @@ export class Alerts {
       listWorkflows(db, { states: ["blocked", "recommending"], recAfter: new Date(now - WORKFLOW_ALERT_DAYS * DAY_MS).toISOString() }),
       loadTrackedRepos(db), readsUseApp(db),
     ]));
-    const rows = workflows.filter((w) => w.recAt !== null && tracked.has(w.repo));
+    const rows = workflows.filter((w) => w.recAt !== null && tracked.has(w.repo) && openQuestion(w) !== null);
     const logins = [...new Set(state.alerters.map((a) => a.login))];
     const [access, permRows, shown] = await db.together(() => Promise.all([
       loadAccess(db, logins), loadPermissionsOfLogins(db, logins), loadShown(db, rows.map((w) => ({ repo: w.repo, number: w.number }))),
@@ -200,7 +202,7 @@ export class Alerts {
       const have = new Set(state.sent.map((s) => `${s.userHash}|${s.workflowId}|${s.recAt}`));
       const hourAgo = new Date(now - HOUR_MS).toISOString();
       for (const p of people) {
-        const fresh = rows.filter((w) => w.recAt! >= p.createdAt && !have.has(`${p.userHash}|${w.id}|${w.recAt}`) && mayReceive(facts, p.login, p.role, [w.repo], now, this.#kept));
+        const fresh = rows.filter((w) => w.recAt! >= p.createdAt && isAsked(w, p.login) && !have.has(`${p.userHash}|${w.id}|${w.recAt}`) && mayReceive(facts, p.login, p.role, [w.repo], now, this.#kept));
         let room = (this.#d.perHour ?? PER_HOUR) - state.sent.filter((s) => s.userHash === p.userHash && s.sentAt > hourAgo).length;
         for (const w of fresh) {
           if (room <= 0) break;

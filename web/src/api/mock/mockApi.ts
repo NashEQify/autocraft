@@ -5,12 +5,12 @@ import { createAdminMock } from "./adminMock";
 import { createMcpMock } from "./mcpMock";
 import { createAgentsMock } from "./agentsMock";
 import { createTraceMock } from "./traceMock";
+import { createChatMock } from "./chatMock";
 import { createHealthMock } from "./healthMock";
 import { createMaintainMock } from "./maintainMock";
 import { createMaintainItemMock } from "./maintainItemMock";
 import { createActivityMock } from "./activityMock";
 import { createAreasMock } from "./areasMock";
-import { createConversationMock } from "./conversationMock";
 import { createSecurityMock } from "./securityMock";
 import { createItemPagesMock, type ItemPagesApi } from "./itemPagesMock";
 import { createBuildMock } from "./buildMock";
@@ -232,7 +232,6 @@ export function createMockApi(): Api {
     progress: () => wait(progress()),
     mainCi: () => wait(mainCi()),
     stuckItems: () => wait(stuckItems()),
-    ...createConversationMock(me, changed),
     ...createAreasMock(me, changed),
     ...createAdminMock(me, changed),
     mcp: mcpMock.mcp,
@@ -257,6 +256,7 @@ export function createMockApi(): Api {
     ...createQueueMock(me, changed),
     ...createMaintainMock(me),
     ...createMaintainItemMock(me, changed),
+    ...createChatMock(me, changed),
     prompts: () => wait(promptsReport(null), 60),
     next: () => wait(nextPageFixture(), 60),
     mention: () => wait({ mention: "autocraft" }, 20),

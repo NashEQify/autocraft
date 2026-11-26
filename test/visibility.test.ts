@@ -317,26 +317,6 @@ describe("repo visibility", () => {
     await db.run(db.k.deleteFrom("fixups").where("repo", "=", "open-app"));
   });
 
-  test("a quiet pull request's conversation has no model text for viewers; an ordinary item's is unchanged", async () => {
-    const now = new Date().toISOString();
-    await db.run(db.k.insertInto("main.items").values({ repo: "open-app", number: 2, kind: "pr", state: "OPEN", title: "Fix", body: "b", head_oid: "h2", author: "autocraft", created_at: now, updated_at: now }));
-    await db.run(db.k.insertInto("security_scans").values({ id: 901, repo: "open-app", state: "done", started_by: "boss", started_at: now }));
-    await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 901, scan_id: 901, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp901", fix_pr: 2, created_at: now, updated_at: now }));
-    for (const n of [1, 2]) {
-      await db.prepare("INSERT INTO main.conversations (repo, number, item_block, item_sig, created_at, created_by) VALUES ('open-app', ?, 'b', 's', ?, 'boss')").run(n, now);
-      await db.prepare("INSERT INTO main.conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('open-app', ?, 'opus', 'opus', ?, 'the Opus analysis', 'blk', NULL, 1)").run(n, now);
-    }
-    type Conv = { turns: { body: string }[] };
-    const reader = await signedIn("reader"), maint = await signedIn("maint");
-    assert.equal((await reader.get<Conv>("/api/conversations/open-app/1")).turns[0]!.body, "the Opus analysis");
-    const quiet = await reader.get<Conv>("/api/conversations/open-app/2");
-    assert.equal(quiet.turns.length, 1);
-    assert.equal(quiet.turns[0]!.body, "");
-    assert.equal((await maint.get<Conv>("/api/conversations/open-app/2")).turns[0]!.body, "the Opus analysis");
-    await db.script("DELETE FROM main.conversation_turns; DELETE FROM main.conversations");
-    await db.run(db.k.deleteFrom("security_findings").where("number", "=", 901));
-  });
-
   test("an ever-tracked repo stays hidden when only its work rows remain; hidden names match whole names in free text", async () => {
     await db.run(db.k.insertInto("ever_tracked_repos").values({ name: "ghost-app" }).onConflict((oc) => oc.doNothing()));
     const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", items: [{ repo: "ghost-app", number: 3 }], prompt: "p" });
@@ -353,6 +333,7 @@ describe("repo visibility", () => {
 
   test("stage notes, job outcomes and the activity feed carry no reason text for viewers, on ordinary and quiet items", async () => {
     const now = new Date().toISOString();
+    await db.run(db.k.insertInto("main.items").values({ repo: "open-app", number: 2, kind: "pr", state: "OPEN", title: "Fix", body: "b", head_oid: "h2", author: "autocraft", created_at: now, updated_at: now }));
     await db.run(db.k.insertInto("security_scans").values({ id: 902, repo: "open-app", state: "done", started_by: "boss", started_at: now }));
     await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 902, scan_id: 902, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp902", fix_pr: 2, created_at: now, updated_at: now }));
     const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", repo: "open-app" }).returning("id")))!;

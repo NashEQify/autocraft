@@ -22,6 +22,17 @@ export async function loadWatchedChannels(db: Db, channelIds: string[]): Promise
   return out;
 }
 
+/** Each channel's name as the bot last reported it (null when it reported none). A channel the bot has not reported is absent. */
+export async function loadChannelNames(db: Db, channelIds: string[]): Promise<Map<string, string | null>> {
+  const q = queryDb(db);
+  const out = new Map<string, string | null>();
+  for (const ids of kx.chunks([...new Set(channelIds)])) {
+    const rows = await q.all(q.k.selectFrom("main.discord_channels").select(["channel_id", "name"]).where(kx.inList(db, "channel_id", ids)), { label: "discord.loadChannelNames" });
+    for (const r of rows) out.set(r.channel_id, r.name);
+  }
+  return out;
+}
+
 /** Ids of channels under the parents or in the guild. */
 export async function loadChannelTree(db: Db, f: { parentIds?: string[]; guildId?: string }): Promise<string[]> {
   const parents = [...new Set(f.parentIds ?? [])];

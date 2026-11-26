@@ -218,7 +218,7 @@ export class AtCommands {
     }
     if (denied.length) return await this.#refuse(m, t("{login} has no write access to {repos}. Nothing ran.", { login, repos: listText(denied) }));
     if (unknown.length) return await this.#refuse(m, t("Could not check {login}'s write access to {repos}. Try again. Nothing ran.", { login, repos: listText(unknown) }));
-    const result = await runDo(db, keys, d, { userId, login }, this.#d.read, this.#d.permission);
+    const result = await runDo(db, keys, d, { userId, login, messageId: m.id }, this.#d.read, this.#d.permission);
     await this.#answer(m, d, result, here, login);
     if (result.items.some((o) => o.outcome === "run")) this.#d.followed?.();
   }

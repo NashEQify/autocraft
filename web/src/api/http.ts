@@ -86,8 +86,6 @@ export function createHttpApi(): Api {
     changed();
     return v;
   }
-  const conv = (repo: string, n: number, rest = "") => `/api/conversations/${encodeURIComponent(repo)}/${encodeURIComponent(String(n))}${rest}`;
-
   return {
     me: Object.assign(() => get<User>("/api/me"), {
       settings: {
@@ -97,14 +95,6 @@ export function createHttpApi(): Api {
     }),
     repos: () => get("/api/repos"),
     repoOwners: () => get("/api/repos/owners"),
-    conversations: {
-      get: (repo, number) => get(conv(repo, number)),
-      say: (repo, number, text, ask) => post(conv(repo, number, "/messages"), ask === false ? { text, ask: false } : { text }),
-      withdraw: (repo, number) => post(conv(repo, number, "/withdraw")),
-      editCard: (id, edit) => post(`/api/conversation-cards/${id}/edit`, edit),
-      doCard: (id, digest) => post(`/api/conversation-cards/${id}/do`, { digest }),
-      dismissCard: (id) => post(`/api/conversation-cards/${id}/dismiss`),
-    },
     areas: {
       get: (repo) => get(`/api/areas/${encodeURIComponent(repo)}`),
       edit: (repo, edit) => post(`/api/areas/${encodeURIComponent(repo)}/edit`, edit),
@@ -128,9 +118,10 @@ export function createHttpApi(): Api {
       queue: () => get("/api/maintain/queue"),
       stats: (period) => get(`/api/maintain/stats${qs({ period })}`),
       items: (q) => get(`/api/maintain/items${qs({ ...q, filters: undefined, filter: q.filters?.join(","), areas: undefined, area: q.areas?.join(","), refs: q.refs?.join(",") })}`),
+      browse: (q) => get(`/api/maintain/browse${qs({ ...q, refs: q.refs?.join(",") })}`),
       command: (text, asked) => post("/api/commands", { text, asked }),
       repos: () => get("/api/maintain/repos"),
-      waiting: () => get("/api/maintain/waiting"),
+      asked: () => get("/api/maintain/asked"),
       control: (input) => post("/api/controls", input),
     },
     maintainItem: {
@@ -145,6 +136,11 @@ export function createHttpApi(): Api {
       },
     },
     itemPage: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/page${qs({ since })}`),
+    itemChat: {
+      get: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/chat${qs({ since })}`),
+      send: (repo, number, conversation, text) => post(`/api/items/${encodeURIComponent(repo)}/${number}/chat`, { conversation, text }),
+      withdraw: (repo, number) => post(`/api/items/${encodeURIComponent(repo)}/${number}/chat/withdraw`),
+    },
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
     securityList: () => get("/api/security/findings"),
     findingPage: (repo, number) => get(`/api/security/findings/${encodeURIComponent(repo)}/${number}/page`),

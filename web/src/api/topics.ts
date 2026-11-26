@@ -7,7 +7,7 @@
  */
 export type Topic =
   | "repos" | "sync" | "items" | "ranks" | "stages" | "checks" | "classify" | "dupes" | "reviews" | "queue" | "workflows" | "workflow-events" | "jobs" | "usage" | "agents"
-  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue";
+  | "envs" | "tasks" | "workspaces" | "actions" | "fixes" | "verify" | "postmerge" | "access" | "settings" | "trace" | "github" | "outside" | "plans" | "conversations" | "steps" | "mainci" | "limits" | "preapprovals" | "security" | "discord" | "discord-links" | "downloads" | "build-features" | "pr-builds" | "nightly" | "remote-helpers" | "remote-queue" | "chat";
 
 /** What moves an item's queue position (src/rank/position.ts), for every query that carries the badge. */
 const withSlot = (...topics: Topic[]): Topic[] => [...new Set<Topic>([...topics, "steps", "repos"])];
@@ -26,9 +26,11 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["item-trace:", TRACE],
   // The item page is the trace plus the header (labels, Discord, holds) and the GitHub side; it also asks `since` its last stamp.
   ["item-page:", [...new Set<Topic>([...TRACE, "discord", "ranks"])]],
+  // The item chat: messages, AutoCraft's replies and work, GitHub and Discord lines; it also asks `since` its last stamp.
+  ["item-chat:", [...new Set<Topic>([...TRACE, "chat", "conversations", "workflows", "discord"])]],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
   ["live", ["jobs", "agents", "tasks", "queue", "remote-helpers"]],
-  ["maintain-waiting", ["workflows", "repos"]],
+  ["maintain-asked", ["workflows", "workflow-events", "chat"]],
   ["maintain-queue", ["workflows", "items", "repos"]],
   // The item page: the workflow row and its events, signals, findings, holds and breakers.
   ["maintain-item:", ["workflows", "trace", "items", "workflow-events", "dupes", "security", "outside", "plans", "limits", "preapprovals", "access", "settings", "repos"]],
@@ -36,8 +38,9 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["maintain-stats:", withSlot("items", "stages", "reviews", "usage", "repos")],
   // The list of the pull requests AutoCraft merged: each merge moves the queue topic.
   ["maintain-items:merged:", ["queue", "access", "repos"]],
+  ["maintain-browse:", ["workflows", "workflow-events", "items", "checks", "ranks", "classify", "dupes", "discord", "reviews", "outside", "access", "security", "repos"]],
   ["maintain-items:", ["workflows", "workflow-events", "items", "plans", "ranks", "classify", "dupes", "outside", "access", "security", "repos"]],
-  ["maintain-home", ["workflows", "workflow-events", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
+  ["maintain-home", ["workflows", "workflow-events", "chat", "items", "remote-helpers", "access", "settings", "plans", "jobs", "limits", "security", "repos", "actions", "outside", "mainci", "envs", "sync"]],
   // One opened event row: its detail reads what the timeline does; the run and the task behind it read one table each.
   ["item-trace-detail:", TRACE],
   ["item-trace-run:", ["agents"]],

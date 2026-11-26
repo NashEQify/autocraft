@@ -218,7 +218,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
       if (settled.kind === "ask") return void (await call.edit({ content: settled.line }));
       d = settled.d;
     }
-    const result = await runDo(db, keys, d, { userId: call.userId, login }, deps.read);
+    const result = await runDo(db, keys, d, { userId: call.userId, login, messageId: call.interaction.id }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {

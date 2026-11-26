@@ -1,4 +1,5 @@
-// Workflow alerts by direct message: who gets a text when a workflow waits for an answer, each recommendation once, and the hourly limit.
+// Workflow alerts by direct message: who gets a text when a workflow waits for an answer (its starter and approver, never for a row only
+// the automatic merge rule started), each recommendation once, and the hourly limit.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -11,6 +12,7 @@ import { createLinkCode, redeemLinkCode } from "../src/discord/links.ts";
 import type { EditBody, MessageBody } from "../src/discord/rest.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { SCRATCH } from "./scratch.ts";
+import { RULE_STARTER } from "../src/workflow/types.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-wf-alerts-"));
@@ -30,11 +32,11 @@ class FakeRest implements DmRest {
   async overwriteGuildCommands() {}
 }
 
-test("a workflow waiting for an answer reaches operators and maintainers with write access, once, within the hourly limit", async () => {
+test("a workflow waiting for an answer reaches its starter and approver while they may answer, once, within the hourly limit; a rule row reaches nobody", async () => {
   const now = Date.now(), old = new Date(now - 30 * 3_600_000).toISOString(), at = new Date(now).toISOString();
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: old, pipeline: 1 }));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
-  for (const n of [2, 3, 4]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: `PR ${n}`, body: "", author: "x", head_oid: "sha", created_at: old, updated_at: old, labels: "[]" }));
+  for (const n of [2, 3, 4, 5]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: `PR ${n}`, body: "", author: "x", head_oid: "sha", created_at: old, updated_at: old, labels: "[]" }));
   for (const [login, role] of [["op", "operator"], ["mia", "maintainer"], ["vi", "viewer"]]) await db.run(db.k.insertInto("access").values({ login, role }));
   await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }));
   await db.run(db.k.insertInto("repo_permissions").values({ login: "mia", repo: "app", permission: "write", checked_at: at }));
@@ -56,22 +58,25 @@ test("a workflow waiting for an answer reaches operators and maintainers with wr
   assert.match(await alertsOn("1"), /Alerts are on/);
   assert.match(await alertsOn("2"), /Alerts are on/);
 
-  const workflow = (n: number, state: string, blocker: string | null) => db.run(db.k.insertInto("item_workflows").values({
-    repo: "app", number: n, kind: "pr", entry: "review", state, started_by: "op", started_at: at, started_via: "cli", blocker, rec: null, rec_at: new Date(Date.now() + 1000).toISOString(), updated_at: at,
+  const rec = JSON.stringify({ text: "Merge it.", parts: { fix: [], drop: [] }, merges: true });
+  const workflow = (n: number, by: string, approvedBy: string | null = null) => db.run(db.k.insertInto("item_workflows").values({
+    repo: "app", number: n, kind: "pr", entry: "review", state: "recommending", started_by: by, approved_by: approvedBy, started_at: at, started_via: "cli", blocker: null, rec, rec_at: new Date(Date.now() + 1000).toISOString(), updated_at: at,
   }));
-  await workflow(2, "recommending", null);
+  await workflow(2, "op", "mia");
+  await workflow(5, RULE_STARTER);
   await alerts.sync();
-  assert.deepEqual(rest.sent.map((m) => m.channelId).sort(), ["dm-1", "dm-2"], "the viewer gets none");
-  assert.match(rest.sent[0]!.body.content ?? "", /app#2/);
+  assert.deepEqual(rest.sent.map((m) => m.channelId).sort(), ["dm-1", "dm-2"], "the starter and the approver; the viewer gets none");
+  assert.ok(rest.sent.every((m) => /app#2/.test(m.body.content ?? "")), "the rule row asks nobody");
   assert.match(rest.sent[0]!.body.content ?? "", /https:\/\/ac\.example\/items\/app\/2/);
 
   await alerts.sync();
   assert.equal(rest.sent.length, 2, "a recommendation is sent once");
 
-  await workflow(3, "recommending", null);
-  await workflow(4, "recommending", null);
+  await workflow(3, "op");
+  await workflow(4, "op");
   await alerts.sync();
   assert.equal(rest.sent.filter((m) => m.channelId === "dm-1").length, 2, "the hourly limit holds the third message back");
+  assert.equal(rest.sent.filter((m) => m.channelId === "dm-2").length, 1, "a maintainer who neither started nor approved an item is not asked");
 
   // A pass that stops half-way has recorded what it sent: the next one does not send it again.
   await db.run(db.k.deleteFrom("discord_alert_msgs"));

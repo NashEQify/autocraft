@@ -25,6 +25,8 @@ import type {
   MaintainStats,
   MaintainItems,
   MaintainItemsQuery,
+  BrowseQuery,
+  BrowseResult,
   MaintainCommandResult,
   MaintainItem,
   MaintainReply,
@@ -33,7 +35,6 @@ import type {
   LiveBoard,
   SecurityList,
   FindingPageData,
-  CardEdit,
   NextPage,
   AccessOverview,
   McpTokenCreated,
@@ -48,6 +49,8 @@ import type {
   ItemTraceQuery,
   ItemTraceUnchanged,
   ItemPageUnchanged,
+  ItemChat,
+  ItemChatUnchanged,
   AgentRunFilter,
   RefusalBreakdown,
   RefusalWindow,
@@ -116,8 +119,6 @@ import type {
   AreaDef,
   AreaEditBody,
   AreaStep,
-  Conversation,
-  ConversationCard,
 } from "./types";
 
 /** The dashboard API as the frontend sees it. The mock and the HTTP client both implement it. */
@@ -133,19 +134,6 @@ export interface Api {
   repos(): Promise<RepoName[]>;
   /** Owners of the visible repos that are not storytold's, by repo name. */
   repoOwners(): Promise<Record<string, string>>;
-  /** Opus conversations, one per item. Writes are for operators; a message is refused while Opus has not answered the last one. */
-  conversations: {
-    get(repo: RepoName, number: number): Promise<Conversation>;
-    /** `ask: false` posts the message without asking Opus (no reply is expected). */
-    say(repo: RepoName, number: number, text: string, ask?: boolean): Promise<Conversation>;
-    /** Withdraws the maintainer's message that waits for Opus (Conversation.canWithdraw). */
-    withdraw(repo: RepoName, number: number): Promise<Conversation>;
-    /** Changes a proposed comment card's `text`. */
-    editCard(id: number, edit: CardEdit): Promise<ConversationCard>;
-    /** Runs the card as shown: `digest` is the shown card's. */
-    doCard(id: number, digest: string): Promise<ConversationCard>;
-    dismissCard(id: number): Promise<ConversationCard>;
-  };
   /** A repo's area list. Reading is for everyone who sees the repo; every write is for whoever runs the repo (operator, or maintainer with write). */
   areas: {
     get(repo: RepoName): Promise<RepoAreas>;
@@ -181,15 +169,18 @@ export interface Api {
     queue(): Promise<MaintainQueueMeta>;
     /** Stats: headline numbers and merges per day for 7 or 30 days. */
     stats(period: "7d" | "30d"): Promise<MaintainStats>;
-    /** Items: four lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
+    /** Items: three lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
     items(query: MaintainItemsQuery): Promise<MaintainItems>;
+    /** The Items browser: one page of the items matching a search with qualifiers; the page's project narrows it. */
+    browse(query: BrowseQuery): Promise<BrowseResult>;
     /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
     /** `asked`: the `asked` of the rows shown, by repo#number. */
     command(text: string, asked?: Record<string, string>): Promise<MaintainCommandResult>;
     /** Repos: every tracked repo the reader may see with its counts, Automatic state and paused steps. */
     repos(): Promise<MaintainRepo[]>;
     /** Per visible repo, the started items that wait for an answer; repos with none are left out. */
-    waiting(): Promise<Record<RepoName, number>>;
+    /** Open questions addressed to the reader. */
+    asked(): Promise<{ count: number }>;
     /** A registered workflow control (resume a breaker, switch Automatic); answers with the line every surface shows. */
     control(input: { control: "resume-breaker"; key: string } | { control: "set-automatic"; repo: RepoName; on: boolean }): Promise<{ ok: boolean; line: string }>;
   };
@@ -204,6 +195,14 @@ export interface Api {
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
+  /** The item's conversations with AutoCraft: what people said, AutoCraft's replies and work, GitHub and Discord activity folded into lines. `since` as for `itemTrace`. */
+  itemChat: {
+    get(repo: RepoName, number: number, since?: string): Promise<ItemChat | ItemChatUnchanged>;
+    /** Posts the reader's message to one conversation; `lines` is what AutoCraft understood or why nothing ran. */
+    send(repo: RepoName, number: number, conversation: string, text: string): Promise<{ chat: ItemChat; lines: string[] }>;
+    /** Withdraws the message that waits for Opus (a said entry's canWithdraw). */
+    withdraw(repo: RepoName, number: number): Promise<ItemChat>;
+  };
   /** The item in brief, for the hover card on its number. */
   itemPeek(repo: RepoName, number: number): Promise<ItemPeek>;
   /** Staff: all findings grouped by what they need. */

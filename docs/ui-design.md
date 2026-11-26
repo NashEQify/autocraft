@@ -86,35 +86,32 @@ Rules:
 
 ### Project scope
 
-- The sidebar and the phone drawer hold the project picker, with each project's count of items waiting for an answer.
+- The sidebar and the phone drawer hold the project picker.
 - A single `repo` in a list URL wins over the saved pick; a URL with several repositories picks no project. Item and settings pages are not scoped.
 - Picking a project replaces the list URL; it adds no history entry. While a project is picked, lists hide their own repository control.
 
 ### Items
 
-- `/items` is one browser. The toolbar has search on its own row, then State, Type, Classification, Repository, Area, Type label and Flag. The toolbar's own width sets its columns: seven from 1258 px, three from 488 px, otherwise two.
-- Area lists the areas of the one repository shown, plus Any area and No area (`area=none`); with no repository or several it offers only those two. Area applies with or without a phase. Group (under More filters, list mode only) set to By area (`group=area`) puts each area's rows under a heading with its count, areas by name and No area last; rows show their area.
-- On phones (< 861 px) search, State and Type stay in the first row. A Filters button opens the other controls inline; while it is shut, a line lists the filters it holds.
-- Phase is picked below the desktop toolbar or in the phone Filters panel; Home's phase tiles link to `/items?phase=…`. With a phase set, State, Classification, Type label and Flag read "By phase" and are disabled, and Clear phase returns to the regular list. Phase and classification filters never combine.
-- Each applied filter shows as a control value or a removable chip, and Reset clears them all. A URL value the endpoint does not take is listed as not applied. A field with several values shows them all (`Settled + Classifiers disagree`).
-- A control change adds one history entry; typing in search or author replaces the current one.
-- `open=repo#number` opens a row's details; filter and paging changes close them. `peek` links open the same row, and `/items/filters` redirects to `/items`.
+- `/items` is one browser: the search box with qualifiers on its own row (the phone Filters button beside it), then the views as chips (one sideways-scrolling row on phones, the picked one kept in sight), then the quick filters (in a side sheet on phones). Grammar and views: dashboard-spec.md, Items.
+- Each quick filter is a select over one qualifier; Label, Priority, Area, Author and Sort read "Label: bug" when set. A value typed in the box that a list lacks still shows as picked. Qualifiers the server did not apply are listed as not applied, in warning text.
+- Every change of the query adds one history entry; the query and the page offset are the URL (`?q=is:open+label:bug&offset=50`).
+- Rows are `ItemRef` rows, stretched; on phones the second line holds the markers, two labels and "+n", CI, counts, author and time; on desktop all labels, classification, size and area, with CI, counts and the linked item in a right-hand column.
 
 ### Home
 
-- One Task Runner line first ("0 Task Runners connected", "3 others available"), then what waits for the reader's answer, what the reader started, problems, stuck items and the live board.
-- Each row has its item link and GitHub button, the one recommendation in a sentence, and the plain-text answer box: `yes`, or another command (see the Commands section of pipeline.md). Arrow keys, Home/End and `j`/`k` move between rows, `p` opens the preview and `o` the item page.
+- One Task Runner line first ("0 Task Runners connected", "3 others available"), then problems, then the reader's own items: those they started, approved, held, resumed, answered or wrote about, newest conversation entry first. Show more opens `/items?filter=mine`. Viewers see the recently updated items of the repos they can see instead.
+- Each row has its item link and GitHub button and the conversation's last message. A row whose open question is addressed to the reader is marked, and the Home entry in the sidebar counts those questions.
 - Editable fields use 16 px text on phones, so the page does not zoom on focus.
 
 ### Items
 
-- The Items page lists what needs an answer, what was started, what AutoCraft works by itself and the rest, with search, filters and a command box that takes a command and a list of items.
+- The Items page is one paged list with a search box that takes qualifiers, a row of views and quick filters, and a command box that takes a command and a list of items (dashboard-spec.md, Items).
 
 ### Item page
 
-- The AutoCraft side shows the status (steps, numbered parts and the recommendation), the command box and the controls, then signals, security, the implementation, screenshots, the conversation with the model and the History. Model-call and tool details load when opened.
-- The GitHub side sits beside the AutoCraft side from 1024 px and below it from 768 px. Phones show one side at a time with an AutoCraft/GitHub switch; viewers start on GitHub.
-- A link to `#hist-…` or `#gh-…` opens the side and the section that hold the target, then scrolls to it.
+- A header with the status, the next step and badges (weight, duplicates, outside hold, security findings for staff), over the chat with AutoCraft: people's messages from every surface, AutoCraft's replies and recommendations, its work rows, and folded GitHub and Discord lines. Holds and paused steps show as a notice with their button above the composer.
+- The side dock holds the GitHub and Events tabs beside the chat, resizable, with a width remembered per viewer and tab. Phones show Chat, GitHub and Events as tabs under the header.
+- `?tab=github|events&event=<id>` opens a tab, and an event in Events; a work row opens its event.
 
 ## 5. Extensibility
 
@@ -139,12 +136,11 @@ interface FeatureModule {
 
 ## 6. Screens
 
-### Item status and command box
+### Item status and chat
 
 - The status names the entry the item runs from (review, fix-up, implement or merge queue), the step it is at, and who started or approved it ("approved by mira", "held by david").
-- The plan is a numbered list of parts (findings and changes). `drop 2` removes a part by number or by words of its title.
-- The recommendation is one plain sentence of what AutoCraft does next and whether it then merges or comes back. Its reason stands under it when the model gave one.
-- The command box takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `hold`). Text that is not fully understood runs nothing; AutoCraft shows what it read. Every accepted answer gets one confirmation line.
+- A recommendation is AutoCraft's message in the chat: the findings and changes as a numbered list, then one plain sentence of what AutoCraft does next and whether it then merges or comes back. `drop 2` removes a part by number or by words of its title.
+- The composer takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `hold`). Text that is not fully understood runs nothing; AutoCraft replies with what it read. Every accepted answer gets one confirmation line.
 - Weight shows as a word next to the item when it is not normal.
 
 Description rendering is for untrusted input: raw HTML is dropped, only `http(s)`, `mailto`, relative and anchor links survive, links open in a new tab with `rel="noopener noreferrer nofollow"`, and only GitHub-hosted images load inline. The CSP allows only same-origin images, so the renderer sends images on the hosts the server allows through the image proxy; others show as a link.

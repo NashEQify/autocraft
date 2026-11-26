@@ -84,6 +84,8 @@ export type { FunnelFacts };
 
 export type ItemsFilter = {
   show: "open" | "backlog" | "closed" | "merged"; filters: ("security" | "outside" | "stuck" | "duplicates")[]; areas: string[]; text: string | null; refs: Ref[]; limit: number;
+  /** Only these items (`repo#number`); an empty list matches none. */
+  mine?: string[];
   /** The order `limit` cuts open items in: latest change, or the weight (`normalWeight` without a workflow), the rank, then the latest change. */
   sort: "priority" | "updated"; normalWeight: number;
 };

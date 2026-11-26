@@ -42,7 +42,8 @@
   [role="button"] {
     border-radius: 3px;
   }
-  svg[viewBox="0 0 256 256"] {
+  /* Phosphor icons default to 1.15em. :where() keeps the rule at zero specificity, so size and display utilities on an icon apply. */
+  :where(svg[viewBox="0 0 256 256"]) {
     display: inline-block;
     width: 1.15em;
     height: 1.15em;

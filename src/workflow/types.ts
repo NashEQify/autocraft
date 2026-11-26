@@ -47,6 +47,8 @@ export type PlanPart = {
 export type Recommendation = {
   /** One plain sentence; either written by the model step that produced it or built from a rule key. */
   text: string;
+  /** Why the automatic merge rule stopped, as a phrase ("the review is unsure"): set on the recommendation of a rule row (auto-stop.ts). */
+  stop?: string;
   /** What a yes runs. */
   parts: { fix: number[]; drop: number[] };
   merges: boolean;
@@ -124,6 +126,8 @@ export type ItemWorkflow = {
   /** Who holds it, and since when (state `stopped`). */
   stoppedBy: string | null;
   stoppedAt: string | null;
+  /** A row the automatic merge rule started: the person whose answer last ran on it. Its questions go to them (asked.ts). */
+  takenBy: string | null;
   blocker: Blocker | null;
   blockerParams: Record<string, unknown> | null;
   rec: Recommendation | null;

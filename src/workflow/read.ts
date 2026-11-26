@@ -85,12 +85,16 @@ const nameOf = (repo: string): string => lower(repo.split("/").pop()!);
 
 const sameRef = (a: ItemRef, b: ItemRef): boolean => a.number === b.number && nameOf(a.repo) === nameOf(b.repo);
 
-/** Items a text names, each once: `owner/name#n`, `name#n`, a GitHub URL, and with `repo` a bare `#n`. */
+/**
+ * Items a text names, each once: `owner/name#n`, `name#n`, a GitHub URL, and with `repo` a bare `#n`. A written owner stays in `repo`, so
+ * the caller's tracked-repo check refuses another owner's repo of the same name.
+ */
 export function refsIn(text: string, repo?: string): ItemRef[] {
   const out: ItemRef[] = [];
-  const add = (r: ItemRef): void => { if (!out.some((o) => sameRef(o, r))) out.push(r); };
-  for (const m of text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)/gi)) add({ repo: m[2]!, number: Number(m[3]) });
-  for (const m of text.matchAll(/(?<![\w./#-])(?:[\w.-]+\/)?([\w.-]+)#(\d+)(?!\d)/g)) add({ repo: m[1]!, number: Number(m[2]) });
+  const full = (r: ItemRef): string => (r.repo.includes("/") ? lower(r.repo) : `${lower(ownerOf(r.repo))}/${lower(r.repo)}`);
+  const add = (r: ItemRef): void => { if (!out.some((o) => o.number === r.number && full(o) === full(r))) out.push(r); };
+  for (const m of text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)/gi)) add({ repo: `${m[1]!}/${m[2]!}`, number: Number(m[3]) });
+  for (const m of text.matchAll(/(?<![\w./#-])((?:[\w.-]+\/)?[\w.-]+)#(\d+)(?!\d)/g)) add({ repo: m[1]!, number: Number(m[2]) });
   if (repo) for (const m of text.matchAll(/(?<![\w./#-])#(\d+)(?!\d)/g)) add({ repo, number: Number(m[1]) });
   return out;
 }

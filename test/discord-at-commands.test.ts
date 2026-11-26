@@ -81,6 +81,16 @@ test("a reply to a message that names items runs on the one named, then on all o
   assert.equal(posted.length, 1);
   assert.deepEqual(posted[0]!.body.allowed_mentions, { parse: [] });
   assert.ok((await followOf(db, keys, threadTarget(keys, thread.id)))!.items.some((i) => i.number === 4));
+  // The command is a message in each item's chat, linked to the event it wrote, and keyed so the chat leaves out its mention line.
+  const said = await db.all(db.k.selectFrom("main.chat_messages as m").innerJoin("main.chat_conversations as c", "c.id", "m.conversation_id")
+    .select(["c.number", "m.author", "m.via", "m.body", "m.payload", "m.workflow_event_id"]).where("m.body", "=", "review all"));
+  assert.deepEqual(said.map((m) => Number(m.number)).sort(), [4, 7]);
+  for (const m of said) {
+    assert.equal(m.author, "nora");
+    assert.equal(m.via, "discord");
+    assert.ok(m.workflow_event_id);
+    assert.equal(JSON.parse(String(m.payload)).msgHash, keys.hash("message", "c-all"));
+  }
 });
 
 test("a sender with no linked login gets one short reply and nothing runs", async () => {

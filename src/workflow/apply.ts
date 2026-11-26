@@ -33,7 +33,7 @@ import { premergeParts } from "./premerge.ts";
 import { atBlocker } from "./recommend.ts";
 import { isLive, premergeStopped, resolve, type Refusal, type Run } from "./resolve.ts";
 import { attributionLines, confirmLine, currentStep, listText, recommendationLine, recommendationText, replyLine, stateLine, stepsFor, utcClock, workflowSteps, type Clock } from "./status.ts";
-import { asksForApprover, heldWork, openRecommendation, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
+import { asksForApprover, heldWork, openRecommendation, RULE_STARTER, WEIGHT_NORMAL, type CloseReason, type HeldWork, type ItemKind, type ItemRef, type ItemWorkflow, type Parsed, type QuestionRef, sameQuestion, type Surface, type WorkflowEventKind } from "./types.ts";
 import { takenOver } from "./work.ts";
 
 /**
@@ -524,6 +524,8 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null });
   if (r.answers) Object.assign(patch, { rec: null, recAt: null, recHead: null, blocker: null, blockerParams: null });
+  // A person's answer takes a row of the automatic merge rule over: its next questions go to them.
+  if (r.answers && live.startedBy === RULE_STARTER && by !== RULE_STARTER) patch.takenBy = by;
   // The person approved or answered at this head: commits they could see are no longer new (blocker 2 counts from here). An option of an
   // implementation's question is about its work, not about a head.
   if (r.approve || r.answers) {
