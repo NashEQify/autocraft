@@ -341,7 +341,7 @@ The move (`autocraft migrate`, also run at the first start of 1.3.0, before the 
 | `calls pick <id>`, `calls unpick <id>` | `pick_model_call`, `unpick_model_call` | "Run on my Task Runner" and its undo (maintainers and operators). |
 | `calls mine` | `my_work` | Today's calls on your machine and your Task Runners. |
 | `settings` | `my_settings` | Your reserve, repos, calls at once and interactive slots (maintainers and operators). |
-| `settings set [--reserve <5h> <weekly>] [--max-calls N \| --no-max-calls] [--repos <a,b>\|all] [--interactive-slots N]` | `set_my_settings` | Changes them with the checks and audit rows of `PUT /api/me/settings`; `--reserve` takes whole percents from 0 to 90 for both windows. |
+| `settings set [--reserve <5h> <weekly>] [--max-calls N \| --no-max-calls] [--repos <a,b>\|all] [--interactive-slots N] [--manual-only on\|off]` | `set_my_settings` | Changes them with the checks and audit rows of `PUT /api/me/settings`; `--reserve` takes whole percents from 0 to 90 for both windows. |
 | `repos` | `list_repos` | Tracked repos with their fix-ups waiting. |
 | `fixups [--repo R] [--limit N]` | `list_fixups` | PRs whose review fixes the pipeline could not apply. |
 | `call [<tool> [args]]` | any | Raw access: alone it lists the tools the credential is offered; `call <tool> --help` prints a tool's description and arguments; a tool with one required text argument takes it bare. `call --guide` prints the server's instructions for an agent. |

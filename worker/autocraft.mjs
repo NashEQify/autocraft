@@ -4904,8 +4904,8 @@ export const CLI_COMMANDS = [
   { path: ["calls", "pick"], tool: "pick_model_call", args: ["id"], usage: "<id>", summary: "reserve a call for your own Task Runners", why: pickWhy },
   { path: ["calls", "unpick"], tool: "unpick_model_call", args: ["id"], usage: "<id>", summary: "end a pick", why: pickWhy },
   { path: ["calls", "mine"], tool: "my_work", usage: "", summary: "today's calls on your machine, and your Task Runners", why: () => "needs one of your Task Runners reporting in, while the server is in the user-local inference mode" },
-  { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once and interactive slots", why: () => "only maintainers and operators have settings" },
-  { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
+  { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once, interactive slots and manual only", why: () => "only maintainers and operators have settings" },
+  { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N] [--manual-only on|off]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
   { path: ["do"], tool: "command", args: ["item", "text"], usage: "<item> \"<command>\"", summary: "send AutoCraft a command on an item, as on GitHub: \"fix-up and merge\", \"yes\", \"stop\"", why: commandWhy },
   { path: ["item"], tool: "get_item", args: ["item"], usage: "<item>", summary: "an item's workflow: state, open recommendation, who started and approved it" },
   { path: ["items"], tool: "my_items", usage: "", summary: "items waiting for your answer, and the ones you started or approved" },
@@ -5091,8 +5091,8 @@ export function parseToolArgs(tool, argv, cmd) {
         if (spec.minimum !== undefined && out < spec.minimum) throw bad(`${v} is below the minimum ${spec.minimum}`);
         if (spec.maximum !== undefined && out > spec.maximum) throw bad(`${v} is above the maximum ${spec.maximum}`);
       } else if (st === "boolean") {
-        if (!/^(true|false)$/.test(v)) throw bad(`${JSON.stringify(v)} is not true or false`);
-        out = v === "true";
+        if (!/^(true|false|on|off)$/.test(v)) throw bad(`${JSON.stringify(v)} is not on or off`);
+        out = v === "true" || v === "on";
       } else if (st === "object" || st === "array") {
         try { out = JSON.parse(v); } catch { throw bad("not valid JSON"); }
       }
@@ -5122,7 +5122,7 @@ export function parseToolArgs(tool, argv, cmd) {
     if (!key) throw new UsageError(`unknown option ${a.slice(0, eq < 0 ? undefined : eq)} for ${name}; valid: ${valid()}`);
     const t = typeOf(props[key]);
     if (t === "boolean") {
-      if (inline === undefined && /^(true|false)$/.test(argv[i + 1] ?? "")) inline = argv[++i];
+      if (inline === undefined && /^(true|false|on|off)$/.test(argv[i + 1] ?? "")) inline = argv[++i];
       args[key] = inline === undefined ? true : typed(key, inline);
       continue;
     }
