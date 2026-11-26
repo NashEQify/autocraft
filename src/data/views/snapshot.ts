@@ -328,7 +328,11 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
         const keys = t.key.join(", ");
         const on = t.key.map((k) => `l.${k} = p.${k}`).join(" AND ");
         for (const x of [`pg_${t.name}`, `chg_${t.name}`, `new_${t.name}`]) out.exec(`DROP TABLE IF EXISTS temp.${x}`);
-        out.exec(`CREATE TEMP TABLE pg_${t.name} (${keys}, h, PRIMARY KEY (${keys}))`);
+        // The key columns carry the snapshot's types: a typeless column has another affinity than the snapshot's INTEGER
+        // `number`, so the compare below would search this key by `repo` alone, scanning a repository's keys per row.
+        // That compare runs inside the Postgres read, which the server ends after 10 s idle in a transaction.
+        const typed = t.key.map((k) => `${k} ${INTEGER_COLUMNS.has(k) ? "INTEGER" : "TEXT"}`).join(", ");
+        out.exec(`CREATE TEMP TABLE pg_${t.name} (${typed}, h TEXT, PRIMARY KEY (${keys}))`);
         const stage = inserter(out, `temp.pg_${t.name}`, [...t.key, "h"]);
         for await (const rows of pgPages(db, t, (q) => q.select([...t.key.map((k) => sql.ref(k).as(k)), t.hash().as("h")]), pageSize * 10)) {
           for (const r of rows) stage.add([...t.key.map((k) => cell(k, r[k])), r.h as string]);
