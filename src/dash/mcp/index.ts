@@ -275,7 +275,7 @@ async function listRepos(env: McpEnv): Promise<ToolResult> {
 }
 
 const NO_ANSWER = "this credential cannot send commands: on the dashboard's Connect page, make a token that sends commands, or allow commands for this Task Runner";
-const PERMISSION_HINT = " (your GitHub permission is read with your newest dashboard session; sign in to the dashboard if you have none)";
+const PERMISSION_HINT = " (your GitHub permission is read with your newest dashboard session, or through the GitHub App when you have none; sign in to the dashboard if neither can read it)";
 
 /** The one place that refuses the command tool to a credential made without it. */
 function requireCommands(env: McpEnv): void {
@@ -359,7 +359,7 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
+  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
   }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } });
   const text = done.lines.join("\n");

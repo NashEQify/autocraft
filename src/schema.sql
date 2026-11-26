@@ -2589,6 +2589,12 @@ CREATE TABLE IF NOT EXISTS discord_link_codes (
   login TEXT NOT NULL,
   expires_at TEXT NOT NULL
 ) WITHOUT ROWID;
+-- Discord users who asked the bot to stop tracking their messages (`/autocraft optout`, src/discord/store.ts). `user_hash` is a keyed
+-- hash of the Discord user id. Their messages record no mentions; what they send to the bot still runs. Bookkeeping: not a change topic.
+CREATE TABLE IF NOT EXISTS discord_optouts (
+  user_hash TEXT PRIMARY KEY,
+  opted_out_at TEXT NOT NULL
+) WITHOUT ROWID;
 
 -- Decision alerts by direct message (src/discord/alerts.ts). A row of `discord_alerts` is an opted-in linked account: `sealed` holds the
 -- direct-message channel id. A row of `discord_alert_msgs` is one message about a decision, kept to edit it after the answer; `sealed` is

@@ -38,6 +38,8 @@ export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage
   const have = (await dc.loadMessageMentions(db, [msgHash])).get(msgHash) ?? [];
   // An edit event may carry no author: keep the one sealed with the existing rows.
   const author = m.author?.id ? keys.hash("author", m.author.id) : have.map((h) => keys.open(h.sealed, msgHash)?.author).find((a) => a);
+  // With no author the opt-out cannot be checked, so such an event records nothing new.
+  if (!author) refs = refs.filter((r) => have.some((h) => h.repo === r.repo && h.number === r.number));
   const sealed = keys.seal({ guildId, channelId: m.channel_id, messageId: m.id, at: m.timestamp ?? new Date().toISOString(), ...(author && { author }) }, msgHash);
   const fresh = refs.filter((r) => !have.some((h) => h.repo === r.repo && h.number === r.number)).length;
   if (fresh && !mentionLimits.allow(Date.now(), [
@@ -78,11 +80,23 @@ export async function forgetAuthor(db: Db, keys: DiscordKeys, userId: string): P
   return await dc.removeMentionRows(db, mine);
 }
 
+/** `/autocraft optout`: the user's messages stop being recorded and their mention rows go. Returns whether the user was opted in, and the rows removed. */
+export async function optOut(db: Db, keys: DiscordKeys, userId: string): Promise<{ changed: boolean; rows: number }> {
+  const changed = await dc.setOptedOut(db, keys.hash("author", userId), true, new Date().toISOString());
+  return { changed, rows: await forgetAuthor(db, keys, userId) };
+}
+
+/** `/autocraft optin`: the user's new messages are recorded again. Returns whether the user was opted out. */
+export const optIn = async (db: Db, keys: DiscordKeys, userId: string): Promise<boolean> =>
+  await dc.setOptedOut(db, keys.hash("author", userId), false, new Date().toISOString());
+
 /** Gateway events that change mention rows. Reads and edits happen in watched channels only; a delete always applies. Returns the message when this event newly recorded it against items, else null. */
 export async function handleDispatch(db: Db, keys: DiscordKeys, type: string, d: unknown): Promise<{ channelId: string; messageId: string; guildId?: string } | null> {
   const x = d as Record<string, unknown> & Partial<DiscordMessage> & { ids?: unknown; unavailable?: boolean };
   if (type === "MESSAGE_CREATE" || type === "MESSAGE_UPDATE") {
     if (typeof x.id !== "string" || typeof x.channel_id !== "string" || !await isWatched(db, x.channel_id)) return null;
+    // An opted-out author's message is not recorded, so it is not flagged or reacted to either; what it asks the bot still runs (pings.ts).
+    if (x.author?.id && await dc.isOptedOut(db, keys.hash("author", x.author.id))) return null;
     const guildId = typeof x.guild_id === "string" ? x.guild_id : await channelGuild(db, x.channel_id);
     const added = await recordMessage(db, keys, x as DiscordMessage, guildId);
     return added > 0 ? { channelId: x.channel_id, messageId: x.id, guildId } : null;

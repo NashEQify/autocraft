@@ -1,5 +1,5 @@
-// `/autocraft link`, `unlink`, `stats` and `status`. Replies are visible to the caller only. Everything they say about
-// items and counts comes from the public status layer (src/public/status.ts).
+// `/autocraft link`, `unlink`, `optout`, `optin`, `stats`, `status`, `do` and `help`. Replies are visible to the caller only. Everything
+// they say about items and counts comes from the public status layer (src/public/status.ts).
 import { audit } from "./audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
@@ -12,6 +12,10 @@ import { prepareDo, runDo } from "./do.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { plain } from "./reply.ts";
 import type { Db } from "../db/index.ts";
+import { envVar } from "../env.ts";
+import { DISCORD_PRIVACY_PATH } from "../dash/server/discord-privacy.ts";
+import { DISCORD_TERMS_PATH } from "../dash/server/discord-terms.ts";
+import { optIn, optOut } from "./store.ts";
 
 const ATTEMPTS = { n: 5, ms: 60_000 };
 const READ_LIMIT = { n: 10, ms: 60_000 };
@@ -34,43 +38,61 @@ export function formatStatus(s: PublicStatus): string {
   return `${s.ref} ${plain(s.title).slice(0, 100)}\n${s.step}${place}`;
 }
 
-/** The `/autocraft do` lines of Help, generated from the command vocabulary. */
+/** The command words and weight words of Help, generated from the command vocabulary. */
 export function doHelp(): string[] {
   return [
-    t("`/autocraft do text:<command>` sends a command to AutoCraft as your linked login. Name items as repo#number, with a list after a colon: `merge: photocraft#123 photocraft#456`."),
-    t("Commands: {commands}. Weight words: {words}. Help in the dashboard says what each does.", {
-      commands: COMMANDS.map((c) => `\`${c.usage}\``).join(", "),
-      words: WEIGHT_HELP.map((w) => `${t(w.word)} (${t(w.weight)})`).join(", "),
-    }),
+    t("Command words: {commands}", { commands: COMMANDS.map((c) => `\`${c.usage.replace(/\s*\[.*\]$/, "")}\``).join(" · ") }),
+    t("Weight words: {words}", { words: WEIGHT_HELP.map((w) => `${w.word.startsWith("(") ? t("none") : `\`${w.word}\``} (${t(w.weight)})`).join(" · ") }),
   ];
 }
 
-/** The @-command lines of Help: commands in a channel, replies to messages that name items, and the thread. */
+/** The lines of Help on sending commands: privately, in a channel, as a reply, and in the thread AutoCraft answers in. */
 export function atHelp(): string[] {
   return [
-    t("`@AutoCraft review photocraft#123` in a watched channel sends the command in public, as `/autocraft do` does."),
-    t("Reply to a message that names items with `@AutoCraft review` (or `review all`) for all of them, or name one for that one only. Replies to posts of bots and webhooks, such as GitHub's integration, do not pick up their links."),
-    t("AutoCraft confirms in a thread and posts each item's status and result there. In the thread, `@AutoCraft fix-up and merge`, or a reply to its message, acts on the thread's items."),
+    t("`/autocraft do text:merge: photocraft#123 photocraft#456` sends it privately"),
+    t("`@AutoCraft review photocraft#123` in a watched channel sends it in public"),
+    t("Reply to a message that names items with `@AutoCraft review` for all of them, or name one"),
+    t("AutoCraft answers in a thread and posts each item's status and result there"),
+    t("In that thread, `@AutoCraft fix-up and merge` or a reply to AutoCraft acts on the thread's items"),
   ];
 }
 
-/** Lists what the slash-command picker does not show: pings, the message command and the reaction. */
-export const HELP = [
-  "**AutoCraft**",
-  "`/autocraft search` opens a form. Pick the app and describe the problem or the idea to see matching issues; if none fits, AutoCraft helps write a new issue and opens it on GitHub, ready to submit.",
-  "`/autocraft status item:photocraft#123` shows where an issue or pull request is.",
-  ...doHelp(),
-  ...atHelp(),
-  "`/autocraft stats` shows counts for the public repos.",
-  "`/autocraft link` and `unlink` connect this Discord account to your AutoCraft login and remove the link (the code is under Link Discord in the dashboard menu).",
-  "`/autocraft alerts on|off` turns on direct messages about workflows that need your answer, once linked.",
-  "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues; text that starts with a command word is a command instead.",
-  "Right-click a message, then Apps › Find issue, to search with that message's text.",
-  "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
-].join("\n");
+/** `/autocraft help`: short sections for scanning, under Discord's 2,000-character limit. The links show only when the public base URL is known. */
+export function helpText(baseUrl: string | null): string {
+  const base = baseUrl?.replace(/\/+$/, "");
+  return [
+    `**${t("Find issues")}**`,
+    t("`/autocraft search` searches existing issues by a few words"),
+    t("`/autocraft report` reports a bug or requests a feature; AutoCraft helps write the issue"),
+    t("Right-click a message › Apps › Find issue searches with its text"),
+    t("`@AutoCraft <question>` in a watched channel replies with matching issues, in public"),
+    t("Reply to a message with `@AutoCraft` to search with that message's text"),
+    "",
+    `**${t("Status")}**`,
+    t("`/autocraft status item:photocraft#123` shows where an issue or pull request is"),
+    t("`/autocraft stats` shows counts for the public repos"),
+    "",
+    `**${t("Commands")}** ${t("(linked account with write access)")}`,
+    ...atHelp(),
+    ...doHelp(),
+    "",
+    `**${t("Your account")}**`,
+    t("`/autocraft link code:<code>` links your AutoCraft login (code: Link Discord in the dashboard menu)"),
+    t("`/autocraft unlink` removes the link"),
+    t("`/autocraft alerts on|off` sends direct messages when a workflow needs your answer"),
+    t("`/autocraft optout` stops recording your messages and deletes the records; commands still work"),
+    t("`/autocraft optin` records them again"),
+    "",
+    `**${t("Privacy")}**`,
+    t("AutoCraft's reaction means it counted the message for the items it names"),
+    t("Deleting a message deletes its record"),
+    ...(base ? [`[${t("Privacy notice")}](<${base}${DISCORD_PRIVACY_PATH}>) · [${t("Terms")}](<${base}${DISCORD_TERMS_PATH}>)`] : []),
+  ].join("\n");
+}
 
-export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps }): void {
+export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps; baseUrl?: string | null }): void {
   const { db, keys } = deps;
+  const help = helpText(deps.baseUrl === undefined ? envVar("BASE_URL") ?? null : deps.baseUrl);
   const tries = new Map<string, number[]>();
   /** Sliding window per key: false when `lim.n` uses are already inside it. Keys whose uses have all expired are dropped. */
   const allow = (key: string, lim: { n: number; ms: number }): boolean => {
@@ -95,6 +117,8 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
       { type: 1, name: "stats", description: "Counts for the public repos", options: [{ type: 3, name: "repo", description: "One repo; all public repos when left out", autocomplete: true }] },
       { type: 1, name: "status", description: "Where an issue or pull request is in AutoCraft", options: [{ type: 3, name: "item", description: "For example photocraft#123", required: true, max_length: 100 }] },
       { type: 1, name: "do", description: "Send a command to AutoCraft, for example: merge: photocraft#123", options: [{ type: 3, name: "text", description: "The command, then a colon and the items: review, urgent: photocraft#123 photocraft#456", required: true, max_length: 1000 }] },
+      { type: 1, name: "optout", description: "Stop recording your messages and delete their records" },
+      { type: 1, name: "optin", description: "Record your messages again after an opt-out" },
       { type: 1, name: "help", description: "What the AutoCraft bot can do" },
     ],
   };
@@ -131,7 +155,26 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {
-    await call.edit({ content: HELP });
+    await call.edit({ content: help });
+  });
+  ix.command("autocraft optout", null, async (call) => {
+    if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
+    // Each opt-out opens every mention row to find the caller's: limited like code entries.
+    if (!allow(`opt:${keys.hash("author", call.userId)}`, ATTEMPTS)) return void (await call.edit({ content: TOO_MANY }));
+    const r = await optOut(db, keys, call.userId);
+    if (r.changed || r.rows) await audit(db, "discord", "discord-optout", null, { rows: r.rows });
+    const deleted = r.rows === 1 ? t("Deleted the record of 1 message that named an issue or pull request.") : t("Deleted {n} records of your messages that named issues or pull requests.", { n: r.rows });
+    await call.edit({ content: [
+      r.changed ? t("You are opted out. AutoCraft no longer records your messages, flags them or reacts to them.") : t("You were already opted out."),
+      deleted,
+      t("Commands and searches you send to AutoCraft still work. `/autocraft optin` turns recording back on."),
+    ].join("\n") });
+  });
+  ix.command("autocraft optin", null, async (call) => {
+    if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
+    const changed = await optIn(db, keys, call.userId);
+    if (changed) await audit(db, "discord", "discord-optin", null);
+    await call.edit({ content: changed ? t("You are opted in. AutoCraft records your new messages that name issues or pull requests again.") : t("You are not opted out.") });
   });
   ix.command("autocraft status", null, async (call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
