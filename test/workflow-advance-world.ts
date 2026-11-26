@@ -79,12 +79,13 @@ export const ownPush = async (w: World, from: string, to: string, number = 2) =>
 };
 export const ANSWERS: [Surface, string][] = [["dashboard", "yes"], ["agent", "approve"], ["discord", "merge"], ["github", "yes"]];
 
-/** PR 2 in the merge queue, stopped at commits its author pushed (head "theirs"). */
+/** PR 2 in the merge queue, stopped at commits its author pushed (head "theirs") that the review round found beyond the approval. */
 export async function authorPushed(): Promise<World> {
   const w = await approvedReview();
   await w.pr(2, { label: "feature" });
   assert.equal((await answer(w, "merge")).outcome, "run");
   await w.synced(2, "theirs");
+  await w.outOfScope(2, "theirs");
   await advanceWorkflows(w.db);
   assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "author-commits");
   await pause();

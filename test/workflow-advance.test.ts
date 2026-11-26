@@ -31,7 +31,7 @@ test("each blocker stops an approved item and keeps its approval", async () => {
   const bigPatch = Array.from({ length: 450 }, (_, i) => `+line ${i}`).join("\n");
   const cases: [Blocker, (w: World) => Promise<unknown>][] = [
     ["major-finding", (w) => review(w, { head: "sha1", verdict: "hold" })],
-    ["author-commits", (w) => w.synced(1, "sha9")],
+    ["author-commits", async (w) => { await w.synced(1, "sha9"); await w.outOfScope(1, "sha9"); }],
     ["failed-twice", async (w) => { await fixup(w, { state: "failed" }); await fixup(w, { state: "refused" }); }],
     ["large-fix", (w) => fixup(w, { state: "pushed", files: ["src/lib.rs"], patch: bigPatch })],
     ["beyond-agreed", async (w) => {

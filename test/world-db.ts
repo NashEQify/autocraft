@@ -263,6 +263,12 @@ export async function world() {
         .run(n, o.head ?? await headOf(n), T0, verdict, o.reason ?? "looks right", fixes.length ? JSON.stringify(fixes) : null, o.sure === false ? 0 : 1);
       return w;
     },
+    /** A review at `head` that finds the author's new commits beyond what was approved (the review round, src/workflow/advance.ts). */
+    async outOfScope(n: number, head: string) {
+      await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, sure, mode, workflow, public_review) VALUES ('app', ?, ?, 'rv', ?, 'm', 'take', 'r', 1, 'full', ?, ?)`)
+        .run(n, head, new Date().toISOString(), JSON.stringify({ outside_purpose: null, recommendation: null, author_commits: { in_scope: false, note: "adds an exporter" } }), JSON.stringify({ summary: "The new commits add a file exporter.", points: [] }));
+      return w;
+    },
     /** The verification result at the head. */
     async verified(n: number, state = "passed") {
       await db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('app', ?, ?, 'tests', 'r', ?, ?)").run(n, await headOf(n), state, T0);
