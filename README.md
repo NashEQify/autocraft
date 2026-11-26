@@ -179,6 +179,7 @@ AutoCraft can count how often tracked items are mentioned in Discord channels yo
 3. Save the bot token in a file readable by the runner only (mode 600), and make a second file of at least 32 random characters for the key that encrypts stored message references (for example `openssl rand -base64 48`). Keep the key file: without it the stored links cannot be opened.
 4. Set `AUTOCRAFT_DISCORD_TOKEN_FILE` and `AUTOCRAFT_DISCORD_KEY_FILE` in the env file that both the dashboard and the runner load. The runner needs both paths. The dashboard needs only the key file path: with it the dashboard shows message links and offers Link Discord in the user menu; without it the dashboard shows counts only and hides Link Discord.
 5. Restart the runner. On the Discord page, switch on the channels to watch and enter the contact for deletion requests. The public notice is at `/privacy`.
+6. Optional, for the contributor role panel's web verification: under OAuth2 in the developer portal, add the redirect `<base URL>/verify/discord/callback` and copy the client secret into a file (mode 600). Set `AUTOCRAFT_DISCORD_CLIENT_ID` and `AUTOCRAFT_DISCORD_CLIENT_SECRET_FILE` for the dashboard, and add `<base URL>/verify/callback` to the GitHub App's callback URLs. Leave the path prefix `/verify` open in any access gate in front of the dashboard.
 
 ### Deployment
 

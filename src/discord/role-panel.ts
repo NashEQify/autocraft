@@ -4,6 +4,8 @@
 // GitHub name is never asked for. The channel and role are instance settings (Discord admin page or
 // `autocraft-server discord role-panel`); the guild is the channel's. The runner posts the panel when the settings
 // change, edits it in place at start, and deletes the old message when the channel moves or the feature is turned off.
+// A member with no linked account gets a link to the public /verify pages (src/dash/server/verify.ts), where the browser proves
+// both accounts; those pages leave a role request that watchRoleGrants carries out here, where the bot token is.
 import { execFile } from "node:child_process";
 import { LOGIN } from "../access.ts";
 import { exclusive } from "../async-seq.ts";
@@ -14,7 +16,7 @@ import { loginOf } from "./links.ts";
 import { RestError, type MessageBody } from "./rest.ts";
 import { WindowLimits } from "./window-limit.ts";
 import { deleteSetting, setting, settings, writeSetting } from "../data/control/index.ts";
-import { loadChannelGuilds } from "../data/discord/index.ts";
+import { finishRoleGrant, listOpenRoleGrants, loadChannelGuilds, type RoleGrant } from "../data/discord/index.ts";
 import { loadAuthorHistory } from "../data/mirror/index.ts";
 import { loadReporterSealed } from "../data/access/index.ts";
 import { AppReadError, readEnv, trackedOwner } from "../github/read.ts";
@@ -99,6 +101,8 @@ export type RoleRest = {
   deleteMessage(channelId: string, messageId: string): Promise<void>;
   pinMessage(channelId: string, messageId: string): Promise<void>;
   addMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void>;
+  /** A member's role ids; null when the user is not in the guild. */
+  memberRoles(guildId: string, userId: string): Promise<string[] | null>;
 };
 
 const saveState = async (db: Db, s: Omit<RolePanelState, "at">): Promise<RolePanelState> => {
@@ -156,6 +160,71 @@ export function watchRolePanel(db: Db, rest: RoleRest, log: (l: string) => void,
     } catch (e) {
       log(`discord: contributor role panel check failed: ${(e as Error).message}`);
       retryAt = Date.now() + RETRY_MS;
+    }
+  });
+  void poll.skip();
+  const timer = setInterval(() => void poll.skip(), POLL_MS);
+  timer.unref();
+  signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+}
+
+/**
+ * What a role request from the /verify pages came to: granted; already (the member had the role); not-member (the user is not in
+ * the panel's server); forbidden (the bot may not manage the role); failed; off (no role is configured).
+ */
+export type GrantResult = "granted" | "already" | "not-member" | "forbidden" | "failed" | "off";
+
+const grantAad = (id: string): string => `discord_role_grants:${id}`;
+
+async function grantOne(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void, cfg: RoleConfig | null, g: RoleGrant): Promise<{ result: GrantResult; user: string | null }> {
+  if (!cfg) return { result: "off", user: null };
+  const userId = keys.openText(g.userSealed, grantAad(g.id));
+  if (!userId) return { result: "failed", user: null };
+  const user = keys.hash("author", userId);
+  try {
+    const roles = await rest.memberRoles(cfg.guildId, userId);
+    if (roles === null) return { result: "not-member", user };
+    if (roles.includes(cfg.roleId)) return { result: "already", user };
+    await rest.addMemberRole(cfg.guildId, userId, cfg.roleId, `Contributor verification: ${g.login} has a merged pull request`);
+    return { result: "granted", user };
+  } catch (e) {
+    const forbidden = e instanceof RestError && e.status === 403;
+    log(forbidden
+      ? `discord: the bot may not give role ${cfg.roleId}: it needs Manage Roles, and its highest role must sit above that role`
+      : `discord: giving the contributor role failed: ${(e as Error).message}`);
+    return { result: forbidden ? "forbidden" : "failed", user };
+  }
+}
+
+/** Carries out the open role requests, oldest first; each result is written once and audited as a Verify press is. Returns how many it answered. */
+export async function runRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void): Promise<number> {
+  const open = await listOpenRoleGrants(db);
+  if (!open.length) return 0;
+  const cfg = await roleConfig(db);
+  let n = 0;
+  for (const g of open) {
+    const { result, user } = await grantOne(db, keys, rest, log, cfg, g);
+    await db.write(async () => {
+      if (!await finishRoleGrant(db, g.id, result, new Date().toISOString())) return;
+      n++;
+      await audit(db, g.login, "discord-role-verify", g.login, { result, ...(user && { user }), from: "web" });
+    });
+  }
+  return n;
+}
+
+/** Runs runRoleGrants at start and whenever a role request is written (the `discord-verify` change counter). */
+export function watchRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void, signal: AbortSignal): void {
+  let seq = -1;
+  const poll = exclusive(async () => {
+    try {
+      const s = (await db.seqs(["discord-verify"]))["discord-verify"] ?? 0;
+      if (s === seq) return;
+      seq = s;
+      await runRoleGrants(db, keys, rest, log);
+    } catch (e) {
+      log(`discord: contributor role requests failed: ${(e as Error).message}`);
+      seq = -1;
     }
   });
   void poll.skip();
@@ -230,10 +299,10 @@ export function installRolePanel(ix: Interactions, deps: RolePanelDeps): void {
     const login = await provenLogin(db, keys, userId);
     if (!login || !LOGIN.test(login)) {
       await record(null, "unlinked");
-      const where = deps.baseUrl ? t("Sign in to AutoCraft at {url} and open the Runner page.", { url: deps.baseUrl }) : t("Sign in to the AutoCraft dashboard and open the Runner page.");
+      if (deps.baseUrl) return void (await call.edit({ content: t("Verify on the web: {url}\nSign in with Discord and GitHub there; with a merged pull request you get the role.", { url: `${deps.baseUrl}/verify` }) }));
       return void (await call.edit({ content: [
         t("Link your GitHub account first, so AutoCraft knows which pull requests are yours:"),
-        `1. ${where}`,
+        `1. ${t("Sign in to the AutoCraft dashboard and open the Runner page.")}`,
         `2. ${t("Under Link Discord, get a code.")}`,
         `3. ${t("Type /autocraft link with that code in this server.")}`,
         `4. ${t("Press Verify again.")}`,

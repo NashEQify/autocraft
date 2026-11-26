@@ -57,7 +57,7 @@ export type Source = {
 export const TOPICS: string[] = [
   "repos", "sync", "items", "ranks", "stages", "checks", "mainci", "classify", "dupes", "reviews", "queue", "workflows", "workflow-events",
   "outside", "plans", "jobs", "limits", "usage", "agents", "envs", "build-features", "pr-builds", "nightly", "workspaces", "tasks", "actions",
-  "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "downloads", "security", "postmerge", "access", "settings",
+  "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "discord-verify", "downloads", "security", "postmerge", "access", "settings",
   "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "plan-inputs", "job-ends", "task-ends", "github", "auto-stops",
   "statement-sources",
 ];

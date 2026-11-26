@@ -144,6 +144,17 @@ export class RestClient implements DiscordRest {
     await this.#queue("PUT", `/guilds/${guildId}/members/${userId}/roles/${roleId}`, undefined, true, { "x-audit-log-reason": encodeURIComponent(reason.slice(0, 400)) });
   }
 
+  /** A guild member's role ids; null when the user is not a member of the guild. */
+  async memberRoles(guildId: string, userId: string): Promise<string[] | null> {
+    try {
+      const m = (await this.#queue("GET", `/guilds/${guildId}/members/${userId}`, undefined, true)) as { roles?: unknown };
+      return Array.isArray(m.roles) ? m.roles.filter((r): r is string => typeof r === "string") : [];
+    } catch (e) {
+      if (e instanceof RestError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
   async overwriteGuildCommands(applicationId: string, guildId: string, commands: CommandDef[]): Promise<void> {
     await this.#queue("PUT", `/applications/${applicationId}/guilds/${guildId}/commands`, commands, true);
   }

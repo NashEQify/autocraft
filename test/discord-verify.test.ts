@@ -1,0 +1,76 @@
+// The public /verify flow: Discord and GitHub sign-ins in one browser leave one role request for a member with a merged pull
+// request, the runner side gives the role, and a spent or expired OAuth state is refused.
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { FakeProvider } from "../src/dash/server/provider.ts";
+import { verifyRoute, type DiscordOAuth, type VerifyDeps } from "../src/dash/server/verify.ts";
+import { DiscordKeys } from "../src/discord/keys.ts";
+import { loginOf } from "../src/discord/links.ts";
+import { runRoleGrants, setRoleConfig, type RoleRest } from "../src/discord/role-panel.ts";
+import { saveChannels } from "../src/data/discord/index.ts";
+import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "./helpers/raw-db.ts";
+
+mkdirSync(SCRATCH, { recursive: true });
+const dir = mkdtempSync(join(SCRATCH, "discord-verify-"));
+const db = await connectDb(join(dir, "d.db"));
+const keys = new DiscordKeys("k".repeat(40));
+after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
+
+const GUILD = "100000000000000001", CHANNEL = "100000000000000002", ROLE = "100000000000000003", USER = "200000000000000001";
+await saveChannels(db, [{ channelId: CHANNEL, guildId: GUILD, guildName: "Server", name: "contributor-role" }]);
+await setRoleConfig(db, "test", { channelId: CHANNEL, roleId: ROLE });
+
+const discord: DiscordOAuth = {
+  authorizeUrl: (state, redirectUri) => `https://discord.invalid/authorize?${new URLSearchParams({ state, redirect_uri: redirectUri })}`,
+  userId: async (code) => (code === "dcode" ? USER : null),
+};
+const github = new FakeProvider(null);
+let now = Date.parse("2026-01-01T00:00:00Z");
+const deps: VerifyDeps = {
+  db, baseUrl: "https://dash.invalid", discord: () => discord, github: () => github, keys: () => keys, now: () => now,
+  check: async (_db, login) => ({ merged: login === "merger", via: "search" }),
+};
+const granted: { guild: string; user: string; role: string }[] = [];
+const rest: RoleRest = {
+  async createMessage() { return { id: "m" }; }, async editMessage() {}, async deleteMessage() {}, async pinMessage() {},
+  async addMemberRole(guild, user, role) { granted.push({ guild, user, role }); },
+  async memberRoles() { return []; },
+};
+
+const go = async (method: string, path: string, cookie = "") =>
+  await verifyRoute(deps, method, new URL(path, "https://dash.invalid"), new Map(cookie ? [["__Host-craft_verify", cookie]] : []), "n", async () => "");
+const param = (url: string | undefined, k: string): string => new URL(url ?? "", "https://dash.invalid").searchParams.get(k) ?? "";
+
+/** Starts a flow and passes the Discord step; returns the flow cookie and the GitHub authorization URL. */
+async function throughDiscord(): Promise<{ cookie: string; githubUrl: string }> {
+  const start = await go("POST", "/verify/discord");
+  const cookie = /^__Host-craft_verify=([^;]+);/.exec(start.cookies?.[0] ?? "")?.[1] ?? "";
+  const back = await go("GET", `/verify/discord/callback?code=dcode&state=${param(start.r.redirect, "state")}`, cookie);
+  return { cookie, githubUrl: back.r.redirect ?? "" };
+}
+
+test("a completed flow with a merged pull request leaves one role request that the runner grants; spent and expired states are refused", async () => {
+  const { cookie, githubUrl } = await throughDiscord();
+  const code = github.issueCode("merger", param(githubUrl, "code_challenge"), param(githubUrl, "redirect_uri"));
+  const callback = `/verify/callback?code=${code}&state=${param(githubUrl, "state")}`;
+  assert.equal((await go("GET", callback, cookie)).r.redirect, "/verify/done");
+  assert.equal((await go("GET", callback, cookie)).r.status, 400, "a spent state is refused");
+  assert.equal(await loginOf(db, keys, USER), "merger");
+
+  assert.equal(await runRoleGrants(db, keys, rest, (l) => assert.fail(l)), 1);
+  assert.deepEqual(granted, [{ guild: GUILD, user: USER, role: ROLE }]);
+  assert.equal(await runRoleGrants(db, keys, rest, (l) => assert.fail(l)), 0, "a request is carried out once");
+  assert.deepEqual((await go("GET", "/verify/status", cookie)).r.json, { result: "granted" });
+  assert.match(String((await go("GET", "/verify/done", cookie)).r.html), /you have the contributor role/);
+
+  // Another browser's cookie does not fit the flow, and a flow past its 15 minutes is refused.
+  const late = await throughDiscord();
+  const lateCode = github.issueCode("merger", param(late.githubUrl, "code_challenge"), param(late.githubUrl, "redirect_uri"));
+  assert.equal((await go("GET", `/verify/callback?code=${lateCode}&state=${param(late.githubUrl, "state")}`, cookie)).r.status, 400);
+  now += 16 * 60_000;
+  assert.equal((await go("GET", `/verify/callback?code=${lateCode}&state=${param(late.githubUrl, "state")}`, late.cookie)).r.status, 400);
+  assert.equal(await runRoleGrants(db, keys, rest, (l) => assert.fail(l)), 0);
+});

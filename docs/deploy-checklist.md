@@ -58,6 +58,8 @@ The image sets every path (`/data/...`, `/config/...`). A deployment sets only t
 | `AUTOCRAFT_IMAGE_TOKEN_FILE` | no | `gh auth token` | File holding the token the dashboard's image proxy uses for GitHub images. |
 | `AUTOCRAFT_DISCORD_TOKEN_FILE` | no | off | File holding a Discord bot token (mode 600). Setting it on the runner turns on Discord mention counting; it needs the key file too. |
 | `AUTOCRAFT_DISCORD_KEY_FILE` | with the token file | none | File of at least 32 random characters (mode 600) that encrypts stored message references. Set it on the dashboard as well to show message links. |
+| `AUTOCRAFT_DISCORD_CLIENT_ID` | for `/verify` | off | The Discord application's client id. With it, the client secret file, the key file and the GitHub App, the dashboard serves the public contributor verification under `/verify`. Dashboard only. |
+| `AUTOCRAFT_DISCORD_CLIENT_SECRET_FILE` | with the client id | none | File holding the Discord application's OAuth2 client secret (mode 600). Dashboard only. |
 | `AUTOCRAFT_ATTACH_S3_ENDPOINT` | no | off | S3-compatible endpoint of the screenshot bucket (`https://<account>.r2.cloudflarestorage.com` for Cloudflare R2). With all five `AUTOCRAFT_ATTACH_*` variables set on the runner, the Discord bug form takes up to 3 screenshots and Submit for me copies them into the issue; with any missing the form has no upload field. |
 | `AUTOCRAFT_ATTACH_BUCKET` | with the endpoint | none | Bucket name. Objects go to `discord/<yyyy>/<mm>/<random>.<ext>`. |
 | `AUTOCRAFT_ATTACH_ACCESS_KEY_ID` | with the endpoint | none | Access key id of an API token that may write objects to the bucket. |

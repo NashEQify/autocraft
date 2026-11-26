@@ -7,3 +7,4 @@ export * from "./mentions.ts";
 export * from "./replies.ts";
 export * from "./setup.ts";
 export * from "./types.ts";
+export * from "./verify.ts";

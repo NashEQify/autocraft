@@ -27,6 +27,7 @@ class FakeRest implements DiscordRest {
   async deleteMessage() {}
   async pinMessage() {}
   async addMemberRole(guild: string, user: string, role: string) { this.roles.push({ guild, user, role }); }
+  async memberRoles() { return [] as string[]; }
   async interactionCallback(_i: string, _t: string, _type: number, _data?: CallbackData) {}
   async editInteractionResponse(_a: string, _t: string, body: EditBody) { this.edits.push(body); }
   async overwriteGuildCommands(_a: string, _g: string, _c: CommandDef[]) {}

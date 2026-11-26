@@ -29,6 +29,13 @@ export async function redeemLinkCode(db: Db, codeHash: string, userHash: string,
   });
 }
 
+/** Links a Discord user hash to a login proven by GitHub sign-in (the /verify pages), replacing an earlier link of that Discord account. */
+export async function linkProven(db: Db, userHash: string, login: Login, now: string): Promise<void> {
+  const q = queryDb(db);
+  await q.run(q.k.insertInto("main.discord_links").values({ user_hash: userHash, login, linked_at: now })
+    .onConflict((oc) => oc.column("user_hash").doUpdateSet(kx.excluded(["login", "linked_at"]))));
+}
+
 /** Login per Discord user hash. */
 export async function loginsOfLinks(db: Db, userHashes: string[]): Promise<Map<string, Login>> {
   const out = new Map<string, Login>();

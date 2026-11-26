@@ -24,7 +24,7 @@ import { Alerts, installAlertCommands } from "./alerts.ts";
 import { installSearchCommands } from "./search-commands.ts";
 import { dropIssueTexts, installIssueNew } from "./issue-new.ts";
 import { installPanel, postPanel } from "./panel.ts";
-import { installRolePanel, roleConfig, RoleConfigError, rolePanelState, setRoleConfig, watchRolePanel } from "./role-panel.ts";
+import { installRolePanel, roleConfig, RoleConfigError, rolePanelState, setRoleConfig, watchRoleGrants, watchRolePanel } from "./role-panel.ts";
 import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from "./keys.ts";
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus } from "./store.ts";
 import { forgetFollowsOf } from "./threads.ts";
@@ -139,6 +139,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   installAlerts(db, keys, rest, interactions, signal, log);
   installRolePanel(interactions, { db, keys, rest, log, baseUrl: envVar("BASE_URL") ?? null });
   watchRolePanel(db, rest, log, signal);
+  watchRoleGrants(db, keys, rest, log, signal);
   const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log }) });
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });

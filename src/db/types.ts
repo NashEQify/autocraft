@@ -692,11 +692,31 @@ export interface DiscordReplies {
   sealed: string;
 }
 
+export interface DiscordRoleGrants {
+  id: string;
+  user_sealed: string;
+  login: string;
+  requested_at: string;
+  result: string | null;
+  done_at: string | null;
+}
+
 export interface DiscordStatus {
   id: Generated<number>;
   state: string;
   detail: string | null;
   at: string;
+}
+
+export interface DiscordVerifyFlows {
+  flow_hash: string;
+  step: string;
+  state_hash: string | null;
+  verifier: string | null;
+  user_sealed: string | null;
+  login: string | null;
+  grant_id: string | null;
+  expires_at: string;
 }
 
 export interface DownloadDeltas {
@@ -2617,7 +2637,9 @@ export interface DB {
   discord_links: DiscordLinks;
   discord_mentions: DiscordMentions;
   discord_replies: DiscordReplies;
+  discord_role_grants: DiscordRoleGrants;
   discord_status: DiscordStatus;
+  discord_verify_flows: DiscordVerifyFlows;
   download_deltas: DownloadDeltas;
   dupe_carries: DupeCarries;
   dupe_comparisons: DupeComparisons;
@@ -2825,7 +2847,9 @@ export interface DB {
   "main.discord_links": DiscordLinks;
   "main.discord_mentions": DiscordMentions;
   "main.discord_replies": DiscordReplies;
+  "main.discord_role_grants": DiscordRoleGrants;
   "main.discord_status": DiscordStatus;
+  "main.discord_verify_flows": DiscordVerifyFlows;
   "main.download_deltas": DownloadDeltas;
   "main.dupe_carries": DupeCarries;
   "main.dupe_comparisons": DupeComparisons;
@@ -3037,7 +3061,9 @@ export const COLUMNS = {
   discord_links: ["user_hash", "login", "linked_at"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],
   discord_replies: ["ping_hash", "quoted_hash", "channel_hash", "sealed"],
+  discord_role_grants: ["id", "user_sealed", "login", "requested_at", "result", "done_at"],
   discord_status: ["id", "state", "detail", "at"],
+  discord_verify_flows: ["flow_hash", "step", "state_hash", "verifier", "user_sealed", "login", "grant_id", "expires_at"],
   download_deltas: ["asset_id", "t", "span", "delta"],
   dupe_carries: ["decision_id", "repo", "number", "state", "attempts", "outcome", "to_head", "from_head", "updated_at"],
   dupe_comparisons: ["repo", "key", "kind", "members", "hash", "kept", "source", "model", "reason", "result", "error", "attempts", "at", "heads", "summary", "why", "sizes"],
