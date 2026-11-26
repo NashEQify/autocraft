@@ -181,3 +181,27 @@ test("`status` in reply to a message that links a pull request answers with that
   assert.ok(shown.includes("texturecraft#775"), shown);
   assert.ok(![763, 764, 765].some((n) => shown.includes(`#${n}`)), shown);
 });
+
+test("`fix and merge <item>` to the bot's role or the bot replies on the named item with what it understood, the same for both", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: 850, kind: "pr", state: "OPEN", title: "Change 850", body: "", url: "https://github.com/storytold/texturecraft/pull/850" }));
+  // No Task Runner reads the text: the parser's own reply goes out.
+  const own = new Pings({ db, keys, rest, search: {} as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l), read: { translate: async () => null }, permission: async () => ({ kind: "ok", permission: "write" }) }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  await own.dispatch("GUILD_CREATE", { id: "g1", roles: [{ id: "1569325571970965618", tags: { bot_id: "100" } }] });
+  const replies: string[] = [];
+  for (const [id, content] of [["fm-role", "<@&1569325571970965618> fix and merge texturecraft#850"], ["fm-user", "<@100> fix and merge texturecraft#850"]] as const) {
+    const m = { id, channel_id: "c1", guild_id: "g1", content, type: 0, author: { id: "u70" } };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+    const sent = rest.sent.length;
+    await own.dispatch("MESSAGE_CREATE", m);
+    await own.idle();
+    replies.push(rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n"));
+  }
+  assert.ok(!(await started()).includes("texturecraft#850"));
+  assert.match(replies[0]!, /texturecraft#850/);
+  assert.match(replies[0]!, /fix-up/);
+  assert.doesNotMatch(replies[0]!, /Name an item/);
+  assert.equal(replies[1], replies[0]);
+});
