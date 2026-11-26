@@ -436,7 +436,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   },
   {
     name: "embed",
-    detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
+    // The diff probe reads every tracked item; it is asked again only when the pass's counters of what it reads moved.
+    detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx), ctx.seqs) ? [{ step: "embed", params: {} }] : []),
   },
   {
     // Scans (local vectors) need no model; a pair check needs a Task Runner, also for its Jev half.
