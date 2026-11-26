@@ -60,7 +60,7 @@ export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
 }
 
 /** The status block of the item's latest workflow. */
-function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean, wait: string | null): MaintainItemStatus {
+export function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean, wait: string | null): MaintainItemStatus {
   const mine = events.filter((e) => e.workflowId === wf.id || (e.workflowId === null && e.at >= wf.startedAt));
   const last = mine[mine.length - 1];
   const answered = [...mine].reverse().find((e) => e.kind === "answered");

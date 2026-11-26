@@ -4,7 +4,7 @@ import type { DiscordAccount, DiscordFilingAdded, DiscordLinkCode, DiscordInfo, 
 import { envVar } from "../../env.ts";
 import { listLinks as loadLinks } from "../../data/access/index.ts";
 import { setting, settings, writeSetting } from "../../data/control/index.ts";
-import { loadDiscordSetup, loadMentionCounts, loadMentionsOfItems, markWatched, offeredRepos, setDefaultRepo } from "../../data/discord/index.ts";
+import { loadChannelNames, loadDiscordSetup, loadMentionCounts, loadMentionsOfItems, markWatched, offeredRepos, setDefaultRepo, type MentionRow } from "../../data/discord/index.ts";
 import { loadPromptSpend } from "../../data/inference/index.ts";
 import { loadReleaseAppNames } from "../../data/mirror/index.ts";
 import { readsUseApp } from "../../data/access/index.ts";
@@ -13,7 +13,7 @@ import { isPublicRepo, publicRepoNames } from "../../public/status.ts";
 import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
-import { mentionLinks, trackedRepos } from "../../discord/store.ts";
+import { mentionLinks, messageUrl, trackedRepos } from "../../discord/store.ts";
 import { addFilingRepo, FilingRepoError, modesOf, offerOf, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
 import { DEFAULT_REACT_EMOJI, setReactEmoji, validReactEmoji } from "../../discord/react.ts";
 import { createLinkCode, linkedSince, unlinkLogin, unlinkRow } from "../../discord/links.ts";
@@ -48,6 +48,25 @@ export async function discordOf(db: Db, repo: string, n: number): Promise<Discor
   const [counts, mentions] = await db.together(() => Promise.all([loadMentionCounts(db, [key]), keys ? loadMentionsOfItems(db, [key]) : Promise.resolve(null)]));
   const c = counts.get(key), rows = mentions?.get(key) ?? [];
   return { count: c?.count ?? 0, links: mentionLinks(keys, rows), signals: c?.signals ?? 0, signalLinks: mentionLinks(keys, rows.filter((r) => r.signal)) };
+}
+
+/** A mention of an item, opened: the message link, its time and the channel's name. */
+export type ItemMention = { msgHash: string; url: string; at: string; channel: string | null };
+
+/**
+ * The mention rows the key opens, oldest first, each with its channel's name (null for a channel the bot cannot see). Rows the key
+ * cannot open, and every row when there is no key, are left out. No message text is stored, so none is shown.
+ */
+export async function openMentions(db: Db, rows: readonly MentionRow[]): Promise<ItemMention[]> {
+  const keys = discordKeys();
+  if (!keys || !rows.length) return [];
+  const opened = rows.flatMap((r) => { const v = keys.open(r.sealed, r.msgHash); return v ? [{ msgHash: r.msgHash, v }] : []; });
+  if (!opened.length) return [];
+  const names = await loadChannelNames(db, opened.map((o) => o.v.channelId));
+  return opened.map(({ msgHash, v }): ItemMention => {
+    const name = names.get(v.channelId) ?? null;
+    return { msgHash, url: messageUrl(v), at: v.at, channel: name && !PLACEHOLDER_NAME.test(name) ? name : null };
+  }).sort((a, b) => a.at.localeCompare(b.at) || a.msgHash.localeCompare(b.msgHash));
 }
 
 const operator = (req: Req): void => {

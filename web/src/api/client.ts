@@ -48,6 +48,8 @@ import type {
   ItemTraceQuery,
   ItemTraceUnchanged,
   ItemPageUnchanged,
+  ItemChat,
+  ItemChatUnchanged,
   AgentRunFilter,
   AgentRunPage,
   JevStatus,
@@ -203,6 +205,10 @@ export interface Api {
   };
   /** The item page's AutoCraft and GitHub sides: status, reviews with earlier ones, result cards, history, GitHub's own sections. `since` as for `itemTrace`. */
   itemPage(repo: RepoName, number: number, since?: string): Promise<ItemPageData | ItemPageUnchanged>;
+  /** The item's conversations with AutoCraft: what people said, AutoCraft's replies and work, GitHub and Discord activity folded into lines. `since` as for `itemTrace`. */
+  itemChat: {
+    get(repo: RepoName, number: number, since?: string): Promise<ItemChat | ItemChatUnchanged>;
+  };
   /** The item in brief, for the hover card on its number. */
   itemPeek(repo: RepoName, number: number): Promise<ItemPeek>;
   /** Staff: all findings grouped by what they need. */

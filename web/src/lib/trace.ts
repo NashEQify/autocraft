@@ -1,6 +1,7 @@
 // Labels, icons and costs of the item trace.
 import {
   ChatsIcon,
+  DiscordLogoIcon,
   GearIcon,
   GithubLogoIcon,
   ListChecksIcon,
@@ -25,6 +26,7 @@ export const TRACE_KIND: Record<TraceKind, { label: string; Icon: PhosphorIcon }
   job: { label: "Jobs", Icon: GearIcon },
   step: { label: "Fixes and merges", Icon: WrenchIcon },
   conversation: { label: "Conversation", Icon: ChatsIcon },
+  discord: { label: "Discord", Icon: DiscordLogoIcon },
 };
 
 export const TRACE_KINDS = Object.keys(TRACE_KIND) as TraceKind[];
