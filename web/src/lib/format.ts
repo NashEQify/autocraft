@@ -33,6 +33,14 @@ export function eventTime(isoTime: string): string {
   return d.getFullYear() === n.getFullYear() ? `${md} ${clock(t)}` : `${md} ${d.getFullYear()}`;
 }
 
+/** A message time: the clock time ("14:32") today, with the date before it ("Nov 3 14:32") on other days. */
+export function messageTime(isoTime: string): string {
+  const t = Date.parse(isoTime);
+  const d = new Date(t), n = new Date(now());
+  const today = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  return today ? clock(t) : `${MONTHS[d.getMonth()]} ${d.getDate()} ${clock(t)}`;
+}
+
 export const num = (n: number) => n.toLocaleString("en");
 export const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "–");
 
