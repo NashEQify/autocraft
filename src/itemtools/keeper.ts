@@ -1,12 +1,14 @@
 // The runner leader keeps the item snapshot on its own disk current. The snapshot's readers (the leader's job processes
 // and the item tools its worker API answers) run beside the leader, while the sync may run in another pod: so the leader
-// builds it, once at start and again after each sync run that finished since its last build. A build runs as a child
+// builds it, once at start and again after each sync run or embed job that finished since its last build. Embed jobs
+// leave the refresh to it, so a job never waits for a build. A build runs as a child
 // process, so its file writes never hold the leader's event loop; the snapshot's file lock keeps two builds apart.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "../db/index.ts";
 import { dbEnv, dbTarget } from "../db/open.ts";
+import { loadLastEndedJob } from "../data/jobs/index.ts";
 import { loadLastSyncEnd } from "../data/mirror/index.ts";
 import { snapshotFile } from "./snapshot.ts";
 
@@ -39,17 +41,18 @@ function buildChild(signal: AbortSignal): Promise<string> {
 
 /**
  * Keeps the item snapshot current until `signal` aborts: a build at start, then one whenever a newer successful sync run
- * has ended or the snapshot has a journal (a refresh was interrupted, or is running and the build waits for it). A failed build is logged and waits for the next sync run. Writes nothing to the database.
+ * or a newer embed job has ended, or the snapshot has a journal (a refresh was interrupted, or is running and the build waits for it). A failed build is logged and waits for the next sync run or embed job. Writes nothing to the database.
  */
 export function keepSnapshot(db: Db, signal: AbortSignal, log: (line: string) => void, opts: { everyMs?: number; build?: (signal: AbortSignal) => Promise<string> } = {}): void {
   const build = opts.build ?? buildChild;
-  let seen: string | null | undefined;
+  let seen: string | undefined;
   let busy = false;
   const check = async () => {
     if (busy || signal.aborted) return;
     busy = true;
     try {
-      const t = await loadLastSyncEnd(db);
+      const [sync, embed] = await db.together(() => Promise.all([loadLastSyncEnd(db), loadLastEndedJob(db, "embed")]));
+      const t = `${sync ?? ""}|${embed ?? ""}`;
       // A journal left by a refresh that was killed keeps read-only readers out until a build rolls it back.
       if (seen !== undefined && t === seen && !existsSync(`${snapshotFile()}-journal`)) return;
       seen = t;
